@@ -1,0 +1,7 @@
+version: 1
+scope:
+  id: 2b040568-bd29-4520-a497-92aadfe2ba3c
+  name: harness-bad
+agent:
+  harness: bash
+  name: Bad Harness Agent

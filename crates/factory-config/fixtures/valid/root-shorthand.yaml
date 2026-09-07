@@ -1,0 +1,11 @@
+version: 1
+
+scope:
+  id: a0558c01-de66-4ad9-a6ca-43c7e5e1aa5d
+  name: root-shorthand
+
+agent:
+  name: Solo
+  harness: pi
+  max_sessions: 3
+  lifetime: permanent

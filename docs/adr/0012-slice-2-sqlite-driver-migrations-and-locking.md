@@ -106,6 +106,28 @@ something long-lived exists to hold it, so it belongs with the daemon decision.
 The backlog's claim that slices 1–4 are identical under either answer survives
 inspection here.
 
+### Implementation note: create the database file before SQLite opens it
+
+Slice 2 requires restrictive permissions on the database. It is not enough to
+`chmod` after opening, because under WAL, SQLite creates `-wal` and `-shm`
+sidecars and derives their mode from the database file's mode *at the moment it
+creates them*. Measured on 2026-09-08:
+
+```text
+create file 0600, then open      ->  factory.sqlite      rw-------
+                                     factory.sqlite-shm  rw-------
+                                     factory.sqlite-wal  rw-------
+
+open, then chmod 600              ->  factory.sqlite      rw-------
+                                     factory.sqlite-shm  rw-r--r--   <-- leaked
+                                     factory.sqlite-wal  rw-------
+```
+
+The `-shm` file inherits the umask default and stays world-readable, beside a
+database that looks correctly locked down. So `Store::open_at` creates the file
+with mode `0600` *before* `Connection::open`, and the permission test asserts
+the mode of all three files rather than only the database.
+
 ## Decision 4: backup by `VACUUM INTO`, verified by restore
 
 ```sql

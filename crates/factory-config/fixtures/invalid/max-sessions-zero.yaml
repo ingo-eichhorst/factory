@@ -1,0 +1,8 @@
+version: 1
+scope:
+  id: 5f4807d1-6693-4933-96c3-68d5baadae5f
+  name: zero-sessions
+agent:
+  max_sessions: 0
+  name: A
+  harness: pi

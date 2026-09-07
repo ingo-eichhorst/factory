@@ -1,0 +1,9 @@
+version: 1
+scope: {id: c112af23-d939-4b6f-96a0-1744009fbb95, name: dup-scope}
+
+agents:
+  - name: assistant
+    harness: pi
+    max_sessions: 2
+  - name: assistant
+    harness: pi

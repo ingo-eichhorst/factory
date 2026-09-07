@@ -77,6 +77,22 @@ including on inner mappings, and produces
 `unknown field `max_sesions`, expected one of name, max_sessions`. Rule 3 is one
 attribute, not hand-rolled code.
 
+Implementation found three further facts the spike had not reached, recorded so
+the next reader does not rediscover them:
+
+- **Every structured error arrives wrapped.** `from_str` does not return
+  `SerdeMissingField` or `SerdeUnknownField` directly; it returns
+  `Error::WithSnippet { error: Box<Error>, .. }` around them, for snippet
+  rendering. Matching the bare variants never fires. Unwrap recursively first.
+- `Location` exposes `line()` and `column()` **methods** returning `u64`, not
+  public fields. The spike's `Debug` output showed field-like names and misled
+  on this point.
+- `Spanned<T>` locates the spanned **value** node. For a key whose value is a
+  block mapping or sequence, that is the first nested line — one below the key —
+  and there is no way to ask for the key's own position. Diagnostics that name a
+  top-level key therefore recover its line by scanning the source, with the
+  value location as a fallback. See `docs/slice-1-error-corpus.md`, case 1.
+
 One constraint the spike added: error `Display` renders the source as `<input>`
 and offers no way to name the file. Slice 1 requires every failure to name the
 file, so `factory-config` **wraps** parse errors with the origin path rather than

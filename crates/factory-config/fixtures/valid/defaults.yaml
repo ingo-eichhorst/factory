@@ -1,0 +1,9 @@
+version: 1
+
+scope:
+  id: 23f35934-c92a-46e7-863d-67c6ed4db906
+  name: defaults
+
+agent:
+  name: Defaulted
+  harness: pi

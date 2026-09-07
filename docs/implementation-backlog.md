@@ -82,9 +82,42 @@ answer whether Factory can drive a harness.
 
 The whole decision lives in `HARNESS_TABLE` in
 `crates/factory-config/src/harness.rs`, so narrowing it back to §2.2 is deleting
-one row. **The alternative is a validation library that rejects two of seven
-production configs**, which is why it was not left open. It is recorded here
-because it was taken without the user present and amends a design section.
+one row. It is recorded here because it was taken without the user present and
+amends a design section.
+
+**Measured, not assumed.** The implemented loader was run against all seven live
+`.factory/config.yaml` files on 2026-09-08. Six load; `awesome-herdr` fails with
+the did-you-mean, which is the intended outcome for a typo. `validate_unique_ids`
+over the six reports no duplicate scope IDs. Under a literal reading of §2.2 it
+would be two failures rather than one, and the second — `model-lab` — would be a
+correctly configured scope that Factory simply could not read.
+
+That run also confirmed the load-bearing half of ADR 0009 rule 2 against the
+real files rather than a fixture copy: the `assistant` config carries a
+top-level `agent:` **and** an indented `agents:` inside a `runtime:` block owned
+by `ensure_assistant_agents.py`, and it loads as exactly one agent. A stricter
+top-level policy would make that scope unloadable today.
+
+**Open item found by that run — the `assistant` scope under-declares itself.**
+Factory's schema sees one agent, `Assistant`, with `max_sessions: 2`. What
+actually runs is two *different* agents: `assistant` and `assistant-chat`, with
+different models, prompts, and extensions, declared in the `runtime:` block that
+belongs to another tool. Design §2.2 names this very scope as the motivating
+example for multi-agent scopes — "one agent watching an iMessage channel and a
+separate agent answering internal requests, as in the `assistant` scope" — so
+the design and the reality agree, and only the configuration disagrees with
+both.
+
+The consequences land in later slices, not in Slice 1. `max_sessions` is per
+agent (Slice 6), so Factory would permit two sessions of one agent where reality
+is two agents that are not interchangeable. Tasks address an agent by name
+(Slices 7–8), so `assistant-chat` is unaddressable as written. Nothing breaks
+today because no adapter reads this yet.
+
+The fix is a configuration migration — moving the two agents into Factory's
+`agents:` list — which overlaps `ensure_assistant_agents.py`'s ownership of the
+`runtime:` block and therefore needs its own task with a migration and rollback
+plan, like the task store. It is deliberately not folded into a slice here.
 
 ## 2. Root SQLite store and idempotent initialization
 
@@ -144,10 +177,30 @@ and Git worktree copies rather than treating every config file as a scope.
 - A copied `.factory/config.yaml` in a Git worktree is ignored as a duplicate
   scope definition; normal operation never recursively discovers scopes.
 - Symlink escapes cannot make a non-descendant appear to be a child.
+- Registration verifies that the scope has a readable `AGENTS.md`. ADR 0013
+  makes Slice 4 fail hard on a context source it cannot read, so the absence
+  must be caught when a scope is registered rather than when an agent starts.
+- The registry supplies **canonical** paths to the context compiler. Slice 4
+  prints the source path into the compiled text and uses what it is given
+  verbatim, by design — it is a pure function and does not explore the
+  filesystem. So byte-stability is guaranteed per input, and it is this slice
+  that must guarantee the input. A relative path reaching the compiler would
+  produce different bytes for the same scope depending on the working
+  directory, which is a §2.5 violation created here and only observed there.
+- `scope reconcile` does not register the configs under
+  `projects/factory/fixtures/`. Those are two syntactically valid scope
+  definitions with real UUIDs, and they carry a `fixture: true` key that Factory
+  **ignores** by rule 2 — so the marker is greppable by a human and invisible to
+  the code. Reconcile must exclude them by a mechanism that actually executes:
+  an explicit exclusion path, or honouring the marker, or moving fixtures out of
+  the scanned tree. Pick one; do not leave the marker described as a safeguard
+  when nothing enforces it.
 
 **Decisions or risks to resolve first:** Define the operator confirmation and
 conflict policy for a moved scope versus a copied scope, and the supported Git
-worktree detection mechanism.
+worktree detection mechanism. Decide which of the three fixture-exclusion
+mechanisms above applies, since this is the first slice that scans for configs
+and therefore the first that can mistake a fixture for a scope.
 
 ## 4. Deterministic context compiler and generated-file guardrails
 
@@ -169,12 +222,33 @@ require an ownership marker before regeneration.
 - Compilation reads `AGENTS.md` and never writes outside `.factory/` (design §4),
   so existing `AGENTS.md`, `CLAUDE.md`, `.pi/`, and `.claude/` cannot be modified
   by construction rather than by a check that must be remembered.
-- An existing non-Factory target under generated output stops generation with a
-  conflict instead of being overwritten.
+- A context source that cannot be read stops compilation, naming the file, the
+  scope that expected it, and the action. It is never replaced by an empty
+  section, because a silently skipped `AGENTS.md` produces an agent running with
+  less instruction than its operator believes it has — mandates about secrets
+  and approval gates quietly absent, with no symptom until the agent does
+  something it should have been told not to do.
+- `factory context show` reports each source, whether it was readable, and its
+  byte count, so an operator can see the composition and not only the result.
+- Compilation follows no `[[links]]` out of `AGENTS.md`. Context is the
+  `AGENTS.md` chain, the agent definition, and the task prompt, and nothing
+  else.
+- ~~An existing non-Factory target under generated output stops generation with
+  a conflict instead of being overwritten.~~ **Deferred:** version 1 generates
+  no compatibility file, so this criterion is vacuous. It is struck rather than
+  deleted, because the rule in design §4 still applies the moment an adapter
+  needs one.
 
-**Decisions or risks to resolve first:** Set context size/error policy and decide
-whether version 1 needs any generated compatibility file at all; manual context
-injection is sufficient for the first rollout.
+**Decisions or risks to resolve first:** None remain; ADR 0013 settles both.
+Version 1 generates no compatibility file, which removes the only writing path
+in this slice and makes the design §4 write rule hold by construction. There is
+no size limit — any constant would be invented, since the real bound is the
+harness's context window and Factory does not know which model a harness runs —
+but the size is always reported. A missing context source is a hard failure.
+Version 1 follows no knowledge links, which answers the §12.4 traversal question
+for now: an unbounded walk is neither bounded nor byte-stable, and a
+depth-bounded one is still unstable, since adding one link to an unrelated note
+would silently change what every agent in that subtree receives.
 
 ## 5. Manual harness adapter proof for Pi
 

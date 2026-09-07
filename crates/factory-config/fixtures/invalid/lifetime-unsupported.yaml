@@ -1,0 +1,8 @@
+version: 1
+scope:
+  id: 63fcf894-6cc9-4c4b-bb70-0c6a1a205f2b
+  name: X
+agents:
+  - name: A
+    lifetime: ephemeral
+    harness: pi

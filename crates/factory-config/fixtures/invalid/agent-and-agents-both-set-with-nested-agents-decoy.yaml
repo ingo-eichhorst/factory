@@ -1,0 +1,19 @@
+version: 1
+
+scope:
+  id: 1d034559-c3e7-47df-9bdf-215d7536bb2a
+  name: both-set-with-nested-agents-decoy
+
+agent:
+  name: A
+  harness: pi
+
+runtime:
+  version: 1
+  agents:
+    - name: nested-decoy
+      kind: pi
+
+agents:
+  - name: B
+    harness: pi

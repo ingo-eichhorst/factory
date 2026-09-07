@@ -1,0 +1,13 @@
+version: 1
+
+scope:
+  id: 42009684-a5dc-4ee9-babd-d7c62a9a81dd
+  name: both-set
+
+agent:
+  name: A
+  harness: pi
+
+agents:
+  - name: B
+    harness: pi

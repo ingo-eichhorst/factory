@@ -1,0 +1,3 @@
+agent:
+  name: A
+  max_sesions: 4

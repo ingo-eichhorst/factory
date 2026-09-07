@@ -41,6 +41,11 @@ The SQLite driver, migration tooling, locking and durability pragmas, the backup
 procedure, and which session states hold a workspace lease are documented in
 [`docs/adr/0012-slice-2-sqlite-driver-migrations-and-locking.md`](docs/adr/0012-slice-2-sqlite-driver-migrations-and-locking.md).
 
+Why version 1 generates no harness compatibility file, why a context source that
+cannot be read is a hard failure rather than an empty section, and why context
+compilation follows no knowledge links are documented in
+[`docs/adr/0013-slice-4-context-compilation-policy.md`](docs/adr/0013-slice-4-context-compilation-policy.md).
+
 The version-1 delivery plan is owned by this project in
 [`docs/implementation-backlog.md`](docs/implementation-backlog.md).
 
@@ -66,14 +71,23 @@ from a fresh shell.
 
 ```text
 crates/factory-config/   parsing and validation of .factory/config.yaml
+crates/factory-context/  root-to-leaf compilation of the text a harness receives
 crates/factory-paths/    canonical path identity and descendant tests
+crates/factory-store/    the company-root SQLite store, migrations, and backup
 fixtures/registration/   a miniature company used as a manual fixture
 docs/                    ADRs, the delivery backlog, operator guides
 ```
 
-There is no `factory` binary yet. Slice 1 delivers the configuration contract as
-libraries with tests; the command surface arrives in Slice 10, after the manual
-procedures it replaces have been proven.
+There is no `factory` binary yet, and that is deliberate rather than pending.
+The slices deliver domain libraries with tests first; the command surface
+arrives in Slice 10, once the manual procedures it replaces have been proven.
+Slices 1, 2, and 4 are implemented. Slice 3 (the scope registry) and Slice 5
+onward are not.
+
+Slice 5 is gated on a decision that is deliberately still open: whether a
+long-running daemon owns all mutations, or each invocation is its own process.
+Slices 1–4 are identical either way — that was checked while settling ADR 0012's
+locking strategy, not merely assumed — so the decision was left for a human.
 
 Error messages are specified before they are implemented, in
 [`docs/slice-1-error-corpus.md`](docs/slice-1-error-corpus.md). Slice 1's

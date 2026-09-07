@@ -72,6 +72,25 @@ Both keys are named and both are located, per the acceptance criterion. This is
 also why ADR 0009 forbids modelling these as an untagged enum: an untagged enum
 can only say "data did not match any variant".
 
+**Both locations must be the line of the key itself.** `Spanned<T>` locates the
+spanned *value* node, so for a key whose value is a block mapping or a block
+sequence it reports the first nested line — one below the key — and
+`serde-saphyr` exposes no way to ask for the key's own position. Reported
+naively, this error points at `  name: A` while talking about `agent:`, and a
+reader who looks where the arrow points sees a name field rather than the
+conflict.
+
+Recover the key's line by scanning the source for a top-level key: a line whose
+first character is not whitespace and which begins `agent:` or `agents:`. These
+keys are always at indentation zero, so the scan is exact for block-style YAML,
+which is what every real and fixture config uses. If the scan finds anything
+other than exactly one match, **fall back to the value-node location** rather
+than guessing — a diagnostic that is one line off is a papercut, and one that
+points at an unrelated line because a comment contained the word `agent:` is a
+defect.
+
+This applies to any error that names a Factory-owned top-level key.
+
 ### 2. Neither `agent` nor `agents`
 
 ```text
@@ -145,6 +164,11 @@ error: missing field `scope`
   --> <file>:1:1
   help: add a `scope:` block with an `id` and a `name`
 ```
+
+The `1:1` here is a property of the fixture, not a rule. `serde-saphyr` reports
+a missing field at the last top-level key it processed, so this file — which
+contains only `version: 1` — reports line 1. A file with more keys would report
+a later line. Assert the message text and let the location follow the input.
 
 ### 10. Unknown field inside a Factory-owned mapping
 

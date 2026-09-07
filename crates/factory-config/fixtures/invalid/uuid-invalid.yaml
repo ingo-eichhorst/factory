@@ -1,0 +1,7 @@
+version: 1
+scope:
+  id: not-a-uuid
+  name: uuid-bad
+agent:
+  name: A
+  harness: pi

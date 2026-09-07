@@ -1,0 +1,15 @@
+# Regression: a comment mentioning agent: must not be mistaken for the real
+# top-level `agent:` key below -- the scan must still land on line 9.
+version: 1
+
+scope:
+  id: ed153930-813b-4269-9c6b-370db8e3da3a
+  name: both-set-with-comment
+
+agent:
+  name: A
+  harness: pi
+
+agents:
+  - name: B
+    harness: pi
