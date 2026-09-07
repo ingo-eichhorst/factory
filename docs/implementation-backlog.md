@@ -8,6 +8,18 @@ line so the Factory CLI can replace manual procedures without changing the
 model. No slice may make external changes (create worktrees, merge branches,
 or alter harness-owned files) as part of normal operation.
 
+Two scope notes from ADR 0010, which reconciles this backlog with the project
+ADRs. Where the design baseline and the ADRs use different words for the same
+thing — supervisor and daemon, harness adapter and supervised plugin, permanent
+and thread agent — they mean the same component, and no slice implements two of
+them. Threads and durable messages are target state and have no slice here: the
+task remains the only durable unit of work exchanged in version 1.
+
+Still unsettled, and to be decided before Slice 5 rather than before Slice 1:
+whether a long-running daemon owns all mutations as ADR 0002 requires, or each
+invocation is its own process as today's prototype is. Slices 1–4 are identical
+under either answer.
+
 ## 1. Repository contract and configuration validation
 
 **Objective:** Establish the safe, inspectable local contract for a company root
@@ -21,17 +33,58 @@ company-root config, child scope config, and `AGENTS.md` files.
 **Dependencies:** None.
 
 **Acceptance criteria:**
-- Valid root and child configuration loads into a typed scope/agent model.
+- Valid root and child configuration loads into a typed scope model carrying one
+  or more agents. Both the `agent:` shorthand and the `agents:` list are
+  accepted; a file setting both fails, naming the file and both keys.
+- Two agents in one scope may not share a name, because the name addresses an
+  agent in `task send`. A duplicate fails with both definitions identified.
+- `lifetime` is optional and defaults to `permanent`; only `permanent` and
+  `temporary` are accepted. Any other value fails with the supported set.
+- `max_sessions` is per agent entry and defaults to `1`. Version 1 has no
+  scope-level aggregate cap: a scope's session bound is the sum of its agents'
+  limits. The bound applies identically to both lifetimes, where for a
+  `temporary` agent it caps concurrently live instances.
 - Missing or malformed fields, unsupported versions, invalid UUIDs, duplicate
   IDs, and unsupported harnesses fail with the file and corrective action.
 - Relative paths, `..`, and symlinked paths resolve to canonical absolute paths
   before comparison.
-- Validation never writes or overwrites `AGENTS.md`, `CLAUDE.md`, `.pi/`, or
-  `.claude/`.
+- Validation writes nothing at all, and more generally no command writes outside
+  a `.factory/` directory (design §4). This subsumes the older rule that
+  `AGENTS.md`, `CLAUDE.md`, `.pi/`, and `.claude/` are never overwritten, and
+  unlike that list it cannot be outgrown by a harness added later.
 
-**Decisions or risks to resolve first:** Select the implementation language,
-YAML library, schema-evolution policy, and canonicalization behavior for paths
-that do not yet exist.
+**Decisions or risks to resolve first:** None remain; Slice 1 is ready to start.
+The implementation language is settled by ADR 0002, with ADR 0008 recording why
+Rust and what it costs. ADR 0009 settles the remaining three: `serde-saphyr` as
+the YAML library, the schema-evolution policy (Factory owns `version`, `scope`,
+`agent`/`agents`; unknown top-level keys are preserved and ignored; unknown
+fields inside Factory-owned mappings are rejected), and path identity
+(canonical path is stored identity, `(st_dev, st_ino)` is the runtime aliasing
+check; only `init --root` may name a non-existent path).
+
+**New open item from ADR 0009:** whether Factory should ever expand `${HOME}` /
+`${REPO_ROOT}` in configuration values. Version 1 does not. The existing
+expansion belongs to `ensure_assistant_agents.py`, not to Factory; adding it
+would need its own specification.
+
+**Open item, decided provisionally during implementation — the accepted harness
+set.** Design §2.2 lists the initial harnesses as exactly `pi` and
+`claude-code`. Surveying the seven live configs found two that a literal reading
+rejects: `model-lab` sets `opencode`, and `awesome-herdr` sets `claude`. ADR 0009
+surveyed the same files and recorded the `runtime:` block but missed this.
+
+Version 1 accepts `pi`, `claude-code`, and `opencode`, and rejects `claude` with
+"did you mean `claude-code`?" — `awesome-herdr` runs Claude Code, so that one is
+a typo, whereas `opencode` is a real harness in real use and §2.2's word
+"initial" anticipates the list growing. Accepting a name here is not a claim that
+an adapter exists for it; Slice 1 has no adapters, and Slice 5 and Slice 10
+answer whether Factory can drive a harness.
+
+The whole decision lives in `HARNESS_TABLE` in
+`crates/factory-config/src/harness.rs`, so narrowing it back to §2.2 is deleting
+one row. **The alternative is a validation library that rejects two of seven
+production configs**, which is why it was not left open. It is recorded here
+because it was taken without the user present and amends a design section.
 
 ## 2. Root SQLite store and idempotent initialization
 
@@ -55,9 +108,20 @@ as their own canonical sources.
 - Database file permissions are restrictive and backups can be performed using
   a documented, consistent SQLite procedure.
 
-**Decisions or risks to resolve first:** Choose migration tooling, lock strategy,
-backup retention/restore verification, and which session states count as a live
-workspace lease.
+**Decisions or risks to resolve first:** None remain; ADR 0012 settles all four.
+`rusqlite` with `bundled` as the driver and `rusqlite_migration` tracking schema
+state in `PRAGMA user_version`; WAL with `busy_timeout` and `BEGIN IMMEDIATE`,
+which *serializes* concurrent mutators rather than rejecting them; `VACUUM INTO`
+for backups with a restore drill that opens the snapshot read-write, retention
+left to the operator; and `starting`, `running`, and `disconnected` holding a
+workspace lease while `stopped` and `failed` release it.
+
+Two consequences reach other slices. `disconnected` holding its lease makes a
+stale-lease recovery action **mandatory** in Slice 9 rather than optional —
+otherwise a session that never returns holds its workspace forever. And the
+single-supervisor question turns out not to live here: serialization is the same
+answer under a daemon or a process per invocation, so the claim that slices 1–4
+are identical either way is now checked rather than assumed.
 
 ## 3. Explicit scope registry and hierarchy reconciliation
 
@@ -102,7 +166,9 @@ require an ownership marker before regeneration.
   ancestors, current scope, agent definition, task prompt.
 - Context inspection identifies every source file and reports missing readable
   context files clearly.
-- Existing `AGENTS.md`, `CLAUDE.md`, `.pi/`, and `.claude/` are never modified.
+- Compilation reads `AGENTS.md` and never writes outside `.factory/` (design §4),
+  so existing `AGENTS.md`, `CLAUDE.md`, `.pi/`, and `.claude/` cannot be modified
+  by construction rather than by a check that must be remembered.
 - An existing non-Factory target under generated output stops generation with a
   conflict instead of being overwritten.
 
@@ -121,6 +187,11 @@ identity, command, generated context handoff, readiness evidence, completion
 markers, question/permission signals, and final-result capture rules. Persist
 only observations in the database; an operator performs terminal actions.
 
+`observe()` takes its state from Irrlicht per ADR 0011, not from terminal
+output: Irrlicht already parses Pi's own transcripts into `working`, `waiting`,
+and `ready`, and joins on the canonical workspace path. This slice consumes that
+rather than deriving readiness from the PTY.
+
 **Dependencies:** Slices 2 and 4.
 
 **Acceptance criteria:**
@@ -132,10 +203,20 @@ only observations in the database; an operator performs terminal actions.
   stored in scope, session, or task domain records.
 - A missing executable or failed launch produces an actionable failed-start
   record and leaves no leaked lease.
+- A Pi session started inside a Herdr pane is observed by Irrlicht exactly as a
+  directly started one is, verified against a real pane. If it is not, the
+  adapter records no observation and falls back to manual confirmation rather
+  than inferring state.
+- With Irrlicht stopped, the adapter still completes the lifecycle in
+  manual-confirmation mode, and no task is lost or duplicated.
 
 **Decisions or risks to resolve first:** Confirm Herdr's stable programmatic or
-operator-visible pane identifiers and Pi's reliable readiness/completion and
-permission-prompt signals. These may require conservative human confirmation.
+operator-visible pane identifiers. The readiness, completion, and
+permission-signal risk is largely retired by ADR 0011 — Irrlicht has a working
+Pi parser in production use — but its open item 1 must be answered here: Irrlicht
+matches processes by working directory, and Herdr-launched sessions have not been
+verified against that. Confirm it against a real pane before the adapter relies
+on it.
 
 ## 6. Session lifecycle and safe workspace leasing
 
@@ -154,15 +235,40 @@ manual start, stop, status, and attach procedures through the Pi proof adapter.
   observed readiness; stopping releases the lease only after the process is no
   longer usable.
 - A second live session cannot lease the same canonical path, including aliases
-  through symlinks.
+  through symlinks and through case variants on a case-insensitive volume
+  (the production default). Per ADR 0009 and its 2026-09-08 correction, this
+  needs both halves: `(st_dev, st_ino)` for "are these the same directory now",
+  and re-canonicalizing a stored path before comparing it rather than
+  string-matching what the database returned.
+- The case-variant test must span time — resolve, rename changing only case,
+  resolve again — because Rust's `canonicalize` normalises case, so a test that
+  resolves two spellings at one instant passes trivially and proves nothing.
+  A lease test that cannot fail is worse than no lease test, because it reports
+  confidence it has not earned.
 - Registered descendant scopes are rejected as another scope's workspace.
 - Existing unregistered descendants and validated same-repository worktrees are
   accepted; nonexistent paths and foreign-repository worktrees are rejected.
-- `max_sessions` prevents further starts without changing existing sessions.
+- `max_sessions` prevents further starts without changing existing sessions, and
+  is evaluated per agent rather than per scope.
+- A `permanent` agent's session survives between tasks and is restarted after a
+  crash. A `temporary` agent's session is created when a task is delivered to it
+  and torn down once that task reaches `done`, `failed`, or `cancelled`.
+  `blocked` is not terminal: a temporary agent awaiting clarification or
+  permission keeps its session and its lease.
+- When a temporary agent's session dies while its task is not in a terminal
+  state — harness crash, Herdr restart, machine restart — the session record is
+  removed, its workspace lease is released, and the task becomes
+  `blocked: interrupted`. Factory never restarts the agent or redelivers the
+  prompt automatically: after an ambiguous failure it is unknown whether the
+  first delivery already had external effect. A human creates a replacement
+  task, which gets a fresh temporary agent and session.
 
-**Decisions or risks to resolve first:** Define stale-lease/operator recovery
-rules and the exact repository identity test (for example, common Git dir plus
-canonical repository root).
+**Decisions or risks to resolve first:** Define the exact repository identity
+test (for example, common Git dir plus canonical repository root). The
+lease-holding states are settled by ADR 0012 — `starting`, `running`, and
+`disconnected` hold; `stopped` and `failed` release — and because
+`disconnected` holds, stale-lease recovery is no longer a rule to define at
+leisure but a required operator action in Slice 9.
 
 ## 7. Durable task queue and single-session delivery
 
@@ -200,16 +306,28 @@ parallel work.
 
 **Scope:** Carry authenticated sender identity from a human or recorded sending
 session; check target scope ancestry before queueing. Exercise two independent
-sessions of one agent in distinct workspaces and establish operator runbooks for
-human targeting, parent-to-child delegation, task review, and terminal attach.
+sessions of a single agent in distinct workspaces, and separately two agents of
+one scope running concurrently, then establish operator runbooks for human
+targeting, parent-to-child delegation, task review, and terminal attach. The
+delegation rule is per scope, so agents sharing a scope share its permissions;
+targeting an individual agent selects a recipient, it does not grant one.
 
 **Dependencies:** Slices 3, 6–7.
 
 **Acceptance criteria:**
 - A human can queue work to any registered scope.
-- A parent scope can queue work to a registered descendant.
-- A session is rejected when targeting its own ancestor, a sibling, or any
-  non-descendant; rejection leaves no task or delivery record.
+- A parent scope can queue work to a registered descendant, and a scope can
+  queue work to a sibling sharing its parent.
+- A session is rejected when targeting its own ancestor, itself, or a scope that
+  is neither a descendant nor a sibling — a nephew or cousin included, which
+  must be reached through its parent. Rejection leaves no task or delivery
+  record.
+- Every task carries the ordered delegation chain of scopes it has passed
+  through, and targeting a scope already in that chain is rejected. A two-step
+  cycle (`A → B → A`) and a longer one are both refused, so peer delegation
+  cannot loop indefinitely.
+- The chain is recorded durably with the task, so a delegation loop is
+  reconstructable after a restart rather than only detectable while running.
 - Two sessions for one scope can run separate tasks concurrently without shared
   workspace leases or prompt multiplexing.
 - The operator can inspect session, task, lease, and compiled-context records
@@ -252,14 +370,27 @@ new delivery or a replacement task.
 **Objective:** Replace validated manual runbooks with an idempotent Factory CLI
 and add the second adapter without changing domain behavior.
 
-**Scope:** Implement the specified `init`, supervisor, scope, agent, task, and
-context command surface over prior services. Automate only adapter actions that
-have passed manual proof; add Claude Code using the same adapter contract and
-repeat the core lifecycle, task, and recovery tests.
+**Scope:** Implement the specified `init`, supervisor, scope, agent, task,
+context, and `doctor` command surface over prior services. Automate only adapter
+actions that have passed manual proof; add Claude Code using the same adapter
+contract and repeat the core lifecycle, task, and recovery tests.
+
+`factory doctor` is read-only diagnosis and belongs here because it inspects
+what slices 1–9 built. It reports and never repairs: recovery keeps the explicit
+review, resume, and replacement actions of slice 9, so there are not two ways to
+change the same state.
 
 **Dependencies:** Slices 1–9.
 
 **Acceptance criteria:**
+- `factory doctor` reports, in one read-only pass and without mutating anything:
+  configuration validity for every registered scope, database integrity and
+  schema version, registry drift (a registered path that no longer exists),
+  leases held with no live session, database sessions against actual Herdr
+  panes, and whether the scheduler job is loaded and when it last fired. It
+  exits non-zero when it finds something, so it is usable from a check.
+- The scheduler check closes a real gap: today nothing would reveal that a cron
+  schedule has not fired for days.
 - Every listed version-1 command maps to existing domain operations and is safe
   to retry after an interrupted invocation.
 - CLI output provides stable IDs, state, actionable errors, and exact context
@@ -279,14 +410,25 @@ manual-confirmation mode rather than weakening at-most-once delivery.
 ## 11. Shared task audit and cron dispatcher
 
 **Objective:** Extend the root task store with durable task runs, decisions,
-results, and recurring task creation without introducing a separate workflow
-engine.
+results, recurring task creation, and the version-1 production-station hooks of
+design section 12, without introducing a separate workflow engine.
 
 **Scope:** Add transactional SQLite tables for task templates, task runs,
 append-only events, decisions, artifacts, and cron schedules. Expose the same
 task tool to every Pi agent. A minute-level dispatcher creates idempotent cron
 runs and attempts delivery only to an assigned idle agent; otherwise work stays
-queued for central assignment.
+queued for central assignment. Add `factory schedule create|list|enable|disable`
+as its own CLI command group, distinct from `factory task send`, mirroring the
+`schedule_create`/`schedule_list`/`schedule_enable`/`schedule_disable` agent
+tools.
+
+Carry the production-station hooks in the same tables and the same migration:
+acceptance criteria and a version on a task template; the executed template
+version, an optional reworked-run reference with the finding that caused it, and
+adapter-reported cost metrics on a task run; and a `verification` event type in
+the append-only log. These are durable fields and event types only. This slice
+does not automate an inspection gate, does not decide rework, and adds no
+projection, report, or command over the recorded figures.
 
 **Dependencies:** Slices 2, 7, and 10.
 
@@ -299,8 +441,164 @@ queued for central assignment.
 - Unassigned, busy, and stopped target agents do not lose queued work.
 - The scheduler never stores secrets or copies sensitive source content into
   SQLite records.
+- `factory schedule create` registers a durable cron rule against a task
+  template without creating a run itself; `list` shows every schedule with its
+  active state and next/last run; `enable`/`disable` toggle a schedule without
+  deleting its history or affecting already-created runs.
+- A task template stores acceptance criteria and a version; every run records
+  the template version it executed, and that record does not change when the
+  template is later revised.
+- A verification verdict is stored as an append-only event attributed to a
+  session other than the one that produced the result, and never replaces or
+  overwrites the worker's own completion record.
+- A run can reference the run it reworks together with the finding that caused
+  the rework, without modifying the referenced run.
+- A run stores model identifier, token counts, and duration when its adapter
+  reports them, and remains valid when the adapter reports none of them.
 
 **Decisions or risks to resolve first:** Delivery is cooperative until the
 Factory supervisor owns all session lifecycle and exact at-most-once handoff.
 `launchd` installation remains an explicit macOS operation and needs a restart
 drill with logs before being treated as unattended production automation.
+Decide whether a verification verdict may transition a run's state in version 1
+or may only annotate it, and confirm which harness adapters can report token
+counts at all before treating cost metrics as a required field. Design section 6
+forbids a scope from targeting itself, so decide who may legally create a
+verification run: a human, the parent scope, a sibling scope, or an explicit
+delegation exception. Allowing siblings does not settle this on its own, since
+the inspecting session would still have to live outside the scope under
+inspection.
+
+## 12. Agent discovery and durable writing
+
+**Objective:** Let an agent find out who else exists and who it may delegate to,
+and give it one enforced path for writing shared knowledge and scope memory.
+
+**Scope:** Implement `factory agent list`, `factory knowledge write|list|show`,
+and `factory memory add|list` per design section 7.
+
+`agent list` returns the registered scopes and their agents with harness,
+lifetime, and availability, and marks which the calling scope may target under
+the section 6 rule. It answers the permission question directly rather than
+returning the tree and leaving each agent to apply the rule, so the rule cannot
+drift between harnesses. Availability comes from the session observation of
+ADR 0011; where no observation is available the entry reports availability as
+unknown rather than guessing idle.
+
+`knowledge write` creates or updates a note in the company root's
+`.factory/knowledge/`. `memory add` writes an entry to the calling scope's
+`.factory/memory/`. Both live under `.factory/` because of the design section 4
+rule that no Factory command writes outside it. The two are separate because the
+material differs: knowledge is shared and sourced, memory is scope-local and
+unsourced.
+
+Knowledge is a note graph in the Obsidian convention, not a folder tree: one
+Markdown file per note, filename as stable identifier, `[[note-name]]` links
+between them. Links are canonical and live in the files; backlinks and the index
+are projections rebuilt by rereading the notes, which is what design section 4
+requires of derived indexes. No index file is maintained by hand, and no index
+service, embedding, or retrieval engine is built, so the section 8 deferral of
+knowledge databases is untouched.
+
+**Dependencies:** Slices 3, 8, and 10.
+
+**Acceptance criteria:**
+- `factory agent list` run from a scope marks exactly the descendants and
+  siblings as targetable, and marks ancestors, itself, nephews, and cousins as
+  not targetable, matching the slice 8 rule with no second implementation.
+- An agent that is registered but has no live session is listed with its
+  availability stated, and is never silently omitted.
+- No command in the whole CLI writes, creates, or deletes a file outside a
+  `.factory/` directory. This is asserted once against every mutating command,
+  not per command, so a command added later cannot quietly escape it.
+- `knowledge write` refuses a note whose frontmatter lacks a title, status,
+  updated date, or at least one source, naming what is missing.
+- `knowledge write` refuses any source path under `data/secrets/`, and the
+  refusal names the rule rather than the file contents.
+- A note write is atomic: after a failure part-way, the note is either fully
+  written or unchanged, never truncated.
+- `factory knowledge list` derives the index and the backlinks by rereading the
+  notes, holds no separate link table, and produces identical output when run
+  twice against unchanged notes.
+- A `[[link]]` to a note that does not exist is accepted on write and reported by
+  `list` as unresolved. It marks a gap to fill and is never an error.
+- Deleting `.factory/knowledge/` and restoring the note files reproduces the same
+  index and backlinks, proving the graph is derived rather than stored.
+- `memory add` writes only to the calling scope's `.factory/memory/`, never to
+  another scope's, and leaves existing entries unmodified.
+- Both writing commands record the write as a task event, so the provenance of a
+  note or memory entry survives the session that produced it.
+
+**Decisions or risks to resolve first:** Decide how the note body reaches the
+command — standard input is the obvious answer for prose, but it must be settled
+before the interface is written. Decide whether `knowledge write` may update an
+existing note or only create one: checking a new note against existing ones for
+contradictions is a judgement the CLI cannot make and must leave with the agent,
+so an update path needs a rule for what the command verifies and what it trusts.
+Decide the note-name rules, since the filename is the link target and renaming a
+note breaks every `[[link]]` pointing at it.
+
+**Migration, not part of this slice:** `knowledge/wiki/` holds seventeen curated
+pages today with their own `SCHEMA.md`, and `MEMORY.md` files exist at scope
+roots. Both are gitignored, so a careless move is not recoverable from Git.
+Moving them into `.factory/` and converting the pages to linked notes needs its
+own task with a migration and rollback plan, in the same way the task store does.
+
+## 13. Scope-bound secret storage
+
+**Objective:** Give plugins and integrations a credential boundary that keeps
+secret values out of prompts, task records, context, logs, and the operational
+database.
+
+**Scope:** Implement `factory secret set|list|remove` per design section 7.
+Values go to the macOS Keychain under a deterministic, scope-bound service name.
+Only a non-secret reference and capability metadata are written to the
+company-root secret registry. `list` shows references and status, never values;
+`remove` deletes the vault item and its registry entry after confirmation.
+
+Port the existing prototype registry rather than inventing a format: the live
+`.factory/secrets.yaml` already carries `scope`, `integration`, `account`,
+`capabilities`, and `status`, and matches the design. Tighten its file mode
+while porting — it is currently world-readable, which is wrong for a file
+naming accounts and integrations even though it holds no secret values.
+
+**Dependencies:** Slice 10.
+
+This is a slice of its own rather than one more command group in slice 10
+because Keychain access is a platform integration with failure modes no other
+command has, and burying them inside the CLI-and-Claude-Code slice would hide
+them. It comes after slice 10 because no earlier slice consumes a credential:
+the prototype registry carries the load until then, and design section 10 does
+not list secrets among the MVP completeness criteria.
+
+**Acceptance criteria:**
+- A secret set for one scope is retrievable by that scope and is not reachable
+  through another scope's service name.
+- No command path writes a secret value to the database, a task record, a
+  generated context, a log, or terminal output; `list` output is safe to paste.
+- `remove` deletes both the vault item and the registry reference, and a partial
+  failure leaves an inspectable state rather than a dangling reference.
+- The registry remains readable and correct after a Keychain item is deleted
+  outside Factory; the entry reports a missing-vault-item status instead of
+  failing the whole command.
+- The registry file is not world-readable.
+
+**Decisions or risks to resolve first:** Confirm the Keychain access behaviour
+for an unsigned binary. An unsigned `factory` may prompt on every access, and
+"always allow" depends on stable code signing, which makes this partly a release
+packaging question rather than only an implementation one. Decide whether
+version 1 accepts repeated prompts, and whether a non-macOS vault backend is in
+scope at all.
+
+## Deferred production stations
+
+Design section 12 classifies four further stations as later work. They are not
+version-1 slices and have no acceptance criteria here; they are listed so the
+delivery plan states what was deliberately left out.
+
+| Station | Smallest next step after version 1 |
+|---|---|
+| Material supply (12.4) | Declared material paths in `AGENTS.md`, compiled with source headings and failing loudly on a missing path. Changes the Slice 4 context contract. |
+| Operating data (12.5) | One read projection over task-run events plus a read-only `factory stats` command. Depends on the 12.1 and 12.2 hooks carrying real verdicts. |
+| Goods receipt and dispatch (12.7) | An intake path that turns an inbound message into a task run with recorded provenance, and a dispatch run whose external effect is approval-gated. |
+| Learning loop (12.8) | A scheduled review run that reads decisions and verification findings and proposes template and `AGENTS.md` changes for human approval. |

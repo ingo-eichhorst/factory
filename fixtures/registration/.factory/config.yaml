@@ -1,0 +1,16 @@
+version: 1
+
+scope:
+  id: 5d8f599e-381a-42a1-929b-628ab6ecded1
+  name: fixture-co
+
+# Marks this file as a test fixture, never a live scope. Factory ignores
+# unknown top-level keys per ADR 0009 rule 2 (docs/adr/0009), so this key's
+# presence changes nothing about how the file validates — it exists only so
+# a fixture is greppable and self-identifying as one.
+fixture: true
+
+agent:
+  name: Fixture Co Agent
+  harness: claude-code
+  max_sessions: 1

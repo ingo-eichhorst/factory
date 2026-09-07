@@ -1,0 +1,209 @@
+# Slice 1 — configuration diagnostic corpus
+
+This document is the specification for `factory-config` error output. Slice 1's
+acceptance criteria are almost entirely *diagnostic* criteria — "naming the file
+and both keys", "both definitions identified", "fails with the supported set",
+"fail with the file and corrective action". The parser is the easy half; this
+table is the deliverable.
+
+Every row below has a fixture under
+`crates/factory-config/fixtures/` and a test asserting the rendered message
+**exactly**. A change to a message is a change to this file first.
+
+## Rendered form
+
+Errors render in the rustc convention, which readers already know:
+
+```text
+error: <summary>
+  --> <file>:<line>:<column>
+  note: <a second location that is part of the same problem>
+  help: <the corrective action>
+```
+
+Rules:
+
+- `--> ` always carries the **absolute path of the file**, never `<input>`.
+  `serde-saphyr` renders the source as `<input>`; the file name is supplied by
+  `factory-config`, which is why parse errors are wrapped rather than forwarded.
+- `note:` appears once per additional location. A problem about two places in a
+  file (both `agent` and `agents` set; two agents sharing a name) names both.
+- `help:` is present on every error and states an action, not a restatement of
+  the problem. "expected one of …" is a summary; "remove `agent:` …" is a help.
+- Line and column are 1-based, as `serde-saphyr` reports them.
+
+## Cases that must load
+
+| Fixture | What it proves |
+|---|---|
+| `valid/root-shorthand.yaml` | The `agent:` shorthand yields exactly one agent |
+| `valid/multi-agent.yaml` | The `agents:` list yields several, order preserved |
+| `valid/unknown-toplevel.yaml` | A `runtime:` block is ignored, not rejected (ADR 0009 rule 2) |
+| `valid/defaults.yaml` | Omitted `max_sessions` is `1`; omitted `lifetime` is `permanent` |
+
+`valid/unknown-toplevel.yaml` is a copy of the real `assistant` scope config,
+which carries a `runtime:` block owned by `ensure_assistant_agents.py`. If this
+fixture ever fails to load, two live scopes have become unloadable.
+
+## Cases that must fail
+
+Column numbers are what `serde-saphyr` reports for the offending node; where a
+fixture's exact column is uncertain the test asserts the line and the message
+text, never a guessed column.
+
+### 1. Both `agent` and `agents`
+
+```yaml
+agent:
+  name: A
+agents:
+  - name: B
+```
+
+```text
+error: `agent` and `agents` are both set; a scope uses one or the other
+  --> <file>:1:1
+  note: `agent` shorthand defined here
+  note: `agents` list defined at <file>:3:1
+  help: keep `agents:` and delete the `agent:` block, or keep `agent:` and delete `agents:`
+```
+
+Both keys are named and both are located, per the acceptance criterion. This is
+also why ADR 0009 forbids modelling these as an untagged enum: an untagged enum
+can only say "data did not match any variant".
+
+### 2. Neither `agent` nor `agents`
+
+```text
+error: no agent is defined; a scope configures at least one agent
+  --> <file>:1:1
+  help: add an `agent:` block, or an `agents:` list with at least one entry
+```
+
+### 3. Two agents sharing a name
+
+```text
+error: two agents in this scope are both named `assistant`
+  --> <file>:8:5
+  note: first defined at <file>:5:5
+  help: agent names address a recipient in `factory task send`, so they must be unique within a scope; rename one
+```
+
+The help states *why* the rule exists, because a duplicate name is not obviously
+wrong until you know the name is an address.
+
+### 4. Unsupported `lifetime`
+
+```text
+error: unsupported lifetime `ephemeral`
+  --> <file>:7:15
+  help: supported lifetimes are `permanent` and `temporary`; `permanent` is the default and may be omitted
+```
+
+### 5. Unsupported `harness`
+
+```text
+error: unsupported harness `bash`
+  --> <file>:6:12
+  help: supported harnesses are `claude-code`, `opencode`, and `pi`
+```
+
+### 6. Harness `claude` — the near-miss
+
+```text
+error: unsupported harness `claude`
+  --> <file>:6:12
+  help: did you mean `claude-code`? supported harnesses are `claude-code`, `opencode`, and `pi`
+```
+
+A separate case because `projects/awesome-herdr/.factory/config.yaml` sets
+exactly this today. See `HARNESS_TABLE` in `src/harness.rs` and the open item in
+the backlog.
+
+### 7. Invalid UUID
+
+```text
+error: `scope.id` is not a UUID: `not-a-uuid`
+  --> <file>:3:7
+  help: generate one with `uuidgen`; the scope ID is permanent identity and must not be reused between scopes
+```
+
+### 8. Unsupported version
+
+```text
+error: unsupported configuration version `2`
+  --> <file>:1:10
+  help: this build of Factory supports version 1
+```
+
+Never a guess and never a silent upgrade, per ADR 0009 rule 4.
+
+### 9. Missing required field
+
+```text
+error: missing field `scope`
+  --> <file>:1:1
+  help: add a `scope:` block with an `id` and a `name`
+```
+
+### 10. Unknown field inside a Factory-owned mapping
+
+```yaml
+agent:
+  name: A
+  max_sesions: 4
+```
+
+```text
+error: unknown field `max_sesions` in `agent`
+  --> <file>:3:3
+  help: expected one of `harness`, `lifetime`, `max_sessions`, `name`; `max_sesions` looks like a typo for `max_sessions`
+```
+
+This is ADR 0009 rule 3, and it is the rule that earns its keep: without it,
+`max_sesions: 4` silently means `max_sessions: 1` and an agent quietly runs at a
+quarter of its configured parallelism. Strictness applies *inside* Factory-owned
+mappings only — the top level stays permissive so `runtime:` survives.
+
+### 11. `max_sessions: 0`
+
+```text
+error: `max_sessions` is 0, so this agent could never start a session
+  --> <file>:6:17
+  help: use at least 1, or remove the agent
+```
+
+### 12. Empty file
+
+```text
+error: the file is empty
+  --> <file>:1:1
+  help: a scope configuration needs at least `version`, `scope`, and one agent
+```
+
+### 13. Duplicate scope IDs across files
+
+Checked by `validate_unique_ids`, not by loading one file, and reported once for
+the pair:
+
+```text
+error: two scopes share the ID `c5fbc985-656a-4219-8614-fcaeaddbf103`
+  --> <file-a>:3:7
+  note: also used by scope `factory` at <file-b>:3:7
+  help: a scope ID is permanent identity; if this file was copied, generate a new ID with `uuidgen`
+```
+
+This is the one Slice 1 check that spans files. It exists here rather than in
+the Slice 3 registry because a copied config is most cheaply caught at the point
+it is read.
+
+## What validation must not do
+
+`factory-config` performs **no** filesystem writes of any kind — no cache, no
+lockfile, no log, not even in a temporary directory. Slice 1's criterion is
+"validation writes nothing at all", which is the strictest form of the design §4
+rule and is asserted directly in `tests/no_writes.rs`.
+
+Validation also does not expand `${HOME}` or `${REPO_ROOT}`. That expansion
+belongs to `ensure_assistant_agents.py` and is explicitly out of scope per
+ADR 0009's closing open item. A configuration value is used verbatim.
