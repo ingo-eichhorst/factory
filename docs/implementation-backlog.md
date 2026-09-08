@@ -296,10 +296,17 @@ identity, command, generated context handoff, readiness evidence, completion
 markers, question/permission signals, and final-result capture rules. Persist
 only observations in the database; an operator performs terminal actions.
 
-`observe()` takes its state from Irrlicht per ADR 0011, not from terminal
-output: Irrlicht already parses Pi's own transcripts into `working`, `waiting`,
-and `ready`, and joins on the canonical workspace path. This slice consumes that
-rather than deriving readiness from the PTY.
+`observe()` takes its state from **Herdr**, not Irrlicht and not the PTY
+(ADR 0017, which supersedes ADR 0011 for Pi only). Herdr does not infer Pi's
+state: Pi loads a Herdr-installed extension that reports lifecycle events over a
+socket, which `herdr agent explain` confirms as
+`screen_detection_skip_reason: full_lifecycle_hook_authority`. Irrlicht parses a
+transcript to infer state; Herdr is told it by the harness.
+
+Herdr's vocabulary is `idle | working | blocked | done | unknown`, which already
+carries the question-and-permission signal this slice lists as a risk. Irrlicht
+remains the source for `claude-code` in Slice 10, and remains the source of
+token and cost metrics that Herdr does not report.
 
 **Dependencies:** Slices 2 and 4.
 
@@ -321,8 +328,18 @@ rather than deriving readiness from the PTY.
   the criterion that a working-directory join silently fails, and the `assistant`
   scope is configured for exactly that with `max_sessions: 2`. Test it with two
   live sessions in one directory, not one.
-- With Irrlicht stopped, the adapter still completes the lifecycle in
-  manual-confirmation mode, and no task is lost or duplicated.
+- With Irrlicht stopped, the adapter still completes the lifecycle: for Pi it
+  loses only enrichment, since state comes from Herdr. With **Herdr** stopped it
+  falls back to manual confirmation, and no task is lost or duplicated.
+- A Pi session started without the Herdr state extension is recorded as
+  **observation-degraded** and gets manual confirmation. The adapter must not
+  accept screen-detected state as if it were hook-reported: it verifies
+  `screen_detection_skip_reason: full_lifecycle_hook_authority` and treats its
+  absence as no observation.
+- `idle` never closes a task, and `done` never closes a task. `idle` means the
+  harness waits for input, which is equally true before delivery and after
+  completion; `done` is Herdr's word for a finished turn, and a task may span
+  many turns. Completion is recorded from the agent's reported result.
 
 **Decisions or risks to resolve first:** ADR 0011's open item 1 is now answered,
 by measurement against the live machine on 2026-09-08, and the answer changes

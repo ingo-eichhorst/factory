@@ -1,0 +1,30 @@
+{
+  "id": "cli:agent:get",
+  "result": {
+    "agent": {
+      "agent": "pi",
+      "agent_session": {
+        "agent": "pi",
+        "kind": "path",
+        "source": "herdr:pi",
+        "value": "/Users/operator/.pi/agent/sessions/--Users-operator-example-company-projects-factory--/2026-09-03T18-51-41-499Z_00000000-0000-0000-0000-000000000000.jsonl"
+      },
+      "agent_status": "idle",
+      "cwd": "/Users/operator/business-factory/projects/factory",
+      "focused": false,
+      "foreground_cwd": "/Users/operator/business-factory/projects/factory",
+      "interactive_ready": true,
+      "name": "factory-builder",
+      "pane_id": "wE:p1",
+      "revision": 1,
+      "screen_detection_skipped": true,
+      "state_change_seq": 588,
+      "tab_id": "wE:t1",
+      "terminal_id": "term_65a98a3efabc71a",
+      "terminal_title": "Example task",
+      "terminal_title_stripped": "Example task",
+      "workspace_id": "wE"
+    },
+    "type": "agent_info"
+  }
+}

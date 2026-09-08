@@ -1,0 +1,23 @@
+{
+  "id": "cli:agent:get",
+  "result": {
+    "agent": {
+      "agent": "claude",
+      "agent_status": "idle",
+      "cwd": "/Users/operator/business-factory/projects/awesome-herdr",
+      "focused": false,
+      "foreground_cwd": "/Users/operator/business-factory/projects/awesome-herdr",
+      "interactive_ready": true,
+      "name": "awesome-herdr-curator",
+      "pane_id": "wD:p1",
+      "revision": 464,
+      "state_change_seq": 448,
+      "tab_id": "wD:t1",
+      "terminal_id": "term_658ddeac2349612",
+      "terminal_title": "✳ Example task",
+      "terminal_title_stripped": "Example task",
+      "workspace_id": "wD"
+    },
+    "type": "agent_info"
+  }
+}
