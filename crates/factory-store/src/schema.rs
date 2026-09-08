@@ -408,3 +408,167 @@ CREATE UNIQUE INDEX tasks_one_running_per_session
     ON tasks (assigned_session_id)
     WHERE status = 'running';
 "#;
+
+/// Migration 4 (backlog §9 / `factory-recovery`'s crate docs, "Migration 4 —
+/// an authorised delivery is recorded, not passed"): `tasks` gains a counter
+/// that turns "a human authorised one further delivery" into a durable fact
+/// a restart can see, rather than a call argument that dies with the process
+/// that received it.
+///
+/// # Plain `ALTER TABLE ADD COLUMN`, not migration 3's rebuild — measured,
+/// not assumed
+///
+/// Migration 2 above rebuilt `scopes` because `ALTER TABLE ... ADD COLUMN`
+/// cannot loosen `canonical_path`'s `UNIQUE`/`NOT NULL` constraints on an
+/// *existing* table — a grammar limit, not a data one. Migration 3's own
+/// reason is sharper than "the grammar disallows a two-column CHECK," and
+/// this migration's own measurement 2 below is what actually proves it:
+/// `tasks_v3`'s CHECK required `status = 'running' AND assigned_session_id
+/// IS NOT NULL`, and a schema-2 database could already hold a `running` row
+/// with no `assigned_session_id` at all (the column did not exist yet).
+/// `ADD COLUMN` validates a self-referencing CHECK's backfilled default
+/// against every existing row before it will commit (measurement 2), so
+/// adding that CHECK by `ADD COLUMN` against such a row would have been
+/// refused outright — there is no single `DEFAULT` expression that is
+/// simultaneously `NOT NULL` for a `running` row and satisfies "non-NULL
+/// whenever `status = 'running'`" for a row already sitting in that state.
+/// Migration 3 needed the rebuild so its `INSERT ... SELECT` could rewrite
+/// exactly those ambiguous rows to `blocked: interrupted` *before* the CHECK
+/// had to hold — see `migration_3_rewrites_a_schema_2_running_task_to_
+/// blocked_interrupted` in `migrations.rs` for the direct evidence. This
+/// column needs none of that: one new column, with a CHECK naming only
+/// itself, and `DEFAULT 1` that every existing row can satisfy unconditionally
+/// — so before writing the rebuild dance a third time, the question was
+/// measured rather than assumed from those two migrations' own comments:
+/// does plain `ADD COLUMN` actually suffice here?
+///
+/// Measured on 2026-09-08 against the exact bundled engine this workspace
+/// compiles (`rusqlite` 0.40.2 / `libsqlite3-sys` 0.38.2, ADR 0012
+/// decision 1), with a throwaway in-memory database, in two steps:
+///
+/// 1. **Does `ADD COLUMN` accept a CHECK naming only the new column, and does
+///    it bite?** Yes: `ALTER TABLE t ADD COLUMN authorised_deliveries
+///    INTEGER NOT NULL DEFAULT 1 CHECK (authorised_deliveries >= 1)`
+///    succeeds against a table with an existing row, and a subsequent
+///    `UPDATE ... SET authorised_deliveries = 0` is rejected with `CHECK
+///    constraint failed` — the same constraint-violation shape
+///    `tests/constraints.rs` already asserts for other CHECKs in this
+///    schema.
+/// 2. **The actual discriminator: does `ADD COLUMN` validate the
+///    `DEFAULT`-backfilled value against a CHECK installed in the very same
+///    statement, for rows that already exist?** Yes. Against a table already
+///    holding one row, `ALTER TABLE t ADD COLUMN x INTEGER NOT NULL DEFAULT 0
+///    CHECK (x >= 1)` — a default deliberately chosen to violate its own
+///    CHECK — is refused outright (`CHECK constraint failed`), and the
+///    column is not added at all (confirmed by reading the table back from
+///    `sqlite_master` afterwards: no trace of `x`). SQLite will not let a
+///    migration silently leave a violating row behind the way a hand-rolled
+///    backfill script could.
+///
+///    This is what actually justifies `DEFAULT 1` here, not merely "the
+///    grammar allows it": `DEFAULT 1` satisfies the CHECK (requiring at
+///    least `1`) by construction, so there is no row for a violation to hide
+///    in — and measurement 2 confirms that even a mistake (say, a stray
+///    `DEFAULT 0`) would fail loudly at migration time on any database
+///    holding a task, rather than shipping a silently-violated invariant.
+///
+/// (The same throwaway database also measured a cross-column CHECK and a
+/// `REFERENCES` clause each succeeding via `ADD COLUMN` against this engine
+/// version — more than migrations 2 and 3's own doc comments above expect of
+/// `ALTER TABLE`. That does not reopen either migration: both are released
+/// and forward-only per ADR 0012 decision 2, so their rebuilds stand
+/// regardless of what a newer SQLite now accepts. Recorded here only so the
+/// next agent does not re-run the same measurement wondering whether this
+/// one did.)
+///
+/// No `.foreign_key_check()` on this migration's entry in `migrations()`,
+/// unlike migrations 2 and 3: `ADD COLUMN` neither drops nor recreates
+/// `tasks`, so no reference to it from `task_delegation_chain` or
+/// `delivery_attempts` is ever invalidated — there is nothing for
+/// `PRAGMA foreign_key_check` to catch that this statement could have broken.
+///
+/// # A count, not a flag
+///
+/// `factory_task::deliver`'s guard (see that module) refuses once the number
+/// of recorded `delivery_attempts` rows reaches this number — "at least the
+/// authorised count," not slice 7's "any row at all." A boolean "resume
+/// approved" flag could only ever re-authorise one further attempt and would
+/// need to be cleared by the same call that consumes it, which is
+/// indistinguishable, after a restart lands between the two writes, from
+/// "never authorised." A monotonically increasing count needs no reset:
+/// `factory_task::deliver::authorise_resume` increments it by exactly one per
+/// human action, and the guard's arithmetic does the rest.
+///
+/// # Backfill
+///
+/// Every row that exists before this migration backfills to exactly `1`: a
+/// task created under slice 7 already carries the authorisation slice 7's
+/// guard assumed it had — one ordinary delivery, no resume yet. `DEFAULT 1`
+/// *is* the backfill; there is no separate `INSERT ... SELECT` to write
+/// because `ADD COLUMN` applies the default to every existing row as part of
+/// the same statement (see measurement 2 above for the direct evidence that
+/// this is not merely assumed).
+pub(crate) const V4_SCHEMA: &str = r#"
+ALTER TABLE tasks ADD COLUMN authorised_deliveries INTEGER NOT NULL DEFAULT 1
+    CHECK (authorised_deliveries >= 1);
+"#;
+
+/// Migration 5 (backlog §9 / `factory-recovery`'s crate docs, "Migration 5 —
+/// a session records how to find its harness again"): `sessions` gains two
+/// nullable identity columns. Same reasoning as migration 4 for the form:
+/// two new columns, neither a `REFERENCES` clause nor a CHECK spanning
+/// another column, so plain `ADD COLUMN` suffices and no
+/// `.foreign_key_check()` is needed on this migration's `migrations()` entry
+/// either — nothing referencing `sessions` is ever dropped or recreated by
+/// it.
+///
+/// # Why nullable, and why that is not merely "no default was chosen"
+///
+/// `grep -ic pane crates/factory-store/src/schema.rs` against every migration
+/// before this one returns `0`: no session row has ever recorded a pane id or
+/// a harness session id, so every pre-existing row backfills to `NULL` by
+/// construction — the same situation `dev`, `ino`, and `parent_id` were left
+/// in by migration 2, for the same reason (there is no historical value to
+/// invent for a fact schema 1 through 4 never captured).
+///
+/// But `NULL` is also the only honest value for a session Factory has never
+/// *since* observed, not only one it has not observed *yet*. ADR 0019
+/// decision 3: "A snapshot may be hours or days old. The pane identifiers it
+/// names may since have been reused by entirely different sessions, so a
+/// pane that exists is not evidence that *this* session exists." A value in
+/// either column is never a live claim that the pane or the harness session
+/// still exists — only that it was observed once. Whether a recorded id is
+/// still worth anything is `factory_recovery::evidence`'s question, not this
+/// schema's: ADR 0019 decision 3 draws exactly that line ("this ADR says what
+/// the database may claim on its own; Slice 9 says what live evidence is
+/// allowed to change about that claim"), and `factory-recovery`'s crate docs
+/// repeat it as the split this whole slice sits on.
+///
+/// # This migration ships with no writer, on purpose
+///
+/// Nothing in `factory-task` — the only other crate this agent may touch this
+/// slice — writes to `sessions` at all. `factory_task::complete` already
+/// receives a full `factory_adapter::Observation` (carrying `pane: PaneId`
+/// and `harness_session_id: Option<String>`) in
+/// [`factory_task::complete::blocked_from_observation`], and discards both
+/// fields after reading only `task_signal` and `confidence` — but that
+/// function updates `tasks`, never `sessions`, and has no session id in its
+/// own signature to write one against. Writing to `sessions` at all is
+/// `factory_session`'s exclusive job in this codebase (`begin_start`'s
+/// `INSERT` and `transition_in_tx`'s `UPDATE` are the only two sites in the
+/// whole workspace that touch the table), and `factory-session` is another
+/// agent's crate this slice. Adding a third write site in `factory-task` that
+/// reaches around `factory-session` into a table it does not own would be a
+/// bigger, uninvited change than "add two columns," not a smaller one.
+///
+/// The natural first writer is `factory_recovery::reconnect` — the crate docs
+/// name it as "the only place a live observation is permitted to move a
+/// session at all," and a live observation is exactly what carries a pane id
+/// and a harness session id. That module is empty on purpose, owned by
+/// another agent this slice. A column nothing yet writes is recorded here as
+/// a real, visible gap rather than hidden behind a writer bolted on in the
+/// wrong crate.
+pub(crate) const V5_SCHEMA: &str = r#"
+ALTER TABLE sessions ADD COLUMN herdr_pane_id TEXT;
+ALTER TABLE sessions ADD COLUMN harness_session_id TEXT;
+"#;

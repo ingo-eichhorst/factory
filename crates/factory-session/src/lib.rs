@@ -1210,6 +1210,119 @@ pub fn interrupt(
     Ok(())
 }
 
+/// ADR 0019 decision 2: after a restore, every lease-holding session becomes
+/// `disconnected` and keeps its lease.
+///
+/// # Why this is not a fourth entry in [`valid_targets`]
+///
+/// ADR 0019 decision 2 requires the edge `Starting → Disconnected` *and*, in
+/// the same paragraph, that "[t]he edge is not opened for any other caller."
+/// [`valid_targets`] is read by every transition in this crate with no way to
+/// restrict one entry to a single caller, so widening it would open the edge
+/// for [`mark_disconnected`] too — exactly the caller ADR 0019 forbids it
+/// for. `factory_recovery`'s crate docs record the resulting split as
+/// coordinator decision 2: the general table stays exactly as it is —
+/// `starting_cannot_go_directly_to_disconnected` in `tests/state_machine.rs`
+/// keeps asserting the edge is absent from it — and restore gets this one
+/// dedicated, narrowly named entry point instead. This is a deliberate
+/// deviation from ADR 0019's stated *mechanism* ("adding
+/// `Starting → Disconnected` to `factory_session`'s transition table") that
+/// honours both of its stated *requirements*.
+///
+/// # Why this takes a `Transaction`, not a `&mut Store`
+///
+/// ADR 0019 decision 1 performs the *entire* restore reconciliation — every
+/// session, every task — as one transaction, so that an operator who copies a
+/// snapshot into place by hand and then runs reconciliation never observes a
+/// half-reconciled database. A function that opened (and committed) its own
+/// transaction could not be called once per session from inside that larger
+/// one; this function is written as the inner primitive `factory_recovery`'s
+/// `restore::reconcile` calls once per lease-holding session, all inside its
+/// own single transaction.
+///
+/// # This move can never release a lease
+///
+/// [`SessionState::holds_lease`] is `true` for exactly `starting`, `running`,
+/// and `disconnected` — the three states this function's precondition below
+/// accepts — so the source state always already holds a lease in exactly the
+/// state this function moves it to. Unlike [`transition_in_tx`]'s general
+/// release logic, there is no `UPDATE workspace_leases` anywhere in this
+/// function's body: not "should not," but structurally cannot, run. Proved,
+/// not merely asserted, by
+/// `reconcile_to_disconnected_never_releases_the_lease` in this module's own
+/// tests below, which drives every lease-holding source state through this
+/// function and then confirms a competing [`begin_start`] on the same
+/// workspace is still rejected.
+///
+/// # Idempotence
+///
+/// Already-`disconnected` is a no-op success, not a re-written row: this
+/// function must not bump `updated_at` on a session that is already where it
+/// belongs, because `factory_recovery::restore::reconcile` must "change
+/// nothing the second time" (ADR 0019 decision 1 / coordinator decision 4),
+/// and a spuriously refreshed `updated_at` would make that false the moment
+/// anyone looked at the column. See `reconcile_to_disconnected_is_idempotent`
+/// below, whose mutation (restamping `updated_at` unconditionally) is exactly
+/// the bug this guard exists to prevent.
+///
+/// # Errors
+///
+/// [`SessionError::NotFound`] if `id` names no session.
+///
+/// [`SessionError::InvalidTransition`] if the session's current state does
+/// not hold a lease — `stopped` and `failed`. ADR 0019's restored-snapshot
+/// scenario only ever describes sessions "in `starting`, `running`, or
+/// `disconnected`"; a session already known to be `stopped` or `failed` has
+/// no lease for this function to preserve, and restore must not move it
+/// *backward* into `disconnected`, which would falsely claim Factory merely
+/// lost sight of a process that in fact already ended cleanly.
+pub fn reconcile_to_disconnected(
+    tx: &rusqlite::Transaction<'_>,
+    id: uuid::Uuid,
+) -> Result<(), SessionError> {
+    let id_str = id.to_string();
+
+    let current: Option<String> = tx
+        .query_row(
+            "SELECT state FROM sessions WHERE id = ?1",
+            [&id_str],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(factory_store::StoreError::from)?;
+    let Some(current) = current else {
+        return Err(SessionError::NotFound(id));
+    };
+    let from = SessionState::from_db_str(&current);
+
+    if !from.holds_lease() {
+        return Err(SessionError::InvalidTransition {
+            id,
+            from,
+            to: SessionState::Disconnected,
+            allowed: "nothing — a restore does not move a session backward out of `stopped` \
+                      or `failed`, which hold no lease for it to preserve"
+                .to_string(),
+        });
+    }
+
+    if from == SessionState::Disconnected {
+        // Already the target state, lease already held throughout — see
+        // "Idempotence" above for why skipping the write here, rather than
+        // an unconditional UPDATE, is load-bearing rather than an
+        // optimisation.
+        return Ok(());
+    }
+
+    tx.execute(
+        "UPDATE sessions SET state = 'disconnected', updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+        [&id_str],
+    )
+    .map_err(factory_store::StoreError::from)?;
+
+    Ok(())
+}
+
 /// Everything that can go wrong starting or transitioning a session.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -1258,4 +1371,228 @@ pub enum SessionError {
         to: SessionState,
         allowed: String,
     },
+}
+
+/// Unit tests for [`reconcile_to_disconnected`], kept inside this crate's own
+/// `src/lib.rs` — this task's agent owns exactly that file within
+/// `factory-session`, not `tests/`, so proof for a function added here lives
+/// here rather than in an integration test file owned by a task this agent
+/// was not assigned. Fixture style mirrors `tests/common/mod.rs`'s own `uid`
+/// and `seed_scope` helpers exactly (raw-SQL scope seeding, a deterministic
+/// UUID built from a seed) for the same reasons those give: this crate has no
+/// dependency on `factory-registry` to build a scope through, and `uuid` is
+/// pinned workspace-wide without the `v4` feature.
+#[cfg(test)]
+mod reconcile_to_disconnected_tests {
+    use super::*;
+
+    fn uid(seed: u32) -> uuid::Uuid {
+        uuid::Uuid::parse_str(&format!("00000000-0000-4000-8000-{seed:012x}")).expect("valid uuid")
+    }
+
+    fn seed_scope(
+        store: &mut factory_store::Store,
+        seed: u32,
+        path: &std::path::Path,
+    ) -> uuid::Uuid {
+        let id = uid(seed);
+        let tx = store.transaction().expect("begin");
+        tx.execute(
+            "INSERT INTO scopes (id, name, declared_path, canonical_path) VALUES (?1, 'scope', ?2, ?2)",
+            (id.to_string(), path.to_string_lossy().into_owned()),
+        )
+        .expect("insert scope");
+        tx.commit().expect("commit");
+        id
+    }
+
+    /// Drives a fresh session, in its own workspace directory, from
+    /// `begin_start` through this crate's own public transitions until it
+    /// reaches `target` — reusing the real API rather than hand-writing rows,
+    /// so these fixtures cannot drift from what a real caller can actually
+    /// produce.
+    fn session_in(
+        store: &mut factory_store::Store,
+        seed: u32,
+        scope_id: uuid::Uuid,
+        workspace: &std::path::Path,
+        target: SessionState,
+    ) -> uuid::Uuid {
+        std::fs::create_dir(workspace).expect("create workspace dir");
+        let id = uid(seed);
+        let canonical = CanonicalPath::resolve(workspace).expect("resolve workspace");
+        begin_start(store, id, scope_id, "agent", 10, &canonical).expect("begin_start");
+        match target {
+            SessionState::Starting => {}
+            SessionState::Running => mark_running(store, id).expect("mark_running"),
+            SessionState::Disconnected => {
+                mark_running(store, id).expect("mark_running");
+                mark_disconnected(store, id).expect("mark_disconnected");
+            }
+            SessionState::Stopped => {
+                mark_running(store, id).expect("mark_running");
+                stop(store, id, "test fixture").expect("stop");
+            }
+            SessionState::Failed => fail(store, id, "test fixture").expect("fail"),
+        }
+        id
+    }
+
+    fn lease_is_open(store: &factory_store::Store, session_id: uuid::Uuid) -> bool {
+        let released_at: Option<String> = store
+            .connection()
+            .query_row(
+                "SELECT released_at FROM workspace_leases WHERE session_id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("lease row exists");
+        released_at.is_none()
+    }
+
+    fn state_of(store: &factory_store::Store, session_id: uuid::Uuid) -> SessionState {
+        let s: String = store
+            .connection()
+            .query_row(
+                "SELECT state FROM sessions WHERE id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("session row exists");
+        SessionState::from_db_str(&s)
+    }
+
+    /// Every lease-holding source state (`starting`, `running`, and —
+    /// as a no-op — already-`disconnected`) reaches `disconnected`, and the
+    /// lease is never released: a competing [`begin_start`] on the identical
+    /// workspace is still rejected afterward. This is the test that proves
+    /// the doc comment's "never releases a lease" claim rather than merely
+    /// asserting it — see the mutation in the task report that changes the
+    /// target state written from `'disconnected'` to `'failed'` and watches
+    /// this test die.
+    #[test]
+    fn reconcile_to_disconnected_never_releases_the_lease() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = factory_store::Store::open(dir.path()).expect("open");
+        let scope = seed_scope(&mut store, 1, dir.path());
+
+        for (seed, from) in [
+            (101, SessionState::Starting),
+            (102, SessionState::Running),
+            (103, SessionState::Disconnected),
+        ] {
+            let workspace = dir.path().join(format!("ws-{seed}"));
+            let session = session_in(&mut store, seed, scope, &workspace, from);
+
+            {
+                let tx = store.transaction().expect("begin");
+                reconcile_to_disconnected(&tx, session)
+                    .unwrap_or_else(|e| panic!("{from} -> disconnected must succeed: {e}"));
+                tx.commit().expect("commit");
+            }
+
+            assert_eq!(
+                state_of(&store, session),
+                SessionState::Disconnected,
+                "session seeded from {from} must end up disconnected"
+            );
+            assert!(
+                lease_is_open(&store, session),
+                "session seeded from {from} must keep its open workspace_leases row"
+            );
+
+            let canonical = CanonicalPath::resolve(&workspace).expect("resolve workspace");
+            let err = begin_start(&mut store, uid(seed + 1000), scope, "agent", 10, &canonical)
+                .expect_err(
+                    "a second start on the same workspace must still be blocked: the lease \
+                     was never released",
+                );
+            assert!(
+                matches!(err, SessionError::WorkspaceLeased { .. }),
+                "expected WorkspaceLeased for the {from} case, got {err:?}"
+            );
+        }
+    }
+
+    /// `stopped` and `failed` hold no lease for this function to preserve, so
+    /// both are refused rather than moved backward into `disconnected`. See
+    /// the task report's mutation, which deletes the `holds_lease` guard and
+    /// watches this test die.
+    #[test]
+    fn reconcile_to_disconnected_refuses_a_session_with_no_lease_to_keep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = factory_store::Store::open(dir.path()).expect("open");
+        let scope = seed_scope(&mut store, 1, dir.path());
+
+        for (seed, from) in [(201, SessionState::Stopped), (202, SessionState::Failed)] {
+            let workspace = dir.path().join(format!("ws-{seed}"));
+            let session = session_in(&mut store, seed, scope, &workspace, from);
+
+            let tx = store.transaction().expect("begin");
+            let err = reconcile_to_disconnected(&tx, session)
+                .expect_err("a session with no lease to keep must not become `disconnected`");
+            assert!(
+                matches!(
+                    err,
+                    SessionError::InvalidTransition {
+                        to: SessionState::Disconnected,
+                        ..
+                    }
+                ),
+                "expected InvalidTransition for the {from} case, got {err:?}"
+            );
+        }
+    }
+
+    /// Calling this function again on an already-`disconnected` session must
+    /// not touch `updated_at` — the property `factory_recovery::restore`'s
+    /// idempotence depends on. A distinctive, obviously-old value is seeded
+    /// directly (bypassing `CURRENT_TIMESTAMP`) so that a mutation which
+    /// restamps it unconditionally on the no-op path is visible; without
+    /// this, "assert nothing changed" would pass by coincidence on a fast
+    /// machine even for the buggy version whenever both calls land in the
+    /// same wall-clock second.
+    #[test]
+    fn reconcile_to_disconnected_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = factory_store::Store::open(dir.path()).expect("open");
+        let scope = seed_scope(&mut store, 1, dir.path());
+        let workspace = dir.path().join("ws");
+        let session = session_in(&mut store, 1, scope, &workspace, SessionState::Running);
+
+        {
+            let tx = store.transaction().expect("begin");
+            reconcile_to_disconnected(&tx, session).expect("running -> disconnected");
+            tx.commit().expect("commit");
+        }
+        assert_eq!(state_of(&store, session), SessionState::Disconnected);
+
+        store
+            .connection()
+            .execute(
+                "UPDATE sessions SET updated_at = '2000-01-01 00:00:00' WHERE id = ?1",
+                [session.to_string()],
+            )
+            .expect("seed a distinctive old updated_at");
+
+        {
+            let tx = store.transaction().expect("begin");
+            reconcile_to_disconnected(&tx, session)
+                .expect("already disconnected: must succeed as a no-op");
+            tx.commit().expect("commit");
+        }
+
+        let updated_at: String = store
+            .connection()
+            .query_row(
+                "SELECT updated_at FROM sessions WHERE id = ?1",
+                [session.to_string()],
+                |row| row.get(0),
+            )
+            .expect("session row exists");
+        assert_eq!(
+            updated_at, "2000-01-01 00:00:00",
+            "a no-op reconciliation must not touch updated_at"
+        );
+    }
 }

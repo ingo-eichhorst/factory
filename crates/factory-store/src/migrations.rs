@@ -26,11 +26,20 @@ use crate::{StoreError, schema};
 /// Migration 3 (backlog §7, `schema::V3_SCHEMA`) carries the same
 /// `.foreign_key_check()` for the same reason: it rebuilds `tasks`, which
 /// `task_delegation_chain` and `delivery_attempts` reference.
+///
+/// Migrations 4 and 5 (backlog §9, `schema::V4_SCHEMA` / `schema::V5_SCHEMA`)
+/// carry no `.foreign_key_check()`: both are measured (see `schema.rs`'s doc
+/// comment on `V4_SCHEMA`) to need nothing beyond plain `ALTER TABLE ADD
+/// COLUMN`, which neither drops nor recreates the table it targets. There is
+/// no reference to `tasks` or `sessions` that either statement could ever
+/// invalidate, unlike migrations 2 and 3's drop/rename dance.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(schema::V1_SCHEMA),
         M::up(schema::V2_SCHEMA).foreign_key_check(),
         M::up(schema::V3_SCHEMA).foreign_key_check(),
+        M::up(schema::V4_SCHEMA),
+        M::up(schema::V5_SCHEMA),
     ])
 }
 
@@ -114,15 +123,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
 
         let fresh = Store::open_at(dir.path().join("fresh.sqlite")).expect("open fresh store");
-        // Was `2` before migration 3 (backlog §7) was appended; a fresh
-        // database now runs migrations 1, 2, and 3, landing on `user_version
-        // = 3`.
-        assert_eq!(fresh.schema_version().unwrap(), 3);
+        // Was `3` before migrations 4 and 5 (backlog §9) were appended; a
+        // fresh database now runs migrations 1 through 5, landing on
+        // `user_version = 5`.
+        assert_eq!(fresh.schema_version().unwrap(), 5);
 
         let migrated_path = dir.path().join("migrated.sqlite");
         seed_schema_1_database(&migrated_path, "");
         let migrated = Store::open_at(&migrated_path).expect("open migrated store");
-        assert_eq!(migrated.schema_version().unwrap(), 3);
+        assert_eq!(migrated.schema_version().unwrap(), 5);
 
         assert_eq!(
             schema_snapshot(&fresh),
@@ -153,10 +162,9 @@ mod tests {
         seed_schema_1_database(&path, &seed);
 
         let store = Store::open_at(&path).expect("migration 2 must succeed against real rows");
-        // Was `2` before migration 3 (backlog §7) was appended; opening this
-        // schema-1 database now also runs migration 3, landing on
-        // `user_version = 3`.
-        assert_eq!(store.schema_version().unwrap(), 3);
+        // Was `2`, then `3` (backlog §7); opening this schema-1 database now
+        // also runs migrations 3 through 5, landing on `user_version = 5`.
+        assert_eq!(store.schema_version().unwrap(), 5);
 
         // declared_path backfills from schema 1's only path fact.
         let (declared_path, canonical_path, dev, ino, parent_id): (
@@ -253,12 +261,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
 
         let fresh = Store::open_at(dir.path().join("fresh.sqlite")).expect("open fresh store");
-        assert_eq!(fresh.schema_version().unwrap(), 3);
+        // Was `3` before migrations 4 and 5 (backlog §9) were appended.
+        assert_eq!(fresh.schema_version().unwrap(), 5);
 
         let migrated_path = dir.path().join("migrated.sqlite");
         seed_schema_2_database(&migrated_path, "");
         let migrated = Store::open_at(&migrated_path).expect("open migrated store");
-        assert_eq!(migrated.schema_version().unwrap(), 3);
+        assert_eq!(migrated.schema_version().unwrap(), 5);
 
         assert_eq!(
             schema_snapshot(&fresh),
@@ -299,7 +308,9 @@ mod tests {
         seed_schema_2_database(&path, &seed);
 
         let store = Store::open_at(&path).expect("migration 3 must succeed against real rows");
-        assert_eq!(store.schema_version().unwrap(), 3);
+        // Was `3`; opening this schema-2 database now also runs migrations 4
+        // and 5 (backlog §9), landing on `user_version = 5`.
+        assert_eq!(store.schema_version().unwrap(), 5);
 
         // The queued row survives untouched, and the two new columns exist,
         // reading back NULL (schema 2 never wrote them).
@@ -445,7 +456,9 @@ mod tests {
 
         let store = Store::open_at(&path)
             .expect("migration 3 must not abort on a pre-existing running row");
-        assert_eq!(store.schema_version().unwrap(), 3);
+        // Was `3`; opening this schema-2 database now also runs migrations 4
+        // and 5 (backlog §9), landing on `user_version = 5`.
+        assert_eq!(store.schema_version().unwrap(), 5);
 
         let (status, blocked_reason, assigned_session_id): (
             String,
@@ -488,5 +501,254 @@ mod tests {
             )
             .expect("queued task row survived the rebuild");
         assert_eq!(untouched, queued_updated_at);
+    }
+
+    // Migration 4 (backlog §9) -----------------------------------------
+
+    /// Builds a schema-3 database directly from `schema::V1_SCHEMA` through
+    /// `schema::V3_SCHEMA`, bypassing `Store` (and therefore migrations 4 and
+    /// 5) entirely, then pins it at `user_version = 3`.
+    ///
+    /// Mirrors [`seed_schema_1_database`] and [`seed_schema_2_database`]'s
+    /// own reasoning, two migrations later: a fresh database now runs
+    /// migrations 1 through 5 back to back inside one shared transaction, so
+    /// it never exercises migration 4 running `ADD COLUMN` against a `tasks`
+    /// table it did not just create moments earlier in the same script.
+    /// Seeding a real schema-3 file here — with `tasks` in its
+    /// pre-migration-4 shape, with no `authorised_deliveries` column at all —
+    /// and then opening it is what actually exercises `ADD COLUMN` the way an
+    /// upgrade of a database left behind by slice 7 would.
+    fn seed_schema_3_database(path: &std::path::Path, extra_sql: &str) {
+        let conn = Connection::open(path).expect("open seed database");
+        conn.execute_batch(schema::V1_SCHEMA)
+            .expect("apply V1 schema");
+        conn.execute_batch(schema::V2_SCHEMA)
+            .expect("apply V2 schema");
+        conn.execute_batch(schema::V3_SCHEMA)
+            .expect("apply V3 schema");
+        if !extra_sql.is_empty() {
+            conn.execute_batch(extra_sql).expect("seed extra rows");
+        }
+        conn.pragma_update(None, "user_version", 3_i64)
+            .expect("pin schema-3 database at user_version 3");
+    }
+
+    /// The same equivalence proved one migration at a time by every sibling
+    /// above: migration 4 (and, since a fresh database runs every pending
+    /// migration together, migration 5 alongside it) must reach the same
+    /// schema whether a database is created fresh or migrated forward from a
+    /// real schema-3 database.
+    #[test]
+    fn fresh_and_migrated_from_v3_have_identical_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let fresh = Store::open_at(dir.path().join("fresh.sqlite")).expect("open fresh store");
+        assert_eq!(fresh.schema_version().unwrap(), 5);
+
+        let migrated_path = dir.path().join("migrated.sqlite");
+        seed_schema_3_database(&migrated_path, "");
+        let migrated = Store::open_at(&migrated_path).expect("open migrated store");
+        assert_eq!(migrated.schema_version().unwrap(), 5);
+
+        assert_eq!(
+            schema_snapshot(&fresh),
+            schema_snapshot(&migrated),
+            "a database created fresh and one migrated from schema 3 must end \
+             up with the same schema"
+        );
+    }
+
+    /// An empty database proves nothing about migration 4's backfill or its
+    /// foreign-key safety, since `tasks` there has no pre-existing row to
+    /// backfill and no referencing row to break. This seeds a scope, a
+    /// session, a `queued` task (schema 3's shape — no
+    /// `authorised_deliveries` column exists yet to set), and a
+    /// `delivery_attempts` row referencing it, then confirms after opening
+    /// through `Store` (which also runs migration 5) that: the pre-existing
+    /// task backfilled to exactly `authorised_deliveries = 1` (not `0`,
+    /// not `NULL` — see `schema::V4_SCHEMA`'s doc comment for the measured
+    /// evidence that `ADD COLUMN` performs this backfill in the same
+    /// statement as the CHECK it installs); the `delivery_attempts` row
+    /// still resolves to the same task; and `PRAGMA foreign_key_check`
+    /// reports nothing — `ADD COLUMN` neither drops nor recreates `tasks`,
+    /// so this is confirming a fact `ADD COLUMN` should never have been able
+    /// to disturb, not probing a rebuild the way migrations 2 and 3's
+    /// siblings do.
+    #[test]
+    fn migration_4_preserves_referencing_rows_and_backfills_authorised_deliveries_to_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("with_tasks.sqlite");
+
+        let scope_id = "5d8f599e-381a-42a1-929b-628ab6ecded1";
+        let session_id = "b6f77e8e-3437-4946-bf47-9d3d35e8aa32";
+        let task_id = "b3f0a7d0-3f6c-4b8a-9b7a-6f2f2c9a6a9a";
+        let seed = format!(
+            "INSERT INTO scopes (id, name, declared_path, canonical_path) \
+             VALUES ('{scope_id}', 'irrlicht', '/instance', '/instance');\n\
+             INSERT INTO sessions (id, scope_id, agent_name, workspace_path, state) \
+             VALUES ('{session_id}', '{scope_id}', 'agent', '/instance', 'running');\n\
+             INSERT INTO tasks (id, target_scope_id, assigned_session_id, prompt, status) \
+             VALUES ('{task_id}', '{scope_id}', '{session_id}', 'do it', 'queued');\n\
+             INSERT INTO delivery_attempts (task_id, session_id, outcome) \
+             VALUES ('{task_id}', '{session_id}', 'sent');"
+        );
+        seed_schema_3_database(&path, &seed);
+
+        let store = Store::open_at(&path).expect("migration 4 must succeed against real rows");
+        assert_eq!(store.schema_version().unwrap(), 5);
+
+        let authorised_deliveries: i64 = store
+            .conn
+            .query_row(
+                "SELECT authorised_deliveries FROM tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .expect("task row survived migration 4's ADD COLUMN");
+        assert_eq!(
+            authorised_deliveries, 1,
+            "a task that existed before migration 4 must backfill to exactly \
+             one authorised delivery — the same authorisation slice 7's guard \
+             already assumed it had"
+        );
+
+        let delivery_task_id: String = store
+            .conn
+            .query_row(
+                "SELECT task_id FROM delivery_attempts WHERE task_id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .expect("delivery_attempts row survived migration 4 untouched");
+        assert_eq!(delivery_task_id, task_id);
+
+        let mut fk_check = store
+            .conn
+            .prepare("PRAGMA foreign_key_check")
+            .expect("prepare foreign_key_check");
+        let violations = fk_check
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("run foreign_key_check")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect foreign_key_check rows");
+        assert!(
+            violations.is_empty(),
+            "foreign_key_check reported violations: {violations:?}"
+        );
+    }
+
+    // Migration 5 (backlog §9) -----------------------------------------
+
+    /// Builds a schema-4 database directly from `schema::V1_SCHEMA` through
+    /// `schema::V4_SCHEMA`, bypassing `Store` (and therefore migration 5)
+    /// entirely, then pins it at `user_version = 4`. Mirrors
+    /// [`seed_schema_3_database`]'s reasoning one migration later.
+    fn seed_schema_4_database(path: &std::path::Path, extra_sql: &str) {
+        let conn = Connection::open(path).expect("open seed database");
+        conn.execute_batch(schema::V1_SCHEMA)
+            .expect("apply V1 schema");
+        conn.execute_batch(schema::V2_SCHEMA)
+            .expect("apply V2 schema");
+        conn.execute_batch(schema::V3_SCHEMA)
+            .expect("apply V3 schema");
+        conn.execute_batch(schema::V4_SCHEMA)
+            .expect("apply V4 schema");
+        if !extra_sql.is_empty() {
+            conn.execute_batch(extra_sql).expect("seed extra rows");
+        }
+        conn.pragma_update(None, "user_version", 4_i64)
+            .expect("pin schema-4 database at user_version 4");
+    }
+
+    /// The same equivalence one migration later again: migration 5 must
+    /// reach the same schema whether a database is created fresh or migrated
+    /// forward from a real schema-4 database.
+    #[test]
+    fn fresh_and_migrated_from_v4_have_identical_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let fresh = Store::open_at(dir.path().join("fresh.sqlite")).expect("open fresh store");
+        assert_eq!(fresh.schema_version().unwrap(), 5);
+
+        let migrated_path = dir.path().join("migrated.sqlite");
+        seed_schema_4_database(&migrated_path, "");
+        let migrated = Store::open_at(&migrated_path).expect("open migrated store");
+        assert_eq!(migrated.schema_version().unwrap(), 5);
+
+        assert_eq!(
+            schema_snapshot(&fresh),
+            schema_snapshot(&migrated),
+            "a database created fresh and one migrated from schema 4 must end \
+             up with the same schema"
+        );
+    }
+
+    /// The migration-5 twin of `migration_4_preserves_referencing_rows_and_
+    /// backfills_authorised_deliveries_to_one`: seeds a schema-4 `sessions`
+    /// row (no `herdr_pane_id` or `harness_session_id` column exists yet) and
+    /// a `workspace_leases` row referencing it, then confirms after opening
+    /// through `Store` that both new columns exist and read back `NULL` for
+    /// the pre-existing row (there is no historical value to backfill —
+    /// see `schema::V5_SCHEMA`'s doc comment), that the `workspace_leases`
+    /// row still resolves to the same session, and that
+    /// `PRAGMA foreign_key_check` reports nothing.
+    #[test]
+    fn migration_5_preserves_referencing_rows_and_backfills_pane_columns_to_null() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("with_sessions.sqlite");
+
+        let scope_id = "5d8f599e-381a-42a1-929b-628ab6ecded1";
+        let session_id = "b6f77e8e-3437-4946-bf47-9d3d35e8aa32";
+        let seed = format!(
+            "INSERT INTO scopes (id, name, declared_path, canonical_path) \
+             VALUES ('{scope_id}', 'irrlicht', '/instance', '/instance');\n\
+             INSERT INTO sessions (id, scope_id, agent_name, workspace_path, state) \
+             VALUES ('{session_id}', '{scope_id}', 'agent', '/instance', 'running');\n\
+             INSERT INTO workspace_leases (session_id, canonical_workspace_path) \
+             VALUES ('{session_id}', '/instance');"
+        );
+        seed_schema_4_database(&path, &seed);
+
+        let store = Store::open_at(&path).expect("migration 5 must succeed against real rows");
+        assert_eq!(store.schema_version().unwrap(), 5);
+
+        let (herdr_pane_id, harness_session_id): (Option<String>, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT herdr_pane_id, harness_session_id FROM sessions WHERE id = ?1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("session row survived migration 5's ADD COLUMN");
+        assert_eq!(
+            herdr_pane_id, None,
+            "a session that existed before migration 5 has never been \
+             observed carrying a pane id; NULL is the only honest backfill"
+        );
+        assert_eq!(harness_session_id, None);
+
+        let lease_session_id: String = store
+            .conn
+            .query_row(
+                "SELECT session_id FROM workspace_leases WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .expect("workspace_leases row survived migration 5 untouched");
+        assert_eq!(lease_session_id, session_id);
+
+        let mut fk_check = store
+            .conn
+            .prepare("PRAGMA foreign_key_check")
+            .expect("prepare foreign_key_check");
+        let violations = fk_check
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("run foreign_key_check")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect foreign_key_check rows");
+        assert!(
+            violations.is_empty(),
+            "foreign_key_check reported violations: {violations:?}"
+        );
     }
 }

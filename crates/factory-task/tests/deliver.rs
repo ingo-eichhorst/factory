@@ -16,9 +16,11 @@ use rusqlite::OptionalExtension;
 
 use factory_paths::CanonicalPath;
 use factory_store::Store;
+use factory_task::TaskError;
 use factory_task::TaskStatus;
 use factory_task::deliver::{
-    DeliverError, OperatorPromptWriter, PromptWriteError, PromptWriter, deliver, mark_running,
+    DeliverError, OperatorPromptWriter, PromptWriteError, PromptWriter, authorise_resume, deliver,
+    mark_running,
 };
 
 /// A deterministic, distinct, syntactically valid UUID — mirrors
@@ -536,4 +538,234 @@ fn operator_prompt_writer_renders_the_prompt_and_session_id() {
     assert!(rendered.contains(&session_id.to_string()));
     assert!(rendered.contains(&task_id.to_string()));
     assert!(rendered.contains("do the thing"));
+}
+
+// authorise_resume -------------------------------------------------------
+
+fn authorised_deliveries_of(store: &Store, task_id: uuid::Uuid) -> i64 {
+    store
+        .connection()
+        .query_row(
+            "SELECT authorised_deliveries FROM tasks WHERE id = ?1",
+            [task_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read authorised_deliveries")
+}
+
+/// Move a task all the way to `blocked` through the ordinary path — assign,
+/// deliver, mark running, then block it via an authoritative observation —
+/// mirroring how a real clarification request would arrive mid-task, so
+/// `authorise_resume`'s own tests exercise it against a task that got there
+/// the way slice 7's guard was designed for, not a hand-built row.
+fn seed_blocked_task(
+    store: &mut Store,
+    seed: u32,
+    scope_id: uuid::Uuid,
+    session_id: uuid::Uuid,
+    prompt: &str,
+) -> uuid::Uuid {
+    let task_id = seed_assigned_task(store, seed, scope_id, session_id, prompt);
+    let mut writer = RecordingWriter::new();
+    deliver(store, task_id, &mut writer).expect("deliver succeeds");
+    mark_running(store, task_id).expect("mark running");
+    factory_task::complete::blocked(store, task_id, factory_task::BlockedReason::Clarification)
+        .expect("block the task");
+    task_id
+}
+
+/// The whole operator action in one call: `blocked → queued`,
+/// `assigned_session_id` cleared, `authorised_deliveries` incremented by
+/// exactly one — this task's report mutation 3 target (backfill vs. increment
+/// arithmetic already covered by the `deliver` suite above; this is the
+/// `authorise_resume`-specific half).
+#[test]
+fn authorise_resume_moves_a_blocked_task_to_queued_and_grants_one_more_delivery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_blocked_task(&mut store, 3, scope_id, session_id, "do it");
+
+    assert_eq!(authorised_deliveries_of(&store, task_id), 1);
+
+    authorise_resume(&mut store, task_id).expect("authorise resume succeeds");
+
+    let task = factory_task::create::show(&store, task_id).expect("show");
+    assert_eq!(task.status, TaskStatus::Queued);
+    assert_eq!(
+        task.assigned_session_id, None,
+        "resume clears the assignment so ordinary re-assignment can choose again"
+    );
+    assert_eq!(
+        task.blocked_reason, None,
+        "blocked_reason must clear alongside the status, or the CHECK constraint \
+         would have refused this very write"
+    );
+    assert_eq!(
+        authorised_deliveries_of(&store, task_id),
+        2,
+        "one human action grants exactly one further delivery"
+    );
+}
+
+/// The direct evidence that the authorisation this grants actually unlocks a
+/// second delivery, closing the loop `a_second_delivery_attempt_is_refused`
+/// (above) opened: without `authorise_resume`, a second `deliver` call on
+/// this same task is refused; after it — and a fresh assignment, since resume
+/// deliberately clears the old one — it succeeds and leaves a second
+/// `delivery_attempts` row.
+#[test]
+fn a_task_can_be_delivered_again_after_authorise_resume_grants_a_second_delivery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_blocked_task(&mut store, 3, scope_id, session_id, "do it");
+
+    authorise_resume(&mut store, task_id).expect("authorise resume succeeds");
+
+    // `authorise_resume` clears `assigned_session_id` on purpose (see its own
+    // doc comment); re-assignment is `assign`'s job, another agent's module,
+    // so this test re-assigns with raw SQL, the same way every other fixture
+    // in this file stands in for it.
+    {
+        let tx = store.transaction().expect("begin");
+        tx.execute(
+            "UPDATE tasks SET assigned_session_id = ?2 WHERE id = ?1",
+            (task_id.to_string(), session_id.to_string()),
+        )
+        .expect("re-assign");
+        tx.commit().expect("commit");
+    }
+
+    let mut writer = RecordingWriter::new();
+    deliver(&mut store, task_id, &mut writer)
+        .expect("the second, authorised delivery must succeed");
+
+    let rows = delivery_attempts_for(&store, task_id);
+    assert_eq!(
+        rows.len(),
+        2,
+        "two delivery_attempts rows now exist: the original attempt and the \
+         authorised resend"
+    );
+
+    // The property design §5 actually turns on: one human action authorises
+    // exactly *one* further delivery, not an open-ended number. Re-assign
+    // again (same stand-in for `assign` as above) and attempt a *third*
+    // delivery — with only one `authorise_resume` call behind it,
+    // `authorised_deliveries` is `2`, two attempts are already recorded, and
+    // `attempted_count >= authorised_deliveries` must refuse this one. A test
+    // that stopped at the second delivery succeeding could not tell "one
+    // further delivery" from "unlimited" apart — this is the assertion that
+    // can.
+    {
+        let tx = store.transaction().expect("begin");
+        tx.execute(
+            "UPDATE tasks SET assigned_session_id = ?2 WHERE id = ?1",
+            (task_id.to_string(), session_id.to_string()),
+        )
+        .expect("re-assign");
+        tx.commit().expect("commit");
+    }
+
+    let mut third_writer = RecordingWriter::new();
+    let err = deliver(&mut store, task_id, &mut third_writer)
+        .expect_err("a third attempt, with only one authorised resume behind it, is refused");
+    assert!(
+        matches!(err, DeliverError::AlreadyAttempted(id) if id == task_id),
+        "expected AlreadyAttempted, got {err:?}"
+    );
+    assert!(
+        third_writer.calls.is_empty(),
+        "the writer must never even be called for a refused third attempt"
+    );
+
+    let rows = delivery_attempts_for(&store, task_id);
+    assert_eq!(
+        rows.len(),
+        2,
+        "a refused third attempt must not add a third delivery_attempts row"
+    );
+}
+
+/// This task's report mutation 3 target: a task that is `running` — not
+/// `blocked` — has nothing for a human to authorise past.
+#[test]
+fn authorise_resume_of_a_running_task_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_assigned_task(&mut store, 3, scope_id, session_id, "do it");
+    let mut writer = RecordingWriter::new();
+    deliver(&mut store, task_id, &mut writer).expect("deliver succeeds");
+    mark_running(&mut store, task_id).expect("mark running");
+
+    let err = authorise_resume(&mut store, task_id).expect_err("a running task is refused");
+    assert!(matches!(
+        err,
+        TaskError::NotBlocked {
+            id,
+            status: TaskStatus::Running
+        } if id == task_id
+    ));
+
+    let task = factory_task::create::show(&store, task_id).expect("show");
+    assert_eq!(
+        task.status,
+        TaskStatus::Running,
+        "a refused call must not touch the row"
+    );
+    assert_eq!(authorised_deliveries_of(&store, task_id), 1);
+}
+
+#[test]
+fn authorise_resume_of_a_queued_task_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let task_id = seed_unassigned_queued_task(&mut store, 2, scope_id);
+
+    let err = authorise_resume(&mut store, task_id).expect_err("a queued task is refused");
+    assert!(matches!(
+        err,
+        TaskError::NotBlocked {
+            id,
+            status: TaskStatus::Queued
+        } if id == task_id
+    ));
+}
+
+#[test]
+fn authorise_resume_of_a_terminal_task_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let task_id = seed_unassigned_queued_task(&mut store, 2, scope_id);
+    // `queued → failed` is a valid transition (delivery itself could not be
+    // completed); `queued → done` is not (only a `running` task reports a
+    // result), so `fail` is what reaches a terminal status from here in one
+    // step.
+    factory_task::complete::fail(&mut store, task_id, Some("could not deliver"), None)
+        .expect("mark failed");
+
+    let err = authorise_resume(&mut store, task_id).expect_err("a failed task is refused");
+    assert!(matches!(
+        err,
+        TaskError::NotBlocked {
+            id,
+            status: TaskStatus::Failed
+        } if id == task_id
+    ));
+}
+
+#[test]
+fn authorise_resume_of_a_nonexistent_task_is_not_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+
+    let err = authorise_resume(&mut store, uid(999)).expect_err("no such task");
+    assert!(matches!(err, TaskError::NotFound(id) if id == uid(999)));
 }

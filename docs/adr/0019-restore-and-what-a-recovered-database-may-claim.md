@@ -84,6 +84,19 @@ a launch that was in progress when the snapshot was taken has three possible
 outcomes and Factory can distinguish none of them, so the conservative reading
 is the same as for `running`. The edge is not opened for any other caller.
 
+> **Amended during slice 9 — the requirement stands, the mechanism changed.**
+> Both sentences above cannot be satisfied by the transition table, because
+> `factory_session::valid_targets` is global: an edge added there is open to
+> every caller, and "not opened for any other caller" would survive only as a
+> comment. Slice 9 therefore adds a dedicated entry point,
+> `factory_session::reconcile_to_disconnected`, which performs exactly this
+> move and refuses a session whose current state holds no lease. The general
+> table is unchanged and `starting_cannot_go_directly_to_disconnected` still
+> passes, so the restriction is enforced by the API rather than asserted in
+> prose. This ADR's *requirements* — the conservative reading, and the edge
+> being unavailable to anyone else — are met as written; only the sentence
+> naming the transition table as the place to put it is superseded.
+
 **Tasks are decided by the delivery journal, not by their status alone.**
 
 | Row | Becomes | Why |

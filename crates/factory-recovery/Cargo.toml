@@ -1,0 +1,24 @@
+[package]
+name = "factory-recovery"
+description = "Reconciliation after a restore or a restart (design §5, ADR 0019, backlog §9): what a recovered database may claim on its own, and what live evidence is allowed to change about that claim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+factory-adapter = { path = "../factory-adapter" }
+factory-paths = { path = "../factory-paths" }
+factory-session = { path = "../factory-session" }
+factory-store = { path = "../factory-store" }
+factory-task = { path = "../factory-task" }
+rusqlite.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

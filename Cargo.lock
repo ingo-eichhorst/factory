@@ -138,11 +138,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "factory-e2e"
+version = "0.1.0"
+dependencies = [
+ "factory-adapter",
+ "factory-config",
+ "factory-context",
+ "factory-delegation",
+ "factory-paths",
+ "factory-recovery",
+ "factory-registry",
+ "factory-session",
+ "factory-store",
+ "factory-task",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "factory-paths"
 version = "0.1.0"
 dependencies = [
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "factory-recovery"
+version = "0.1.0"
+dependencies = [
+ "factory-adapter",
+ "factory-paths",
+ "factory-session",
+ "factory-store",
+ "factory-task",
+ "rusqlite",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

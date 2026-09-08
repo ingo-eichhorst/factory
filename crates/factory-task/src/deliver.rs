@@ -14,8 +14,18 @@
 //! 1. refuse unless the task is `queued` and carries a non-NULL
 //!    `assigned_session_id` ([`DeliverError::NotQueued`] /
 //!    [`DeliverError::NotAssigned`]);
-//! 2. refuse if the task already has a `delivery_attempts` row
-//!    ([`DeliverError::AlreadyAttempted`]) — delivery is at-most-once;
+//! 2. refuse if the task's recorded `delivery_attempts` rows already number
+//!    **at least** `tasks.authorised_deliveries` ([`DeliverError::AlreadyAttempted`])
+//!    — delivery is at-most-once *per authorisation*. Every task is created
+//!    with exactly one authorisation (`factory_store::schema` migration 4
+//!    backfills and defaults `authorised_deliveries` to `1`), so for a task
+//!    nothing has ever resumed this is byte-for-byte the slice 7 rule it
+//!    replaces ("refuse any task that already carries a `delivery_attempts`
+//!    row"): one attempt already meets a limit of one. [`authorise_resume`]
+//!    is the only way that limit ever moves, and it moves it by exactly one
+//!    human action at a time — see its own doc comment for why a *failed*
+//!    attempt still consumes the authorisation it was given, and why that is
+//!    not a bug;
 //! 3. **insert the `delivery_attempts` row with `outcome` NULL and commit
 //!    it, in its own transaction, before calling the writer.** A crash
 //!    between that commit and the writer call must leave a row saying an
@@ -181,7 +191,7 @@ pub enum DeliverError {
     NotAssigned(uuid::Uuid),
 
     #[error(
-        "task {0} already has a delivery attempt\n  help: delivery is at-most-once (design §5); a second attempt after an ambiguous outcome is exactly what the design forbids — resolve the existing attempt or create a replacement task"
+        "task {0} has no remaining authorised deliveries\n  help: delivery is at-most-once per authorisation (design §5); a second attempt after an ambiguous outcome is exactly what the design forbids — a human may authorise a further delivery with `authorise_resume`, or create a replacement task"
     )]
     AlreadyAttempted(uuid::Uuid),
 
@@ -230,15 +240,16 @@ pub fn deliver<W: PromptWriter>(
     let (session_id, prompt, attempt_row_id) = {
         let tx = store.transaction()?;
 
-        let row: Option<(String, String, Option<String>)> = tx
+        let row: Option<(String, String, Option<String>, i64)> = tx
             .query_row(
-                "SELECT status, prompt, assigned_session_id FROM tasks WHERE id = ?1",
+                "SELECT status, prompt, assigned_session_id, authorised_deliveries \
+                 FROM tasks WHERE id = ?1",
                 [id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(factory_store::StoreError::from)?;
-        let Some((status, prompt, assigned_session_id)) = row else {
+        let Some((status, prompt, assigned_session_id, authorised_deliveries)) = row else {
             return Err(DeliverError::NotFound(id));
         };
         let status = TaskStatus::from_db_str(&status);
@@ -252,14 +263,21 @@ pub fn deliver<W: PromptWriter>(
             panic!("tasks.assigned_session_id is a UUID; read {assigned_session_id:?}: {e}")
         });
 
-        let already_attempted: bool = tx
+        // At-most-once *per authorisation*: refuse once the number of
+        // recorded attempts reaches (not merely exceeds) what has been
+        // authorised. Every task starts with `authorised_deliveries = 1`
+        // (`factory_store::schema` migration 4), so for a never-resumed task
+        // this is exactly slice 7's "any row at all" — one existing attempt
+        // already meets a limit of one. See this module's doc comment and
+        // [`authorise_resume`] for how, and why, that limit ever moves.
+        let attempted_count: i64 = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM delivery_attempts WHERE task_id = ?1)",
+                "SELECT COUNT(*) FROM delivery_attempts WHERE task_id = ?1",
                 [id.to_string()],
                 |row| row.get(0),
             )
             .map_err(factory_store::StoreError::from)?;
-        if already_attempted {
+        if attempted_count >= authorised_deliveries {
             return Err(DeliverError::AlreadyAttempted(id));
         }
 
@@ -355,6 +373,131 @@ pub fn mark_running(store: &mut factory_store::Store, id: uuid::Uuid) -> Result<
     tx.execute(
         "UPDATE tasks SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
         [id.to_string()],
+    )
+    .map_err(factory_store::StoreError::from)?;
+    tx.commit().map_err(factory_store::StoreError::from)?;
+    Ok(())
+}
+
+/// The operator action design §5 names as the other way on from an ambiguous
+/// delivery — "a human may resume or create a replacement task" — and
+/// backlog §9's "Resume has no mechanism yet, found during slice 7." This is
+/// that mechanism: the first function in this crate to write the
+/// `blocked → queued` edge [`crate::valid_targets`] has always permitted but
+/// nothing has used ("the explicit resume... does not exist yet, so a
+/// requeued task waits for a human either way," per that table's own doc
+/// comment — this function is what ends the wait).
+///
+/// One human action, one meaning, in one transaction:
+///
+/// - requires `status = 'blocked'` ([`TaskError::NotBlocked`] otherwise —
+///   refused for a task that is `queued` or `running` (nothing to authorise
+///   past yet) and for every terminal status alike);
+/// - increments `tasks.authorised_deliveries` by exactly one — recording the
+///   authorisation *with the task*, per `factory_store::schema` migration
+///   4's doc comment, rather than accepting it as a call argument to
+///   [`deliver`] that a restart could never see;
+/// - moves the task to `queued` and clears `assigned_session_id`, exactly
+///   the pairing [`crate::valid_targets`]'s doc comment already describes
+///   for this edge — "re-assignment is all it re-enters." Clearing the
+///   assignment is what lets the ordinary untargeted-assignment path choose
+///   fresh, instead of handing back to a session that may no longer be the
+///   right one, or a live one at all, by the time the block is resolved;
+/// - clears `blocked_reason`, because `tasks.blocked_reason`'s own CHECK
+///   (`factory_store::schema`) requires it to be NULL for every non-`blocked`
+///   status — the same clearing [`crate::create::cancel`] already performs
+///   for its own `blocked → cancelled` arm, for the identical reason.
+///
+/// # Why one transaction, not two calls
+///
+/// The increment and the re-queue are one write on purpose, not two. Splitting
+/// them — "record the authorisation," then separately "re-queue the task" —
+/// would let a restart land between the two and find a task that is still
+/// `blocked` but already carries the incremented count, or one that is
+/// `queued` with a fresh budget but no visible reason why. Either state is
+/// indistinguishable from an ordinary half-written mutation, which is exactly
+/// the ambiguity `authorised_deliveries` exists to remove. A human authorising
+/// one further delivery is not the automatic resend design §5 forbids — but a
+/// half-resumed task discovered on restart would be precisely as ambiguous as
+/// the possibly-delivered prompts this whole mechanism exists to stop
+/// guessing about.
+///
+/// # This does not deliver anything, and does not decide delivery's outcome
+///
+/// `authorise_resume` only raises the delivery budget and re-queues the task;
+/// it does not call [`deliver`] and never touches a [`PromptWriter`]. The
+/// ordinary assignment and delivery path picks the re-queued task up exactly
+/// as it would any other `queued` task, and [`deliver`]'s own guard (this
+/// module's top doc comment, point 2) is what actually spends the
+/// authorisation granted here.
+///
+/// Worth stating plainly, because it is easy to design away by accident: a
+/// **failed** delivery still consumes the authorisation it was given. The
+/// `delivery_attempts` row is journalled *before* the terminal write (design
+/// §5 step 3), specifically so that a crash or a writer error leaves evidence
+/// an attempt was made even when its outcome is unknown — which is exactly
+/// the case where Factory cannot tell whether the prompt arrived. Refusing to
+/// count a failed attempt against the budget would treat "the writer returned
+/// an error" as proof no external effect occurred, which is the same
+/// inference AGENTS.md forbids ("never infer that an external action failed
+/// merely because its response was lost") and which
+/// `deliver`'s own doc comment already refuses to draw for `tasks.status`.
+/// The conservative reading — one authorisation, one attempt, regardless of
+/// outcome — is the only one that keeps `authorised_deliveries` meaning what
+/// its name says: a human authorised **an attempt**, not a **successful**
+/// one. A future change that only decrements the budget on a confirmed
+/// failure would silently reopen the at-most-once guarantee this migration
+/// was built to keep intact.
+pub fn authorise_resume(
+    store: &mut factory_store::Store,
+    task_id: uuid::Uuid,
+) -> Result<(), crate::TaskError> {
+    let tx = store.transaction()?;
+
+    let status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM tasks WHERE id = ?1",
+            [task_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(factory_store::StoreError::from)?;
+    let Some(status) = status else {
+        return Err(crate::TaskError::NotFound(task_id));
+    };
+    let current = TaskStatus::from_db_str(&status);
+
+    if current != TaskStatus::Blocked {
+        return Err(crate::TaskError::NotBlocked {
+            id: task_id,
+            status: current,
+        });
+    }
+
+    // Defence in depth, per this crate's house rule ("everything writes
+    // through the transition table... do not write a status with raw SQL
+    // that bypasses `is_valid_transition`"): `current == Blocked` already
+    // guarantees today's table allows `blocked → queued` (`crate::valid_targets`),
+    // but the call stays so a future regression in the table is caught here
+    // too, not only by `lib.rs`'s own unit tests.
+    if !is_valid_transition(current, TaskStatus::Queued) {
+        return Err(crate::TaskError::InvalidTransition {
+            id: task_id,
+            from: current,
+            to: TaskStatus::Queued,
+            allowed: crate::complete::describe_targets(current),
+        });
+    }
+
+    tx.execute(
+        "UPDATE tasks SET \
+         status = 'queued', \
+         blocked_reason = NULL, \
+         assigned_session_id = NULL, \
+         authorised_deliveries = authorised_deliveries + 1, \
+         updated_at = CURRENT_TIMESTAMP \
+         WHERE id = ?1",
+        [task_id.to_string()],
     )
     .map_err(factory_store::StoreError::from)?;
     tx.commit().map_err(factory_store::StoreError::from)?;

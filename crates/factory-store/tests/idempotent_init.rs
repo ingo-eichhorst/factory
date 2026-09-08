@@ -12,11 +12,13 @@ fn opening_twice_preserves_data_and_schema_version() {
     let mut store = Store::open(dir.path()).expect("first open");
     let version_after_first_open = store.schema_version().expect("schema_version");
     assert_eq!(
-        version_after_first_open, 3,
-        "three migrations are released: schema 1 (Slice 2), schema 2, the \
-         registry projection columns on `scopes` (ADR 0016 / Slice 3), and \
+        version_after_first_open, 5,
+        "five migrations are released: schema 1 (Slice 2), schema 2, the \
+         registry projection columns on `scopes` (ADR 0016 / Slice 3), \
          schema 3, the `tasks` columns and rules for single-session \
-         delivery (backlog §7)"
+         delivery (backlog §7), schema 4, `tasks.authorised_deliveries` \
+         (backlog §9), and schema 5, the `sessions` pane/harness identity \
+         columns (backlog §9)"
     );
 
     {

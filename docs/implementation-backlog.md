@@ -622,6 +622,42 @@ cannot tell an authorised second delivery from an accidental one.
 reconnect to after each restart class and whether task resume means an explicit
 new delivery or a replacement task.
 
+**Resolved during slice 9.** Resume is an explicit new delivery, and the
+permission is *recorded with the task* rather than passed as a call argument:
+migration 4 adds `tasks.authorised_deliveries`, backfilled to `1`, and
+`deliver` refuses once the recorded attempts reach it. `authorise_resume` is
+one operator action in one transaction — it grants exactly one further
+delivery, re-queues the task and clears its assignment — so a restart can tell
+an authorised second delivery from an accidental one, which two separate calls
+could not. A failed attempt still consumes its authorisation: the journal row
+is written before the terminal write, so a failure is precisely the case where
+Factory cannot know whether the prompt arrived.
+
+What Herdr can be trusted with is settled by one predicate with one home,
+`factory_recovery::evidence::may_promote_from_disconnected`: only an
+observation the harness reported through the Herdr lifecycle hook may move a
+session out of `disconnected`. A recorded pane id says *where to look*, never
+*what is true* — migration 5 adds `sessions.herdr_pane_id` and
+`harness_session_id` for the first, and ADR 0019 decision 3 explains why they
+are never enough on their own.
+
+**Deviation from ADR 0019, recorded in that ADR.** The `Starting →
+Disconnected` edge is a dedicated `factory_session` entry point, not a widened
+`valid_targets`, because the table is global and the ADR requires the edge to
+stay closed to every other caller.
+
+**End-to-end drills live in `crates/factory-e2e`.** They build a throwaway
+instance from a real `config.yaml`, project the registry through
+`resolve`/`reconcile`/`apply`, and drive the whole chain through the public
+API. `tests/live_herdr.rs` runs against the Herdr actually running on the
+machine and is `#[ignore]`d, because a suite that goes red when a terminal was
+closed teaches an operator to ignore red:
+`cargo test -p factory-e2e --test live_herdr -- --ignored`.
+
+**Left open by slice 9:** `target_agent_name` (unchanged since slice 8), and
+terminal attach, which needs the pane identity migration 5 now records plus an
+adapter method that does not exist — backlog §10 owns both.
+
 ## 10. CLI automation and Claude Code parity
 
 **Objective:** Replace validated manual runbooks with an idempotent Factory CLI

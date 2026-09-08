@@ -288,6 +288,11 @@ pub enum TaskError {
     AlreadyTerminal { id: uuid::Uuid, status: TaskStatus },
 
     #[error(
+        "task {id} is `{status}`, not `blocked`\n  help: `authorise_resume` is one human action with one meaning — it re-queues a task that is waiting on a human and records that a further delivery was approved. A task that is not `blocked` has nothing for a human to authorise past"
+    )]
+    NotBlocked { id: uuid::Uuid, status: TaskStatus },
+
+    #[error(
         "task {id} cannot move from `{from}` to `{to}`\n  help: `{from}` only reaches {allowed}"
     )]
     InvalidTransition {
