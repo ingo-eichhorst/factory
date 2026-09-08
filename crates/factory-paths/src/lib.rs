@@ -27,6 +27,14 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+pub mod repo;
+pub mod workspace;
+
+pub use repo::{RepoError, RepositoryId, repository_id};
+pub use workspace::{
+    WorkspaceError, WorkspaceKind, WorkspaceOutcome, WorkspaceRejection, validate,
+};
+
 /// A path that has been resolved against the filesystem.
 ///
 /// Constructing one proves the path existed at that moment. Two
