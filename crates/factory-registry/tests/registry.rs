@@ -138,7 +138,11 @@ fn drift_id(drift: &Drift) -> uuid::Uuid {
         | Drift::PathChangedSameIdentity { id, .. }
         | Drift::PathChangedDifferentIdentity { id, .. }
         | Drift::MissingPath { id, .. }
-        | Drift::UnreadableContext { id, .. } => *id,
+        | Drift::UnreadableContext { id, .. }
+        | Drift::NameChanged { id, .. }
+        | Drift::GitChanged { id, .. }
+        | Drift::DeclaredPathChanged { id, .. }
+        | Drift::ParentChanged { id, .. } => *id,
     }
 }
 
@@ -209,7 +213,7 @@ fn rebuilding_the_table_from_scratch_reproduces_it() {
 }
 
 // ---------------------------------------------------------------------
-// 2. Each of the six `Drift` variants, individually.
+// 2. Each of the ten `Drift` variants, individually.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -380,6 +384,18 @@ fn a_move_is_recognised_as_path_changed_same_identity() {
             Drift::PathChangedSameIdentity { id, .. } if *id == scopes_after[0].id
         )),
         "expected PathChangedSameIdentity in {report_after:?}"
+    );
+    // The move also changed `declared_path`'s text ("original" -> "moved")
+    // and, in principle, could have changed the computed `parent_id`. Both
+    // are folded into `PathChangedSameIdentity`'s own `apply`, so
+    // `DeclaredPathChanged` and `ParentChanged` must not also appear — one
+    // underlying event, one report — per their doc comments' suppression
+    // rule.
+    assert_eq!(
+        report_after.items.len(),
+        1,
+        "a move must not double-report as DeclaredPathChanged or ParentChanged \
+         alongside PathChangedSameIdentity: {report_after:?}"
     );
 
     apply(&mut store, &scopes_after, &report_after).expect("apply the move");
@@ -654,7 +670,277 @@ fn a_symlink_escape_is_rejected() {
 }
 
 // ---------------------------------------------------------------------
-// 9. `apply` rolls back completely on a mid-way failure.
+// 9. `NameChanged` and `GitChanged`: the two declarative columns with no
+//    identity of their own.
+// ---------------------------------------------------------------------
+
+#[test]
+fn name_changed_when_the_configuration_renames_a_scope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_agents_md(dir.path());
+
+    let instance_id = uid(150);
+    let scope_id = uid(151);
+    let config_before = parse(&config_text(
+        &instance_id,
+        &[scope(&scope_id, "before-name", ".")],
+    ));
+    let scopes_before = resolve(&config_before, dir.path()).expect("resolve before rename");
+
+    let mut store = Store::open(dir.path()).expect("open store");
+    let report = reconcile(&store, &scopes_before).expect("reconcile");
+    apply(&mut store, &scopes_before, &report).expect("apply initial projection");
+
+    let config_after = parse(&config_text(
+        &instance_id,
+        &[scope(&scope_id, "after-name", ".")],
+    ));
+    let scopes_after = resolve(&config_after, dir.path()).expect("resolve after rename");
+
+    let report_after = reconcile(&store, &scopes_after).expect("reconcile after rename");
+    assert!(
+        contains_variant(&report_after, |d| matches!(
+            d,
+            Drift::NameChanged { id, from, to }
+                if *id == scopes_after[0].id && from == "before-name" && to == "after-name"
+        )),
+        "expected NameChanged in {report_after:?}"
+    );
+
+    apply(&mut store, &scopes_after, &report_after).expect("apply the rename");
+    let snapshot = scopes_snapshot(&mut store);
+    assert_eq!(
+        snapshot[0].1, "after-name",
+        "the stored name now matches the configuration"
+    );
+
+    let clean = reconcile(&store, &scopes_after).expect("reconcile after apply");
+    assert!(
+        clean.is_clean(),
+        "expected no drift after applying the rename: {clean:?}"
+    );
+}
+
+#[test]
+fn git_changed_when_the_configuration_gains_or_loses_a_git_reference() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_agents_md(dir.path());
+
+    let instance_id = uid(160);
+    let scope_id = uid(161);
+    let git_url = "https://example.invalid/svc.git";
+
+    let config_no_git = parse(&config_text(&instance_id, &[scope(&scope_id, "svc", ".")]));
+    let scopes_no_git = resolve(&config_no_git, dir.path()).expect("resolve without git");
+
+    let mut store = Store::open(dir.path()).expect("open store");
+    let report = reconcile(&store, &scopes_no_git).expect("reconcile");
+    apply(&mut store, &scopes_no_git, &report).expect("apply initial projection");
+
+    // Gains a `git:` reference.
+    let config_with_git = parse(&config_text(
+        &instance_id,
+        &[ScopeSpec {
+            id: scope_id.clone(),
+            name: "svc",
+            path: ".",
+            git: Some(git_url),
+        }],
+    ));
+    let scopes_with_git = resolve(&config_with_git, dir.path()).expect("resolve after gaining git");
+
+    let report_gain = reconcile(&store, &scopes_with_git).expect("reconcile after gaining git");
+    assert!(
+        contains_variant(&report_gain, |d| matches!(
+            d,
+            Drift::GitChanged { id, from: None, to: Some(to), .. }
+                if *id == scopes_with_git[0].id && to == git_url
+        )),
+        "expected GitChanged (gained) in {report_gain:?}"
+    );
+    apply(&mut store, &scopes_with_git, &report_gain).expect("apply the gained git reference");
+    let clean_after_gain = reconcile(&store, &scopes_with_git).expect("reconcile after apply");
+    assert!(
+        clean_after_gain.is_clean(),
+        "expected no drift after applying the gained git reference: {clean_after_gain:?}"
+    );
+
+    // Loses the `git:` reference again.
+    let report_loss = reconcile(&store, &scopes_no_git).expect("reconcile after losing git");
+    assert!(
+        contains_variant(&report_loss, |d| matches!(
+            d,
+            Drift::GitChanged { id, from: Some(from), to: None, .. }
+                if *id == scopes_no_git[0].id && from == git_url
+        )),
+        "expected GitChanged (lost) in {report_loss:?}"
+    );
+    apply(&mut store, &scopes_no_git, &report_loss).expect("apply the lost git reference");
+    let clean_after_loss = reconcile(&store, &scopes_no_git).expect("reconcile after apply");
+    assert!(
+        clean_after_loss.is_clean(),
+        "expected no drift after applying the lost git reference: {clean_after_loss:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 10. `DeclaredPathChanged` and `ParentChanged`: drift `PathChangedSameIdentity`
+//     cannot see because this scope's own canonicalization never moved.
+// ---------------------------------------------------------------------
+
+#[test]
+fn declared_path_changed_when_the_declared_text_changes_without_moving() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_agents_md(dir.path());
+
+    // Two aliases inside the instance root that resolve to the same real
+    // directory, so switching the declared path between them changes no
+    // canonicalization and no `(dev, ino)` — the scenario `PathChanged*`
+    // cannot see, per `Drift::DeclaredPathChanged`'s doc comment.
+    let real = dir.path().join("real");
+    fs::create_dir(&real).expect("create real");
+    write_agents_md(&real);
+    std::os::unix::fs::symlink(&real, dir.path().join("link-a")).expect("symlink link-a");
+    std::os::unix::fs::symlink(&real, dir.path().join("link-b")).expect("symlink link-b");
+
+    let instance_id = uid(170);
+    let scope_id = uid(171);
+    let config_before = parse(&config_text(
+        &instance_id,
+        &[scope(&scope_id, "aliased", "link-a")],
+    ));
+    let scopes_before = resolve(&config_before, dir.path()).expect("resolve before alias switch");
+
+    let mut store = Store::open(dir.path()).expect("open store");
+    let report = reconcile(&store, &scopes_before).expect("reconcile");
+    apply(&mut store, &scopes_before, &report).expect("apply initial projection");
+
+    let config_after = parse(&config_text(
+        &instance_id,
+        &[scope(&scope_id, "aliased", "link-b")],
+    ));
+    let scopes_after = resolve(&config_after, dir.path()).expect("resolve after alias switch");
+
+    assert_eq!(
+        scopes_before[0]
+            .canonical_path
+            .as_ref()
+            .map(|c| c.as_path()),
+        scopes_after[0].canonical_path.as_ref().map(|c| c.as_path()),
+        "both aliases must resolve to the same real directory, or this test \
+         cannot exercise the scenario it exists to check"
+    );
+    assert_eq!(
+        scopes_before[0].file_id, scopes_after[0].file_id,
+        "same real directory means same (dev, ino)"
+    );
+
+    let report_after = reconcile(&store, &scopes_after).expect("reconcile after alias switch");
+    assert!(
+        contains_variant(&report_after, |d| matches!(
+            d,
+            Drift::DeclaredPathChanged { id, from, to, .. }
+                if *id == scopes_after[0].id && from == Path::new("link-a") && to == Path::new("link-b")
+        )),
+        "expected DeclaredPathChanged in {report_after:?}"
+    );
+    assert!(
+        !contains_variant(&report_after, |d| matches!(
+            d,
+            Drift::PathChangedSameIdentity { .. } | Drift::PathChangedDifferentIdentity { .. }
+        )),
+        "canonicalization and identity are unchanged, so no PathChanged* drift \
+         should also fire: {report_after:?}"
+    );
+
+    apply(&mut store, &scopes_after, &report_after).expect("apply the alias switch");
+    let snapshot = scopes_snapshot(&mut store);
+    assert_eq!(
+        snapshot[0].2, "link-b",
+        "declared_path now matches the new alias"
+    );
+
+    let clean = reconcile(&store, &scopes_after).expect("reconcile after apply");
+    assert!(
+        clean.is_clean(),
+        "expected no drift after applying the alias switch: {clean:?}"
+    );
+}
+
+#[test]
+fn parent_changed_when_a_new_ancestor_scope_is_declared() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_agents_md(dir.path());
+    let child_dir = dir.path().join("child");
+    fs::create_dir(&child_dir).expect("create child");
+    write_agents_md(&child_dir);
+
+    let instance_id = uid(180);
+    let child_id = uid(181);
+
+    // Only `child` is declared at first: it has no registered ancestor.
+    let config_before = parse(&config_text(
+        &instance_id,
+        &[scope(&child_id, "child", "child")],
+    ));
+    let scopes_before =
+        resolve(&config_before, dir.path()).expect("resolve before ancestor declared");
+    assert_eq!(scopes_before[0].parent_id, None);
+
+    let mut store = Store::open(dir.path()).expect("open store");
+    let report = reconcile(&store, &scopes_before).expect("reconcile");
+    apply(&mut store, &scopes_before, &report).expect("apply initial projection");
+
+    // The instance root is now also declared as a scope. `child`'s own
+    // directory has not moved — only another scope's declaration changed —
+    // yet it now has a nearest registered ancestor.
+    let root_id = uid(182);
+    let config_after = parse(&config_text(
+        &instance_id,
+        &[
+            scope(&root_id, "root", "."),
+            scope(&child_id, "child", "child"),
+        ],
+    ));
+    let scopes_after = resolve(&config_after, dir.path()).expect("resolve after ancestor declared");
+    let root_after = scopes_after
+        .iter()
+        .find(|s| s.id.to_string() == root_id)
+        .expect("root resolved");
+    let child_after = scopes_after
+        .iter()
+        .find(|s| s.id.to_string() == child_id)
+        .expect("child resolved");
+    assert_eq!(child_after.parent_id, Some(root_after.id));
+
+    let report_after = reconcile(&store, &scopes_after).expect("reconcile after ancestor declared");
+    assert!(
+        contains_variant(&report_after, |d| matches!(
+            d,
+            Drift::ParentChanged { id, from: None, to: Some(to), .. }
+                if *id == child_after.id && *to == root_after.id
+        )),
+        "expected ParentChanged for the child in {report_after:?}"
+    );
+    assert!(
+        !contains_variant(&report_after, |d| matches!(
+            d,
+            Drift::PathChangedSameIdentity { id, .. } | Drift::PathChangedDifferentIdentity { id, .. }
+                if *id == child_after.id
+        )),
+        "the child's own path did not move: {report_after:?}"
+    );
+
+    apply(&mut store, &scopes_after, &report_after).expect("apply");
+    let clean = reconcile(&store, &scopes_after).expect("reconcile after apply");
+    assert!(
+        clean.is_clean(),
+        "expected no drift after applying: {clean:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 11. `apply` rolls back completely on a mid-way failure.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -701,7 +987,7 @@ fn apply_rolls_back_completely_on_a_midway_failure() {
 }
 
 // ---------------------------------------------------------------------
-// 10. The real `fixtures/registration/` instance.
+// 12. The real `fixtures/registration/` instance.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -763,4 +1049,416 @@ fn reconcile_does_not_change_the_scopes_table() {
     let after = scopes_snapshot(&mut store);
 
     assert_eq!(before, after, "reconcile must not modify the scopes table");
+}
+
+// ---------------------------------------------------------------------
+// 13. Guard: every column of `scopes` must have drift coverage, or be
+//     explicitly and defensibly exempt.
+// ---------------------------------------------------------------------
+
+/// Reads the *live* `scopes` schema and, for every column not explicitly
+/// exempted, corrupts exactly that column on an otherwise-clean row and
+/// requires `reconcile` to report something naming the corrupted scope.
+///
+/// This is deliberately schema-driven rather than a hand-copied column list.
+/// A hand-copied list is exactly what let `name`, `git`, `declared_path`,
+/// and `parent_id` go uncovered in the first place: nothing forced "columns
+/// `reconcile` compares" to be updated in step with "columns migration 2
+/// projects" (`crates/factory-store/src/schema.rs`), which is the gap this
+/// change closes. Reading `PRAGMA table_info(scopes)` instead means a
+/// *future* column reaches the `panic!` in the `match` below the moment a
+/// migration adds it — before anyone has to remember to update this test by
+/// hand — and the corrupt/assert/restore cycle around it proves real
+/// detection, not just that a name appears on a list.
+#[test]
+fn every_scopes_column_has_drift_coverage_or_is_explicitly_exempt() {
+    // Columns that are not, and structurally cannot be, drift. `id` is the
+    // join key `reconcile` uses to find a stored row for a resolved scope in
+    // the first place (`stored_by_id.remove(&scope.id)`) — it is how "this
+    // row" and "this scope" are matched, not a value compared once matched.
+    // `created_at` is audit metadata: nothing in the configuration or the
+    // filesystem produces a value to compare it against, which is the same
+    // reason `scopes_snapshot` above excludes it from equality checks (a
+    // rebuild cannot reproduce a timestamp).
+    const EXEMPT: &[&str] = &["id", "created_at"];
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_agents_md(dir.path());
+    let child_dir = dir.path().join("child");
+    fs::create_dir(&child_dir).expect("create child");
+    write_agents_md(&child_dir);
+
+    let instance_id = uid(190);
+    let root_id = uid(191);
+    let child_id = uid(192);
+    let config = parse(&config_text(
+        &instance_id,
+        &[
+            scope(&root_id, "root", "."),
+            scope(&child_id, "child", "child"),
+        ],
+    ));
+    let scopes = resolve(&config, dir.path()).expect("resolve");
+    let child = scopes
+        .iter()
+        .find(|s| s.id.to_string() == child_id)
+        .expect("child scope resolved")
+        .clone();
+    let child_file_id = child.file_id.expect("child directory exists");
+    assert_eq!(
+        child.parent_id,
+        Some(
+            scopes
+                .iter()
+                .find(|s| s.id.to_string() == root_id)
+                .expect("root resolved")
+                .id
+        ),
+        "fixture assumption: child is nested under root, so parent_id starts non-null \
+         and mutating it to NULL below is a real change"
+    );
+
+    let mut store = Store::open(dir.path()).expect("open store");
+    let report = reconcile(&store, &scopes).expect("reconcile");
+    apply(&mut store, &scopes, &report).expect("apply initial projection");
+    let clean = reconcile(&store, &scopes).expect("reconcile after apply");
+    assert!(clean.is_clean(), "fixture must start clean: {clean:?}");
+
+    let original = scopes_snapshot(&mut store)
+        .into_iter()
+        .find(|row| row.0 == child_id)
+        .expect("child row present");
+    #[allow(clippy::type_complexity)]
+    let (
+        _,
+        orig_name,
+        orig_declared_path,
+        orig_canonical_path,
+        orig_git,
+        orig_dev,
+        orig_ino,
+        orig_parent_id,
+    ): (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+    ) = original.clone();
+
+    // The live column list — read from the schema, not copied by hand.
+    let columns: Vec<String> = {
+        let mut stmt = store
+            .connection()
+            .prepare("PRAGMA table_info(scopes)")
+            .expect("prepare PRAGMA table_info");
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .expect("run PRAGMA table_info")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect column names")
+    };
+    assert!(
+        columns.len() > EXEMPT.len(),
+        "PRAGMA table_info returned suspiciously few columns: {columns:?}"
+    );
+
+    for column in &columns {
+        if EXEMPT.contains(&column.as_str()) {
+            continue;
+        }
+
+        // Corrupt exactly this column on the child's row.
+        {
+            let tx = store.transaction().expect("begin corruption");
+            let changed = match column.as_str() {
+                "name" => tx.execute(
+                    "UPDATE scopes SET name = 'mutated-name' WHERE id = ?1",
+                    [child_id.as_str()],
+                ),
+                "declared_path" => tx.execute(
+                    "UPDATE scopes SET declared_path = 'mutated/declared/path' WHERE id = ?1",
+                    [child_id.as_str()],
+                ),
+                "canonical_path" => tx.execute(
+                    "UPDATE scopes SET canonical_path = canonical_path || '-mutated' WHERE id = ?1",
+                    [child_id.as_str()],
+                ),
+                "git" => tx.execute(
+                    "UPDATE scopes SET git = 'https://example.invalid/mutated.git' WHERE id = ?1",
+                    [child_id.as_str()],
+                ),
+                "dev" => tx.execute(
+                    "UPDATE scopes SET dev = ?2 WHERE id = ?1",
+                    (child_id.as_str(), (child_file_id.dev() as i64) + 1),
+                ),
+                "ino" => tx.execute(
+                    "UPDATE scopes SET ino = ?2 WHERE id = ?1",
+                    (child_id.as_str(), (child_file_id.ino() as i64) + 1),
+                ),
+                "parent_id" => tx.execute(
+                    "UPDATE scopes SET parent_id = NULL WHERE id = ?1",
+                    [child_id.as_str()],
+                ),
+                other => panic!(
+                    "`scopes` has a column `{other}` this guard test does not know how \
+                     to corrupt. A migration added a projected column without teaching \
+                     this test about it — add a case above that mutates it and confirm \
+                     `reconcile` reports the mutation (adding real `Drift` coverage in \
+                     `crates/factory-registry/src/lib.rs`), or add `{other}` to `EXEMPT` \
+                     with a comment justifying why no value can ever disagree there. \
+                     Update ADR 0016's drift table either way."
+                ),
+            }
+            .unwrap_or_else(|e| panic!("corrupt column `{column}`: {e}"));
+            assert_eq!(
+                changed, 1,
+                "corrupting `{column}` should touch exactly the child row"
+            );
+            tx.commit().expect("commit corruption");
+        }
+
+        // Prove the mutation actually mutated something — otherwise a
+        // NULL-propagating or no-op UPDATE (e.g. concatenating onto a NULL
+        // column) could make this test pass for the wrong reason, which is
+        // exactly the decorative-test failure mode this guard exists to
+        // avoid.
+        let mutated = scopes_snapshot(&mut store)
+            .into_iter()
+            .find(|row| row.0 == child_id)
+            .expect("child row present after corruption");
+        assert_ne!(
+            mutated, original,
+            "corrupting `{column}` did not change the child's row at all — \
+             the mutation above is a no-op and proves nothing"
+        );
+
+        let report = reconcile(&store, &scopes).expect("reconcile after corruption");
+        assert!(
+            contains_variant(&report, |d| drift_id(d) == child.id),
+            "corrupting `scopes.{column}` alone produced no drift naming the \
+             child scope — add `Drift` coverage for this column: {report:?}"
+        );
+
+        // Restore this column's original value directly, not via `apply`:
+        // corrupting `dev` or `ino` alone produces `PathChangedDifferentIdentity`,
+        // which is deliberately never applied, so `apply` could not restore
+        // it and the next column's check would start from a dirty row.
+        {
+            let tx = store.transaction().expect("begin restore");
+            match column.as_str() {
+                "name" => tx.execute(
+                    "UPDATE scopes SET name = ?2 WHERE id = ?1",
+                    (child_id.as_str(), &orig_name),
+                ),
+                "declared_path" => tx.execute(
+                    "UPDATE scopes SET declared_path = ?2 WHERE id = ?1",
+                    (child_id.as_str(), &orig_declared_path),
+                ),
+                "canonical_path" => tx.execute(
+                    "UPDATE scopes SET canonical_path = ?2 WHERE id = ?1",
+                    (child_id.as_str(), &orig_canonical_path),
+                ),
+                "git" => tx.execute(
+                    "UPDATE scopes SET git = ?2 WHERE id = ?1",
+                    (child_id.as_str(), &orig_git),
+                ),
+                "dev" => tx.execute(
+                    "UPDATE scopes SET dev = ?2 WHERE id = ?1",
+                    (child_id.as_str(), orig_dev),
+                ),
+                "ino" => tx.execute(
+                    "UPDATE scopes SET ino = ?2 WHERE id = ?1",
+                    (child_id.as_str(), orig_ino),
+                ),
+                "parent_id" => tx.execute(
+                    "UPDATE scopes SET parent_id = ?2 WHERE id = ?1",
+                    (child_id.as_str(), &orig_parent_id),
+                ),
+                other => unreachable!("already handled or panicked above: {other}"),
+            }
+            .unwrap_or_else(|e| panic!("restore column `{column}`: {e}"));
+            tx.commit().expect("commit restore");
+        }
+
+        let restored = reconcile(&store, &scopes).expect("reconcile after restore");
+        assert!(
+            restored.is_clean(),
+            "restoring `{column}` did not bring the row back to clean, so the \
+             next column's check would start dirty: {restored:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// 14. `apply` must not depend on declaration order for a new nested scope.
+//
+// `scopes.parent_id REFERENCES scopes (id)`, and `PRAGMA foreign_keys = ON`
+// is set on every connection (`factory_store::pragma`) with immediate, not
+// deferred, enforcement. If `apply` ever writes a child's row — carrying its
+// parent's UUID in `parent_id` — before the row that parent names exists,
+// that single `INSERT` violates the constraint and SQLite rolls back the
+// *whole* transaction, undoing every other statement that had already
+// succeeded. This is the practical trigger the doc comment on `apply`
+// describes: a human adds a nested scope to `.factory/config.yaml` and
+// writes the child entry above its new ancestor.
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_child_declared_above_its_new_parent_still_projects_both() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_agents_md(dir.path());
+    let parent_dir = dir.path().join("parent-dir");
+    let child_dir = parent_dir.join("child-dir");
+    fs::create_dir_all(&child_dir).expect("create nested directories");
+    write_agents_md(&parent_dir);
+    write_agents_md(&child_dir);
+
+    let instance_id = uid(210);
+    let child_id = uid(211);
+    let parent_id = uid(212);
+
+    // The child is listed *first* — above its new ancestor — exactly as a
+    // human editing the configuration by hand would do. Both are brand new,
+    // so `reconcile` reports two `DeclaredNotProjected` drifts, and it walks
+    // `scopes` in declaration order (see `reconcile`'s loop over `scopes`),
+    // so the child's drift lands first in `report.items` unless `apply`
+    // itself reorders what it executes.
+    let config = parse(&config_text(
+        &instance_id,
+        &[
+            scope(&child_id, "child", "parent-dir/child-dir"),
+            scope(&parent_id, "parent", "parent-dir"),
+        ],
+    ));
+    let scopes = resolve(&config, dir.path()).expect("resolve");
+    let child = scopes
+        .iter()
+        .find(|s| s.id.to_string() == child_id)
+        .expect("child resolved");
+    let parent = scopes
+        .iter()
+        .find(|s| s.id.to_string() == parent_id)
+        .expect("parent resolved");
+    assert_eq!(
+        child.parent_id,
+        Some(parent.id),
+        "child's nearest registered ancestor is parent"
+    );
+
+    let mut store = Store::open(dir.path()).expect("open store");
+    let report = reconcile(&store, &scopes).expect("reconcile");
+    assert_eq!(report.items.len(), 2, "both scopes are new: {report:?}");
+    assert!(
+        matches!(
+            &report.items[0],
+            Drift::DeclaredNotProjected { id, .. } if *id == child.id
+        ),
+        "the child's drift must be reported before the parent's, or this test \
+         does not exercise the hazard `apply`'s doc comment describes: {report:?}"
+    );
+
+    // Before the fix, this fails: SQLite reports `FOREIGN KEY constraint
+    // failed` on the child's INSERT (its parent_id names a row that does not
+    // exist yet in insertion order) and the whole transaction — including
+    // the parent's own INSERT, which would otherwise have succeeded — rolls
+    // back.
+    apply(&mut store, &scopes, &report).expect(
+        "apply must project a new nested scope regardless of whether the \
+         configuration declares the child before the parent",
+    );
+
+    let snapshot = scopes_snapshot(&mut store);
+    assert_eq!(snapshot.len(), 2, "both scopes are projected");
+
+    let clean = reconcile(&store, &scopes).expect("reconcile after apply");
+    assert!(
+        clean.is_clean(),
+        "expected no drift after applying: {clean:?}"
+    );
+}
+
+/// The same hazard, reached through `ParentChanged` rather than
+/// `DeclaredNotProjected`: `child` is already projected with no parent, a new
+/// ancestor scope is declared over it, and the configuration lists `child`
+/// *before* the new ancestor. `reconcile` then reports `ParentChanged` for
+/// `child` ahead of `DeclaredNotProjected` for the ancestor, and
+/// `ParentChanged`'s `UPDATE` writes the same not-yet-existing `parent_id` —
+/// so the fix must order by the *target* scope's nesting depth, not by
+/// which `Drift` variant is involved.
+#[test]
+fn a_parent_changed_update_above_its_new_parents_insert_still_projects_both() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_agents_md(dir.path());
+    let parent_dir = dir.path().join("parent-dir");
+    let child_dir = parent_dir.join("child-dir");
+    fs::create_dir_all(&child_dir).expect("create nested directories");
+    write_agents_md(&parent_dir);
+    write_agents_md(&child_dir);
+
+    let instance_id = uid(220);
+    let child_id = uid(221);
+    let parent_id = uid(222);
+
+    // Only `child` is declared at first: it has no registered ancestor.
+    let config_before = parse(&config_text(
+        &instance_id,
+        &[scope(&child_id, "child", "parent-dir/child-dir")],
+    ));
+    let scopes_before =
+        resolve(&config_before, dir.path()).expect("resolve before ancestor declared");
+    assert_eq!(scopes_before[0].parent_id, None);
+
+    let mut store = Store::open(dir.path()).expect("open store");
+    let report = reconcile(&store, &scopes_before).expect("reconcile");
+    apply(&mut store, &scopes_before, &report).expect("apply initial projection");
+
+    // Now `parent-dir` is declared too, and listed *after* `child` — the
+    // same practical trigger, but arriving as `ParentChanged` on an already-
+    // projected row instead of `DeclaredNotProjected` on a new one.
+    let config_after = parse(&config_text(
+        &instance_id,
+        &[
+            scope(&child_id, "child", "parent-dir/child-dir"),
+            scope(&parent_id, "parent", "parent-dir"),
+        ],
+    ));
+    let scopes_after = resolve(&config_after, dir.path()).expect("resolve after ancestor declared");
+    let child = scopes_after
+        .iter()
+        .find(|s| s.id.to_string() == child_id)
+        .expect("child resolved");
+    let parent = scopes_after
+        .iter()
+        .find(|s| s.id.to_string() == parent_id)
+        .expect("parent resolved");
+    assert_eq!(child.parent_id, Some(parent.id));
+
+    let report_after = reconcile(&store, &scopes_after).expect("reconcile after ancestor declared");
+    assert_eq!(report_after.items.len(), 2, "{report_after:?}");
+    assert!(
+        matches!(
+            &report_after.items[0],
+            Drift::ParentChanged { id, .. } if *id == child.id
+        ),
+        "the child's ParentChanged must be reported before the parent's \
+         DeclaredNotProjected, or this test does not exercise the hazard: \
+         {report_after:?}"
+    );
+
+    // Before the fix: the child's UPDATE runs first, naming a parent row
+    // that does not exist yet, and SQLite reports `FOREIGN KEY constraint
+    // failed` — rolling back the parent's INSERT too.
+    apply(&mut store, &scopes_after, &report_after).expect(
+        "apply must project a new ancestor regardless of whether the \
+         configuration declares the already-registered child before it",
+    );
+
+    let clean = reconcile(&store, &scopes_after).expect("reconcile after apply");
+    assert!(
+        clean.is_clean(),
+        "expected no drift after applying: {clean:?}"
+    );
 }

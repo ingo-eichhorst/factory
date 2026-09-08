@@ -59,7 +59,7 @@ actions of slice 9, so there are not two ways to change the same state." The
 same reasoning applies a slice earlier. A reconcile that silently repaired would
 be the second way to change scope registration, competing with `scope add`.
 
-Four kinds of drift are distinguished, because they have different remedies:
+Ten kinds of drift are distinguished, because they have different remedies:
 
 | Drift | Meaning | `--apply` |
 |---|---|---|
@@ -67,8 +67,36 @@ Four kinds of drift are distinguished, because they have different remedies:
 | **Projected, not declared** | An entry a human removed | Reports only |
 | **Path changed, same identity** | The directory moved; `(dev, ino)` matches the recorded value | Applies |
 | **Path changed, different identity** | Recorded inode is gone or belongs to another directory | Reports only |
+| **Missing path** | The declared path does not currently exist | Reports only |
+| **Unreadable context** | The scope's `AGENTS.md` cannot be read (decision 3) | Reports only |
+| **Name changed** | The configuration renamed the scope | Applies |
+| **Git changed** | The configuration's `git` reference was added, changed, or removed | Applies |
+| **Declared path changed** | The declared path's *text* changed without the canonicalization moving — two configuration spellings of one directory, such as a symlink alias | Applies |
+| **Parent changed** | The nearest registered ancestor recomputed, because a *different* scope's declaration changed, not this scope's own path | Applies |
 
-The last two are the whole point of the table. A moved directory keeps its
+The first four rows shipped with Slice 3. **Missing path** and **Unreadable
+context** were always produced by `reconcile` (decision 3 requires the latter)
+but were missing from this table — an oversight this revision also corrects.
+
+**Name changed** through **Parent changed** were added after a 2026-09 review
+found that every original variant keyed on the path, so a config-only change
+to any other projected column — a rename, a `git` reference gained or lost, a
+declared-path spelling that resolves to the same directory, or a different
+scope's declaration changing this scope's nearest ancestor — went completely
+unreported. `reconcile` said "clean" while the projection actually disagreed
+with the configuration. All four are applied for the same reason **Name
+changed** is: none of them carries identity of its own — the UUID does — so,
+unlike a path, applying them raises no "is this still the same scope"
+question. **Declared path changed** and **Parent changed** are reported only
+when no `PathChanged*` drift already fired for the same scope in the same
+reconcile pass: `PathChangedSameIdentity`'s `apply` already rewrites both
+columns as part of recording a move, and a second report of the same
+underlying event would be noise, not new information. See the `Drift` enum's
+doc comments in `crates/factory-registry/src/lib.rs` for the full reasoning,
+including why this rule does not extend to `PathChangedDifferentIdentity`,
+which stays report-only.
+
+The identity pair is the whole point of the table. A moved directory keeps its
 inode, so a rename is recognisable as a move rather than guessed at from the
 name. But `(dev, ino)` is *not* durable identity — ADR 0009 is explicit that
 delete-and-recreate at the same path yields a new inode — so a mismatch means
@@ -80,6 +108,26 @@ at whatever now occupies the path.
 still has rows referencing it. `--apply` reports it and stops; retiring a scope
 is its own command, in a later slice, because it has to decide what happens to
 that scope's history.
+
+**Applying writes a parent before any child that names it.** `scopes.parent_id`
+is `REFERENCES scopes (id)`, checked immediately rather than deferred to commit
+(`PRAGMA foreign_keys = ON`, ADR 0012 decision 3). Two applicable drifts write
+`parent_id` — **Declared, not projected**'s `INSERT` and **Parent changed**'s
+`UPDATE` — so executing them in `report.items` order, which is declaration
+order, can write a scope's row before the row it names as parent and fail that
+statement's FK check, rolling back the whole transaction. `apply` avoids this
+by sorting the applicable drift by the nesting depth of the scope each one
+names — a registered parent's canonical path is always a strictly shorter
+prefix of its child's (`resolve`'s ancestor search, over `factory_paths`'
+`is_descendant`), so ordering by depth is ordering parent-before-child. This is
+a depth comparison, not a general topological sort: scope parentage is derived
+entirely from filesystem nesting, which makes it a forest, and a cycle would
+require a directory to be its own ancestor, which `is_descendant` cannot
+produce. See `apply`'s doc comment in `crates/factory-registry/src/lib.rs` for
+the full reasoning, and `tests/registry.rs` for the two regression tests
+(`a_child_declared_above_its_new_parent_still_projects_both` and
+`a_parent_changed_update_above_its_new_parents_insert_still_projects_both`)
+that fail against the unordered execution and pass against the sorted one.
 
 ## Decision 3: registration requires a readable `AGENTS.md`
 
@@ -116,6 +164,12 @@ read-only command whose job is exactly to report what disagrees with reality.
   its byte-stability depends on.
 - A rebuild test is mandatory, not optional. It is what keeps decision 1 true as
   the table grows columns.
+- A schema-driven guard test is likewise mandatory: it reads the live `scopes`
+  columns via `PRAGMA table_info` and requires every one, other than `id` and
+  `created_at`, to produce a `Drift` variant when corrupted in isolation. This
+  is what keeps *this* table — the one above — from silently going stale the
+  next time a column is added, which is exactly how `name`, `git`,
+  `declared_path`, and `parent_id` went uncovered the first time.
 
 ## Open item created by this ADR
 
