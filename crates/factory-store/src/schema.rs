@@ -568,6 +568,16 @@ ALTER TABLE tasks ADD COLUMN authorised_deliveries INTEGER NOT NULL DEFAULT 1
 /// another agent this slice. A column nothing yet writes is recorded here as
 /// a real, visible gap rather than hidden behind a writer bolted on in the
 /// wrong crate.
+///
+/// **What `harness_session_id` holds, since nothing yet pins it.** It is the
+/// bare UUID `factory_adapter::parse_harness_session_id` lifts out of a Pi
+/// transcript filename (`<iso-timestamp>_<uuid>.jsonl`), not the path itself.
+/// Slice 9 writes it and compares it, and both sides come from that one
+/// extractor — so the comparison is self-consistent whatever the format is,
+/// and no test in the workspace would notice if it changed. The first caller
+/// that will actually care is slice 10's terminal attach, which has to turn a
+/// stored value back into something a harness recognises. Recorded here so
+/// that caller finds the answer rather than inferring it.
 pub(crate) const V5_SCHEMA: &str = r#"
 ALTER TABLE sessions ADD COLUMN herdr_pane_id TEXT;
 ALTER TABLE sessions ADD COLUMN harness_session_id TEXT;

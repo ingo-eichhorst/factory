@@ -672,11 +672,51 @@ deliveries."
 | Herdr restart / machine restart | `crates/factory-recovery/tests/herdr_or_machine_restart.rs::queued_tasks_remain_queued_through_recreation`, `::pane_recorded_but_non_authoritative_observation_still_recreates`, `::nonexistent_workspace_is_not_recreated`, `::live_evidence_of_the_same_session_blocks_recreation_and_promotes_instead`, `::rerunning_after_recreation_creates_no_second_session`, `::authoritative_but_reused_pane_recreates_rather_than_promotes`, `::existing_workspace_with_no_live_evidence_is_recreated` |
 | The shared give-up operation | `crates/factory-recovery/tests/unrecoverable.rs::unrecoverable_session_with_no_attached_task_just_fails`, `::queued_task_with_a_prior_delivery_attempt_is_also_interrupted`, `::unrecoverable_session_fails_and_interrupts_its_non_terminal_task_while_keeping_delivery_history` |
 | Harness crash | `crates/factory-recovery/tests/harness_crash.rs::authoritative_confirmed_crash_fails_session_and_interrupts_its_running_task`, `::authoritative_confirmed_crash_leaves_an_already_terminal_task_alone`, `::authoritative_but_alive_is_not_confirmed_a_crash`, `::degraded_evidence_is_inconclusive_and_keeps_the_lease`, `::unavailable_evidence_is_also_inconclusive`, `::a_second_crash_notification_for_the_same_session_is_a_caller_error` |
-| Harness change | `crates/factory-recovery/tests/harness_change.rs::a_running_task_requires_review_and_keeps_the_lease_regardless_of_evidence`, `::a_queued_task_is_retained_exactly_as_queued`, `::no_running_task_and_confirmed_dead_evidence_stops_the_session_cleanly`, `::no_running_task_and_inconclusive_evidence_keeps_the_lease`, `::no_running_task_and_still_alive_evidence_keeps_the_lease_too`, `::a_session_with_no_recorded_pane_is_inconclusive_not_stopped`, `::a_session_that_never_confirmed_running_fails_rather_than_stops`, `::only_sessions_of_the_named_agent_are_affected`, `::calling_it_twice_does_not_retire_a_session_still_awaiting_review` |
+| Harness change | `crates/factory-recovery/tests/harness_change.rs::a_running_task_requires_review_and_keeps_the_lease_regardless_of_evidence`, `::a_queued_task_with_no_delivery_attempt_stays_queued_because_nothing_was_sent`, `::a_queued_task_with_a_prior_delivery_attempt_requires_review_like_running_work`, `::no_running_task_and_confirmed_dead_evidence_stops_the_session_cleanly`, `::no_running_task_and_inconclusive_evidence_keeps_the_lease`, `::no_running_task_and_still_alive_evidence_keeps_the_lease_too`, `::a_session_with_no_recorded_pane_is_inconclusive_not_stopped`, `::a_session_that_never_confirmed_running_fails_rather_than_stops`, `::only_sessions_of_the_named_agent_are_affected`, `::calling_it_twice_does_not_retire_a_session_still_awaiting_review` |
 | Resume | `crates/factory-task/tests/deliver.rs::authorise_resume_of_a_nonexistent_task_is_not_found`, `::authorise_resume_of_a_terminal_task_is_refused`, `::authorise_resume_of_a_queued_task_is_refused`, `::authorise_resume_of_a_running_task_is_refused`, `::authorise_resume_moves_a_blocked_task_to_queued_and_grants_one_more_delivery`, `::a_task_can_be_delivered_again_after_authorise_resume_grants_a_second_delivery` |
-| Real Herdr, any procedure | Not proven — not attempted. See "What this slice delivers, and what it does not." |
+| Real Herdr, read-only | `crates/factory-e2e/tests/live_herdr.rs::a_live_pi_pane_is_observed_and_reconnected` |
+| Real Herdr, a real agent doing the work | `crates/factory-e2e/tests/live_agent.rs::a_real_agent_answers_a_factory_task` |
+| The whole chain, offline | `crates/factory-e2e/tests/full_chain.rs`, `tests/delegation_tree.rs`, `tests/restart_drill.rs` |
 
-Every row above except "Real Herdr" is part of the permanent suite
+## Running the two live drills
+
+The last three rows above were added after this guide was first written, when
+the drills existed to fill them. The two `live_*` drills are `#[ignore]`d:
+`./check.sh` must not go red because a terminal was closed, since a suite that
+does that teaches an operator to ignore red.
+
+`live_herdr` is read-only against Herdr — it runs `agent list`, `agent get`
+and `agent explain`, starts no pane and sends no prompt. It needs only a
+running Herdr with at least one live `pi` pane:
+
+```text
+cargo test -p factory-e2e --test live_herdr -- --ignored --nocapture
+```
+
+`live_agent` writes a real prompt into a real terminal, so it needs preparing
+first. Build a throwaway instance (an `AGENTS.md` per scope and a
+`.factory/config.yaml`, as `crates/factory-e2e/tests/common/mod.rs` builds
+one), then:
+
+```text
+herdr workspace create --cwd <instance>/worker --label factory-e2e --no-focus
+herdr agent start e2e-worker --kind pi --pane <pane id from the line above>
+
+FACTORY_E2E_ROOT=<instance> FACTORY_E2E_PANE=<pane id>   cargo test -p factory-e2e --test live_agent -- --ignored --nocapture
+```
+
+Close the workspace afterwards with `herdr workspace close <workspace id>`.
+
+**Two traps this drill fell into before it was trustworthy**, both worth
+knowing before writing any test that talks to a live agent. `herdr agent wait
+--until idle` matches the `idle` the agent was in *before* the prompt, so the
+prompt is submitted with `--wait --until working` and the wait that follows
+cannot match the stale state. And asserting on a fixed answer word passes on
+the *previous* run's reply still in the scrollback, so each run asks for a
+token derived from its own task id. The first version of this drill went green
+in 0.06 seconds without the agent having answered anything.
+
+Every row above except the three live ones is part of the permanent suite
 `./check.sh` already runs on every change; none of it depends on the scratch
 file this document tells you to discard, which is not part of the crate's
 test tree (see this task's own constraint: no real `.factory/factory.sqlite`
