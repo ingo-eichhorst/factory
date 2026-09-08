@@ -549,6 +549,13 @@ Herdr, machine, harness, and harness-change events.
 
 **Dependencies:** Slices 5–8.
 
+ADR 0019 settles the half of this that needs no live evidence: what a restored
+database may claim on its own. After a restore every session is `disconnected`
+with its lease held, and every task with a delivery attempt against it is
+`blocked: interrupted`. This slice starts from that known claim and owns the
+opposite direction — what live Herdr and adapter evidence is allowed to change
+about it.
+
 **Acceptance criteria:**
 - After a supervisor restart, known panes are reconnected where possible and no
   task prompt is silently sent a second time.
@@ -579,6 +586,13 @@ contract and repeat the core lifecycle, task, and recovery tests.
 what slices 1–9 built. It reports and never repairs: recovery keeps the explicit
 review, resume, and replacement actions of slice 9, so there are not two ways to
 change the same state.
+
+The read-only pass needs a door that does not exist yet. `Store::open_at` is the
+only way into the database and it migrates unconditionally, so today's doctor
+would change the schema before reporting it. ADR 0018 decision 1 provides
+`Store::open_read_only` for exactly this, and decisions 2 and 5 of ADRs 0018 and
+0019 add two things to doctor's report: whether migrations are pending, and the
+count, size, and age span of `.factory/backups/`.
 
 **Dependencies:** Slices 1–9.
 
