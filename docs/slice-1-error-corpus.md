@@ -1,5 +1,52 @@
 # Slice 1 — configuration diagnostic corpus
 
+## Amendment 2026-09-08: the document shape changed (ADR 0015)
+
+A scope is no longer a directory holding its own `.factory/config.yaml`. The
+Factory instance has one configuration listing every scope:
+
+```yaml
+version: 1
+instance:
+  id: <uuid>
+  name: business-factory
+scopes:
+  - id: <uuid>
+    name: irrlicht
+    path: projects/irrlicht
+    git: https://github.com/example/irrlicht.git   # optional
+    agent:                                          # or `agents:`
+      name: Irrlicht Agent
+      harness: pi
+```
+
+**Everything below still applies**, with three adjustments:
+
+1. **Scope-level errors name the scope as well as the file.** A problem in one
+   entry of a list must say which entry, or the reader has to count. Prefix the
+   summary accordingly: ``error: scope `irrlicht` sets both `agent` and
+   `agents`; a scope uses one or the other``. The `-->` location, the `note:`
+   lines, and the `help:` are unchanged in form.
+2. **Case 13 (duplicate scope IDs) becomes an intra-file check** and is
+   therefore stronger: it runs on every load rather than only when a caller
+   remembers to compare two configs. Both locations are in the same file.
+   `validate_unique_ids` as a separate cross-file entry point disappears.
+   A companion case is added: **two scopes may not share a `path`** either, with
+   the same shape of message — sharing a path means two scopes claiming one
+   directory, which the Slice 6 lease would later have to reject anyway, and
+   catching it at load names both entries instead of one lease failure.
+3. **The top-level key scan of case 1 now searches within a scope entry**, whose
+   keys are indented. The "first character is not whitespace" rule was correct
+   for the old shape and is wrong for this one. Anchor instead on the entry's
+   own indentation: within the byte range of the scope entry, find a line whose
+   indentation equals that of the entry's other keys and which begins `agent:`
+   or `agents:`. The fallback is unchanged and still matters — on anything
+   ambiguous, use the value-node location rather than guessing.
+
+`git` is validated as present-or-absent only. Version 1 does not contact a
+remote, parse a URL, or verify that a checkout matches the reference; a scope
+entry is a record, and checking it against the world is `factory doctor`'s job.
+
 This document is the specification for `factory-config` error output. Slice 1's
 acceptance criteria are almost entirely *diagnostic* criteria — "naming the file
 and both keys", "both definitions identified", "fails with the supported set",
