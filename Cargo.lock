@@ -124,6 +124,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "factory-delegation"
+version = "0.1.0"
+dependencies = [
+ "factory-registry",
+ "factory-session",
+ "factory-store",
+ "factory-task",
+ "rusqlite",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "factory-paths"
 version = "0.1.0"
 dependencies = [
@@ -138,6 +152,7 @@ dependencies = [
  "factory-config",
  "factory-paths",
  "factory-store",
+ "rusqlite",
  "tempfile",
  "thiserror",
  "uuid",

@@ -88,7 +88,7 @@ fn seed_assigned_task(
 /// A plain `queued` task with no assigned session, as `create::create`
 /// alone leaves it.
 fn seed_unassigned_queued_task(store: &mut Store, seed: u32, scope_id: uuid::Uuid) -> uuid::Uuid {
-    factory_task::create::create(store, uid(seed), None, scope_id, None, None, "do it")
+    factory_task::create::create(store, uid(seed), None, scope_id, None, None, "do it", &[])
         .expect("create a queued task")
 }
 

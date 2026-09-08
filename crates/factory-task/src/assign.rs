@@ -92,7 +92,7 @@ use std::path::PathBuf;
 
 use rusqlite::OptionalExtension;
 
-use crate::TaskStatus;
+use crate::{TaskError, TaskStatus};
 
 /// What [`assign`] decided, or reports needs to happen before it can decide.
 ///
@@ -542,4 +542,41 @@ pub fn assign(
 
     tx.commit().map_err(factory_store::StoreError::from)?;
     Ok(assignment)
+}
+
+/// The task `session_id` is currently running, if any — backlog §8's
+/// concurrency demonstrations read this to tell two sessions' work apart
+/// without relying on terminal scrollback (AGENTS.md: "users must be able
+/// to see the exact scope, task... state that caused an action").
+///
+/// `status = 'running'` is the exact predicate `tasks_one_running_per_session`
+/// enforces (`factory_store::schema`), so at most one row can ever match; a
+/// task that is merely `assigned_session_id`-set but still `queued` (the gap
+/// between `assign` and `deliver`/`mark_running` this module's own docs
+/// describe) does not count, and neither does a task this session ran to
+/// completion. Bound through [`TaskStatus::Running`]'s own
+/// [`TaskStatus::as_db_str`] rather than the literal `"running"`, for the
+/// same reason [`is_idle`] compares session state through
+/// `SessionState::Running`'s `Display` impl instead of a hand-typed string.
+///
+/// Read-only: `&Store`, through [`factory_store::Store::connection`] — same
+/// reasoning as [`crate::create::delegation_chain_of`] and every other read
+/// path in this crate.
+pub fn running_task_of_session(
+    store: &factory_store::Store,
+    session_id: uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, TaskError> {
+    let id: Option<String> = store
+        .connection()
+        .query_row(
+            "SELECT id FROM tasks WHERE assigned_session_id = ?1 AND status = ?2",
+            (session_id.to_string(), TaskStatus::Running.as_db_str()),
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(factory_store::StoreError::from)?;
+    Ok(id.map(|id| {
+        uuid::Uuid::parse_str(&id)
+            .unwrap_or_else(|e| panic!("tasks.id is a UUID; read {id:?}: {e}"))
+    }))
 }

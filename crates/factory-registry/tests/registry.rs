@@ -19,7 +19,10 @@
 use std::fs;
 use std::path::Path;
 
-use factory_registry::{Drift, DriftReport, RegistryError, apply, reconcile, resolve};
+use factory_registry::{
+    Drift, DriftReport, Kinship, RegistryError, apply, kinship, reconcile, require_registered,
+    resolve,
+};
 use factory_store::Store;
 
 // ---------------------------------------------------------------------
@@ -1460,5 +1463,290 @@ fn a_parent_changed_update_above_its_new_parents_insert_still_projects_both() {
     assert!(
         clean.is_clean(),
         "expected no drift after applying: {clean:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 3. `kinship` — the delegation trust rule's ancestry primitive
+//    (design §6, backlog §8).
+// ---------------------------------------------------------------------
+//
+// Every scenario below seeds `scopes` rows directly with `insert_scope` /
+// `update_parent`, bypassing `resolve`/`apply` entirely: `kinship` reads
+// `parent_id` straight off the table, not off a `RegisteredScope`, and the
+// one scenario that most needs bypassing `resolve` — a hand-edited
+// `A.parent = B, B.parent = A` cycle — is a shape `resolve` cannot produce
+// at all (see `nesting_depth`'s doc comment in `src/lib.rs`), so building it
+// any other way is not available.
+
+/// Insert a `scopes` row directly. `declared_path` is just `name` and
+/// `canonical_path` is left `NULL` — neither carries meaning for `kinship`,
+/// which reads only `id` and `parent_id`.
+fn insert_scope(store: &mut Store, id: &str, name: &str, parent_id: Option<&str>) {
+    let tx = store.transaction().expect("begin insert_scope");
+    tx.execute(
+        "INSERT INTO scopes (id, name, declared_path, parent_id) VALUES (?1, ?2, ?3, ?4)",
+        (id, name, name, parent_id),
+    )
+    .expect("insert scope row");
+    tx.commit().expect("commit insert_scope");
+}
+
+/// Rewrite an existing row's `parent_id`. Used only to seed the hand-edited
+/// cycle below, where `b`'s row must already exist before `a` can be
+/// pointed at it — the foreign key is checked immediately per statement,
+/// not deferred to commit.
+fn update_parent(store: &mut Store, id: &str, parent_id: &str) {
+    let tx = store.transaction().expect("begin update_parent");
+    tx.execute(
+        "UPDATE scopes SET parent_id = ?2 WHERE id = ?1",
+        (id, parent_id),
+    )
+    .expect("update parent_id");
+    tx.commit().expect("commit update_parent");
+}
+
+fn parse_uid(seed: u32) -> uuid::Uuid {
+    uuid::Uuid::parse_str(&uid(seed)).expect("uid() produces a valid UUID")
+}
+
+// Seeds for `seed_family_tree`'s shape:
+//
+//   gp
+//   ├─ p
+//   │  ├─ m            (the scope every assertion below sends from)
+//   │  │  └─ child
+//   │  │     └─ grandchild
+//   │  └─ sib           (m's sibling: shares parent `p`)
+//   │     └─ nephew
+//   └─ aunt             (p's sibling: shares parent `gp`)
+//      └─ cousin
+const GP: u32 = 900;
+const P: u32 = 901;
+const M: u32 = 902;
+const CHILD: u32 = 903;
+const GRANDCHILD: u32 = 904;
+const SIB: u32 = 905;
+const NEPHEW: u32 = 906;
+const AUNT: u32 = 907;
+const COUSIN: u32 = 908;
+
+/// Seed the family tree diagrammed above `GP`. `m` (`M`) is the scope every
+/// `Kinship` variant except the two-roots and cycle scenarios is checked
+/// against — those two need shapes this tree cannot express (a second root;
+/// a hand-edited cycle) and seed their own scopes instead.
+fn seed_family_tree(store: &mut Store) {
+    insert_scope(store, &uid(GP), "gp", None);
+    insert_scope(store, &uid(P), "p", Some(&uid(GP)));
+    insert_scope(store, &uid(M), "m", Some(&uid(P)));
+    insert_scope(store, &uid(CHILD), "child", Some(&uid(M)));
+    insert_scope(store, &uid(GRANDCHILD), "grandchild", Some(&uid(CHILD)));
+    insert_scope(store, &uid(SIB), "sib", Some(&uid(P)));
+    insert_scope(store, &uid(NEPHEW), "nephew", Some(&uid(SIB)));
+    insert_scope(store, &uid(AUNT), "aunt", Some(&uid(GP)));
+    insert_scope(store, &uid(COUSIN), "cousin", Some(&uid(AUNT)));
+}
+
+#[test]
+fn kinship_self_is_same_scope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    seed_family_tree(&mut store);
+
+    let result = kinship(store.connection(), parse_uid(M), parse_uid(M)).expect("kinship");
+    assert_eq!(result, Kinship::SameScope);
+}
+
+#[test]
+fn kinship_parent_is_ancestor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    seed_family_tree(&mut store);
+
+    let result = kinship(store.connection(), parse_uid(M), parse_uid(P)).expect("kinship");
+    assert_eq!(result, Kinship::Ancestor);
+}
+
+#[test]
+fn kinship_grandparent_is_ancestor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    seed_family_tree(&mut store);
+
+    let result = kinship(store.connection(), parse_uid(M), parse_uid(GP)).expect("kinship");
+    assert_eq!(
+        result,
+        Kinship::Ancestor,
+        "ancestor must hold at any depth, not just one level up"
+    );
+}
+
+#[test]
+fn kinship_child_is_descendant() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    seed_family_tree(&mut store);
+
+    let result = kinship(store.connection(), parse_uid(M), parse_uid(CHILD)).expect("kinship");
+    assert_eq!(result, Kinship::Descendant);
+}
+
+#[test]
+fn kinship_grandchild_is_descendant() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    seed_family_tree(&mut store);
+
+    let result = kinship(store.connection(), parse_uid(M), parse_uid(GRANDCHILD)).expect("kinship");
+    assert_eq!(
+        result,
+        Kinship::Descendant,
+        "descendant must hold at any depth, not just one level down"
+    );
+}
+
+#[test]
+fn kinship_sibling_shares_the_same_parent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    seed_family_tree(&mut store);
+
+    let result = kinship(store.connection(), parse_uid(M), parse_uid(SIB)).expect("kinship");
+    assert_eq!(result, Kinship::Sibling);
+}
+
+#[test]
+fn kinship_nephew_is_unrelated_not_sibling() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    seed_family_tree(&mut store);
+
+    let result = kinship(store.connection(), parse_uid(M), parse_uid(NEPHEW)).expect("kinship");
+    assert_eq!(
+        result,
+        Kinship::Unrelated,
+        "backlog §8: a nephew is reached through its parent, not targeted directly"
+    );
+}
+
+#[test]
+fn kinship_cousin_is_unrelated_despite_a_shared_grandparent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    seed_family_tree(&mut store);
+
+    let result = kinship(store.connection(), parse_uid(M), parse_uid(COUSIN)).expect("kinship");
+    assert_eq!(
+        result,
+        Kinship::Unrelated,
+        "backlog §8: sharing a grandparent is not sharing a parent — flattening \
+         'shares any ancestor' into kinship would wrongly admit a cousin"
+    );
+}
+
+#[test]
+fn kinship_two_root_scopes_are_unrelated_not_siblings() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    insert_scope(&mut store, &uid(910), "root-a", None);
+    insert_scope(&mut store, &uid(911), "root-b", None);
+
+    let result = kinship(store.connection(), parse_uid(910), parse_uid(911)).expect("kinship");
+    assert_eq!(
+        result,
+        Kinship::Unrelated,
+        "a NULL parent is the absence of one, not a value two roots can share; \
+         `Option<Uuid> == Option<Uuid>` would wrongly say None == None here"
+    );
+}
+
+#[test]
+fn kinship_unknown_scope_id_is_a_typed_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    seed_family_tree(&mut store);
+
+    let unknown = parse_uid(999);
+    let err = kinship(store.connection(), unknown, parse_uid(M)).expect_err("unknown sender id");
+    assert!(
+        matches!(err, RegistryError::UnknownScope { id } if id == unknown),
+        "expected UnknownScope, got {err:?}"
+    );
+}
+
+#[test]
+fn kinship_a_hand_edited_parent_cycle_errors_instead_of_hanging() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+
+    // `a` starts with no parent so `b` (below) can reference it, then gets
+    // repointed at `b` — `resolve` can never produce this (see
+    // `nesting_depth`'s doc comment in `src/lib.rs`), but nothing in the
+    // schema forbids a human editing the row directly.
+    insert_scope(&mut store, &uid(920), "a", None);
+    insert_scope(&mut store, &uid(921), "b", Some(&uid(920)));
+    update_parent(&mut store, &uid(920), &uid(921));
+
+    // A third scope with no relation to the cycle at all. This is the pair
+    // that actually exercises the guard: `kinship(a, b)` on this two-node
+    // cycle would resolve on its very first hop (`a`'s parent literally is
+    // `b`) without ever revisiting a scope, so removing the cycle guard
+    // would not make *that* query hang and the mutation would prove
+    // nothing. Querying `outsider`'s kinship against a scope *inside* the
+    // cycle forces the walk to search for an id it will never find, looping
+    // `a -> b -> a -> b -> ...` forever without the visited-set guard.
+    insert_scope(&mut store, &uid(922), "outsider", None);
+
+    let err = kinship(store.connection(), parse_uid(922), parse_uid(920))
+        .expect_err("a parent cycle must not be silently resolved");
+    assert!(
+        matches!(err, RegistryError::CyclicParentage { .. }),
+        "expected CyclicParentage, got {err:?}"
+    );
+}
+
+/// The coordinator's acceptance finding: `kinship`'s existence checks run
+/// *before* the `SameScope` short-circuit (see its doc comment), which
+/// `factory-delegation` leans on by calling `kinship(conn, target, target)`
+/// purely to probe existence. `kinship_unknown_scope_id_is_a_typed_error`
+/// above passes an unknown *sender* against a known target, which never
+/// reaches the `SameScope` branch at all — it does not pin this ordering.
+/// This test compares an unknown id against **itself**, which the
+/// short-circuit would reach first if it ran before the existence checks;
+/// it must still be `RegistryError::UnknownScope`, never `Kinship::SameScope`.
+#[test]
+fn kinship_unknown_scope_compared_to_itself_is_a_typed_error_not_same_scope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("open store");
+
+    let unknown = parse_uid(930);
+    let err = kinship(store.connection(), unknown, unknown)
+        .expect_err("an unknown id compared to itself must still be a typed error");
+    assert!(
+        matches!(err, RegistryError::UnknownScope { id } if id == unknown),
+        "expected UnknownScope, got {err:?}"
+    );
+}
+
+#[test]
+fn require_registered_accepts_a_registered_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open store");
+    seed_family_tree(&mut store);
+
+    require_registered(store.connection(), parse_uid(M)).expect("m is registered");
+}
+
+#[test]
+fn require_registered_refuses_an_unknown_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("open store");
+
+    let unknown = parse_uid(931);
+    let err =
+        require_registered(store.connection(), unknown).expect_err("unknown id is not registered");
+    assert!(
+        matches!(err, RegistryError::UnknownScope { id } if id == unknown),
+        "expected UnknownScope, got {err:?}"
     );
 }

@@ -21,7 +21,7 @@
 //! The table adds what the configuration cannot hold: the canonical absolute
 //! path, the `(st_dev, st_ino)` identity of ADR 0009, and the resolved parent.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use factory_paths::{CanonicalPath, FileId, PathError, is_descendant};
@@ -806,6 +806,191 @@ pub fn apply(
     Ok(applicable.into_iter().cloned().collect())
 }
 
+// ---------------------------------------------------------------------
+// Kinship — the delegation trust rule's ancestry primitive.
+// ---------------------------------------------------------------------
+
+/// How `target_scope_id` stands relative to `sender_scope_id` — named from
+/// the target's point of view.
+///
+/// This is the ancestry check design §6's delegation rule needs: "An agent
+/// may target a registered descendant or sibling scope, never an ancestor
+/// and never itself." Backlog §8 sharpens the boundary further — "a scope
+/// that is neither a descendant nor a sibling... [a] nephew or cousin
+/// included, which must be reached through its parent" — which is why this
+/// has five variants instead of collapsing "shares some ancestor" into one:
+/// a cousin and a sibling both have *an* ancestor in common, but only one of
+/// them is targetable. Nothing here decides policy; a caller enforcing the
+/// rule matches on the variant, this only answers "what is this pair,
+/// structurally."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kinship {
+    SameScope,
+    /// The target is an ancestor of the sender, at any depth.
+    Ancestor,
+    /// The target is a descendant of the sender, at any depth.
+    Descendant,
+    /// The target and the sender share the same non-NULL parent.
+    Sibling,
+    Unrelated,
+}
+
+/// `scopes.parent_id` for `id`, or a typed error when `id` names no row.
+///
+/// This is [`kinship`]'s existence check, not just a column read: an id
+/// that names no row must surface as [`RegistryError::UnknownScope`], never
+/// as a silently-computed `Unrelated` — a caller cannot otherwise tell
+/// "these two scopes are unrelated" from "I passed a made-up id," and the
+/// delegation rule this feeds (design §6) needs to reject the second case
+/// outright rather than fail open into the first.
+fn scope_parent(
+    conn: &rusqlite::Connection,
+    id: uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, RegistryError> {
+    let parent: Option<String> = conn
+        .query_row(
+            "SELECT parent_id FROM scopes WHERE id = ?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|err| match err {
+            rusqlite::Error::QueryReturnedNoRows => RegistryError::UnknownScope { id },
+            other => RegistryError::Store(factory_store::StoreError::from(other)),
+        })?;
+
+    Ok(parent.map(|parent| {
+        uuid::Uuid::parse_str(&parent)
+            .expect("scopes.parent_id is a UUID: only this crate ever writes it")
+    }))
+}
+
+/// Whether `candidate` appears anywhere in the parent chain above `start`
+/// (`start` itself is never considered a match).
+///
+/// Carries its own visited set rather than trusting the walk to terminate
+/// at a `NULL` `parent_id`. [`nesting_depth`]'s doc comment explains why
+/// [`resolve`]'s *own* output can never cycle — a registered parent is
+/// always a strictly shorter canonical path than its child, so
+/// `A.parent = B, B.parent = A` is unrepresentable by construction there.
+/// But this function reads `scopes.parent_id` back from the database, not
+/// `resolve`'s output, and nothing in the schema stops a hand-edited row
+/// from writing exactly that cycle — `parent_id` is a plain self-referencing
+/// foreign key with no acyclicity constraint SQLite can express. Without the
+/// `visited.insert` check below, such a row would make this loop spin
+/// forever; with it, [`kinship`] returns
+/// [`RegistryError::CyclicParentage`] instead of hanging.
+fn is_ancestor(
+    conn: &rusqlite::Connection,
+    candidate: uuid::Uuid,
+    start: uuid::Uuid,
+) -> Result<bool, RegistryError> {
+    let mut current = start;
+    let mut visited = HashSet::from([current]);
+    loop {
+        let Some(parent) = scope_parent(conn, current)? else {
+            return Ok(false); // Reached a root without finding `candidate`.
+        };
+        if parent == candidate {
+            return Ok(true);
+        }
+        if !visited.insert(parent) {
+            return Err(RegistryError::CyclicParentage { id: parent });
+        }
+        current = parent;
+    }
+}
+
+/// How `target_scope_id` stands relative to `sender_scope_id`, per
+/// [`Kinship`].
+///
+/// Takes `&rusqlite::Connection`, not `&Store` or `&Transaction`, so a
+/// caller can pass either `store.connection()` (a read, per
+/// [`Store::connection`](factory_store::Store::connection)) or a live
+/// `Transaction` — it derefs to `Connection`, so no adapter is needed to
+/// check kinship as one step inside a larger write.
+///
+/// Four things this deliberately gets right, each covered by its own test
+/// in `tests/registry.rs`:
+///
+/// 1. **Descendant is any depth; sibling is exactly one shared parent.**
+///    Flattening both into "shares any ancestor" would wrongly admit a
+///    cousin as kin — backlog §8 names cousin and nephew explicitly as
+///    *rejected*, reachable only through their parent.
+/// 2. **Two root scopes are not siblings.** Both have `parent_id IS NULL`,
+///    and `Option<Uuid> == Option<Uuid>` would say `None == None` and call
+///    that a shared parent — wrong, since a `NULL` parent is the *absence*
+///    of one, not a value two roots can share. The `Some(..) == Some(..)`
+///    match below (not a bare `sender_parent == target_parent`) is what
+///    makes that explicit rather than accidental.
+/// 3. **The walk cannot hang on a hand-edited cycle** — see
+///    [`is_ancestor`]'s doc comment.
+/// 4. **An unknown scope id is a typed error**, not a silent `Unrelated` —
+///    see [`scope_parent`].
+///
+/// A caller that wants *only* the existence check in point 4 — with no
+/// interest in how the two ids relate — should call [`require_registered`]
+/// instead of encoding "does this exist" as `kinship(conn, id, id)`. Both
+/// existence checks below still run unconditionally, before the
+/// `SameScope` short-circuit, so `kinship(conn, id, id)` remains correct for
+/// an unregistered `id` — but a reader of a call site should not have to
+/// know that to see what the call means.
+pub fn kinship(
+    conn: &rusqlite::Connection,
+    sender_scope_id: uuid::Uuid,
+    target_scope_id: uuid::Uuid,
+) -> Result<Kinship, RegistryError> {
+    // Both existence checks run unconditionally, before the `SameScope`
+    // short-circuit below, so an unknown id is always a typed error — even
+    // one compared against itself — rather than an error that only surfaces
+    // for some argument orderings.
+    let sender_parent = scope_parent(conn, sender_scope_id)?;
+    let target_parent = scope_parent(conn, target_scope_id)?;
+
+    if sender_scope_id == target_scope_id {
+        return Ok(Kinship::SameScope);
+    }
+
+    if is_ancestor(conn, target_scope_id, sender_scope_id)? {
+        return Ok(Kinship::Ancestor);
+    }
+    if is_ancestor(conn, sender_scope_id, target_scope_id)? {
+        return Ok(Kinship::Descendant);
+    }
+
+    // Point 2 above: only a `Some(..) == Some(..)` match counts as a shared
+    // parent. Two `None`s falls through to `Unrelated` below.
+    if let (Some(sender_parent), Some(target_parent)) = (sender_parent, target_parent) {
+        if sender_parent == target_parent {
+            return Ok(Kinship::Sibling);
+        }
+    }
+
+    Ok(Kinship::Unrelated)
+}
+
+/// Refuse an id that names no registered scope.
+///
+/// Existence is a narrower question than [`kinship`] answers, and it earns
+/// its own name: a caller that wants only "does this scope exist" and
+/// expresses that as `kinship(conn, id, id)` has to decode a trick to get a
+/// plain existence check, and is now coupled to `kinship`'s internal
+/// ordering — specifically, to its existence checks running *before* the
+/// `SameScope` short-circuit — as if that ordering were part of its public
+/// contract rather than an implementation detail one caller once relied on.
+/// `require_registered` is what that caller should have named instead. It
+/// is built on the same [`scope_parent`] lookup `kinship` itself uses for
+/// exactly this check, so there remains exactly one place that knows how
+/// `scopes` answers "is this id registered" — this function just gives that
+/// answer its own name and return type instead of asking a question that
+/// happens to also answer it.
+pub fn require_registered(
+    conn: &rusqlite::Connection,
+    id: uuid::Uuid,
+) -> Result<(), RegistryError> {
+    scope_parent(conn, id)?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     #[error("path error: {0}")]
@@ -822,4 +1007,19 @@ pub enum RegistryError {
         path: PathBuf,
         root: PathBuf,
     },
+
+    /// [`kinship`] was asked about an id absent from `scopes`. Never
+    /// returned for a *stale but once-valid* id — this crate never deletes
+    /// rows — only for one that was never registered at all.
+    #[error("scope `{id}` is not registered")]
+    UnknownScope { id: uuid::Uuid },
+
+    /// [`kinship`]'s walk revisited a scope id already seen in the current
+    /// parent-chain traversal. [`resolve`] cannot produce this (see
+    /// [`nesting_depth`]'s doc comment) — it means some `scopes.parent_id`
+    /// value was written by a hand edit, not by this crate.
+    #[error(
+        "scope `{id}`'s parent_id cycles back to a scope already seen while walking its ancestry — parent_id was hand-edited; resolve() cannot produce a cycle"
+    )]
+    CyclicParentage { id: uuid::Uuid },
 }

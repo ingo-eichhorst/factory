@@ -110,10 +110,18 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 /// under.
 ///
 /// Design §5 step 1: the row is durable *before* anything is entered into a
-/// terminal. This function is the entirety of that step — it does not
-/// choose a session, does not touch a harness or an adapter, and writes no
-/// `task_delegation_chain` row (delegation is station 8's concern, not this
-/// slice's).
+/// terminal. This function is the entirety of that step — it does not choose
+/// a session and does not touch a harness or an adapter.
+///
+/// `delegation_chain` is written in the *same* transaction as the task row.
+/// A task whose chain were committed separately could be read back, after a
+/// crash between the two commits, as a task that had travelled through no
+/// scope at all — and backlog §8 asks for exactly the opposite: "the chain is
+/// recorded durably with the task, so a delegation loop is reconstructable
+/// after a restart rather than only detectable while running." This function
+/// stores the chain it is given and judges none of it; deciding *what* the
+/// chain is, and whether the target may be appended to it at all, belongs to
+/// `factory_delegation`, which calls this.
 ///
 /// `id` is supplied by the caller rather than generated here, mirroring
 /// `factory_session::begin_start`'s own `id: uuid::Uuid` parameter: the
@@ -133,6 +141,7 @@ pub fn create(
     target_session_id: Option<uuid::Uuid>,
     target_workspace_path: Option<&str>,
     prompt: &str,
+    delegation_chain: &[uuid::Uuid],
 ) -> Result<uuid::Uuid, TaskError> {
     let tx = store.transaction()?;
     tx.execute(
@@ -149,8 +158,65 @@ pub fn create(
         ),
     )
     .map_err(factory_store::StoreError::from)?;
+    for (position, scope_id) in delegation_chain.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO task_delegation_chain (task_id, position, scope_id) \
+             VALUES (?1, ?2, ?3)",
+            (id.to_string(), position as i64, scope_id.to_string()),
+        )
+        .map_err(factory_store::StoreError::from)?;
+    }
     tx.commit().map_err(factory_store::StoreError::from)?;
     Ok(id)
+}
+
+/// The ordered delegation chain recorded with `task_id`, position 0 first —
+/// design §2.4's "delegation chain (every scope the task has passed
+/// through)" and backlog §8's "[e]very task carries the ordered delegation
+/// chain of scopes it has passed through." 0-based, with the target itself
+/// last, mirroring exactly what [`create`] was given and wrote — this
+/// function judges none of it, the same stance [`create`]'s own doc comment
+/// takes.
+///
+/// Read-only: takes `&Store`, going through [`factory_store::Store::connection`]
+/// — never [`factory_store::Store::transaction`], per that method's own doc
+/// comment on why a read path must not take the write lock and contend with
+/// real writers.
+///
+/// `ORDER BY position` is load-bearing, not decorative, and for a reason
+/// stronger than "insertion order might not be preserved": this table also
+/// carries a `UNIQUE (task_id, scope_id)` index, and — confirmed with
+/// `EXPLAIN QUERY PLAN` against a throwaway database before this function
+/// was written — a query that only selects `scope_id` and has no `ORDER BY`
+/// is satisfied by SQLite's query planner from *that* index as a covering
+/// scan, which returns rows in `scope_id`'s lexicographic order, not
+/// `position` order and not insertion order. Dropping this clause is
+/// therefore invisible against a chain whose scopes happen to sort the same
+/// way they were positioned, which is why
+/// [`tests::delegation_chain_of_round_trips_a_three_scope_chain_in_position_order`]
+/// in `tests/create.rs` deliberately chooses scope ids whose lexicographic
+/// order differs from their position order.
+pub fn delegation_chain_of(
+    store: &factory_store::Store,
+    task_id: uuid::Uuid,
+) -> Result<Vec<uuid::Uuid>, TaskError> {
+    let mut stmt = store
+        .connection()
+        .prepare("SELECT scope_id FROM task_delegation_chain WHERE task_id = ?1 ORDER BY position")
+        .map_err(factory_store::StoreError::from)?;
+    let scope_ids: Vec<String> = stmt
+        .query_map([task_id.to_string()], |row| row.get(0))
+        .map_err(factory_store::StoreError::from)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(factory_store::StoreError::from)?;
+    Ok(scope_ids
+        .into_iter()
+        .map(|scope_id| {
+            uuid::Uuid::parse_str(&scope_id).unwrap_or_else(|e| {
+                panic!("task_delegation_chain.scope_id is a UUID; read {scope_id:?}: {e}")
+            })
+        })
+        .collect())
 }
 
 /// Every task, oldest first — read-only inspection before automation

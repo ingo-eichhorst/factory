@@ -4,6 +4,7 @@ members = [
     "crates/factory-adapter",
     "crates/factory-config",
     "crates/factory-context",
+    "crates/factory-delegation",
     "crates/factory-paths",
     "crates/factory-registry",
     "crates/factory-session",

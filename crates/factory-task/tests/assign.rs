@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use factory_paths::CanonicalPath;
 use factory_store::Store;
 use factory_task::TaskStatus;
-use factory_task::assign::{AssignError, Assignment, DeferReason, assign};
+use factory_task::assign::{AssignError, Assignment, DeferReason, assign, running_task_of_session};
 use factory_task::create::{create, show};
 
 /// A deterministic, distinct, syntactically valid UUID — mirrors
@@ -118,7 +118,17 @@ fn untargeted_assign_picks_the_only_idle_session() {
     let (session_id, _) = seed_idle_session(&mut store, dir.path(), 2, scope_id, "agent", 10);
 
     let task_id = uid(50);
-    create(&mut store, task_id, None, scope_id, None, None, "do it").expect("create");
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create");
 
     let outcome = assign(&mut store, task_id, "agent", 10).expect("assign");
     assert_eq!(outcome, Assignment::Assigned(session_id));
@@ -139,7 +149,17 @@ fn untargeted_assign_defers_when_no_session_exists_at_all() {
     let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
 
     let task_id = uid(50);
-    create(&mut store, task_id, None, scope_id, None, None, "do it").expect("create");
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create");
 
     let outcome = assign(&mut store, task_id, "agent", 10).expect("assign");
     assert_eq!(
@@ -168,7 +188,17 @@ fn a_starting_session_holds_the_lease_but_is_not_idle() {
     let _ = start_session(&mut store, dir.path(), 2, scope_id, "agent", 10);
 
     let task_id = uid(50);
-    create(&mut store, task_id, None, scope_id, None, None, "do it").expect("create");
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create");
 
     let outcome = assign(&mut store, task_id, "agent", 10).expect("assign");
     assert_eq!(
@@ -200,7 +230,17 @@ fn a_session_whose_task_is_blocked_is_not_idle() {
     );
 
     let task_id = uid(50);
-    create(&mut store, task_id, None, scope_id, None, None, "do it").expect("create");
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create");
 
     let outcome = assign(&mut store, task_id, "agent", 10).expect("assign");
     assert_eq!(
@@ -226,8 +266,8 @@ fn a_second_untargeted_assign_does_not_double_book_the_only_idle_session() {
 
     let task_a = uid(50);
     let task_b = uid(51);
-    create(&mut store, task_a, None, scope_id, None, None, "a").expect("create a");
-    create(&mut store, task_b, None, scope_id, None, None, "b").expect("create b");
+    create(&mut store, task_a, None, scope_id, None, None, "a", &[]).expect("create a");
+    create(&mut store, task_b, None, scope_id, None, None, "b", &[]).expect("create b");
 
     let outcome_a = assign(&mut store, task_a, "agent", 10).expect("assign a");
     assert_eq!(outcome_a, Assignment::Assigned(session_id));
@@ -262,10 +302,71 @@ fn untargeted_assign_picks_the_earliest_created_idle_session_deterministically()
     let (_second, _) = seed_idle_session(&mut store, dir.path(), 3, scope_id, "agent", 10);
 
     let task_id = uid(50);
-    create(&mut store, task_id, None, scope_id, None, None, "do it").expect("create");
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create");
 
     let outcome = assign(&mut store, task_id, "agent", 10).expect("assign");
     assert_eq!(outcome, Assignment::Assigned(first));
+}
+
+/// Direct proof of `find_idle_session`'s `agent_name = ?2` predicate,
+/// independent of `rowid` ordering. Acceptance review found that
+/// `tests/concurrency.rs::two_agents_of_one_scope_run_concurrently`, as
+/// originally written, kept passing even with that predicate deleted
+/// outright (`WHERE scope_id = ?1 AND agent_name = ?2` mutated to
+/// `WHERE scope_id = ?1 AND ?2 IS NOT NULL`) — it happened to deliver the
+/// lower-`rowid` session's own agent's task first, so a query that ignores
+/// `agent_name` still picked the right session by `rowid` order alone. This
+/// test does not depend on ordering at all: exactly one idle session
+/// exists, and it belongs to a *different* agent than the one requested, so
+/// there is nothing for a broken filter to get right by accident. Asserts
+/// the exact [`Assignment`] variant — [`DeferReason::NoIdleSession`], not
+/// merely "the task was not assigned" — so a mutation that substitutes some
+/// other idle session instead of correctly deferring is also caught.
+#[test]
+fn untargeted_assign_never_picks_another_agents_idle_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let _other_agents_idle_session =
+        seed_idle_session(&mut store, dir.path(), 2, scope_id, "agent-a", 10);
+
+    let task_id = uid(50);
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create");
+
+    let outcome = assign(&mut store, task_id, "agent-b", 10).expect("assign");
+    assert_eq!(
+        outcome,
+        Assignment::Deferred(DeferReason::NoIdleSession {
+            agent_name: "agent-b".to_string()
+        }),
+        "an idle session belonging to a different agent must never be picked"
+    );
+
+    let task = show(&store, task_id).expect("show");
+    assert_eq!(
+        task.assigned_session_id, None,
+        "must not have been assigned to the other agent's session"
+    );
 }
 
 // Requested session ------------------------------------------------------
@@ -287,6 +388,7 @@ fn requested_session_is_used_when_idle_even_if_another_idle_session_exists() {
         Some(requested),
         None,
         "do it",
+        &[],
     )
     .expect("create");
 
@@ -316,6 +418,7 @@ fn requested_session_that_is_busy_is_deferred_not_substituted() {
         Some(requested),
         None,
         "do it",
+        &[],
     )
     .expect("create");
 
@@ -366,6 +469,7 @@ fn create_rejects_a_target_session_id_that_names_no_real_session() {
         Some(missing),
         None,
         "do it",
+        &[],
     )
     .expect_err("a task cannot durably request a session that was never real");
     assert!(
@@ -392,6 +496,7 @@ fn requested_workspace_reuses_its_idle_session() {
         None,
         Some(path.to_str().expect("utf8 path")),
         "do it",
+        &[],
     )
     .expect("create");
 
@@ -416,6 +521,7 @@ fn requested_workspace_with_a_busy_occupant_is_deferred() {
         None,
         Some(path.to_str().expect("utf8 path")),
         "do it",
+        &[],
     )
     .expect("create");
 
@@ -458,6 +564,7 @@ fn a_workspace_whose_occupant_is_still_starting_is_not_offered_for_a_new_session
         None,
         Some(path.to_str().expect("utf8 path")),
         "do it",
+        &[],
     )
     .expect("create");
 
@@ -495,6 +602,7 @@ fn a_workspace_leased_by_another_scope_is_never_offered_as_free() {
         None,
         Some(path.to_str().expect("utf8 path")),
         "do it",
+        &[],
     )
     .expect("create");
 
@@ -537,6 +645,7 @@ fn a_starting_session_still_spends_a_max_sessions_slot() {
         None,
         Some(workspace_dir.to_str().expect("utf8 path")),
         "do it",
+        &[],
     )
     .expect("create");
 
@@ -567,6 +676,7 @@ fn requested_workspace_that_does_not_exist_is_deferred_not_an_error() {
         None,
         Some(missing_path.to_str().expect("utf8 path")),
         "do it",
+        &[],
     )
     .expect("create");
 
@@ -601,6 +711,7 @@ fn requested_workspace_with_no_occupant_and_room_starts_a_session() {
         None,
         Some(workspace_dir.to_str().expect("utf8 path")),
         "do it",
+        &[],
     )
     .expect("create");
 
@@ -641,6 +752,7 @@ fn requested_workspace_defers_when_the_agent_is_already_at_max_sessions() {
         None,
         Some(new_workspace.to_str().expect("utf8 path")),
         "do it",
+        &[],
     )
     .expect("create");
 
@@ -680,6 +792,7 @@ fn a_requested_session_takes_precedence_over_a_requested_workspace() {
         Some(requested_session),
         Some(workspace_path.to_str().expect("utf8 path")),
         "do it",
+        &[],
     )
     .expect("create");
 
@@ -766,4 +879,63 @@ fn assign_of_a_nonexistent_task_is_not_found() {
 
     let err = assign(&mut store, uid(999), "agent", 10).expect_err("no such task exists");
     assert!(matches!(err, AssignError::TaskNotFound(id) if id == uid(999)));
+}
+
+// running_task_of_session -------------------------------------------------
+
+#[test]
+fn running_task_of_session_finds_the_running_task() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let (session_id, _) = seed_idle_session(&mut store, dir.path(), 2, scope_id, "agent", 10);
+    let task_id = seed_task(&mut store, 20, scope_id, Some(session_id), "running", None);
+
+    let running = running_task_of_session(&store, session_id).expect("read");
+    assert_eq!(running, Some(task_id));
+}
+
+#[test]
+fn running_task_of_session_is_none_when_nothing_is_assigned() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let (session_id, _) = seed_idle_session(&mut store, dir.path(), 2, scope_id, "agent", 10);
+
+    let running = running_task_of_session(&store, session_id).expect("read");
+    assert_eq!(running, None);
+}
+
+/// Mutation target: dropping `status = 'running'` from the query (answering
+/// from `assigned_session_id` alone) would return this task instead of
+/// `None` — it is assigned to the session but has not been delivered yet,
+/// the exact gap `assign.rs`'s own module docs describe between `assign`
+/// and `deliver`/`mark_running`. This is a `queued` task, deliberately not
+/// `blocked` or a terminal status, so the mutation this test targets is
+/// isolated from `TaskStatus::is_terminal`'s own list.
+#[test]
+fn running_task_of_session_ignores_a_queued_assigned_task() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let (session_id, _) = seed_idle_session(&mut store, dir.path(), 2, scope_id, "agent", 10);
+    let _task_id = seed_task(&mut store, 20, scope_id, Some(session_id), "queued", None);
+
+    let running = running_task_of_session(&store, session_id).expect("read");
+    assert_eq!(
+        running, None,
+        "a task assigned but not yet running must not count as the session's running task"
+    );
+}
+
+#[test]
+fn running_task_of_session_ignores_a_task_the_session_already_finished() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let (session_id, _) = seed_idle_session(&mut store, dir.path(), 2, scope_id, "agent", 10);
+    let _task_id = seed_task(&mut store, 20, scope_id, Some(session_id), "done", None);
+
+    let running = running_task_of_session(&store, session_id).expect("read");
+    assert_eq!(running, None);
 }

@@ -531,7 +531,7 @@ fn acknowledge_cancellation_of_a_queued_task_is_refused_as_not_running() {
     let mut store = Store::open(dir.path()).expect("open");
     let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
     let task_id =
-        factory_task::create::create(&mut store, uid(3), None, scope_id, None, None, "do it")
+        factory_task::create::create(&mut store, uid(3), None, scope_id, None, None, "do it", &[])
             .expect("create");
 
     let err = acknowledge_cancellation(&mut store, task_id).expect_err("not running");

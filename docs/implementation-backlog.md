@@ -550,6 +550,33 @@ or a rejected task.
 an interactive session and clearly document that this is cooperative policy,
 not security isolation.
 
+**Resolved during slice 8.** Sender identity is bound as an *API shape*, not a
+column: the agent-facing entry point takes a session id and resolves
+`sessions.scope_id` from that row, so a caller can never name its own sender
+scope. The six decisions this slice was built on — including why it needed no
+migration, why two root scopes are not siblings, and why the Rust check is the
+rule's home while `UNIQUE (task_id, scope_id)` is only its backstop — are
+written into `crates/factory-delegation/src/lib.rs`'s crate documentation
+rather than repeated here, because that is where the next person to change the
+rule will be standing. Ancestry lives in `factory_registry::kinship`, its one
+home; nothing else in the workspace walks `parent_id`.
+
+**Coverage gap found during slice 8, in code slice 7 delivered.** `assign`
+filtered idle sessions by `agent_name`, and no test covered it: deleting the
+filter outright left all 84 `factory-task` tests green. This slice's own "two agents
+of one scope" demonstration passed for the wrong reason — the two sessions
+happened to be tried in `rowid` order, so a broken filter still chose
+correctly. `untargeted_assign_never_picks_another_agents_idle_session` now
+tests the rule head-on, and the demonstration was reordered so the ordering can
+no longer rescue it.
+
+**Left open by slice 8:** `target_agent_name`. None of this slice's acceptance
+criteria need it — the delegation rule is per scope, and `assign` already takes
+`agent_name` as a call parameter — so adding the column here would have mixed a
+second, unrelated question into the delegation chain. The gap recorded above
+stands exactly as written, and the `assistant` scope's two agents remain
+undecidable from a task row alone.
+
 ## 9. Reconciliation, restart drills, and failure handling
 
 **Objective:** Make recovery conservative and auditable before unattended
@@ -831,9 +858,10 @@ scope at all.
 
 ## Deferred production stations
 
-Design section 12 classifies four further stations as later work. They are not
-version-1 slices and have no acceptance criteria here; they are listed so the
-delivery plan states what was deliberately left out.
+Design section 12 classifies four further stations as later work, and ADR 0020
+adds a fifth item that is not a §12 station but is deferred on the same terms.
+None is a version-1 slice and none has acceptance criteria here; they are listed
+so the delivery plan states what was deliberately left out.
 
 | Station | Smallest next step after version 1 |
 |---|---|
@@ -841,3 +869,4 @@ delivery plan states what was deliberately left out.
 | Operating data (12.5) | One read projection over task-run events plus a read-only `factory stats` command. Depends on the 12.1 and 12.2 hooks carrying real verdicts. |
 | Goods receipt and dispatch (12.7) | An intake path that turns an inbound message into a task run with recorded provenance, and a dispatch run whose external effect is approval-gated. |
 | Learning loop (12.8) | A scheduled review run that reads decisions and verification findings and proposes template and `AGENTS.md` changes for human approval. |
+| Evaluation bench (ADR 0020) | A fixture corpus with executable acceptance gates, plus a runner that executes one case across a harness-and-model matrix and reports the comparison. Version 1 records the run fields ADR 0020 pins; the corpus, runner, and report are post-version-1. |

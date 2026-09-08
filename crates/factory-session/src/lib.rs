@@ -476,6 +476,237 @@ fn find_aliasing_conflict(
     Ok(None)
 }
 
+/// `sessions.scope_id` for `id` — a plain read, added for
+/// `factory_delegation::queue::queue_from_session`, which resolves "which
+/// scope is asking" from a *session id* rather than trusting a caller to
+/// name its own sender scope (`factory_delegation`'s crate docs, decision 1:
+/// "a caller that may name its own sender scope has no rule left to
+/// break"). Nothing before this needed to read a session row at all — every
+/// other function here only ever transitions one — so no equivalent existed
+/// for that crate to call instead of inlining the SQL itself.
+///
+/// Takes `&Store`, not `&mut Store` / a transaction: mirrors
+/// `factory_task::create::show`'s own reasoning — a read of one row needs no
+/// write lock, and a caller holding `&Store` cannot also be mid-transaction
+/// on the same store.
+///
+/// # Errors
+///
+/// [`SessionError::NotFound`] when `id` names no session.
+pub fn scope_of_session(
+    store: &factory_store::Store,
+    id: uuid::Uuid,
+) -> Result<uuid::Uuid, SessionError> {
+    let scope_id: Option<String> = store
+        .connection()
+        .query_row(
+            "SELECT scope_id FROM sessions WHERE id = ?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(factory_store::StoreError::from)?;
+
+    let scope_id = scope_id.ok_or(SessionError::NotFound(id))?;
+    // `sessions.scope_id` is a UUID this crate itself wrote (`begin_start`'s
+    // `INSERT`), so a value that fails to parse would be a broken invariant
+    // in a row this function just selected, not an input to handle — the
+    // same stance `factory_task::create`'s own `parse_uuid` helper takes.
+    Ok(uuid::Uuid::parse_str(&scope_id)
+        .unwrap_or_else(|e| panic!("sessions.scope_id is a UUID; read {scope_id:?}: {e}")))
+}
+
+/// One `sessions` row, as read back by [`list`] and [`show`].
+///
+/// Backlog §8's closing acceptance criterion — "[t]he operator can inspect
+/// session, task, lease, and compiled-context records without relying on
+/// terminal scrollback" — names sessions and leases as the two record kinds
+/// that, unlike tasks ([`factory_task::create::Task`]) and compiled context
+/// ([`factory_context::compile`]), had no reader at all before this. This
+/// struct and [`list`]/[`show`] deliberately mirror
+/// `factory_task::create::Task`/`list`/`show`'s own shape — a plain data
+/// record, not a handle, with every `TEXT`-typed identifier column parsed
+/// into its typed form ([`uuid::Uuid`], [`SessionState`]) since this crate
+/// itself wrote them and a value that does not parse is a broken invariant,
+/// not an input to handle (the same stance [`SessionState::from_db_str`]
+/// takes) — so that an operator who has learned one reader already knows the
+/// other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Session {
+    pub id: uuid::Uuid,
+    pub scope_id: uuid::Uuid,
+    pub agent_name: String,
+    pub state: SessionState,
+    pub workspace_path: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+const SESSION_COLUMNS: &str =
+    "id, scope_id, agent_name, state, workspace_path, created_at, updated_at";
+
+/// `sessions.id` and `.scope_id` are UUIDs this crate itself wrote
+/// (`begin_start`'s `INSERT`); a value that fails to parse is a broken
+/// invariant in a row this code just selected, mirroring
+/// `factory_task::create::parse_uuid`'s stance exactly (that helper is
+/// private to its own crate, so this is not a call to it, only the same
+/// reasoning restated for this crate's own rows).
+fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
+    let id: String = row.get(0)?;
+    let scope_id: String = row.get(1)?;
+    let agent_name: String = row.get(2)?;
+    let state: String = row.get(3)?;
+    let workspace_path: String = row.get(4)?;
+    let created_at: String = row.get(5)?;
+    let updated_at: String = row.get(6)?;
+
+    Ok(Session {
+        id: uuid::Uuid::parse_str(&id)
+            .unwrap_or_else(|e| panic!("sessions.id is a UUID; read {id:?}: {e}")),
+        scope_id: uuid::Uuid::parse_str(&scope_id)
+            .unwrap_or_else(|e| panic!("sessions.scope_id is a UUID; read {scope_id:?}: {e}")),
+        agent_name,
+        state: SessionState::from_db_str(&state),
+        workspace_path,
+        created_at,
+        updated_at,
+    })
+}
+
+/// Every session, oldest first — read-only inspection before automation
+/// (AGENTS.md: "Design read-only inspection... before automation"), mirroring
+/// `factory_task::create::list` exactly, down to the `ORDER BY created_at,
+/// id` tiebreaker: `created_at` is `CURRENT_TIMESTAMP`, second-resolution, so
+/// two sessions started inside the same wall-clock second tie on it, and `id`
+/// (this crate's caller-supplied UUID, never reused) is what keeps the
+/// ordering total rather than merely "usually right." See
+/// `list_returns_every_session_oldest_first` in `tests/read.rs` for a fixture
+/// that ties `created_at` deliberately, to prove the tiebreaker is load-bearing
+/// and not decorative.
+///
+/// Takes `&Store`, not `&mut Store`: per `Store::connection`'s own doc
+/// comment, a read path must never go through `Store::transaction` (which
+/// takes a write lock and would needlessly contend with real writers under
+/// WAL) — the same reasoning [`scope_of_session`] and
+/// `factory_task::create::list` both give for the identical choice.
+pub fn list(store: &factory_store::Store) -> Result<Vec<Session>, SessionError> {
+    let mut stmt = store
+        .connection()
+        .prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions ORDER BY created_at, id"
+        ))
+        .map_err(factory_store::StoreError::from)?;
+    let rows = stmt
+        .query_map([], row_to_session)
+        .map_err(factory_store::StoreError::from)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| factory_store::StoreError::from(e).into())
+}
+
+/// One session by id — the other half of read-only inspection, mirroring
+/// `factory_task::create::show`.
+///
+/// # Errors
+///
+/// [`SessionError::NotFound`] when `id` names no session.
+pub fn show(store: &factory_store::Store, id: uuid::Uuid) -> Result<Session, SessionError> {
+    store
+        .connection()
+        .query_row(
+            &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
+            [id.to_string()],
+            row_to_session,
+        )
+        .optional()
+        .map_err(factory_store::StoreError::from)?
+        .ok_or(SessionError::NotFound(id))
+}
+
+/// One `workspace_leases` row, as read back by [`leases_of_session`].
+///
+/// `id` is the row's own `INTEGER PRIMARY KEY AUTOINCREMENT`, kept (rather
+/// than discarded as an implementation detail) because it is a stable,
+/// tie-free handle onto one specific acquisition in the journal — useful the
+/// moment an operator needs to say "that lease," not just "a lease."
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceLease {
+    pub id: i64,
+    pub canonical_workspace_path: String,
+    pub acquired_at: String,
+    /// `None` while this lease is still held — see `schema.rs`'s own comment
+    /// on the column.
+    pub released_at: Option<String>,
+    pub release_reason: Option<String>,
+}
+
+/// The full lease *history* of `session_id` — every acquisition it has ever
+/// recorded in `workspace_leases`, oldest first, not merely whether one is
+/// held now. This is what turns backlog §8's "the operator can inspect...
+/// lease... records" from "is this session currently holding a lease" (a
+/// question [`show`]'s `state` field already answers via
+/// [`SessionState::holds_lease`]) into "what happened to this session's
+/// leases over its whole lifetime" — released leases and all, which
+/// `workspace_leases`'s own doc comment in `schema.rs` says the table is kept
+/// for: "audit and for Slice 9's mandatory stale-lease recovery action."
+///
+/// `ORDER BY id` rather than `ORDER BY acquired_at`: `id` is this table's own
+/// `INTEGER PRIMARY KEY AUTOINCREMENT`, strictly increasing with insertion
+/// order and never tied, whereas `acquired_at` is a second-resolution
+/// `CURRENT_TIMESTAMP` two acquisitions could in principle share.
+///
+/// In practice this choice cannot be told apart from `ORDER BY acquired_at`
+/// by any fixture, and that is worth stating plainly rather than leaving it
+/// implied: [`begin_start`] is the only inserter of `workspace_leases` rows,
+/// it runs at most once per session `id` (the same call also does the one
+/// `INSERT` into `sessions`, whose `id` is a `PRIMARY KEY`), and no entry in
+/// [`valid_targets`] ever moves a session *out of* `Stopped` or `Failed` —
+/// the two states a released lease leaves it in — back to a lease-holding
+/// one. So there is no path back to a second `begin_start` for that same
+/// `id`, and therefore no fixture can seed two `workspace_leases` rows for
+/// one `session_id` whose `id` order and `acquired_at` order disagree. This
+/// ordering choice is consequently not pinned by mutation the way [`list`]'s
+/// is — see the task report for the measurement. `id` is used anyway
+/// because it is exact by construction, independent of that invariant ever
+/// changing, rather than because the invariant currently makes the two
+/// orderings agree.
+///
+/// No existence check against `sessions` is performed before querying —
+/// mirrors `factory_task::create::delegation_chain_of`'s own stance
+/// (`WHERE task_id = ?1` against a `task_id` that names no task returns an
+/// empty `Vec`, not an error): a `session_id` that names no session, or one
+/// whose lease rows this function has no other reason to expect, both
+/// legitimately produce "no history," and inventing a `NotFound` here would
+/// be indistinguishable from that case anyway without a second query this
+/// function has no other reason to run.
+///
+/// Takes `&Store`, not `&mut Store` / a transaction, for the same
+/// write-lock-avoidance reason as [`list`] and [`show`].
+pub fn leases_of_session(
+    store: &factory_store::Store,
+    session_id: uuid::Uuid,
+) -> Result<Vec<WorkspaceLease>, SessionError> {
+    let mut stmt = store
+        .connection()
+        .prepare(
+            "SELECT id, canonical_workspace_path, acquired_at, released_at, release_reason \
+             FROM workspace_leases WHERE session_id = ?1 ORDER BY id",
+        )
+        .map_err(factory_store::StoreError::from)?;
+    let rows = stmt
+        .query_map([session_id.to_string()], |row| {
+            Ok(WorkspaceLease {
+                id: row.get(0)?,
+                canonical_workspace_path: row.get(1)?,
+                acquired_at: row.get(2)?,
+                released_at: row.get(3)?,
+                release_reason: row.get(4)?,
+            })
+        })
+        .map_err(factory_store::StoreError::from)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| factory_store::StoreError::from(e).into())
+}
+
 /// Count of `agent_name`'s currently lease-holding sessions in `scope_id` —
 /// `starting`, `running`, or `disconnected` (see [`SessionState::holds_lease`]
 /// — the same three states [`find_aliasing_conflict`] treats as live, for the

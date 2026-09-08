@@ -20,7 +20,7 @@
 
 use factory_paths::CanonicalPath;
 use factory_store::Store;
-use factory_task::create::{cancel, create, list, show};
+use factory_task::create::{cancel, create, delegation_chain_of, list, show};
 use factory_task::{TaskError, TaskStatus};
 
 /// A deterministic, distinct, syntactically valid UUID. `uuid` is pinned
@@ -142,6 +142,7 @@ fn create_commits_a_queued_row_and_returns_its_id() {
         None,
         None,
         "do the thing",
+        &[],
     )
     .expect("create a queued task");
     assert_eq!(returned, task_id, "create returns the id it was given");
@@ -180,6 +181,7 @@ fn create_records_a_requested_session_without_assigning_one() {
         Some(requested_session),
         None,
         "do it",
+        &[],
     )
     .expect("create a task that requests a specific session");
 
@@ -207,12 +209,164 @@ fn create_records_the_sender_scope_when_given() {
         None,
         None,
         "do it",
+        &[],
     )
     .expect("create with a sender scope");
 
     let task = show(&store, task_id).expect("show");
     assert_eq!(task.sender_scope_id, Some(sender));
     assert_eq!(task.target_scope_id, target);
+}
+
+// delegation_chain_of -------------------------------------------------------
+
+#[test]
+fn delegation_chain_of_an_empty_chain_is_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let task_id = uid(50);
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create with an empty chain");
+
+    let chain = delegation_chain_of(&store, task_id).expect("read chain");
+    assert_eq!(chain, Vec::<uuid::Uuid>::new());
+}
+
+/// Round trip through `create` and back: a three-scope chain, 0-based with
+/// the target last (per `delegation_chain_of`'s own doc comment), comes
+/// back in exactly the order it was written.
+///
+/// The three scope ids are deliberately seeded so their lexicographic
+/// (string) order — `hop_b (10) < target (20) < hop_a (30)` — differs from
+/// their position order — `hop_a, hop_b, target`. This is deliberate, not
+/// incidental: `delegation_chain_of`'s doc comment records that, without
+/// `ORDER BY position`, SQLite answers this exact query (only `scope_id`
+/// selected, filtered by `task_id`) from the `UNIQUE (task_id, scope_id)`
+/// covering index instead of the `(task_id, position)` primary key, which
+/// returns rows in `scope_id`'s lexicographic order. A chain whose scopes
+/// happen to sort the same way they are positioned would pass with or
+/// without that clause; this one cannot.
+#[test]
+fn delegation_chain_of_round_trips_a_three_scope_chain_in_position_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let hop_a = seed_scope(&mut store, 30, "hop-a", "/instance/hop-a");
+    let hop_b = seed_scope(&mut store, 10, "hop-b", "/instance/hop-b");
+    let target = seed_scope(&mut store, 20, "target", "/instance/target");
+    let chain = [hop_a, hop_b, target];
+
+    let task_id = uid(50);
+    create(
+        &mut store, task_id, None, target, None, None, "do it", &chain,
+    )
+    .expect("create with a three-scope chain");
+
+    let read_back = delegation_chain_of(&store, task_id).expect("read chain");
+    assert_eq!(
+        read_back,
+        vec![hop_a, hop_b, target],
+        "must come back in position order, 0-based with the target last"
+    );
+}
+
+/// Backlog §8: "the chain is recorded durably with the task, so a
+/// delegation loop is reconstructable after a restart rather than only
+/// detectable while running." A chain committed in a transaction separate
+/// from the task row could, after a crash between the two commits, be read
+/// back as a task that had travelled through no scope at all — this is the
+/// direct proof that cannot happen. `create` writes the chain inside the
+/// same transaction as the task row (see its own doc comment); forcing the
+/// chain insert to fail — a chain entry naming a scope that was never
+/// registered, so `task_delegation_chain.scope_id REFERENCES scopes (id)`
+/// rejects it, the same defense-in-depth shape
+/// `create_rejects_a_target_session_id_that_names_no_real_session` in
+/// `tests/assign.rs` already proves works for `target_session_id` — must
+/// leave **no task row at all**, not a task row with a partial or empty
+/// chain.
+///
+/// Mutation target: move the chain-insert loop after `tx.commit()`, into
+/// its own transaction. With that change the task row survives this exact
+/// failure and the `show` assertion below dies.
+#[test]
+fn a_failed_chain_insert_leaves_no_task_row_at_all() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let target = seed_scope(&mut store, 1, "target", "/instance/target");
+    let never_registered = uid(999);
+
+    let task_id = uid(50);
+    let err = create(
+        &mut store,
+        task_id,
+        None,
+        target,
+        None,
+        None,
+        "do it",
+        &[never_registered],
+    )
+    .expect_err("a chain entry naming a nonexistent scope must be refused");
+    assert!(
+        matches!(err, TaskError::Store(_)),
+        "expected the schema's own foreign key to reject the chain row, got {err:?}"
+    );
+
+    let result = show(&store, task_id);
+    assert!(
+        matches!(result, Err(TaskError::NotFound(id)) if id == task_id),
+        "the task row must not survive a failed chain insert — got {result:?}"
+    );
+}
+
+/// `task_delegation_chain`'s `UNIQUE (task_id, scope_id)` is the database's
+/// own last word on a looping chain (design §6: "a scope already in that
+/// chain cannot be targeted again"; backlog §8: "[a] two-step cycle
+/// (`A → B → A`)... [is] refused"). This is deliberately a *backstop* — the
+/// typed refusal is `factory_delegation`'s job, a crate this one does not
+/// depend on and cannot call into — so this test documents the database
+/// constraint as exactly that: a backstop, not the primary enforcement.
+/// `A → B → A` is modelled directly: `A` appears at position 0 and again at
+/// position 2 (the target), which is precisely what re-targeting an
+/// already-visited scope looks like on the wire.
+#[test]
+fn a_chain_that_targets_an_already_visited_scope_is_refused_by_the_database_uniqueness_backstop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_a = seed_scope(&mut store, 1, "a", "/instance/a");
+    let scope_b = seed_scope(&mut store, 2, "b", "/instance/b");
+
+    let task_id = uid(50);
+    let err = create(
+        &mut store,
+        task_id,
+        None,
+        scope_a,
+        None,
+        None,
+        "do it",
+        &[scope_a, scope_b, scope_a],
+    )
+    .expect_err("re-targeting an already-visited scope must be refused");
+    assert!(
+        matches!(err, TaskError::Store(_)),
+        "expected the schema's UNIQUE (task_id, scope_id) to reject the repeat, got {err:?}"
+    );
+
+    let result = show(&store, task_id);
+    assert!(
+        matches!(result, Err(TaskError::NotFound(id)) if id == task_id),
+        "atomicity holds here too: no task row should survive"
+    );
 }
 
 // list / show --------------------------------------------------------------
@@ -225,8 +379,18 @@ fn list_returns_every_task_oldest_first() {
 
     let first = uid(10);
     let second = uid(11);
-    create(&mut store, first, None, scope_id, None, None, "first").expect("create first");
-    create(&mut store, second, None, scope_id, None, None, "second").expect("create second");
+    create(&mut store, first, None, scope_id, None, None, "first", &[]).expect("create first");
+    create(
+        &mut store,
+        second,
+        None,
+        scope_id,
+        None,
+        None,
+        "second",
+        &[],
+    )
+    .expect("create second");
 
     let tasks = list(&store).expect("list");
     let ids: Vec<uuid::Uuid> = tasks.iter().map(|t| t.id).collect();
@@ -254,7 +418,17 @@ fn cancel_a_queued_task_moves_it_straight_to_cancelled() {
     let mut store = Store::open(dir.path()).expect("open");
     let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
     let task_id = uid(20);
-    create(&mut store, task_id, None, scope_id, None, None, "do it").expect("create");
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create");
 
     let outcome = cancel(&mut store, task_id).expect("cancel a queued task");
     assert_eq!(outcome, TaskStatus::Cancelled);

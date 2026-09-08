@@ -1,6 +1,6 @@
 [package]
-name = "factory-registry"
-description = "Projects the instance configuration into scope records and reports drift"
+name = "factory-delegation"
+description = "The one version-1 delegation rule (design §6, backlog §8): who may target whom, and the chain that makes a delegation loop refusable after a restart"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-factory-config = { path = "../factory-config" }
-factory-paths = { path = "../factory-paths" }
+factory-registry = { path = "../factory-registry" }
+factory-session = { path = "../factory-session" }
 factory-store = { path = "../factory-store" }
+factory-task = { path = "../factory-task" }
 rusqlite.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
