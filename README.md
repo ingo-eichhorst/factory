@@ -48,6 +48,12 @@ compilation follows no knowledge links are documented in
 That a long-running daemon owns all mutations, and what that means for the CLI,
 for `factory doctor`, and for sessions that outlive the daemon, is documented in
 [`docs/adr/0014-daemon-owns-all-mutations.md`](docs/adr/0014-daemon-owns-all-mutations.md).
+Why a scope is an entry in a central registry rather than a directory carrying
+its own configuration file — and which class of defects that deletes — is
+documented in
+[`docs/adr/0015-central-scope-registry.md`](docs/adr/0015-central-scope-registry.md),
+with the plan for moving the seven live scopes in
+[`docs/scope-registry-migration-plan.md`](docs/scope-registry-migration-plan.md).
 
 The version-1 delivery plan is owned by this project in
 [`docs/implementation-backlog.md`](docs/implementation-backlog.md).

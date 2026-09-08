@@ -31,17 +31,32 @@ precisely the condition an operator runs it to diagnose.
 **Objective:** Establish the safe, inspectable local contract for a company root
 and a registered scope.
 
-**Scope:** Define version-1 YAML schemas for `.factory/config.yaml`, defaults
-(`max_sessions: 1`), UUID and harness validation, canonical-path utilities, and
-human-readable validation errors. Document a manual registration fixture:
-company-root config, child scope config, and `AGENTS.md` files.
+**Scope:** Define the version-1 YAML schema for the instance's
+`.factory/config.yaml`, defaults (`max_sessions: 1`), UUID and harness
+validation, canonical-path utilities, and human-readable validation errors.
+Document a manual registration fixture: an instance configuration registering
+two scopes, and the `AGENTS.md` files those scopes provide.
+
+**Reworked by ADR 0015.** One file per scope became one instance file listing
+every scope. The agent schema, the validation rules, the harness table, and the
+whole diagnostic corpus survive unchanged; what moved is the document shape, and
+duplicate-ID detection becomes an intra-file check rather than a cross-file one —
+which makes it stronger, since it now runs on every load rather than only when a
+caller remembers to compare two configs.
 
 **Dependencies:** None.
 
 **Acceptance criteria:**
-- Valid root and child configuration loads into a typed scope model carrying one
-  or more agents. Both the `agent:` shorthand and the `agents:` list are
-  accepted; a file setting both fails, naming the file and both keys.
+- A valid instance configuration loads into a typed model carrying the instance
+  and its registered scopes, each with one or more agents. Both the `agent:`
+  shorthand and the `agents:` list are accepted within a scope entry; a scope
+  setting both fails, naming the file, the scope, and both keys.
+- A scope entry carries a `path`, and optionally a `git` reference. `git` marks
+  the project as its own repository; its absence means the project's files live
+  in the instance's repository. Neither form causes Factory to write anything at
+  the scope's path.
+- Two scopes may not share a `path` or an `id`. Both are reported with the two
+  entries identified, in one pass over the single file.
 - Two agents in one scope may not share a name, because the name addresses an
   agent in `task send`. A duplicate fails with both definitions identified.
 - `lifetime` is optional and defaults to `permanent`; only `permanent` and
@@ -168,21 +183,28 @@ chosen the daemon, and the exclusive `flock` deferred here now has an owner.
 **Objective:** Register scopes deliberately and derive parentage safely from
 paths and stable IDs.
 
-**Scope:** Add scope records from validated configs; list, move, and reconcile
-known scopes with a bounded supplied scan root. Detect config UUID/path drift
-and Git worktree copies rather than treating every config file as a scope.
+**Scope:** Project the instance configuration's `scopes:` list into scope
+records; list, move, and reconcile them. Detect drift between a recorded path
+and the filesystem.
+
+**This slice is materially smaller than it was.** ADR 0015 made a scope a
+registry entry rather than a discoverable file, which deleted three of its
+problems outright: a bounded scan root, Git-worktree copy detection, and the
+fixture-exclusion mechanism this entry used to require. None of them describe
+anything now, because Factory no longer searches for scopes at all. What remains
+is path canonicalization, ancestry, and drift.
 
 **Dependencies:** Slices 1–2.
 
 **Acceptance criteria:**
-- A root and registered descendants can be added and listed with stable UUID,
-  name, canonical path, and nearest registered ancestor.
-- Moving a registered directory and reconciling updates its path while retaining
-  its UUID.
+- The instance and its registered scopes can be listed with stable UUID, name,
+  canonical path, optional `git` reference, and nearest registered ancestor.
+- Moving a registered directory and updating its `path` retains its UUID; the
+  UUID is identity and the path is a location.
 - Duplicate IDs and path collisions are reported without partially updating the
   registry.
-- A copied `.factory/config.yaml` in a Git worktree is ignored as a duplicate
-  scope definition; normal operation never recursively discovers scopes.
+- `scope reconcile` reports a recorded path that no longer exists, or one whose
+  identity has changed, and repairs nothing on its own.
 - Symlink escapes cannot make a non-descendant appear to be a child.
 - Registration verifies that the scope has a readable `AGENTS.md`. ADR 0013
   makes Slice 4 fail hard on a context source it cannot read, so the absence
@@ -194,20 +216,11 @@ and Git worktree copies rather than treating every config file as a scope.
   that must guarantee the input. A relative path reaching the compiler would
   produce different bytes for the same scope depending on the working
   directory, which is a §2.5 violation created here and only observed there.
-- `scope reconcile` does not register the configs under
-  `projects/factory/fixtures/`. Those are two syntactically valid scope
-  definitions with real UUIDs, and they carry a `fixture: true` key that Factory
-  **ignores** by rule 2 — so the marker is greppable by a human and invisible to
-  the code. Reconcile must exclude them by a mechanism that actually executes:
-  an explicit exclusion path, or honouring the marker, or moving fixtures out of
-  the scanned tree. Pick one; do not leave the marker described as a safeguard
-  when nothing enforces it.
-
-**Decisions or risks to resolve first:** Define the operator confirmation and
-conflict policy for a moved scope versus a copied scope, and the supported Git
-worktree detection mechanism. Decide which of the three fixture-exclusion
-mechanisms above applies, since this is the first slice that scans for configs
-and therefore the first that can mistake a fixture for a scope.
+**Decisions or risks to resolve first:** Define the operator confirmation policy
+for a moved scope. The fixture-exclusion question is closed rather than answered:
+a fixture is now just a file that nothing reads unless a test passes it in, so
+there is no scan to exclude it from. The `fixture: true` marker may stay as
+human-readable documentation, but it no longer stands in for a safeguard.
 
 ## 4. Deterministic context compiler and generated-file guardrails
 
@@ -605,8 +618,10 @@ knowledge databases is untouched.
   `list` as unresolved. It marks a gap to fill and is never an error.
 - Deleting `.factory/knowledge/` and restoring the note files reproduces the same
   index and backlinks, proving the graph is derived rather than stored.
-- `memory add` writes only to the calling scope's `.factory/memory/`, never to
-  another scope's, and leaves existing entries unmodified.
+- `memory add` writes only under the instance's `.factory/memory/<scope>/` for
+  the calling scope, never another scope's directory, and leaves existing entries
+  unmodified. Memory is keyed by scope rather than stored beside it (ADR 0015),
+  so it survives the project being moved, re-cloned, or deleted.
 - Both writing commands record the write as a task event, so the provenance of a
   note or memory entry survives the session that produced it.
 
