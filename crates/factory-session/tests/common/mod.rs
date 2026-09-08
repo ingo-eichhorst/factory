@@ -52,6 +52,18 @@ pub fn seed_scope(store: &mut Store, seed: u32, name: &str, canonical_path: &Pat
 /// `factory-store`'s schema, per design §2.4) — mirroring `seed_scope`'s own
 /// choice to write raw SQL rather than depend on a crate that owns the
 /// concept.
+///
+/// Backlog §7's migration 3 added `tasks.assigned_session_id` together with a
+/// CHECK that a `running` row must carry a non-NULL one (the same rule that
+/// makes `tasks_one_running_per_session` bite). Every `"running"` call site
+/// in this crate's test suite already passes the live session under test as
+/// `target_session_id` — the session `interrupt`/`on_task_terminal` is
+/// exercised against — so this helper writes that same id into
+/// `assigned_session_id` whenever `status` is `"running"`, rather than
+/// leaving it NULL and failing the CHECK on every existing fixture. This
+/// crate does not otherwise model "requested vs. chosen" (that split is
+/// `factory-task`'s to own); the two columns coinciding here is a fixture
+/// simplification, not a claim that they are the same column.
 pub fn seed_task(
     store: &mut Store,
     seed: u32,
@@ -61,14 +73,20 @@ pub fn seed_task(
     target_session_id: Option<uuid::Uuid>,
 ) -> uuid::Uuid {
     let id = uid(seed);
+    let assigned_session_id = if status == "running" {
+        target_session_id
+    } else {
+        None
+    };
     let tx = store.transaction().expect("begin");
     tx.execute(
-        "INSERT INTO tasks (id, target_scope_id, target_session_id, prompt, status, blocked_reason) \
-         VALUES (?1, ?2, ?3, 'do the thing', ?4, ?5)",
+        "INSERT INTO tasks (id, target_scope_id, target_session_id, assigned_session_id, prompt, status, blocked_reason) \
+         VALUES (?1, ?2, ?3, ?4, 'do the thing', ?5, ?6)",
         (
             id.to_string(),
             target_scope_id.to_string(),
             target_session_id.map(|s| s.to_string()),
+            assigned_session_id.map(|s| s.to_string()),
             status,
             blocked_reason,
         ),

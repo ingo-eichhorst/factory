@@ -1,10 +1,14 @@
 //! Coverage for schema constraints not exercised by the other test files:
 //! the `blocked_reason` CHECK (both directions plus the NULL case), the
 //! `tasks.status` CHECK, the delegation-chain uniqueness that makes design
-//! §6's "cannot be targeted again" rule enforceable, and that
+//! §6's "cannot be targeted again" rule enforceable, that
 //! `foreign_keys` enforcement actually reaches DML rather than only reading
 //! back as `1` from `PRAGMA foreign_keys` (which `pragma::tests` already
-//! covers).
+//! covers), and — added by migration 3 (backlog §7) — the
+//! `running`-requires-`assigned_session_id` CHECK together with
+//! `tasks_one_running_per_session`, which schema.rs's own comment on that
+//! index describes as "one mechanism, not two": these tests are what proves
+//! it, by exercising the CHECK and the index each on their own and together.
 
 mod common;
 
@@ -161,4 +165,111 @@ fn a_session_cannot_reference_a_nonexistent_scope() {
     )
     .expect_err("a session referencing a nonexistent scope must be rejected");
     assert_check_violation(err);
+}
+
+// Migration 3 (backlog §7) --------------------------------------------------
+//
+// `tasks.assigned_session_id`, the `running`-requires-`assigned_session_id`
+// CHECK, and `tasks_one_running_per_session` below.
+
+#[test]
+fn running_task_without_an_assigned_session_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+
+    let tx = store.transaction().expect("begin");
+    common::insert_scope(&tx, "scope-1", "irrlicht", "/instance").expect("insert scope");
+
+    // The explicit `IS NOT NULL` in the CHECK is what makes this fail: a
+    // bare comparison against NULL evaluates to NULL, not FALSE, and CHECK
+    // only rejects a row that evaluates to FALSE (the same trap
+    // `blocked_reason`'s CHECK documents above).
+    let err = tx
+        .execute(
+            "INSERT INTO tasks (id, target_scope_id, prompt, status, assigned_session_id) \
+             VALUES ('task-1', 'scope-1', 'do it', 'running', NULL)",
+            [],
+        )
+        .expect_err("a `running` task with no assigned session must be rejected");
+    assert_check_violation(err);
+}
+
+#[test]
+fn running_task_with_an_assigned_session_is_accepted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+
+    let tx = store.transaction().expect("begin");
+    common::insert_scope(&tx, "scope-1", "irrlicht", "/instance").expect("insert scope");
+    common::insert_session(&tx, "session-1", "scope-1", "agent", "/instance", "running")
+        .expect("insert session");
+
+    tx.execute(
+        "INSERT INTO tasks (id, target_scope_id, prompt, status, assigned_session_id) \
+         VALUES ('task-1', 'scope-1', 'do it', 'running', 'session-1')",
+        [],
+    )
+    .expect("a `running` task naming its assigned session must be accepted");
+    tx.commit().expect("commit");
+}
+
+#[test]
+fn a_second_running_task_on_the_same_assigned_session_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+
+    let tx = store.transaction().expect("begin");
+    common::insert_scope(&tx, "scope-1", "irrlicht", "/instance").expect("insert scope");
+    common::insert_session(&tx, "session-1", "scope-1", "agent", "/instance", "running")
+        .expect("insert session");
+    tx.execute(
+        "INSERT INTO tasks (id, target_scope_id, prompt, status, assigned_session_id) \
+         VALUES ('task-1', 'scope-1', 'do it', 'running', 'session-1')",
+        [],
+    )
+    .expect("the first running task on this session must be accepted");
+
+    // Backlog §7: "each session has at most one running task." This is what
+    // `tasks_one_running_per_session` — a partial unique index over
+    // `assigned_session_id` `WHERE status = 'running'` — exists to reject.
+    let err = tx
+        .execute(
+            "INSERT INTO tasks (id, target_scope_id, prompt, status, assigned_session_id) \
+             VALUES ('task-2', 'scope-1', 'do another thing', 'running', 'session-1')",
+            [],
+        )
+        .expect_err("a second running task on an already-busy session must be rejected");
+    assert_check_violation(err);
+}
+
+#[test]
+fn two_non_running_tasks_may_share_one_assigned_session_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+
+    let tx = store.transaction().expect("begin");
+    common::insert_scope(&tx, "scope-1", "irrlicht", "/instance").expect("insert scope");
+    common::insert_session(&tx, "session-1", "scope-1", "agent", "/instance", "running")
+        .expect("insert session");
+
+    // `tasks_one_running_per_session` is a *partial* index, `WHERE status =
+    // 'running'` — pinning that partiality, not just that some unique index
+    // exists on `assigned_session_id`. Two `done` tasks recording the same
+    // historical assignment must both be insertable; a plain (non-partial)
+    // unique index would wrongly reject the second one and this test would
+    // still pass if the `WHERE` clause were dropped, so it is the one
+    // dropping that specific clause cannot get past.
+    tx.execute(
+        "INSERT INTO tasks (id, target_scope_id, prompt, status, assigned_session_id) \
+         VALUES ('task-1', 'scope-1', 'do it', 'done', 'session-1')",
+        [],
+    )
+    .expect("a finished task may still record its former assigned session");
+    tx.execute(
+        "INSERT INTO tasks (id, target_scope_id, prompt, status, assigned_session_id) \
+         VALUES ('task-2', 'scope-1', 'do another thing', 'done', 'session-1')",
+        [],
+    )
+    .expect("a second, unrelated finished task may record the same former session");
+    tx.commit().expect("commit");
 }

@@ -8,6 +8,7 @@ members = [
     "crates/factory-registry",
     "crates/factory-session",
     "crates/factory-store",
+    "crates/factory-task",
 ]
 
 [workspace.package]
