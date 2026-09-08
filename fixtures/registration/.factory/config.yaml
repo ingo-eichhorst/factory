@@ -1,16 +1,43 @@
 version: 1
 
-scope:
-  id: 5d8f599e-381a-42a1-929b-628ab6ecded1
-  name: fixture-co
-
-# Marks this file as a test fixture, never a live scope. Factory ignores
-# unknown top-level keys per ADR 0009 rule 2 (docs/adr/0009), so this key's
-# presence changes nothing about how the file validates — it exists only so
-# a fixture is greppable and self-identifying as one.
+# A miniature Factory instance used as the Slice 1 registration fixture.
+#
+# Marks this file as a test fixture, never a live instance. Factory ignores
+# unknown top-level keys per ADR 0009 rule 2, so this key's presence changes
+# nothing about how the file validates — it exists so a fixture is greppable
+# and self-identifying. Since ADR 0015 it is documentation only: Factory no
+# longer searches the filesystem for configurations, so a fixture cannot be
+# mistaken for a live scope by anything but a human reading too quickly.
 fixture: true
 
-agent:
-  name: Fixture Co Agent
-  harness: claude-code
-  max_sessions: 1
+instance:
+  id: 6ada403b-db6c-4e49-95f5-2d0d73650c33
+  name: fixture-co
+
+scopes:
+  # The company root, using the `agent:` shorthand for a single agent.
+  - id: 5d8f599e-381a-42a1-929b-628ab6ecded1
+    name: fixture-co
+    path: .
+    agent:
+      name: Fixture Co Agent
+      harness: claude-code
+      max_sessions: 1
+
+  # A child scope using the `agents:` list, so the fixture exercises both
+  # spellings and both lifetimes in one place. It also carries a `git`
+  # reference, covering the case where a project is its own repository and
+  # Factory writes nothing inside it.
+  - id: b6f77e8e-3437-4946-bf47-9d3d35e8aa32
+    name: example-project
+    path: projects/example-project
+    git: https://example.invalid/example-project.git
+    agents:
+      - name: example-project
+        harness: pi
+        max_sessions: 1
+        lifetime: permanent
+      - name: example-project-reviewer
+        harness: opencode
+        max_sessions: 2
+        lifetime: temporary

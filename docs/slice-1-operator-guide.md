@@ -97,23 +97,34 @@ purpose:
 
 ```text
 fixtures/registration/
-├── .factory/config.yaml        # company-root scope, `agent:` shorthand
+├── .factory/config.yaml        # the instance, registering BOTH scopes
 ├── AGENTS.md                   # company context
 └── projects/
     └── example-project/
-        ├── .factory/config.yaml    # child scope, `agents:` list, two agents
-        └── AGENTS.md               # project context, additive to the root
+        └── AGENTS.md           # project context, additive to the root
 ```
 
-The root config uses the `agent:` shorthand for a single agent. The child
-config uses the `agents:` list to define two: one `permanent` (`harness: pi`)
-and one `temporary` (`harness: opencode`), so between the two files the
-fixture exercises both accepted spellings and both `lifetime` values in one
-place. Both files also carry a top-level `fixture: true` key. That key means
-nothing to the schema — Factory ignores unknown top-level keys per ADR 0009
-rule 2, the same rule that lets the real `assistant` scope keep its unrelated
-`runtime:` block — but it makes every fixture file greppable and impossible to
-mistake for a live scope.
+Note what the project directory does *not* contain. Since ADR 0015 a scope is an
+entry in the instance's configuration, so `example-project` holds only its own
+`AGENTS.md` — nothing of Factory's. That is the whole point of the change: a
+project that is someone else's repository stays clean.
+
+The first scope entry uses the `agent:` shorthand for a single agent. The second
+uses the `agents:` list to define two — one `permanent` (`harness: pi`) and one
+`temporary` (`harness: opencode`) — so the fixture exercises both accepted
+spellings and both `lifetime` values in one file. The second entry also carries
+a `git` reference, covering the case where a project is its own repository.
+
+The file carries a top-level `fixture: true` key. It means nothing to the schema:
+Factory ignores unknown top-level keys per ADR 0009 rule 2, the same rule that
+lets the real `assistant` scope keep its unrelated `runtime:` block.
+
+Be precise about what that marker does, because it was once described as more.
+It makes the file greppable for a human. It does **not** protect anything, and
+it never did — Factory ignores it by design. What actually prevents a fixture
+being mistaken for a live scope is ADR 0015: Factory no longer searches the
+filesystem for configurations at all, so a fixture is simply a file that nothing
+reads unless a test hands it over.
 
 To actually run a config through the loader without a CLI, write a short test
 against the public API and run it with `cargo test`. This is deliberately not
