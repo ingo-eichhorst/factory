@@ -212,6 +212,14 @@ is path canonicalization, ancestry, and drift.
   registry.
 - `scope reconcile` reports a recorded path that no longer exists, or one whose
   identity has changed, and repairs nothing on its own.
+- **Gap found during implementation, still open:** the six drift kinds all key
+  on the path. A human who only renames a scope or adds a `git` reference
+  changes nothing about where it is, so reconcile reports a clean registry while
+  the projection holds the old `name` and `git`. This is silent staleness, and
+  it is the failure mode ADR 0016's rebuild rule exists to bound — a rebuild
+  fixes it, but nothing tells an operator a rebuild is needed. Either add a
+  `FieldsChanged` drift kind, or have reconcile compare every projected column
+  and not just the path.
 - Symlink escapes cannot make a non-descendant appear to be a child.
 - Registration verifies that the scope has a readable `AGENTS.md`. ADR 0013
   makes Slice 4 fail hard on a context source it cannot read, so the absence

@@ -12,8 +12,9 @@ fn opening_twice_preserves_data_and_schema_version() {
     let mut store = Store::open(dir.path()).expect("first open");
     let version_after_first_open = store.schema_version().expect("schema_version");
     assert_eq!(
-        version_after_first_open, 1,
-        "version 1 is a single migration"
+        version_after_first_open, 2,
+        "two migrations are released: schema 1 (Slice 2) and schema 2, the \
+         registry projection columns on `scopes` (ADR 0016 / Slice 3)"
     );
 
     {

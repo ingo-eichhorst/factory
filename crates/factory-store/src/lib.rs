@@ -82,6 +82,23 @@ impl Store {
         &self.path
     }
 
+    /// Borrow the connection for reads.
+    ///
+    /// A read path must not go through [`Store::transaction`], which is
+    /// `BEGIN IMMEDIATE` and therefore takes a *write* lock: a reader would then
+    /// contend with real writers and, under ADR 0012's `busy_timeout`, fail
+    /// after five seconds for a query that changes nothing. Under WAL, readers
+    /// never block and are never blocked, so a borrowed connection is the
+    /// correct tool.
+    ///
+    /// This exposes no new dependency — [`Store::transaction`] already returns a
+    /// `rusqlite` type. The `&self` receiver is what keeps it honest: a caller
+    /// holding one of these cannot start a transaction on the same store.
+    #[must_use]
+    pub fn connection(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
+
     /// The applied schema version, read from `PRAGMA user_version`.
     pub fn schema_version(&self) -> Result<i64, StoreError> {
         let version: i64 = self

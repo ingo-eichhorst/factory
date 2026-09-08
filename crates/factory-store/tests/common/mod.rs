@@ -19,6 +19,12 @@ use rusqlite::Connection;
 
 /// Insert a scope row. Takes `&Connection` so it also accepts
 /// `&rusqlite::Transaction` via deref coercion.
+///
+/// Since migration 2 (ADR 0016 / Slice 3), `declared_path` is `NOT NULL` and
+/// distinct from `canonical_path`. These integration tests predate that
+/// distinction and have no declared-vs-canonical scenario of their own, so
+/// `declared_path` is set equal to `canonical_path` here — the same
+/// backfill migration 2 itself uses for rows that existed before it.
 pub fn insert_scope(
     conn: &Connection,
     id: &str,
@@ -26,7 +32,7 @@ pub fn insert_scope(
     canonical_path: &str,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO scopes (id, name, canonical_path) VALUES (?1, ?2, ?3)",
+        "INSERT INTO scopes (id, name, declared_path, canonical_path) VALUES (?1, ?2, ?3, ?3)",
         (id, name, canonical_path),
     )?;
     Ok(())

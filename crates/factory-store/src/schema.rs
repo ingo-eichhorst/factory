@@ -165,3 +165,57 @@ CREATE TABLE delivery_attempts (
 
 CREATE INDEX delivery_attempts_task_id ON delivery_attempts (task_id);
 "#;
+
+/// Migration 2 (ADR 0016 / Slice 3): `scopes` gains the registry projection's
+/// columns.
+///
+/// SQLite's `ALTER TABLE` cannot add a `REFERENCES` clause, and cannot drop or
+/// loosen a `NOT NULL`/`UNIQUE` constraint, so widening `scopes` — and making
+/// `canonical_path` nullable, since a declared path that does not currently
+/// exist is a reportable state (ADR 0016), not an unrepresentable one — takes
+/// the create-new-table / copy / drop / rename dance from the SQLite manual's
+/// "Making Other Kinds Of Table Schema Changes". Three points matter here:
+///
+/// - `declared_path` backfills from the only value schema 1 ever had for a
+///   path — `canonical_path` — since that is the closest available fact about
+///   what schema 1 rows were declared as. `dev`, `ino`, and `parent_id` start
+///   `NULL`: schema 1 never recorded identity or parentage, and inventing
+///   values here would be a guess dressed as data.
+/// - `parent_id REFERENCES scopes (id)` names the table's own *final* name,
+///   not `scopes_v2`. SQLite does not resolve a foreign key target at
+///   `CREATE TABLE` time, and the closing `ALTER TABLE ... RENAME TO scopes`
+///   below makes that name correct by the time anything checks it.
+/// - Foreign keys against `scopes` — from `sessions`, `tasks`, and
+///   `task_delegation_chain` — are untouched by this migration and need no
+///   special handling: `DROP TABLE scopes` followed by renaming the new table
+///   back to `scopes` leaves every other table's `REFERENCES scopes (id)`
+///   resolving correctly again, because SQLite resolves that clause by name
+///   at reference time, not by binding to a table identity that a rename or
+///   recreation could invalidate.
+///
+/// This migration is declared with `.foreign_key_check()` (see
+/// `migrations()`), so `PRAGMA foreign_key_check` runs automatically before
+/// the migration's transaction commits — and `PRAGMA foreign_keys` itself
+/// must be OFF for the connection while this runs, since SQLite documents
+/// that toggling it inside a transaction (which every migration is) is a
+/// no-op; `migrations::apply` handles that around the whole batch, not here.
+pub(crate) const V2_SCHEMA: &str = r#"
+CREATE TABLE scopes_v2 (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    declared_path  TEXT NOT NULL,
+    canonical_path TEXT UNIQUE,
+    git            TEXT,
+    dev            INTEGER,
+    ino            INTEGER,
+    parent_id      TEXT REFERENCES scopes (id),
+    created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO scopes_v2 (id, name, declared_path, canonical_path, created_at)
+SELECT id, name, canonical_path, canonical_path, created_at FROM scopes;
+
+DROP TABLE scopes;
+
+ALTER TABLE scopes_v2 RENAME TO scopes;
+"#;
