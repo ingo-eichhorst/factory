@@ -92,6 +92,41 @@ The `AGENTS.md` task-workflow instructions reference tool *names* only
 (`run_get`, `run_progress`, `run_decision`, `run_complete`, `run_block`), never
 filesystem paths, so no instruction file needs editing.
 
+## Collision found 2026-09-08: one table name, two schemas
+
+This is not a breakage the move causes; it exists whether the files move or
+not, and it blocks a later slice rather than this plan.
+
+Design section 4 pins one operational database to the company root, and both
+systems are aimed at it. `factory_store::Store::open(company_root)` opens
+`<root>/.factory/factory.sqlite` and applies migration 1, which contains
+`CREATE TABLE tasks`. The live database already has a `tasks` table, written by
+this prototype, with a different schema (`title`, `creator`, `target_agent`,
+`status IN ('open', 'paused', 'closed')`).
+
+Measured on 2026-09-08 against a *copy* of the live file:
+
+- `PRAGMA user_version` is `0`, so `rusqlite_migration` would attempt migration
+  1 rather than skip it.
+- `CREATE TABLE tasks (...)` fails with `table tasks already exists`.
+- `tasks` is the *only* name in common. `scopes`, `sessions`,
+  `workspace_leases`, `task_delegation_chain` and `delivery_attempts` are all
+  absent from the live file, and the prototype's `task_runs`, `task_events`,
+  `task_decisions`, `artifacts` and `schedules` are absent from the Factory
+  schema.
+
+So the two schemas are one name apart. Nothing is broken today, because no
+Factory code has yet opened the company root — every test opens a temporary
+file. The first command that does will fail at migration 1, loudly, without
+touching data. That is the good failure mode, and it is worth keeping: the
+alternative, a Factory schema that quietly adopted whatever `tasks` it found,
+would mix two vocabularies of `status` in one column.
+
+Resolving it belongs to slice 11, which owns the shared task audit, and the
+choice is between renaming one side's table and giving the Factory schema its
+own database file. Both are decisions with operational consequences for the
+running dispatcher, so neither is made here.
+
 ## Migration steps
 
 1. Record the pre-migration state: `sqlite3 .factory/factory.sqlite` row counts
