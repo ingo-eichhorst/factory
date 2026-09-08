@@ -151,32 +151,47 @@ impl std::fmt::Display for BlockedReason {
 ///   result (design §5 step 5).
 /// - `running → blocked`: the harness surfaces a question, a permission
 ///   prompt, or an interruption ([`blocked_reason_for`]).
-/// - **No `running → cancelled`.** Cancelling running work records a request
-///   and waits for the agent to notice it; design §2.4: "Task cancellation is
-///   cooperative once a task is running." A direct edge here would be the
-///   force-stop design §2.4 describes as "a separate user action," which this
-///   crate does not implement (see [`create::cancel`]'s doc comment on why
+/// - `running → cancelled`: [`complete::acknowledge_cancellation`]'s
+///   cooperative path — the *only* function in this crate that writes this
+///   edge. **This table permits the move unconditionally; that is only half
+///   the rule.** What keeps it cooperative rather than a force-stop is that
+///   function's own guard, which requires `cancel_requested_at IS NOT NULL`
+///   (set by [`create::cancel`]'s `running` arm), checked inside the same
+///   transaction as the status write — see its doc comment for the other
+///   half of this same rule, documented at both sites on purpose. Design
+///   §2.4: "Task cancellation is cooperative once a task is running." A
+///   direct edge with no such guard would be the force-stop design §2.4
+///   describes as "a separate user action," which this crate does not
+///   implement (see [`create::cancel`]'s doc comment on why
 ///   `factory_session::interrupt` is not the tool for this either).
 /// - `blocked → queued`: the blocking condition is resolved (an answer is
 ///   given, a permission is granted) and the task re-enters the ordinary
-///   assignment path.
+///   assignment path. Re-assignment is all it re-enters. [`deliver::deliver`]
+///   refuses any task that already carries a `delivery_attempts` row, so a
+///   requeued task is not automatically sent a second time — design §5 is
+///   explicit that Factory "does not automatically resend a possibly
+///   delivered prompt", and offers exactly two ways on: "a human may resume
+///   or create a replacement task." Creating a replacement works today. The
+///   explicit resume — a human authorising one further delivery, which is
+///   not the automatic resend §5 forbids — is slice 9's action and does not
+///   exist yet, so a requeued task waits for a human either way.
 /// - `blocked → failed`: the blocking condition is never resolved and an
 ///   operator gives up on the task.
 /// - `blocked → cancelled`: [`create::cancel`]'s immediate path — a blocked
 ///   task is not running anywhere, so, like `queued`, cancelling it needs no
 ///   cooperation from an agent.
 /// - **No `blocked → running`.** A blocked task returns through `queued`
-///   instead, so it is re-assigned and re-delivered by the ordinary path with
-///   a fresh delivery-attempt row (design §5 step 3), rather than resuming
-///   silently against a session that may no longer exist by the time the
-///   block is resolved.
+///   instead, rather than resuming silently against a session that may no
+///   longer exist by the time the block is resolved. Going back through
+///   `queued` is what forces the question "which session should this run in
+///   now?" to be asked again instead of assumed.
 /// - `done`, `failed`, `cancelled`: terminal (see [`TaskStatus::is_terminal`])
 ///   — nothing reaches anywhere from here.
 pub(crate) fn valid_targets(from: TaskStatus) -> &'static [TaskStatus] {
     use TaskStatus::{Blocked, Cancelled, Done, Failed, Queued, Running};
     match from {
         Queued => &[Running, Blocked, Failed, Cancelled],
-        Running => &[Done, Failed, Blocked],
+        Running => &[Done, Failed, Blocked, Cancelled],
         Blocked => &[Queued, Failed, Cancelled],
         Done | Failed | Cancelled => &[],
     }
@@ -329,7 +344,16 @@ mod tests {
         );
         assert_eq!(
             valid_targets(TaskStatus::Running),
-            &[TaskStatus::Done, TaskStatus::Failed, TaskStatus::Blocked]
+            &[
+                TaskStatus::Done,
+                TaskStatus::Failed,
+                TaskStatus::Blocked,
+                TaskStatus::Cancelled
+            ],
+            "running → cancelled is the cooperative-cancellation-acknowledgement \
+             edge added for this slice; see complete::acknowledge_cancellation, \
+             the only function that uses it, for the guard that keeps it \
+             cooperative"
         );
         assert_eq!(
             valid_targets(TaskStatus::Blocked),
@@ -344,19 +368,39 @@ mod tests {
         assert_eq!(valid_targets(TaskStatus::Cancelled), &[]);
     }
 
-    /// The two edges the design deliberately omits: `running → cancelled`
-    /// (cancellation of running work is cooperative, never a direct jump)
-    /// and `blocked → running` (a blocked task always returns through
-    /// `queued` for re-assignment).
+    /// The one edge the design deliberately omits: `blocked → running` (a
+    /// blocked task always returns through `queued` for re-assignment, never
+    /// resuming straight against a session that may no longer exist by the
+    /// time the block is resolved).
+    ///
+    /// `running → cancelled` used to be a second deliberately-missing edge
+    /// here (hence this test's former name, `..._two_..._edges_are_absent`),
+    /// until this slice added it for acknowledged cooperative cancellation.
+    /// The table alone does not make that edge safe — see
+    /// `running_to_cancelled_is_present_for_acknowledged_cancellation_only`
+    /// below, and `complete::acknowledge_cancellation`'s doc comment, for the
+    /// guard that keeps it cooperative rather than a force-stop.
     #[test]
-    fn the_two_deliberately_missing_edges_are_absent() {
-        assert!(!is_valid_transition(
-            TaskStatus::Running,
-            TaskStatus::Cancelled
-        ));
+    fn the_deliberately_missing_edge_is_absent() {
         assert!(!is_valid_transition(
             TaskStatus::Blocked,
             TaskStatus::Running
+        ));
+    }
+
+    /// The companion to the test above: `running → cancelled` is now *in*
+    /// the table, on purpose, for `complete::acknowledge_cancellation` — the
+    /// only function in this crate that writes it. This table entry is one
+    /// half of what keeps that edge cooperative rather than a force-stop;
+    /// the other half is that function's own `cancel_requested_at IS NOT
+    /// NULL` guard, checked inside its transaction, which this test cannot
+    /// see from here (it is exercised in `tests/complete.rs`, including the
+    /// task report's mutation 5, which drops that guard).
+    #[test]
+    fn running_to_cancelled_is_present_for_acknowledged_cancellation_only() {
+        assert!(is_valid_transition(
+            TaskStatus::Running,
+            TaskStatus::Cancelled
         ));
     }
 

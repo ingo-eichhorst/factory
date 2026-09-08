@@ -287,7 +287,16 @@ impl SessionState {
     /// strings, so an unrecognised value read back from a row this crate
     /// itself just selected is a broken invariant, not an input to handle —
     /// hence the panic rather than a `Result`.
-    fn from_db_str(s: &str) -> Self {
+    ///
+    /// Public because [`holds_lease`](Self::holds_lease) is only the single
+    /// home of ADR 0012 decision 5 if every crate that reads `sessions.state`
+    /// can reach it. Keeping this private forced `factory-task` to re-list
+    /// the three lease-holding states, which is exactly the duplication
+    /// `holds_lease` exists to prevent. The precondition is unchanged and
+    /// belongs to the caller: pass a string read from `sessions.state`,
+    /// nothing else.
+    #[must_use]
+    pub fn from_db_str(s: &str) -> Self {
         match s {
             "stopped" => Self::Stopped,
             "starting" => Self::Starting,
@@ -486,7 +495,15 @@ fn find_aliasing_conflict(
 /// [`find_aliasing_conflict`]'s own reasoning: there are only ever a handful
 /// of rows per agent, so the scan costs nothing, and it keeps the
 /// lease-holding rule in exactly one place.
-fn count_live_sessions(
+///
+/// Public for the same reason as [`SessionState::from_db_str`]: slice 7's
+/// assignment must not spend a `max_sessions` slot by a different rule than
+/// the one that grants it.
+///
+/// # Errors
+///
+/// [`SessionError::Store`] if the query fails.
+pub fn count_live_sessions(
     tx: &rusqlite::Transaction<'_>,
     scope_id: uuid::Uuid,
     agent_name: &str,

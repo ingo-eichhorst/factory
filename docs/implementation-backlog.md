@@ -533,6 +533,19 @@ targeting an individual agent selects a recipient, it does not grant one.
 - The operator can inspect session, task, lease, and compiled-context records
   without relying on terminal scrollback.
 
+**Schema gap found during slice 7:** `tasks` records `target_scope_id` but no
+agent. `agent_name` exists only on `sessions`. Design §2.4 says "a task sent
+only to an agent is assigned to any idle session" and this slice's own scope
+line says targeting an individual agent selects a recipient — neither is
+expressible today. It is not hypothetical: the `assistant` scope runs two
+agents, `assistant` and `assistant-chat`, so a task aimed at that scope cannot
+say which one it is for. Slice 7's `assign` works around it by taking
+`agent_name` as a call parameter, which means the choice is made at assignment
+time and never recorded, so after a restart the task row cannot say which agent
+it was meant for. Resolving this needs a migration adding `target_agent_name`
+to `tasks`, and a rule for what an absent value means — any agent of the scope,
+or a rejected task.
+
 **Decisions or risks to resolve first:** Choose how sender identity is bound to
 an interactive session and clearly document that this is cooperative policy,
 not security isolation.
@@ -567,6 +580,16 @@ about it.
   according to documented evidence.
 - Changing a harness stops old sessions, retains queued tasks, and requires
   review of running work.
+
+**Resume has no mechanism yet, found during slice 7.** `deliver` refuses any
+task that already carries a `delivery_attempts` row, which is the correct
+reading of design §5's "does not automatically resend a possibly delivered
+prompt". The consequence is that a `blocked → queued` task can be re-assigned
+but never re-delivered: it can only be replaced. Design §5 offers resume as the
+other way on, and a human authorising one further delivery is not the automatic
+resend §5 forbids — so resume needs a way to say so, and that permission must
+be recorded with the task rather than passed as a call argument, or a restart
+cannot tell an authorised second delivery from an accidental one.
 
 **Decisions or risks to resolve first:** Determine what Herdr can reliably
 reconnect to after each restart class and whether task resume means an explicit
