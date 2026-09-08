@@ -1,0 +1,69 @@
+# The same gate developers run locally: `./check.sh`, nothing more.
+#
+# Deliberately runs on macOS only. Factory targets a dedicated Apple-silicon
+# machine (design baseline, "Platform"), and its platform surface is macOS —
+# Keychain in Slice 13, launchd for the scheduler, Herdr for terminals. A Linux
+# runner would be testing a platform Factory does not support.
+#
+# There is a sharper reason too. The production volume is APFS, case-insensitive
+# by default, and ADR 0009 §3a warns that a case-sensitive filesystem hides the
+# path-aliasing defect entirely: `factory-paths` has a case-variant test that
+# skips itself, loudly, when the volume is case-sensitive. On a Linux runner
+# that test would skip on every run and CI would report green while never
+# exercising the behaviour the whole crate exists for.
+#
+# Only first-party actions are used. Slice 13 will put credentials on this
+# machine, and a third-party action in the workflow that builds it is an
+# unnecessary supply-chain dependency.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Note: no global `RUSTFLAGS: -D warnings`. It would apply to dependency
+  # builds as well, so a new warning in someone else's crate — or a compiler
+  # upgrade on the runner — would fail this repository's CI for something no
+  # change here caused. `check.sh` already denies warnings where it matters, via
+  # `cargo clippy -- -D warnings` over this workspace's own crates.
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup is preinstalled on GitHub macOS runners; rust-toolchain.toml
+      # pins the channel and pulls in rustfmt and clippy, so there is nothing
+      # to select here. Printing it makes the resolved version visible in the
+      # log when a build behaves differently from a developer's machine.
+      - name: Show toolchain
+        run: |
+          rustup show
+          cargo --version
+          rustc --version
+
+      # `rusqlite` is built with the `bundled` feature, so every cold build
+      # compiles SQLite from C. Caching that is the difference between a
+      # two-minute job and a ten-minute one.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: check.sh
+        run: ./check.sh

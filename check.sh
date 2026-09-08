@@ -7,6 +7,10 @@
 set -eu
 
 WORKSPACE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# Safe under `set -e` even when the file is absent: POSIX exempts a failing
+# command that is not the last in an AND-OR list, so a machine without rustup
+# skips the sourcing and carries on rather than aborting before the first check.
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
 cd "$WORKSPACE"

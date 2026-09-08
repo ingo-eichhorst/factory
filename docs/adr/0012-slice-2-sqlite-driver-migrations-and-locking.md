@@ -208,8 +208,11 @@ must not be able to take a second lease on one directory.
   `PRAGMA integrity_check`, both of which exist because of decisions 2 and 4.
 - Slice 6 inherits a defined lease-holding set, and Slice 9 inherits a mandatory
   stale-lease recovery action.
-- The daemon-versus-process decision remains open and remains outside slices
-  1–4, now checked rather than assumed.
+- The daemon-versus-process decision remains outside slices 1–4, now checked
+  rather than assumed. It was settled shortly afterwards by ADR 0014 — a
+  long-running daemon owns all mutations — which makes the deferred
+  single-supervisor `flock` real: the daemon holds it for its lifetime, while
+  ordinary CLI mutations keep serializing through SQLite as decided here.
 
 ## Open item created by this ADR
 

@@ -14,9 +14,12 @@
 //!   operator can read the schema version with the `sqlite3` CLI during an
 //!   incident, without Factory and without knowing a bookkeeping table's shape;
 //! - WAL, `busy_timeout`, and `BEGIN IMMEDIATE`, which *serialize* concurrent
-//!   mutators rather than rejecting them — the same answer whether Factory runs
-//!   as a daemon or as a process per invocation, which is why the parked
-//!   daemon decision does not reach this slice;
+//!   mutators rather than rejecting them. That is the same answer whether
+//!   Factory runs as a daemon or as a process per invocation, which is why this
+//!   crate could be written while that question was still open. ADR 0014 has
+//!   since chosen the daemon, and nothing here changed as a result — the
+//!   exclusive lock that keeps a *second daemon* from starting belongs to the
+//!   daemon, not to the store;
 //! - `synchronous = FULL` rather than WAL's usual `NORMAL`, because Slice 7
 //!   commits a task as `queued` *before* a prompt reaches a terminal precisely
 //!   so a crash cannot lose the record of work that may already have had

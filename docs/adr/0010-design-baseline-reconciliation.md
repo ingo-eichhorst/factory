@@ -84,7 +84,7 @@ reconciliation would not have been necessary.
 - No accepted ADR is rewritten. ADRs 0001, 0002, and 0007 keep their decisions;
   this ADR records their scope relative to version 1.
 
-## Open item created by this ADR
+## Open item created by this ADR — closed 2026-09-08 by ADR 0014
 
 The backlog is silent on the daemon and on plugin hosting. Slices 5–10 describe
 adapters and a CLI without saying whether a long-running daemon owns the
@@ -93,3 +93,13 @@ process, as the current Python prototype is. This is the next reconciliation
 step and it should be settled before Slice 5, not before Slice 1: slices 1–4
 (configuration validation, SQLite store, scope registry, context compiler) are
 identical under either answer.
+
+**Resolved: a long-running daemon owns all mutations (ADR 0014).** This confirms
+ADR 0002 rather than amending it, so the divergence this ADR recorded is closed
+in favour of the project ADRs.
+
+The claim that slices 1–4 are identical either way was afterwards *checked*
+rather than left as an argument — ADR 0012 found that WAL with `busy_timeout`
+and `BEGIN IMMEDIATE` serializes mutators identically under both models — and
+those three slices were then implemented and committed while the question was
+still open, without any of them having to guess.

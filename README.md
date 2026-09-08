@@ -45,6 +45,9 @@ Why version 1 generates no harness compatibility file, why a context source that
 cannot be read is a hard failure rather than an empty section, and why context
 compilation follows no knowledge links are documented in
 [`docs/adr/0013-slice-4-context-compilation-policy.md`](docs/adr/0013-slice-4-context-compilation-policy.md).
+That a long-running daemon owns all mutations, and what that means for the CLI,
+for `factory doctor`, and for sessions that outlive the daemon, is documented in
+[`docs/adr/0014-daemon-owns-all-mutations.md`](docs/adr/0014-daemon-owns-all-mutations.md).
 
 The version-1 delivery plan is owned by this project in
 [`docs/implementation-backlog.md`](docs/implementation-backlog.md).
@@ -84,10 +87,13 @@ arrives in Slice 10, once the manual procedures it replaces have been proven.
 Slices 1, 2, and 4 are implemented. Slice 3 (the scope registry) and Slice 5
 onward are not.
 
-Slice 5 is gated on a decision that is deliberately still open: whether a
-long-running daemon owns all mutations, or each invocation is its own process.
-Slices 1–4 are identical either way — that was checked while settling ADR 0012's
-locking strategy, not merely assumed — so the decision was left for a human.
+Slice 5 was gated on whether a long-running daemon owns all mutations or each
+invocation is its own process. That is now settled — a daemon owns them, and the
+CLI is a client — in
+[`docs/adr/0014-daemon-owns-all-mutations.md`](docs/adr/0014-daemon-owns-all-mutations.md).
+Slices 1–4 were identical either way, which was checked while settling ADR
+0012's locking strategy rather than merely assumed, so they were built and
+committed before the decision was taken and needed no change afterwards.
 
 Error messages are specified before they are implemented, in
 [`docs/slice-1-error-corpus.md`](docs/slice-1-error-corpus.md). Slice 1's

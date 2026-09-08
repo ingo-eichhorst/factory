@@ -15,10 +15,16 @@ and thread agent — they mean the same component, and no slice implements two o
 them. Threads and durable messages are target state and have no slice here: the
 task remains the only durable unit of work exchanged in version 1.
 
-Still unsettled, and to be decided before Slice 5 rather than before Slice 1:
-whether a long-running daemon owns all mutations as ADR 0002 requires, or each
-invocation is its own process as today's prototype is. Slices 1–4 are identical
-under either answer.
+Settled on 2026-09-08 by ADR 0014: **a long-running daemon owns all mutations,
+and the CLI is a client.** This confirms ADR 0002 and closes ADR 0010's last
+open structural question. Slices 1–4 were identical under either answer — a
+claim ADR 0012 checked rather than assumed — and were implemented and committed
+before the decision was taken, without any of them having to guess.
+
+Slices 5 onward describe a daemon and its clients. Two consequences reach
+existing entries: the single-supervisor `flock` ADR 0012 deferred becomes real,
+and `factory doctor` must keep working when the daemon is down, since that is
+precisely the condition an operator runs it to diagnose.
 
 ## 1. Repository contract and configuration validation
 
@@ -154,7 +160,8 @@ stale-lease recovery action **mandatory** in Slice 9 rather than optional —
 otherwise a session that never returns holds its workspace forever. And the
 single-supervisor question turns out not to live here: serialization is the same
 answer under a daemon or a process per invocation, so the claim that slices 1–4
-are identical either way is now checked rather than assumed.
+are identical either way is now checked rather than assumed. ADR 0014 has since
+chosen the daemon, and the exclusive `flock` deferred here now has an owner.
 
 ## 3. Explicit scope registry and hierarchy reconciliation
 
