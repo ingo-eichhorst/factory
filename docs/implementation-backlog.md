@@ -304,20 +304,45 @@ rather than deriving readiness from the PTY.
   stored in scope, session, or task domain records.
 - A missing executable or failed launch produces an actionable failed-start
   record and leaves no leaked lease.
-- A Pi session started inside a Herdr pane is observed by Irrlicht exactly as a
-  directly started one is, verified against a real pane. If it is not, the
-  adapter records no observation and falls back to manual confirmation rather
-  than inferring state.
+- A Pi session started inside a Herdr pane is correlated through Herdr's
+  pane-to-transcript mapping, not through Irrlicht's pane ID, which is absent
+  for every Pi session measured. Where no transcript path is available on either
+  side, the adapter records **no** observation and falls back to manual
+  confirmation rather than inferring state.
+- Two Pi sessions of one agent in the same workspace are never confused. This is
+  the criterion that a working-directory join silently fails, and the `assistant`
+  scope is configured for exactly that with `max_sessions: 2`. Test it with two
+  live sessions in one directory, not one.
 - With Irrlicht stopped, the adapter still completes the lifecycle in
   manual-confirmation mode, and no task is lost or duplicated.
 
-**Decisions or risks to resolve first:** Confirm Herdr's stable programmatic or
-operator-visible pane identifiers. The readiness, completion, and
-permission-signal risk is largely retired by ADR 0011 — Irrlicht has a working
-Pi parser in production use — but its open item 1 must be answered here: Irrlicht
-matches processes by working directory, and Herdr-launched sessions have not been
-verified against that. Confirm it against a real pane before the adapter relies
-on it.
+**Decisions or risks to resolve first:** ADR 0011's open item 1 is now answered,
+by measurement against the live machine on 2026-09-08, and the answer changes
+this slice.
+
+Irrlicht detects every Herdr-launched session — ten sessions matching Herdr's
+ten panes, each with a state. **Correlation is what fails, and only for Pi.**
+Irrlicht resolves the Herdr pane for 4/4 `claude-code`, 2/2 `codex`, and 1/1
+`opencode` sessions, but **0 of 3 `pi` sessions**, and a transcript path for
+only one of the three. Herdr reports a transcript path for all three.
+
+So the join key ADR 0011 decision 5 assumed — workspace path, plus a session
+UUID "where present" — is not available for Pi. Working directory is not unique
+either: two directories on this machine host several sessions each, and a scope
+with `max_sessions: 2` like `assistant` makes that structural rather than
+incidental.
+
+- For **Pi**, take the join from Herdr: `herdr agent list` gives per pane the
+  transcript path (hence the session UUID), `agent_status`, and
+  `interactive_ready`. Consume Irrlicht's richer state only after matching a
+  session that way. **Do not join Pi sessions on working directory** — with two
+  sessions in one workspace it would attribute one session's state to the other,
+  which is worse than no observation because it looks like an answer.
+- For **`claude-code`** (Slice 10) the Irrlicht pane ID is present and the
+  original design works unchanged.
+
+What remains open is Herdr pane-identifier stability across a Herdr restart,
+which the Slice 9 drills must establish.
 
 ## 6. Session lifecycle and safe workspace leasing
 

@@ -79,6 +79,30 @@ pub struct FileId {
 }
 
 impl FileId {
+    /// The device number, for persisting this identity.
+    #[must_use]
+    pub fn dev(self) -> u64 {
+        self.dev
+    }
+
+    /// The inode number, for persisting this identity.
+    #[must_use]
+    pub fn ino(self) -> u64 {
+        self.ino
+    }
+
+    /// Rebuild an identity previously persisted via [`FileId::dev`] and
+    /// [`FileId::ino`].
+    ///
+    /// Touches no filesystem and asserts nothing about whether the pair still
+    /// refers to anything. Comparing a stored identity against a live one is
+    /// precisely the caller's purpose — see ADR 0016's drift table, where a
+    /// mismatch means "this may be a different directory", never "this is".
+    #[must_use]
+    pub fn from_parts(dev: u64, ino: u64) -> Self {
+        Self { dev, ino }
+    }
+
     /// Read the identity of the file or directory at `path`.
     pub fn of(path: impl AsRef<Path>) -> Result<Self, PathError> {
         let path = path.as_ref();
