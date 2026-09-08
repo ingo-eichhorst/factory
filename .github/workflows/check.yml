@@ -39,7 +39,7 @@ jobs:
   check:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rustup is preinstalled on GitHub macOS runners; rust-toolchain.toml
       # pins the channel and pulls in rustfmt and clippy, so there is nothing
@@ -55,7 +55,7 @@ jobs:
       # compiles SQLite from C. Caching that is the difference between a
       # two-minute job and a ten-minute one.
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index

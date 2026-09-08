@@ -52,6 +52,38 @@ for `factory doctor`, and for sessions that outlive the daemon, is documented in
 The version-1 delivery plan is owned by this project in
 [`docs/implementation-backlog.md`](docs/implementation-backlog.md).
 
+## Where this repository lives
+
+Factory is developed inside the private Business Factory working repository, at
+`projects/factory/`, and published here as its own repository with the project
+at the root. The published history is produced with `git subtree split`, so it
+contains this directory's commits and nothing from the company root.
+
+That split is deliberate rather than incidental. The working repository is the
+company root: it carries the company design baseline, scope configuration for
+every department and project, and operational scripts. Publishing it wholesale
+to a repository named `factory` would put material here that has no reason to
+be, so the boundary is enforced by what is exported rather than by remembering
+what not to push.
+
+To publish new work from the working repository:
+
+```sh
+git subtree push --prefix=projects/factory \
+  https://github.com/ingo-eichhorst/factory.git main
+```
+
+**No remote for this repository is configured in the working repository, on
+purpose.** A remote named `origin` there is how someone eventually runs
+`git push --all` and publishes the company root by accident. Passing the URL
+explicitly costs one line and removes that failure mode.
+
+This does mean the project is tracked in two places, and that the two can drift.
+Making this repository the single home — and reducing the working repository's
+copy to a checkout, as it already does for other projects' code — is the
+alternative, and it is a decision for the owner rather than a detail to settle
+in passing.
+
 ## Building
 
 The toolchain was installed with `rustup --no-modify-path`, so `~/.cargo/bin` is
