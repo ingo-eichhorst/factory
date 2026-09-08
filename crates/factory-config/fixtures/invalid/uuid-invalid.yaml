@@ -1,7 +1,13 @@
 version: 1
-scope:
-  id: not-a-uuid
-  name: uuid-bad
-agent:
-  name: A
-  harness: pi
+
+instance:
+  id: 33181ebe-bbd7-4b58-b035-d818516ab03b
+  name: uuid-bad-instance
+
+scopes:
+  - id: not-a-uuid
+    name: uuid-bad
+    path: projects/uuid-bad
+    agent:
+      name: A
+      harness: pi

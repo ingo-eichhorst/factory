@@ -79,7 +79,22 @@ step 2 says reuse and step 6 verifies it.
 
 ## Sequencing
 
-This migration should follow the `factory-config` rework rather than precede it.
-Until the crate can read the new shape, the new registry would be a file nothing
-validates — and writing configuration that no code has ever parsed is how a
-schema and its consumer drift apart before either is finished.
+This migration had to follow the `factory-config` rework rather than precede it:
+writing configuration that no code has ever parsed is how a schema and its
+consumer drift apart before either is finished.
+
+**That prerequisite is now met.** The crate reads the new shape, and the live
+instance configuration reports exactly what it lacks:
+
+```text
+error: missing field `instance`
+  --> /Users/factory/business-factory/.factory/config.yaml:7:1
+  help: add an `instance:` block with an `id` and a `name`
+```
+
+So the current state is honest rather than broken: Factory cannot read the live
+configuration, it says why, and this plan is the fix. Nothing in production
+depends on it yet, because no adapter, daemon, or CLI consumes these files —
+`ensure_assistant_agents.py` reads only its `runtime:` block, and
+`factory_tasks.py` uses the path as a marker without parsing it.
+

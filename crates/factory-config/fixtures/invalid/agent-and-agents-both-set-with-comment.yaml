@@ -1,15 +1,19 @@
-# Regression: a comment mentioning agent: must not be mistaken for the real
-# top-level `agent:` key below -- the scan must still land on line 9.
 version: 1
 
-scope:
-  id: ed153930-813b-4269-9c6b-370db8e3da3a
-  name: both-set-with-comment
+instance:
+  id: 7b55f3fb-5fe6-4f4b-997f-8ea64fc09faf
+  name: both-set-comment-instance
 
-agent:
-  name: A
-  harness: pi
+scopes:
+  - id: b58ca471-065f-4ce9-b9b9-f483b2314dc6
+    name: both-set-with-comment
+    path: projects/both-set-with-comment
+    # Regression: a comment mentioning agent: at this entry's own
+    # indentation must not be mistaken for the real key below.
+    agent:
+      name: A
+      harness: pi
 
-agents:
-  - name: B
-    harness: pi
+    agents:
+      - name: B
+        harness: pi

@@ -1,7 +1,13 @@
 version: 1
-scope:
-  id: e2683b45-2369-4184-9d8e-e6db02436f13
-  name: harness-near-miss
-agent:
-  harness: claude
-  name: Awesome Herdr Agent
+
+instance:
+  id: bcc4c15e-8afa-4c4a-b204-2231e4aeaed0
+  name: harness-near-miss-instance
+
+scopes:
+  - id: c0af8bcd-6ea6-432b-9ecf-1b1baa6566b6
+    name: harness-near-miss
+    path: projects/awesome-herdr
+    agent:
+      harness: claude
+      name: Awesome Herdr Agent

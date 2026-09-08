@@ -67,8 +67,15 @@ caller remembers to compare two configs.
   `temporary` agent it caps concurrently live instances.
 - Missing or malformed fields, unsupported versions, invalid UUIDs, duplicate
   IDs, and unsupported harnesses fail with the file and corrective action.
-- Relative paths, `..`, and symlinked paths resolve to canonical absolute paths
-  before comparison.
+- `factory-paths` resolves relative paths, `..`, and symlinked paths to
+  canonical absolute paths, and compares them by `(st_dev, st_ino)` rather than
+  by string. **Configuration parsing does not canonicalize.** A scope's `path`
+  is stored as written, and the duplicate-path check above is textual. Reading a
+  configuration file must not depend on the filesystem the way canonicalization
+  does — a config naming a path that does not exist yet is a registration
+  problem for Slice 3 to report, not a parse failure that makes the file
+  unreadable. The two capabilities ship in this slice; joining them is Slice 3's
+  work.
 - Validation writes nothing at all, and more generally no command writes outside
   a `.factory/` directory (design §4). This subsumes the older rule that
   `AGENTS.md`, `CLAUDE.md`, `.pi/`, and `.claude/` are never overwritten, and

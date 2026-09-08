@@ -1,11 +1,15 @@
 version: 1
 
-scope:
-  id: a0558c01-de66-4ad9-a6ca-43c7e5e1aa5d
-  name: root-shorthand
+instance:
+  id: f72da97f-140d-4f88-839b-685424441ed7
+  name: root-shorthand-instance
 
-agent:
-  name: Solo
-  harness: pi
-  max_sessions: 3
-  lifetime: permanent
+scopes:
+  - id: 8444ec60-970a-483d-9fcd-ef10938a1581
+    name: root-shorthand
+    path: projects/root-shorthand
+    agent:
+      name: Solo
+      harness: pi
+      max_sessions: 3
+      lifetime: permanent

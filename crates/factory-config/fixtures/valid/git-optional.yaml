@@ -1,0 +1,24 @@
+# ADR 0015: `git` marks a scope as its own repository, checked out at `path`;
+# its absence means the project's files live in the instance's own
+# repository. Both forms are valid and neither causes Factory to write
+# anything at the scope's path.
+version: 1
+
+instance:
+  id: ab79306c-d513-4745-bdbe-f87eadf434a8
+  name: git-optional-instance
+
+scopes:
+  - id: ed2ccc2f-0bae-441d-b4db-d47fb1836feb
+    name: has-git
+    path: projects/has-git
+    git: https://github.com/example/has-git.git
+    agent:
+      name: HasGit
+      harness: pi
+  - id: 07a241fb-d77e-40e3-a810-544d240caf0f
+    name: no-git
+    path: projects/no-git
+    agent:
+      name: NoGit
+      harness: pi

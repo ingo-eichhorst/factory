@@ -1,0 +1,30 @@
+# Regression: a *sibling* scope entry's own `agent:` key sits at exactly the
+# same indentation as the failing entry's -- both are list items of the same
+# `scopes:` list. The entry-relative scan must bound its search to the
+# failing entry's own line range, or the sibling's `agent:` key below would
+# create a second match and wrongly trigger the safe-fallback path instead of
+# reporting the failing entry's own, correct key locations.
+version: 1
+
+instance:
+  id: 649215b0-ce58-4680-a15e-2f4d8877d1b4
+  name: both-set-sibling-decoy-instance
+
+scopes:
+  - id: 3f56570c-9ee8-4428-aab5-908a91344093
+    name: sibling-a
+    path: projects/sibling-a
+    agent:
+      name: SiblingA
+      harness: pi
+
+  - id: 7e871697-7f5b-42f3-afaf-36feb32ad52d
+    name: sibling-b-both-set
+    path: projects/sibling-b-both-set
+    agent:
+      name: A
+      harness: pi
+
+    agents:
+      - name: B
+        harness: pi

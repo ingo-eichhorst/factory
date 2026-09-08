@@ -27,6 +27,18 @@ scopes:
    summary accordingly: ``error: scope `irrlicht` sets both `agent` and
    `agents`; a scope uses one or the other``. The `-->` location, the `note:`
    lines, and the `help:` are unchanged in form.
+
+   **One documented exception: unknown-field and missing-field errors (case 10,
+   case 9) do not name the scope.** `deny_unknown_fields` rejects the document
+   during deserialization, before any scope entry has been constructed, so at
+   that moment no name exists to print. Recovering one would mean re-scanning
+   unparsed text to find entry boundaries.
+
+   This is accepted rather than worked around, because those errors already
+   carry the file and an exact line and column pointing at the offending key —
+   which is what a reader needs to act. The scope name is a convenience when the
+   location is a whole entry, and redundant when it is a single line. Revisit it
+   only if a real message is found to be ambiguous in practice.
 2. **Case 13 (duplicate scope IDs) becomes an intra-file check** and is
    therefore stronger: it runs on every load rather than only when a caller
    remembers to compare two configs. Both locations are in the same file.
@@ -127,16 +139,25 @@ naively, this error points at `  name: A` while talking about `agent:`, and a
 reader who looks where the arrow points sees a name field rather than the
 conflict.
 
-Recover the key's line by scanning the source for a top-level key: a line whose
-first character is not whitespace and which begins `agent:` or `agents:`. These
-keys are always at indentation zero, so the scan is exact for block-style YAML,
-which is what every real and fixture config uses. If the scan finds anything
-other than exactly one match, **fall back to the value-node location** rather
-than guessing — a diagnostic that is one line off is a papercut, and one that
-points at an unrelated line because a comment contained the word `agent:` is a
-defect.
+Recover the key's line by scanning **within the scope entry**. `serde-saphyr`
+reports a spanned entry's location at that entry's first key, which gives both
+the entry's starting line and the indentation its keys share. An entry's line
+range runs from there to the line before the next entry starts, or to the end of
+the file for the last one. Inside that range, look for a line whose indentation
+equals the entry's key indentation and which begins `agent:` or `agents:`.
 
-This applies to any error that names a Factory-owned top-level key.
+Requiring both the range and the exact indentation is what makes the scan safe.
+The range keeps a sibling entry's `agent:` from being matched — every scope has
+one, so without it the scan would find several. The indentation keeps a nested
+`agents:` from being matched, such as the one inside the live `assistant`
+scope's `runtime:` block.
+
+If the scan finds anything other than exactly one match, **fall back to the
+value-node location** rather than guessing. A diagnostic that is one line off is
+a papercut; one that points at an unrelated line because a comment contained the
+word `agent:` is a defect.
+
+This applies to any error naming a Factory-owned key inside a scope entry.
 
 ### 2. Neither `agent` nor `agents`
 
@@ -188,11 +209,22 @@ the backlog.
 
 ### 7. Invalid UUID
 
+There are two, because there are two kinds of identity in the file:
+
 ```text
-error: `scope.id` is not a UUID: `not-a-uuid`
-  --> <file>:3:7
-  help: generate one with `uuidgen`; the scope ID is permanent identity and must not be reused between scopes
+error: scope `irrlicht`'s `id` is not a UUID: `not-a-uuid`
+  --> <file>:12:9
+  help: generate one with `uuidgen`; a scope ID is permanent identity and must not be reused between scopes
 ```
+
+```text
+error: `instance.id` is not a UUID: `not-a-uuid`
+  --> <file>:4:7
+  help: generate one with `uuidgen`; the instance ID identifies this Factory instance and never changes
+```
+
+The instance error cannot name a scope, because the fault is above all of them.
+That is the reason it reads differently rather than an inconsistency to fix.
 
 ### 8. Unsupported version
 
@@ -252,21 +284,33 @@ error: the file is empty
   help: a scope configuration needs at least `version`, `scope`, and one agent
 ```
 
-### 13. Duplicate scope IDs across files
+### 13. Two scopes sharing an ID, or a path
 
-Checked by `validate_unique_ids`, not by loading one file, and reported once for
-the pair:
+Both run inside `parse`, on every load, and each is reported once for the pair:
 
 ```text
 error: two scopes share the ID `c5fbc985-656a-4219-8614-fcaeaddbf103`
-  --> <file-a>:3:7
-  note: also used by scope `factory` at <file-b>:3:7
-  help: a scope ID is permanent identity; if this file was copied, generate a new ID with `uuidgen`
+  --> <file>:12:9
+  note: also used by scope `factory` at <file>:31:9
+  help: a scope ID is permanent identity; if this entry was copied, generate a new ID with `uuidgen`
 ```
 
-This is the one Slice 1 check that spans files. It exists here rather than in
-the Slice 3 registry because a copied config is most cheaply caught at the point
-it is read.
+```text
+error: two scopes share the path `projects/irrlicht`
+  --> <file>:14:11
+  note: also claimed by scope `irrlicht-fix` at <file>:33:11
+  help: two scopes cannot own one directory; give one of them a different path
+```
+
+This used to be the single Slice 1 check that spanned files, performed by a
+separate `validate_unique_ids` a caller had to remember to call. Since ADR 0015
+put every scope in one file it is an ordinary intra-file check, which makes it
+**stronger**: it now runs on every load rather than only when someone compares
+two configs.
+
+The path check is the companion. Two scopes claiming one directory would
+otherwise surface much later as a Slice 6 lease failure naming one session;
+caught here it names both entries and the file.
 
 ## What validation must not do
 

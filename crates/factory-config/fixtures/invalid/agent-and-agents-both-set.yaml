@@ -1,13 +1,17 @@
 version: 1
 
-scope:
-  id: 42009684-a5dc-4ee9-babd-d7c62a9a81dd
-  name: both-set
+instance:
+  id: 4854f60b-8f53-442f-8bd0-bfa7cf9e18df
+  name: both-set-instance
 
-agent:
-  name: A
-  harness: pi
+scopes:
+  - id: fa8b2fc7-b87c-4df5-9d19-165f2cf394f1
+    name: both-set
+    path: projects/both-set
+    agent:
+      name: A
+      harness: pi
 
-agents:
-  - name: B
-    harness: pi
+    agents:
+      - name: B
+        harness: pi

@@ -91,8 +91,13 @@ pub(crate) fn to_location(origin: &Path, loc: serde_saphyr::Location) -> Locatio
 
 fn missing_field_help(field: &str) -> String {
     match field {
-        "scope" => "add a `scope:` block with an `id` and a `name`".to_string(),
+        "instance" => "add an `instance:` block with an `id` and a `name`".to_string(),
+        "scopes" => "add a `scopes:` list with at least one scope entry".to_string(),
         "version" => "add a `version:` key; this build of Factory supports version 1".to_string(),
+        "path" => {
+            "add a `path:` key naming where the scope's files live, relative to the instance root"
+                .to_string()
+        }
         _ => format!("add a `{field}:` key"),
     }
 }

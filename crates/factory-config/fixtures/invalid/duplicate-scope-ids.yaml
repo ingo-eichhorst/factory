@@ -1,0 +1,22 @@
+# ADR 0015: duplicate scope IDs are now an intra-file check, so both entries
+# are in the same instance file and the check runs on every load.
+version: 1
+
+instance:
+  id: 4b9d31c2-f7e2-486f-b3ea-c9951fb7ebbd
+  name: dup-ids-instance
+
+scopes:
+  - id: 73995414-d129-456f-82fe-c3f7f657be59
+    name: scope-a
+    path: projects/scope-a
+    agent:
+      name: A
+      harness: pi
+
+  - id: 73995414-d129-456f-82fe-c3f7f657be59
+    name: scope-b
+    path: projects/scope-b
+    agent:
+      name: B
+      harness: pi

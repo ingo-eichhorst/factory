@@ -1,8 +1,14 @@
 version: 1
-scope:
-  id: 5f4807d1-6693-4933-96c3-68d5baadae5f
-  name: zero-sessions
-agent:
-  max_sessions: 0
-  name: A
-  harness: pi
+
+instance:
+  id: 7bf4725a-d1a2-4ed7-9762-722d472bbaf8
+  name: max-sessions-zero-instance
+
+scopes:
+  - id: 2171b42d-00a2-43ed-bd1c-a0724139f585
+    name: zero-sessions
+    path: projects/zero-sessions
+    agent:
+      max_sessions: 0
+      name: A
+      harness: pi

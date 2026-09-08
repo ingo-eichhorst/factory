@@ -1,19 +1,30 @@
 version: 1
 
-scope:
-  id: 1d034559-c3e7-47df-9bdf-215d7536bb2a
-  name: both-set-with-nested-agents-decoy
+instance:
+  id: d21428b2-ac4f-45b6-abea-b6ff82f3e7c4
+  name: both-set-nested-decoy-instance
 
-agent:
-  name: A
-  harness: pi
-
+# Regression: an unrelated top-level `runtime:` block -- the kind ADR 0009
+# rule 2 requires Factory to ignore -- carries its own nested, indented
+# `agents:` key here, positioned ahead of the real scope entry below. Since
+# ADR 0015 makes a scope entry `deny_unknown_fields`, this decoy can no
+# longer live *inside* the entry the way it could in the old per-scope file;
+# it lives here instead, entirely outside the entry's own line range, which
+# is what the entry-relative scan must rely on to ignore it.
 runtime:
   version: 1
   agents:
     - name: nested-decoy
       kind: pi
 
-agents:
-  - name: B
-    harness: pi
+scopes:
+  - id: 72ef06c7-93bb-4fd7-9849-a303aac46db7
+    name: both-set-with-nested-agents-decoy
+    path: projects/both-set-with-nested-agents-decoy
+    agent:
+      name: A
+      harness: pi
+
+    agents:
+      - name: B
+        harness: pi

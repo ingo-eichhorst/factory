@@ -1,3 +1,4 @@
-agent:
-  name: A
-  max_sesions: 4
+scopes:
+  - agent:
+      name: A
+      max_sesions: 4

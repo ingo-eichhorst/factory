@@ -1,8 +1,14 @@
 version: 1
-scope:
-  id: 63fcf894-6cc9-4c4b-bb70-0c6a1a205f2b
-  name: X
-agents:
-  - name: A
-    lifetime: ephemeral
-    harness: pi
+
+instance:
+  id: e870aa97-b4aa-4c00-a44f-47507575996c
+  name: lifetime-bad-instance
+
+scopes:
+  - id: c31b9d99-4bf6-4da7-b936-9adcc5940f5c
+    name: X
+    path: projects/x
+    agents:
+      - name: A
+        lifetime: ephemeral
+        harness: pi

@@ -1,0 +1,68 @@
+# A realistic instance configuration modelled on the shape of the seven live
+# Factory scopes (see ADR 0015's migration notes) -- fresh UUIDs throughout,
+# never the real ones. Mixes `agent:`/`agents:`, `git` present/absent, every
+# accepted harness, and both lifetimes, in one file.
+version: 1
+
+instance:
+  id: 6f24b0a5-c881-41c0-818e-dac16766aafc
+  name: business-factory
+
+scopes:
+  - id: 96db938d-5730-4aa2-9e22-1d45b99e4bb7
+    name: assistant
+    path: assistant
+    agent:
+      name: Assistant
+      harness: pi
+      max_sessions: 2
+
+  - id: e9f1211c-b927-4427-b99c-b7c540b27658
+    name: irrlicht
+    path: projects/irrlicht
+    git: https://github.com/example/irrlicht.git
+    agent:
+      name: Irrlicht Agent
+      harness: pi
+
+  - id: 899939e2-88db-4d10-82d0-1c8107029ec8
+    name: awesome-herdr
+    path: projects/awesome-herdr
+    git: https://github.com/example/awesome-herdr.git
+    agent:
+      name: Awesome Herdr Agent
+      harness: claude-code
+
+  - id: 89cffa3c-d0ee-45a6-a3f9-c99fac04af21
+    name: model-lab
+    path: projects/model-lab
+    agent:
+      name: Model Lab Agent
+      harness: opencode
+
+  - id: 157719cf-c379-4d23-a0fd-9ef75df79f9a
+    name: ingo
+    path: projects/ingo
+    agent:
+      name: Ingo Agent
+      harness: pi
+
+  - id: 06c7c6ad-b987-4a3c-a972-7ee349163235
+    name: factory
+    path: projects/factory
+    git: https://github.com/example/factory.git
+    agents:
+      - name: Factory Dev Agent
+        harness: pi
+        max_sessions: 2
+      - name: Factory Review Agent
+        harness: claude-code
+        lifetime: temporary
+
+  - id: 76b0127e-0b0f-461e-a9db-cf95b889d37a
+    name: sandbox
+    path: projects/sandbox
+    agent:
+      name: Sandbox Agent
+      harness: pi
+      lifetime: temporary

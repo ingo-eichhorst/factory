@@ -1,16 +1,20 @@
 version: 1
 
-scope:
-  id: 1f11c010-c37e-4b1e-8e25-6f70fe91b043
-  name: multi-agent
+instance:
+  id: 02ac7527-1a42-467b-b12a-520908b60d82
+  name: multi-agent-instance
 
-agents:
-  - name: First
-    harness: pi
-    max_sessions: 1
-  - name: Second
-    harness: claude-code
-    max_sessions: 4
-    lifetime: temporary
-  - name: Third
-    harness: opencode
+scopes:
+  - id: 6f03ff06-921f-406f-8e44-51ae6ce5ec0b
+    name: multi-agent
+    path: projects/multi-agent
+    agents:
+      - name: First
+        harness: pi
+        max_sessions: 1
+      - name: Second
+        harness: claude-code
+        max_sessions: 4
+        lifetime: temporary
+      - name: Third
+        harness: opencode

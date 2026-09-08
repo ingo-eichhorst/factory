@@ -1,19 +1,26 @@
-# A realistic shape of the live `assistant` scope config (see
-# /Users/factory/business-factory/assistant/.factory/config.yaml), with the
-# scope ID and every embedded session ID replaced by freshly generated values
-# so this fixture can never be mistaken for a live scope. Proves ADR 0009
-# rule 2: the `runtime:` block — nested maps and a list, owned by
-# `ensure_assistant_agents.py` — must survive untouched.
+# A synthetic regression fixture, not a literal copy of any live file: it
+# proves ADR 0009 rule 2 survives ADR 0015's document-shape change. An
+# unrelated top-level `runtime:` block (nested maps and a list, of the kind
+# `ensure_assistant_agents.py` owns in a scope's own file) must still be
+# ignored, not rejected, when it sits alongside `version`/`instance`/`scopes`
+# in the instance's own file. The scope entry itself carries only
+# Factory-owned fields -- ADR 0015 makes a scope entry `deny_unknown_fields`,
+# so a block like this can no longer live *inside* an entry the way it used
+# to live at a scope file's top level.
 version: 1
 
-scope:
-  id: fb58a4a1-c7ac-4f53-9f1f-fd770eee4268
-  name: assistant-fixture
+instance:
+  id: c835520e-5940-4c0d-8cb2-93b02ce4efe2
+  name: business-factory-fixture
 
-agent:
-  name: Assistant
-  harness: pi
-  max_sessions: 2
+scopes:
+  - id: 57a4ca60-28a4-486b-a073-99de5782e32e
+    name: assistant-fixture
+    path: assistant
+    agent:
+      name: Assistant
+      harness: pi
+      max_sessions: 2
 
 runtime:
   version: 1
@@ -21,51 +28,12 @@ runtime:
     binary: ${HOME}/.local/bin/herdr
     session: factory
     workspace_label: assistant
-    workspace_cwd: ${REPO_ROOT}/assistant
-    agent_start_timeout_ms: 30000
   agents:
     - name: assistant
       kind: pi
       lifetime: permanent
       cwd: ${REPO_ROOT}/assistant
-      split_direction: right
-      pi_args:
-        - --session-id
-        - 8f6e6f2b-9b0b-4b2a-9b0a-1c2d3e4f5a6b
-        - --name
-        - assistant
-        - --no-extensions
-        - --no-skills
-        - --extension
-        - ${HOME}/.pi/agent/extensions/herdr-agent-state.ts
-        - --extension
-        - ${REPO_ROOT}/.pi/extensions/factory-tasks.ts
-        - --extension
-        - ${REPO_ROOT}/assistant/.pi/extensions/local-llamacpp.ts
-        - --provider
-        - business-factory-qwen3.8
-        - --model
-        - qwen3.8-27b
-        - --thinking
-        - medium
-        - --approve
     - name: assistant-chat
       kind: pi
       lifetime: permanent
       cwd: ${REPO_ROOT}/assistant/chat
-      split_direction: right
-      pi_args:
-        - --session-id
-        - 2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f
-        - --name
-        - assistant-chat
-        - --no-builtin-tools
-        - --no-extensions
-        - --no-skills
-        - --provider
-        - business-factory-qwen3.8-chat
-        - --model
-        - qwen3.8-27b
-        - --thinking
-        - low
-        - --approve

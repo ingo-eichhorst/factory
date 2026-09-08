@@ -53,7 +53,10 @@ fn load_and_parse_write_nothing() {
     // paths run against the same directory before it is snapshotted.
     let sources = [
         ("valid/root-shorthand.yaml", "root-shorthand.yaml"),
-        ("valid/multi-agent.yaml", "multi-agent.yaml"),
+        (
+            "valid/multi-scope-instance.yaml",
+            "multi-scope-instance.yaml",
+        ),
         (
             "invalid/agent-and-agents-both-set.yaml",
             "agent-and-agents-both-set.yaml",

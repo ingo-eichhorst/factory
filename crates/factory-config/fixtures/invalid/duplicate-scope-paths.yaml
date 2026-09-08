@@ -1,0 +1,22 @@
+# ADR 0015's companion to the duplicate-ID check: two scopes may not share a
+# `path` either, since that means two scopes claiming one directory.
+version: 1
+
+instance:
+  id: c2f44cce-77a6-47b5-b76d-2c3a563302ee
+  name: dup-paths-instance
+
+scopes:
+  - id: 99a26716-12d8-4fed-9021-ad0920ab4947
+    name: scope-a
+    path: projects/shared
+    agent:
+      name: A
+      harness: pi
+
+  - id: ebbf911a-df68-4a19-8532-9a39dd36eef5
+    name: scope-b
+    path: projects/shared
+    agent:
+      name: B
+      harness: pi

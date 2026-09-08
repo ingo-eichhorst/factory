@@ -1,0 +1,14 @@
+version: 1
+
+instance:
+  id: 9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a
+  name: x
+
+scopes:
+  - id: 06f5e4d3-c2b1-4a09-8f7e-6d5c4b3a2910
+    name: y
+    path: projects/y
+    pathh: typo
+    agent:
+      name: A
+      harness: pi

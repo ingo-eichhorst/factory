@@ -1,7 +1,0 @@
-version: 1
-scope:
-  id: 22243942-ae4e-474d-a837-5a49c5eb7a7c
-  name: scope-b
-agent:
-  name: B
-  harness: pi

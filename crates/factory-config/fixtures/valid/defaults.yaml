@@ -1,9 +1,13 @@
 version: 1
 
-scope:
-  id: 23f35934-c92a-46e7-863d-67c6ed4db906
-  name: defaults
+instance:
+  id: bfefd5f5-f426-4d8d-8d63-de350b8ef6ab
+  name: defaults-instance
 
-agent:
-  name: Defaulted
-  harness: pi
+scopes:
+  - id: 633e2938-2e04-49a0-83dd-02e68a16b933
+    name: defaults
+    path: projects/defaults
+    agent:
+      name: Defaulted
+      harness: pi

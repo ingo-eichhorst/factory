@@ -1,7 +1,13 @@
 version: 2
-scope:
-  id: b3d34f83-041b-4a6b-a0c1-24747cdce062
-  name: version-bad
-agent:
-  name: A
-  harness: pi
+
+instance:
+  id: 4ae9987c-4ce0-41c0-9750-9cb65f1253e6
+  name: version-bad-instance
+
+scopes:
+  - id: bea1fe4d-a024-406f-bc09-9b801be77066
+    name: version-bad
+    path: projects/version-bad
+    agent:
+      name: A
+      harness: pi

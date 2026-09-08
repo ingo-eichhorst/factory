@@ -1,5 +1,10 @@
 version: 1
 
-scope:
-  id: 2a2dc05c-9f97-4c54-ad1a-330be459ebd9
-  name: no-agent
+instance:
+  id: 4bc93fb1-8948-497c-82a6-d50d9a360daf
+  name: no-agent-instance
+
+scopes:
+  - id: 7b7f36b1-ff29-4316-b4a7-4089a8b9ab82
+    name: no-agent
+    path: projects/no-agent

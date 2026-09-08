@@ -1,14 +1,18 @@
-//! Serde-facing shapes for `.factory/config.yaml`.
+//! Serde-facing shapes for the Factory instance's `.factory/config.yaml`.
 //!
 //! These mirror the file structurally but carry none of the validation rules
 //! themselves — `crate::validate` turns a [`RawDocument`] into a
-//! [`crate::ScopeConfig`] or a [`crate::ConfigError`].
+//! [`crate::InstanceConfig`] or a [`crate::ConfigError`].
 //!
-//! Two modelling choices are load-bearing, both fixed by ADR 0009:
+//! Two modelling choices are load-bearing, both fixed by ADR 0009 and carried
+//! forward unchanged by ADR 0015:
 //!
 //! - [`RawDocument`] does **not** derive `deny_unknown_fields`: rule 2 requires
 //!   unknown top-level keys (the `runtime:` block owned by
-//!   `ensure_assistant_agents.py`) to pass through silently.
+//!   `ensure_assistant_agents.py`) to pass through silently. [`RawScopeEntry`]
+//!   *does* derive it: a scope entry is a Factory-owned mapping (it lives
+//!   inside the Factory-owned `scopes:` list), so an ad-hoc extra key there is
+//!   rejected the same way an unknown field inside `agent:` is.
 //! - `agent` and `agents` are two independent optional fields, never an
 //!   untagged enum. `serde-saphyr` cannot carry span information through an
 //!   untagged enum variant, and an untagged enum could not report the
@@ -24,18 +28,37 @@ use serde_saphyr::Spanned;
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawDocument {
     pub version: Spanned<u32>,
-    pub scope: RawScope,
-    pub agent: Option<Spanned<RawAgent>>,
-    pub agents: Option<Vec<Spanned<RawAgent>>>,
+    pub instance: RawInstance,
+    /// May be empty — a freshly initialized instance has no scopes yet — but
+    /// the key itself is required, so a typo'd `scope:` or `scopess:` fails
+    /// loudly instead of silently producing an empty instance.
+    pub scopes: Vec<Spanned<RawScopeEntry>>,
 }
 
-/// Design §2.1. Factory-owned, so unknown fields here are rejected (ADR 0009
-/// rule 3) — a typo in `scope:` should fail as loudly as one in `agent:`.
+/// ADR 0015. Factory-owned, so unknown fields here are rejected (ADR 0009
+/// rule 3) — a typo in `instance:` should fail as loudly as one in `agent:`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawScope {
+pub(crate) struct RawInstance {
     pub id: Spanned<String>,
     pub name: String,
+}
+
+/// One entry of the instance's `scopes:` list, per ADR 0015. Factory-owned,
+/// so — like [`RawInstance`] and [`RawAgent`] — unknown fields are rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawScopeEntry {
+    pub id: Spanned<String>,
+    pub name: String,
+    pub path: Spanned<String>,
+    /// Present when the project is its own repository; absent when it lives
+    /// in the instance's own repository. ADR 0015 validates only
+    /// presence-or-absence, so a plain `String` is enough — no `Spanned`
+    /// location is ever needed for it.
+    pub git: Option<String>,
+    pub agent: Option<Spanned<RawAgent>>,
+    pub agents: Option<Vec<Spanned<RawAgent>>>,
 }
 
 /// Design §2.2. Shared by both the `agent:` shorthand and each element of an
@@ -53,15 +76,16 @@ pub(crate) struct RawAgent {
 /// The field names of a Factory-owned mapping, for two purposes:
 ///
 /// 1. Turning `serde_saphyr::Error::SerdeUnknownField`'s `expected` list back
-///    into a `scope` vs `agent` context name for the "unknown field `x` in
-///    `y`" message (case 10) — `serde-saphyr` reports the flat field list but
-///    not which struct it came from.
+///    into an `instance` vs `scope` vs `agent` context name for the "unknown
+///    field `x` in `y`" message (case 10) — `serde-saphyr` reports the flat
+///    field list but not which struct it came from.
 /// 2. Rendering that same list, alphabetised, in the `help:` line.
 pub(crate) fn mapping_name_for_fields(expected: &[&'static str]) -> &'static str {
     let mut sorted = expected.to_vec();
     sorted.sort_unstable();
     match sorted.as_slice() {
-        ["id", "name"] => "scope",
+        ["id", "name"] => "instance",
+        ["agent", "agents", "git", "id", "name", "path"] => "scope",
         ["harness", "lifetime", "max_sessions", "name"] => "agent",
         _ => "configuration",
     }

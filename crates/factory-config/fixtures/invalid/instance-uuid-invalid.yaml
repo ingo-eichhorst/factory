@@ -1,0 +1,13 @@
+version: 1
+
+instance:
+  id: not-a-uuid
+  name: instance-uuid-bad
+
+scopes:
+  - id: a3b6a045-1ab3-4103-9aff-9b05748b9b46
+    name: x
+    path: projects/x
+    agent:
+      name: A
+      harness: pi
