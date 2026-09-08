@@ -1,6 +1,6 @@
 [package]
 name = "factory-session"
-description = "The session state machine and workspace-lease acquisition (design §2.3, ADR 0012 decision 5, ADR 0009)"
+description = "The session state machine, workspace-lease acquisition, per-agent max_sessions, lifetime-driven teardown, and interrupted-task handling (design §2.2-§2.4, ADR 0012 decision 5, ADR 0009, backlog §6)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+factory-config = { path = "../factory-config" }
 factory-paths = { path = "../factory-paths" }
 factory-store = { path = "../factory-store" }
 rusqlite.workspace = true

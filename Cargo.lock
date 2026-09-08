@@ -147,6 +147,7 @@ dependencies = [
 name = "factory-session"
 version = "0.1.0"
 dependencies = [
+ "factory-config",
  "factory-paths",
  "factory-store",
  "rusqlite",

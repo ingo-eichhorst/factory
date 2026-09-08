@@ -442,12 +442,26 @@ manual start, stop, status, and attach procedures through the Pi proof adapter.
   `blocked` is not terminal: a temporary agent awaiting clarification or
   permission keeps its session and its lease.
 - When a temporary agent's session dies while its task is not in a terminal
-  state — harness crash, Herdr restart, machine restart — the session record is
-  removed, its workspace lease is released, and the task becomes
+  state — harness crash, Herdr restart, machine restart — the session stops
+  holding anything, its workspace lease is released, and the task becomes
   `blocked: interrupted`. Factory never restarts the agent or redelivers the
   prompt automatically: after an ambiguous failure it is unknown whether the
   first delivery already had external effect. A human creates a replacement
   task, which gets a fresh temporary agent and session.
+
+  This said "the session record is removed", which reads as `DELETE FROM
+  sessions` and is not what the implementation does. Corrected on 2026-09-08
+  after building it, for two reasons found in that order. Measured first:
+  `workspace_leases.session_id` is `NOT NULL` with no `ON DELETE`, so under
+  `PRAGMA foreign_keys = ON` the delete fails outright while a lease row
+  references the session — and `workspace_leases` is a durable audit journal,
+  so deleting *it* first to make room is the wrong direction. The stronger
+  reason came second: a deleted row erases the fact that a session died
+  mid-task, which is exactly the evidence §12.5's operating data needs to
+  report session mortality at all. A session that dies is moved to `failed`,
+  which releases the lease by ADR 0012's rule and leaves the death on the
+  record. Nothing counts it afterwards: `max_sessions` counts sessions that
+  hold a lease, so a `failed` row occupies no slot.
 
 **Decisions or risks to resolve first:** Define the exact repository identity
 test (for example, common Git dir plus canonical repository root). The

@@ -83,6 +83,135 @@
 //! the same time at all. Without `BEGIN IMMEDIATE` this scan-then-insert
 //! pattern would itself be exactly the race the lease exists to prevent.
 //!
+//! # `max_sessions`, lifetimes, and interrupted handling
+//!
+//! These are the seams the paragraphs above name as *not* this crate's job as
+//! of Slice 6's first commit; this section documents where they landed once
+//! they became this crate's job, in the same package rather than a new one
+//! (the backlog draws no crate boundary between "the session state machine"
+//! and "what decides which transition to make").
+//!
+//! **`max_sessions` is checked inside [`begin_start`]'s own transaction**,
+//! immediately before the aliasing scan, by [`count_live_sessions`] — a scan
+//! over `(scope_id, agent_name)`'s rows, filtered by
+//! [`SessionState::holds_lease`] in Rust for the same reason
+//! [`find_aliasing_conflict`] is: one method stays the single source of truth
+//! for "does this state hold a lease," rather than a second hard-coded
+//! `state IN (...)` list that could drift from it. It runs first, not after
+//! the aliasing scan, because it is a pure row count with no `stat` calls,
+//! and a caller who has already hit their cap should not pay for filesystem
+//! work whose answer cannot change the outcome.
+//!
+//! Scoping the count by `(scope_id, agent_name)` together, never by
+//! `scope_id` alone, is the entire implementation of "per agent rather than
+//! per scope" (`factory_config::Agent::max_sessions`, design §2.2): two
+//! agents in one scope simply query different rows and so never share a
+//! budget. See `max_sessions_is_evaluated_per_agent_not_per_scope` in
+//! `tests/max_sessions.rs`, and the task report's mutation run against the
+//! `agent_name` predicate specifically — dropping only the cap-vs-count
+//! comparison proves a cap exists at all, but not that it is per-agent, so
+//! that is the predicate the mutation targets.
+//!
+//! **Lifetime-driven teardown is [`on_task_terminal`], which does not trust
+//! its caller's word for "the task ended."** It re-reads `tasks.status`
+//! itself and refuses — [`SessionError::TaskNotTerminal`] — unless it is
+//! already one of design §2.4's three terminal statuses. An earlier version
+//! of this function took an enum the caller constructed (`Done` / `Failed` /
+//! `Cancelled`, with no `Blocked` variant to pass), which made "blocked
+//! cannot trigger teardown" a compile-time fact — true, but untestable: a
+//! rule a test suite cannot break by mutation is a rule the suite is not
+//! actually watching (see the backlog's own "a lease test that cannot fail is
+//! worse than no lease test" for the general version of this complaint).
+//! Reading the durable row instead puts backlog §6's sharpest rule — "blocked
+//! is NOT terminal... test this explicitly" — into a predicate a mutation can
+//! widen (add `'blocked'` to the accepted set) and a test can catch failing;
+//! see `on_task_terminal_refuses_to_tear_down_a_session_for_a_blocked_task` in
+//! `tests/lifetime.rs`.
+//!
+//! `Lifetime::Permanent` short-circuits to `Ok(())` before that check even
+//! runs: design §2.2 says a permanent session "survive[s] between tasks," so
+//! there is nothing to verify or do.
+//!
+//! **[`interrupt`] is the "session dies while its task is not terminal"
+//! path** (backlog §6, the rule with, in the brief's own words, "the sharpest
+//! reasoning behind it"). It moves the session straight to
+//! [`SessionState::Failed`] (releasing the lease) and, in the same
+//! transaction, moves `task_id` to `blocked: interrupted` — unless the task
+//! has already reached a terminal status, which this function must never
+//! overwrite. A task already `blocked` for some other reason
+//! (`clarification`, `permission`) is *not* exempt from that overwrite: that
+//! is the direct, data-visible proof that `blocked` is not terminal, and it
+//! is unrelated to, but reinforces, [`on_task_terminal`]'s check above. See
+//! `interrupt_overwrites_an_existing_blocked_reason_because_blocked_is_not_terminal`
+//! in `tests/interrupted.rs`.
+//!
+//! ## Why "the session record is removed" is `Failed`, not `DELETE FROM sessions`
+//!
+//! Backlog §6 and this task's brief both say, verbatim, that an interrupted
+//! session's "record is removed." Measured against the real schema (not
+//! assumed): `workspace_leases.session_id`, `tasks.target_session_id`, and
+//! `delivery_attempts.session_id` all reference `sessions (id)`, none
+//! declares an `ON DELETE` action, and ADR 0012 decision 3 sets
+//! `PRAGMA foreign_keys = ON` on every connection — so a bare
+//! `DELETE FROM sessions WHERE id = ?` on a session `begin_start` ever
+//! created fails immediately, because `begin_start` always leaves at least
+//! one `workspace_leases` row pointing at it. Proved directly, through this
+//! crate's own `begin_start` and the real schema, by
+//! `the_schema_rejects_deleting_a_session_that_a_lease_still_references` in
+//! `tests/interrupted.rs`.
+//!
+//! **Rejected alternative: delete the referencing `workspace_leases` row
+//! first, then the session.** This is mechanically possible — it is not a
+//! bug the foreign key stops you from creating, only one it stops you from
+//! creating *silently*. It is rejected on design grounds, not a technical
+//! one: `workspace_leases`'s own doc comment in `schema.rs` states it is kept
+//! "for audit and for Slice 9's mandatory stale-lease recovery action,"
+//! independent of whether the session that acquired a lease still exists as
+//! a row. Deleting that history to make the session row deletable would
+//! defeat the reason the table exists. `Failed` already means, by
+//! [`SessionState::holds_lease`] and the transition table below, "gone, lease
+//! released, unreachable from here" — every property "removed" needs for
+//! `max_sessions` counting, lease exclusivity, and future re-use — without
+//! inventing a sixth state absent from design §2.3's fixed five-state
+//! vocabulary, and without deleting the audit trail Slice 9 depends on.
+//!
+//! ## The permanent/temporary restart asymmetry, and why it is not an inconsistency
+//!
+//! A `permanent` agent's session is restarted after a crash; a `temporary`
+//! one is not — Factory never redelivers its prompt, `interrupt` never calls
+//! [`begin_start`], and there is no code path from `interrupt` back to a
+//! fresh session for the same task. The asymmetry is not a special case
+//! carved out of one consistent rule; it follows from a genuine difference in
+//! what a session is doing:
+//!
+//! - A **permanent** session serves a standing channel, not one delivery. Its
+//!   crash-recovery path is the state machine already proves elsewhere:
+//!   `running → disconnected → running` (Factory loses sight, then regains
+//!   it — possibly of a freshly relaunched process in the same row, or a
+//!   confirmed-still-alive one; either way no task-level consequence follows,
+//!   because a permanent session was never "handling one task" in the sense
+//!   §2.4 means). See
+//!   `disconnected_session_can_regain_sight_which_is_how_a_permanent_agent_recovers`
+//!   in `tests/state_machine.rs` — mechanically identical machinery to
+//!   [`interrupt`]'s starting point, diverging only in outcome.
+//! - A **temporary** session exists to carry out one delivery whose external
+//!   effect is, after an ambiguous failure, unknown — a sent mail, a pushed
+//!   commit, a placed order may already have happened. Restarting it and
+//!   resending the same prompt risks doing that effect twice with no way to
+//!   detect the duplication after the fact. [`interrupt`] therefore does not
+//!   retry; it stops, and a human — who can check what actually happened —
+//!   creates a replacement task, which gets its own fresh temporary agent and
+//!   session.
+//!
+//! This "never redelivers" rule cannot be pinned by mutation — there is no
+//! retry call in [`interrupt`] to delete and watch a test fail. It is instead
+//! pinned by assertion: `tests/interrupted.rs` checks that after `interrupt`,
+//! exactly the one (now-`failed`) session row exists for that
+//! `(scope_id, agent_name)`, and that `delivery_attempts` gains no new row for
+//! the task — the table that exists specifically to journal each delivery
+//! attempt, so zero new rows *is* "no redelivery happened," made durable and
+//! checkable rather than merely absent from the code.
+//!
 //! # What this crate does not do
 //!
 //! - **Workspace path validation** — is this path an allowed workspace for
@@ -108,16 +237,14 @@
 //!   the caller's precondition, stated here rather than left implicit. What
 //!   *is* enforced here is that no *other* transition releases the lease:
 //!   `running`→`disconnected` deliberately leaves it held (ADR 0012 decision
-//!   5's most important case — see [`SessionState::holds_lease`]), and there
-//!   is no `starting`→`disconnected` transition at all (see the transition
-//!   table below) — a start that never reached an observed `running` has no
-//!   confirmed process to lose sight of, so a failed launch is honestly
-//!   `failed`, which already releases.
-//! - **`max_sessions`, permanent/temporary teardown, and Slice 9's stale-lease
-//!   recovery command.** Those consume the transitions this crate exposes
-//!   ([`mark_running`], `disconnected`→`stopped`/`failed` via [`stop`]/
-//!   [`fail`]) but decide *when* to call them, which is out of this
-//!   package's scope.
+//!   5's most important case — see [`SessionState::holds_lease`]).
+//! - **Detecting that a session has died at all.** [`interrupt`] models what
+//!   happens once a temporary agent's session's death is *reported*; Slice 9
+//!   owns the restart drill that produces that report (harness exit codes,
+//!   Herdr's own liveness signal, a missed heartbeat — none of which this
+//!   crate has an opinion on). Likewise, choosing *when* an operator runs the
+//!   already-existing `disconnected`→`stopped`/`failed` stale-lease recovery
+//!   transitions is Slice 9's command, not this crate's.
 
 use std::path::PathBuf;
 
@@ -201,17 +328,35 @@ impl std::fmt::Display for SessionState {
 /// - `Running → Stopped`: a graceful stop, once the caller has confirmed the
 ///   process is no longer usable (this crate's precondition, not something
 ///   it can check — see the module docs).
+/// - `Running → Failed`: added for [`interrupt`], and worth explaining
+///   because it looks at first like it should route through `Disconnected`
+///   the way every other "session might be gone" case does. It deliberately
+///   does not: `Disconnected` means *Factory lost sight and does not yet
+///   know*, but backlog §6's interrupted scenario is the opposite — the
+///   caller (Slice 9's restart drill) has *already confirmed* the process is
+///   gone, directly, with the task still non-terminal. Recording an
+///   intervening `disconnected` row would journal a period of ambiguity that
+///   never actually happened. Both routes release the lease identically once
+///   `Failed` is reached (ADR 0012 decision 5), so nothing about lease
+///   correctness depends on this choice — it is about not fabricating
+///   history that a later audit of `workspace_leases` or `sessions` would
+///   read as "Factory wasn't sure for a while," when in fact it was sure
+///   immediately.
 /// - `Disconnected → Running`: Factory regains sight and confirms the same
-///   session is still alive.
+///   session is still alive — the mechanism a **permanent** agent's crash
+///   recovery uses (see the module docs' restart-asymmetry section); no
+///   task-level consequence follows, in contrast to [`interrupt`].
 /// - `Disconnected → Stopped` / `Disconnected → Failed`: the mechanism
 ///   Slice 9's mandatory stale-lease recovery action uses to release a lease
 ///   whose session cannot be recovered — deciding *when* to call this is
-///   Slice 9's job, not this crate's.
+///   Slice 9's job, not this crate's. [`interrupt`] also reaches `Failed`
+///   this way when the dying session was already `disconnected` at the time
+///   its death was confirmed.
 fn valid_targets(from: SessionState) -> &'static [SessionState] {
     use SessionState::{Disconnected, Failed, Running, Starting, Stopped};
     match from {
         Starting => &[Running, Failed],
-        Running => &[Disconnected, Stopped],
+        Running => &[Disconnected, Stopped, Failed],
         Disconnected => &[Running, Stopped, Failed],
         Stopped | Failed => &[],
     }
@@ -322,11 +467,57 @@ fn find_aliasing_conflict(
     Ok(None)
 }
 
+/// Count of `agent_name`'s currently lease-holding sessions in `scope_id` —
+/// `starting`, `running`, or `disconnected` (see [`SessionState::holds_lease`]
+/// — the same three states [`find_aliasing_conflict`] treats as live, for the
+/// same reason: a "concurrently live instance" is exactly a lease-holding
+/// one).
+///
+/// This is the entire implementation of `factory_config::Agent::max_sessions`
+/// being "per agent rather than per scope" (design §2.2): scoping the `WHERE`
+/// clause by `(scope_id, agent_name)` together, rather than `scope_id` alone,
+/// means two agents in one scope query disjoint sets of rows and so can never
+/// share, or steal from, one another's budget. See the module docs' section
+/// on this and `max_sessions_is_evaluated_per_agent_not_per_scope` in
+/// `tests/max_sessions.rs`.
+///
+/// Scans and filters with [`SessionState::holds_lease`] in Rust rather than a
+/// second hard-coded `state IN (...)` in the SQL, mirroring
+/// [`find_aliasing_conflict`]'s own reasoning: there are only ever a handful
+/// of rows per agent, so the scan costs nothing, and it keeps the
+/// lease-holding rule in exactly one place.
+fn count_live_sessions(
+    tx: &rusqlite::Transaction<'_>,
+    scope_id: uuid::Uuid,
+    agent_name: &str,
+) -> Result<u32, SessionError> {
+    let mut stmt = tx
+        .prepare("SELECT state FROM sessions WHERE scope_id = ?1 AND agent_name = ?2")
+        .map_err(factory_store::StoreError::from)?;
+    let mut rows = stmt
+        .query((scope_id.to_string(), agent_name))
+        .map_err(factory_store::StoreError::from)?;
+
+    let mut live = 0u32;
+    while let Some(row) = rows.next().map_err(factory_store::StoreError::from)? {
+        let state: String = row.get(0).map_err(factory_store::StoreError::from)?;
+        if SessionState::from_db_str(&state).holds_lease() {
+            live += 1;
+        }
+    }
+    Ok(live)
+}
+
 /// Begin starting a session for `agent_name` (under `scope_id`) in
 /// `workspace`, recording it as `starting` *before* any launch attempt.
 ///
 /// `workspace` must already be resolved (and, by another package,
 /// validated) — see the module docs' "what this crate does not do".
+/// `max_sessions` is the agent's configured bound
+/// (`factory_config::Agent::max_sessions`, design §2.2); this function takes
+/// it as a plain `u32` rather than a `factory_config::Agent` so that a caller
+/// who already knows the number (from wherever it loaded the config) does not
+/// have to reconstruct a whole `Agent` value just to start a session.
 ///
 /// # Why `starting`, not `running`, is what gets recorded here
 ///
@@ -337,7 +528,22 @@ fn find_aliasing_conflict(
 /// prevent. Recording `starting` first, synchronously, before any launch
 /// happens, is what closes that race.
 ///
+/// # Why the `max_sessions` check runs first
+///
+/// It is a pure row count against already-open rows — no `stat` calls, unlike
+/// [`find_aliasing_conflict`] — so a caller who has already exhausted their
+/// budget gets rejected without this function ever touching the filesystem.
+/// Both checks run inside the one `BEGIN IMMEDIATE` transaction started
+/// below, for the same race-freedom reason the module docs give for the
+/// aliasing scan: no concurrent mutator can insert a competing session
+/// between either check and the `INSERT`.
+///
 /// # Errors
+///
+/// [`SessionError::MaxSessionsReached`] when `agent_name` already has
+/// `max_sessions` (or more) live sessions in `scope_id`. This rejects the
+/// *new* start only — an existing session's row is never read for update and
+/// never touched, so a rejected `begin_start` cannot disturb one.
 ///
 /// [`SessionError::WorkspaceLeased`] when the Rust-level aliasing scan (see
 /// [`find_aliasing_conflict`]) finds an existing lease-holder for the same
@@ -354,13 +560,23 @@ pub fn begin_start(
     id: uuid::Uuid,
     scope_id: uuid::Uuid,
     agent_name: &str,
+    max_sessions: u32,
     workspace: &CanonicalPath,
 ) -> Result<(), SessionError> {
     let candidate_file_id = FileId::of(workspace.as_path())?;
 
-    // BEGIN IMMEDIATE takes the write lock here, before the scan below reads
-    // a single row — see the module docs' race-freedom argument.
+    // BEGIN IMMEDIATE takes the write lock here, before either check below
+    // reads a single row — see the module docs' race-freedom argument.
     let tx = store.transaction()?;
+
+    let live = count_live_sessions(&tx, scope_id, agent_name)?;
+    if live >= max_sessions {
+        return Err(SessionError::MaxSessionsReached {
+            agent_name: agent_name.to_string(),
+            max_sessions,
+            live_count: live,
+        });
+    }
 
     if let Some(holder) = find_aliasing_conflict(&tx, candidate_file_id)? {
         return Err(SessionError::WorkspaceLeased {
@@ -397,17 +613,22 @@ pub fn begin_start(
     Ok(())
 }
 
-/// Move `id` to `to`, releasing the workspace lease exactly when that moves
-/// it out of a lease-holding state (see [`SessionState::holds_lease`]).
-/// `release_reason` is recorded on the `workspace_leases` row when a release
-/// happens, and ignored otherwise.
-fn transition(
-    store: &mut factory_store::Store,
+/// The body of [`transition`], taking an already-open transaction rather than
+/// opening (and committing) its own.
+///
+/// Split out for [`interrupt`] and [`on_task_terminal`], both of which need a
+/// session transition to commit atomically alongside a write to `tasks` in
+/// the very same transaction — for [`interrupt`], "the lease is released" and
+/// "the task is blocked as interrupted" must rise or fall together, or a
+/// crash between two separate commits could leave a released lease with no
+/// record of why the task never finished. [`transition`] itself becomes a
+/// two-line wrapper: open, delegate, commit.
+fn transition_in_tx(
+    tx: &rusqlite::Transaction<'_>,
     id: uuid::Uuid,
     to: SessionState,
     release_reason: Option<&str>,
 ) -> Result<(), SessionError> {
-    let tx = store.transaction()?;
     let id_str = id.to_string();
 
     let current: Option<String> = tx
@@ -471,6 +692,21 @@ fn transition(
         .map_err(factory_store::StoreError::from)?;
     }
 
+    Ok(())
+}
+
+/// Move `id` to `to`, releasing the workspace lease exactly when that moves
+/// it out of a lease-holding state (see [`SessionState::holds_lease`]).
+/// `release_reason` is recorded on the `workspace_leases` row when a release
+/// happens, and ignored otherwise.
+fn transition(
+    store: &mut factory_store::Store,
+    id: uuid::Uuid,
+    to: SessionState,
+    release_reason: Option<&str>,
+) -> Result<(), SessionError> {
+    let tx = store.transaction()?;
+    transition_in_tx(&tx, id, to, release_reason)?;
     tx.commit().map_err(factory_store::StoreError::from)?;
     Ok(())
 }
@@ -491,7 +727,12 @@ pub fn mark_disconnected(
     transition(store, id, SessionState::Disconnected, None)
 }
 
-/// `starting → failed` or `disconnected → failed`. Releases the lease.
+/// `starting → failed`, `disconnected → failed`, or `running → failed`.
+/// Releases the lease. [`interrupt`] is a thin, task-aware wrapper around
+/// this same target state for the specific case of a temporary agent's
+/// session dying mid-task; call this one directly for every other reason a
+/// session might fail (a launch that never became `running`, or a
+/// `disconnected` session Slice 9's stale-lease recovery gives up on).
 pub fn fail(
     store: &mut factory_store::Store,
     id: uuid::Uuid,
@@ -513,6 +754,214 @@ pub fn stop(
     transition(store, id, SessionState::Stopped, Some(reason))
 }
 
+/// Design §2.2's lifetime rule, applied once `task_id` — the task
+/// `session_id` was handling — has genuinely finished.
+///
+/// Does **not** take the caller's word for "finished." It re-reads
+/// `task_id`'s own `status` column and proceeds only if that row already
+/// shows one of design §2.4's three terminal statuses (`done`, `failed`,
+/// `cancelled`); otherwise it refuses with [`SessionError::TaskNotTerminal`]
+/// rather than touch the session. This is what makes backlog §6's sharpest
+/// warning about this rule — "`blocked` is NOT terminal... test this
+/// explicitly, because 'blocked' reads like an ending" — a runtime check a
+/// test can break by mutation, instead of a compile-time-only guarantee. See
+/// the module docs' "lifetimes" section for why a caller-supplied enum was
+/// rejected in favour of this read, and
+/// `on_task_terminal_refuses_to_tear_down_a_session_for_a_blocked_task` in
+/// `tests/lifetime.rs`.
+///
+/// - [`factory_config::Lifetime::Permanent`]: short-circuits to `Ok(())`
+///   before the check above even runs. Design §2.2: a permanent session
+///   "survive[s] between tasks," so there is nothing to verify or do — this
+///   is the "permanent" half of the crash-restart asymmetry the module docs
+///   describe; the session is simply left alone.
+/// - [`factory_config::Lifetime::Temporary`]: once the task is confirmed
+///   terminal, tears the session down via [`stop`] — reusing [`stop`]'s own
+///   precondition (the caller has arranged for the process to no longer be
+///   needed) rather than inventing a second teardown path.
+///
+/// Reads and writes happen in one transaction, so a task whose status
+/// changes between the check and the teardown cannot produce a session that
+/// is torn down against a task row that, by the time anyone looks, no longer
+/// justifies it.
+///
+/// # Errors
+///
+/// [`SessionError::TaskNotFound`] if `task_id` does not exist.
+/// [`SessionError::TaskNotTerminal`] if it exists but its `status` is not
+/// `done`, `failed`, or `cancelled` (this is where `blocked` — and `queued`,
+/// and `running` — are refused). Any error [`transition_in_tx`] can produce
+/// for the underlying `stop`, verbatim (for example
+/// [`SessionError::InvalidTransition`] if `session_id` is not currently
+/// `running` or `disconnected`).
+pub fn on_task_terminal(
+    store: &mut factory_store::Store,
+    session_id: uuid::Uuid,
+    task_id: uuid::Uuid,
+    lifetime: factory_config::Lifetime,
+) -> Result<(), SessionError> {
+    if lifetime == factory_config::Lifetime::Permanent {
+        return Ok(());
+    }
+
+    let tx = store.transaction()?;
+
+    let status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM tasks WHERE id = ?1",
+            [task_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(factory_store::StoreError::from)?;
+    let Some(status) = status else {
+        return Err(SessionError::TaskNotFound(task_id));
+    };
+    if !matches!(status.as_str(), "done" | "failed" | "cancelled") {
+        return Err(SessionError::TaskNotTerminal { task_id, status });
+    }
+
+    transition_in_tx(
+        &tx,
+        session_id,
+        SessionState::Stopped,
+        Some(&format!(
+            "temporary agent torn down: task {task_id} reached `{status}`"
+        )),
+    )?;
+
+    tx.commit().map_err(factory_store::StoreError::from)?;
+    Ok(())
+}
+
+/// Backlog §6's interrupted-handling rule — described there as the one "with
+/// the sharpest reasoning behind it" — for a temporary agent's session that
+/// died while `task_id` had not reached a terminal state: "harness crash,
+/// Herdr restart, machine restart" are the backlog's own examples. *Detecting*
+/// that death is Slice 9's restart drill, not this function; `interrupt` is
+/// what that drill calls once it has.
+///
+/// Atomically, in one transaction:
+///
+/// 1. `session_id` moves straight to [`SessionState::Failed`] (see
+///    [`valid_targets`] for why this is now a direct edge from every
+///    lease-holding state, including `running`), releasing its workspace
+///    lease. See the module docs' "why 'the session record is removed' is
+///    `Failed`, not `DELETE FROM sessions`" for why this — and not an actual
+///    row deletion — is what "the session record is removed" means here,
+///    with the foreign-key evidence for the claim.
+/// 2. `task_id` moves to `blocked: interrupted` — *unless* it has already
+///    reached `done`, `failed`, or `cancelled`, which this must never
+///    overwrite. A task that is already `blocked` for another reason
+///    (`clarification`, `permission`) is *not* exempt: overwriting it is the
+///    direct, data-visible proof that design §2.4 does not count `blocked`
+///    as terminal. See
+///    `interrupt_overwrites_an_existing_blocked_reason_because_blocked_is_not_terminal`
+///    in `tests/interrupted.rs`.
+///
+/// Both writes commit together or not at all: a crash between "lease
+/// released" and "task marked interrupted" must never happen, because a
+/// released lease with no record of why the task stalled is exactly the kind
+/// of ambiguity backlog §6 exists to prevent.
+///
+/// # Why there is no retry here, and why that cannot be pinned by mutation
+///
+/// This function contains no call to [`begin_start`] and constructs no new
+/// session. That is deliberate, not an oversight: after an ambiguous
+/// failure it is unknown whether the task's one delivery already had
+/// external effect — a sent mail, a pushed commit, a placed order — and
+/// resending the same prompt risks doing that effect twice with no way to
+/// detect the duplication afterward. A human, who can check what actually
+/// happened, creates the replacement task; that gets its own fresh temporary
+/// agent and session, entirely outside this function. Contrast a
+/// **permanent** agent, which carries no in-flight delivery whose effect is
+/// in question and is restarted freely — see the module docs'
+/// "restart asymmetry" section and
+/// `disconnected_session_can_regain_sight_which_is_how_a_permanent_agent_recovers`
+/// in `tests/state_machine.rs`.
+///
+/// There is no line to delete here that a mutation test could restore to
+/// prove this — absence is not a rule a mutation can remove. It is instead
+/// pinned by assertion: see `interrupt_leaves_delivery_attempts_untouched...`
+/// in `tests/interrupted.rs`, which checks that `delivery_attempts` — the
+/// table that exists specifically to journal each delivery attempt — gains
+/// no row for `task_id` as a result of calling this function.
+///
+/// # Why this takes no `Lifetime`, unlike [`on_task_terminal`]
+///
+/// [`on_task_terminal`] can verify its caller's claim against a durable
+/// record (`tasks.status`, right there in this database). An agent's
+/// `lifetime` cannot be verified the same way: it lives in `.factory/config.yaml`
+/// (`factory_config::Agent::lifetime`, design §2.2), which this crate has no
+/// connection to and does not read. Accepting a `Lifetime` parameter here
+/// would only be trusting the caller's word for it — precisely the
+/// caller-supplied-enum design this module's docs reject for
+/// [`on_task_terminal`]'s own terminal-status check, for the identical
+/// reason. So `interrupt` takes none: deciding "this agent is temporary,
+/// therefore call `interrupt` instead of the permanent-agent recovery path"
+/// is the caller's job, stated as a precondition rather than an
+/// unverifiable parameter — the same shape of boundary the module docs
+/// already draw around [`stop`]'s "process confirmed gone" precondition.
+/// A caller that calls `interrupt` for a permanent agent gets exactly what
+/// it asked for (the session fails, its task — if any — is blocked as
+/// interrupted); nothing here detects or refuses that misuse.
+///
+/// # Errors
+///
+/// [`SessionError::TaskNotFound`] if `task_id` does not exist — checked
+/// before either write, so a garbage `task_id` fails the whole call rather
+/// than releasing the session's lease while silently skipping the half of
+/// this function's contract that touches `tasks` (an `UPDATE` matching zero
+/// rows would otherwise return `Ok` with nothing to show for it).
+/// [`SessionError::NotFound`] if `session_id` does not exist.
+/// [`SessionError::InvalidTransition`] if `session_id` is already `stopped`
+/// or `failed` — there is nothing left to interrupt, and silently succeeding
+/// would hide a caller bug (interrupting a session twice, or one another path
+/// already cleaned up).
+pub fn interrupt(
+    store: &mut factory_store::Store,
+    session_id: uuid::Uuid,
+    task_id: uuid::Uuid,
+) -> Result<(), SessionError> {
+    let tx = store.transaction()?;
+
+    // Checked up front, like `on_task_terminal`'s `TaskNotFound`, rather than
+    // left implicit in an `UPDATE` that would otherwise affect zero rows and
+    // return `Ok`. Without this, a garbage `task_id` would still fail the
+    // session (lease released) but silently skip the task-side half of this
+    // function's contract, with no error to say so.
+    let task_exists: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM tasks WHERE id = ?1",
+            [task_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(factory_store::StoreError::from)?;
+    if task_exists.is_none() {
+        return Err(SessionError::TaskNotFound(task_id));
+    }
+
+    let reason = format!("interrupted: task {task_id} was not terminal when the session died");
+    transition_in_tx(&tx, session_id, SessionState::Failed, Some(&reason))?;
+
+    // `blocked` is deliberately included among the rows this still updates —
+    // see the doc comment above and the module docs: design §2.4 does not
+    // count it as terminal, so a task already `blocked: clarification` or
+    // `blocked: permission` is still rewritten to `blocked: interrupted`
+    // here.
+    tx.execute(
+        "UPDATE tasks SET status = 'blocked', blocked_reason = 'interrupted', \
+         updated_at = CURRENT_TIMESTAMP \
+         WHERE id = ?1 AND status NOT IN ('done', 'failed', 'cancelled')",
+        [task_id.to_string()],
+    )
+    .map_err(factory_store::StoreError::from)?;
+
+    tx.commit().map_err(factory_store::StoreError::from)?;
+    Ok(())
+}
+
 /// Everything that can go wrong starting or transitioning a session.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -532,8 +981,25 @@ pub enum SessionError {
         holder_state: SessionState,
     },
 
+    #[error(
+        "agent `{agent_name}` already has {live_count} of its {max_sessions} allowed session(s) running\n  help: stop or wait for an existing session of this agent before starting another — max_sessions is per agent (design §2.2), not per scope"
+    )]
+    MaxSessionsReached {
+        agent_name: String,
+        max_sessions: u32,
+        live_count: u32,
+    },
+
     #[error("no session with id {0}")]
     NotFound(uuid::Uuid),
+
+    #[error("no task with id {0}")]
+    TaskNotFound(uuid::Uuid),
+
+    #[error(
+        "task {task_id} has status `{status}`, which is not terminal\n  help: only `done`, `failed`, or `cancelled` end a task; `blocked` does not (design §2.4) and must not tear down its session"
+    )]
+    TaskNotTerminal { task_id: uuid::Uuid, status: String },
 
     #[error(
         "session {id} cannot move from `{from}` to `{to}`\n  help: `{from}` only reaches {allowed}"

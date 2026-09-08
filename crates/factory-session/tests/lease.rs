@@ -127,8 +127,15 @@ fn case_variant_lease_conflict_spans_a_rename() {
 
     // Session A leases the directory under its original spelling.
     let original = common::resolve(&mixed_case_dir);
-    begin_start(&mut store, common::uid(1), scope_id, "agent-a", &original)
-        .expect("session A takes the lease as `Workspace`");
+    begin_start(
+        &mut store,
+        common::uid(1),
+        scope_id,
+        "agent-a",
+        10,
+        &original,
+    )
+    .expect("session A takes the lease as `Workspace`");
 
     // A case-only rename. Same inode; the on-disk spelling changes under
     // session A's still-open lease.
@@ -156,8 +163,15 @@ fn case_variant_lease_conflict_spans_a_rename() {
 
     // Session B attempts to start in the renamed directory. Must be
     // rejected: it is the same directory session A already leases.
-    let err = begin_start(&mut store, common::uid(2), scope_id, "agent-b", &candidate)
-        .expect_err("a case-only rename must not let a second session lease the same directory");
+    let err = begin_start(
+        &mut store,
+        common::uid(2),
+        scope_id,
+        "agent-b",
+        10,
+        &candidate,
+    )
+    .expect_err("a case-only rename must not let a second session lease the same directory");
     assert!(
         matches!(&err, SessionError::WorkspaceLeased { holder_agent, .. } if holder_agent == "agent-a"),
         "expected WorkspaceLeased naming session A's agent, got {err:?}"
@@ -186,8 +200,15 @@ fn delete_and_recreate_at_the_same_path_is_still_rejected() {
 
     let original = common::resolve(&workspace_dir);
     let original_file_id = FileId::of(original.as_path()).unwrap();
-    begin_start(&mut store, common::uid(1), scope_id, "agent-a", &original)
-        .expect("session A takes the lease");
+    begin_start(
+        &mut store,
+        common::uid(1),
+        scope_id,
+        "agent-a",
+        10,
+        &original,
+    )
+    .expect("session A takes the lease");
 
     // Delete and recreate at the identical path. Same string; SQLite has no
     // way to know the underlying directory changed. A brand new inode is
@@ -209,7 +230,15 @@ fn delete_and_recreate_at_the_same_path_is_still_rejected() {
     // Rejected either way — but, as measured, via the Rust scan
     // (`WorkspaceLeased`), because it re-resolves session A's *stored* path
     // text and lands on the very directory `recreated` also names.
-    let err = begin_start(&mut store, common::uid(2), scope_id, "agent-b", &recreated).expect_err(
+    let err = begin_start(
+        &mut store,
+        common::uid(2),
+        scope_id,
+        "agent-b",
+        10,
+        &recreated,
+    )
+    .expect_err(
         "a delete-and-recreate at the same path must still be rejected — the \
          workspace is, by path, still what session A holds",
     );
@@ -247,10 +276,24 @@ fn symlink_alias_is_also_caught() {
     // as a smoke test rather than the load-bearing one.
     assert_eq!(via_real, via_link);
 
-    begin_start(&mut store, common::uid(1), scope_id, "agent-a", &via_real)
-        .expect("start via real");
-    let err = begin_start(&mut store, common::uid(2), scope_id, "agent-b", &via_link)
-        .expect_err("the same directory reached through a symlink must be rejected");
+    begin_start(
+        &mut store,
+        common::uid(1),
+        scope_id,
+        "agent-a",
+        10,
+        &via_real,
+    )
+    .expect("start via real");
+    let err = begin_start(
+        &mut store,
+        common::uid(2),
+        scope_id,
+        "agent-b",
+        10,
+        &via_link,
+    )
+    .expect_err("the same directory reached through a symlink must be rejected");
     assert!(matches!(err, SessionError::WorkspaceLeased { .. }));
 }
 
@@ -278,8 +321,15 @@ fn a_stale_lease_does_not_block_an_unrelated_start() {
     let scope_id = common::seed_scope(&mut store, 100, "irrlicht", dir.path());
 
     let stale = common::resolve(&stale_dir);
-    begin_start(&mut store, common::uid(1), scope_id, "agent-stale", &stale)
-        .expect("session A takes the lease");
+    begin_start(
+        &mut store,
+        common::uid(1),
+        scope_id,
+        "agent-stale",
+        10,
+        &stale,
+    )
+    .expect("session A takes the lease");
 
     // A's directory is gone. Its `sessions` row still says `starting` — a
     // live lease-holding state — but nothing exists at its stored path
@@ -292,6 +342,7 @@ fn a_stale_lease_does_not_block_an_unrelated_start() {
         common::uid(2),
         scope_id,
         "agent-elsewhere",
+        10,
         &elsewhere,
     )
     .expect(
@@ -344,13 +395,27 @@ fn scan_continues_past_a_stale_row_to_find_a_later_conflict() {
 
     // A is inserted first, so it is scanned first under `ORDER BY rowid`.
     let stale = common::resolve(&stale_dir);
-    begin_start(&mut store, common::uid(1), scope_id, "agent-stale", &stale)
-        .expect("session A takes the lease");
+    begin_start(
+        &mut store,
+        common::uid(1),
+        scope_id,
+        "agent-stale",
+        10,
+        &stale,
+    )
+    .expect("session A takes the lease");
 
     // B is inserted second, on a real, distinct directory.
     let original = common::resolve(&mixed_case_dir);
-    begin_start(&mut store, common::uid(2), scope_id, "agent-b", &original)
-        .expect("session B takes the lease as `Real`");
+    begin_start(
+        &mut store,
+        common::uid(2),
+        scope_id,
+        "agent-b",
+        10,
+        &original,
+    )
+    .expect("session B takes the lease as `Real`");
 
     // Now A's directory is deleted — its row becomes the stale, unresolvable
     // one the scan must skip past, not stop at.
@@ -369,7 +434,15 @@ fn scan_continues_past_a_stale_row_to_find_a_later_conflict() {
          re-canonicalization"
     );
 
-    let err = begin_start(&mut store, common::uid(3), scope_id, "agent-c", &candidate).expect_err(
+    let err = begin_start(
+        &mut store,
+        common::uid(3),
+        scope_id,
+        "agent-c",
+        10,
+        &candidate,
+    )
+    .expect_err(
         "the scan must continue past A's stale row and still find B's \
          genuine conflict; if it stops at A, this begin_start wrongly \
          succeeds and two live sessions end up holding B's workspace",
