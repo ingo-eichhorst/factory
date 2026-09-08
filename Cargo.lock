@@ -144,6 +144,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "factory-session"
+version = "0.1.0"
+dependencies = [
+ "factory-paths",
+ "factory-store",
+ "rusqlite",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "factory-store"
 version = "0.1.0"
 dependencies = [

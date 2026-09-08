@@ -133,3 +133,101 @@ fn duplicate_canonical_scope_paths_are_rejected() {
     .expect_err("a second scope at the same canonical path must be rejected");
     assert_unique_violation(err);
 }
+
+/// `workspace_path` is declared `TEXT` with no `COLLATE NOCASE`, so SQLite's
+/// default `BINARY` collation treats `/x/Workspace` and `/x/workspace` as two
+/// distinct strings — the partial unique index above does not, and cannot,
+/// see a case-variant alias by itself.
+///
+/// This is not a bug in the index; it is the reason `factory-session`'s
+/// `begin_start` runs its own `(st_dev, st_ino)` scan (ADR 0009's
+/// 2026-09-08 correction) before ever reaching this index. Without this test
+/// a reader has no way to tell whether that Rust-level scan is load-bearing
+/// or decorative — this proves it is load-bearing, by showing what the
+/// database alone accepts.
+#[test]
+fn the_database_index_alone_does_not_see_case_variant_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+
+    let tx = store.transaction().expect("begin");
+    common::insert_scope(
+        &tx,
+        "scope-1",
+        "irrlicht",
+        "/company/root/projects/irrlicht",
+    )
+    .expect("insert scope");
+    common::insert_session(
+        &tx,
+        "session-1",
+        "scope-1",
+        "agent",
+        "/company/root/projects/irrlicht-case-probe/Workspace",
+        "running",
+    )
+    .expect("first spelling holds the lease");
+    // A second session naming the *same directory on a case-insensitive
+    // volume*, spelled differently, is accepted by the index alone — BINARY
+    // collation compares bytes, not filesystem identity.
+    common::insert_session(
+        &tx,
+        "session-2",
+        "scope-1",
+        "agent",
+        "/company/root/projects/irrlicht-case-probe/workspace",
+        "running",
+    )
+    .expect(
+        "a case-variant spelling of the same directory is NOT rejected by \
+         the index alone; this is the gap factory-session's (st_dev, st_ino) \
+         scan exists to close",
+    );
+    tx.commit().expect("commit");
+}
+
+/// `sessions_one_live_lease_per_workspace` is what rejects an exact-string
+/// duplicate — not application code that could be deleted. Proved by
+/// removing the index at runtime and showing the identical insert that
+/// `a_second_lease_holding_session_on_the_same_workspace_is_rejected` proves
+/// fails now succeeds without it.
+#[test]
+fn dropping_the_lease_index_allows_an_exact_duplicate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open(dir.path()).expect("open");
+
+    store
+        .connection()
+        .execute("DROP INDEX sessions_one_live_lease_per_workspace", [])
+        .expect("drop the index that normally enforces exclusivity");
+
+    common::insert_scope(
+        store.connection(),
+        "scope-1",
+        "irrlicht",
+        "/company/root/projects/irrlicht",
+    )
+    .expect("insert scope");
+    common::insert_session(
+        store.connection(),
+        "session-1",
+        "scope-1",
+        "agent",
+        WORKSPACE,
+        "running",
+    )
+    .expect("first session holds the lease");
+    common::insert_session(
+        store.connection(),
+        "session-2",
+        "scope-1",
+        "agent",
+        WORKSPACE,
+        "running",
+    )
+    .expect(
+        "with the index gone, an exact-string duplicate lease-holder on the \
+         same workspace is wrongly accepted — proving the index, not Rust, \
+         is what normally rejects it",
+    );
+}

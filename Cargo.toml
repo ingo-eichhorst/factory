@@ -6,6 +6,7 @@ members = [
     "crates/factory-context",
     "crates/factory-paths",
     "crates/factory-registry",
+    "crates/factory-session",
     "crates/factory-store",
 ]
 
