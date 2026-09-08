@@ -140,19 +140,30 @@ fn unknown_toplevel_runtime_block_is_ignored_not_rejected() {
     assert_eq!(config.scopes[0].path, PathBuf::from("assistant"));
     // Explicit, on top of the full-value equality below: this fixture's
     // top-level `runtime:` block carries its own nested, indented `agents:`
-    // list (matching the live `assistant` scope's shape). That must
-    // contribute zero agents to this scope -- a scan or parse that got
-    // greedy and picked it up would silently produce a second agent here
-    // rather than fail loudly where the mistake was made.
-    assert_eq!(config.scopes[0].agents.len(), 1);
+    // list (matching the live `assistant` scope's corrected shape, including
+    // reusing the same two agent names). That must contribute zero agents to
+    // this scope -- a scan or parse that got greedy and picked it up would
+    // silently change this count rather than fail loudly where the mistake
+    // was made. Asserting exactly 2 here (not "at least 2") is what makes a
+    // leak of the nested block's own entries visible instead of masked by a
+    // name collision.
+    assert_eq!(config.scopes[0].agents.len(), 2);
     assert_eq!(
         config.scopes[0].agents,
-        vec![Agent {
-            name: "Assistant".to_string(),
-            harness: Harness::Pi,
-            max_sessions: 2,
-            lifetime: Lifetime::Permanent,
-        }]
+        vec![
+            Agent {
+                name: "assistant".to_string(),
+                harness: Harness::Pi,
+                max_sessions: 1,
+                lifetime: Lifetime::Permanent,
+            },
+            Agent {
+                name: "assistant-chat".to_string(),
+                harness: Harness::Pi,
+                max_sessions: 1,
+                lifetime: Lifetime::Permanent,
+            }
+        ]
     );
     assert_eq!(config.origin, path.clone());
     // This fixture's nine-line comment header pushes the scope entry's `id`

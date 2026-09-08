@@ -17,10 +17,15 @@ scopes:
   - id: 57a4ca60-28a4-486b-a073-99de5782e32e
     name: assistant-fixture
     path: assistant
-    agent:
-      name: Assistant
-      harness: pi
-      max_sessions: 2
+    agents:
+      - name: assistant
+        harness: pi
+        max_sessions: 1
+        lifetime: permanent
+      - name: assistant-chat
+        harness: pi
+        max_sessions: 1
+        lifetime: permanent
 
 runtime:
   version: 1

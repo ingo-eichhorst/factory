@@ -147,6 +147,41 @@ The fix is a configuration migration — moving the two agents into Factory's
 `runtime:` block and therefore needs its own task with a migration and rollback
 plan, like the task store. It is deliberately not folded into a slice here.
 
+**Resolved 2026-09-08.** The registry's `assistant` entry now uses `agents:`
+to name both agents the `runtime:` block actually starts — `assistant` and
+`assistant-chat`, harness `pi`, `lifetime: permanent`, `max_sessions: 1`
+each — instead of one agent with `max_sessions: 2`. `crates/factory-config`
+already accepted an `agents:` list before this fix; only the registry entry
+was wrong, so nothing in the crate changed.
+
+The two agents' real working directories differ — `assistant` and
+`assistant/chat` — and the scope declares one `path:`. That is not a gap in
+the schema and needs no follow-up: design §2.3 makes the workspace a property
+of a *session*, not of an agent (`start(scope, session_id, workspace,
+generated_context)`), and §2.3 lists an existing unregistered descendant as a
+permitted workspace, which is exactly what `assistant/chat` is. A per-agent
+`cwd:` in the registry would be a second place to say where a session runs,
+disagreeing with the one the start call already carries. Slice 6 validates and
+leases that path; the review of this fix confirmed the reading against the
+design rather than assuming it.
+The migration and rollback plan this item asked for, sized to the change: the
+edit is one entry in one already-committed file (`a49bd20`), so rollback is
+`git checkout -- .factory/config.yaml`. No consumer needs reconciling —
+`ensure_assistant_agents.py` reads only the `runtime:` block in its own,
+untouched file; `factory_tasks.py` uses the registry's path as an ancestor
+marker without parsing agents; `factory-config` is the only parser of this
+entry and has no other caller yet. Covered by
+`crates/factory-config/tests/live_registry.rs`, which loads this file
+directly (skipping, not failing, where the company root is not checked out —
+`projects/factory`'s own subtree remote, see its `git:` comment above) and
+fails on the old shape.
+Also stale as of this fix: Slice 10's acceptance criteria and risk analysis
+below still cite `assistant` as a live example of one agent configured with
+`max_sessions: 2` in one workspace (search for "like `assistant`"). That
+example no longer matches the registry — flagged here rather than corrected
+there, since re-deriving Slice 10's concrete example is that slice's work, not
+this fix's.
+
 ## 2. Root SQLite store and idempotent initialization
 
 **Objective:** Make the root database the durable source for runtime state

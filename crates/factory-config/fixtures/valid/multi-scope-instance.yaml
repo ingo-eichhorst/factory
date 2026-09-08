@@ -12,10 +12,13 @@ scopes:
   - id: 96db938d-5730-4aa2-9e22-1d45b99e4bb7
     name: assistant
     path: assistant
-    agent:
-      name: Assistant
-      harness: pi
-      max_sessions: 2
+    agents:
+      - name: assistant
+        harness: pi
+        max_sessions: 1
+      - name: assistant-chat
+        harness: pi
+        max_sessions: 1
 
   - id: e9f1211c-b927-4427-b99c-b7c540b27658
     name: irrlicht
