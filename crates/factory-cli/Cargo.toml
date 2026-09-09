@@ -1,0 +1,29 @@
+[package]
+name = "factory-cli"
+description = "The `factory` executable (design §7, ADR 0002 decision 1): one binary that is the daemon in one mode and its client in every other"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "factory"
+path = "src/main.rs"
+
+[dependencies]
+factory-config = { path = "../factory-config" }
+factory-daemon = { path = "../factory-daemon" }
+factory-doctor = { path = "../factory-doctor" }
+factory-paths = { path = "../factory-paths" }
+factory-store = { path = "../factory-store" }
+clap.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

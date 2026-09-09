@@ -2,9 +2,12 @@
 resolver = "3"
 members = [
     "crates/factory-adapter",
+    "crates/factory-cli",
     "crates/factory-config",
     "crates/factory-context",
+    "crates/factory-daemon",
     "crates/factory-delegation",
+    "crates/factory-doctor",
     "crates/factory-e2e",
     "crates/factory-paths",
     "crates/factory-recovery",
@@ -31,6 +34,19 @@ serde-saphyr = "1.2"
 thiserror = "2"
 uuid = "1"
 tempfile = "3"
+
+# Station 10's two new outside dependencies.
+#
+# `clap` parses design §7's command surface. The derive feature keeps the
+# surface declared next to the types it produces, so a command cannot exist in
+# the parser without a struct that carries its arguments.
+#
+# `fd-lock` holds ADR 0014's installation lock — the exclusive lock ADR 0012
+# deferred until something long-lived existed to hold it. It wraps `flock` in a
+# safe API, which this workspace requires: `unsafe_code` is forbidden, so
+# calling `libc::flock` here is not an option.
+clap = { version = "4", features = ["derive"] }
+fd-lock = "4"
 
 # `bundled` compiles SQLite into the binary rather than linking whatever macOS
 # ships, so `VACUUM INTO` and the locking behaviour cannot change under Factory

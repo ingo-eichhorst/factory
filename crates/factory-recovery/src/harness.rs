@@ -412,13 +412,17 @@ fn task_under_review_of(
     let row: Option<(String, String, Option<String>)> = store
         .connection()
         .query_row(
-            "SELECT id, status, blocked_reason FROM tasks WHERE assigned_session_id = ?1 \
-             AND (status = 'running' \
-                  OR (status = 'queued' AND EXISTS( \
-                        SELECT 1 FROM delivery_attempts \
-                        WHERE delivery_attempts.task_id = tasks.id)) \
-                  OR (status = 'blocked' AND blocked_reason = 'interrupted')) \
-             ORDER BY created_at, id LIMIT 1",
+            &format!(
+                "SELECT id, status, blocked_reason FROM tasks WHERE assigned_session_id = ?1 \
+                 AND (status = 'running' \
+                      OR (status = 'queued' AND EXISTS( \
+                            SELECT 1 FROM delivery_attempts \
+                            WHERE delivery_attempts.task_id = tasks.id \
+                            AND {predicate})) \
+                      OR (status = 'blocked' AND blocked_reason = 'interrupted')) \
+                 ORDER BY created_at, id LIMIT 1",
+                predicate = factory_task::deliver::ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL
+            ),
             [session_id.to_string()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )

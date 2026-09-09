@@ -140,6 +140,25 @@ impl PromptWriter for FailingWriter {
     }
 }
 
+/// A writer that refuses before writing anything — the shape
+/// `AdapterPromptWriter` takes when the adapter reports `SessionBusy`.
+struct RefusingWriter {
+    calls: usize,
+}
+
+impl PromptWriter for RefusingWriter {
+    fn write_prompt(
+        &mut self,
+        _session_id: uuid::Uuid,
+        _prompt: &str,
+    ) -> Result<(), PromptWriteError> {
+        self.calls += 1;
+        Err(PromptWriteError::refused(
+            "the session is working; nothing was submitted",
+        ))
+    }
+}
+
 /// What the row looked like, from the writer's own point of view, the
 /// instant it was called — read through a *separate* connection to the same
 /// database file, not through the `Store` `deliver` is using, so this is
@@ -768,4 +787,81 @@ fn authorise_resume_of_a_nonexistent_task_is_not_found() {
 
     let err = authorise_resume(&mut store, uid(999)).expect_err("no such task");
     assert!(matches!(err, TaskError::NotFound(id) if id == uid(999)));
+}
+
+/// A refusal is not a delivery, so it must not spend the task's one
+/// authorised delivery.
+///
+/// The writer established that nothing reached the terminal — that is what
+/// separates `PromptWriteError::refused` from `PromptWriteError::new`. Design
+/// §5 refuses to resend after an *ambiguous* failure; a refusal is not
+/// ambiguous. Counting it would send an operator to `task resume` to
+/// authorise a second delivery of a prompt that was never sent once, and an
+/// authorisation performed routinely stops being read.
+#[test]
+fn a_refused_delivery_does_not_spend_the_tasks_authorised_delivery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_assigned_task(&mut store, 3, scope_id, session_id, "do it");
+
+    let mut refusing = RefusingWriter { calls: 0 };
+    deliver(&mut store, task_id, &mut refusing).expect_err("a refusal is still an error");
+    assert_eq!(refusing.calls, 1);
+
+    // The refusal is journalled — design §5 records what happened — but it is
+    // recorded as `refused`, which every "was this possibly delivered?"
+    // question excludes.
+    let rows = delivery_attempts_for(&store, task_id);
+    assert_eq!(rows.len(), 1, "the refusal is still journalled");
+    assert_eq!(rows[0].1.as_deref(), Some("refused"));
+
+    // And so the next attempt goes through, with no human authorisation.
+    let mut second = RecordingWriter::new();
+    deliver(&mut store, task_id, &mut second)
+        .expect("a refusal left the authorised delivery unspent");
+    assert_eq!(second.calls.len(), 1, "the prompt reaches the writer");
+}
+
+/// The other half, and the one that must not regress: an *ambiguous* failure
+/// still spends the authorisation. Without this test, making every failure a
+/// refusal would pass the test above.
+#[test]
+fn an_ambiguous_failure_still_spends_the_tasks_authorised_delivery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_assigned_task(&mut store, 3, scope_id, session_id, "do it");
+
+    let mut failing = FailingWriter;
+    deliver(&mut store, task_id, &mut failing).expect_err("first delivery fails");
+
+    let rows = delivery_attempts_for(&store, task_id);
+    assert_eq!(rows[0].1.as_deref(), Some("failed"));
+
+    let mut second = RecordingWriter::new();
+    let err = deliver(&mut store, task_id, &mut second)
+        .expect_err("an ambiguous failure must still block a resend");
+    assert!(matches!(err, DeliverError::AlreadyAttempted(id) if id == task_id));
+    assert!(second.calls.is_empty());
+}
+
+/// `mark_running` insists the task was actually delivered. A refusal is not a
+/// delivery, so a task whose only attempt was refused is not markable.
+#[test]
+fn mark_running_refuses_a_task_whose_only_attempt_was_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_assigned_task(&mut store, 3, scope_id, session_id, "do it");
+
+    let mut refusing = RefusingWriter { calls: 0 };
+    deliver(&mut store, task_id, &mut refusing).expect_err("refused");
+
+    let err = mark_running(&mut store, task_id)
+        .expect_err("a refused attempt is not evidence a prompt was received");
+    assert!(matches!(err, DeliverError::NotDelivered(id) if id == task_id));
 }

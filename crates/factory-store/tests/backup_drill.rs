@@ -2,6 +2,13 @@
 //! until it has been restored." Checks integrity, `user_version`, row
 //! counts, and — the step that actually matters — that the snapshot opens
 //! read-write and accepts a write.
+//!
+//! ADR 0018 decision 1 moves the first three (inspection) steps through
+//! `Store::open_read_only`: inspecting a snapshot must not be the thing that
+//! migrates it, which opening it through `Store::open_at` — as this test did
+//! before that ADR — would silently do. Only the fourth step, which exists
+//! specifically to prove the snapshot also works as a live database, opens
+//! read-write.
 
 mod common;
 
@@ -17,6 +24,17 @@ fn row_counts(store: &mut Store, tables: &[&str]) -> Vec<i64> {
         .collect();
     tx.commit().expect("commit read-only transaction");
     counts
+}
+
+/// The same row-count check, but through a borrowed connection rather than
+/// [`Store::transaction`] — the only thing a [`Store::open_read_only`]
+/// handle can offer, since a write-lock transaction is unreachable through
+/// it by design.
+fn row_counts_read_only(store: &Store, tables: &[&str]) -> Vec<i64> {
+    tables
+        .iter()
+        .map(|table| common::row_count(store.connection(), table).expect("count"))
+        .collect()
 }
 
 #[test]
@@ -84,23 +102,32 @@ fn backup_and_restore_drill() {
         other => panic!("expected StoreError::BackupExists, got {other:?}"),
     }
 
-    // The drill: step 1, integrity.
-    let mut restored = Store::open_at(&backup_path).expect("open the snapshot");
-    assert_eq!(restored.integrity_check().expect("integrity_check"), "ok");
+    // The drill: step 1, integrity — through the read-only door (ADR 0018
+    // decision 1). Inspecting a snapshot must not be the act that migrates
+    // it: `Store::open_at` would apply every pending migration here, and an
+    // old snapshot opened later to inspect it would be silently rewritten.
+    let inspected = Store::open_read_only(&backup_path).expect("open the snapshot read-only");
+    assert_eq!(inspected.integrity_check().expect("integrity_check"), "ok");
 
-    // Step 2, schema version matches the source.
+    // Step 2, schema version matches the source — and is the version the
+    // snapshot was actually taken at, since open_read_only never migrates.
     assert_eq!(
-        restored.schema_version().expect("restored schema_version"),
+        inspected.schema_version().expect("restored schema_version"),
         source_version
     );
 
     // Step 3, row counts match the source.
-    let restored_counts = row_counts(&mut restored, TABLES);
+    let restored_counts = row_counts_read_only(&inspected, TABLES);
     assert_eq!(restored_counts, source_counts);
+    drop(inspected);
 
     // Step 4, the snapshot opens read-write and accepts a write. A snapshot
     // that only passes an integrity check can still be unusable as a
-    // working database; this is the step that actually exercises that.
+    // working database; this is the step that actually exercises that. This
+    // is the one place a snapshot may be migrated, and it comes after the
+    // user_version comparison above, so that comparison still saw the
+    // version the snapshot was taken at.
+    let mut restored = Store::open_at(&backup_path).expect("open the snapshot read-write");
     let tx = restored
         .transaction()
         .expect("begin write on the restored snapshot");

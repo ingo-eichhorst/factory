@@ -1,0 +1,31 @@
+[package]
+name = "factory-daemon"
+description = "The Factory supervisor and its local socket API (design §3, ADR 0014, ADR 0002): the only process that mutates core state, and the client half its CLI speaks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+factory-adapter = { path = "../factory-adapter" }
+factory-config = { path = "../factory-config" }
+factory-context = { path = "../factory-context" }
+factory-delegation = { path = "../factory-delegation" }
+factory-paths = { path = "../factory-paths" }
+factory-recovery = { path = "../factory-recovery" }
+factory-registry = { path = "../factory-registry" }
+factory-session = { path = "../factory-session" }
+factory-store = { path = "../factory-store" }
+factory-task = { path = "../factory-task" }
+fd-lock.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

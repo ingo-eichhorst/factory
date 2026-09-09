@@ -11,6 +11,13 @@ publish.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
+
+# Not in `[workspace.dependencies]`: it is a workspace-member path crate, like
+# every other consumer of `CanonicalPath` (factory-session, factory-registry,
+# factory-recovery, …), none of which route it through the workspace table
+# either — that table holds external crates.io dependencies only.
+factory-paths = { path = "../factory-paths" }
 
 [dev-dependencies]
 tempfile.workspace = true

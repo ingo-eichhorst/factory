@@ -89,14 +89,48 @@ pub trait PromptWriter {
 #[error("{message}")]
 pub struct PromptWriteError {
     message: String,
+    /// Whether the writer refused *before* anything could reach the terminal.
+    ///
+    /// This is the one thing only the writer can know, and it decides whether
+    /// the task's authorised delivery is spent. An ordinary failure is
+    /// ambiguous — the keystrokes may have landed — so design §5 forbids an
+    /// automatic resend and the attempt counts. A refusal is not ambiguous:
+    /// nothing was written, so counting it would make a human authorise a
+    /// resend for a delivery that never happened, and an authorisation
+    /// ceremony performed routinely stops being read.
+    refused_before_sending: bool,
 }
 
 impl PromptWriteError {
+    /// The writer tried and failed. The attempt counts, because it may have
+    /// arrived.
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            refused_before_sending: false,
         }
+    }
+
+    /// The writer refused and provably wrote nothing — a busy session, a
+    /// precondition it checked itself. The attempt does not count.
+    ///
+    /// Only use this where "nothing was written" is a fact the writer
+    /// established, never where it is merely likely: a wrong `refused` here
+    /// is a silent second delivery, which is precisely what at-most-once
+    /// exists to prevent.
+    #[must_use]
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            refused_before_sending: true,
+        }
+    }
+
+    /// Whether this error means nothing reached the terminal.
+    #[must_use]
+    pub fn refused_before_sending(&self) -> bool {
+        self.refused_before_sending
     }
 }
 
@@ -160,6 +194,11 @@ fn render_prompt(task_id: uuid::Uuid, prompt: &str) -> String {
 enum DeliveryOutcome {
     Sent,
     Failed,
+    /// The writer refused before writing anything. Journalled like any other
+    /// attempt — design §5 records what happened — but excluded from every
+    /// "was this possibly delivered?" question by
+    /// [`ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL`].
+    Refused,
 }
 
 impl DeliveryOutcome {
@@ -167,6 +206,7 @@ impl DeliveryOutcome {
         match self {
             Self::Sent => "sent",
             Self::Failed => "failed",
+            Self::Refused => "refused",
         }
     }
 }
@@ -231,6 +271,26 @@ pub enum DeliverError {
 /// because its response was lost"). Leaving the task `queued` with a
 /// `failed`-outcome `delivery_attempts` row is exactly the ambiguous state
 /// ADR 0019 decision 2's restore reconciliation is built to recognise.
+/// The SQL predicate for "this attempt may have reached the terminal".
+///
+/// **One home for one rule.** Four places ask whether a task was possibly
+/// delivered, and they must agree: this module's at-most-once count and its
+/// [`mark_running`] guard, and `factory-recovery`'s restore table (ADR 0019
+/// decision 2's middle row) and its harness-change review. A refusal — the
+/// writer established that nothing was written — is evidence of *nothing*
+/// having happened, so none of the four may treat it as delivery.
+///
+/// It is exported as SQL rather than as a Rust function because two of the
+/// four uses are correlated subqueries inside a larger statement, which a
+/// function cannot express. The column is qualified so it reads correctly in
+/// both forms.
+///
+/// If you add a fifth caller, use this. If you change it, the mutation that
+/// catches a missed caller is to delete the predicate here and confirm a test
+/// dies in every crate that claims to depend on it.
+pub const ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL: &str =
+    "(delivery_attempts.outcome IS NULL OR delivery_attempts.outcome <> 'refused')";
+
 pub fn deliver<W: PromptWriter>(
     store: &mut factory_store::Store,
     id: uuid::Uuid,
@@ -272,7 +332,10 @@ pub fn deliver<W: PromptWriter>(
         // [`authorise_resume`] for how, and why, that limit ever moves.
         let attempted_count: i64 = tx
             .query_row(
-                "SELECT COUNT(*) FROM delivery_attempts WHERE task_id = ?1",
+                &format!(
+                    "SELECT COUNT(*) FROM delivery_attempts WHERE task_id = ?1 \
+                     AND {ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL}"
+                ),
                 [id.to_string()],
                 |row| row.get(0),
             )
@@ -297,6 +360,7 @@ pub fn deliver<W: PromptWriter>(
     let write_result = writer.write_prompt(session_id, &rendered);
     let outcome = match &write_result {
         Ok(()) => DeliveryOutcome::Sent,
+        Err(source) if source.refused_before_sending() => DeliveryOutcome::Refused,
         Err(_) => DeliveryOutcome::Failed,
     };
 
@@ -348,7 +412,10 @@ pub fn mark_running(store: &mut factory_store::Store, id: uuid::Uuid) -> Result<
 
     let delivered: bool = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM delivery_attempts WHERE task_id = ?1)",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM delivery_attempts WHERE task_id = ?1 \
+                 AND {ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL})"
+            ),
             [id.to_string()],
             |row| row.get(0),
         )

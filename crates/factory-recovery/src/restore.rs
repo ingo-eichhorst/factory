@@ -245,9 +245,17 @@ pub fn reconcile(store: &mut factory_store::Store) -> Result<RestoreReport, Reco
                     });
                 }
                 "queued" => {
+                    // A refused attempt wrote nothing (see
+                    // `factory_task::deliver::ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL`),
+                    // so it is not the "weaker evidence" this row turns on.
                     let has_attempt: bool = tx
                         .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM delivery_attempts WHERE task_id = ?1)",
+                            &format!(
+                                "SELECT EXISTS(SELECT 1 FROM delivery_attempts \
+                                 WHERE task_id = ?1 AND {predicate})",
+                                predicate =
+                                    factory_task::deliver::ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL
+                            ),
                             [&id_str],
                             |row| row.get(0),
                         )

@@ -398,3 +398,56 @@ fn calling_it_twice_does_not_retire_a_session_still_awaiting_review() {
     assert_eq!(status, "blocked");
     assert_eq!(blocked_reason.as_deref(), Some("interrupted"));
 }
+
+/// The same row, with a *refused* attempt: not review-worthy, because
+/// nothing was sent.
+///
+/// `a_queued_task_with_a_prior_delivery_attempt_requires_review_like_running_work`
+/// turns on the attempt being evidence that a prompt may already have
+/// arrived. A refusal is evidence of the opposite — the writer established
+/// that it wrote nothing — so this task is an ordinary queued task and its
+/// session retires cleanly, lease released.
+///
+/// One home for that rule:
+/// `factory_task::deliver::ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL`. Neuter it
+/// and this test fails alongside `factory-task`'s and `restore.rs`'s.
+#[test]
+fn a_queued_task_whose_only_attempt_was_refused_stays_queued_because_nothing_was_sent() {
+    let (_db_dir, mut store) = open_store();
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let scope = seed_scope(&mut store, 1, "scope", workspace.path());
+    let session = uid(2);
+    harness_common::seed_session(
+        &mut store,
+        session,
+        scope,
+        "pi",
+        workspace.path(),
+        "running",
+        Some("wE:p1"),
+    );
+    let task = seed_task(&mut store, 3, scope, "queued", None, Some(session));
+    seed_refused_delivery_attempt(&mut store, task, session);
+    let adapter = FakeAdapter::new().with_observation(
+        "wE:p1",
+        observation("wE:p1", Confidence::Authoritative, false),
+    );
+
+    let records =
+        harness_changed(&mut store, scope, "pi", &adapter).expect("harness_changed must succeed");
+
+    assert_eq!(records.len(), 1);
+    assert_ne!(
+        records[0].outcome,
+        HarnessChangeOutcome::RequiresReview { task_id: task },
+        "a refused attempt is not work in flight"
+    );
+    let (status, blocked_reason) = task_status(&store, task);
+    assert_eq!(status, "queued", "queued tasks remain queued");
+    assert_eq!(blocked_reason, None);
+    assert_eq!(
+        delivery_attempts_count(&store, task),
+        1,
+        "the refusal is still preserved in the delivery history"
+    );
+}

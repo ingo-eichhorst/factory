@@ -388,9 +388,18 @@ only one of the three. Herdr reports a transcript path for all three.
 
 So the join key ADR 0011 decision 5 assumed — workspace path, plus a session
 UUID "where present" — is not available for Pi. Working directory is not unique
-either: two directories on this machine host several sessions each, and a scope
-with `max_sessions: 2` like `assistant` makes that structural rather than
-incidental.
+either: two directories on this machine host several sessions each, and more
+than one session of one harness in one directory makes that structural rather
+than incidental.
+
+**Concrete example re-derived during station 10**, replacing the stale
+`assistant` one this section carried (see the resolved item in section 1 —
+`assistant` is now two agents with `max_sessions: 1` each, in two directories).
+Measured on 2026-09-09: Irrlicht reports **four `claude-code` sessions sharing
+the single working directory `projects/factory`**. A working-directory join
+would attribute any one of the four to any other. The example moved harness but
+the conclusion did not, which is the point — the ambiguity is a property of a
+scope running concurrent sessions, not of Pi.
 
 - For **Pi**, take the join from Herdr: `herdr agent list` gives per pane the
   transcript path (hence the session UUID), `agent_status`, and
@@ -706,6 +715,75 @@ count, size, and age span of `.factory/backups/`.
 **Decisions or risks to resolve first:** Confirm Herdr automation APIs and test
 fixtures for both harnesses. If either adapter cannot observe safely, retain its
 manual-confirmation mode rather than weakening at-most-once delivery.
+
+**Resolved before station 10 began, by measurement on 2026-09-09.**
+
+*Pi automates.* Herdr 0.8.0 carries every command the contract needs:
+`herdr agent start|prompt|send-keys|wait|attach|read`, `herdr pane
+split|close|run|send-text`, `herdr workspace create|close`. And it is told Pi's
+state rather than reading it — `herdr agent explain` on a live Pi pane answers
+`screen_detection_skip_reason: full_lifecycle_hook_authority`, which is what
+ADR 0017 requires before an observation may be called authoritative.
+
+*Claude Code does not, and this is the risk clause landing exactly where it was
+aimed.* The same command on a live Claude pane answers
+`rule: live_prompt_box (region=prompt_box_body priority=950)`, `evidence: "❯\n"`.
+Herdr reads Claude's screen. So the Claude adapter takes its state from
+Irrlicht, as ADR 0011 always said it would.
+
+Irrlicht does carry the join key this backlog promised for `claude-code`,
+though not where the earlier note implied: the Herdr pane is nested under
+`launcher.herdr_pane_id`, present for **5 of 5** live `claude-code` sessions
+alongside `launcher.herdr_socket_path`. ADR 0017's rule that the pane is the
+join key therefore holds for both harnesses, and neither adapter joins on
+working directory.
+
+What Irrlicht cannot supply is authority. All five sessions report
+`confidence: "medium"` and `last_event: "transcript_activity"` — state inferred
+from a transcript, which ADR 0017 distinguishes from state a harness reports.
+The Claude adapter therefore returns [`Confidence::Degraded`] and never
+`Authoritative`. Irrlicht's `/api/v1/hooks/claudecode` endpoint does exist and
+Claude Code posts to it, but no session's state is sourced from it today.
+
+**The consequence is deliberate and is the manual-confirmation mode this risk
+clause asked for.** `factory_recovery::evidence::may_promote_from_disconnected`
+requires `Authoritative`, so a Claude Code session that reaches `disconnected`
+is returned to service by a human, never by the adapter's own reading. Claude
+Code passes the same contract tests for start, send, interrupt and stop; what
+differs is what its observations are allowed to decide. Weakening the evidence
+rule to admit `Degraded` would have made at-most-once delivery rest on a
+heuristic for one of the two harnesses, which is the trade this clause forbids.
+
+**The CLI is a client, per ADR 0014.** Station 10 builds the daemon that
+decision requires, its Unix-socket transport, and the installation lock ADR 0012
+deferred until something long-lived existed to hold it. It builds the
+request/response half only: ADR 0002 also specifies an event stream, idempotency
+keys, an outbox and CQRS projections, and under ADR 0010 decision 3 those are
+target-state, because no backlog slice carries them. `factory doctor` is the
+one component outside the daemon that opens the database, read-only, because
+"the daemon is down" is the condition an operator runs it to diagnose.
+
+**Design §7 is implemented in part, and stubbed nowhere.** In scope here:
+`init`, `start|stop|status|doctor`, `scope`, `agent`, `task`, `context`. Absent,
+not stubbed: `secret` (station 13), `schedule` (station 11), `knowledge`,
+`memory` and `agent list` (station 12). A stub that exits non-zero is a command
+that exists, and an operator reads it as broken rather than as unbuilt.
+
+**An agent reports its own result, and that is not an observation.** Design §3
+lists "capturing the final response when the harness exposes it" among adapter
+duties and design §5 step 5 stores it, but neither says how an agent that
+finishes work tells Factory so. Station 10 answers it with `factory task
+done|fail|block`, run by the agent inside its own session: a push, over the
+same client transport as every other command. It changes nothing about
+`TaskSignal` — no harness state closes a task, and now nothing has to, because
+the agent says so itself.
+
+When such a task carries a delegation chain, the delegating session is told,
+through the same journal-then-write path as any other delivery and carrying
+nothing but the task id and its outcome. That is not a message primitive and
+must not become one: the task record is still the only durable unit of work
+exchanged, so design §2.4 and ADR 0010 decision 2 hold unchanged. A caller that
+would rather block than be told uses design §7's `task send --wait`.
 
 ## 11. Shared task audit and cron dispatcher
 

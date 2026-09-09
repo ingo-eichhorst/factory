@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use factory_adapter::{Adapter, AdapterError, Observation, PaneId};
+use factory_adapter::{Adapter, AdapterError, Observation, PaneId, StartRequest, StartedSession};
 use factory_store::Store;
 
 /// A deterministic, distinct, syntactically valid UUID — mirrors
@@ -129,6 +129,24 @@ pub fn seed_task(
 /// carry delivery history (ADR 0019 decision 2's "queued with at least one
 /// `delivery_attempts` row" case, and the "recorded delivery history"
 /// backlog §9 asks [`GiveUpOutcome`] to leave intact).
+/// A *refused* attempt: journalled, but with the outcome a writer records
+/// when it established that nothing reached the terminal. Excluded from every
+/// "possibly delivered" question by
+/// `factory_task::deliver::ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL`.
+pub fn seed_refused_delivery_attempt(
+    store: &mut Store,
+    task_id: uuid::Uuid,
+    session_id: uuid::Uuid,
+) {
+    let tx = store.transaction().expect("begin");
+    tx.execute(
+        "INSERT INTO delivery_attempts (task_id, session_id, outcome) VALUES (?1, ?2, 'refused')",
+        (task_id.to_string(), session_id.to_string()),
+    )
+    .expect("insert refused delivery attempt");
+    tx.commit().expect("commit");
+}
+
 pub fn seed_delivery_attempt(store: &mut Store, task_id: uuid::Uuid, session_id: uuid::Uuid) {
     let tx = store.transaction().expect("begin");
     tx.execute(
@@ -261,6 +279,39 @@ impl FakeAdapter {
 }
 
 impl Adapter for FakeAdapter {
+    // ADR 0017 decision 5, unchanged by the Slice-10 expansion of `Adapter`:
+    // this crate's recovery paths only ever call `observe`. `start`, `send`,
+    // `interrupt`, `stop`, and `attach_command` are documented operator
+    // procedures here, not something a recovery test should ever reach — so
+    // `FakeAdapter` implements them as loud failures rather than quiet
+    // no-ops, exactly like this file's own `agent_explain must not be
+    // called` fakes elsewhere in the crate: a recovery test that starts
+    // calling one of these must fail immediately, not silently pass.
+    fn start(&self, _req: &StartRequest) -> Result<StartedSession, AdapterError> {
+        unreachable!("factory-recovery's tests never call Adapter::start")
+    }
+
+    fn send(
+        &self,
+        _pane: &PaneId,
+        _task_id: uuid::Uuid,
+        _prompt: &str,
+    ) -> Result<(), AdapterError> {
+        unreachable!("factory-recovery's tests never call Adapter::send")
+    }
+
+    fn interrupt(&self, _pane: &PaneId) -> Result<(), AdapterError> {
+        unreachable!("factory-recovery's tests never call Adapter::interrupt")
+    }
+
+    fn stop(&self, _pane: &PaneId) -> Result<(), AdapterError> {
+        unreachable!("factory-recovery's tests never call Adapter::stop")
+    }
+
+    fn attach_command(&self, _pane: &PaneId) -> Result<Vec<String>, AdapterError> {
+        unreachable!("factory-recovery's tests never call Adapter::attach_command")
+    }
+
     fn observe(&self, pane: &PaneId) -> Result<Observation, AdapterError> {
         if let Some(detail) = self.errors.get(&pane.0) {
             return Err(AdapterError::UnreadableOutput {

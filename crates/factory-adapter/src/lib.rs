@@ -8,7 +8,16 @@
 //! harness. Irrlicht remains the source for `claude-code` and for token and cost
 //! metrics Herdr does not report.
 //!
-//! Three rules run through everything here:
+//! This crate implements design §3's full adapter boundary —
+//! `start(scope, session_id, workspace, generated_context)`, `send(task_id,
+//! prompt)`, `observe()`, `interrupt()`, `stop()` — plus `attach_command` and
+//! `runtime_version`, which design §3 does not name but every caller needs.
+//! [`PiAdapter`] is the one implementation today; ADR 0010 decision on hosting
+//! keeps this in-process rather than a supervised subprocess, and a Claude Code
+//! adapter (Slice 10) is expected to satisfy the identical [`Adapter`] trait
+//! and the identical [`contract::run_contract_suite`].
+//!
+//! Four rules run through everything here:
 //!
 //! - **A wrong observation is worse than none**, because it looks like an
 //!   answer. Every path that cannot establish state returns
@@ -17,11 +26,21 @@
 //!   recorded. Working directory is never used: two sessions of one agent may
 //!   share a workspace, and `assistant` is configured for exactly that.
 //! - **No harness state closes a task.** See [`TaskSignal`].
+//! - **A `working` pane cannot confirm a new submission.** `herdr agent prompt
+//!   --wait --until working` does not track turns: run against a pane already
+//!   `working`, the wait matches whichever turn is already running and returns
+//!   immediately, without ever observing *this* prompt at all (measured:
+//!   `herdr agent prompt --help`). [`Adapter::send`] refuses instead of risking
+//!   that false confirmation — see [`AdapterError::SessionBusy`].
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use factory_paths::CanonicalPath;
 use serde_json::Value;
+
+mod claude;
+pub use claude::{ClaudeAdapter, IrrlichtAccess, IrrlichtHttp};
 
 /// A Herdr pane, such as `wE:p1`.
 ///
@@ -95,20 +114,101 @@ pub struct Observation {
     pub harness_session_id: Option<String>,
 }
 
-/// What every harness adapter provides.
-///
-/// Slice 5 implements only `observe`. Starting, sending, interrupting, and
-/// stopping remain documented operator procedures: design §5 requires a
-/// delivery attempt to be recorded before input reaches the PTY, and building
-/// that on an unproven state source is the wrong order. Slice 10 automates what
-/// this slice proves.
+/// design §3's `start(scope, session_id, workspace, generated_context)`,
+/// carried as one struct so every adapter takes the same four inputs in the
+/// same shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartRequest {
+    pub scope_id: uuid::Uuid,
+    pub session_id: uuid::Uuid,
+    pub workspace: CanonicalPath,
+    /// The compiled context text (design §2.5: company context → ancestor
+    /// scope contexts → current scope context → agent definition).
+    ///
+    /// Carried on every `StartRequest` because design §3's contract is
+    /// uniform across harnesses, not because [`PiAdapter`] sends it anywhere.
+    /// It does not: Pi reads `AGENTS.md` natively at process start (design
+    /// §2.5 — `pi --help` lists `--no-context-files` as the way to *disable*
+    /// that discovery, so loading it is the default), so writing this text
+    /// into the pane over the wire would duplicate what Pi already loaded and,
+    /// sent as a prompt, would consume Pi's first turn on context instead of a
+    /// task. `PiAdapter::start` never reads this field; see its doc comment.
+    pub generated_context: String,
+}
+
+/// What `start` hands back: at minimum the pane design §3's architecture
+/// diagram shows the adapter creating, and — when Herdr reports one — the
+/// harness's own session identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedSession {
+    pub pane: PaneId,
+    pub harness_session_id: Option<String>,
+    /// The confidence of the observation `start` used to confirm the session
+    /// actually came up.
+    ///
+    /// ADR 0017 decision 2: a Pi session started without the Herdr lifecycle
+    /// extension degrades silently to screen detection rather than failing
+    /// outright, so `start` must not error on a missing hook marker — it
+    /// reports [`Confidence::Degraded`] (or [`Confidence::Unavailable`], if
+    /// even that could not be read) and lets the caller fall back to manual
+    /// confirmation, exactly as [`Adapter::observe`]'s own contract already
+    /// does elsewhere.
+    pub confidence: Confidence,
+}
+
+/// What every harness adapter provides — design §3's adapter boundary in
+/// full.
 pub trait Adapter {
+    /// Start a harness session per design §3's `start(scope, session_id,
+    /// workspace, generated_context)`.
+    ///
+    /// Returns `Err` when the underlying harness or Herdr could not be
+    /// brought up at all — never a fabricated [`StartedSession`]. A missing
+    /// Herdr lifecycle-hook marker is *not* one of those failures; see
+    /// [`StartedSession::confidence`].
+    fn start(&self, req: &StartRequest) -> Result<StartedSession, AdapterError>;
+
+    /// Submit one task's prompt to `pane` and confirm the harness accepted it
+    /// before returning.
+    ///
+    /// `Ok(())` means **confirmed**: the harness was observed moving to
+    /// `working` after submission. It does not mean the task finished — only
+    /// that it started. Design §5 step 3 journals the delivery attempt before
+    /// this call is even made, so when the underlying keystrokes may already
+    /// have reached the pane but nothing confirmed it, that is reported as
+    /// [`AdapterError::SubmissionUnconfirmed`] — distinct from every other
+    /// error variant, because the caller must be able to tell "never sent"
+    /// apart from "sent, outcome unknown."
+    ///
+    /// Refuses with [`AdapterError::SessionBusy`], sending nothing, when the
+    /// session is already `working` a turn — see the module docs.
+    fn send(&self, pane: &PaneId, task_id: uuid::Uuid, prompt: &str) -> Result<(), AdapterError>;
+
     /// Read the current state of the session in `pane`.
     ///
     /// Returns an `Observation` with [`Confidence::Unavailable`] rather than an
     /// error when the harness is simply not answerable — a missing pane, a
     /// stopped Herdr. An `Err` means the adapter itself failed.
     fn observe(&self, pane: &PaneId) -> Result<Observation, AdapterError>;
+
+    /// Interrupt whatever `pane` is doing (Ctrl-C to the harness) without
+    /// closing the session.
+    fn interrupt(&self, pane: &PaneId) -> Result<(), AdapterError>;
+
+    /// Stop the session in `pane`. Design §3: Herdr owns panes; this closes
+    /// the one the session occupied.
+    fn stop(&self, pane: &PaneId) -> Result<(), AdapterError>;
+
+    /// The argv the CLI should exec to attach an operator's terminal to
+    /// `pane`. This method never attaches anything itself.
+    ///
+    /// The adapter runs inside the daemon (design §3: "Factory supervisor
+    /// owns ... starting, stopping, observing, and reconciling agents"). A
+    /// daemon thread has no controlling terminal to hand to a PTY takeover,
+    /// and must not try — that belongs to the CLI process an operator
+    /// actually runs. This method only computes the command; `factory agent
+    /// attach` execs it.
+    fn attach_command(&self, pane: &PaneId) -> Result<Vec<String>, AdapterError>;
 
     /// The harness runtime's version, recorded with each session so that later
     /// behaviour changes are attributable.
@@ -124,6 +224,41 @@ pub trait HerdrAccess {
     fn agent_explain(&self, pane: &PaneId) -> Result<String, AdapterError>;
     /// Raw stdout of `herdr --version`.
     fn version(&self) -> Result<String, AdapterError>;
+
+    /// Raw stdout of `herdr workspace create --cwd <path> --no-focus`.
+    ///
+    /// Creates a fresh Herdr workspace/tab/pane rooted at `cwd` — the pane
+    /// `start` then hands to `agent_start`. `--no-focus` is not optional: a
+    /// daemon-driven start must never steal an operator's UI focus (measured:
+    /// `herdr workspace create --help` documents `--focus`/`--no-focus` as a
+    /// pair; this adapter always passes the latter).
+    fn workspace_create(&self, cwd: &Path) -> Result<String, AdapterError>;
+
+    /// Raw stdout of `herdr agent start <name> --kind <kind> --pane <pane>
+    /// [-- <args...>]`.
+    fn agent_start(
+        &self,
+        name: &str,
+        kind: &str,
+        pane: &PaneId,
+        args: &[String],
+    ) -> Result<String, AdapterError>;
+
+    /// Raw stdout of `herdr agent prompt <pane> <text> --wait --until
+    /// working`.
+    ///
+    /// A stalled or timed-out wait (measured shape: `herdr agent prompt
+    /// --help` — "otherwise it returns `agent_prompt_stalled`... a shorter
+    /// `--timeout` returns `timeout` instead") is reported as
+    /// [`AdapterError::SubmissionUnconfirmed`] rather than folded into the
+    /// generic [`AdapterError::UnreadableOutput`] every other command uses.
+    fn agent_prompt(&self, pane: &PaneId, text: &str) -> Result<String, AdapterError>;
+
+    /// Raw stdout of `herdr agent send-keys <pane> ctrl+c`.
+    fn agent_interrupt(&self, pane: &PaneId) -> Result<String, AdapterError>;
+
+    /// Raw stdout of `herdr pane close <pane>`.
+    fn pane_close(&self, pane: &PaneId) -> Result<String, AdapterError>;
 }
 
 /// Runs the real `herdr` binary as a subprocess.
@@ -173,6 +308,37 @@ impl HerdrCli {
 
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
+
+    /// Like [`Self::run`], for `herdr agent prompt` specifically: a non-zero
+    /// exit is classified by [`classify_prompt_failure`] rather than folded
+    /// into the generic [`AdapterError::UnreadableOutput`] every other command
+    /// gets — `agent prompt`'s own documented stalled/timeout outcomes must
+    /// stay distinguishable from a hard failure.
+    fn run_prompt(&self, pane: &PaneId, args: &[&str]) -> Result<String, AdapterError> {
+        let output = Command::new(&self.binary)
+            .args(args)
+            .output()
+            .map_err(|source| AdapterError::RuntimeUnavailable {
+                binary: self.binary.clone(),
+                help: "install Herdr and ensure the `herdr` binary is on PATH, or pass its \
+                           full path to `HerdrCli::new`"
+                    .to_string(),
+                source,
+            })?;
+
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+
+        Err(classify_prompt_failure(
+            &pane.0,
+            &String::from_utf8_lossy(&output.stderr),
+        ))
+    }
+}
+
+fn owned_str_args(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
 }
 
 impl HerdrAccess for HerdrCli {
@@ -185,9 +351,40 @@ impl HerdrAccess for HerdrCli {
     fn version(&self) -> Result<String, AdapterError> {
         self.run(&["--version"])
     }
+
+    fn workspace_create(&self, cwd: &Path) -> Result<String, AdapterError> {
+        let args = workspace_create_args(cwd);
+        self.run(&owned_str_args(&args))
+    }
+
+    fn agent_start(
+        &self,
+        name: &str,
+        kind: &str,
+        pane: &PaneId,
+        args: &[String],
+    ) -> Result<String, AdapterError> {
+        let full = agent_start_args(name, kind, pane, args);
+        self.run(&owned_str_args(&full))
+    }
+
+    fn agent_prompt(&self, pane: &PaneId, text: &str) -> Result<String, AdapterError> {
+        let args = prompt_args(pane, text);
+        self.run_prompt(pane, &owned_str_args(&args))
+    }
+
+    fn agent_interrupt(&self, pane: &PaneId) -> Result<String, AdapterError> {
+        let args = interrupt_args(pane);
+        self.run(&owned_str_args(&args))
+    }
+
+    fn pane_close(&self, pane: &PaneId) -> Result<String, AdapterError> {
+        let args = pane_close_args(pane);
+        self.run(&owned_str_args(&args))
+    }
 }
 
-/// The Pi adapter, reading state from Herdr.
+/// The Pi adapter, reading state from and driving Herdr.
 pub struct PiAdapter<A: HerdrAccess> {
     herdr: A,
 }
@@ -197,6 +394,55 @@ impl<A: HerdrAccess> PiAdapter<A> {
     pub fn new(herdr: A) -> Self {
         Self { herdr }
     }
+
+    /// `herdr agent start` immediately after `herdr workspace create`,
+    /// retrying a handful of times on `agent_pane_busy`.
+    ///
+    /// Measured live on this machine: a pane Herdr just reports as created
+    /// can still fail `agent start` with `{"error":{"code":"agent_pane_busy",
+    /// "message":"...is not an available shell"}}` — the shell has not
+    /// finished reaching its interactive prompt yet, especially under load.
+    /// A second attempt moments later succeeds; this is a brief startup race,
+    /// not a real failure, and `start`'s caller should not see it as one.
+    /// Every other `agent_start` failure (Herdr down, `pi` not installed) is
+    /// returned immediately, unretried.
+    fn start_pi_with_retry(&self, name: &str, pane: &PaneId) -> Result<String, AdapterError> {
+        const ATTEMPTS: u32 = 5;
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+        let mut last_err = None;
+        for attempt in 0..ATTEMPTS {
+            match self
+                .herdr
+                .agent_start(name, "pi", pane, &pi_extension_args())
+            {
+                Ok(raw) => return Ok(raw),
+                Err(err) => {
+                    let is_last_attempt = attempt + 1 == ATTEMPTS;
+                    if is_last_attempt || !is_transient_pane_not_ready(&err) {
+                        return Err(err);
+                    }
+                    last_err = Some(err);
+                    std::thread::sleep(RETRY_DELAY);
+                }
+            }
+        }
+        // Unreachable: the loop above always returns on its last iteration
+        // (`is_last_attempt` is true when `attempt + 1 == ATTEMPTS`), but
+        // `last_err` still has to be a real value for the type checker.
+        Err(last_err.expect("the loop always returns before exhausting every attempt"))
+    }
+}
+
+/// Whether `err` is Herdr's transient "the pane exists but its shell has not
+/// finished reaching an interactive prompt yet" answer to `agent start`,
+/// rather than a real failure.
+fn is_transient_pane_not_ready(err: &AdapterError) -> bool {
+    matches!(
+        err,
+        AdapterError::UnreadableOutput { detail, .. }
+            if detail.contains("\"code\":\"agent_pane_busy\"")
+    )
 }
 
 /// Herdr's `blocked` status does not say *which* kind of block this is, only
@@ -256,7 +502,7 @@ fn looks_like_iso_timestamp(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-fn looks_like_uuid(s: &str) -> bool {
+pub(crate) fn looks_like_uuid(s: &str) -> bool {
     const GROUP_LENGTHS: [usize; 5] = [8, 4, 4, 4, 12];
     let groups: Vec<&str> = s.split('-').collect();
     groups.len() == GROUP_LENGTHS.len()
@@ -291,7 +537,207 @@ fn unreadable_agent_get(pane: &PaneId, detail: impl Into<String>) -> AdapterErro
     }
 }
 
+// --- Pure argv builders -----------------------------------------------
+//
+// Every flag Herdr actually receives is built by one of these free functions,
+// deliberately kept separate from `HerdrCli`'s `Command` plumbing (which the
+// crate docs already note no test exercises — it runs the real binary). That
+// split is what makes each flag mutation-testable: delete `--no-focus` or
+// reorder `--wait`/`--until working` here and a unit test below fails, rather
+// than the change being invisible to `cargo test --workspace`.
+
+fn workspace_create_args(cwd: &Path) -> Vec<String> {
+    vec![
+        "workspace".to_string(),
+        "create".to_string(),
+        "--cwd".to_string(),
+        cwd.to_string_lossy().into_owned(),
+        "--no-focus".to_string(),
+    ]
+}
+
+fn agent_start_args(name: &str, kind: &str, pane: &PaneId, extra: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "agent".to_string(),
+        "start".to_string(),
+        name.to_string(),
+        "--kind".to_string(),
+        kind.to_string(),
+        "--pane".to_string(),
+        pane.0.clone(),
+    ];
+    if !extra.is_empty() {
+        args.push("--".to_string());
+        args.extend(extra.iter().cloned());
+    }
+    args
+}
+
+fn prompt_args(pane: &PaneId, text: &str) -> Vec<String> {
+    vec![
+        "agent".to_string(),
+        "prompt".to_string(),
+        pane.0.clone(),
+        text.to_string(),
+        "--wait".to_string(),
+        "--until".to_string(),
+        "working".to_string(),
+    ]
+}
+
+fn interrupt_args(pane: &PaneId) -> Vec<String> {
+    vec![
+        "agent".to_string(),
+        "send-keys".to_string(),
+        pane.0.clone(),
+        "ctrl+c".to_string(),
+    ]
+}
+
+fn pane_close_args(pane: &PaneId) -> Vec<String> {
+    vec!["pane".to_string(), "close".to_string(), pane.0.clone()]
+}
+
+/// The argv `factory agent attach` execs — see [`Adapter::attach_command`]'s
+/// doc comment for why this crate only computes it.
+fn attach_argv(pane: &PaneId) -> Vec<String> {
+    vec![
+        "herdr".to_string(),
+        "agent".to_string(),
+        "attach".to_string(),
+        pane.0.clone(),
+    ]
+}
+
+/// The Herdr lifecycle-hook extension argument, passed to `pi` after `--` so
+/// Pi (not Herdr) parses it. Mirrors the live `assistant` configuration ADR
+/// 0017 decision 2 cites: `--extension
+/// ${HOME}/.pi/agent/extensions/herdr-agent-state.ts`. Without it Pi never
+/// loads the extension that gives `observe` hook authority at all.
+fn pi_extension_args() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    vec![
+        "--extension".to_string(),
+        format!("{home}/.pi/agent/extensions/herdr-agent-state.ts"),
+    ]
+}
+
+/// A Herdr agent name for `session_id`: `[a-z][a-z0-9_-]{0,31}`, unique among
+/// live agents (measured: `herdr --skill`). A bare UUID can start with a
+/// digit and is longer than the limit; the `factory-` prefix and an 8-hex-char
+/// suffix satisfy both, and stay unique as long as `session_id` is (Factory's
+/// own guarantee, not Herdr's).
+///
+/// The suffix is the *last* 8 hex characters of the UUID's simple form, not
+/// the first 8: this workspace's own deterministic test ids are all shaped
+/// `00000000-0000-4000-8000-<seed>`, varying only in the final group, so a
+/// prefix slice would collide across every seeded test id in the codebase.
+fn agent_name_for(session_id: uuid::Uuid) -> String {
+    let simple = session_id.simple().to_string();
+    format!("factory-{}", &simple[simple.len() - 8..])
+}
+
+/// Classifies a non-zero `herdr agent prompt` exit.
+///
+/// `"code":"agent_prompt_stalled"` and `"code":"timeout"` are the two
+/// documented non-fatal outcomes (measured: `herdr agent prompt --help` —
+/// "otherwise it returns `agent_prompt_stalled`... a shorter `--timeout`
+/// returns `timeout` instead"); the surrounding JSON envelope is inferred
+/// from the shape measured live for every other Herdr error on this machine
+/// (`{"error":{"code":"...","message":"..."},"id":"..."}`), not captured for
+/// this exact command. Everything else — including the `agent_not_found`
+/// shape this crate's tests do capture live, from `herdr agent prompt` run
+/// against a pane holding no agent — is a hard failure.
+fn classify_prompt_failure(pane: &str, stderr: &str) -> AdapterError {
+    let trimmed = stderr.trim();
+    let stalled = trimmed.contains("\"code\":\"agent_prompt_stalled\"");
+    let timed_out = trimmed.contains("\"code\":\"timeout\"");
+    if stalled || timed_out {
+        AdapterError::SubmissionUnconfirmed {
+            pane: pane.to_string(),
+            detail: trimmed.to_string(),
+            help: "the prompt may have reached the pane without Herdr observing it start \
+                   working; run `herdr agent get <pane>` by hand before deciding whether to retry"
+                .to_string(),
+        }
+    } else {
+        AdapterError::UnreadableOutput {
+            command: format!("herdr agent prompt {pane}"),
+            detail: trimmed.to_string(),
+            help: "run the command directly outside Factory to see the underlying Herdr error"
+                .to_string(),
+        }
+    }
+}
+
+/// Parses `.result.root_pane.pane_id` from `herdr workspace create`'s stdout.
+fn parse_created_pane(raw: &str) -> Result<PaneId, AdapterError> {
+    let unreadable = |detail: &str| AdapterError::UnreadableOutput {
+        command: "herdr workspace create".to_string(),
+        detail: detail.to_string(),
+        help: "confirm the running Herdr is 0.8.0, the version this adapter was built against; \
+               the JSON shape may have changed"
+            .to_string(),
+    };
+    let payload: Value =
+        serde_json::from_str(raw).map_err(|source| unreadable(&source.to_string()))?;
+    payload
+        .get("result")
+        .and_then(|result| result.get("root_pane"))
+        .and_then(|pane| pane.get("pane_id"))
+        .and_then(Value::as_str)
+        .map(|id| PaneId(id.to_string()))
+        .ok_or_else(|| unreadable("missing `result.root_pane.pane_id`"))
+}
+
 impl<A: HerdrAccess> Adapter for PiAdapter<A> {
+    fn start(&self, req: &StartRequest) -> Result<StartedSession, AdapterError> {
+        let created = self.herdr.workspace_create(req.workspace.as_path())?;
+        let pane = parse_created_pane(&created)?;
+
+        let name = agent_name_for(req.session_id);
+        if let Err(err) = self.start_pi_with_retry(&name, &pane) {
+            // Nothing else will release a pane whose agent never started —
+            // best-effort cleanup so a failed start does not leak a Herdr
+            // pane. Its own failure is not reported: the caller already has
+            // the more useful error from `agent_start` below.
+            let _ = self.herdr.pane_close(&pane);
+            return Err(err);
+        }
+
+        // Reuse `observe`'s own hook-authority and session-id parsing rather
+        // than re-deriving it — ADR 0017 decision 2's degraded fallback is
+        // `observe`'s rule already, not a second copy of it.
+        let observed = self.observe(&pane)?;
+        Ok(StartedSession {
+            pane,
+            harness_session_id: observed.harness_session_id,
+            confidence: observed.confidence,
+        })
+    }
+
+    fn send(&self, pane: &PaneId, task_id: uuid::Uuid, prompt: &str) -> Result<(), AdapterError> {
+        // See the module docs' fourth rule: a pane already `working` cannot
+        // safely confirm a *new* submission, so this never reaches
+        // `agent_prompt` for one.
+        let observed = self.observe(pane)?;
+        if observed.harness_state == "working" {
+            return Err(AdapterError::SessionBusy {
+                pane: pane.0.clone(),
+                harness_state: observed.harness_state,
+                help: "wait for the current turn to finish, or send an explicit interrupt, \
+                       before sending another task to this session"
+                    .to_string(),
+            });
+        }
+
+        // Design §5: "each prompt includes its task UUID so that work can be
+        // correlated with its database record."
+        let text = format!("[task {task_id}] {prompt}");
+        self.herdr.agent_prompt(pane, &text)?;
+        Ok(())
+    }
+
     fn observe(&self, pane: &PaneId) -> Result<Observation, AdapterError> {
         // "Herdr could not answer at all" — a stopped Herdr, an unknown pane —
         // is not an adapter failure. It is recorded as Unavailable so the
@@ -382,6 +828,20 @@ impl<A: HerdrAccess> Adapter for PiAdapter<A> {
         })
     }
 
+    fn interrupt(&self, pane: &PaneId) -> Result<(), AdapterError> {
+        self.herdr.agent_interrupt(pane)?;
+        Ok(())
+    }
+
+    fn stop(&self, pane: &PaneId) -> Result<(), AdapterError> {
+        self.herdr.pane_close(pane)?;
+        Ok(())
+    }
+
+    fn attach_command(&self, pane: &PaneId) -> Result<Vec<String>, AdapterError> {
+        Ok(attach_argv(pane))
+    }
+
     fn runtime_version(&self) -> Result<String, AdapterError> {
         self.herdr.version().map(|raw| raw.trim().to_string())
     }
@@ -410,11 +870,153 @@ pub enum AdapterError {
         found: String,
         help: String,
     },
+
+    /// The prompt may have reached `pane` — the keystrokes may have landed —
+    /// but nothing confirmed the harness started working on it. Distinct from
+    /// [`Self::RuntimeUnavailable`] and [`Self::UnreadableOutput`] on
+    /// purpose: the caller has already journalled the delivery attempt
+    /// (design §5 step 3) before calling `send`, so "never sent" and "sent,
+    /// outcome unknown" must never collapse into one variant.
+    #[error("prompt to {pane} was not confirmed: {detail}\n  help: {help}")]
+    SubmissionUnconfirmed {
+        pane: String,
+        detail: String,
+        help: String,
+    },
+
+    /// `send` refused: `pane` is already `working` a turn, and `herdr agent
+    /// prompt --wait --until working` cannot distinguish confirming a new
+    /// submission from matching the turn already in flight. Nothing was
+    /// submitted — unlike [`Self::SubmissionUnconfirmed`], there is no
+    /// ambiguity about whether keystrokes landed, so this carries no
+    /// at-most-once delivery risk on its own.
+    #[error("pane {pane} is still {harness_state}\n  help: {help}")]
+    SessionBusy {
+        pane: String,
+        harness_state: String,
+        help: String,
+    },
+}
+
+/// The backlog §10 contract every harness adapter must satisfy: start, send,
+/// observe, interrupt, stop, failed start, and one-task-per-session, run
+/// against [`PiAdapter`] in this crate's own `tests/contract_pi.rs`.
+///
+/// This module is exported — not kept as a private test helper — because the
+/// alternative is duplication. Backlog §10 requires that "Pi and Claude Code
+/// pass the same contract tests," and a second harness adapter re-deriving
+/// "does `send` refuse a busy pane," "does a failed `start` return `Err`
+/// rather than a fabricated session" in its own words is exactly the kind of
+/// drift ADR 0011 and ADR 0017 both record this codebase paying for once
+/// already, for observation alone. One suite, run against every `Adapter`
+/// impl through [`ContractFixture`], is the only way "the same contract
+/// tests" stays true rather than becoming two suites that happen to agree
+/// today and diverge the first time either one is edited.
+pub mod contract {
+    use super::{Adapter, AdapterError, StartRequest};
+
+    /// What [`run_contract_suite`] needs from a test's own fixture: an
+    /// adapter, plus one [`StartRequest`] guaranteed to succeed and one
+    /// guaranteed to fail.
+    ///
+    /// Deliberately minimal. Everything else the suite needs — a live
+    /// session, a busy one, a stopped one — it derives itself by calling the
+    /// adapter, so a fixture cannot shortcut the state transitions the suite
+    /// exists to check by pre-seeding them.
+    pub trait ContractFixture {
+        type A: Adapter;
+
+        /// The adapter under test.
+        fn adapter(&self) -> &Self::A;
+
+        /// A `StartRequest` this fixture guarantees `start` accepts.
+        fn startable(&self) -> StartRequest;
+
+        /// A `StartRequest` this fixture guarantees `start` rejects —
+        /// backlog §10's "failed start".
+        fn unstartable(&self) -> StartRequest;
+    }
+
+    /// Runs backlog §10's seven scenarios — start, send, observe, interrupt,
+    /// stop, failed start, and one-task-per-session — against one
+    /// `ContractFixture`. Later scenarios build on the one live session the
+    /// earlier ones proved, rather than each starting its own.
+    ///
+    /// Panics (via the usual `assert!`/`expect`) on the first violated claim,
+    /// so this is meant to be called from inside a `#[test]` function.
+    pub fn run_contract_suite<F: ContractFixture>(fixture: &F) {
+        let adapter = fixture.adapter();
+
+        // Failed start: `Err`, never a fabricated session.
+        adapter
+            .start(&fixture.unstartable())
+            .expect_err("an unstartable request must return Err, not a fabricated StartedSession");
+
+        // Start: a startable request produces a session `observe` can read
+        // back.
+        let started = adapter
+            .start(&fixture.startable())
+            .expect("a startable request must succeed");
+
+        // Observe: reports the pane it was asked about.
+        let observed = adapter
+            .observe(&started.pane)
+            .expect("observe must succeed for a pane this adapter just started");
+        assert_eq!(
+            observed.pane, started.pane,
+            "observe must report the pane it was asked about, not a substitute"
+        );
+
+        // Send: a freshly started, idle session confirms.
+        adapter
+            .send(&started.pane, task_uuid(1), "first task")
+            .expect("send to a freshly started, idle session must confirm and return Ok");
+
+        // One-task-per-session: a second send while the first is still
+        // `working` is refused, never falsely confirmed.
+        let busy = adapter
+            .send(&started.pane, task_uuid(2), "second task")
+            .expect_err(
+                "a session still working its first task must refuse a second send, not risk a \
+                 false confirmation",
+            );
+        assert!(
+            matches!(busy, AdapterError::SessionBusy { .. }),
+            "a busy session's refusal must be AdapterError::SessionBusy, not a generic error: \
+             {busy:?}"
+        );
+
+        // Interrupt: succeeds against the live, busy session.
+        adapter
+            .interrupt(&started.pane)
+            .expect("interrupt must succeed against a live session");
+
+        // Stop: ends the session; a later observe must show it gone.
+        adapter
+            .stop(&started.pane)
+            .expect("stop must succeed against a live session");
+        let after_stop = adapter
+            .observe(&started.pane)
+            .expect("observe must still answer for a pane whose session was stopped");
+        assert!(
+            !after_stop.session_alive,
+            "a stopped session must no longer be reported alive"
+        );
+    }
+
+    /// A deterministic task id, distinct per `seed`. `uuid` is pinned
+    /// workspace-wide without the `v4` feature (see this workspace's other
+    /// `uid`-style test helpers), so the suite cannot call `Uuid::new_v4`.
+    fn task_uuid(seed: u8) -> uuid::Uuid {
+        uuid::Uuid::parse_str(&format!("00000000-0000-4000-8000-{seed:012x}")).expect("valid uuid")
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
+    use std::rc::Rc;
 
     use super::*;
 
@@ -424,10 +1026,23 @@ mod tests {
     /// multiplexer. `HerdrCli` itself is never exercised by these tests — it
     /// runs the real `herdr` binary, which this crate's test suite must not
     /// touch.
+    ///
+    /// Each new command added for the full adapter contract gets its own
+    /// closure field with an inert-but-valid default, so existing `observe`
+    /// tests built before those commands existed keep compiling unchanged.
+    type PaneFn = Box<dyn Fn(&PaneId) -> Resp>;
+    type AgentStartFn = Box<dyn Fn(&str, &str, &PaneId, &[String]) -> Resp>;
+    type AgentPromptFn = Box<dyn Fn(&PaneId, &str) -> Resp>;
+
     struct FakeHerdr {
-        get: Box<dyn Fn(&PaneId) -> Resp>,
-        explain: Box<dyn Fn(&PaneId) -> Resp>,
+        get: PaneFn,
+        explain: PaneFn,
         version: Box<dyn Fn() -> Resp>,
+        workspace_create: Box<dyn Fn(&Path) -> Resp>,
+        agent_start: AgentStartFn,
+        agent_prompt: AgentPromptFn,
+        agent_interrupt: PaneFn,
+        pane_close: PaneFn,
     }
 
     impl FakeHerdr {
@@ -439,11 +1054,48 @@ mod tests {
                 get: Box::new(get),
                 explain: Box::new(explain),
                 version: Box::new(|| Ok("herdr 0.8.0\n".to_string())),
+                workspace_create: Box::new(|_| {
+                    Ok(r#"{"result":{"root_pane":{"pane_id":"wZ:p1"}}}"#.to_string())
+                }),
+                agent_start: Box::new(|_, _, _, _| {
+                    Ok(r#"{"result":{"type":"agent_started"}}"#.to_string())
+                }),
+                agent_prompt: Box::new(|_, _| Ok(r#"{"result":{"type":"ok"}}"#.to_string())),
+                agent_interrupt: Box::new(|_| Ok(r#"{"result":{"type":"ok"}}"#.to_string())),
+                pane_close: Box::new(|_| Ok(r#"{"result":{"type":"ok"}}"#.to_string())),
             }
         }
 
         fn with_version(mut self, version: impl Fn() -> Resp + 'static) -> Self {
             self.version = Box::new(version);
+            self
+        }
+
+        fn with_workspace_create(mut self, f: impl Fn(&Path) -> Resp + 'static) -> Self {
+            self.workspace_create = Box::new(f);
+            self
+        }
+
+        fn with_agent_start(
+            mut self,
+            f: impl Fn(&str, &str, &PaneId, &[String]) -> Resp + 'static,
+        ) -> Self {
+            self.agent_start = Box::new(f);
+            self
+        }
+
+        fn with_agent_prompt(mut self, f: impl Fn(&PaneId, &str) -> Resp + 'static) -> Self {
+            self.agent_prompt = Box::new(f);
+            self
+        }
+
+        fn with_agent_interrupt(mut self, f: impl Fn(&PaneId) -> Resp + 'static) -> Self {
+            self.agent_interrupt = Box::new(f);
+            self
+        }
+
+        fn with_pane_close(mut self, f: impl Fn(&PaneId) -> Resp + 'static) -> Self {
+            self.pane_close = Box::new(f);
             self
         }
     }
@@ -457,6 +1109,21 @@ mod tests {
         }
         fn version(&self) -> Resp {
             (self.version)()
+        }
+        fn workspace_create(&self, cwd: &Path) -> Resp {
+            (self.workspace_create)(cwd)
+        }
+        fn agent_start(&self, name: &str, kind: &str, pane: &PaneId, args: &[String]) -> Resp {
+            (self.agent_start)(name, kind, pane, args)
+        }
+        fn agent_prompt(&self, pane: &PaneId, text: &str) -> Resp {
+            (self.agent_prompt)(pane, text)
+        }
+        fn agent_interrupt(&self, pane: &PaneId) -> Resp {
+            (self.agent_interrupt)(pane)
+        }
+        fn pane_close(&self, pane: &PaneId) -> Resp {
+            (self.pane_close)(pane)
         }
     }
 
@@ -539,6 +1206,13 @@ mod tests {
                 .to_string(),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file or directory"),
         }
+    }
+
+    /// A deterministic, distinct uuid — mirrors the `uid` helper other
+    /// crates in this workspace use for the same reason: `uuid` is pinned
+    /// without the `v4` feature.
+    fn uid(seed: u32) -> uuid::Uuid {
+        uuid::Uuid::parse_str(&format!("00000000-0000-4000-8000-{seed:012x}")).expect("valid uuid")
     }
 
     // 1. The real Pi fixture yields Authoritative, the correct harness_state,
@@ -847,5 +1521,495 @@ mod tests {
         let version = adapter.runtime_version().expect("version must be readable");
 
         assert_eq!(version, "herdr 0.8.0");
+    }
+
+    // --- Pure argv builders -------------------------------------------
+
+    #[test]
+    fn workspace_create_args_passes_cwd_and_never_steals_focus() {
+        let args = workspace_create_args(Path::new("/tmp/ws"));
+        assert_eq!(
+            args,
+            ["workspace", "create", "--cwd", "/tmp/ws", "--no-focus"]
+        );
+    }
+
+    #[test]
+    fn agent_start_args_places_extension_after_a_bare_double_dash() {
+        let pane = PaneId("wE:p1".to_string());
+        let extra = vec!["--extension".to_string(), "/x.ts".to_string()];
+        let args = agent_start_args("factory-abcd1234", "pi", &pane, &extra);
+        assert_eq!(
+            args,
+            [
+                "agent",
+                "start",
+                "factory-abcd1234",
+                "--kind",
+                "pi",
+                "--pane",
+                "wE:p1",
+                "--",
+                "--extension",
+                "/x.ts",
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_start_args_omits_the_double_dash_with_no_extra_args() {
+        let pane = PaneId("wE:p1".to_string());
+        let args = agent_start_args("factory-abcd1234", "pi", &pane, &[]);
+        assert!(
+            !args.contains(&"--".to_string()),
+            "no extra args means no bare `--` at all: {args:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_args_waits_until_working() {
+        let pane = PaneId("wE:p1".to_string());
+        let args = prompt_args(&pane, "[task x] do it");
+        assert_eq!(
+            args,
+            [
+                "agent",
+                "prompt",
+                "wE:p1",
+                "[task x] do it",
+                "--wait",
+                "--until",
+                "working",
+            ]
+        );
+    }
+
+    #[test]
+    fn interrupt_args_send_ctrl_c() {
+        let pane = PaneId("wE:p1".to_string());
+        assert_eq!(
+            interrupt_args(&pane),
+            ["agent", "send-keys", "wE:p1", "ctrl+c"]
+        );
+    }
+
+    #[test]
+    fn pane_close_args_close_the_right_pane() {
+        let pane = PaneId("wE:p1".to_string());
+        assert_eq!(pane_close_args(&pane), ["pane", "close", "wE:p1"]);
+    }
+
+    #[test]
+    fn attach_argv_execs_herdr_agent_attach() {
+        let pane = PaneId("wE:p1".to_string());
+        assert_eq!(attach_argv(&pane), ["herdr", "agent", "attach", "wE:p1"]);
+    }
+
+    #[test]
+    fn pi_extension_args_names_the_herdr_lifecycle_hook() {
+        let args = pi_extension_args();
+        assert_eq!(args[0], "--extension");
+        assert!(
+            args[1].ends_with("/.pi/agent/extensions/herdr-agent-state.ts"),
+            "got {args:?}"
+        );
+    }
+
+    #[test]
+    fn agent_name_for_is_a_valid_unique_herdr_name() {
+        let a = agent_name_for(uid(1));
+        let b = agent_name_for(uid(2));
+        assert_ne!(a, b, "two different sessions must get two different names");
+        for name in [&a, &b] {
+            assert!(name.len() <= 32, "{name} exceeds Herdr's 32-char limit");
+            let mut chars = name.chars();
+            let first = chars.next().expect("non-empty name");
+            assert!(first.is_ascii_lowercase(), "{name} must start with a-z");
+            assert!(
+                chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'),
+                "{name} has a character outside [a-z0-9_-]"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_prompt_failure_maps_stalled_and_timeout_to_submission_unconfirmed() {
+        // Code names measured from `herdr agent prompt --help`; the envelope
+        // is inferred from the shape measured live for other Herdr errors on
+        // this machine (see `classify_prompt_failure`'s doc comment) — not
+        // captured for these two outcomes specifically.
+        let stalled = r#"{"error":{"code":"agent_prompt_stalled","message":"no state change observed within 5000ms"},"id":"cli:agent:prompt"}"#;
+        let err = classify_prompt_failure("wE:p1", stalled);
+        assert!(
+            matches!(err, AdapterError::SubmissionUnconfirmed { .. }),
+            "got {err:?}"
+        );
+
+        let timeout = r#"{"error":{"code":"timeout","message":"exceeded --timeout"},"id":"cli:agent:prompt"}"#;
+        let err = classify_prompt_failure("wE:p1", timeout);
+        assert!(
+            matches!(err, AdapterError::SubmissionUnconfirmed { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_prompt_failure_maps_other_errors_to_unreadable_output() {
+        // Measured live on this machine: `herdr agent prompt <pane>
+        // --wait --until working` against a pane holding no agent.
+        let not_found = r#"{"error":{"code":"agent_not_found","message":"agent target wP:p1 not found"},"id":"cli:agent:prompt"}"#;
+        let err = classify_prompt_failure("wP:p1", not_found);
+        assert!(
+            matches!(err, AdapterError::UnreadableOutput { .. }),
+            "got {err:?}"
+        );
+    }
+
+    // --- start / send / interrupt / stop / attach_command --------------
+
+    #[test]
+    fn attach_command_never_touches_herdr() {
+        let herdr = FakeHerdr::new(
+            |_| unreachable!("attach_command must never call agent_get"),
+            |_| unreachable!("attach_command must never call agent_explain"),
+        )
+        .with_workspace_create(|_| unreachable!("attach_command must never call workspace_create"))
+        .with_agent_start(|_, _, _, _| unreachable!("attach_command must never call agent_start"))
+        .with_agent_prompt(|_, _| unreachable!("attach_command must never call agent_prompt"))
+        .with_agent_interrupt(|_| unreachable!("attach_command must never call agent_interrupt"))
+        .with_pane_close(|_| unreachable!("attach_command must never call pane_close"));
+        let adapter = PiAdapter::new(herdr);
+
+        let argv = adapter
+            .attach_command(&PaneId("wE:p1".to_string()))
+            .expect("attach_command is pure and infallible in practice");
+        assert_eq!(argv, ["herdr", "agent", "attach", "wE:p1"]);
+    }
+
+    #[test]
+    fn interrupt_sends_ctrl_c_to_the_right_pane() {
+        let seen: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let seen_write = Rc::clone(&seen);
+        let herdr = FakeHerdr::new(always(pi_get()), always(pi_explain())).with_agent_interrupt(
+            move |pane| {
+                *seen_write.borrow_mut() = Some(pane.0.clone());
+                Ok(r#"{"result":{"type":"ok"}}"#.to_string())
+            },
+        );
+        let adapter = PiAdapter::new(herdr);
+
+        adapter
+            .interrupt(&PaneId("wE:p1".to_string()))
+            .expect("interrupt must succeed");
+        assert_eq!(seen.borrow().as_deref(), Some("wE:p1"));
+    }
+
+    #[test]
+    fn stop_closes_the_right_pane() {
+        let seen: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let seen_write = Rc::clone(&seen);
+        let herdr =
+            FakeHerdr::new(always(pi_get()), always(pi_explain())).with_pane_close(move |pane| {
+                *seen_write.borrow_mut() = Some(pane.0.clone());
+                Ok(r#"{"result":{"type":"ok"}}"#.to_string())
+            });
+        let adapter = PiAdapter::new(herdr);
+
+        adapter
+            .stop(&PaneId("wE:p1".to_string()))
+            .expect("stop must succeed");
+        assert_eq!(seen.borrow().as_deref(), Some("wE:p1"));
+    }
+
+    #[test]
+    fn send_embeds_the_task_id_in_the_submitted_text() {
+        let seen: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let seen_write = Rc::clone(&seen);
+        let herdr = FakeHerdr::new(always(pi_get_with_status("idle")), always(pi_explain()))
+            .with_agent_prompt(move |_, text| {
+                *seen_write.borrow_mut() = Some(text.to_string());
+                Ok(r#"{"result":{"type":"ok"}}"#.to_string())
+            });
+        let adapter = PiAdapter::new(herdr);
+        let task_id = uid(42);
+
+        adapter
+            .send(&PaneId("wE:p1".to_string()), task_id, "do the thing")
+            .expect("send to an idle session must confirm");
+
+        let sent = seen.borrow().clone().expect("agent_prompt must be called");
+        assert!(
+            sent.contains(&task_id.to_string()),
+            "the submitted text must carry the task id so the harness's transcript correlates \
+             with it: {sent}"
+        );
+        assert!(sent.contains("do the thing"));
+    }
+
+    #[test]
+    fn send_refuses_a_working_pane_without_submitting_anything() {
+        let herdr = FakeHerdr::new(always(pi_get_with_status("working")), always(pi_explain()))
+            .with_agent_prompt(|_, _| {
+                unreachable!("send must refuse before ever calling agent_prompt on a working pane")
+            });
+        let adapter = PiAdapter::new(herdr);
+
+        let err = adapter
+            .send(&PaneId("wE:p1".to_string()), uid(1), "second task")
+            .expect_err("a working pane must refuse a new send");
+
+        match err {
+            AdapterError::SessionBusy { harness_state, .. } => {
+                assert_eq!(harness_state, "working");
+            }
+            other => panic!("expected SessionBusy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_propagates_submission_unconfirmed_from_herdr() {
+        let herdr = FakeHerdr::new(always(pi_get_with_status("idle")), always(pi_explain()))
+            .with_agent_prompt(|pane, _| {
+                Err(AdapterError::SubmissionUnconfirmed {
+                    pane: pane.0.clone(),
+                    detail: "fixture: stalled".to_string(),
+                    help: "fix the test".to_string(),
+                })
+            });
+        let adapter = PiAdapter::new(herdr);
+
+        let err = adapter
+            .send(&PaneId("wE:p1".to_string()), uid(1), "task")
+            .expect_err("a stalled confirmation must not be reported as Ok");
+        assert!(
+            matches!(err, AdapterError::SubmissionUnconfirmed { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn start_creates_a_pane_and_starts_pi_in_it() {
+        let seen_cwd: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
+        let seen_cwd_write = Rc::clone(&seen_cwd);
+        let seen_kind: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let seen_kind_write = Rc::clone(&seen_kind);
+
+        let herdr = FakeHerdr::new(always(pi_get_with_status("idle")), always(pi_explain()))
+            .with_workspace_create(move |cwd| {
+                *seen_cwd_write.borrow_mut() = Some(cwd.to_path_buf());
+                Ok(r#"{"result":{"root_pane":{"pane_id":"wQ:p1"}}}"#.to_string())
+            })
+            .with_agent_start(move |_, kind, pane, args| {
+                *seen_kind_write.borrow_mut() = Some(kind.to_string());
+                assert_eq!(
+                    pane.0, "wQ:p1",
+                    "agent_start must target the pane just created"
+                );
+                assert!(
+                    args.iter().any(|a| a == "--extension"),
+                    "the Herdr lifecycle hook extension must be passed: {args:?}"
+                );
+                Ok(r#"{"result":{"type":"agent_started"}}"#.to_string())
+            });
+        let adapter = PiAdapter::new(herdr);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = CanonicalPath::resolve(dir.path()).expect("resolve tempdir");
+        let req = StartRequest {
+            scope_id: uid(1),
+            session_id: uid(2),
+            workspace,
+            generated_context: "company\nscope\nagent\n".to_string(),
+        };
+
+        let started = adapter.start(&req).expect("start must succeed");
+        assert_eq!(started.pane, PaneId("wQ:p1".to_string()));
+        // Compare against the *canonicalized* workspace path, not the
+        // TempDir's raw one — on this machine `/tmp` resolves through
+        // `/var`'s symlink to `/private/var`, and `CanonicalPath::resolve`
+        // follows it, exactly as it is documented to.
+        assert_eq!(seen_cwd.borrow().as_deref(), Some(req.workspace.as_path()));
+        assert_eq!(seen_kind.borrow().as_deref(), Some("pi"));
+    }
+
+    #[test]
+    fn start_reports_degraded_confidence_rather_than_failing_on_a_missing_hook_marker() {
+        let explain_without_marker: String = pi_explain()
+            .lines()
+            .filter(|line| !line.starts_with("screen_detection_skip_reason"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let herdr = FakeHerdr::new(
+            always(pi_get_with_status("idle")),
+            always(explain_without_marker),
+        );
+        let adapter = PiAdapter::new(herdr);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = CanonicalPath::resolve(dir.path()).expect("resolve tempdir");
+        let req = StartRequest {
+            scope_id: uid(1),
+            session_id: uid(2),
+            workspace,
+            generated_context: String::new(),
+        };
+
+        let started = adapter
+            .start(&req)
+            .expect("a missing hook marker must not fail start (ADR 0017 decision 2)");
+        assert_eq!(started.confidence, Confidence::Degraded);
+    }
+
+    #[test]
+    fn start_propagates_a_failed_workspace_create() {
+        let herdr =
+            FakeHerdr::new(always(pi_get()), always(pi_explain())).with_workspace_create(|_| {
+                Err(AdapterError::UnreadableOutput {
+                    command: "herdr workspace create".to_string(),
+                    detail: "fixture: refused".to_string(),
+                    help: "fix the test".to_string(),
+                })
+            });
+        let adapter = PiAdapter::new(herdr);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = CanonicalPath::resolve(dir.path()).expect("resolve tempdir");
+        let req = StartRequest {
+            scope_id: uid(1),
+            session_id: uid(2),
+            workspace,
+            generated_context: String::new(),
+        };
+
+        adapter
+            .start(&req)
+            .expect_err("a refused workspace_create must fail start, not fabricate a session");
+    }
+
+    #[test]
+    fn start_closes_the_pane_it_created_when_agent_start_fails() {
+        let closed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let closed_write = Rc::clone(&closed);
+
+        let herdr = FakeHerdr::new(always(pi_get()), always(pi_explain()))
+            .with_workspace_create(|_| {
+                Ok(r#"{"result":{"root_pane":{"pane_id":"wQ:p1"}}}"#.to_string())
+            })
+            .with_agent_start(|_, _, _, _| {
+                Err(AdapterError::UnreadableOutput {
+                    command: "herdr agent start".to_string(),
+                    detail: "fixture: pi not installed".to_string(),
+                    help: "fix the test".to_string(),
+                })
+            })
+            .with_pane_close(move |pane| {
+                closed_write.borrow_mut().push(pane.0.clone());
+                Ok(r#"{"result":{"type":"ok"}}"#.to_string())
+            });
+        let adapter = PiAdapter::new(herdr);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = CanonicalPath::resolve(dir.path()).expect("resolve tempdir");
+        let req = StartRequest {
+            scope_id: uid(1),
+            session_id: uid(2),
+            workspace,
+            generated_context: String::new(),
+        };
+
+        adapter
+            .start(&req)
+            .expect_err("a failed agent_start must fail start");
+        assert_eq!(
+            closed.borrow().as_slice(),
+            ["wQ:p1"],
+            "the pane created before agent_start failed must be closed, or it leaks"
+        );
+    }
+
+    // Measured live on this machine (see `PiAdapter::start_pi_with_retry`'s
+    // doc comment): a pane Herdr just created can briefly answer
+    // `agent_pane_busy` to `agent start` before its shell reaches an
+    // interactive prompt. `start` must ride that out rather than fail.
+    #[test]
+    fn start_retries_agent_start_on_a_transient_pane_busy_error() {
+        let attempts: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+        let attempts_write = Rc::clone(&attempts);
+
+        let herdr = FakeHerdr::new(always(pi_get_with_status("idle")), always(pi_explain()))
+            .with_workspace_create(|_| {
+                Ok(r#"{"result":{"root_pane":{"pane_id":"wQ:p1"}}}"#.to_string())
+            })
+            .with_agent_start(move |_, _, _, _| {
+                let n = attempts_write.get();
+                attempts_write.set(n + 1);
+                if n < 2 {
+                    Err(AdapterError::UnreadableOutput {
+                        command: "herdr agent start".to_string(),
+                        detail: r#"{"error":{"code":"agent_pane_busy","message":"agent target pane wQ:p1 is not an available shell"}}"#.to_string(),
+                        help: "fix the test".to_string(),
+                    })
+                } else {
+                    Ok(r#"{"result":{"type":"agent_started"}}"#.to_string())
+                }
+            });
+        let adapter = PiAdapter::new(herdr);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = CanonicalPath::resolve(dir.path()).expect("resolve tempdir");
+        let req = StartRequest {
+            scope_id: uid(1),
+            session_id: uid(2),
+            workspace,
+            generated_context: String::new(),
+        };
+
+        adapter
+            .start(&req)
+            .expect("two transient agent_pane_busy failures must be ridden out, not surfaced");
+        assert_eq!(
+            attempts.get(),
+            3,
+            "must have retried exactly until the third attempt succeeded"
+        );
+    }
+
+    #[test]
+    fn start_does_not_retry_a_non_transient_agent_start_failure() {
+        let attempts: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+        let attempts_write = Rc::clone(&attempts);
+
+        let herdr = FakeHerdr::new(always(pi_get()), always(pi_explain()))
+            .with_workspace_create(|_| {
+                Ok(r#"{"result":{"root_pane":{"pane_id":"wQ:p1"}}}"#.to_string())
+            })
+            .with_agent_start(move |_, _, _, _| {
+                attempts_write.set(attempts_write.get() + 1);
+                Err(AdapterError::UnreadableOutput {
+                    command: "herdr agent start".to_string(),
+                    detail: "fixture: pi not installed".to_string(),
+                    help: "fix the test".to_string(),
+                })
+            });
+        let adapter = PiAdapter::new(herdr);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = CanonicalPath::resolve(dir.path()).expect("resolve tempdir");
+        let req = StartRequest {
+            scope_id: uid(1),
+            session_id: uid(2),
+            workspace,
+            generated_context: String::new(),
+        };
+
+        adapter
+            .start(&req)
+            .expect_err("a non-transient agent_start failure must still fail start");
+        assert_eq!(
+            attempts.get(),
+            1,
+            "a non-transient failure must not be retried at all"
+        );
     }
 }

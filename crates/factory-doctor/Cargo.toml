@@ -1,0 +1,26 @@
+[package]
+name = "factory-doctor"
+description = "Read-only diagnosis of an installed instance (backlog §10, ADR 0014, ADR 0018): the one component allowed to open the database outside the daemon, because 'the daemon is down' is what an operator runs it to find out"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+factory-adapter = { path = "../factory-adapter" }
+factory-config = { path = "../factory-config" }
+factory-paths = { path = "../factory-paths" }
+factory-registry = { path = "../factory-registry" }
+factory-session = { path = "../factory-session" }
+factory-store = { path = "../factory-store" }
+rusqlite.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

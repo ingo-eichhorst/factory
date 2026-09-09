@@ -5,10 +5,12 @@
 //! schema version with the `sqlite3` CLI during an incident, with no Factory
 //! code and no knowledge of a table layout (Slice 10's `factory doctor`).
 
-use rusqlite::Connection;
-use rusqlite_migration::{M, Migrations};
+use std::path::Path;
 
-use crate::{StoreError, schema};
+use rusqlite::Connection;
+use rusqlite_migration::{Error as MigrationError, M, MigrationDefinitionError, Migrations};
+
+use crate::{StoreError, schema, snapshot};
 
 /// The full set of released migrations, in order.
 ///
@@ -34,21 +36,52 @@ use crate::{StoreError, schema};
 /// no reference to `tasks` or `sessions` that either statement could ever
 /// invalidate, unlike migrations 2 and 3's drop/rename dance.
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![
+    Migrations::new(migration_list())
+}
+
+/// The migration list itself, so that [`latest_schema_version`] can count it
+/// without a database connection.
+fn migration_list() -> Vec<M<'static>> {
+    vec![
         M::up(schema::V1_SCHEMA),
         M::up(schema::V2_SCHEMA).foreign_key_check(),
         M::up(schema::V3_SCHEMA).foreign_key_check(),
         M::up(schema::V4_SCHEMA),
         M::up(schema::V5_SCHEMA),
-    ])
+    ]
 }
 
-/// Bring `conn` to the latest schema.
+/// The highest schema version this build understands.
+///
+/// Counted from the migration list rather than written down beside it, so
+/// there is no second place to update when a migration is added — and so a
+/// caller outside this crate (`factory-doctor`, which reports whether
+/// migrations are pending) does not have to keep its own copy of a number
+/// only this module can know. `user_version` is 1-based and each migration
+/// advances it by one, so the count *is* the version.
+#[must_use]
+pub fn latest_schema_version() -> i64 {
+    i64::try_from(migration_list().len()).unwrap_or(i64::MAX)
+}
+
+/// Bring `conn` (backing `db_path`) to the latest schema.
 ///
 /// Safe to call against a fresh database or one already at the latest
 /// version: `rusqlite_migration` compares `user_version` against the
 /// migration list and applies only what is missing, which is what makes
 /// repeated `Store::open` calls idempotent (Slice 2's acceptance criterion).
+///
+/// Before anything else, this reads `user_version` and asks `rusqlite_migration`
+/// how many migrations are pending — the one call this module makes into
+/// `pending_migrations`, so `snapshot::snapshot_before_migration` (ADR 0018
+/// decision 3) and the `DatabaseTooFarAhead` mapping below (ADR 0018
+/// decision 2) both work from the same numbers `to_latest` is about to see,
+/// rather than each recomputing them and risking disagreement. The identity
+/// `from_version + pending == (the number of migrations this build defines)`
+/// holds unconditionally — it is exactly `pending_migrations`'s own formula,
+/// `self.ms.len() - user_version` — so it is also how this function learns
+/// the schema version *this build* understands, without a second constant
+/// that could drift from the `Vec` in [`migrations`].
 ///
 /// `foreign_keys` is turned off for the duration of the batch and back on
 /// immediately after, in both the success and failure path. This is
@@ -59,12 +92,43 @@ fn migrations() -> Migrations<'static> {
 /// only get a clean drop/recreate by having the *connection* enter the batch
 /// with enforcement already off, never by asking the migration's own SQL to
 /// turn it off.
-pub(crate) fn apply(conn: &mut Connection) -> Result<(), StoreError> {
+pub(crate) fn apply(conn: &mut Connection, db_path: &Path) -> Result<(), StoreError> {
+    let ms = migrations();
+    let from_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let pending = ms.pending_migrations(conn)?;
+    let built_schema = from_version + i64::from(pending);
+
+    // Decision 3: the only rollback an append-only migration will ever have.
+    // If this fails, the `?` below returns before `to_latest` is ever
+    // called — the migration must not run.
+    snapshot::snapshot_before_migration(conn, db_path, from_version, pending)?;
+
     conn.pragma_update(None, "foreign_keys", "OFF")?;
-    let outcome = migrations().to_latest(conn);
+    let outcome = ms.to_latest(conn);
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    outcome?;
-    Ok(())
+    outcome.map_err(|source| map_database_too_far_ahead(source, from_version, built_schema))
+}
+
+/// Map `rusqlite_migration`'s undifferentiated `DatabaseTooFarAhead` into
+/// [`StoreError::DatabaseTooFarAhead`], which names both schema numbers and
+/// what an operator can do about it (ADR 0018 decision 2). Every other
+/// migration error passes through unchanged.
+fn map_database_too_far_ahead(
+    source: MigrationError,
+    database_schema: i64,
+    built_schema: i64,
+) -> StoreError {
+    if matches!(
+        source,
+        MigrationError::MigrationDefinition(MigrationDefinitionError::DatabaseTooFarAhead)
+    ) {
+        StoreError::DatabaseTooFarAhead {
+            built_schema,
+            database_schema,
+        }
+    } else {
+        StoreError::Migration(source)
+    }
 }
 
 #[cfg(test)]
@@ -749,6 +813,190 @@ mod tests {
         assert!(
             violations.is_empty(),
             "foreign_key_check reported violations: {violations:?}"
+        );
+    }
+
+    // ADR 0018 decision 2: `DatabaseTooFarAhead` is Factory's contract --
+
+    /// The probe ADR 0018 describes measuring against `rusqlite_migration`
+    /// 2.6.0 directly, but against Factory's real `migrations()` set rather
+    /// than the ADR's synthetic two-migration stand-in: a database whose
+    /// `user_version` is above the highest release migration must be
+    /// refused, and left completely untouched, by the real migration set —
+    /// not by a fact about the dependency this test never checks.
+    #[test]
+    fn a_database_too_far_ahead_of_the_real_migrations_is_refused_and_left_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("too_far_ahead.sqlite");
+
+        // `DatabaseTooFarAhead` is a pure `user_version`-vs-migration-count
+        // comparison inside `rusqlite_migration::goto` -- it runs before
+        // any SQL touches a table, so the seed only needs a real,
+        // non-trivial database (schema 4) pinned one past what this
+        // build's `migrations()` defines, not an actual sixth migration.
+        seed_schema_4_database(&path, "");
+        {
+            let conn = Connection::open(&path).expect("open seed database");
+            conn.pragma_update(None, "user_version", 6_i64)
+                .expect("pin the database one past the highest release migration");
+        }
+        let before_bytes = std::fs::read(&path).expect("read db bytes before the refused open");
+
+        let mut conn = Connection::open(&path).expect("open raw connection");
+        let err = apply(&mut conn, &path)
+            .expect_err("a database ahead of this build's migrations() must be refused");
+        match err {
+            StoreError::DatabaseTooFarAhead {
+                built_schema,
+                database_schema,
+            } => {
+                assert_eq!(
+                    built_schema, 5,
+                    "this build's migrations() defines exactly 5"
+                );
+                assert_eq!(
+                    database_schema, 6,
+                    "the database's own version must be named"
+                );
+            }
+            other => panic!("expected StoreError::DatabaseTooFarAhead, got {other:?}"),
+        }
+        drop(conn);
+
+        let after_bytes = std::fs::read(&path).expect("read db bytes after the refused open");
+        assert_eq!(
+            before_bytes, after_bytes,
+            "a database too far ahead must be left byte-for-byte untouched"
+        );
+    }
+
+    // ADR 0018 decision 3: pre-migration snapshots ----------------------
+
+    /// Mutation target: delete the "if the snapshot fails, refuse the
+    /// migration" branch in `apply` (e.g. by ignoring
+    /// `snapshot::snapshot_before_migration`'s `Result` instead of
+    /// propagating it with `?`) and this must fail. It seeds a *real*
+    /// schema-1 database -- the same fixture
+    /// `fresh_and_migrated_from_v1_have_identical_schema` proves migrates
+    /// cleanly all the way to schema 5 -- then blocks the snapshot by
+    /// occupying `backups`' path with a plain file, so
+    /// `std::fs::create_dir_all` fails. With the guard in place, `apply`
+    /// must return before ever calling `to_latest`, leaving the database at
+    /// schema 1. With the guard deleted, this same fixture migrates
+    /// successfully (proven elsewhere), so `user_version` would move to 5 --
+    /// which is exactly what this test refuses to see.
+    #[test]
+    fn migration_does_not_run_when_its_pre_migration_snapshot_cannot_be_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("with_data.sqlite");
+        seed_schema_1_database(&path, "");
+
+        // Occupy the `backups` directory's own path with a regular file, so
+        // `snapshot_before_migration`'s `create_dir_all` cannot create it.
+        std::fs::write(dir.path().join("backups"), b"not a directory")
+            .expect("occupy the backups path with a file");
+
+        let mut conn = Connection::open(&path).expect("open raw connection");
+        let err = apply(&mut conn, &path).expect_err(
+            "apply must refuse to migrate when its pre-migration snapshot cannot be written",
+        );
+        assert!(
+            matches!(err, StoreError::Io { .. }),
+            "expected StoreError::Io from the blocked snapshot, got {err:?}"
+        );
+        drop(conn);
+
+        let conn = Connection::open(&path).expect("reopen to verify nothing moved");
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read back user_version");
+        assert_eq!(
+            version, 1,
+            "a migration must not run at all when its snapshot could not be written"
+        );
+    }
+
+    /// The positive half of the snapshot guard: seeds a real schema-4
+    /// database (so the migration this triggers -- migration 5, a plain
+    /// `ALTER TABLE ADD COLUMN` -- actually succeeds), opens it through
+    /// `Store::open_at`, and confirms the snapshot this produces is a
+    /// genuinely usable rollback artifact: opened through the read-only
+    /// door (ADR 0018 decision 1), it reports schema 4, not schema 5 -- the
+    /// version the source database was at the moment before migration 5
+    /// ran, not the version it ended up at.
+    #[test]
+    fn pre_migration_snapshot_is_a_usable_schema_4_rollback_artifact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("with_sessions.sqlite");
+        seed_schema_4_database(&path, "");
+
+        let store = crate::Store::open_at(&path).expect("migration 5 must succeed");
+        assert_eq!(store.schema_version().unwrap(), 5);
+        drop(store);
+
+        let backups_dir = dir.path().join("backups");
+        let mut entries: Vec<_> = std::fs::read_dir(&backups_dir)
+            .expect("backups dir must exist")
+            .map(|entry| entry.expect("dir entry").file_name())
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries.len(),
+            1,
+            "exactly one pre-migration snapshot must be written, got {entries:?}"
+        );
+        let name = entries[0].to_str().expect("utf8 filename").to_string();
+        assert!(
+            name.starts_with("pre-migration-4-to-5-") && name.ends_with(".sqlite"),
+            "unexpected snapshot name: {name}"
+        );
+
+        let snapshot_path = backups_dir.join(&name);
+        let snapshot = crate::Store::open_read_only(&snapshot_path)
+            .expect("the snapshot must open through the read-only door");
+        assert_eq!(
+            snapshot.schema_version().unwrap(),
+            4,
+            "the snapshot must preserve the schema version the source database \
+             was at immediately before migration 5 ran, not the version it \
+             ended up at"
+        );
+    }
+
+    /// Mutation target: delete the fresh-database exemption (`from_version
+    /// <= 0`) in `snapshot::snapshot_before_migration` and this must fail.
+    /// A brand-new database has nothing to lose, so opening it for the
+    /// first time must not create `backups/` at all.
+    #[test]
+    fn a_fresh_database_gets_no_pre_migration_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fresh.sqlite");
+
+        let store = crate::Store::open_at(&path).expect("open fresh store");
+        assert_eq!(store.schema_version().unwrap(), 5);
+
+        let backups_dir = dir.path().join("backups");
+        assert!(
+            !backups_dir.exists(),
+            "a fresh database must not get a pre-migration snapshot, found: {backups_dir:?}"
+        );
+    }
+
+    /// Reopening an already up-to-date database (nothing pending) must not
+    /// snapshot it again: `pending <= 0` is the second half of the
+    /// exemption, distinct from the fresh-database half above.
+    #[test]
+    fn reopening_an_up_to_date_database_does_not_snapshot_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("factory.sqlite");
+
+        crate::Store::open_at(&path).expect("first open migrates to latest");
+        crate::Store::open_at(&path).expect("second open: nothing pending");
+
+        let backups_dir = dir.path().join("backups");
+        assert!(
+            !backups_dir.exists(),
+            "an up-to-date database must not be snapshotted again, found: {backups_dir:?}"
         );
     }
 }

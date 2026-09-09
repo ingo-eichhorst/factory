@@ -1,0 +1,129 @@
+{
+  "groups": [
+    {
+      "name": "factory",
+      "agents": [
+        {
+          "version": 1,
+          "session_id": "22222222-2222-4222-8222-000000000001",
+          "state": "ready",
+          "adapter": "codex",
+          "cwd": "/Users/operator",
+          "transcript_path": "/Users/operator/.codex/sessions/2026/09/01/rollout-2026-09-01T10-00-00-22222222-2222-4222-8222-000000000001.jsonl",
+          "confidence": "medium",
+          "last_event": "transcript_activity",
+          "pid": 11111,
+          "launcher": {
+            "term_program": "zed",
+            "tty": "/dev/ttys001",
+            "herdr_pane_id": "w3:pD",
+            "herdr_socket_path": "/Users/operator/.config/herdr/sessions/factory/herdr.sock"
+          },
+          "daemon_version": "0.6.2"
+        }
+      ]
+    },
+    {
+      "name": "business-factory",
+      "agents": [
+        {
+          "version": 1,
+          "session_id": "33333333-3333-4333-8333-000000000002",
+          "state": "working",
+          "adapter": "pi",
+          "cwd": "/Users/operator/business-factory/assistant",
+          "confidence": "medium",
+          "last_event": "transcript_activity",
+          "pid": 22222,
+          "launcher": {
+            "term_program": "zed",
+            "tty": "/dev/ttys002",
+            "herdr_pane_id": "w6:p1",
+            "herdr_socket_path": "/Users/operator/.config/herdr/sessions/factory/herdr.sock"
+          },
+          "daemon_version": "0.6.2"
+        },
+        {
+          "version": 1,
+          "session_id": "11111111-1111-4111-8111-0000000000a1",
+          "state": "working",
+          "adapter": "claude-code",
+          "cwd": "/Users/operator/business-factory/projects/factory",
+          "transcript_path": "/Users/operator/.claude/projects/-Users-operator-business-factory-projects-factory/11111111-1111-4111-8111-0000000000a1.jsonl",
+          "git_branch": "main",
+          "project_name": "business-factory",
+          "confidence": "medium",
+          "last_event": "transcript_activity",
+          "pid": 33333,
+          "launcher": {
+            "term_program": "zed",
+            "tty": "/dev/ttys026",
+            "herdr_pane_id": "wE:p2",
+            "herdr_socket_path": "/Users/operator/.config/herdr/sessions/factory/herdr.sock"
+          },
+          "daemon_version": "0.6.2",
+          "children": [
+            {
+              "version": 1,
+              "session_id": "agent-a2d8e1c8393c11d44",
+              "state": "working",
+              "adapter": "claude-code",
+              "cwd": "/Users/operator/business-factory/projects/factory",
+              "transcript_path": "/Users/operator/.claude/projects/-Users-operator-business-factory-projects-factory/11111111-1111-4111-8111-0000000000a1/subagents/agent-a2d8e1c8393c11d44.jsonl",
+              "parent_session_id": "11111111-1111-4111-8111-0000000000a1",
+              "confidence": "medium",
+              "last_event": "transcript_activity"
+            }
+          ]
+        },
+        {
+          "version": 1,
+          "session_id": "11111111-1111-4111-8111-0000000000a2",
+          "state": "ready",
+          "adapter": "claude-code",
+          "cwd": "/Users/operator/business-factory/projects/factory",
+          "transcript_path": "/Users/operator/.claude/projects/-Users-operator-business-factory-projects-factory/11111111-1111-4111-8111-0000000000a2.jsonl",
+          "git_branch": "main",
+          "project_name": "business-factory",
+          "confidence": "medium",
+          "last_event": "transcript_activity",
+          "pid": 44444,
+          "launcher": {
+            "term_program": "zed",
+            "tty": "/dev/ttys030",
+            "herdr_pane_id": "wE:p4",
+            "herdr_socket_path": "/Users/operator/.config/herdr/sessions/factory/herdr.sock"
+          },
+          "daemon_version": "0.6.2"
+        }
+      ]
+    },
+    {
+      "name": "awesome-herdr",
+      "agents": [
+        {
+          "version": 1,
+          "session_id": "11111111-1111-4111-8111-0000000000a3",
+          "state": "error",
+          "adapter": "claude-code",
+          "cwd": "/Users/operator/business-factory/projects/awesome-herdr",
+          "transcript_path": "/Users/operator/.claude/projects/-Users-operator-business-factory-projects-awesome-herdr/11111111-1111-4111-8111-0000000000a3.jsonl",
+          "confidence": "medium",
+          "last_event": "transcript_activity",
+          "pid": 55555,
+          "launcher": {
+            "term_program": "zed",
+            "tty": "/dev/ttys040",
+            "herdr_pane_id": "wD:p1",
+            "herdr_socket_path": "/Users/operator/.config/herdr/sessions/factory/herdr.sock"
+          },
+          "daemon_version": "0.6.2"
+        }
+      ]
+    }
+  ],
+  "costs": {
+    "month": 0.0,
+    "year": 0.0
+  }
+}

@@ -31,8 +31,10 @@
 mod backup;
 mod init;
 mod migrations;
+pub use migrations::latest_schema_version;
 mod pragma;
 mod schema;
+mod snapshot;
 
 use std::path::{Path, PathBuf};
 
@@ -69,7 +71,55 @@ impl Store {
 
         let mut conn = rusqlite::Connection::open(&db_path)?;
         pragma::apply(&conn)?;
-        migrations::apply(&mut conn)?;
+        migrations::apply(&mut conn, &db_path)?;
+
+        Ok(Self {
+            conn,
+            path: db_path,
+        })
+    }
+
+    /// Open an existing database read-only (ADR 0018 decision 1): applies
+    /// the pragmas that are safe without write access, reports the schema
+    /// version it finds, and never migrates.
+    ///
+    /// `Store::open_at` is the only door that calls `migrations::apply`, and
+    /// it does so unconditionally — so a caller whose whole contract is
+    /// "look, don't touch" (`factory doctor`'s read-only pass; the backup
+    /// drill's inspection steps, which today migrate the very snapshot they
+    /// are inspecting) needs a door where that is true in fact, not by
+    /// convention. What makes it true in fact is the SQLite connection
+    /// itself: it is opened with `SQLITE_OPEN_READ_ONLY`, so any write —
+    /// this module never issuing one, migration code someone adds here
+    /// later, a caller's own mistake — fails at the driver rather than
+    /// depending on this function's good behaviour. Measured directly: a
+    /// `SQLITE_OPEN_READ_ONLY` connection can read a WAL-mode database
+    /// (Factory's own) both after a clean close and while a writer still
+    /// holds it open, so no pragma here has anything to lose from the
+    /// restriction.
+    ///
+    /// Never creates a database. `db_path` must already exist —
+    /// `SQLITE_OPEN_READ_ONLY` reports a missing file as
+    /// `StoreError::Sqlite`, the same way `rusqlite` reports it for any
+    /// other read-only open.
+    ///
+    /// `Store::transaction` is still callable on the result — `Store` has no
+    /// read-only variant of its own type — but do not expect it to be a
+    /// useful way to write: `BEGIN IMMEDIATE` itself succeeds even on a
+    /// read-only connection (measured directly), so it is the first actual
+    /// write *inside* the transaction that fails with `SQLITE_READONLY`, not
+    /// the `transaction()` call. A `commit()` with nothing written then
+    /// succeeds trivially. Prefer [`Store::connection`] for reads through
+    /// this door.
+    pub fn open_read_only(db_path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let db_path = db_path.as_ref().to_path_buf();
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        pragma::apply_read_only(&conn)?;
 
         Ok(Self {
             conn,
@@ -151,6 +201,21 @@ pub enum StoreError {
 
     #[error("migration failed: {0}")]
     Migration(#[from] rusqlite_migration::Error),
+
+    /// ADR 0018 decision 2: `rusqlite_migration`'s own
+    /// `DatabaseTooFarAhead` names neither number — this does, plus what an
+    /// operator can do about it. `built_schema` is the highest schema
+    /// version this build's `migrations()` defines; `database_schema` is
+    /// the `user_version` the database was actually found at.
+    #[error(
+        "database schema is too far ahead: this build understands schema {built_schema}, \
+         the database is at schema {database_schema}; install a newer build of Factory, \
+         or restore a snapshot taken before the upgrade that produced schema {database_schema}"
+    )]
+    DatabaseTooFarAhead {
+        built_schema: i64,
+        database_schema: i64,
+    },
 
     #[error("cannot use {path}: {source}")]
     Io {

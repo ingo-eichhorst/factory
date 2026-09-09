@@ -167,6 +167,24 @@ pub fn record_delivery_attempt(store: &mut Store, task_id: uuid::Uuid, session_i
     tx.commit().expect("commit");
 }
 
+/// Record a *refused* `delivery_attempts` row: journalled like any other
+/// attempt, but with the outcome the writer records when it established that
+/// nothing reached the terminal (`factory_task::deliver::PromptWriteError::refused`,
+/// which the daemon returns for `AdapterError::SessionBusy`).
+pub fn record_refused_delivery_attempt(
+    store: &mut Store,
+    task_id: uuid::Uuid,
+    session_id: uuid::Uuid,
+) {
+    let tx = store.transaction().expect("begin");
+    tx.execute(
+        "INSERT INTO delivery_attempts (task_id, session_id, outcome) VALUES (?1, ?2, 'refused')",
+        (task_id.to_string(), session_id.to_string()),
+    )
+    .expect("insert refused delivery attempt");
+    tx.commit().expect("commit");
+}
+
 pub fn session_state(store: &Store, id: uuid::Uuid) -> String {
     store
         .connection()

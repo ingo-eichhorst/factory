@@ -35,6 +35,28 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Apply the pragmas that are safe on a [`rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY`]
+/// connection (ADR 0018 decision 1's read-only door).
+///
+/// `journal_mode` and `synchronous` are deliberately not touched here, unlike
+/// [`apply`]. Setting `journal_mode` can require rewriting the database's
+/// header — measured directly: a `SQLITE_OPEN_READ_ONLY` connection can
+/// *read* a WAL database (checked both against a cleanly closed WAL database
+/// and against one with a live writer still holding it open) without ever
+/// needing to touch `journal_mode` itself, so there is nothing to gain by
+/// setting it and a real risk of a spurious failure on a database that is not
+/// already in WAL mode — exactly the kind of old snapshot this door exists to
+/// open. `synchronous` governs durability of writes this connection can never
+/// make, so setting it would be a no-op dressed up as a precaution.
+pub(crate) fn apply_read_only(conn: &Connection) -> Result<(), StoreError> {
+    // Harmless and, unlike `journal_mode`, purely a connection-local setting
+    // that touches nothing on disk — safe to set the same way on both doors.
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "busy_timeout", 5_000_i64)?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::Store;
@@ -73,5 +95,31 @@ mod tests {
             .pragma_query_value(None, "synchronous", |row| row.get(0))
             .expect("synchronous readback");
         assert_eq!(synchronous, 2);
+    }
+
+    /// The read-only door's own pragma read-back: `foreign_keys` and
+    /// `busy_timeout` must be set exactly as they are on the read-write
+    /// door, on a connection opened through [`Store::open_read_only`].
+    #[test]
+    fn both_read_only_pragmas_are_actually_in_effect() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A database has to exist — and be at least schema-bearing — before
+        // there is anything to open read-only.
+        Store::open(dir.path()).expect("create the database first");
+        let db_path = dir.path().join(".factory").join("factory.sqlite");
+
+        let store = Store::open_read_only(&db_path).expect("open_read_only");
+
+        let foreign_keys: i64 = store
+            .conn
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .expect("foreign_keys readback");
+        assert_eq!(foreign_keys, 1);
+
+        let busy_timeout: i64 = store
+            .conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("busy_timeout readback");
+        assert_eq!(busy_timeout, 5000);
     }
 }

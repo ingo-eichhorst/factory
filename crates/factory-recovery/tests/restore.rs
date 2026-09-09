@@ -391,3 +391,39 @@ fn reconcile_refuses_to_write_a_report_when_the_database_is_not_under_dot_factor
         "no report directory should have been created outside .factory/"
     );
 }
+
+/// The middle row does not apply to a *refused* attempt.
+///
+/// ADR 0019 decision 2's middle row turns on "the attempt was journalled
+/// before the terminal write", which makes `queued` the weaker evidence —
+/// the prompt may already have arrived. A refusal carries the opposite
+/// information: the writer established that nothing was written. Treating it
+/// as possible delivery would block a task that was never sent, and would
+/// make a human authorise a resend of a prompt that never left the building.
+///
+/// One home for that rule:
+/// `factory_task::deliver::ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL`. Neuter it
+/// and this test fails alongside `factory-task`'s own.
+#[test]
+fn reconcile_leaves_a_queued_task_queued_when_its_only_attempt_was_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope = restore_common::seed_scope(&mut store, 1, dir.path());
+    let ws = dir.path().join("ws");
+    let session = restore_common::seed_session(&mut store, 1, scope, &ws, "running");
+    let task = restore_common::seed_task(&mut store, 1, scope, "queued", Some(session));
+    restore_common::record_refused_delivery_attempt(&mut store, task, session);
+
+    reconcile(&mut store).expect("reconcile");
+
+    let (status, blocked_reason, assigned) = restore_common::task_row(&store, task);
+    assert_eq!(
+        status, "queued",
+        "a refused attempt wrote nothing, so this task was never delivered"
+    );
+    assert_eq!(blocked_reason, None);
+    assert_eq!(
+        assigned, None,
+        "the assignment is still cleared so selection can choose again"
+    );
+}
