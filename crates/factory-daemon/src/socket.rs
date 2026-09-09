@@ -25,11 +25,30 @@ use crate::lock::InstallationLock;
 /// caller cannot construct an `InstallationLock` without successfully taking
 /// the exclusive lock first, so a call to `bind` is proof, at the type level,
 /// that no live daemon can own the file this is about to remove.
+/// The longest socket path `AF_UNIX` accepts here.
+///
+/// `sockaddr_un.sun_path` is 104 bytes on macOS including its terminator, so
+/// 103 bytes of path bind and 104 do not — measured directly rather than read
+/// off a header, because the value differs across platforms (Linux allows
+/// 107).
+const MAX_SOCKET_PATH_BYTES: usize = 103;
+
 pub(crate) fn bind(
     _lock: &InstallationLock,
     socket_path: impl AsRef<Path>,
 ) -> Result<UnixListener, SocketError> {
     let socket_path = socket_path.as_ref();
+
+    // Checked before anything is created or removed: a path that cannot be
+    // bound must not first cause a live daemon's socket file to be deleted.
+    let length = socket_path.as_os_str().as_encoded_bytes().len();
+    if length > MAX_SOCKET_PATH_BYTES {
+        return Err(SocketError::PathTooLong {
+            path: socket_path.to_path_buf(),
+            length,
+            limit: MAX_SOCKET_PATH_BYTES,
+        });
+    }
 
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| SocketError::Io {
@@ -63,6 +82,26 @@ pub enum SocketError {
         path: PathBuf,
         #[source]
         source: std::io::Error,
+    },
+
+    /// The socket path exceeds what `AF_UNIX` accepts.
+    ///
+    /// Measured on this platform on 2026-09-09: 103 bytes bind, 104 do not.
+    /// The limit is `sun_path`'s size in `sockaddr_un`, not a Factory choice,
+    /// and it is small enough to hit in ordinary use — a Factory instance
+    /// under a deeply nested directory (a temp dir, a sandbox path) reaches
+    /// it easily. Without this the operator sees only rusqlite's passthrough
+    /// "path must be shorter than SUN_LEN", which names neither the path nor
+    /// the limit nor anything to do about it.
+    #[error(
+        "the daemon socket path is {length} bytes, and this platform accepts at most {limit}: \
+         {path}\n  help: the limit is the operating system's, not Factory's — move the instance \
+         to a shorter path, or reach it through a shorter symlink"
+    )]
+    PathTooLong {
+        path: PathBuf,
+        length: usize,
+        limit: usize,
     },
 
     #[error("cannot bind the factory daemon socket at {path}: {source}")]

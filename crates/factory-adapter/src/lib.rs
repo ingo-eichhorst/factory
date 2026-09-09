@@ -725,15 +725,24 @@ impl<A: HerdrAccess> Adapter for PiAdapter<A> {
             return Err(AdapterError::SessionBusy {
                 pane: pane.0.clone(),
                 harness_state: observed.harness_state,
-                help: "wait for the current turn to finish, or send an explicit interrupt, \
-                       before sending another task to this session"
-                    .to_string(),
+                help: format!(
+                    "task {task_id} was not submitted; wait for the current turn to finish, \
+                     or send an explicit interrupt, before sending another task to this session"
+                ),
             });
         }
 
-        // Design §5: "each prompt includes its task UUID so that work can be
-        // correlated with its database record."
-        let text = format!("[task {task_id}] {prompt}");
+        // The task id is NOT prefixed here. `factory_task::deliver` renders
+        // it into the prompt (design §5: "each prompt includes its task UUID
+        // so that work can be correlated with its database record"), and it
+        // must, because station 7's `OperatorPromptWriter` — a human pasting
+        // the prompt by hand — never passes through an adapter at all. An
+        // adapter that prefixed as well produced `[task <id>] [task <id>]` on
+        // a real Pi pane, which is how this was found.
+        //
+        // `task_id` stays in the signature: it is what an adapter names in
+        // its own errors, and what a live drill correlates on.
+        let text = prompt.to_string();
         self.herdr.agent_prompt(pane, &text)?;
         Ok(())
     }
@@ -1722,7 +1731,7 @@ mod tests {
     }
 
     #[test]
-    fn send_embeds_the_task_id_in_the_submitted_text() {
+    fn send_submits_the_prompt_verbatim_without_adding_a_second_task_id() {
         let seen: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let seen_write = Rc::clone(&seen);
         let herdr = FakeHerdr::new(always(pi_get_with_status("idle")), always(pi_explain()))
@@ -1738,12 +1747,16 @@ mod tests {
             .expect("send to an idle session must confirm");
 
         let sent = seen.borrow().clone().expect("agent_prompt must be called");
-        assert!(
-            sent.contains(&task_id.to_string()),
-            "the submitted text must carry the task id so the harness's transcript correlates \
-             with it: {sent}"
+        assert_eq!(
+            sent, "do the thing",
+            "the adapter submits the prompt verbatim: `factory_task::deliver` already rendered \
+             design §5's task-id line into it. An adapter that prefixed too produced \
+             `[task <id>] [task <id>]` on a real Pi pane."
         );
-        assert!(sent.contains("do the thing"));
+        assert!(
+            !sent.contains(&task_id.to_string()),
+            "the adapter must not add the task id a second time: {sent}"
+        );
     }
 
     #[test]

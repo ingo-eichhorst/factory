@@ -200,6 +200,7 @@ name = "factory-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "factory-adapter",
  "factory-config",
  "factory-daemon",
  "factory-doctor",
@@ -291,6 +292,7 @@ dependencies = [
  "factory-adapter",
  "factory-config",
  "factory-context",
+ "factory-daemon",
  "factory-delegation",
  "factory-paths",
  "factory-recovery",

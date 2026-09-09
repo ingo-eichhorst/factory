@@ -12,6 +12,7 @@ name = "factory"
 path = "src/main.rs"
 
 [dependencies]
+factory-adapter = { path = "../factory-adapter" }
 factory-config = { path = "../factory-config" }
 factory-daemon = { path = "../factory-daemon" }
 factory-doctor = { path = "../factory-doctor" }

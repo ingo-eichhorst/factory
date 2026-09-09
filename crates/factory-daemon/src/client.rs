@@ -42,9 +42,13 @@ pub fn call(
         .read_line(&mut response_line)
         .map_err(ClientError::Io)?;
     if read == 0 {
-        return Err(ClientError::Protocol(
-            "the daemon closed the connection without sending a response".to_string(),
-        ));
+        // Accepted, then closed with nothing written. In practice this is a
+        // daemon shutting down: the listener still accepts from the backlog
+        // while the process is on its way out. It is not a protocol
+        // violation, and calling it one made a *successful* `factory stop`
+        // print "malformed response from the factory daemon" — observed
+        // against a real daemon.
+        return Err(ClientError::ClosedWithoutResponse);
     }
 
     let response = envelope::parse_response(&response_line).map_err(ClientError::Protocol)?;
@@ -90,6 +94,17 @@ pub enum ClientError {
 
     #[error("i/o error talking to the factory daemon: {0}")]
     Io(#[source] std::io::Error),
+
+    /// The daemon accepted the connection and closed it without answering,
+    /// which is what a daemon on its way down does. Distinct from
+    /// [`ClientError::Protocol`]: nothing was malformed, there was simply
+    /// nobody left to serve. Callers probing liveness read this as "not
+    /// running".
+    #[error(
+        "the factory daemon accepted the connection and then closed it without answering\n  \
+         help: it is most likely shutting down — retry, or run `factory status`"
+    )]
+    ClosedWithoutResponse,
 
     #[error("malformed response from the factory daemon: {0}")]
     Protocol(String),

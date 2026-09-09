@@ -174,3 +174,44 @@ fn restart_after_a_clean_stop_succeeds() {
     let second = Daemon::start(&root);
     assert!(second.is_ok(), "{second:?}");
 }
+
+/// A socket path too long for `AF_UNIX` is refused with the length, the
+/// limit, and something to do about it — and refused *before* anything on
+/// disk is touched.
+///
+/// Found by running the real `factory` binary from a deeply nested scratch
+/// directory: the operator saw only "path must be shorter than SUN_LEN",
+/// which names neither the path nor the limit. The nesting that produced it
+/// was ordinary — a per-session temporary directory.
+#[test]
+fn a_socket_path_too_long_for_the_platform_is_refused_with_an_actionable_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // Nest until `<root>/.factory/factory.sock` is past the limit.
+    let mut root = dir.path().to_path_buf();
+    while factory_daemon::socket_path(&root)
+        .as_os_str()
+        .as_encoded_bytes()
+        .len()
+        <= 103
+    {
+        root = root.join("nested-directory-name");
+    }
+    std::fs::create_dir_all(&root).expect("create the nested root");
+
+    let err = factory_daemon::Daemon::start(&root).expect_err("this path cannot be bound");
+    let rendered = err.to_string();
+
+    assert!(
+        rendered.contains("103"),
+        "the message must name the platform's limit: {rendered}"
+    );
+    assert!(
+        rendered.contains("shorter path"),
+        "the message must say what an operator can do: {rendered}"
+    );
+    assert!(
+        !factory_daemon::socket_path(&root).exists(),
+        "a path that cannot be bound must not leave a socket file behind"
+    );
+}

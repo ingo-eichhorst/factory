@@ -13,6 +13,7 @@ publish.workspace = true
 factory-adapter = { path = "../factory-adapter" }
 factory-config = { path = "../factory-config" }
 factory-context = { path = "../factory-context" }
+factory-daemon = { path = "../factory-daemon" }
 factory-delegation = { path = "../factory-delegation" }
 factory-paths = { path = "../factory-paths" }
 factory-recovery = { path = "../factory-recovery" }
