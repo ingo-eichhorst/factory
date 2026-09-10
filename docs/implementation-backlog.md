@@ -953,8 +953,8 @@ adds `task_templates`, `schedules`, `task_events`, `task_decisions` and
 verify`. `factory doctor`'s check 6 answers two questions instead of one.
 `docs/slice-11-operator-guide.md` is the runbook.
 
-Six defects were found by accepting the work rather than by running it, and
-each is worth naming because none would have failed a test:
+Eight defects were found by accepting the work, or by running it, rather than
+by any test, and each is worth naming because none would have failed one:
 
 - *The dispatcher was never started.* `dispatch::spawn` was referenced only by
   its own test file. No installed instance would have fired anything.
@@ -977,15 +977,36 @@ each is worth naming because none would have failed a test:
   for the central agent" and a trap that could never fire. §11's sentence is
   about the target *agent*; the column is now `NOT NULL`.
 
-Left open, and carried into later stations: **no live drill has run** — the
-cut-over from the Python prototype is a documented operator procedure that
-nobody has performed, and Factory's own migration 1 fails on that database by
-design; **a verdict recorded through the CLI carries no author session**,
-because Factory has no caller identity at all, so the independence guard is
-enforced everywhere an author is known and is unreachable from the CLI path;
-**a paused template's skipped minutes are recorded nowhere**; and `check.sh`
-runs no `cargo doc`, which today would report 70 errors across 8 of the 14
-crates.
+The last two came from the live drill, on a throwaway root, and neither was
+visible from inside the test suite:
+
+- *`factory doctor` reported two dispatchers where there was one.* `launchctl`
+  is machine-wide, so a job loaded for the company root made every other
+  instance on the machine report a second writer of its own database. The
+  check was making a claim about a database it had not looked at — in the
+  check whose whole job is noticing a second writer. The job's own record
+  names the root it serves, and the check had been discarding it.
+- *A cron run was indistinguishable from a manual one.* Four scheduled runs
+  and a hand-sent one looked identical in `factory task list`, because `Task`
+  read 24 columns and not `triggered_by`, `schedule_id` or
+  `fired_for_minute`. The one question a schedule exists to answer — what did
+  my rule produce — could only be answered by opening the database.
+
+What the drill did prove: **one run per schedule per local minute**, over four
+minutes and twelve ticks; a schedule firing within seconds of being created; a
+run staying `queued` when no session could take it; and each creation refusal
+naming what was wrong.
+
+Left open, and carried into later stations: **the delivery half of the drill
+has not run**, since a cron run reaching a real Herdr pane needs a live
+session the first drill did not create; **the cut-over from the Python
+prototype has not been performed**, and Factory's own migration 1 fails on
+that database by design; **a verdict recorded through the CLI carries no
+author session**, because Factory has no caller identity at all, so the
+independence guard is enforced everywhere an author is known and is
+unreachable from the CLI path; **a paused template's skipped minutes are
+recorded nowhere**; and `check.sh` runs no `cargo doc`, which today would
+report 70 errors across 8 of the 14 crates.
 
 ## 12. Agent discovery and durable writing
 
