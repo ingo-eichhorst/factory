@@ -57,28 +57,26 @@ fn create_template(
         .expect("create template")
 }
 
-/// A template row whose `target_scope_id` is NULL, written by raw SQL.
-///
-/// `factory_task::template::create` will not produce one: a run's own
-/// `tasks.target_scope_id` is NOT NULL, so a template without a scope could
-/// never fire, and version 1 refuses to create one rather than let an
-/// operator make a schedule that silently never runs. The column itself is
-/// still nullable, so a hand edit or a foreign restore can put one there —
-/// which is exactly the state this helper builds, and exactly what
-/// `FireOutcome::NoTargetScope` exists to name.
-fn create_template_with_no_scope(
+/// A template that names a target agent, for the delivery-attempt tests —
+/// [`create_template`] always passes `None`, since most tests in this file
+/// only care about the fire itself.
+fn create_template_with_agent(
     store: &mut factory_store::Store,
     id: uuid::Uuid,
     name: &str,
+    target_scope_id: uuid::Uuid,
+    agent_name: &str,
 ) -> uuid::Uuid {
-    let tx = store.transaction().expect("begin");
-    tx.execute(
-        "INSERT INTO task_templates (id, name, prompt) VALUES (?1, ?2, 'do it')",
-        (id.to_string(), name),
+    factory_task::template::create(
+        store,
+        id,
+        name,
+        target_scope_id,
+        Some(agent_name),
+        "do it",
+        None,
     )
-    .expect("insert a scopeless template by hand");
-    tx.commit().expect("commit");
-    id
+    .expect("create template with a target agent")
 }
 
 fn create_schedule(
@@ -88,6 +86,44 @@ fn create_schedule(
     cron: &str,
 ) -> uuid::Uuid {
     factory_task::schedule::create(store, id, template_id, cron, "UTC").expect("create schedule")
+}
+
+/// A `running`, idle session for `agent_name` in `scope_id`, with `pane`
+/// recorded as its `herdr_pane_id` when given — written directly with raw
+/// SQL. `factory_session::begin_start`'s workspace-lease machinery is more
+/// than these tests need: `assign::is_idle` only reads `sessions.state` and
+/// whether any non-terminal task already names the session, and
+/// `crate::handler::pane::record` is `pub(crate)` to `factory-daemon`, so a
+/// raw insert is this crate's own sanctioned way to seed one — the same
+/// convention `create_template_with_no_scope` (removed with defect 3) used
+/// for `task_templates`.
+///
+/// `workspace_path` must be distinct per session in one test:
+/// `sessions_one_live_lease_per_workspace` is a unique index over every
+/// lease-holding state, `running` included.
+fn create_idle_session(
+    store: &mut factory_store::Store,
+    id: uuid::Uuid,
+    scope_id: uuid::Uuid,
+    agent_name: &str,
+    workspace_path: &str,
+    pane: Option<&str>,
+) -> uuid::Uuid {
+    let tx = store.transaction().expect("begin");
+    tx.execute(
+        "INSERT INTO sessions (id, scope_id, agent_name, workspace_path, state, herdr_pane_id) \
+         VALUES (?1, ?2, ?3, ?4, 'running', ?5)",
+        (
+            id.to_string(),
+            scope_id.to_string(),
+            agent_name,
+            workspace_path,
+            pane,
+        ),
+    )
+    .expect("insert idle session");
+    tx.commit().expect("commit");
+    id
 }
 
 /// The run columns `factory_task::create::Task` does not expose — see this
@@ -135,11 +171,12 @@ fn a_due_schedule_creates_exactly_one_run() {
     let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
     let scope_id = fixture.scope("alpha");
     let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
 
     let template_id = create_template(&mut store, uid(10), "tmpl-a", scope_id);
     let schedule_id = create_schedule(&mut store, uid(11), template_id, MATCHING_CRON);
 
-    let reports = dispatch::tick(&mut store, instant());
+    let reports = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
 
     assert_eq!(
         reports.len(),
@@ -176,11 +213,12 @@ fn a_schedule_that_does_not_match_this_minute_creates_nothing() {
     let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
     let scope_id = fixture.scope("alpha");
     let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
 
     let template_id = create_template(&mut store, uid(20), "tmpl-b", scope_id);
     create_schedule(&mut store, uid(21), template_id, NON_MATCHING_CRON);
 
-    let reports = dispatch::tick(&mut store, instant());
+    let reports = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
 
     assert!(
         reports.is_empty(),
@@ -201,12 +239,13 @@ fn a_disabled_schedule_creates_nothing_even_when_its_cron_matches() {
     let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
     let scope_id = fixture.scope("alpha");
     let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
 
     let template_id = create_template(&mut store, uid(30), "tmpl-c", scope_id);
     let schedule_id = create_schedule(&mut store, uid(31), template_id, MATCHING_CRON);
     factory_task::schedule::disable(&mut store, schedule_id).expect("disable");
 
-    let reports = dispatch::tick(&mut store, instant());
+    let reports = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
 
     assert!(
         reports.is_empty(),
@@ -229,17 +268,18 @@ fn the_same_tick_run_twice_creates_exactly_one_run_and_the_second_is_not_an_erro
     let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
     let scope_id = fixture.scope("alpha");
     let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
 
     let template_id = create_template(&mut store, uid(40), "tmpl-d", scope_id);
     create_schedule(&mut store, uid(41), template_id, MATCHING_CRON);
 
-    let first = dispatch::tick(&mut store, instant());
+    let first = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
     assert!(
         matches!(first[0].outcome, FireOutcome::Fired { .. }),
         "first tick must fire: {first:?}"
     );
 
-    let second = dispatch::tick(&mut store, instant());
+    let second = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
     assert_eq!(second.len(), 1);
     assert_eq!(
         second[0].outcome,
@@ -265,6 +305,7 @@ fn last_fired_at_is_stamped_on_a_successful_fire_and_not_on_a_rejected_duplicate
     let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
     let scope_id = fixture.scope("alpha");
     let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
 
     let template_id = create_template(&mut store, uid(50), "tmpl-e", scope_id);
     let schedule_id = create_schedule(&mut store, uid(51), template_id, MATCHING_CRON);
@@ -272,14 +313,14 @@ fn last_fired_at_is_stamped_on_a_successful_fire_and_not_on_a_rejected_duplicate
     let before = factory_task::schedule::get(&store, schedule_id).expect("get");
     assert_eq!(before.last_fired_at, None);
 
-    dispatch::tick(&mut store, instant());
+    dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
     let after_first = factory_task::schedule::get(&store, schedule_id).expect("get");
     assert!(
         after_first.last_fired_at.is_some(),
         "last_fired_at must be stamped on a successful fire"
     );
 
-    dispatch::tick(&mut store, instant());
+    dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
     let after_second = factory_task::schedule::get(&store, schedule_id).expect("get");
     assert_eq!(
         after_second.last_fired_at, after_first.last_fired_at,
@@ -297,6 +338,7 @@ fn last_fired_at_is_stamped_on_a_successful_fire_and_not_on_a_rejected_duplicate
 fn dispatcher_state_is_absent_before_the_first_tick_and_present_after() {
     let fixture = common::build(&[]);
     let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
 
     assert_eq!(
         dispatcher_state_row_count(&store),
@@ -305,7 +347,7 @@ fn dispatcher_state_is_absent_before_the_first_tick_and_present_after() {
     );
 
     let when = instant();
-    let reports = dispatch::tick(&mut store, when);
+    let reports = dispatch::tick(&mut store, &adapter, fixture.instance_root(), when);
     assert!(reports.is_empty(), "no schedules exist in this fixture");
 
     assert_eq!(dispatcher_state_row_count(&store), 1);
@@ -313,34 +355,39 @@ fn dispatcher_state_is_absent_before_the_first_tick_and_present_after() {
 }
 
 /// One schedule's outcome never depends on, or blocks, another's in the same
-/// tick. Two schedules are due in the same tick here: one whose template has
-/// a registered target scope (fires normally) and one whose template does
-/// not (see "A template with no target scope" below) — chosen because this
-/// schema's foreign keys make a genuine `TaskError`/`StoreError` hard to
-/// provoke without first breaking an invariant `factory_task::schedule::create`
-/// or `factory_task::template::create` themselves refuse to let a test set
-/// up (a bad `template_id` or `target_scope_id` is rejected by a `REFERENCES`
-/// constraint at the moment a test tries to create the schedule or template
-/// that would carry it, not later). `NoTargetScope` reaches `tick`'s per
-/// schedule loop through the exact same branch `FireOutcome::Failed` would —
-/// `try_fire` returning something other than `Fired` for one schedule and the
-/// loop moving on to the next — so this is a faithful proof of isolation
-/// even though it is not literally a `Failed` outcome.
+/// tick. Two schedules are due in the same tick here: one whose template is
+/// `open` (fires normally) and one whose template is `paused` (skipped, see
+/// defect 2's own tests below) — chosen because this schema's foreign keys
+/// make a genuine `TaskError`/`StoreError` hard to provoke without first
+/// breaking an invariant `factory_task::schedule::create` or
+/// `factory_task::template::create` themselves refuse to let a test set up.
+/// `TemplateNotOpen` reaches `tick`'s per schedule loop through the exact
+/// same branch `FireOutcome::Failed` would — `try_fire` returning something
+/// other than `Fired` for one schedule and the loop moving on to the next —
+/// so this is a faithful proof of isolation even though it is not literally
+/// a `Failed` outcome.
 #[test]
 fn one_schedules_outcome_does_not_stop_the_others_in_the_same_tick() {
     let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
     let scope_id = fixture.scope("alpha");
     let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
 
     let ok_template = create_template(&mut store, uid(60), "tmpl-f-ok", scope_id);
     let ok_schedule = create_schedule(&mut store, uid(61), ok_template, MATCHING_CRON);
 
-    let broken_template = create_template_with_no_scope(&mut store, uid(62), "tmpl-f-broken");
-    let broken_schedule = create_schedule(&mut store, uid(63), broken_template, MATCHING_CRON);
+    let paused_template = create_template(&mut store, uid(62), "tmpl-f-paused", scope_id);
+    factory_task::template::set_state(
+        &mut store,
+        paused_template,
+        factory_task::template::TemplateState::Paused,
+    )
+    .expect("pause");
+    let paused_schedule = create_schedule(&mut store, uid(63), paused_template, MATCHING_CRON);
 
-    let mut reports = dispatch::tick(&mut store, instant());
+    let mut reports = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
     reports.sort_by_key(|r| r.schedule_id);
-    let mut expected_order = [ok_schedule, broken_schedule];
+    let mut expected_order = [ok_schedule, paused_schedule];
     expected_order.sort();
 
     assert_eq!(reports.len(), 2);
@@ -348,10 +395,15 @@ fn one_schedules_outcome_does_not_stop_the_others_in_the_same_tick() {
         if report.schedule_id == ok_schedule {
             assert!(
                 matches!(report.outcome, FireOutcome::Fired { .. }),
-                "the schedule with a real target scope must still fire: {report:?}"
+                "the schedule whose template is open must still fire: {report:?}"
             );
-        } else if report.schedule_id == broken_schedule {
-            assert_eq!(report.outcome, FireOutcome::NoTargetScope);
+        } else if report.schedule_id == paused_schedule {
+            assert_eq!(
+                report.outcome,
+                FireOutcome::TemplateNotOpen {
+                    state: factory_task::template::TemplateState::Paused
+                }
+            );
         } else {
             panic!("unexpected schedule id in report: {report:?}");
         }
@@ -361,37 +413,457 @@ fn one_schedules_outcome_does_not_stop_the_others_in_the_same_tick() {
     assert_eq!(
         tasks.len(),
         1,
-        "only the schedule with a target scope may have produced a run: {tasks:?}"
+        "only the schedule whose template is open may have produced a run: {tasks:?}"
     );
 }
 
-/// A template row with `target_scope_id = NULL` names no run it could ever
-/// produce, and the dispatcher says so rather than inventing a scope.
-///
-/// `factory_task::template::create` cannot make one: design §11's run that
-/// "remains queued for the central agent to assign" is one whose target
-/// **agent** is unspecified, and a run's own `tasks.target_scope_id` is NOT
-/// NULL. So version 1 requires a scope on the template, and an operator
-/// cannot create a schedule that silently never fires.
-///
-/// The column is still nullable, so a hand edit or a restore from something
-/// that was not Factory can put such a row there. This test builds exactly
-/// that state, and asserts the dispatcher names the schedule instead of
-/// failing the tick or quietly skipping it.
+// Defect 1: attempting delivery after a fire --------------------------------
+//
+// `create_from_schedule` never sets `target_session_id` or
+// `target_workspace_path` on a cron run, so `assign` always takes the
+// untargeted branch below — every fixture in this section only needs an
+// idle session with the right `scope_id`/`agent_name`, never a targeted one.
+
+/// The acceptance path design §11 names: a fired run reaches an idle session
+/// and is delivered. Mutation caught: `try_fire` returning `Fired` without
+/// ever calling `assign`/`deliver` (the defect this task closes).
 #[test]
-fn a_hand_written_template_with_no_target_scope_is_named_not_skipped() {
-    let fixture = common::build(&[]);
+fn a_fired_run_with_an_idle_session_is_delivered() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
     let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
 
-    let template_id = create_template_with_no_scope(&mut store, uid(70), "tmpl-g");
-    let schedule_id = create_schedule(&mut store, uid(71), template_id, MATCHING_CRON);
+    let template_id = create_template_with_agent(&mut store, uid(80), "tmpl-h", scope_id, "agent");
+    let schedule_id = create_schedule(&mut store, uid(81), template_id, MATCHING_CRON);
+    let session_id = uid(82);
+    create_idle_session(
+        &mut store,
+        session_id,
+        scope_id,
+        "agent",
+        "/workspace-h",
+        Some("pane-h"),
+    );
 
-    let reports = dispatch::tick(&mut store, instant());
+    let reports = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
 
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].schedule_id, schedule_id);
-    assert_eq!(reports[0].outcome, FireOutcome::NoTargetScope);
-    assert!(factory_task::create::list(&store).expect("list").is_empty());
+    let task_id = match reports[0].outcome {
+        FireOutcome::Fired { task_id } => task_id,
+        ref other => panic!("expected Fired, got {other:?}"),
+    };
+
+    let task = factory_task::create::show(&store, task_id).expect("show");
+    assert_eq!(
+        task.status,
+        factory_task::TaskStatus::Running,
+        "a delivered run must be marked running"
+    );
+    assert_eq!(task.assigned_session_id, Some(session_id));
+
+    let sends = adapter.send_calls();
+    assert_eq!(
+        sends.len(),
+        1,
+        "the prompt must reach the adapter exactly once"
+    );
+    assert_eq!(sends[0].0, "pane-h");
+    assert_eq!(sends[0].1, task_id);
+}
+
+/// Backlog §11: "Unassigned, busy, and stopped target agents do not lose
+/// queued work." No session at all exists for the template's agent here, so
+/// the run stays `queued` — and a second tick (`AlreadyFired`) must not
+/// somehow change that either, since `attempt_delivery` is only ever called
+/// from the branch that actually created a row.
+#[test]
+fn a_fired_run_with_no_idle_session_stays_queued_across_two_ticks() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
+
+    let template_id = create_template_with_agent(&mut store, uid(90), "tmpl-i", scope_id, "agent");
+    let schedule_id = create_schedule(&mut store, uid(91), template_id, MATCHING_CRON);
+
+    let first = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].schedule_id, schedule_id);
+    let task_id = match first[0].outcome {
+        FireOutcome::Fired { task_id } => task_id,
+        ref other => panic!("expected Fired, got {other:?}"),
+    };
+
+    let task = factory_task::create::show(&store, task_id).expect("show");
+    assert_eq!(task.status, factory_task::TaskStatus::Queued);
+    assert_eq!(task.assigned_session_id, None);
+
+    let second = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        second[0].outcome,
+        FireOutcome::AlreadyFired,
+        "the same minute must not fire a second run: {:?}",
+        second[0].outcome
+    );
+
+    let task_after = factory_task::create::show(&store, task_id).expect("show");
+    assert_eq!(
+        task_after.status,
+        factory_task::TaskStatus::Queued,
+        "still queued after a second tick"
+    );
+    assert_eq!(task_after.assigned_session_id, None);
+    assert!(
+        adapter.send_calls().is_empty(),
+        "with no idle session, delivery must never be attempted at all"
+    );
+}
+
+/// ADR 0021 decision 4a: "a refusal is an event, because station 10 decided
+/// it is not a delivery." `AdapterError::SessionBusy` is the one `send`
+/// error `AdapterPromptWriter` turns into a refusal rather than an ordinary
+/// failure — the run must stay `queued`, `assign` must still have recorded
+/// its own choice, and a `refused` event must exist.
+#[test]
+fn a_refused_delivery_leaves_the_run_queued_and_records_a_refused_event() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
+    adapter.set_send_busy(true);
+
+    let template_id = create_template_with_agent(&mut store, uid(100), "tmpl-j", scope_id, "agent");
+    let schedule_id = create_schedule(&mut store, uid(101), template_id, MATCHING_CRON);
+    let session_id = uid(102);
+    create_idle_session(
+        &mut store,
+        session_id,
+        scope_id,
+        "agent",
+        "/workspace-j",
+        Some("pane-j"),
+    );
+
+    let reports = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
+    assert_eq!(reports[0].schedule_id, schedule_id);
+    let task_id = match reports[0].outcome {
+        FireOutcome::Fired { task_id } => task_id,
+        ref other => panic!("expected Fired, got {other:?}"),
+    };
+
+    let task = factory_task::create::show(&store, task_id).expect("show");
+    assert_eq!(
+        task.status,
+        factory_task::TaskStatus::Queued,
+        "a refusal must never advance status past queued"
+    );
+    assert_eq!(
+        task.assigned_session_id,
+        Some(session_id),
+        "assign still records its own choice even though delivery was refused"
+    );
+
+    let events = factory_task::events::for_task(&store, task_id).expect("read events");
+    assert!(
+        events
+            .iter()
+            .any(|e| e.event_type == factory_task::events::EventType::Refused),
+        "a refusal must be journalled as its own event: {events:?}"
+    );
+}
+
+/// ADR 0021 decision 6, exercised the same way `crates/factory-daemon/tests/cost.rs`
+/// exercises `ops::task::send`'s own baseline: a delivered run must carry a
+/// `cost_baseline`, sampled after `mark_running` commits.
+#[test]
+fn a_delivered_cron_run_has_a_cost_baseline() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
+    adapter.queue_cost_sample(
+        "pane-k",
+        Some(factory_adapter::CostSample {
+            source: factory_adapter::CostSource::ClaudeCode,
+            model: Some("claude-test".to_string()),
+            input_tokens: 100,
+            output_tokens: 20,
+            duration_ms: Some(1_000),
+            context_utilization_percent: Some(5.0),
+        }),
+    );
+
+    let template_id = create_template_with_agent(&mut store, uid(110), "tmpl-k", scope_id, "agent");
+    let schedule_id = create_schedule(&mut store, uid(111), template_id, MATCHING_CRON);
+    create_idle_session(
+        &mut store,
+        uid(112),
+        scope_id,
+        "agent",
+        "/workspace-k",
+        Some("pane-k"),
+    );
+
+    let reports = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
+    assert_eq!(reports[0].schedule_id, schedule_id);
+    let task_id = match reports[0].outcome {
+        FireOutcome::Fired { task_id } => task_id,
+        ref other => panic!("expected Fired, got {other:?}"),
+    };
+
+    let task = factory_task::create::show(&store, task_id).expect("show");
+    assert_eq!(task.status, factory_task::TaskStatus::Running);
+    assert!(
+        task.cost_baseline.is_some(),
+        "a delivered cron run must sample a cost baseline just like ops::task::send does"
+    );
+}
+
+/// One schedule's *delivery* failure (as opposed to its *fire*, already
+/// covered above) must not stop the next schedule in the same tick. `alpha`'s
+/// idle session has no recorded pane at all, so `AdapterPromptWriter` refuses
+/// before ever calling the adapter; `beta`'s has a real pane and succeeds.
+/// Two scopes, each with their own "agent", so `assign` cannot cross-wire the
+/// two sessions.
+#[test]
+fn one_schedules_delivery_failure_does_not_stop_the_next_schedule_in_the_same_tick() {
+    let fixture = common::build(&[
+        common::ScopeSpec::new("alpha", "alpha"),
+        common::ScopeSpec::new("beta", "beta"),
+    ]);
+    let alpha = fixture.scope("alpha");
+    let beta = fixture.scope("beta");
+    let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
+
+    let alpha_template =
+        create_template_with_agent(&mut store, uid(120), "tmpl-l1", alpha, "agent");
+    let alpha_schedule = create_schedule(&mut store, uid(121), alpha_template, MATCHING_CRON);
+    create_idle_session(&mut store, uid(122), alpha, "agent", "/workspace-l1", None);
+
+    let beta_template = create_template_with_agent(&mut store, uid(123), "tmpl-l2", beta, "agent");
+    let beta_schedule = create_schedule(&mut store, uid(124), beta_template, MATCHING_CRON);
+    create_idle_session(
+        &mut store,
+        uid(125),
+        beta,
+        "agent",
+        "/workspace-l2",
+        Some("pane-l2"),
+    );
+
+    let reports = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
+    assert_eq!(reports.len(), 2);
+    for report in &reports {
+        assert!(
+            matches!(report.outcome, FireOutcome::Fired { .. }),
+            "both schedules must still fire regardless of what delivery does: {report:?}"
+        );
+    }
+
+    let alpha_task_id = reports
+        .iter()
+        .find(|r| r.schedule_id == alpha_schedule)
+        .map(|r| match r.outcome {
+            FireOutcome::Fired { task_id } => task_id,
+            _ => unreachable!(),
+        })
+        .expect("alpha schedule reported");
+    let beta_task_id = reports
+        .iter()
+        .find(|r| r.schedule_id == beta_schedule)
+        .map(|r| match r.outcome {
+            FireOutcome::Fired { task_id } => task_id,
+            _ => unreachable!(),
+        })
+        .expect("beta schedule reported");
+
+    let alpha_task = factory_task::create::show(&store, alpha_task_id).expect("show alpha");
+    assert_eq!(
+        alpha_task.status,
+        factory_task::TaskStatus::Queued,
+        "the paneless session refuses delivery, so alpha's run stays queued"
+    );
+
+    let beta_task = factory_task::create::show(&store, beta_task_id).expect("show beta");
+    assert_eq!(
+        beta_task.status,
+        factory_task::TaskStatus::Running,
+        "beta's delivery must succeed independently of alpha's"
+    );
+}
+
+// Defect 2: a paused template is skipped, not failed -------------------------
+
+/// Backlog acceptance: a schedule whose template is `paused` creates no run
+/// and is not reported as a failure, and starts firing again once the
+/// template is set back to `open`. `last_fired_at` staying `None` across the
+/// skipped tick pins that the skip happens *before* `create_from_schedule` —
+/// not after, with the run then discarded.
+#[test]
+fn a_paused_templates_schedule_creates_no_run_and_fires_again_once_reopened() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
+
+    let template_id = create_template(&mut store, uid(140), "tmpl-m", scope_id);
+    let schedule_id = create_schedule(&mut store, uid(141), template_id, MATCHING_CRON);
+    factory_task::template::set_state(
+        &mut store,
+        template_id,
+        factory_task::template::TemplateState::Paused,
+    )
+    .expect("pause");
+
+    let reports = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].schedule_id, schedule_id);
+    assert_eq!(
+        reports[0].outcome,
+        FireOutcome::TemplateNotOpen {
+            state: factory_task::template::TemplateState::Paused
+        }
+    );
+    assert!(
+        factory_task::create::list(&store).expect("list").is_empty(),
+        "a paused template must create no run"
+    );
+    let after_skip = factory_task::schedule::get(&store, schedule_id).expect("get");
+    assert_eq!(
+        after_skip.last_fired_at, None,
+        "a skipped fire must not stamp last_fired_at — the skip happens before \
+         create_from_schedule, not as a discard afterwards"
+    );
+
+    factory_task::template::set_state(
+        &mut store,
+        template_id,
+        factory_task::template::TemplateState::Open,
+    )
+    .expect("reopen");
+
+    let reports_after_reopen =
+        dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
+    assert_eq!(reports_after_reopen.len(), 1);
+    assert!(
+        matches!(reports_after_reopen[0].outcome, FireOutcome::Fired { .. }),
+        "reopening the template must let the same due minute fire: {:?}",
+        reports_after_reopen[0].outcome
+    );
+    assert_eq!(
+        factory_task::create::list(&store).expect("list").len(),
+        1,
+        "exactly one run must exist once the template is reopened"
+    );
+}
+
+/// A template naming an agent the instance configuration does not declare —
+/// a template and the config can drift independently, since nothing
+/// validates one against the other once the template exists. Resolving
+/// `max_sessions` for delivery must fail no worse than
+/// `Assignment::Deferred` does: the run stays `queued`, and — the point of
+/// this test — the tick is not aborted, so an ordinary schedule due in the
+/// same tick still fires and still gets delivered.
+///
+/// The unconfigured agent is given its own idle, paned session so that
+/// staying `queued` cannot be a coincidence of "no idle session either way"
+/// — `assign_untargeted` does not care whether a name is configured, only
+/// whether a matching session row exists. Mutation caught: resolving
+/// `max_sessions` via a hard-coded placeholder instead of loading the
+/// config, which skips `find_agent` entirely and lets this session receive
+/// the run.
+#[test]
+fn a_template_naming_an_unconfigured_agent_fires_but_is_not_delivered() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+    let adapter = common::FakeAdapter::new();
+
+    let ghost_template =
+        create_template_with_agent(&mut store, uid(150), "tmpl-n1", scope_id, "ghost-agent");
+    let ghost_schedule = create_schedule(&mut store, uid(151), ghost_template, MATCHING_CRON);
+    // An idle session under the unconfigured name, written by raw SQL (the
+    // same way `create_idle_session` always bypasses config) — deliberately
+    // NOT gated by whether "ghost-agent" is declared anywhere. This is the
+    // fixture that actually proves config resolution runs: `assign_untargeted`
+    // would happily hand this session the task if delivery ever reached it,
+    // so the run staying `queued` below can only be `find_agent` refusing
+    // the name *before* `assign` is ever called — not an accidental "no idle
+    // session" outcome that would hold even without resolving the config at
+    // all.
+    create_idle_session(
+        &mut store,
+        uid(155),
+        scope_id,
+        "ghost-agent",
+        "/workspace-ghost",
+        Some("pane-ghost"),
+    );
+
+    let ok_template =
+        create_template_with_agent(&mut store, uid(152), "tmpl-n2", scope_id, "agent");
+    let ok_schedule = create_schedule(&mut store, uid(153), ok_template, MATCHING_CRON);
+    create_idle_session(
+        &mut store,
+        uid(154),
+        scope_id,
+        "agent",
+        "/workspace-n",
+        Some("pane-n"),
+    );
+
+    let reports = dispatch::tick(&mut store, &adapter, fixture.instance_root(), instant());
+    assert_eq!(reports.len(), 2);
+    for report in &reports {
+        assert!(
+            matches!(report.outcome, FireOutcome::Fired { .. }),
+            "an unconfigured agent must not stop either schedule from firing: {report:?}"
+        );
+    }
+
+    let ghost_task_id = reports
+        .iter()
+        .find(|r| r.schedule_id == ghost_schedule)
+        .map(|r| match r.outcome {
+            FireOutcome::Fired { task_id } => task_id,
+            _ => unreachable!(),
+        })
+        .expect("ghost schedule reported");
+    let ok_task_id = reports
+        .iter()
+        .find(|r| r.schedule_id == ok_schedule)
+        .map(|r| match r.outcome {
+            FireOutcome::Fired { task_id } => task_id,
+            _ => unreachable!(),
+        })
+        .expect("ok schedule reported");
+
+    let ghost_task = factory_task::create::show(&store, ghost_task_id).expect("show ghost");
+    assert_eq!(
+        ghost_task.status,
+        factory_task::TaskStatus::Queued,
+        "an agent the config does not declare leaves the run queued, not failed"
+    );
+    assert_eq!(ghost_task.assigned_session_id, None);
+    assert!(
+        adapter
+            .send_calls()
+            .iter()
+            .all(|(pane, _, _)| pane != "pane-ghost"),
+        "the ghost session must never receive the prompt: {:?}",
+        adapter.send_calls()
+    );
+
+    let ok_task = factory_task::create::show(&store, ok_task_id).expect("show ok");
+    assert_eq!(
+        ok_task.status,
+        factory_task::TaskStatus::Running,
+        "the next schedule's delivery must succeed independently of the unconfigured one"
+    );
 }
 
 // The loop itself -------------------------------------------------------

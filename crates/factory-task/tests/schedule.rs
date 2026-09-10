@@ -382,7 +382,7 @@ fn create_with_new_template_creates_both_rows_in_one_call() {
 
     let template = template::get_by_id(&store, template_id).expect("template exists");
     assert_eq!(template.name, "weekly-status");
-    assert_eq!(template.target_scope_id, Some(scope_id));
+    assert_eq!(template.target_scope_id, scope_id);
     assert_eq!(template.target_agent_name.as_deref(), Some("writer"));
     assert_eq!(template.state, TemplateState::Open);
 

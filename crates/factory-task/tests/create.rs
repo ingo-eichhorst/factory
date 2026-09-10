@@ -128,12 +128,24 @@ fn seed_terminal_task(
 /// own tests of `create_from_template` stay self-contained the same way its
 /// other fixtures bypass `factory-registry` and `factory-session`'s own
 /// creation paths. Returns the template's id.
-fn seed_template(store: &mut Store, seed: u32, name: &str, version: i64) -> uuid::Uuid {
+///
+/// `target_scope_id` is `NOT NULL` (station 11 closeout), so every caller
+/// hands in a real scope it has already seeded — none of these tests care
+/// which one, only that `create_from_template`'s own `target_scope_id`
+/// argument (a separate value) is what actually lands on the run.
+fn seed_template(
+    store: &mut Store,
+    seed: u32,
+    name: &str,
+    version: i64,
+    target_scope_id: uuid::Uuid,
+) -> uuid::Uuid {
     let id = uid(seed);
     let tx = store.transaction().expect("begin");
     tx.execute(
-        "INSERT INTO task_templates (id, name, prompt, version) VALUES (?1, ?2, 'do it', ?3)",
-        (id.to_string(), name, version),
+        "INSERT INTO task_templates (id, name, target_scope_id, prompt, version) \
+         VALUES (?1, ?2, ?3, 'do it', ?4)",
+        (id.to_string(), name, target_scope_id.to_string(), version),
     )
     .expect("insert template");
     tx.commit().expect("commit");
@@ -255,7 +267,7 @@ fn create_from_template_records_the_template_id_and_its_version_at_creation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
     let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
-    let template_id = seed_template(&mut store, 2, "nightly-report", 5);
+    let template_id = seed_template(&mut store, 2, "nightly-report", 5, scope_id);
 
     let task_id = uid(50);
     create_from_template(
@@ -701,7 +713,7 @@ fn create_from_template_also_writes_exactly_one_created_event() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
     let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
-    let template_id = seed_template(&mut store, 2, "nightly-report", 1);
+    let template_id = seed_template(&mut store, 2, "nightly-report", 1, scope_id);
     let task_id = uid(50);
     create_from_template(
         &mut store,

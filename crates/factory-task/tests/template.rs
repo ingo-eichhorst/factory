@@ -62,8 +62,7 @@ fn create_with_no_target_agent_starts_open_at_version_one() {
     let template = factory_task::template::get_by_id(&store, template_id).expect("get_by_id");
     assert_eq!(template.name, "nightly-report");
     assert_eq!(
-        template.target_scope_id,
-        Some(scope_id),
+        template.target_scope_id, scope_id,
         "a template always names the scope the work is for"
     );
     assert_eq!(
@@ -95,7 +94,7 @@ fn create_records_a_target_scope_and_agent_and_acceptance_criteria_when_given() 
     .expect("create a template with a target");
 
     let template = factory_task::template::get_by_id(&store, template_id).expect("get_by_id");
-    assert_eq!(template.target_scope_id, Some(scope_id));
+    assert_eq!(template.target_scope_id, scope_id);
     assert_eq!(template.target_agent_name, Some("auditor".to_string()));
     assert_eq!(
         template.acceptance_criteria,
@@ -173,8 +172,9 @@ fn the_name_uniqueness_index_itself_refuses_a_duplicate_bypassing_the_typed_prec
     .expect("create the first template");
 
     let result = store.connection().execute(
-        "INSERT INTO task_templates (id, name, prompt) VALUES (?1, 'nightly-report', 'do it')",
-        [uid(2).to_string()],
+        "INSERT INTO task_templates (id, name, target_scope_id, prompt) \
+         VALUES (?1, 'nightly-report', ?2, 'do it')",
+        [uid(2).to_string(), scope_id.to_string()],
     );
     assert!(
         result.is_err(),

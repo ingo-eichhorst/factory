@@ -95,17 +95,16 @@ impl std::fmt::Display for TemplateState {
 pub struct Template {
     pub id: uuid::Uuid,
     pub name: String,
-    /// Read back as an `Option` because the column is nullable, and written
-    /// only as `Some` because [`create`] requires one.
+    /// `task_templates.target_scope_id` is `NOT NULL` (station 11 closeout:
+    /// the schema now says what [`create`] already enforced).
     ///
-    /// `None` is **not** design §11's run that "remains queued for the
-    /// central agent to assign." That sentence is about the **agent**
+    /// A run without one is **not** design §11's run that "remains queued for
+    /// the central agent to assign." That sentence is about the **agent**
     /// ([`Template::target_agent_name`]), not the scope. A run's own
     /// `tasks.target_scope_id` is `NOT NULL`, so a template without a scope
     /// could never produce a run at all: an operator would be able to create
-    /// one that silently never fires. The column stays nullable so a later
-    /// station can relax the rule without a migration; version 1 does not.
-    pub target_scope_id: Option<uuid::Uuid>,
+    /// one that silently never fires.
+    pub target_scope_id: uuid::Uuid,
     pub target_agent_name: Option<String>,
     pub prompt: String,
     /// §12.1's hook. Prose, not a machine gate — version 1 stores the
@@ -123,7 +122,7 @@ const TEMPLATE_COLUMNS: &str = "id, name, target_scope_id, target_agent_name, pr
 fn row_to_template(row: &rusqlite::Row<'_>) -> rusqlite::Result<Template> {
     let id: String = row.get(0)?;
     let name: String = row.get(1)?;
-    let target_scope_id: Option<String> = row.get(2)?;
+    let target_scope_id: String = row.get(2)?;
     let target_agent_name: Option<String> = row.get(3)?;
     let prompt: String = row.get(4)?;
     let acceptance_criteria: Option<String> = row.get(5)?;
@@ -136,10 +135,8 @@ fn row_to_template(row: &rusqlite::Row<'_>) -> rusqlite::Result<Template> {
         id: uuid::Uuid::parse_str(&id)
             .unwrap_or_else(|e| panic!("task_templates.id is a UUID; read {id:?}: {e}")),
         name,
-        target_scope_id: target_scope_id.as_deref().map(|s| {
-            uuid::Uuid::parse_str(s).unwrap_or_else(|e| {
-                panic!("task_templates.target_scope_id is a UUID; read {s:?}: {e}")
-            })
+        target_scope_id: uuid::Uuid::parse_str(&target_scope_id).unwrap_or_else(|e| {
+            panic!("task_templates.target_scope_id is a UUID; read {target_scope_id:?}: {e}")
         }),
         target_agent_name,
         prompt,

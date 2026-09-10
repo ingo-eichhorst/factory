@@ -40,9 +40,15 @@ fn assert_constraint_violation(err: rusqlite::Error) {
 /// Insert one `task_templates` row and one `schedules` row referencing it,
 /// so a `tasks_one_run_per_schedule_minute` test only has to write the
 /// `tasks` row it actually cares about.
+///
+/// `target_scope_id` is `NOT NULL`; every call site already inserts
+/// `"scope-1"` via `common::insert_scope` immediately before calling this,
+/// so that is the id used here rather than a new parameter every caller
+/// would have to pass identically.
 fn insert_template_and_schedule(conn: &Connection, template_id: &str, schedule_id: &str) {
     conn.execute(
-        "INSERT INTO task_templates (id, name, prompt) VALUES (?1, ?1, 'do it')",
+        "INSERT INTO task_templates (id, name, target_scope_id, prompt) \
+         VALUES (?1, ?1, 'scope-1', 'do it')",
         [template_id],
     )
     .expect("insert task template");
@@ -819,16 +825,19 @@ fn task_template_name_must_be_unique() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
     let tx = store.transaction().expect("begin");
+    common::insert_scope(&tx, "scope-1", "irrlicht", "/instance").expect("insert scope");
 
     tx.execute(
-        "INSERT INTO task_templates (id, name, prompt) VALUES ('tmpl-1', 'nightly-report', 'do it')",
+        "INSERT INTO task_templates (id, name, target_scope_id, prompt) \
+         VALUES ('tmpl-1', 'nightly-report', 'scope-1', 'do it')",
         [],
     )
     .expect("the first template with this name must be accepted");
 
     let err = tx
         .execute(
-            "INSERT INTO task_templates (id, name, prompt) VALUES ('tmpl-2', 'nightly-report', 'do it')",
+            "INSERT INTO task_templates (id, name, target_scope_id, prompt) \
+             VALUES ('tmpl-2', 'nightly-report', 'scope-1', 'do it')",
             [],
         )
         .expect_err("a second template with the same name must be rejected");
@@ -844,13 +853,34 @@ fn task_template_version_below_one_is_rejected() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
     let tx = store.transaction().expect("begin");
+    common::insert_scope(&tx, "scope-1", "irrlicht", "/instance").expect("insert scope");
 
     let err = tx
         .execute(
-            "INSERT INTO task_templates (id, name, prompt, version) VALUES ('tmpl-1', 'x', 'do it', 0)",
+            "INSERT INTO task_templates (id, name, target_scope_id, prompt, version) \
+             VALUES ('tmpl-1', 'x', 'scope-1', 'do it', 0)",
             [],
         )
         .expect_err("version 0 must be rejected");
+    assert_constraint_violation(err);
+}
+
+/// Station 11 closeout: `target_scope_id` became `NOT NULL` because
+/// `factory_task::template::create` already refused to write one — the
+/// schema now says what the typed API already enforced, "one home for a
+/// rule." Mutation caught: dropping `NOT NULL` from `target_scope_id`.
+#[test]
+fn task_template_without_a_target_scope_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let tx = store.transaction().expect("begin");
+
+    let err = tx
+        .execute(
+            "INSERT INTO task_templates (id, name, prompt) VALUES ('tmpl-1', 'nightly-report', 'do it')",
+            [],
+        )
+        .expect_err("a template with no target scope must be rejected");
     assert_constraint_violation(err);
 }
 

@@ -676,14 +676,21 @@ CREATE TABLE task_templates (
     -- a name that means different things in different scopes would make that
     -- reference ambiguous at exactly the moment nobody is watching.
     name                TEXT NOT NULL,
-    -- NULL does **not** mean design §11's run that "remains queued for the
+    -- Absent does **not** mean design §11's run that "remains queued for the
     -- central agent to assign." That sentence is about the target *agent*,
     -- which is the next column. A template with no scope can never produce a
     -- run at all: `schedules` carries no scope of its own, so a run's scope
     -- can only come from its template, and `tasks.target_scope_id` is
-    -- `NOT NULL`. So a NULL here is a template that silently never fires, and
-    -- `factory_task::template::create` refuses to write one.
-    target_scope_id     TEXT REFERENCES scopes (id),
+    -- `NOT NULL`. So `NOT NULL` here too is "one home for a rule" —
+    -- `factory_task::template::create` already refused to write a NULL, and a
+    -- schema that still allowed one left the same rule enforced in exactly
+    -- one of its two homes.
+    --
+    -- This is a live change to an already-shipped migration, which ADR 0012's
+    -- forward-only rule would otherwise forbid. That rule governs a migration
+    -- *released to an installation*; migration 6 has been released to none
+    -- (station 11 is still open), so there is nothing for it to govern here.
+    target_scope_id     TEXT NOT NULL REFERENCES scopes (id),
     target_agent_name   TEXT,
     prompt              TEXT NOT NULL,
     -- §12.1's hook. Prose, not a machine gate: version 1 stores the criterion

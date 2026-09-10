@@ -151,6 +151,13 @@ type CostSampleHook = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 struct FakeState {
     observations: HashMap<String, Observation>,
     send_fail: bool,
+    // `AdapterError::SessionBusy`, not `send_fail`'s generic
+    // `UnreadableOutput` — the one `Adapter::send` error
+    // `AdapterPromptWriter::write_prompt` turns into a *refusal*
+    // (`PromptWriteError::refused`) rather than an ordinary write failure.
+    // A test proving design §5's "a refusal is not a delivery" needs this
+    // exact variant; `send_fail` alone cannot produce it.
+    send_busy: bool,
     send_calls: Vec<(String, uuid::Uuid, String)>,
     stop_calls: Vec<String>,
     start_fail: bool,
@@ -200,6 +207,14 @@ impl FakeAdapter {
 
     pub fn set_send_fail(&self, fail: bool) {
         self.state.lock().unwrap().send_fail = fail;
+    }
+
+    /// Make `send` refuse with `AdapterError::SessionBusy` — the pane is
+    /// "still working" a turn — rather than succeed or fail generically. See
+    /// `FakeState::send_busy`'s own doc comment for why this is a distinct
+    /// knob from [`Self::set_send_fail`].
+    pub fn set_send_busy(&self, busy: bool) {
+        self.state.lock().unwrap().send_busy = busy;
     }
 
     pub fn set_start_fail(&self, fail: bool) {
@@ -300,6 +315,13 @@ impl Adapter for FakeAdapter {
         state
             .send_calls
             .push((pane.0.clone(), task_id, prompt.to_string()));
+        if state.send_busy {
+            return Err(AdapterError::SessionBusy {
+                pane: pane.0.clone(),
+                harness_state: "working".to_string(),
+                help: "test fixture".to_string(),
+            });
+        }
         if state.send_fail {
             return Err(unavailable_error("send configured to fail"));
         }
