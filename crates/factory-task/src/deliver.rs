@@ -480,6 +480,37 @@ pub fn mark_running(store: &mut factory_store::Store, id: uuid::Uuid) -> Result<
     Ok(())
 }
 
+/// Records the cost sample taken at delivery — ADR 0021 decision 6's
+/// baseline. A cumulative source (Claude Code's Irrlicht `metrics`, and Pi's
+/// own transcript sum — see `factory_adapter::sum_pi_transcript_usage`'s doc
+/// comment for why the latter is cumulative-shaped too) can only answer "what
+/// did *this run* cost" as a difference between two samples, and a
+/// difference held only in memory does not survive the daemon restart this
+/// project drills for. `baseline` is `factory_adapter::CostSample`'s own
+/// `Display` (JSON), or `None` when the adapter reported nothing usable —
+/// the ordinary case, not the edge.
+///
+/// A plain `UPDATE`, not a status transition: cost is an annotation on a
+/// delivery that has already committed
+/// ([`mark_running`]'s own transaction, above), never a precondition for one.
+/// `factory-daemon`'s `ops::task::send` calls this *after* `mark_running` has
+/// already returned `Ok`, in its own transaction, precisely so that a
+/// failure recording the baseline can never undo a delivery that already
+/// happened — see that module's own report for the mutation that proves it.
+pub fn record_cost_baseline(
+    store: &mut factory_store::Store,
+    id: uuid::Uuid,
+    baseline: Option<&str>,
+) -> Result<(), factory_store::StoreError> {
+    let tx = store.transaction()?;
+    tx.execute(
+        "UPDATE tasks SET cost_baseline = ?2 WHERE id = ?1",
+        (id.to_string(), baseline),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// The operator action design §5 names as the other way on from an ambiguous
 /// delivery — "a human may resume or create a replacement task" — and
 /// backlog §9's "Resume has no mechanism yet, found during slice 7." This is

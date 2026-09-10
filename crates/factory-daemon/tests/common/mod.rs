@@ -135,6 +135,18 @@ pub fn seed(n: u32) -> uuid::Uuid {
 
 // --- A configurable fake `Adapter` ---------------------------------------
 
+/// What one queued [`FakeAdapter::cost_sample`] call answers.
+#[derive(Clone)]
+enum CostSampleReply {
+    Value(Option<factory_adapter::CostSample>),
+    Err,
+}
+
+/// A hook run synchronously inside every `cost_sample` call — see
+/// `FakeState::cost_sample_hook`'s own doc comment. Named so the field
+/// itself stays under clippy's type-complexity limit.
+type CostSampleHook = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 #[derive(Default)]
 struct FakeState {
     observations: HashMap<String, Observation>,
@@ -143,6 +155,25 @@ struct FakeState {
     stop_calls: Vec<String>,
     start_fail: bool,
     start_confidence: Option<Confidence>,
+    // Per-pane queue, popped front-first: `task.send`'s baseline sample and a
+    // later `task.done`/`task.fail`/`task.cancel`'s terminal sample both call
+    // `cost_sample` against the same pane, and a test needs to answer them
+    // differently.
+    cost_samples: HashMap<String, std::collections::VecDeque<CostSampleReply>>,
+    // Every pane sampled, in call order — regardless of what was queued for
+    // it — so a test can assert *that* a call happened even when the answer
+    // was the unconfigured default.
+    cost_sample_calls: Vec<String>,
+    // Overrides every queued reply with `Err` when set — for a test that
+    // wants *every* `cost_sample` call to fail, at delivery and at the
+    // terminal alike, without tracking exactly how many calls that takes.
+    cost_sample_fail: bool,
+    // Run synchronously inside every `cost_sample` call, before it answers —
+    // lets a test observe (or manufacture) database state at the exact
+    // moment a sample is taken, which a call count alone cannot: see
+    // `cost_sample_runs_before_session_teardown` and the write-failure tests
+    // in `tests/cost.rs`.
+    cost_sample_hook: Option<CostSampleHook>,
 }
 
 /// A fully in-memory [`Adapter`]: every method is driven by state a test sets
@@ -185,6 +216,51 @@ impl FakeAdapter {
 
     pub fn stop_calls(&self) -> Vec<String> {
         self.state.lock().unwrap().stop_calls.clone()
+    }
+
+    /// Queue `sample` as the next `cost_sample(pane)` answer. Calls against
+    /// `pane` pop this queue front-first; once it is empty, `cost_sample`
+    /// answers `Ok(None)`, `FakeAdapter`'s unconfigured default.
+    pub fn queue_cost_sample(&self, pane: &str, sample: Option<factory_adapter::CostSample>) {
+        self.state
+            .lock()
+            .unwrap()
+            .cost_samples
+            .entry(pane.to_string())
+            .or_default()
+            .push_back(CostSampleReply::Value(sample));
+    }
+
+    /// Queue an `Err` as the next `cost_sample(pane)` answer.
+    pub fn queue_cost_sample_err(&self, pane: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .cost_samples
+            .entry(pane.to_string())
+            .or_default()
+            .push_back(CostSampleReply::Err);
+    }
+
+    /// Make every `cost_sample` call fail, at every pane, regardless of
+    /// what is queued — for a test that wants to prove a failure to *read*
+    /// cost never blocks the task action it accompanies, without having to
+    /// track exactly how many calls that takes.
+    pub fn set_cost_sample_fail(&self, fail: bool) {
+        self.state.lock().unwrap().cost_sample_fail = fail;
+    }
+
+    /// Every pane `cost_sample` was asked about, in call order.
+    pub fn cost_sample_calls(&self) -> Vec<String> {
+        self.state.lock().unwrap().cost_sample_calls.clone()
+    }
+
+    /// Run `hook` synchronously inside every subsequent `cost_sample` call,
+    /// before it answers, with the pane string it was asked about. See
+    /// `FakeState::cost_sample_hook`'s own doc comment for why this exists
+    /// instead of a plain call-order log.
+    pub fn set_cost_sample_hook(&self, hook: impl Fn(&str) + Send + Sync + 'static) {
+        self.state.lock().unwrap().cost_sample_hook = Some(std::sync::Arc::new(hook));
     }
 }
 
@@ -263,15 +339,41 @@ impl Adapter for FakeAdapter {
         Ok("fake-1.0".to_string())
     }
 
-    /// This double reports no cost data. Stated rather than omitted: the
-    /// trait has no default, so an implementor cannot answer `None` by
-    /// forgetting the method. ADR 0021 decision 6 makes `None` a valid
-    /// answer, and it is this fake's real one.
+    /// Unconfigured, this double reports no cost data — stated rather than
+    /// omitted: the trait has no default, so an implementor cannot answer
+    /// `None` by forgetting the method, and ADR 0021 decision 6 makes `None`
+    /// a valid answer regardless. A test that needs something else queues it
+    /// with [`FakeAdapter::queue_cost_sample`] / `queue_cost_sample_err` /
+    /// `set_cost_sample_fail`.
     fn cost_sample(
         &self,
-        _pane: &PaneId,
+        pane: &PaneId,
     ) -> Result<Option<factory_adapter::CostSample>, AdapterError> {
-        Ok(None)
+        let hook = {
+            let mut state = self.state.lock().unwrap();
+            state.cost_sample_calls.push(pane.0.clone());
+            state.cost_sample_hook.clone()
+        };
+        // Run outside the lock: a hook that itself touches this adapter (or
+        // just takes a while, as the write-failure tests' hooks
+        // deliberately do) must not hold `state` while it works.
+        if let Some(hook) = hook {
+            hook(&pane.0);
+        }
+
+        let mut state = self.state.lock().unwrap();
+        if state.cost_sample_fail {
+            return Err(unavailable_error("cost_sample configured to fail"));
+        }
+        match state
+            .cost_samples
+            .get_mut(&pane.0)
+            .and_then(std::collections::VecDeque::pop_front)
+        {
+            Some(CostSampleReply::Value(sample)) => Ok(sample),
+            Some(CostSampleReply::Err) => Err(unavailable_error("cost_sample configured to fail")),
+            None => Ok(None),
+        }
     }
 }
 

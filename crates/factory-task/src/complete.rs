@@ -310,6 +310,57 @@ pub fn blocked(
     Ok(())
 }
 
+/// Records a run's own cost figures at a terminal state — ADR 0021 decision
+/// 6's terminal half. The caller (`factory-daemon`'s `ops::task::on_terminal`)
+/// has already computed each value through
+/// `factory_adapter::CostSample::since`, against the baseline
+/// [`crate::deliver::record_cost_baseline`] wrote at delivery; this function
+/// only writes what it is given.
+///
+/// Every argument is independently nullable, matching every cost column's
+/// own nullability (`factory_store::schema` migration 6's doc comment: "All
+/// nullable: opencode reports nothing at all, and two of four live Pi
+/// sessions reported no metrics"). `model` and `context_utilization_percent`
+/// are never diffed (ADR 0021 decision 7) — the caller passes them straight
+/// from the terminal sample, whether or not the token counts beside them
+/// could be computed at all.
+///
+/// A plain `UPDATE`, not a status transition — `is_valid_transition` has
+/// nothing to say about a column the task's own state machine never reads.
+/// Deliberately its own transaction, separate from
+/// [`complete_with_result`]'s: `factory-daemon`'s `ops::task::on_terminal`
+/// calls this only *after* `done`/`fail`'s own transaction has already
+/// committed, so a failure here can never roll back a completion that
+/// already happened — cost is an annotation on a run, never part of it. See
+/// that module's own report for the mutation that proves the two never
+/// share a transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn record_cost_result(
+    store: &mut factory_store::Store,
+    id: uuid::Uuid,
+    model: Option<&str>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    duration_ms: Option<i64>,
+    context_utilization_percent: Option<f64>,
+) -> Result<(), factory_store::StoreError> {
+    let tx = store.transaction()?;
+    tx.execute(
+        "UPDATE tasks SET cost_model = ?2, cost_input_tokens = ?3, cost_output_tokens = ?4, \
+         cost_duration_ms = ?5, context_utilization_percent = ?6 WHERE id = ?1",
+        (
+            id.to_string(),
+            model,
+            input_tokens,
+            output_tokens,
+            duration_ms,
+            context_utilization_percent,
+        ),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Observation-driven blocking: the automatic half of [`blocked`].
 ///
 /// Calls `lib.rs`'s [`crate::blocked_reason_for`] — never re-implements its

@@ -22,7 +22,11 @@ use crate::{BlockedReason, TaskError, TaskStatus, is_valid_transition, valid_tar
 /// vocabulary columns) since this crate itself wrote them and a value that
 /// does not parse is a broken invariant, not an input to handle — the same
 /// stance [`TaskStatus::from_db_str`] takes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`: `context_utilization_percent` is `f64`, which has none. Nothing
+/// in this crate ever needed `Task: Eq` (it is not used as a map key or in a
+/// set), so the derive is simply narrowed rather than worked around.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Task {
     pub id: uuid::Uuid,
     /// `None` means the sender was a human, not another scope.
@@ -62,12 +66,45 @@ pub struct Task {
     /// [`create_from_template`] and never touched again by anything in this
     /// crate.
     pub template_version: Option<i64>,
+    /// The harness's own model identifier for this run's terminal cost
+    /// sample — ADR 0021 decision 6. `None` whenever the adapter reported
+    /// nothing usable, which is the ordinary case for two of four live Pi
+    /// sessions and every `opencode` session (that decision's own
+    /// measurement), not the edge.
+    pub cost_model: Option<String>,
+    /// `later.input_tokens - baseline.input_tokens`, written by
+    /// `factory-daemon`'s `ops::task::on_terminal` through
+    /// [`crate::complete::record_cost_result`]. `None` exactly when no run
+    /// figure could be computed at all — see that function's own doc
+    /// comment for the cases that leaves this `NULL`.
+    pub cost_input_tokens: Option<i64>,
+    /// See [`Task::cost_input_tokens`]; the output-token twin.
+    pub cost_output_tokens: Option<i64>,
+    /// Milliseconds. `None` whenever either sample carried no duration —
+    /// Pi's transcript never does (`factory_adapter`'s module docs).
+    pub cost_duration_ms: Option<i64>,
+    /// The adapter-shaped sample taken **at delivery**
+    /// (`factory_adapter::CostSample`'s own `Display`, i.e. JSON), through
+    /// [`crate::deliver::record_cost_baseline`]. ADR 0021 decision 6: a
+    /// cumulative source can only answer "what did this run cost" as a
+    /// difference between two samples, and a difference held only in memory
+    /// does not survive the daemon restart this project drills for — this
+    /// column is what does. Deliberately not exposed by
+    /// `factory-daemon`'s `task_json`: it is the raw counters this run
+    /// started from, not a figure about the run itself.
+    pub cost_baseline: Option<String>,
+    /// How full the context window was when the terminal sample was taken,
+    /// 0–100. Never diffed (ADR 0021 decision 7): it is context *pressure*
+    /// at the end of the run, not a token count, and it is written from the
+    /// terminal sample directly rather than through a subtraction.
+    pub context_utilization_percent: Option<f64>,
 }
 
 const TASK_COLUMNS: &str = "id, sender_scope_id, target_scope_id, target_session_id, \
      target_workspace_path, assigned_session_id, prompt, status, blocked_reason, \
      cancel_requested_at, result_summary, result_artifact_paths, created_at, updated_at, \
-     template_id, template_version";
+     template_id, template_version, cost_model, cost_input_tokens, cost_output_tokens, \
+     cost_duration_ms, cost_baseline, context_utilization_percent";
 
 /// `tasks.id`, `.sender_scope_id`, `.target_scope_id`, `.target_session_id`,
 /// and `.assigned_session_id` are all UUIDs this crate — or `factory-session`
@@ -96,6 +133,12 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     let updated_at: String = row.get(13)?;
     let template_id: Option<String> = row.get(14)?;
     let template_version: Option<i64> = row.get(15)?;
+    let cost_model: Option<String> = row.get(16)?;
+    let cost_input_tokens: Option<i64> = row.get(17)?;
+    let cost_output_tokens: Option<i64> = row.get(18)?;
+    let cost_duration_ms: Option<i64> = row.get(19)?;
+    let cost_baseline: Option<String> = row.get(20)?;
+    let context_utilization_percent: Option<f64> = row.get(21)?;
 
     Ok(Task {
         id: parse_uuid("id", &id),
@@ -120,6 +163,12 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         updated_at,
         template_id: template_id.as_deref().map(|s| parse_uuid("template_id", s)),
         template_version,
+        cost_model,
+        cost_input_tokens,
+        cost_output_tokens,
+        cost_duration_ms,
+        cost_baseline,
+        context_utilization_percent,
     })
 }
 

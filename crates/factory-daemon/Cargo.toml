@@ -32,6 +32,12 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `tests/cost.rs` opens a second, real connection to a fixture's SQLite file
+# to force write contention (proving a failed cost write cannot roll back a
+# completion that already committed) and to read committed session state at
+# an exact moment (proving cost is sampled before session teardown). Neither
+# is expressible against `factory_store::Store` alone.
+rusqlite.workspace = true
 
 [lints]
 workspace = true

@@ -361,6 +361,7 @@ dependencies = [
  "factory-store",
  "factory-task",
  "fd-lock",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

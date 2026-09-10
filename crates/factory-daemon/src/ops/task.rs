@@ -87,14 +87,35 @@ pub(crate) fn send(h: &FactoryHandler, scope_id: uuid::Uuid, payload: Value) -> 
         factory_task::assign::Assignment::Assigned(session_id) => {
             let (pane, _) = crate::handler::pane::read(&store, session_id)?;
             let pane = pane.map(factory_adapter::PaneId);
-            let mut writer =
-                crate::handler::deliver::AdapterPromptWriter::new(h.adapter(), task_id, pane);
+            let mut writer = crate::handler::deliver::AdapterPromptWriter::new(
+                h.adapter(),
+                task_id,
+                pane.clone(),
+            );
             let deliver_result = factory_task::deliver::deliver(&mut store, task_id, &mut writer);
 
             match deliver_result {
                 Ok(()) => {
                     factory_task::deliver::mark_running(&mut store, task_id)
                         .map_err(errors::deliver_error)?;
+
+                    // ADR 0021 decision 6: the baseline is the cost sample
+                    // taken when the task is delivered, so a cumulative
+                    // source can still answer "what did this run cost" after
+                    // a restart. Taken and written *after* `mark_running`
+                    // has already committed, in its own transaction, so a
+                    // failure here can never undo a delivery that already
+                    // happened -- cost is an annotation, never a
+                    // precondition. See this task's own report for the
+                    // mutation that proves it.
+                    let baseline = sample_cost_best_effort(h.adapter(), pane.as_ref());
+                    let baseline_json = baseline.as_ref().map(ToString::to_string);
+                    let _ = factory_task::deliver::record_cost_baseline(
+                        &mut store,
+                        task_id,
+                        baseline_json.as_deref(),
+                    );
+
                     (
                         json!({ "kind": "assigned", "session_id": session_id.to_string() }),
                         json!({ "sent": true, "error": Value::Null }),
@@ -409,7 +430,127 @@ fn task_json(t: &factory_task::create::Task) -> Value {
         "result_artifact_paths": t.result_artifact_paths,
         "created_at": t.created_at,
         "updated_at": t.updated_at,
+        // Station 11's closeout list already names this gap: `template_id`
+        // and `template_version` existed on the row (migration 6) but were
+        // never carried into this response. Added alongside the cost
+        // figures below rather than left for a separate pass.
+        "template_id": t.template_id.map(|id| id.to_string()),
+        "template_version": t.template_version,
+        // Design §12.6 / ADR 0021 decisions 6-7. `cost_baseline` is
+        // deliberately not here: it is the raw adapter-shaped counters this
+        // run started from, not a figure about the run itself -- see
+        // `Task::cost_baseline`'s own doc comment.
+        "cost_model": t.cost_model,
+        "cost_input_tokens": t.cost_input_tokens,
+        "cost_output_tokens": t.cost_output_tokens,
+        "cost_duration_ms": t.cost_duration_ms,
+        "context_utilization_percent": t.context_utilization_percent,
     })
+}
+
+/// A best-effort cost sample: `None` when there is no pane to ask, when the
+/// adapter itself errors, or when the adapter simply has nothing to report.
+/// ADR 0021 decision 6's own point: `None` is the ordinary answer for two of
+/// four live Pi sessions and every `opencode` session, not the edge, and "a
+/// failure to read cost must never fail" the task action this accompanies —
+/// this is the one place that rule is enforced for both call sites below.
+fn sample_cost_best_effort(
+    adapter: &(dyn factory_adapter::Adapter + Send + Sync),
+    pane: Option<&factory_adapter::PaneId>,
+) -> Option<factory_adapter::CostSample> {
+    let pane = pane?;
+    adapter.cost_sample(pane).ok().flatten()
+}
+
+/// ADR 0021 decision 6's terminal half: a second cost sample, subtracted
+/// from the baseline `task.send` recorded at delivery
+/// (`Task::cost_baseline`), and written to the run's own cost columns.
+///
+/// Both `PiAdapter` and `ClaudeAdapter` hand back a *cumulative-to-date*
+/// sample (verified in `factory_adapter::sum_pi_transcript_usage`'s own body
+/// and doc comment: it sums the whole Pi transcript to date, not a
+/// caller-supplied window, so the "sample now, sample later, subtract" rule
+/// applies identically to both sources) — so there is exactly one arithmetic
+/// here, `factory_adapter::CostSample::since`, and no `match` on
+/// `CostSource` is needed at this call site.
+///
+/// Every step is best-effort, mirroring `teardown_session_if_terminal`'s own
+/// stance just below it in `on_terminal`: a task's completion has already
+/// committed by the time this runs, and a cost figure is an annotation on
+/// it, never a precondition.
+fn record_cost_at_terminal(
+    h: &FactoryHandler,
+    store: &mut factory_store::Store,
+    task: &factory_task::create::Task,
+) {
+    let Some(session_id) = task.assigned_session_id else {
+        return;
+    };
+    let Ok((pane, _)) = crate::handler::pane::read(store, session_id) else {
+        return;
+    };
+    let Some(pane) = pane.map(factory_adapter::PaneId) else {
+        return;
+    };
+    let Some(terminal) = sample_cost_best_effort(h.adapter(), Some(&pane)) else {
+        return;
+    };
+
+    // No baseline at all -- no pane at delivery, an adapter that reported
+    // nothing then -- means there is no run figure to compute, full stop.
+    // Writing `terminal`'s own model here regardless would read as "this
+    // run's cost was measured" to anything that checks for a cost column's
+    // mere presence rather than the token counts specifically: the same
+    // right-type-wrong-column defect ADR 0021 decision 7 already names,
+    // worn by a different field.
+    let Some(baseline) = task
+        .cost_baseline
+        .as_deref()
+        .and_then(|raw| raw.parse::<factory_adapter::CostSample>().ok())
+    else {
+        return;
+    };
+
+    let (model, input_tokens, output_tokens, duration_ms, context_utilization_percent) =
+        match terminal.since(&baseline) {
+            Ok(Some(run_cost)) => (
+                run_cost.model,
+                Some(run_cost.input_tokens as i64),
+                Some(run_cost.output_tokens as i64),
+                run_cost.duration_ms.map(|ms| ms as i64),
+                run_cost.context_utilization_percent,
+            ),
+            // The token counters could not be subtracted -- a compaction or
+            // transcript rotation between the two samples
+            // (`CostSample::since`'s own doc comment). `model` and
+            // `context_utilization_percent` are never diffed in the first
+            // place, so that doc comment is explicit that the caller must
+            // still read them from `terminal` directly rather than lose
+            // them alongside a token delta that could not be computed.
+            Ok(None) => (
+                terminal.model.clone(),
+                None,
+                None,
+                None,
+                terminal.context_utilization_percent,
+            ),
+            // A caller bug -- `baseline` and `terminal` came from different
+            // adapters (`CostSampleError::MismatchedSource`). Cost is an
+            // annotation, never a precondition for completion, so this
+            // degrades to "nothing to write" like every other cost failure
+            // here rather than propagating an error nobody can act on.
+            Err(_) => return,
+        };
+
+    let _ = factory_task::complete::record_cost_result(
+        store,
+        task.id,
+        model.as_deref(),
+        input_tokens,
+        output_tokens,
+        duration_ms,
+        context_utilization_percent,
+    );
 }
 
 /// After a task's own status write commits (`task.done`, `task.fail`, or
@@ -422,6 +563,21 @@ fn on_terminal(
     task_id: uuid::Uuid,
 ) -> Result<(), ErrorBody> {
     let task = factory_task::create::show(store, task_id).map_err(errors::task_error)?;
+
+    // ADR 0021 decision 6's terminal cost sample, taken while the task's
+    // session -- if any -- is still `running`. This must run *before*
+    // `teardown_session_if_terminal` just below: measured directly (see the
+    // ordering test's own mutation), that call commits
+    // `sessions.state = 'stopped'` for a temporary agent's session, and
+    // sampling after it would read a session the run no longer owns. (It
+    // does not, today, also close the real Herdr pane --
+    // `factory_session::on_task_terminal` has no `factory-adapter`
+    // dependency and never calls `Adapter::stop` -- but `Adapter::cost_sample`
+    // takes a pane, and this ordering is what keeps the answer correct if
+    // that ever changes, not only correct against today's session-state
+    // check.) `cost_sample_runs_before_session_teardown` in `tests/cost.rs`
+    // pins the ordering so a later edit cannot move it back down unnoticed.
+    record_cost_at_terminal(h, store, &task);
 
     teardown_session_if_terminal(store, h.instance_root(), &task);
 
