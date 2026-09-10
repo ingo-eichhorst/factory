@@ -326,7 +326,8 @@ pub fn spawn(
         loop {
             {
                 let mut store = handler.lock_store();
-                let _ = tick(&mut store, Utc::now());
+                let reports = tick(&mut store, Utc::now());
+                log_failed_fires(&reports);
             }
             let _ = ticked_tx.send(());
             match stop_rx.recv_timeout(interval) {
@@ -337,4 +338,57 @@ pub fn spawn(
     });
 
     (join, stop_tx, ticked_rx)
+}
+
+/// Print the outcomes from one [`tick`] that mean a schedule did not fire
+/// when it should have.
+///
+/// `eprintln!`, not a return value a caller must remember to check: this
+/// runs inside the spawned thread, where the only way out is already stderr
+/// or silence. Living here, next to [`tick`] itself, rather than in whatever
+/// called [`spawn`], means every caller gets this visibility for free and
+/// never has to remember to add it — a failed fire is this module's own
+/// domain information (`FireOutcome` is this module's type), not something a
+/// generic caller should have to interpret. `factory start`
+/// (`factory-cli`'s `open_log_pair`) redirects the whole daemon process's
+/// stderr to `<root>/.factory/daemon.log`, so this reaches a real,
+/// operator-readable file without this crate knowing anything about log
+/// files — stderr is stderr, wherever the process's stderr ends up.
+///
+/// Logs [`FireOutcome::Failed`] and [`FireOutcome::NoTargetScope`] only.
+/// That already covers every entry [`factory_task::schedule::due`] puts in
+/// `Due::unreadable`: [`tick`] folds each one into a `ScheduleReport` whose
+/// outcome is `FireOutcome::Failed(bad.reason)` before this function ever
+/// sees the list, so there is no separate `unreadable` case to add here.
+///
+/// Silent on purpose for [`FireOutcome::AlreadyFired`] and
+/// [`FireOutcome::Fired`]. At `DISPATCH_INTERVAL`'s cadence (roughly three
+/// ticks a minute — see `factory-cli`'s own comment on that constant),
+/// `AlreadyFired` is the *normal* outcome for a healthy instance almost
+/// every tick; logging it would put several lines a minute in the log for
+/// an instance where nothing is wrong.
+///
+/// A schedule that stays broken (bad cron on a hand-edited row, a template
+/// whose scope was removed) repeats its line once every tick, forever. That
+/// repetition is deliberate, not a bug to fix here: telling "still broken"
+/// apart from "broken again" needs state this loop does not keep — it would
+/// have to remember which schedule ids it already logged and when — and a
+/// row nobody has fixed yet is exactly the kind of finding an operator
+/// should keep seeing on every tick, not one that quietly falls silent after
+/// its first mention.
+fn log_failed_fires(reports: &[ScheduleReport]) {
+    for report in reports {
+        match &report.outcome {
+            FireOutcome::Failed(reason) => eprintln!(
+                "factory: dispatcher: schedule {} failed to fire: {reason}",
+                report.schedule_id
+            ),
+            FireOutcome::NoTargetScope => eprintln!(
+                "factory: dispatcher: schedule {} has a template with no target scope; it can \
+                 never fire until the template is fixed",
+                report.schedule_id
+            ),
+            FireOutcome::Fired { .. } | FireOutcome::AlreadyFired => {}
+        }
+    }
 }

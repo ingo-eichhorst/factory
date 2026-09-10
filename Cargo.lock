@@ -386,6 +386,7 @@ dependencies = [
 name = "factory-doctor"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "factory-adapter",
  "factory-config",
  "factory-paths",

@@ -43,8 +43,8 @@ fn print_report(report: &DoctorReport) {
         report.backups.newest_modified
     );
     println!(
-        "scheduler: label={} loaded={} last_fired={:?}",
-        report.scheduler.label, report.scheduler.loaded, report.scheduler.last_fired
+        "scheduler: label={} loaded={} last_tick_at={:?}",
+        report.scheduler.label, report.scheduler.loaded, report.scheduler.last_tick_at
     );
 
     if report.findings.is_empty() {
@@ -122,12 +122,38 @@ fn render(finding: &Finding) -> String {
         Finding::HerdrPaneQueryFailed(error) => format!(
             "could not query herdr's panes: {error}\n  help: confirm herdr is installed and on PATH"
         ),
-        Finding::SchedulerNotLoaded { label } => format!(
-            "scheduler job `{label}` is not loaded\n  help: load it if a recurring dispatcher is \
-             expected on this machine"
-        ),
         Finding::SchedulerQueryFailed { label, error } => format!(
             "could not query scheduler job `{label}`: {error}\n  help: confirm launchctl is on PATH"
+        ),
+        // A negative age is a real case, not a rounding artefact: the check
+        // compares the magnitude of the age so that a timestamp in the
+        // future cannot mask a dead dispatcher (ADR 0021 decision 10). It is
+        // rendered as what it is. "(-3600s ago)" would be arithmetically
+        // true and would still leave an operator guessing at a clock skew.
+        Finding::DispatcherTickStale {
+            last_tick_at,
+            age_seconds,
+        } if *age_seconds < 0 => format!(
+            "dispatcher tick is dated in the future: last tick {last_tick_at}, {}s from now\n  \
+             help: this database's clock and this machine's disagree; check both before \
+             trusting any timestamp in it",
+            age_seconds.abs()
+        ),
+        Finding::DispatcherTickStale {
+            last_tick_at,
+            age_seconds,
+        } => format!(
+            "dispatcher has not ticked lately: last tick {last_tick_at} ({age_seconds}s ago)\n  \
+             help: check that the factory daemon is running (`factory status`)"
+        ),
+        Finding::TwoDispatchers {
+            label,
+            last_tick_at,
+        } => format!(
+            "two dispatchers against one database: `{label}` is loaded under launchctl, and \
+             Factory's own dispatcher last ticked at {last_tick_at}\n  help: remove `{label}` \
+             (`launchctl remove {label}`) and follow the cut-over procedure in the slice-11 \
+             operator guide"
         ),
     }
 }

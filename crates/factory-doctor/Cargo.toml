@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+chrono.workspace = true
 factory-adapter = { path = "../factory-adapter" }
 factory-config = { path = "../factory-config" }
 factory-paths = { path = "../factory-paths" }

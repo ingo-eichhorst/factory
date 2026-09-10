@@ -676,8 +676,13 @@ CREATE TABLE task_templates (
     -- a name that means different things in different scopes would make that
     -- reference ambiguous at exactly the moment nobody is watching.
     name                TEXT NOT NULL,
-    -- NULL means "no target" — design §11's run that "remains queued for the
-    -- central agent to assign."
+    -- NULL does **not** mean design §11's run that "remains queued for the
+    -- central agent to assign." That sentence is about the target *agent*,
+    -- which is the next column. A template with no scope can never produce a
+    -- run at all: `schedules` carries no scope of its own, so a run's scope
+    -- can only come from its template, and `tasks.target_scope_id` is
+    -- `NOT NULL`. So a NULL here is a template that silently never fires, and
+    -- `factory_task::template::create` refuses to write one.
     target_scope_id     TEXT REFERENCES scopes (id),
     target_agent_name   TEXT,
     prompt              TEXT NOT NULL,
@@ -795,8 +800,17 @@ CREATE INDEX task_decisions_task_id ON task_decisions (task_id);
 -- is a distinct answer from a stale row**: no row means no dispatcher has ever
 -- ticked against this database, which is the ordinary state of a freshly
 -- initialised instance, and doctor must not report a fault for it. ADR 0021
--- decision 2 retires doctor's `launchd` label check in favour of this: a
--- loaded `launchd` job proves only that `launchd` fired.
+-- decision 10 adds this **alongside** doctor's `launchd` label check, not in
+-- place of it: a loaded `launchd` job proves only that `launchd` fired, and
+-- this row proves only that Factory ticked. The two together are the check
+-- that matters — a loaded foreign job beside a fresh Factory tick is two
+-- dispatchers against one database. (An earlier draft of ADR 0021 said
+-- decision 2 retired the label check. That draft assumed the label would
+-- never be loaded; it is loaded on this machine, and decision 10 reverses
+-- it. This comment is corrected rather than left standing because migration
+-- 6 has been released to no installation and a comment inside the SQL
+-- changes no schema — ADR 0012 decision 2 governs a released migration's
+-- effect, and this edit has none.)
 CREATE TABLE dispatcher_state (
     id           INTEGER PRIMARY KEY CHECK (id = 1),
     last_tick_at TEXT NOT NULL

@@ -458,6 +458,43 @@ The earlier plan to retire the `launchctl` check outright was wrong, and it was
 wrong because of an assumption rather than a measurement: this document's first
 draft said the label "will never be loaded." It is loaded now.
 
+Four further rules follow from those two halves. They are written down here
+because none of them is obvious from the two paragraphs above, and a reader who
+finds a green `factory doctor` next to a loaded prototype needs to know that is
+the intended answer rather than a defect.
+
+**A label that is not loaded is no longer a finding.** `SchedulerNotLoaded` is
+deleted, not kept. Decision 2 makes Factory's dispatcher a daemon thread, so
+"nothing is loaded under that label" is the *desired* end state after the
+cut-over. A doctor that kept reporting it would be demanding that the retired
+prototype stay installed forever.
+
+**A loaded label beside a Factory dispatcher that has never ticked is not a
+finding either.** That is the documented state of an instance that has not cut
+over yet — every instance, today. It is reported as a fact in
+`SchedulerStatus`, and nothing more. A check that goes red on every instance
+before its cut-over teaches an operator to ignore check 6, which costs more
+than it finds.
+
+**A stale tick is reported as stale, never also as two dispatchers.** A
+dispatcher that has stopped is not a second writer. Reporting both would name
+one fault twice and describe the second one wrongly.
+
+**Staleness is compared on the magnitude of the age, not its sign.** A
+clock-skewed or hand-edited row can carry a timestamp in the future, and
+treating "in the future" as fresh would mask a dead dispatcher for as long as
+that row stands. The signed age is still carried in the finding, so a negative
+number reads as what it is instead of as an implausible staleness.
+
+**The `dispatcher_state` read is gated on the schema version.** Below migration
+6 the table does not exist, which is the real shape of a machine still running
+the prototype: it keeps its own `factory_schema_migrations` table, so
+`PRAGMA user_version` reads 0 there. An ungated read would fail, and the
+failure would propagate out of `diagnose` as an error — doctor reporting
+*nothing at all* on exactly the instance an operator most needs it for. The
+gate reports `CheckSkipped` instead, which is the pattern checks 3 and 5
+already use for the same reason.
+
 ## Consequences
 
 - Migration 6 is additive: new tables, plus `ALTER TABLE tasks ADD COLUMN` for

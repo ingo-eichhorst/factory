@@ -90,13 +90,11 @@ impl std::fmt::Display for TemplateState {
 pub struct Template {
     pub id: uuid::Uuid,
     pub name: String,
-    /// `None` means "no target" — design §11's run that "remains queued for
-    /// the central agent to assign."
     /// Read back as an `Option` because the column is nullable, and written
     /// only as `Some` because [`create`] requires one.
     ///
-    /// Design §11's "if a target agent is absent, the run remains queued for
-    /// the central agent to assign" is about the **agent**
+    /// `None` is **not** design §11's run that "remains queued for the
+    /// central agent to assign." That sentence is about the **agent**
     /// ([`Template::target_agent_name`]), not the scope. A run's own
     /// `tasks.target_scope_id` is `NOT NULL`, so a template without a scope
     /// could never produce a run at all: an operator would be able to create

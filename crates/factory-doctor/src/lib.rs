@@ -26,15 +26,20 @@
 //! 3. [`registry`] — registry drift (ADR 0016).
 //! 4. [`leases`] — leases held with no live session.
 //! 5. [`panes`] — database sessions against actual Herdr panes.
-//! 6. [`scheduler`] — whether the scheduler job is loaded, and when it last
-//!    fired.
+//! 6. [`scheduler`] — two questions, not one (ADR 0021 decision 10):
+//!    whether Factory's own dispatcher has ticked lately, from
+//!    `dispatcher_state`; and whether the foreign, pre-station-11
+//!    scheduler is loaded under `launchctl`. A loaded foreign scheduler
+//!    next to a fresh Factory tick is two dispatchers against one
+//!    database, which ADR 0014 forbids.
 //!
 //! Every check that can run without the others still running does: a broken
 //! configuration does not stop the schema check, a schema behind this build
 //! does not stop the scheduler check. Where a later check genuinely cannot
 //! run without an earlier one's result (registry drift needs a valid
-//! configuration; registry drift and the pane audit need schema columns that
-//! do not exist before a specific migration), that is reported as
+//! configuration; registry drift, the pane audit, and the dispatcher tick
+//! need schema columns or tables that do not exist before a specific
+//! migration), that is reported as
 //! [`Finding::CheckSkipped`] rather than silently omitted or allowed to
 //! crash the whole pass — "I could not check X" is exactly the kind of gap
 //! the backlog says nothing reveals today, so it is itself a finding.
@@ -143,11 +148,25 @@ pub enum Finding {
     /// session.
     HerdrPaneQueryFailed(String),
 
-    /// Check 6. `launchctl` reports no job loaded under [`SCHEDULER_LABEL`].
-    SchedulerNotLoaded { label: String },
-
     /// Check 6. `launchctl` itself could not be queried.
     SchedulerQueryFailed { label: String, error: String },
+
+    /// Check 6. `dispatcher_state.last_tick_at` is older (in either
+    /// direction — see `scheduler::report_tick_health`) than the staleness
+    /// window. A dispatcher ran against this database and stopped ticking.
+    /// `age_seconds` is signed: negative means the timestamp is in the
+    /// future (clock skew or a corrupted row), carried honestly rather than
+    /// folded into a positive number.
+    DispatcherTickStale {
+        last_tick_at: String,
+        age_seconds: i64,
+    },
+
+    /// Check 6. The foreign scheduler (`label`, [`SCHEDULER_LABEL`]) is
+    /// loaded under `launchctl`, and Factory's own dispatcher has a fresh
+    /// tick at `last_tick_at`. Two writers against one database — ADR 0021
+    /// decision 10, ADR 0014.
+    TwoDispatchers { label: String, last_tick_at: String },
 }
 
 /// A check that [`Finding::CheckSkipped`] names.
@@ -155,6 +174,8 @@ pub enum Finding {
 pub enum CheckName {
     RegistryDrift,
     SessionPaneAudit,
+    /// Check 6's `dispatcher_state` read — see `scheduler::read_last_tick`.
+    DispatcherTick,
 }
 
 /// What [`diagnose`] found: the facts it always reports (schema version,
@@ -274,7 +295,7 @@ pub fn diagnose_with(
 
     panes::check(&store, schema_version, herdr, &mut findings)?;
 
-    let scheduler = scheduler::check(launchd, &mut findings);
+    let scheduler = scheduler::check(&store, schema_version, launchd, &mut findings);
 
     Ok(DoctorReport {
         schema_version,

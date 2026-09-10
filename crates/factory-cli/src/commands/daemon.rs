@@ -17,6 +17,31 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// state. Nothing depends on the exact figure — no rule is timed off it.
 const OBSERVE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How often the dispatcher checks for cron schedules that are due — ADR
+/// 0021 decision 2, "the same shape with a different period" as the observe
+/// loop above.
+///
+/// Unlike `OBSERVE_INTERVAL`, this figure is not a free choice, and 60
+/// seconds is the one wrong answer. `dispatch::tick` fires a schedule only
+/// when its cron expression matches the *current* local minute, and
+/// `tasks.fired_for_minute` is the dedup key for that minute (ADR 0021
+/// decisions 3, 3a). So a wall-clock minute this loop never samples is a
+/// fire that is lost for good — no later tick can go back and catch it. A
+/// minute sampled more than once, by contrast, costs nothing but a cheap
+/// `FireOutcome::AlreadyFired`: the partial unique index
+/// `tasks_one_run_per_schedule_minute` makes a repeat sample free and
+/// correct. A 60-second interval has no room for drift — any delay makes the
+/// loop land twice in one minute and skip the next, and the skipped minute
+/// is the fire this comment is about. 20 seconds samples each minute three
+/// times, so an occasional multi-second delay costs an extra
+/// `AlreadyFired`, never a lost fire.
+///
+/// The headroom is not theoretical: `observe::spawn`'s loop holds
+/// `handler.lock_store()` across every adapter call in its pass (a Herdr
+/// subprocess, an Irrlicht HTTP request), so a dispatcher tick waiting on
+/// the same lock can be delayed by seconds on lock acquisition alone.
+const DISPATCH_INTERVAL: Duration = Duration::from_secs(20);
+
 /// `factory daemon run`: bind the socket, hold the installation lock, serve
 /// requests until this process is signalled.
 ///
@@ -83,8 +108,15 @@ fn serve_with<A: factory_adapter::Adapter + Send + Sync + 'static>(root: &Path, 
     };
     let handler = std::sync::Arc::new(handler);
 
-    let (_observe_join, _stop) =
+    let (_observe_join, _observe_stop) =
         factory_daemon::observe::spawn(std::sync::Arc::clone(&handler), OBSERVE_INTERVAL);
+
+    // Named, `_`-prefixed bindings, not a bare `_` — dropping the stop sender
+    // here would close the loop's `stop_rx` immediately and the dispatcher
+    // would exit before its first tick. The observe loop above has the same
+    // landmine and is bound the same way.
+    let (_dispatch_join, _dispatch_stop, _dispatch_ticked) =
+        factory_daemon::dispatch::spawn(std::sync::Arc::clone(&handler), DISPATCH_INTERVAL);
 
     println!(
         "factory: daemon listening at {}",

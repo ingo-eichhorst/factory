@@ -21,6 +21,33 @@ fn set_user_version(company_root: &std::path::Path, version: i64) {
         .expect("set user_version");
 }
 
+/// Writes `dispatcher_state`'s one row directly with rusqlite, the way the
+/// tests below build a fresh or stale tick without a clock parameter into
+/// `diagnose_with`. Uses `to_rfc3339()`, matching
+/// `factory_daemon::dispatch::record_tick` exactly — this is what makes a
+/// "fresh tick" test pin the cross-crate contract between what the daemon
+/// writes and what doctor parses, rather than passing for the wrong reason.
+fn write_dispatcher_tick(company_root: &std::path::Path, when: chrono::DateTime<chrono::Utc>) {
+    let raw = rusqlite::Connection::open(company_root.join(".factory").join("factory.sqlite"))
+        .expect("reopen raw connection");
+    raw.execute(
+        "INSERT OR REPLACE INTO dispatcher_state (id, last_tick_at) VALUES (1, ?1)",
+        [when.to_rfc3339()],
+    )
+    .expect("insert dispatcher_state row");
+}
+
+/// Drops `dispatcher_state` entirely, so a schema-gate test can exercise the
+/// real shape of a pre-migration-6 database (the table absent) rather than
+/// only a hand-lowered `user_version` pragma over a table that still
+/// physically exists.
+fn drop_dispatcher_state_table(company_root: &std::path::Path) {
+    let raw = rusqlite::Connection::open(company_root.join(".factory").join("factory.sqlite"))
+        .expect("reopen raw connection");
+    raw.execute("DROP TABLE dispatcher_state", [])
+        .expect("drop dispatcher_state");
+}
+
 // --- Check 1: configuration validity -----------------------------------
 
 /// Mutation target: delete the `Err(err) => findings.push(Finding::ConfigInvalid(err))`
@@ -515,12 +542,20 @@ fn herdr_query_failure_is_reported_when_a_session_has_a_recorded_pane() {
     );
 }
 
-// --- Check 6: scheduler job loaded / last fired -------------------------
+// --- Check 6: Factory's dispatcher tick, and the foreign scheduler ------
+//
+// ADR 0021 decision 10: check 6 answers two questions that must not be
+// blended into one verdict. The tests below cover each tick state alone
+// (with the foreign label held at `NotLoaded`, so a stale/fresh finding
+// cannot be confused with a two-dispatchers one), then the two states
+// where the label being loaded changes the answer.
 
-/// Mutation target: invert the `Ok(None) => ...` / `Ok(Some(_)) => ...` arms
-/// in `scheduler::check`, or delete the call entirely.
+/// Mutation target: delete the `if age_seconds.is_none()` / no-row branch in
+/// `scheduler::read_last_tick`, or make it push a finding anyway. No
+/// dispatcher has ever ticked against this database — ordinary on a fresh
+/// instance (`factory_store::schema`'s own comment on `dispatcher_state`).
 #[test]
-fn scheduler_not_loaded_is_reported_when_launchd_has_no_matching_job() {
+fn dispatcher_tick_absent_is_not_a_finding_on_a_fresh_instance() {
     let dir = tempfile::tempdir().expect("tempdir");
     let company_root = dir.path();
     open_db(company_root);
@@ -529,31 +564,125 @@ fn scheduler_not_loaded_is_reported_when_launchd_has_no_matching_job() {
         factory_doctor::diagnose_with(company_root, &FakePanes(vec![]), &FakeLaunchd::NotLoaded)
             .expect("diagnose");
 
-    assert!(!report.scheduler.loaded);
-    assert_eq!(
-        report.scheduler.last_fired, None,
-        "launchd exposes no last-fired timestamp; this must never be fabricated"
-    );
+    assert_eq!(report.scheduler.last_tick_at, None);
     assert!(
-        report
-            .findings
-            .contains(&factory_doctor::Finding::SchedulerNotLoaded {
-                label: factory_doctor::SCHEDULER_LABEL.to_string(),
-            }),
-        "expected SchedulerNotLoaded, got {:#?}",
+        !report.findings.iter().any(|f| matches!(
+            f,
+            factory_doctor::Finding::DispatcherTickStale { .. }
+                | factory_doctor::Finding::TwoDispatchers { .. }
+        )),
+        "no dispatcher has ever ticked; that must not be a finding: {:#?}",
         report.findings
     );
 }
 
-/// The predicate-inversion counterpart: a loaded job must produce no
-/// finding at all. Without this test, a mutation that always pushes
-/// `SchedulerNotLoaded` regardless of `launchd`'s answer would still pass
-/// the "not loaded" test above.
+/// The predicate-inversion counterpart to the stale test below: a fresh
+/// tick, alone, must never be a finding. Without this, a mutation that
+/// always reports `DispatcherTickStale` would still pass the "stale" test.
 #[test]
-fn scheduler_loaded_produces_no_finding() {
+fn dispatcher_tick_fresh_is_not_a_finding() {
     let dir = tempfile::tempdir().expect("tempdir");
     let company_root = dir.path();
     open_db(company_root);
+    write_dispatcher_tick(company_root, chrono::Utc::now());
+
+    let report =
+        factory_doctor::diagnose_with(company_root, &FakePanes(vec![]), &FakeLaunchd::NotLoaded)
+            .expect("diagnose");
+
+    assert!(report.scheduler.last_tick_at.is_some());
+    assert!(
+        !report.findings.iter().any(|f| matches!(
+            f,
+            factory_doctor::Finding::DispatcherTickStale { .. }
+                | factory_doctor::Finding::TwoDispatchers { .. }
+        )),
+        "a fresh tick must not be a finding: {:#?}",
+        report.findings
+    );
+}
+
+/// Mutation target: delete or widen the `age_seconds.abs() >
+/// STALE_AFTER_SECONDS` comparison in `scheduler::report_tick_health`.
+#[test]
+fn dispatcher_tick_stale_is_a_finding() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let company_root = dir.path();
+    open_db(company_root);
+    let stale = chrono::Utc::now() - chrono::Duration::hours(1);
+    write_dispatcher_tick(company_root, stale);
+
+    let report =
+        factory_doctor::diagnose_with(company_root, &FakePanes(vec![]), &FakeLaunchd::NotLoaded)
+            .expect("diagnose");
+
+    let (last_tick_at, age_seconds) = report
+        .findings
+        .iter()
+        .find_map(|f| match f {
+            factory_doctor::Finding::DispatcherTickStale {
+                last_tick_at,
+                age_seconds,
+            } => Some((last_tick_at.clone(), *age_seconds)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected DispatcherTickStale, got {:#?}", report.findings));
+
+    assert_eq!(last_tick_at, stale.to_rfc3339());
+    // An hour ago, computed against a live clock rather than a fixed one
+    // injected into `diagnose_with` — loose bounds absorb the test's own
+    // run time.
+    assert!(
+        (3000..4200).contains(&age_seconds),
+        "age_seconds = {age_seconds}, expected roughly 3600"
+    );
+}
+
+/// Binding rule: staleness is compared on the *magnitude* of the age, not
+/// its sign, so a clock-skewed or corrupted row cannot masquerade as fresh
+/// forever. A future timestamp must still be reported stale, with its
+/// signed (negative) age carried honestly.
+#[test]
+fn dispatcher_tick_in_the_future_is_reported_stale_not_fresh() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let company_root = dir.path();
+    open_db(company_root);
+    let future = chrono::Utc::now() + chrono::Duration::hours(1);
+    write_dispatcher_tick(company_root, future);
+
+    let report =
+        factory_doctor::diagnose_with(company_root, &FakePanes(vec![]), &FakeLaunchd::NotLoaded)
+            .expect("diagnose");
+
+    let age_seconds = report
+        .findings
+        .iter()
+        .find_map(|f| match f {
+            factory_doctor::Finding::DispatcherTickStale { age_seconds, .. } => Some(*age_seconds),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected DispatcherTickStale for a future timestamp, got {:#?}",
+                report.findings
+            )
+        });
+
+    assert!(
+        age_seconds < 0,
+        "a future tick's age must read as a negative number, not be mistaken for fresh: \
+         {age_seconds}"
+    );
+}
+
+/// ADR 0021 decision 10 / ADR 0014: a loaded foreign scheduler next to a
+/// fresh Factory tick is two dispatchers against one database.
+#[test]
+fn a_loaded_foreign_scheduler_next_to_a_fresh_tick_is_two_dispatchers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let company_root = dir.path();
+    open_db(company_root);
+    write_dispatcher_tick(company_root, chrono::Utc::now());
 
     let report = factory_doctor::diagnose_with(
         company_root,
@@ -564,14 +693,118 @@ fn scheduler_loaded_produces_no_finding() {
 
     assert!(report.scheduler.loaded);
     assert!(
-        !report.findings.iter().any(|f| matches!(
+        report.findings.iter().any(|f| matches!(
             f,
-            factory_doctor::Finding::SchedulerNotLoaded { .. }
-                | factory_doctor::Finding::SchedulerQueryFailed { .. }
+            factory_doctor::Finding::TwoDispatchers { label, .. }
+                if label == factory_doctor::SCHEDULER_LABEL
         )),
-        "a loaded job must not also report a scheduler finding: {:#?}",
+        "expected TwoDispatchers, got {:#?}",
         report.findings
     );
+}
+
+/// A stale dispatcher is not dispatching, so a loaded foreign scheduler next
+/// to a stale tick must report the stale finding alone, never
+/// `TwoDispatchers` as well.
+#[test]
+fn a_loaded_foreign_scheduler_next_to_a_stale_tick_reports_stale_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let company_root = dir.path();
+    open_db(company_root);
+    let stale = chrono::Utc::now() - chrono::Duration::hours(1);
+    write_dispatcher_tick(company_root, stale);
+
+    let report = factory_doctor::diagnose_with(
+        company_root,
+        &FakePanes(vec![]),
+        &FakeLaunchd::Loaded("job details".to_string()),
+    )
+    .expect("diagnose");
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| matches!(f, factory_doctor::Finding::DispatcherTickStale { .. })),
+        "expected DispatcherTickStale, got {:#?}",
+        report.findings
+    );
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|f| matches!(f, factory_doctor::Finding::TwoDispatchers { .. })),
+        "a stale dispatcher is not dispatching; it must not also be reported as a second \
+         writer: {:#?}",
+        report.findings
+    );
+}
+
+/// The schema gate is the load-bearing case (ADR 0021 decision 10): the real
+/// machine has a schema-5-or-lower database, with no `dispatcher_state`
+/// table at all (the Python prototype tracks its own migrations
+/// elsewhere). Drops the table for real, rather than only hand-lowering
+/// `user_version` over a table that still physically exists, so this
+/// fixture matches that machine exactly. Without the gate in
+/// `scheduler::read_last_tick`, reading the table fails; proving the
+/// failure never reaches `diagnose_with` as a whole-report `Err` is the
+/// point of this test, not a side effect of it.
+#[test]
+fn dispatcher_tick_is_skipped_below_schema_6_and_the_rest_of_the_report_is_intact() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let company_root = dir.path();
+    open_db(company_root);
+    support::write_valid_config_with_no_scopes(company_root, support::uid(1));
+    drop_dispatcher_state_table(company_root);
+    set_user_version(company_root, 5);
+
+    let report = factory_doctor::diagnose_with(
+        company_root,
+        &FakePanes(vec![]),
+        &FakeLaunchd::Loaded("irrelevant".to_string()),
+    )
+    .expect("diagnose must still return a full report, not Err, below schema 6");
+
+    assert!(
+        report
+            .findings
+            .contains(&factory_doctor::Finding::CheckSkipped {
+                check: factory_doctor::CheckName::DispatcherTick,
+                reason: "database schema is 5; `dispatcher_state` was introduced in schema 6"
+                    .to_string(),
+            }),
+        "expected DispatcherTick to be reported skipped, got {:#?}",
+        report.findings
+    );
+    assert_eq!(report.scheduler.last_tick_at, None);
+    // The launchd half's answer survives untouched by the schema gate.
+    assert!(report.scheduler.loaded);
+    // Every other check's own output is intact: schema 5 is behind this
+    // build (a real, separate finding), and registry/pane both run
+    // normally at schema 5 rather than being dragged into a skip that is
+    // only the dispatcher's to report.
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| matches!(f, factory_doctor::Finding::SchemaBehindBuild { .. })),
+        "expected SchemaBehindBuild, got {:#?}",
+        report.findings
+    );
+    assert!(
+        !report.findings.iter().any(|f| matches!(
+            f,
+            factory_doctor::Finding::CheckSkipped {
+                check: factory_doctor::CheckName::RegistryDrift
+                    | factory_doctor::CheckName::SessionPaneAudit,
+                ..
+            }
+        )),
+        "registry drift and the pane audit both run fine at schema 5; only the dispatcher \
+         tick needs schema 6: {:#?}",
+        report.findings
+    );
+    assert_eq!(report.integrity_check, "ok");
 }
 
 #[test]
@@ -682,15 +915,18 @@ fn diagnose_against_the_real_launchctl_and_herdr_binaries_completes_and_is_inter
     let report = factory_doctor::diagnose(company_root).expect("diagnose");
 
     assert_eq!(report.scheduler.label, factory_doctor::SCHEDULER_LABEL);
-    assert_eq!(report.scheduler.last_fired, None);
-    assert_eq!(
-        !report.scheduler.loaded,
-        report.findings.iter().any(|f| matches!(
+    // A fresh tempdir database has no `dispatcher_state` row: no dispatcher
+    // has ever ticked against it, whatever `loaded` turns out to be on the
+    // machine running this suite (ADR 0021 decision 10: the foreign label
+    // being loaded is the documented, ordinary pre-cut-over state).
+    assert_eq!(report.scheduler.last_tick_at, None);
+    assert!(
+        !report.findings.iter().any(|f| matches!(
             f,
-            factory_doctor::Finding::SchedulerNotLoaded { .. }
-                | factory_doctor::Finding::SchedulerQueryFailed { .. }
+            factory_doctor::Finding::DispatcherTickStale { .. }
+                | factory_doctor::Finding::TwoDispatchers { .. }
         )),
-        "`loaded` and the presence of a scheduler finding must always disagree: {:#?}",
+        "no tick was ever recorded on this fresh fixture, so neither finding can fire: {:#?}",
         report.findings
     );
 }
