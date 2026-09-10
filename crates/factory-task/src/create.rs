@@ -98,13 +98,24 @@ pub struct Task {
     /// at the end of the run, not a token count, and it is written from the
     /// terminal sample directly rather than through a subtraction.
     pub context_utilization_percent: Option<f64>,
+    /// §12.2's hook: the run this one reworks, if any — set once, at
+    /// creation, by [`create_rework`], and never written again by anything
+    /// in this crate. `None` for every run created through [`create`],
+    /// [`create_from_template`], or [`create_from_schedule`].
+    pub reworks_task_id: Option<uuid::Uuid>,
+    /// The finding that caused the rework. `Some` exactly when
+    /// [`Task::reworks_task_id`] is `Some` — [`create_rework`] refuses an
+    /// empty finding, the same stance `decisions::record` takes toward
+    /// `task_decisions.rationale`.
+    pub rework_finding: Option<String>,
 }
 
 const TASK_COLUMNS: &str = "id, sender_scope_id, target_scope_id, target_session_id, \
      target_workspace_path, assigned_session_id, prompt, status, blocked_reason, \
      cancel_requested_at, result_summary, result_artifact_paths, created_at, updated_at, \
      template_id, template_version, cost_model, cost_input_tokens, cost_output_tokens, \
-     cost_duration_ms, cost_baseline, context_utilization_percent";
+     cost_duration_ms, cost_baseline, context_utilization_percent, reworks_task_id, \
+     rework_finding";
 
 /// `tasks.id`, `.sender_scope_id`, `.target_scope_id`, `.target_session_id`,
 /// and `.assigned_session_id` are all UUIDs this crate — or `factory-session`
@@ -139,6 +150,8 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     let cost_duration_ms: Option<i64> = row.get(19)?;
     let cost_baseline: Option<String> = row.get(20)?;
     let context_utilization_percent: Option<f64> = row.get(21)?;
+    let reworks_task_id: Option<String> = row.get(22)?;
+    let rework_finding: Option<String> = row.get(23)?;
 
     Ok(Task {
         id: parse_uuid("id", &id),
@@ -169,6 +182,10 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         cost_duration_ms,
         cost_baseline,
         context_utilization_percent,
+        reworks_task_id: reworks_task_id
+            .as_deref()
+            .map(|s| parse_uuid("reworks_task_id", s)),
+        rework_finding,
     })
 }
 
@@ -197,11 +214,19 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 /// Writes the run's `created` event (`crate`'s station-11 decision 3) in the
 /// same transaction as the INSERT above — the one home for "a task was
 /// created" is here, since this is the one INSERT this crate ever issues for
-/// a run, and both [`create`] and [`create_from_template`] reach it through
-/// this function. No payload: the row this function just inserted already
-/// carries every fact about the creation, and `prompt` is exactly the kind
-/// of content decision 6 forbids from a payload, so nothing beyond the event
-/// type itself is recorded here.
+/// a run, and [`create`], [`create_from_template`], [`create_from_schedule`],
+/// and [`create_rework`] all reach it through this function. No payload: the
+/// row this function just inserted already carries every fact about the
+/// creation, and `prompt` is exactly the kind of content decision 6 forbids
+/// from a payload, so nothing beyond the event type itself is recorded here.
+///
+/// `reworks_task_id` / `rework_finding` (§12.2's hook) are the one exception
+/// to "no payload beyond the event type": when [`create_rework`] passes
+/// `Some`, this function writes a **second** event, `Rework`, against the
+/// *new* row this call just inserted — never against the run it reworks. See
+/// [`create_rework`]'s own doc comment for the validation that runs before
+/// this function is ever called, and for why the referenced run's own row is
+/// never written to.
 #[allow(clippy::too_many_arguments)]
 fn insert_task(
     tx: &rusqlite::Transaction<'_>,
@@ -215,6 +240,7 @@ fn insert_task(
     template_id: Option<uuid::Uuid>,
     template_version: Option<i64>,
     cron_origin: Option<CronOrigin<'_>>,
+    rework: Option<(uuid::Uuid, &str)>,
 ) -> Result<(), TaskError> {
     // `triggered_by` is derived from `cron_origin` rather than passed
     // separately, because migration 6's CHECK ties the three together: a
@@ -230,12 +256,16 @@ fn insert_task(
         ),
         None => ("manual", None, None),
     };
+    let (reworks_task_id, rework_finding) = match rework {
+        Some((reworks_task_id, finding)) => (Some(reworks_task_id.to_string()), Some(finding)),
+        None => (None, None),
+    };
     tx.execute(
         "INSERT INTO tasks \
          (id, sender_scope_id, target_scope_id, target_session_id, target_workspace_path, \
           prompt, status, template_id, template_version, \
-          triggered_by, schedule_id, fired_for_minute) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8, ?9, ?10, ?11)",
+          triggered_by, schedule_id, fired_for_minute, reworks_task_id, rework_finding) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         (
             id.to_string(),
             sender_scope_id.map(|s| s.to_string()),
@@ -248,6 +278,8 @@ fn insert_task(
             triggered_by,
             schedule_id,
             fired_for_minute,
+            reworks_task_id,
+            rework_finding,
         ),
     )
     .map_err(factory_store::StoreError::from)?;
@@ -260,6 +292,20 @@ fn insert_task(
         .map_err(factory_store::StoreError::from)?;
     }
     crate::events::append(tx, id, EventType::Created, None, None)?;
+    if let Some((reworks_task_id, finding)) = rework {
+        // Against `id` — the row just inserted above — never against
+        // `reworks_task_id`. This is the whole of the writing path design
+        // §11 / §12.2 ask for: "a run can reference the run it reworks...
+        // without modifying the referenced run." Nothing here executes an
+        // UPDATE against `reworks_task_id`'s own row, and nothing above does
+        // either.
+        let payload = serde_json::json!({
+            "reworks_task_id": reworks_task_id.to_string(),
+            "finding": finding,
+        })
+        .to_string();
+        crate::events::append(tx, id, EventType::Rework, None, Some(&payload))?;
+    }
     Ok(())
 }
 
@@ -303,6 +349,7 @@ pub fn create(
         target_workspace_path,
         prompt,
         delegation_chain,
+        None,
         None,
         None,
         None,
@@ -386,6 +433,124 @@ pub fn create_from_template(
         Some(template_id),
         template_version,
         None,
+        None,
+    )?;
+    tx.commit().map_err(factory_store::StoreError::from)?;
+    Ok(id)
+}
+
+/// The rework-backed twin of [`create`]: design §11 / §12.2's hook — "a run
+/// can reference the run it reworks together with the finding that caused
+/// it, without modifying the referenced run." A sibling entry point over the
+/// same [`insert_task`], the same shape [`create_from_template`] already
+/// takes over `create`'s own signature, and for the same reason: this
+/// crate's two outside callers (`factory_delegation::queue::queue_from_human`
+/// and `::queue_from_session`) call [`create`] positionally, so a new
+/// parameter belongs on a sibling, not on `create` itself.
+///
+/// # The three rules this function decides, and why
+///
+/// Nothing in `factory_store::schema` binds `reworks_task_id` or
+/// `rework_finding` — both are plain nullable columns with no `CHECK`
+/// spanning two rows — so every rule below is a Rust guard, not a database
+/// one, and each has exactly one home: here, before [`insert_task`] is ever
+/// called. A second copy of any of them, in a CLI layer or a second creation
+/// path, is the exact defect this task's own brief warns against: a
+/// validation call present on one path and absent on a sibling proves
+/// nothing was ever protected.
+///
+/// **The referenced run must already be finished.** §12.2's analogy is a
+/// rework loop that "carries the inspection finding back onto the line" —
+/// a finding presumes an inspection already happened, and an inspection
+/// presumes the run it inspects has stopped moving. [`TaskStatus::is_terminal`]
+/// is the one home of "finished" in this crate, so this function calls it
+/// rather than re-listing `done`/`failed`/`cancelled` — the same stance
+/// every other terminal check in this crate already takes.
+///
+/// This deliberately excludes `blocked`, even though design §12.2's own
+/// prose reads as if it might include it ("`failed` and `blocked` are
+/// terminal states addressed to a human"). `TaskStatus::is_terminal`'s own
+/// doc comment is explicit that `blocked` is not terminal: a blocked run can
+/// still return to `queued` and finish. Allowing a rework against it would
+/// let two live attempts exist for the same piece of work at once — the run
+/// still working towards `done`, and a second run already reworking it —
+/// which is a worse record than refusing the rework until the first run
+/// actually stops. This is a case where this function's rule and §12.2's own
+/// prose read differently; the coordinator asked to be told, so it is
+/// recorded here rather than only in this task's report.
+///
+/// **A run may not rework itself.** `reworks_task_id TEXT REFERENCES tasks
+/// (id)` does not catch `reworks_task_id == id`: SQLite's foreign-key check
+/// runs after the statement, by which point the row being inserted already
+/// exists, so a self-reference satisfies the constraint. Checked before the
+/// transaction even opens, since it needs no database read at all.
+///
+/// **Chains are allowed, and no cycle check is needed — as long as this
+/// stays the only writer of `reworks_task_id`.** A reworks B reworks C is
+/// ordinary provenance, not a defect, and nothing here restricts chain
+/// length. A genuine cycle (B reworking A after A already reworks B) cannot
+/// form under this function alone: `reworks_task_id` is written once, at
+/// creation, by this function, and nothing in this crate ever `UPDATE`s it
+/// afterwards — so by the time a later run could name an earlier one as the
+/// run it reworks, the earlier one's own `reworks_task_id` was already fixed
+/// and cannot be rewritten to point forward. **If a later change adds any
+/// path that updates `tasks.reworks_task_id` after creation, that change must
+/// add cycle detection alongside it** — this invariant is exactly what makes
+/// the omission safe today, and only today.
+#[allow(clippy::too_many_arguments)]
+pub fn create_rework(
+    store: &mut factory_store::Store,
+    id: uuid::Uuid,
+    sender_scope_id: Option<uuid::Uuid>,
+    target_scope_id: uuid::Uuid,
+    target_session_id: Option<uuid::Uuid>,
+    target_workspace_path: Option<&str>,
+    prompt: &str,
+    delegation_chain: &[uuid::Uuid],
+    reworks_task_id: uuid::Uuid,
+    rework_finding: &str,
+) -> Result<uuid::Uuid, TaskError> {
+    if reworks_task_id == id {
+        return Err(TaskError::SelfRework(id));
+    }
+    if rework_finding.is_empty() {
+        return Err(TaskError::ReworkFindingRequired(id));
+    }
+
+    let tx = store.transaction()?;
+
+    let status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM tasks WHERE id = ?1",
+            [reworks_task_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(factory_store::StoreError::from)?;
+    let Some(status) = status else {
+        return Err(TaskError::NotFound(reworks_task_id));
+    };
+    let status = TaskStatus::from_db_str(&status);
+    if !status.is_terminal() {
+        return Err(TaskError::ReworkTargetNotTerminal {
+            id: reworks_task_id,
+            status,
+        });
+    }
+
+    insert_task(
+        &tx,
+        id,
+        sender_scope_id,
+        target_scope_id,
+        target_session_id,
+        target_workspace_path,
+        prompt,
+        delegation_chain,
+        None,
+        None,
+        None,
+        Some((reworks_task_id, rework_finding)),
     )?;
     tx.commit().map_err(factory_store::StoreError::from)?;
     Ok(id)
@@ -677,6 +842,7 @@ pub fn create_from_schedule(
             schedule_id,
             fired_for_minute,
         }),
+        None,
     );
 
     match inserted {

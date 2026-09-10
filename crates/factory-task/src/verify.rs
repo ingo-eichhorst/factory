@@ -29,11 +29,13 @@
 //! **This module creates no verification *run*.** ADR 0021 decision 5:
 //! version 1 has no agent-initiated inspection, so design §6 needs no
 //! exception and none is written here. Nothing in this crate calls
-//! [`record_verdict`] — it exists for a caller outside this crate (a future
-//! CLI command or operator tool) to reach, the same way `authorise_resume`
-//! sat with no caller for a whole station before slice 9's guard finally got
-//! one; ADR 0021 decision 5 names that history directly as the reason no
-//! exception is written ahead of a concrete caller.
+//! [`record_verdict`] — `factory-daemon`'s `ops::task::verify` (station 11's
+//! own gap 2) is its caller, reached through `factory task verify`, the same
+//! way `authorise_resume` sat with no caller for a whole station before
+//! slice 9's guard finally got one; ADR 0021 decision 5 names that history
+//! directly as the reason no *exception* is written ahead of a concrete
+//! caller — a caller for the verdict-recording path itself is a different
+//! thing, and this is it.
 
 use rusqlite::OptionalExtension;
 
@@ -59,14 +61,18 @@ pub enum VerifyError {
 
 /// Record one verdict against `task_id`.
 ///
-/// `verdict` is a short structured fact, not a report — decision 6 ("no
-/// secret and no copied private source content, ever") applies here exactly
-/// as it does to every other event payload in this crate: this is not the
-/// place for a transcript, a diff, or a rationale that quotes private
-/// source. The payload is `{"verdict": verdict}`, nothing else — there is no
-/// acceptance-criteria vocabulary to check against in version 1 (§12.1's
-/// gate "remains a human operation"), so this module does not constrain
-/// `verdict`'s text beyond what `task_events.payload` already requires (JSON).
+/// `verdict` and `note` are both short structured facts, not a report —
+/// decision 6 ("no secret and no copied private source content, ever")
+/// applies here exactly as it does to every other event payload in this
+/// crate: this is not the place for a transcript, a diff, or a rationale
+/// that quotes private source. The payload is `{"verdict": verdict, "note":
+/// note}` — there is no acceptance-criteria vocabulary to check against in
+/// version 1 (§12.1's gate "remains a human operation"), so this module does
+/// not constrain either field's text beyond what `task_events.payload`
+/// already requires (JSON). `note` is genuinely optional (`None` writes a
+/// JSON `null`, not an empty string) — a verdict that is self-explanatory
+/// needs no elaboration, and `factory task verify`'s own `--note` is the
+/// only caller today that always supplies one.
 ///
 /// # The independence guard, and why the read happens before the transaction
 ///
@@ -102,6 +108,7 @@ pub fn record_verdict(
     task_id: uuid::Uuid,
     author_session_id: Option<uuid::Uuid>,
     verdict: &str,
+    note: Option<&str>,
 ) -> Result<(), VerifyError> {
     let author_scope_id = author_session_id
         .map(|session_id| factory_session::scope_of_session(store, session_id))
@@ -137,7 +144,7 @@ pub fn record_verdict(
         }
     }
 
-    let payload = serde_json::json!({ "verdict": verdict }).to_string();
+    let payload = serde_json::json!({ "verdict": verdict, "note": note }).to_string();
     crate::events::append(
         &tx,
         task_id,

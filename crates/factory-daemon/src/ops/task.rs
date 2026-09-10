@@ -1,6 +1,10 @@
 //! `task.send`, `task.cancel`, `task.done`, `task.fail`, `task.block`,
 //! `task.resume`, `task.list`, `task.show`, `task.wait` (design §2.4, §5,
-//! §7).
+//! §7), and station 11's gap 2: `task.assign`, `task.progress`,
+//! `task.decision`, `task.verify`. Every one of the four wires straight into
+//! a `factory_task` domain function that already existed with no caller —
+//! this file adds no domain logic of its own, per ADR 0014's own division of
+//! labour.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -184,6 +188,192 @@ fn defer_reason_json(r: &factory_task::assign::DeferReason) -> Value {
             "max_sessions": max_sessions,
         }),
     }
+}
+
+/// The shape `send` already builds inline for its own `assignment` field —
+/// pulled out so [`assign`] can build the identical shape without
+/// duplicating a `match` on [`factory_task::assign::Assignment`]. `send`
+/// keeps its own inline match: it also decides `delivery_json` and `status`
+/// from the same value, which this helper does not need.
+fn assignment_json(a: &factory_task::assign::Assignment) -> Value {
+    use factory_task::assign::Assignment as A;
+    match a {
+        A::Assigned(session_id) => {
+            json!({ "kind": "assigned", "session_id": session_id.to_string() })
+        }
+        A::StartSessionAt(path) => {
+            json!({ "kind": "start_session_at", "path": path.display().to_string() })
+        }
+        A::Deferred(reason) => json!({ "kind": "deferred", "reason": defer_reason_json(reason) }),
+    }
+}
+
+/// Station 11 gap 2: a re-assignment path for a task that already exists —
+/// `factory_task::assign::assign` itself, the same function `send` already
+/// calls right after creating a task. This op is for the case `send`'s own
+/// doc comment does not cover: a task that stayed `queued` (deferred, or
+/// created untargeted with no agent yet idle) and now needs a fresh
+/// assignment attempt, without creating a second task.
+///
+/// `agent_name` is resolved against the task's own `target_scope_id`, read
+/// back via `factory_task::create::show` — never the envelope's `scope_id` —
+/// so a caller does not have to already know (and cannot mismatch) which
+/// scope this task belongs to; it only has to name the agent.
+///
+/// Never delivers. `send`'s own delivery step is a separate concern this op
+/// does not repeat — a caller that wants delivery after a manual assignment
+/// sends the task again through the ordinary path, or a later dispatcher
+/// (backlog §11's own cron dispatcher) does it centrally.
+pub(crate) fn assign(h: &FactoryHandler, _scope_id: uuid::Uuid, payload: Value) -> HandlerOutcome {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Payload {
+        #[serde(with = "crate::serde_uuid::required")]
+        task_id: uuid::Uuid,
+        agent_name: String,
+    }
+    let payload: Payload = errors::parse_payload(&payload)?;
+
+    let mut store = h.lock_store();
+    let task = factory_task::create::show(&store, payload.task_id).map_err(errors::task_error)?;
+
+    let config = crate::handler::config::load(h.instance_root())?;
+    let max_sessions =
+        crate::handler::config::find_agent(&config, task.target_scope_id, &payload.agent_name)?
+            .max_sessions;
+
+    let assignment = factory_task::assign::assign(
+        &mut store,
+        payload.task_id,
+        &payload.agent_name,
+        max_sessions,
+    )
+    .map_err(errors::assign_error)?;
+
+    // `handler.rs`'s own rule for `mutated`: `false` for "a command that
+    // turned out to be a no-op." `Deferred` and `StartSessionAt` write
+    // nothing to `tasks` — only `Assigned` does.
+    let mutated = matches!(assignment, factory_task::assign::Assignment::Assigned(_));
+
+    h.success(
+        json!({
+            "task_id": payload.task_id.to_string(),
+            "assignment": assignment_json(&assignment),
+        }),
+        mutated,
+    )
+}
+
+/// Station 11 gap 2: `factory_task::events::record_progress` — a `progress`
+/// event, an annotation that changes no column of `tasks`. Always authored
+/// by no session (`None`): every CLI-issued mutation in this file that has
+/// no independent reason to attribute authorship to a session already takes
+/// this stance (`task.done`/`task.fail`/`task.block` carry no session field
+/// at all), and `factory task progress` names no `--session` flag today.
+pub(crate) fn progress(
+    h: &FactoryHandler,
+    _scope_id: uuid::Uuid,
+    payload: Value,
+) -> HandlerOutcome {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Payload {
+        #[serde(with = "crate::serde_uuid::required")]
+        task_id: uuid::Uuid,
+        note: String,
+    }
+    let payload: Payload = errors::parse_payload(&payload)?;
+
+    let mut store = h.lock_store();
+    factory_task::events::record_progress(&mut store, payload.task_id, None, &payload.note)
+        .map_err(errors::progress_error)?;
+
+    h.success(
+        json!({ "task_id": payload.task_id.to_string(), "recorded": true }),
+        true,
+    )
+}
+
+/// Station 11 gap 2: `factory_task::decisions::record`. `id` is minted by
+/// the CLI (`crate::ids::new_id` there), mirroring `task.send`'s own
+/// `task_id` — this crate never mints an id for a caller, the same stance
+/// `task.send`'s own doc comment takes.
+pub(crate) fn decision(
+    h: &FactoryHandler,
+    _scope_id: uuid::Uuid,
+    payload: Value,
+) -> HandlerOutcome {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Payload {
+        #[serde(with = "crate::serde_uuid::required")]
+        decision_id: uuid::Uuid,
+        #[serde(with = "crate::serde_uuid::required")]
+        task_id: uuid::Uuid,
+        decision: String,
+        rationale: String,
+        #[serde(default)]
+        alternatives: Option<String>,
+        #[serde(default)]
+        consequences: Option<String>,
+    }
+    let payload: Payload = errors::parse_payload(&payload)?;
+
+    let mut store = h.lock_store();
+    factory_task::decisions::record(
+        &mut store,
+        payload.decision_id,
+        payload.task_id,
+        None,
+        &payload.decision,
+        &payload.rationale,
+        payload.alternatives.as_deref(),
+        payload.consequences.as_deref(),
+    )
+    .map_err(errors::decision_error)?;
+
+    h.success(
+        json!({
+            "task_id": payload.task_id.to_string(),
+            "decision_id": payload.decision_id.to_string(),
+        }),
+        true,
+    )
+}
+
+/// Station 11 gap 2: `factory_task::verify::record_verdict`. Always
+/// authored by no session (`None`) — ADR 0021 decision 5: version 1 has no
+/// agent-initiated verification, so `factory task verify` is a human
+/// operation with no `--session` flag, and the independence guard
+/// (`VerifyError::NotIndependent`) has nothing to refuse for a human
+/// author. The guard itself lives entirely in `factory_task::verify` and is
+/// not re-derived or re-checked here.
+pub(crate) fn verify(h: &FactoryHandler, _scope_id: uuid::Uuid, payload: Value) -> HandlerOutcome {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Payload {
+        #[serde(with = "crate::serde_uuid::required")]
+        task_id: uuid::Uuid,
+        verdict: String,
+        #[serde(default)]
+        note: Option<String>,
+    }
+    let payload: Payload = errors::parse_payload(&payload)?;
+
+    let mut store = h.lock_store();
+    factory_task::verify::record_verdict(
+        &mut store,
+        payload.task_id,
+        None,
+        &payload.verdict,
+        payload.note.as_deref(),
+    )
+    .map_err(errors::verify_error)?;
+
+    h.success(
+        json!({ "task_id": payload.task_id.to_string(), "recorded": true }),
+        true,
+    )
 }
 
 pub(crate) fn cancel(h: &FactoryHandler, _scope_id: uuid::Uuid, payload: Value) -> HandlerOutcome {
@@ -445,6 +635,11 @@ fn task_json(t: &factory_task::create::Task) -> Value {
         "cost_output_tokens": t.cost_output_tokens,
         "cost_duration_ms": t.cost_duration_ms,
         "context_utilization_percent": t.context_utilization_percent,
+        // §12.2's hook. Carried into `task.show`/`task.list` for the same
+        // reason `template_id`/`template_version` were added above: a run's
+        // rework link is otherwise durable but unreachable from the CLI.
+        "reworks_task_id": t.reworks_task_id.map(|id| id.to_string()),
+        "rework_finding": t.rework_finding,
     })
 }
 

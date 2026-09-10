@@ -83,6 +83,10 @@
 //! | `task.cancel` | `factory task cancel` |
 //! | `task.done`, `task.fail`, `task.block` | `factory task done\|fail\|block` |
 //! | `task.resume` | `factory task resume` |
+//! | `task.assign` | `factory task assign` |
+//! | `task.progress` | `factory task progress` |
+//! | `task.decision` | `factory task decision` |
+//! | `task.verify` | `factory task verify` |
 //! | `schedule.create` | `factory schedule create` |
 //! | `schedule.enable`, `schedule.disable` | `factory schedule enable\|disable` |
 //!
@@ -99,7 +103,7 @@
 //! | `context.show` | `factory context show` |
 //! | `daemon.status` | `factory status` |
 //!
-//! Four of these need saying out loud.
+//! Seven of these need saying out loud.
 //!
 //! **`factory init` is not here, because it cannot be.** It creates the
 //! configuration and the database that a daemon needs before one can run. It
@@ -138,6 +142,27 @@
 //! scope that template already names (`factory_task::template`'s own
 //! `target_scope_id` column), never the operator's positional argument —
 //! see `ops::schedule`'s own module docs.
+//!
+//! **`task.assign` ignores the envelope's `scope_id`, deliberately — the
+//! same stance `task.cancel`/`task.done`/`task.fail`/`task.block`/`task.resume`
+//! already take (each takes `_scope_id: Uuid` and never reads it).** The
+//! task named by `task_id` already carries its own `target_scope_id`, read
+//! back through `factory_task::create::show` before `agent_name` is resolved
+//! against the instance configuration, so a caller re-assigning an existing
+//! task only ever has to name the agent — it cannot supply a `--scope` that
+//! disagrees with the task's own.
+//!
+//! **`task.verify` is station 11's gap 2, and its one binding rule is ADR
+//! 0021 decision 4: a verdict annotates, it never transitions.** This
+//! operation writes exactly one `verification` event through
+//! `factory_task::verify::record_verdict` and touches no column of `tasks` —
+//! `task.show`'s `status` is identical before and after a `task.verify`
+//! call. `record_verdict`'s own independence guard (design §12.1: the
+//! author's scope must not be the run's own `target_scope_id`) lives
+//! entirely in `factory_task::verify` and is not re-derived here; this crate
+//! always calls it with no author session (`None`), since `factory task
+//! verify` is a human operation in version 1 (ADR 0021 decision 5) and takes
+//! no `--session` flag.
 //!
 //! # Station 10's `Handler`: [`handler::FactoryHandler`]
 //!
@@ -185,6 +210,10 @@
 //! | `task.done` / `task.fail` | `{ "task_id": Uuid, "result_summary": String?, "result_artifact_paths": [String]? }` | `{ "task_id", "status" }` |
 //! | `task.block` | `{ "task_id": Uuid, "reason": "clarification"\|"permission"\|"interrupted"\|"external" }` | `{ "task_id", "status": "blocked", "blocked_reason" }` |
 //! | `task.resume` | `{ "task_id": Uuid }` | `{ "task_id", "status": "queued" }` |
+//! | `task.assign` | `{ "task_id": Uuid, "agent_name": String }` | `{ "task_id", "assignment": {"kind": "assigned"\|"start_session_at"\|"deferred", ...} }` — the same `assignment` shape `task.send` returns, built by the same match; see the call-out below on which scope `agent_name` resolves against |
+//! | `task.progress` | `{ "task_id": Uuid, "note": String }` | `{ "task_id", "recorded": true }` — an annotation; changes no column of `tasks` |
+//! | `task.decision` | `{ "decision_id": Uuid, "task_id": Uuid, "decision": String, "rationale": String, "alternatives": String?, "consequences": String? }` | `{ "task_id", "decision_id" }` — `rationale` empty is `validation.no_rationale`, refused before any row is written (`task_decisions.rationale` is `NOT NULL` on purpose, design §11) |
+//! | `task.verify` | `{ "task_id": Uuid, "verdict": String, "note": String? }` | `{ "task_id", "recorded": true }` — see the call-out below; this is the one command in this table that mutates the audit log and deliberately not the run |
 //! | `task.list` | `{}` | `{ "tasks": [Task] }` |
 //! | `task.show` | `{ "task_id": Uuid }` | `{ ...Task, "delegation_chain": [Uuid] }` |
 //! | `task.wait` | `{ "task_id": Uuid, "timeout_ms": u64? }` (default and maximum in `handler::task`) | `{ "task_id", "status", "timed_out": bool }` — never mutates; see the module docs above |

@@ -389,6 +389,37 @@ pub enum TaskError {
         "task result artifact paths are {len} bytes, over the {max}-byte limit\n  help: shorten the artifact path list — overflow is refused rather than truncated so nothing is silently lost"
     )]
     ResultArtifactPathsTooLarge { len: usize, max: usize },
+
+    /// §12.2's hook, `create::create_rework`'s own guard: a run cannot
+    /// rework itself. `reworks_task_id` is nullable and self-referencing
+    /// passes the schema's own `REFERENCES tasks (id)` foreign key (the new
+    /// row exists by the time SQLite checks it), so nothing but this check
+    /// stops it.
+    #[error(
+        "task {0} cannot rework itself\n  help: `reworks_task_id` must name a different, already-finished run"
+    )]
+    SelfRework(uuid::Uuid),
+
+    /// §12.2's hook: a rework carries an inspection finding back onto the
+    /// line, and a finding presumes the referenced run has already finished.
+    /// `blocked` is deliberately not accepted here even though it is not
+    /// terminal in the ordinary sense either — see `create::create_rework`'s
+    /// own doc comment for why a run waiting on a human is not safe to
+    /// rework.
+    #[error(
+        "task {id} cannot be reworked because it is `{status}`, not finished\n  help: a rework carries a finding back onto the line, and a finding presumes the referenced run is finished — wait for it to reach `done`, `failed`, or `cancelled` before reworking it"
+    )]
+    ReworkTargetNotTerminal { id: uuid::Uuid, status: TaskStatus },
+
+    /// design §11 / §12.2: a rework's finding is what makes the record
+    /// honest — without it, a `reworks_task_id` link says a run replaces
+    /// another but never says why. The same three-valued-logic gap
+    /// `decisions::record`'s own `NoRationale` guards against for
+    /// `task_decisions.rationale`.
+    #[error(
+        "task {0} reworks another run but names no finding\n  help: a rework without the finding that caused it is an unexplained link, not an audit trail"
+    )]
+    ReworkFindingRequired(uuid::Uuid),
 }
 
 #[cfg(test)]

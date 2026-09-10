@@ -125,6 +125,38 @@ pub fn dispatch(cli: Cli) -> i32 {
             TaskCommand::Resume { task_id } => {
                 with_root(cli.root.as_deref(), |root| task::resume(root, task_id))
             }
+            TaskCommand::Assign {
+                task_id,
+                agent_name,
+            } => with_root(cli.root.as_deref(), |root| {
+                task::assign(root, task_id, &agent_name)
+            }),
+            TaskCommand::Progress { task_id, note } => with_root(cli.root.as_deref(), |root| {
+                task::progress(root, task_id, &note)
+            }),
+            TaskCommand::Decision {
+                task_id,
+                decision,
+                rationale,
+                alternatives,
+                consequences,
+            } => with_root(cli.root.as_deref(), |root| {
+                task::decision(
+                    root,
+                    task_id,
+                    &decision,
+                    &rationale,
+                    alternatives.as_deref(),
+                    consequences.as_deref(),
+                )
+            }),
+            TaskCommand::Verify {
+                task_id,
+                verdict,
+                note,
+            } => with_root(cli.root.as_deref(), |root| {
+                task::verify(root, task_id, &verdict, note.as_deref())
+            }),
             TaskCommand::List => with_root(cli.root.as_deref(), task::list),
             TaskCommand::Show { task_id } => {
                 with_root(cli.root.as_deref(), |root| task::show(root, task_id))

@@ -407,3 +407,328 @@ fn unknown_operation_and_missing_field_are_validation_errors() {
         .unwrap_err();
     assert_eq!(err.code, "validation.malformed_payload");
 }
+
+// --- Station 11 gap 2: task.assign, task.progress, task.decision, task.verify
+
+#[test]
+fn task_assign_chooses_the_idle_session_started_after_the_task_was_queued() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let (handler, _adapter) = new_handler(&fixture);
+
+    // Untargeted send with no idle session yet: stays queued.
+    let task_id = uid(9001);
+    let sent = handler
+        .handle_command(cmd(
+            scope_id,
+            "task.send",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "prompt": "do it",
+                "agent_name": "agent",
+            }),
+        ))
+        .expect("task.send succeeds");
+    assert_eq!(sent.result["status"], "queued");
+
+    // Now an idle session exists; `task.assign` finds it without a second
+    // `task.send`.
+    let session_id = uid(9002);
+    handler
+        .handle_command(cmd(
+            scope_id,
+            "agent.start",
+            serde_json::json!({ "session_id": session_id.to_string(), "agent_name": "agent" }),
+        ))
+        .expect("agent.start succeeds");
+
+    let assigned = handler
+        .handle_command(cmd(
+            scope_id,
+            "task.assign",
+            serde_json::json!({ "task_id": task_id.to_string(), "agent_name": "agent" }),
+        ))
+        .expect("task.assign succeeds");
+    assert_eq!(assigned.result["assignment"]["kind"], "assigned");
+    assert_eq!(
+        assigned.result["assignment"]["session_id"],
+        session_id.to_string()
+    );
+
+    let shown = handler
+        .handle_query(qry(
+            scope_id,
+            "task.show",
+            serde_json::json!({ "task_id": task_id.to_string() }),
+        ))
+        .expect("task.show succeeds");
+    // `assign` never delivers, so `status` stays `queued` even though
+    // `assigned_session_id` is now set — the same distinction
+    // `factory_task::assign`'s own module docs draw.
+    assert_eq!(shown.result["status"], "queued");
+    assert_eq!(shown.result["assigned_session_id"], session_id.to_string());
+}
+
+/// `task.assign` on a task that is not `queued` is refused with the same
+/// code `factory_task::assign::AssignError::NotQueued` already maps to
+/// (`errors::assign_error`) — this is the real boundary of the command, and
+/// exactly the case a second `task.assign` after a first one already
+/// succeeded would hit.
+#[test]
+fn task_assign_on_an_already_assigned_task_is_refused() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let (handler, _adapter) = new_handler(&fixture);
+
+    let session_id = uid(9101);
+    handler
+        .handle_command(cmd(
+            scope_id,
+            "agent.start",
+            serde_json::json!({ "session_id": session_id.to_string(), "agent_name": "agent" }),
+        ))
+        .expect("agent.start succeeds");
+
+    let task_id = uid(9102);
+    handler
+        .handle_command(cmd(
+            scope_id,
+            "task.send",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "prompt": "do it",
+                "target_session_id": session_id.to_string(),
+            }),
+        ))
+        .expect("task.send succeeds");
+
+    // `task.send` above already delivered, so the task is now `running` —
+    // not `queued` — and a second `task.assign` must be refused.
+    let shown = handler
+        .handle_query(qry(
+            scope_id,
+            "task.show",
+            serde_json::json!({ "task_id": task_id.to_string() }),
+        ))
+        .expect("task.show succeeds");
+    assert_eq!(shown.result["status"], "running");
+
+    let err = handler
+        .handle_command(cmd(
+            scope_id,
+            "task.assign",
+            serde_json::json!({ "task_id": task_id.to_string(), "agent_name": "agent" }),
+        ))
+        .unwrap_err();
+    assert_eq!(err.code, "conflict.task_not_queued");
+}
+
+/// `handler.rs`'s own rule for `mutated`: `false` for "a command that turned
+/// out to be a no-op." A deferred `task.assign` (no idle session yet) writes
+/// nothing to `tasks`, so it must not advance `event_cursor` — the same
+/// no-mutation contract `task.wait`'s own timeout path already honours.
+#[test]
+fn task_assign_deferred_does_not_advance_the_event_cursor() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let (handler, _adapter) = new_handler(&fixture);
+
+    let task_id = uid(9601);
+    let sent = handler
+        .handle_command(cmd(
+            scope_id,
+            "task.send",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "prompt": "do it",
+                "agent_name": "agent",
+            }),
+        ))
+        .expect("task.send succeeds");
+    let cursor_after_send = sent.event_cursor;
+
+    // No idle session exists, so this must defer without writing anything.
+    let assigned = handler
+        .handle_command(cmd(
+            scope_id,
+            "task.assign",
+            serde_json::json!({ "task_id": task_id.to_string(), "agent_name": "agent" }),
+        ))
+        .expect("task.assign succeeds");
+    assert_eq!(assigned.result["assignment"]["kind"], "deferred");
+    assert_eq!(
+        assigned.event_cursor, cursor_after_send,
+        "a deferred assign must not advance the cursor"
+    );
+}
+
+#[test]
+fn task_progress_records_a_note_and_changes_no_status() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let (handler, _adapter) = new_handler(&fixture);
+
+    let task_id = uid(9201);
+    handler
+        .handle_command(cmd(
+            scope_id,
+            "task.send",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "prompt": "do it",
+                "agent_name": "agent",
+            }),
+        ))
+        .expect("task.send succeeds");
+
+    let progressed = handler
+        .handle_command(cmd(
+            scope_id,
+            "task.progress",
+            serde_json::json!({ "task_id": task_id.to_string(), "note": "halfway there" }),
+        ))
+        .expect("task.progress succeeds");
+    assert_eq!(progressed.result["recorded"], true);
+
+    let shown = handler
+        .handle_query(qry(
+            scope_id,
+            "task.show",
+            serde_json::json!({ "task_id": task_id.to_string() }),
+        ))
+        .expect("task.show succeeds");
+    assert_eq!(
+        shown.result["status"], "queued",
+        "a progress note must not change status"
+    );
+}
+
+/// design §11: "a decision without a rationale is a log line, not a
+/// decision" — `task_decisions.rationale` is `NOT NULL` on purpose, and this
+/// is the daemon-level proof that an empty `rationale` is refused before any
+/// row is written, not merely a domain-level one.
+#[test]
+fn task_decision_with_an_empty_rationale_is_refused() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let (handler, _adapter) = new_handler(&fixture);
+
+    let task_id = uid(9301);
+    handler
+        .handle_command(cmd(
+            scope_id,
+            "task.send",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "prompt": "do it",
+                "agent_name": "agent",
+            }),
+        ))
+        .expect("task.send succeeds");
+
+    let err = handler
+        .handle_command(cmd(
+            scope_id,
+            "task.decision",
+            serde_json::json!({
+                "decision_id": uid(9302).to_string(),
+                "task_id": task_id.to_string(),
+                "decision": "use approach B",
+                "rationale": "",
+            }),
+        ))
+        .unwrap_err();
+    assert_eq!(err.code, "validation.no_rationale");
+}
+
+#[test]
+fn task_decision_records_alternatives_and_consequences() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let (handler, _adapter) = new_handler(&fixture);
+
+    let task_id = uid(9401);
+    handler
+        .handle_command(cmd(
+            scope_id,
+            "task.send",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "prompt": "do it",
+                "agent_name": "agent",
+            }),
+        ))
+        .expect("task.send succeeds");
+
+    let decision_id = uid(9402);
+    let recorded = handler
+        .handle_command(cmd(
+            scope_id,
+            "task.decision",
+            serde_json::json!({
+                "decision_id": decision_id.to_string(),
+                "task_id": task_id.to_string(),
+                "decision": "use approach B",
+                "rationale": "approach A needed a schema change we don't own",
+                "alternatives": "approach A",
+                "consequences": "slower, no cross-crate coordination",
+            }),
+        ))
+        .expect("task.decision succeeds");
+    assert_eq!(recorded.result["decision_id"], decision_id.to_string());
+}
+
+/// ADR 0021 decision 4's whole point, proven through the wire: recording a
+/// verdict must leave `task.show`'s own `status` exactly as it was.
+#[test]
+fn task_verify_records_a_verdict_and_leaves_status_unchanged() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let (handler, _adapter) = new_handler(&fixture);
+
+    let task_id = uid(9501);
+    handler
+        .handle_command(cmd(
+            scope_id,
+            "task.send",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "prompt": "do it",
+                "agent_name": "agent",
+            }),
+        ))
+        .expect("task.send succeeds");
+
+    let before = handler
+        .handle_query(qry(
+            scope_id,
+            "task.show",
+            serde_json::json!({ "task_id": task_id.to_string() }),
+        ))
+        .expect("task.show before succeeds");
+
+    let verified = handler
+        .handle_command(cmd(
+            scope_id,
+            "task.verify",
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "verdict": "pass",
+                "note": "looks correct",
+            }),
+        ))
+        .expect("task.verify succeeds");
+    assert_eq!(verified.result["recorded"], true);
+
+    let after = handler
+        .handle_query(qry(
+            scope_id,
+            "task.show",
+            serde_json::json!({ "task_id": task_id.to_string() }),
+        ))
+        .expect("task.show after succeeds");
+    assert_eq!(
+        before.result["status"], after.result["status"],
+        "a verdict must not transition the run"
+    );
+}

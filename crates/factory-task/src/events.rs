@@ -6,8 +6,8 @@
 //! module is the one place that INSERTs into it. Every material transition
 //! elsewhere in this crate — the set in the schema's own CHECK — calls
 //! [`append`] rather than composing the row itself; see each of `create.rs`,
-//! `assign.rs`, `deliver.rs`, `complete.rs` for the call sites and this
-//! task's report for the exhaustive list.
+//! `assign.rs`, `deliver.rs`, `complete.rs`, `verify.rs`, and [`record_progress`]
+//! below for the call sites and this task's report for the exhaustive list.
 //!
 //! # What the signature guarantees, and what it does not
 //!
@@ -29,17 +29,14 @@
 //! backstop for that, not a proof of it.
 use crate::TaskError;
 
-/// The twelve strings `task_events.event_type`'s CHECK allows
+/// The thirteen strings `task_events.event_type`'s CHECK allows
 /// (`factory_store::schema`, `V6_SCHEMA`), typed so no caller threads a
 /// hand-written string past this module's boundary — the same reasoning as
 /// [`crate::TaskStatus`] and [`crate::BlockedReason`].
 ///
-/// Not every variant has a caller in this station. `Progress` and `Rework`
-/// are in the schema's CHECK for a later station (§12.2's rework, §12.4's
-/// progress reporting) and nothing here writes them — ADR 0021 decision 5's
-/// own warning against a rule with no caller applies just as much to an
-/// event type with no writer, so neither is wired ahead of the work that
-/// would need it.
+/// `Progress` is written by [`record_progress`] below; `Rework` is written
+/// by `create::create_rework`, against the *new* run only, never against the
+/// run it reworks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventType {
     Created,
@@ -168,6 +165,60 @@ pub(crate) fn append(
         ),
     )
     .map_err(factory_store::StoreError::from)?;
+    Ok(())
+}
+
+/// Everything that can go wrong recording a progress note — the same shape
+/// `decisions::DecisionError` and `verify::VerifyError` already take: a
+/// `Task` variant for the ordinary cases, plus one variant for this
+/// function's own extra rule.
+#[derive(Debug, thiserror::Error)]
+pub enum ProgressError {
+    #[error(transparent)]
+    Task(#[from] TaskError),
+
+    #[error(
+        "task {0} progress note is empty\n  help: a progress note with no text is a log line, not a note — the same reason `decisions::record` refuses an empty rationale"
+    )]
+    EmptyNote(uuid::Uuid),
+}
+
+/// Record one `progress` event against `task_id`, in its own transaction —
+/// backlog §11's "progress" verb (design §2.4's fuller vocabulary lists
+/// `progress` alongside `blocked`/`done`/`failed` as a material transition
+/// this crate's own CHECK already carries, but nothing wrote it until now).
+///
+/// A progress note **changes no column of `tasks`** — it is an annotation on
+/// the run, not a transition, the same stance [`crate::decisions::record`]
+/// and [`crate::verify::record_verdict`] both take toward their own tables.
+///
+/// A bad `task_id` is refused by `task_events.task_id REFERENCES tasks (id)`,
+/// enforced on every connection (ADR 0012 decision 3) — this function does
+/// not duplicate that check in Rust, the same stance
+/// [`crate::decisions::record`] takes toward `task_decisions.task_id`.
+pub fn record_progress(
+    store: &mut factory_store::Store,
+    task_id: uuid::Uuid,
+    author_session_id: Option<uuid::Uuid>,
+    note: &str,
+) -> Result<(), ProgressError> {
+    if note.is_empty() {
+        return Err(ProgressError::EmptyNote(task_id));
+    }
+
+    let tx = store.transaction().map_err(TaskError::from)?;
+    let payload = serde_json::json!({ "note": note }).to_string();
+    append(
+        &tx,
+        task_id,
+        EventType::Progress,
+        author_session_id,
+        Some(&payload),
+    )
+    .map_err(TaskError::from)?;
+    tx.commit()
+        .map_err(factory_store::StoreError::from)
+        .map_err(TaskError::from)?;
     Ok(())
 }
 

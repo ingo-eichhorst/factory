@@ -1,5 +1,5 @@
 //! `factory task send|cancel|done|fail|block|resume|list|show` (design §2.4,
-//! §5, §7).
+//! §5, §7), and station 11 gap 2's `assign|progress|decision|verify`.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -198,6 +198,87 @@ pub fn resume(root: &Path, task_id: Uuid) -> i32 {
     );
     rpc::report(root, outcome, |result| {
         rpc::print_result(&format!("factory: task {task_id} queued"), &result);
+        exit::OK
+    })
+}
+
+pub fn assign(root: &Path, task_id: Uuid, agent_name: &str) -> i32 {
+    let outcome = rpc::command(
+        root,
+        Uuid::nil(),
+        "task.assign",
+        json!({ "task_id": task_id.to_string(), "agent_name": agent_name }),
+    );
+    rpc::report(root, outcome, |result| {
+        rpc::print_result(
+            &format!("factory: task {task_id} assignment recorded"),
+            &result,
+        );
+        exit::OK
+    })
+}
+
+pub fn progress(root: &Path, task_id: Uuid, note: &str) -> i32 {
+    let outcome = rpc::command(
+        root,
+        Uuid::nil(),
+        "task.progress",
+        json!({ "task_id": task_id.to_string(), "note": note }),
+    );
+    rpc::report(root, outcome, |result| {
+        rpc::print_result(
+            &format!("factory: task {task_id} progress recorded"),
+            &result,
+        );
+        exit::OK
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn decision(
+    root: &Path,
+    task_id: Uuid,
+    decision: &str,
+    rationale: &str,
+    alternatives: Option<&str>,
+    consequences: Option<&str>,
+) -> i32 {
+    let decision_id = crate::ids::new_id();
+    let mut payload = json!({
+        "decision_id": decision_id.to_string(),
+        "task_id": task_id.to_string(),
+        "decision": decision,
+        "rationale": rationale,
+    });
+    if let Some(alternatives) = alternatives {
+        payload["alternatives"] = json!(alternatives);
+    }
+    if let Some(consequences) = consequences {
+        payload["consequences"] = json!(consequences);
+    }
+
+    let outcome = rpc::command(root, Uuid::nil(), "task.decision", payload);
+    rpc::report(root, outcome, |result| {
+        rpc::print_result(
+            &format!("factory: task {task_id} decision recorded"),
+            &result,
+        );
+        exit::OK
+    })
+}
+
+pub fn verify(root: &Path, task_id: Uuid, verdict: &str, note: Option<&str>) -> i32 {
+    let mut payload = json!({ "task_id": task_id.to_string(), "verdict": verdict });
+    if let Some(note) = note {
+        payload["note"] = json!(note);
+    }
+
+    let outcome = rpc::command(root, Uuid::nil(), "task.verify", payload);
+    rpc::report(root, outcome, |result| {
+        rpc::print_result(
+            &format!("factory: task {task_id} verdict recorded"),
+            &result,
+        );
         exit::OK
     })
 }

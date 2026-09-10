@@ -235,6 +235,57 @@ pub enum TaskCommand {
         task_id: Uuid,
     },
 
+    /// Choose a session for a task that is still `queued` and record the
+    /// choice — a manual re-attempt at assignment, distinct from `task send`,
+    /// which creates a new task. Never delivers.
+    Assign {
+        #[arg(long)]
+        task_id: Uuid,
+        #[arg(long)]
+        agent_name: String,
+    },
+
+    /// Record a progress note against a task — an annotation, not a status
+    /// change.
+    Progress {
+        #[arg(long)]
+        task_id: Uuid,
+        #[arg(long)]
+        note: String,
+    },
+
+    /// Record a structured decision against a task: what was decided, and
+    /// why. `--rationale` is required — design §11 asks for "nachvollziehbare
+    /// Entscheidungen" (traceable decisions), and a decision without a
+    /// rationale is a log line, not a decision.
+    Decision {
+        #[arg(long)]
+        task_id: Uuid,
+        #[arg(long)]
+        decision: String,
+        #[arg(long)]
+        rationale: String,
+        #[arg(long)]
+        alternatives: Option<String>,
+        #[arg(long)]
+        consequences: Option<String>,
+    },
+
+    /// Record a verification verdict against a task — design §12.1's hook.
+    /// Annotates only: it never changes the task's status, never creates a
+    /// rework, and never commissions an inspection (ADR 0021 decisions 4 and
+    /// 5). This is a human operation in version 1, so there is no `--session`
+    /// flag; the daemon's own independence guard still refuses a verdict
+    /// authored from inside the scope under inspection.
+    Verify {
+        #[arg(long)]
+        task_id: Uuid,
+        #[arg(long)]
+        verdict: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+
     /// List every task.
     List,
 

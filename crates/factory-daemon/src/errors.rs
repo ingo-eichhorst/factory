@@ -109,6 +109,15 @@ pub fn task_error(e: factory_task::TaskError) -> ErrorBody {
         // database fault to an operator who would find nothing wrong with
         // the database.
         E::ScheduleVanished(_) => err("conflict.schedule_vanished", e.to_string()),
+        // §12.2's hook (`create::create_rework`). No daemon operation calls
+        // that function today (station 11's own report explains why), but
+        // `TaskError` is one enum shared by every caller in this crate, so
+        // this match must stay exhaustive over it regardless.
+        E::SelfRework(_) => err("validation.rework_self_reference", e.to_string()),
+        E::ReworkTargetNotTerminal { .. } => {
+            err("conflict.rework_target_not_terminal", e.to_string())
+        }
+        E::ReworkFindingRequired(_) => err("validation.rework_finding_required", e.to_string()),
         E::Store(_) => err("internal.store_error", e.to_string()),
     }
 }
@@ -144,6 +153,39 @@ pub fn complete_error(e: factory_task::complete::CompleteError) -> ErrorBody {
         E::NoResult(_) => err("validation.no_result", e.to_string()),
         E::NotRunning { .. } => err("conflict.task_not_running", e.to_string()),
         E::CancellationNotRequested(_) => err("conflict.cancellation_not_requested", e.to_string()),
+    }
+}
+
+pub fn decision_error(e: factory_task::decisions::DecisionError) -> ErrorBody {
+    use factory_task::decisions::DecisionError as E;
+    match e {
+        E::Task(inner) => task_error(inner),
+        // `validation.no_rationale`, mirroring `validation.no_result`'s own
+        // shape for `complete::CompleteError::NoResult` — both are "the
+        // caller supplied no content for a field this operation requires,"
+        // never a database fault.
+        E::NoRationale(_) => err("validation.no_rationale", e.to_string()),
+    }
+}
+
+pub fn verify_error(e: factory_task::verify::VerifyError) -> ErrorBody {
+    use factory_task::verify::VerifyError as E;
+    match e {
+        E::Task(inner) => task_error(inner),
+        E::Session(inner) => session_error(inner),
+        // `authorization.*`, mirroring `authorization.scope_not_eligible`'s
+        // own shape for `DelegationError::NotEligible` — this is design
+        // §12.1's independence rule refusing an author, not a missing row or
+        // a bad transition.
+        E::NotIndependent { .. } => err("authorization.verifier_not_independent", e.to_string()),
+    }
+}
+
+pub fn progress_error(e: factory_task::events::ProgressError) -> ErrorBody {
+    use factory_task::events::ProgressError as E;
+    match e {
+        E::Task(inner) => task_error(inner),
+        E::EmptyNote(_) => err("validation.empty_progress_note", e.to_string()),
     }
 }
 

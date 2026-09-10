@@ -67,7 +67,7 @@ fn a_verdict_by_a_session_of_a_different_scope_is_accepted() {
     let task_id = seed_task(&mut store, 3, target_scope);
     let verifier = seed_session(&mut store, dir.path(), 4, other_scope);
 
-    record_verdict(&mut store, task_id, Some(verifier), "pass").expect("independent verdict");
+    record_verdict(&mut store, task_id, Some(verifier), "pass", None).expect("independent verdict");
 
     let events = for_task(&store, task_id).expect("read events");
     assert_eq!(events.len(), 2, "created, then verification");
@@ -77,6 +77,7 @@ fn a_verdict_by_a_session_of_a_different_scope_is_accepted() {
         serde_json::from_str(events[1].payload.as_deref().expect("payload present"))
             .expect("valid JSON");
     assert_eq!(payload["verdict"], "pass");
+    assert_eq!(payload["note"], serde_json::Value::Null);
 }
 
 /// §12.1's core rule: a *sibling* session of the run's own scope is refused,
@@ -104,7 +105,7 @@ fn a_verdict_by_a_sibling_session_of_the_runs_own_scope_is_refused() {
         tx.commit().expect("commit");
     }
 
-    let err = record_verdict(&mut store, task_id, Some(sibling_session), "pass")
+    let err = record_verdict(&mut store, task_id, Some(sibling_session), "pass", None)
         .expect_err("a sibling session of the same scope is not independent");
     assert!(matches!(
         err,
@@ -136,7 +137,7 @@ fn the_hole_test_a_never_assigned_task_still_refuses_a_same_scope_verifier() {
     );
     let verifier = seed_session(&mut store, dir.path(), 3, scope_id);
 
-    let err = record_verdict(&mut store, task_id, Some(verifier), "pass").expect_err(
+    let err = record_verdict(&mut store, task_id, Some(verifier), "pass", None).expect_err(
         "target_scope_id matches the verifier's scope, independent of assigned_session_id",
     );
     assert!(matches!(
@@ -163,12 +164,41 @@ fn a_verdict_with_no_author_session_is_always_accepted() {
     let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
     let task_id = seed_task(&mut store, 2, scope_id);
 
-    record_verdict(&mut store, task_id, None, "pass").expect("a human's verdict is always allowed");
+    record_verdict(&mut store, task_id, None, "pass", None)
+        .expect("a human's verdict is always allowed");
 
     let events = for_task(&store, task_id).expect("read events");
     assert_eq!(events.len(), 2);
     assert_eq!(events[1].event_type, EventType::Verification);
     assert_eq!(events[1].author_session_id, None);
+}
+
+/// `note` is optional and, when given, rides beside `verdict` in the same
+/// payload — the CLI's `--verdict`/`--note` are two fields typed separately
+/// and must stay two fields in the durable record, not one concatenated
+/// string.
+#[test]
+fn a_note_is_carried_beside_the_verdict_in_the_payload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let task_id = seed_task(&mut store, 2, scope_id);
+
+    record_verdict(
+        &mut store,
+        task_id,
+        None,
+        "fail",
+        Some("missing test coverage"),
+    )
+    .expect("verdict with a note");
+
+    let events = for_task(&store, task_id).expect("read events");
+    let payload: serde_json::Value =
+        serde_json::from_str(events[1].payload.as_deref().expect("payload present"))
+            .expect("valid JSON");
+    assert_eq!(payload["verdict"], "fail");
+    assert_eq!(payload["note"], "missing test coverage");
 }
 
 /// Decision 4's whole point: a verdict annotates, it never transitions. The
@@ -185,7 +215,7 @@ fn a_verdict_changes_no_column_of_tasks() {
     let verifier = seed_session(&mut store, dir.path(), 4, other_scope);
 
     let before = show(&store, task_id).expect("show before");
-    record_verdict(&mut store, task_id, Some(verifier), "pass").expect("verdict");
+    record_verdict(&mut store, task_id, Some(verifier), "pass", None).expect("verdict");
     let after = show(&store, task_id).expect("show after");
 
     assert_eq!(before, after, "a verdict must touch no column of tasks");
@@ -215,7 +245,7 @@ fn a_verdict_can_be_recorded_against_an_already_done_task() {
     factory_task::complete::done(&mut store, task_id, Some("finished"), None).expect("done");
 
     let verifier = seed_session(&mut store, dir.path(), 5, other_scope);
-    record_verdict(&mut store, task_id, Some(verifier), "pass")
+    record_verdict(&mut store, task_id, Some(verifier), "pass", None)
         .expect("verdict against a done run");
 
     let task = show(&store, task_id).expect("show");
@@ -231,7 +261,7 @@ fn a_verdict_against_a_nonexistent_task_is_not_found() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
 
-    let err = record_verdict(&mut store, uid(999), None, "pass").expect_err("no such task");
+    let err = record_verdict(&mut store, uid(999), None, "pass", None).expect_err("no such task");
     assert!(matches!(err, VerifyError::Task(TaskError::NotFound(id)) if id == uid(999)));
 }
 
@@ -246,7 +276,7 @@ fn a_verdict_by_a_nonexistent_session_is_a_session_error() {
     let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
     let task_id = seed_task(&mut store, 2, scope_id);
 
-    let err = record_verdict(&mut store, task_id, Some(uid(999)), "pass")
+    let err = record_verdict(&mut store, task_id, Some(uid(999)), "pass", None)
         .expect_err("no such session exists");
     assert!(matches!(
         err,

@@ -533,6 +533,202 @@ fn task_send_envelope_matches_decision_9s_payload_table() {
     assert!(request.get("idempotency_key").is_none());
 }
 
+// --- Station 11 gap 2: task assign|progress|decision|verify ---------------
+
+#[test]
+fn task_assign_envelope_matches_decision_9s_payload_table() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| {
+        FakeResponse::Ok(json!({
+            "task_id": request["payload"]["task_id"],
+            "assignment": {"kind": "assigned", "session_id": "00000000-0000-4000-8000-000000000001"},
+        }))
+    });
+
+    let task_id = "00000000-0000-4000-8000-000000000099";
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args([
+            "task",
+            "assign",
+            "--task-id",
+            task_id,
+            "--agent-name",
+            "demo",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["api"], "factory.command/v1");
+    assert_eq!(request["command"], "task.assign");
+    assert_eq!(request["scope_id"], NIL_SCOPE);
+    assert_eq!(request["payload"]["task_id"], task_id);
+    assert_eq!(request["payload"]["agent_name"], "demo");
+    assert!(request.get("idempotency_key").is_none());
+}
+
+#[test]
+fn task_progress_envelope_matches_decision_9s_payload_table() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| {
+        FakeResponse::Ok(json!({ "task_id": request["payload"]["task_id"], "recorded": true }))
+    });
+
+    let task_id = "00000000-0000-4000-8000-000000000099";
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args([
+            "task",
+            "progress",
+            "--task-id",
+            task_id,
+            "--note",
+            "halfway there",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["command"], "task.progress");
+    assert_eq!(request["scope_id"], NIL_SCOPE);
+    assert_eq!(request["payload"]["task_id"], task_id);
+    assert_eq!(request["payload"]["note"], "halfway there");
+    assert!(request.get("idempotency_key").is_none());
+}
+
+#[test]
+fn task_decision_envelope_matches_decision_9s_payload_table() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| {
+        FakeResponse::Ok(json!({
+            "task_id": request["payload"]["task_id"],
+            "decision_id": request["payload"]["decision_id"],
+        }))
+    });
+
+    let task_id = "00000000-0000-4000-8000-000000000099";
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args([
+            "task",
+            "decision",
+            "--task-id",
+            task_id,
+            "--decision",
+            "use approach B",
+            "--rationale",
+            "approach A needed a schema change we don't own",
+            "--alternatives",
+            "approach A",
+            "--consequences",
+            "slower, no cross-crate coordination",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["command"], "task.decision");
+    assert_eq!(request["scope_id"], NIL_SCOPE);
+    assert!(request["payload"]["decision_id"].is_string());
+    assert_eq!(request["payload"]["task_id"], task_id);
+    assert_eq!(request["payload"]["decision"], "use approach B");
+    assert_eq!(
+        request["payload"]["rationale"],
+        "approach A needed a schema change we don't own"
+    );
+    assert_eq!(request["payload"]["alternatives"], "approach A");
+    assert_eq!(
+        request["payload"]["consequences"],
+        "slower, no cross-crate coordination"
+    );
+    assert!(request.get("idempotency_key").is_none());
+}
+
+/// A decision with no `--alternatives`/`--consequences` must not send them
+/// at all — the daemon's own `#[serde(default)]` on those fields treats an
+/// absent key as `None`, not the string `"null"`.
+#[test]
+fn task_decision_without_alternatives_or_consequences_omits_those_fields() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| {
+        FakeResponse::Ok(json!({
+            "task_id": request["payload"]["task_id"],
+            "decision_id": request["payload"]["decision_id"],
+        }))
+    });
+
+    let task_id = "00000000-0000-4000-8000-000000000099";
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args([
+            "task",
+            "decision",
+            "--task-id",
+            task_id,
+            "--decision",
+            "use approach B",
+            "--rationale",
+            "it was simpler",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert!(requests[0]["payload"].get("alternatives").is_none());
+    assert!(requests[0]["payload"].get("consequences").is_none());
+}
+
+#[test]
+fn task_verify_envelope_matches_decision_9s_payload_table() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| {
+        FakeResponse::Ok(json!({ "task_id": request["payload"]["task_id"], "recorded": true }))
+    });
+
+    let task_id = "00000000-0000-4000-8000-000000000099";
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args([
+            "task",
+            "verify",
+            "--task-id",
+            task_id,
+            "--verdict",
+            "pass",
+            "--note",
+            "looks correct",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["command"], "task.verify");
+    assert_eq!(request["scope_id"], NIL_SCOPE);
+    assert_eq!(request["payload"]["task_id"], task_id);
+    assert_eq!(request["payload"]["verdict"], "pass");
+    assert_eq!(request["payload"]["note"], "looks correct");
+    assert!(request.get("idempotency_key").is_none());
+}
+
 #[test]
 fn agent_start_mints_a_session_id_and_reports_the_returned_state() {
     let dir = TempDir::new().unwrap();

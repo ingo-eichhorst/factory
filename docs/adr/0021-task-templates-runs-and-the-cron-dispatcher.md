@@ -306,6 +306,29 @@ When something agent-initiated does exist, it will arrive with a concrete
 caller, and the exception can be written against that caller rather than
 against a guess about it.
 
+**A verdict recorded through `factory task verify` carries no author session,
+and no flag is added to let it claim one.** Measured while building the
+command: Factory has no caller identity at all. A request's `scope_id` is the
+scope the command *concerns*, not the scope that issued it, and no environment
+variable or handshake tells the daemon which session ran a CLI command. So the
+independence guard is enforced wherever an author session is known — every
+caller inside `factory-task`, with tests, including the hole test for a run
+that was never assigned — and is simply not reachable from the CLI path.
+
+An optional `--author-session` flag was considered and rejected. It would be
+self-declared: an agent could omit it, or name someone else's session, and the
+guard would pass. That is worse than the gap it would appear to close, because
+it would look like enforcement. ADR 0017 already settles the principle for
+observation, and it holds here: a wrong answer is worse than none, because it
+looks like an answer.
+
+The consequence for backlog §11's criterion — "a verification verdict is
+stored as an append-only event attributed to a session other than the one that
+produced the result" — is that version 1 meets the append-only half, the
+annotates-never-transitions half, and the independence rule wherever an author
+is known, but cannot attribute a CLI-recorded verdict to any session. Caller
+identity is the prerequisite, and it is not station 11's to invent.
+
 ### 6. Cost is one adapter method with two implementations, and `None` is a
 valid answer.
 
