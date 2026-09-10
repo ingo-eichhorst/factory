@@ -19,6 +19,7 @@
 
 use rusqlite::OptionalExtension;
 
+use crate::events::EventType;
 use crate::{
     BlockedReason, MAX_RESULT_ARTIFACT_PATHS_BYTES, MAX_RESULT_SUMMARY_BYTES, TaskError,
     TaskStatus, is_valid_transition, valid_targets,
@@ -181,6 +182,22 @@ fn complete_with_result(
         .into());
     }
 
+    // The event records *that* a result was reported, not the result. The
+    // text itself already lives one column away in `tasks.result_summary`,
+    // reachable from the event by `task_id`, so copying it here buys a reader
+    // nothing and costs a second permanent copy: `task_events` is append-only
+    // and is never corrected or deleted, so a summary written here outlives
+    // any later edit of the task's own. Up to 16 KiB of agent-authored free
+    // text, duplicated forever, is the wrong default for a log whose payloads
+    // are meant to be short structured facts (crate decision 6).
+    //
+    // `has_summary` is still what decides whether there is a payload at all,
+    // reusing the check [`CompleteError::NoResult`] already makes rather than
+    // re-deriving it from `summary`. `result_artifact_paths` is absent for
+    // the same reason as the summary, and more obviously so.
+    let event_payload =
+        has_summary.then(|| serde_json::json!({ "result_summary_present": true }).to_string());
+
     tx.execute(
         "UPDATE tasks SET status = ?2, blocked_reason = NULL, result_summary = ?3, \
          result_artifact_paths = ?4, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
@@ -188,6 +205,15 @@ fn complete_with_result(
     )
     .map_err(factory_store::StoreError::from)
     .map_err(TaskError::from)?;
+
+    let event_type = match to {
+        TaskStatus::Done => EventType::Done,
+        TaskStatus::Failed => EventType::Failed,
+        _ => unreachable!("this function's own debug_assert restricts `to` to Done or Failed"),
+    };
+    crate::events::append(&tx, id, event_type, None, event_payload.as_deref())
+        .map_err(TaskError::from)?;
+
     tx.commit()
         .map_err(factory_store::StoreError::from)
         .map_err(TaskError::from)?;
@@ -271,6 +297,13 @@ pub fn blocked(
     )
     .map_err(factory_store::StoreError::from)
     .map_err(TaskError::from)?;
+
+    // `crate`'s station-11 decision 3, same transaction as the status write.
+    // The brief's own words: "a blocked event carries its reason."
+    let payload = serde_json::json!({ "reason": reason.as_db_str() }).to_string();
+    crate::events::append(&tx, id, EventType::Blocked, None, Some(&payload))
+        .map_err(TaskError::from)?;
+
     tx.commit()
         .map_err(factory_store::StoreError::from)
         .map_err(TaskError::from)?;
@@ -394,6 +427,12 @@ pub fn acknowledge_cancellation(
     )
     .map_err(factory_store::StoreError::from)
     .map_err(TaskError::from)?;
+
+    // `crate`'s station-11 decision 3, same transaction as the status write.
+    // No payload: nothing beyond "this task is now cancelled" is known here
+    // that the row itself does not already carry.
+    crate::events::append(&tx, id, EventType::Cancelled, None, None).map_err(TaskError::from)?;
+
     tx.commit()
         .map_err(factory_store::StoreError::from)
         .map_err(TaskError::from)?;

@@ -20,7 +20,8 @@
 
 use factory_paths::CanonicalPath;
 use factory_store::Store;
-use factory_task::create::{cancel, create, delegation_chain_of, list, show};
+use factory_task::create::{cancel, create, create_from_template, delegation_chain_of, list, show};
+use factory_task::events::{EventType, for_task};
 use factory_task::{TaskError, TaskStatus};
 
 /// A deterministic, distinct, syntactically valid UUID. `uuid` is pinned
@@ -122,6 +123,23 @@ fn seed_terminal_task(
     task_id
 }
 
+/// Insert a `task_templates` row directly, bypassing `factory_task::template`
+/// (a sibling module this file does not otherwise depend on) so this file's
+/// own tests of `create_from_template` stay self-contained the same way its
+/// other fixtures bypass `factory-registry` and `factory-session`'s own
+/// creation paths. Returns the template's id.
+fn seed_template(store: &mut Store, seed: u32, name: &str, version: i64) -> uuid::Uuid {
+    let id = uid(seed);
+    let tx = store.transaction().expect("begin");
+    tx.execute(
+        "INSERT INTO task_templates (id, name, prompt, version) VALUES (?1, ?2, 'do it', ?3)",
+        (id.to_string(), name, version),
+    )
+    .expect("insert template");
+    tx.commit().expect("commit");
+    id
+}
+
 // create -----------------------------------------------------------------
 
 /// Design §5 step 1: `create` commits `queued`, in its own transaction,
@@ -159,6 +177,11 @@ fn create_commits_a_queued_row_and_returns_its_id() {
     );
     assert_eq!(task.blocked_reason, None);
     assert_eq!(task.cancel_requested_at, None);
+    assert_eq!(
+        task.template_id, None,
+        "create never records a template — that is create_from_template's job"
+    );
+    assert_eq!(task.template_version, None);
 }
 
 /// `target_session_id` (what the sender requested) and `assigned_session_id`
@@ -216,6 +239,83 @@ fn create_records_the_sender_scope_when_given() {
     let task = show(&store, task_id).expect("show");
     assert_eq!(task.sender_scope_id, Some(sender));
     assert_eq!(task.target_scope_id, target);
+}
+
+// create_from_template -------------------------------------------------
+
+/// ADR 0021 decision 2, exercised directly at the `create` level rather than
+/// through `template::revise` (that round trip lives in `tests/template.rs`):
+/// the version recorded on the run is whatever `task_templates.version` held
+/// at the moment of this INSERT. Seeding the template at version 5 here,
+/// rather than 1, is deliberate — it is the version a fresh template could
+/// never have on its own, so a test that only checked for `Some(1)` could
+/// pass by accident (e.g. a bug that always wrote 1) without this failing.
+#[test]
+fn create_from_template_records_the_template_id_and_its_version_at_creation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let template_id = seed_template(&mut store, 2, "nightly-report", 5);
+
+    let task_id = uid(50);
+    create_from_template(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[scope_id],
+        template_id,
+    )
+    .expect("create a run from the template");
+
+    let task = show(&store, task_id).expect("show");
+    assert_eq!(task.template_id, Some(template_id));
+    assert_eq!(task.template_version, Some(5));
+    assert_eq!(
+        task.status,
+        TaskStatus::Queued,
+        "a template-backed run still starts out queued, same as any other"
+    );
+}
+
+/// A `template_id` naming no real template is refused by
+/// `tasks.template_id REFERENCES task_templates (id)` — the identical
+/// backstop shape `a_failed_chain_insert_leaves_no_task_row_at_all` below
+/// already proves for a chain entry naming an unregistered scope. Atomicity
+/// holds the same way: no task row survives.
+#[test]
+fn create_from_template_rejects_a_template_id_that_names_no_real_template() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let never_registered = uid(999);
+
+    let task_id = uid(50);
+    let err = create_from_template(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[scope_id],
+        never_registered,
+    )
+    .expect_err("a nonexistent template_id must be refused");
+    assert!(
+        matches!(err, TaskError::Store(_)),
+        "expected the schema's own foreign key to reject the insert, got {err:?}"
+    );
+
+    let result = show(&store, task_id);
+    assert!(
+        matches!(result, Err(TaskError::NotFound(id)) if id == task_id),
+        "the task row must not survive a failed template_id reference"
+    );
 }
 
 // delegation_chain_of -------------------------------------------------------
@@ -561,4 +661,136 @@ fn cancel_of_a_nonexistent_task_is_not_found() {
 
     let err = cancel(&mut store, uid(999)).expect_err("no such task exists");
     assert!(matches!(err, TaskError::NotFound(id) if id == uid(999)));
+}
+
+// events (station 11, `crate`'s own decision 3) ---------------------------
+
+/// `create` writes exactly one `created` event, with no payload and no
+/// author session — the row itself already carries every fact about the
+/// creation, and `prompt` is exactly what decision 6 forbids from a payload.
+#[test]
+fn create_writes_exactly_one_created_event_with_no_payload_and_no_author() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let task_id = uid(20);
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, EventType::Created);
+    assert_eq!(events[0].author_session_id, None);
+    assert_eq!(events[0].payload, None);
+}
+
+/// `create_from_template` reaches the same one-INSERT path as `create` (both
+/// call the private `insert_task` helper), so it must write the identical
+/// `created` event, not a second kind, and not zero.
+#[test]
+fn create_from_template_also_writes_exactly_one_created_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let template_id = seed_template(&mut store, 2, "nightly-report", 1);
+    let task_id = uid(50);
+    create_from_template(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+        template_id,
+    )
+    .expect("create a run from the template");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, EventType::Created);
+}
+
+/// `cancel`'s immediate path (`queued` → `cancelled`) writes the matching
+/// event, in the same transaction as the status write.
+#[test]
+fn cancel_of_a_queued_task_writes_exactly_one_cancelled_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let task_id = uid(20);
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create");
+
+    cancel(&mut store, task_id).expect("cancel a queued task");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(events.len(), 2, "created, then cancelled");
+    assert_eq!(events[0].event_type, EventType::Created);
+    assert_eq!(events[1].event_type, EventType::Cancelled);
+    assert_eq!(events[1].payload, None);
+}
+
+/// `cancel`'s cooperative path on a `running` task changes no `tasks.status`
+/// — it only records `cancel_requested_at` — and there is no
+/// `cancel_requested` entry in the schema's twelve event types. This is the
+/// regression guard against inventing one, or against reusing `cancelled` for
+/// a request that has not actually moved the task there yet.
+#[test]
+fn cancel_of_a_running_task_writes_no_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_running_task(&mut store, 22, scope_id, session_id);
+
+    cancel(&mut store, task_id).expect("cancel a running task");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(
+        events.len(),
+        0,
+        "this task was seeded directly by raw SQL, not through `create`, so it \
+         starts with no events, and the cooperative request must add none"
+    );
+}
+
+/// The mutation this test catches: a refused cancel (already terminal) must
+/// leave no additional event behind. `cancel` returns
+/// `TaskError::AlreadyTerminal` before it ever reaches a write.
+#[test]
+fn cancel_of_a_terminal_task_writes_no_additional_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let task_id = seed_terminal_task(&mut store, 23, scope_id, "done");
+
+    cancel(&mut store, task_id).expect_err("a terminal task cannot be cancelled");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(
+        events.len(),
+        0,
+        "this task was seeded directly by raw SQL, not through `create`, so it \
+         starts with no events, and the refused cancel must add none"
+    );
 }

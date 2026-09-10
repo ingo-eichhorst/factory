@@ -212,6 +212,7 @@
 //! not as a cold start.
 
 pub mod client;
+pub mod dispatch;
 pub mod envelope;
 mod errors;
 pub mod handler;

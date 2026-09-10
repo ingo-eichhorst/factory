@@ -13,6 +13,14 @@ factory-config = { path = "../factory-config" }
 factory-paths = { path = "../factory-paths" }
 factory-session = { path = "../factory-session" }
 factory-store = { path = "../factory-store" }
+# Station 11's cron schedules (ADR 0021 decision 3a). `schedule` is the one
+# home for "does this expression match this minute", so the cron and timezone
+# crates enter the workspace here and nowhere else: the daemon's dispatcher and
+# the CLI's next-run preview both call this module rather than parsing cron
+# themselves.
+chrono.workspace = true
+chrono-tz.workspace = true
+croner.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

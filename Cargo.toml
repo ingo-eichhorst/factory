@@ -54,6 +54,24 @@ fd-lock = "4"
 rusqlite = { version = "0.40", features = ["bundled"] }
 rusqlite_migration = "2"
 
+# Station 11's cron dependencies (ADR 0021 decision 3a).
+#
+# `croner` parses design §11's five-field expression as it is written, with no
+# seconds field to fake, and rejects malformed input with a message an operator
+# can act on. `chrono-tz` resolves the IANA name a schedule stores; an offset
+# cannot express a rule that survives a daylight-saving change, and this is
+# where hand-rolled schedulers fire twice or not at all. `chrono` is croner's
+# own time type and is used directly for the local-minute rendering that
+# `tasks.fired_for_minute` stores.
+#
+# Only croner's matching predicate is used. Its next-occurrence search moves a
+# run that a spring-forward skipped to the following hour, which is the
+# scheduler deciding something the operator did not write down. Measured, see
+# ADR 0021 decision 3a.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10"
+croner = "4"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

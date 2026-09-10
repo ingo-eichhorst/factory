@@ -62,6 +62,7 @@
 
 use rusqlite::OptionalExtension;
 
+use crate::events::EventType;
 use crate::{TaskStatus, is_valid_transition};
 
 /// What every prompt-delivery mechanism provides.
@@ -364,7 +365,19 @@ pub fn deliver<W: PromptWriter>(
         Err(_) => DeliveryOutcome::Failed,
     };
 
-    // --- Transaction 2: record the outcome on the same row, by its id. ---
+    // --- Transaction 2: record the outcome on the same row, by its id, and
+    // the matching event, in the same transaction as that write. -----------
+    //
+    // `crate`'s station-11 decision 3: `Sent` and `Failed` both write
+    // `delivered` — `ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL` just above
+    // already groups them together as "may have reached the terminal", and
+    // this task's own brief says to follow that distinction exactly rather
+    // than invent a second one. Writing no event for `Failed` would be the
+    // wrong answer decision 4a itself names: "a task sitting `queued` with
+    // nothing in the log explaining why." `Refused` writes `refused`, never
+    // `delivered` — station 10's whole point. The payload carries which of
+    // the three actually happened, so the log is not silently
+    // over-generalising `Failed` into `delivered`.
     {
         let tx = store.transaction()?;
         tx.execute(
@@ -372,6 +385,18 @@ pub fn deliver<W: PromptWriter>(
             (attempt_row_id, outcome.as_db_str()),
         )
         .map_err(factory_store::StoreError::from)?;
+
+        let event_type = match outcome {
+            DeliveryOutcome::Sent | DeliveryOutcome::Failed => EventType::Delivered,
+            DeliveryOutcome::Refused => EventType::Refused,
+        };
+        let payload = serde_json::json!({
+            "delivery_attempt_id": attempt_row_id,
+            "outcome": outcome.as_db_str(),
+        })
+        .to_string();
+        crate::events::append(&tx, id, event_type, None, Some(&payload))?;
+
         tx.commit().map_err(factory_store::StoreError::from)?;
     }
 
@@ -406,9 +431,9 @@ pub fn mark_running(store: &mut factory_store::Store, id: uuid::Uuid) -> Result<
     };
     let current = TaskStatus::from_db_str(&status);
 
-    if assigned_session_id.is_none() {
+    let Some(assigned_session_id) = assigned_session_id else {
         return Err(DeliverError::NotAssigned(id));
-    }
+    };
 
     let delivered: bool = tx
         .query_row(
@@ -442,6 +467,15 @@ pub fn mark_running(store: &mut factory_store::Store, id: uuid::Uuid) -> Result<
         [id.to_string()],
     )
     .map_err(factory_store::StoreError::from)?;
+
+    // `crate`'s station-11 decision 3, same transaction as the status write.
+    // No author session: this is Factory's own observation that a delivered
+    // prompt was received, not an action the session itself took. The
+    // payload names the session so the log is self-sufficient without a
+    // cross-reference to `tasks.assigned_session_id`.
+    let payload = serde_json::json!({ "session_id": assigned_session_id }).to_string();
+    crate::events::append(&tx, id, EventType::Running, None, Some(&payload))?;
+
     tx.commit().map_err(factory_store::StoreError::from)?;
     Ok(())
 }
@@ -567,6 +601,15 @@ pub fn authorise_resume(
         [task_id.to_string()],
     )
     .map_err(factory_store::StoreError::from)?;
+
+    // Design §11 asks that every material status transition be logged, and
+    // this is one: a human authorising one further delivery of a task a
+    // restart left `blocked: interrupted`. It went unlogged when the audit
+    // log was first wired, because `blocked → queued` had no event type; the
+    // gap was the vocabulary's, not this function's. The author is always a
+    // human here, so `author_session_id` is NULL.
+    crate::events::append(&tx, task_id, crate::events::EventType::Resumed, None, None)?;
+
     tx.commit().map_err(factory_store::StoreError::from)?;
     Ok(())
 }

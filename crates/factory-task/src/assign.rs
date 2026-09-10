@@ -92,6 +92,7 @@ use std::path::PathBuf;
 
 use rusqlite::OptionalExtension;
 
+use crate::events::EventType;
 use crate::{TaskError, TaskStatus};
 
 /// What [`assign`] decided, or reports needs to happen before it can decide.
@@ -538,6 +539,16 @@ pub fn assign(
             (task_id.to_string(), session_id.to_string()),
         )
         .map_err(factory_store::StoreError::from)?;
+
+        // `crate`'s station-11 decision 3: the assignment event's one home is
+        // here, in the same transaction as the write it records. The payload
+        // names the session chosen — `tasks.assigned_session_id` holds only
+        // the *current* choice and `authorise_resume` can clear it later, so
+        // this is the audit log's only durable record of which session an
+        // earlier assignment actually named. No author session: `assign`
+        // never runs as a session, only as Factory's own coordination.
+        let payload = serde_json::json!({ "session_id": session_id.to_string() }).to_string();
+        crate::events::append(&tx, task_id, EventType::Assigned, None, Some(&payload))?;
     }
 
     tx.commit().map_err(factory_store::StoreError::from)?;

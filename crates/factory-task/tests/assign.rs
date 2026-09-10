@@ -13,6 +13,7 @@ use factory_store::Store;
 use factory_task::TaskStatus;
 use factory_task::assign::{AssignError, Assignment, DeferReason, assign, running_task_of_session};
 use factory_task::create::{create, show};
+use factory_task::events::{EventType, for_task};
 
 /// A deterministic, distinct, syntactically valid UUID — mirrors
 /// `tests/create.rs::uid` and `factory-session/tests/common/mod.rs::uid`.
@@ -938,4 +939,105 @@ fn running_task_of_session_ignores_a_task_the_session_already_finished() {
 
     let running = running_task_of_session(&store, session_id).expect("read");
     assert_eq!(running, None);
+}
+
+// events (station 11, `crate`'s own decision 3) ---------------------------
+
+/// A successful assign writes exactly one `assigned` event, naming the
+/// session it chose, in the same transaction as the `assigned_session_id`
+/// write. `events::for_task` is read after `assign` returns, through the
+/// same `Store`, so this only proves the event exists once `assign` has
+/// already committed — see `tests/deliver.rs` for a test that observes the
+/// same claim mid-transaction, through a second connection.
+#[test]
+fn a_successful_assign_writes_exactly_one_assigned_event_naming_the_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let (session_id, _) = seed_idle_session(&mut store, dir.path(), 2, scope_id, "agent", 10);
+    let task_id = uid(50);
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create");
+
+    assign(&mut store, task_id, "agent", 10).expect("assign");
+
+    let events = for_task(&store, task_id).expect("read events");
+    // `created` (from `create`) plus this function's own `assigned`.
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event_type, EventType::Created);
+    assert_eq!(events[1].event_type, EventType::Assigned);
+    assert_eq!(
+        events[1].author_session_id, None,
+        "Factory assigned, not a session"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(events[1].payload.as_deref().expect("payload present"))
+            .expect("valid JSON");
+    assert_eq!(payload["session_id"], session_id.to_string());
+}
+
+/// A deferred assign (no idle session) writes no event at all — nothing
+/// material happened, only a report that nothing could be done yet.
+#[test]
+fn a_deferred_assign_writes_no_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let task_id = uid(50);
+    create(
+        &mut store,
+        task_id,
+        None,
+        scope_id,
+        None,
+        None,
+        "do it",
+        &[],
+    )
+    .expect("create");
+
+    let outcome = assign(&mut store, task_id, "agent", 10).expect("assign");
+    assert!(matches!(outcome, Assignment::Deferred(_)));
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(
+        events.len(),
+        1,
+        "only `created` — a deferral is not a material transition"
+    );
+    assert_eq!(events[0].event_type, EventType::Created);
+}
+
+/// The mutation this test catches: a transition that is refused must leave
+/// no event behind. `assign` on an already-`running` task fails its own
+/// `NotQueued` guard before it ever reaches the write — if the event write
+/// were ever moved ahead of that guard, this test would see an event
+/// instead of none.
+#[test]
+fn assign_of_a_non_queued_task_writes_no_additional_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let (session_id, _) = seed_idle_session(&mut store, dir.path(), 2, scope_id, "agent", 10);
+    let task_id = seed_task(&mut store, 20, scope_id, Some(session_id), "running", None);
+
+    let err = assign(&mut store, task_id, "agent", 10).expect_err("already running");
+    assert!(matches!(err, AssignError::NotQueued { .. }));
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(
+        events.len(),
+        0,
+        "this task was seeded directly by raw SQL, not through `create`, so it \
+         starts with no events at all, and the refused assign must add none"
+    );
 }

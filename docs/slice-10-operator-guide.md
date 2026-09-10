@@ -52,10 +52,13 @@ like this one honest, and this document follows its shape.
 - **`opencode` is configurable but not driveable.** `factory start --harness
   opencode` is refused at startup with "no adapter", rather than starting a
   daemon that fails on the first session.
-- **No `launchd` job is installed.** `factory doctor`'s scheduler check
-  reports that none is loaded — which is a true finding, not a defect in the
-  check. Station 11 decides what installs one, and the scheduler design
-  document gates that behind explicit release.
+- **Factory installs no `launchd` job.** `factory doctor`'s scheduler check
+  asks `launchctl` about `com.business-factory.scheduler` and reports what it
+  finds. On this machine it finds one **loaded**: the pre-Factory Python
+  prototype, `scripts/factory_tasks.py dispatch --deliver`, which writes to the
+  same `.factory/factory.sqlite`. Station 11 decides what happens to it
+  (ADR 0021 decision 10) and the scheduler design document gates installing a
+  new one behind explicit release.
 - **A Claude Code session that reaches `disconnected` is returned to service
   by a human, never by its own adapter.** This is deliberate; see "Why Claude
   Code needs a human" below.
@@ -308,8 +311,12 @@ Six checks:
    longer in a lease-holding state.
 5. **The pane audit**, both directions — a live session whose pane is gone
    from Herdr, and a pane still alive for a session the database calls dead.
-6. **The scheduler** — whether a `launchd` job is loaded under the expected
-   label, and when it last fired. Today it reports none, correctly.
+6. **The scheduler** — whether a `launchd` job is loaded under
+   `com.business-factory.scheduler`. On this machine one **is** loaded: the
+   pre-Factory Python prototype. `last_fired` is always `None`, because neither
+   `launchctl list` nor `launchctl print` exposes a last-fired time and
+   `LastExitStatus` is an exit code, not a timestamp. Station 11 adds the half
+   that can answer it, from Factory's own dispatcher (ADR 0021 decision 10).
 
 It always reports the backup summary too (count, total size, oldest and
 newest under `.factory/backups/`, per ADR 0019 decision 5). Purely

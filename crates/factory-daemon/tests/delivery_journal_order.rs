@@ -95,6 +95,17 @@ impl Adapter for JournalCheckingAdapter {
     fn runtime_version(&self) -> Result<String, AdapterError> {
         Ok("journal-checking-fake".to_string())
     }
+
+    /// This double reports no cost data. Stated rather than omitted: the
+    /// trait has no default, so an implementor cannot answer `None` by
+    /// forgetting the method. ADR 0021 decision 6 makes `None` a valid
+    /// answer, and it is this fake's real one.
+    fn cost_sample(
+        &self,
+        _pane: &PaneId,
+    ) -> Result<Option<factory_adapter::CostSample>, AdapterError> {
+        Ok(None)
+    }
 }
 
 #[test]
@@ -179,5 +190,16 @@ impl Adapter for ArcAdapter {
     }
     fn runtime_version(&self) -> Result<String, AdapterError> {
         self.0.runtime_version()
+    }
+
+    /// Delegated like every other method. This wrapper is the reason
+    /// `Adapter::cost_sample` has no default: with one, this arm could be
+    /// left out and the wrapper would answer `None` while the adapter it
+    /// wraps had real figures, and nothing would fail.
+    fn cost_sample(
+        &self,
+        pane: &PaneId,
+    ) -> Result<Option<factory_adapter::CostSample>, AdapterError> {
+        self.0.cost_sample(pane)
     }
 }

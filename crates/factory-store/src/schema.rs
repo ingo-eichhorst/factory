@@ -582,3 +582,283 @@ pub(crate) const V5_SCHEMA: &str = r#"
 ALTER TABLE sessions ADD COLUMN herdr_pane_id TEXT;
 ALTER TABLE sessions ADD COLUMN harness_session_id TEXT;
 "#;
+
+/// Station 11 — task templates, the run fields, the audit log, and cron
+/// schedules. ADR 0021 is the whole of the reasoning; this comment records
+/// only what a reader of the SQL below needs and cannot see in it.
+///
+/// # `tasks` is the run. There is no `task_runs` table.
+///
+/// ADR 0021 decision 1. `agent-task-scheduler-design.md` uses `tasks` for the
+/// *template* and `task_runs` for the execution; that document predates
+/// stations 7 through 10, and in this tree `tasks` is already the execution —
+/// it carries `assigned_session_id`, `authorised_deliveries`, its own
+/// `delivery_attempts` journal, `task_delegation_chain`, the
+/// one-running-task-per-session index, and every restore transition ADR 0019
+/// wrote. Design §11 governs: templates and runs are "an extension of the
+/// existing `Task` primitive, not a new parallel workflow." So a template goes
+/// *above* `tasks` and the run fields go *into* it.
+///
+/// # Additive, unlike migrations 2 and 3 — and measured before it was written
+///
+/// Every change below is a `CREATE TABLE`, a `CREATE INDEX`, or an
+/// `ALTER TABLE ... ADD COLUMN`. No table is rebuilt. Migrations 2 and 3 had
+/// to rebuild because they added a `REFERENCES` clause to an existing column
+/// and changed a CHECK; neither applies here. Three things this depends on
+/// were run against the bundled SQLite before this migration was written,
+/// rather than assumed from the documentation:
+///
+/// 1. `ADD COLUMN ... REFERENCES parent (id)` is accepted when the column is
+///    nullable, which it is here — the implicit default is NULL.
+/// 2. `ADD COLUMN ... NOT NULL DEFAULT 'manual' CHECK (...)` is accepted, and
+///    the CHECK bites on the next write (`CHECK constraint failed:
+///    triggered_by IN ('manual','cron')`), not merely on newly created tables.
+/// 3. A partial unique index over two nullable columns rejects a duplicate
+///    pair and ignores every row where either is NULL — which is what makes
+///    `tasks_one_run_per_schedule_minute` below cover cron rows without
+///    constraining the manual ones.
+///
+/// # Why the minute is a column and not a dispatcher's memory
+///
+/// ADR 0021 decision 3. Backlog §11 asks for "no more than one run for the
+/// same local minute, **including after dispatcher restarts**." A dispatcher
+/// that remembers which minutes it has fired is correct until it is killed
+/// mid-minute. `tasks_one_run_per_schedule_minute` is correct because the
+/// second insert cannot happen — a property of the database, not of a
+/// process's lifetime. `sessions_one_live_lease_per_workspace` and
+/// `tasks_one_running_per_session` are the two precedents, and their comments
+/// give the same reason.
+///
+/// `fired_for_minute` is TEXT, `'YYYY-MM-DDTHH:MM'`, rendered in the
+/// **schedule's own timezone** rather than UTC. That is deliberate: the
+/// uniqueness that matters is the one an operator can reason about ("it fired
+/// at 09:00 Berlin time"), and a timezone whose clocks repeat an hour will
+/// otherwise produce two runs for one local minute during the autumn
+/// transition, which is precisely the case backlog §11 names.
+///
+/// # `schedules` stores what happened, not what will happen
+///
+/// `last_fired_at` is a fact. A `next_run_at` column would be a second home
+/// for the cron evaluator's answer, stale the moment a schedule is edited, a
+/// timezone's rules change, or the daemon is down across it. The next run is
+/// computed from `cron` and `timezone` when someone asks.
+///
+/// # What the cost columns are, and the one that is not a token count
+///
+/// ADR 0021 decisions 6 and 7. `cost_input_tokens` and `cost_output_tokens`
+/// come from a cumulative source in the Claude Code case, so `cost_baseline`
+/// holds the adapter-shaped sample taken **at delivery**: a difference held in
+/// memory does not survive the daemon restart this project drills for.
+///
+/// `context_utilization_percent` is not a cost figure and must never be added
+/// to one. Irrlicht's `metrics.total_tokens` was measured across all 8 live
+/// sessions carrying the fields to be exactly `context_window ×
+/// context_utilization_percentage / 100` — how full the window is right now,
+/// which *falls* when a session compacts. It answers "how close to the edge
+/// was this run," which token counts cannot.
+///
+/// No currency column (decision 8): Irrlicht reports an estimate against its
+/// own price table and Pi reports its harness's billing figure, and one column
+/// holding either would mean something different depending on who wrote it.
+///
+/// # No `artifacts` table
+///
+/// Decision 9. `tasks.result_artifact_paths` is already a JSON array, and
+/// migration 1's own comment says why: this crate "does not own artifact-path
+/// semantics." A child table now would be a second home for the same paths.
+pub(crate) const V6_SCHEMA: &str = r#"
+-- Design §11: durable intent, separate from the run that executes it.
+-- §12.3's hook is `version`; §12.1's is `acceptance_criteria`.
+CREATE TABLE task_templates (
+    id                  TEXT PRIMARY KEY,
+    -- The handle an operator and `factory schedule create` use. Unique across
+    -- the instance rather than per scope: a schedule names one template, and
+    -- a name that means different things in different scopes would make that
+    -- reference ambiguous at exactly the moment nobody is watching.
+    name                TEXT NOT NULL,
+    -- NULL means "no target" — design §11's run that "remains queued for the
+    -- central agent to assign."
+    target_scope_id     TEXT REFERENCES scopes (id),
+    target_agent_name   TEXT,
+    prompt              TEXT NOT NULL,
+    -- §12.1's hook. Prose, not a machine gate: version 1 stores the criterion
+    -- and leaves the gate to a human.
+    acceptance_criteria TEXT,
+    -- §12.3's hook. Starts at 1 and increases when the prompt or the criteria
+    -- change; a run records the value it executed and never sees a later one.
+    version             INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    state               TEXT NOT NULL DEFAULT 'open' CHECK (
+                            state IN ('open', 'paused', 'closed')
+                        ),
+    created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX task_templates_name ON task_templates (name);
+
+-- Design §11: "A schedule only creates a task run; it never executes an
+-- untracked prompt." That is why `template_id` is NOT NULL — there is no way
+-- to express a schedule carrying its own prompt.
+CREATE TABLE schedules (
+    id            TEXT PRIMARY KEY,
+    template_id   TEXT NOT NULL REFERENCES task_templates (id),
+    -- Five fields, design §11. The evaluator, not this column, decides what
+    -- that means; storing the operator's own text keeps `schedule list` able
+    -- to show back exactly what was typed.
+    cron          TEXT NOT NULL,
+    -- An IANA name ("Europe/Berlin"), not an offset. An offset cannot express
+    -- a rule that survives a daylight-saving change.
+    timezone      TEXT NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    -- A fact. There is deliberately no `next_run_at`; see this migration's
+    -- doc comment.
+    last_fired_at TEXT,
+    created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX schedules_template_id ON schedules (template_id);
+
+-- Design §11: "`task_events` wird nie geändert oder gelöscht. Korrigiert wird
+-- durch ein neues Ereignis." An INTEGER PRIMARY KEY is the append order, and
+-- it is the ordering readers use — `created_at` has second granularity and
+-- two events in one second are ordinary.
+CREATE TABLE task_events (
+    id                INTEGER PRIMARY KEY,
+    task_id           TEXT NOT NULL REFERENCES tasks (id),
+    -- `verification` is §12.1's hook. It annotates and never transitions
+    -- (ADR 0021 decision 4) — nothing in this schema could enforce that, so
+    -- it is a code guard with a mutation test behind it.
+    -- `resumed` is `authorise_resume`'s edge, `blocked` back to `queued`.
+    -- Design §11 asks that "every material status transition" be logged, and
+    -- a human authorising one further delivery of a task a restart
+    -- interrupted is exactly that. There is deliberately no
+    -- `cancel_requested`: `tasks.cancel_requested_at`'s own comment above
+    -- records that asking a running task to stop "is not a status change by
+    -- itself", and this vocabulary is for transitions.
+    --
+    -- `refused` is here because station 10 decided a refusal is not a
+    -- delivery: `Adapter::send` can decline to submit into a busy session,
+    -- the task stays `queued`, and nothing reached a terminal. Without its
+    -- own event type the audit log would show a task sitting queued with
+    -- nothing saying why, or would call the refusal a `delivered`, which is
+    -- the exact confusion station 10 removed one layer up.
+    event_type        TEXT NOT NULL CHECK (
+                          event_type IN (
+                              'created', 'assigned', 'delivered', 'refused',
+                              'running', 'progress', 'blocked', 'done',
+                              'failed', 'cancelled', 'resumed', 'verification',
+                              'rework'
+                          )
+                      ),
+    -- NULL means a human or the daemon itself, not a session. §12.1's
+    -- independence rule compares the author's **scope** against the run's
+    -- `target_scope_id`, never against `assigned_session_id`: a worker may not
+    -- verify another session of its own scope (§12.1), and
+    -- `assigned_session_id` is NULL on every task no session ever ran, so a
+    -- guard against it would pass trivially there. ADR 0021 decision 4.
+    author_session_id TEXT REFERENCES sessions (id),
+    -- JSON. Never a secret and never copied private source content — design
+    -- §11 and `agent-task-scheduler-design.md`'s security section both say so
+    -- in as many words.
+    payload           TEXT,
+    created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- `(task_id, id)` rather than `(task_id)`: every read of this table is one
+-- task's events in append order, and the composite index serves that without
+-- a sort.
+CREATE INDEX task_events_task_id ON task_events (task_id, id);
+
+-- Design §11's `task_decisions`: "Entscheidung, Begründung, Alternativen,
+-- Folgen." Separate from `task_events` because a decision is looked up as a
+-- decision — `agent-task-scheduler-design.md`'s acceptance criterion 5 asks
+-- for them "strukturiert abrufbar", which a JSON payload inside the event log
+-- would not give.
+CREATE TABLE task_decisions (
+    id                TEXT PRIMARY KEY,
+    task_id           TEXT NOT NULL REFERENCES tasks (id),
+    author_session_id TEXT REFERENCES sessions (id),
+    decision          TEXT NOT NULL,
+    -- NOT NULL on purpose. A decision without a rationale is a log line, and
+    -- design §11 asks for "nachvollziehbare Entscheidungen."
+    rationale         TEXT NOT NULL,
+    alternatives      TEXT,
+    consequences      TEXT,
+    created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX task_decisions_task_id ON task_decisions (task_id);
+
+-- One row, so `factory doctor` can answer "has the dispatcher run at all
+-- lately" without inferring it from the absence of task rows. **No row at all
+-- is a distinct answer from a stale row**: no row means no dispatcher has ever
+-- ticked against this database, which is the ordinary state of a freshly
+-- initialised instance, and doctor must not report a fault for it. ADR 0021
+-- decision 2 retires doctor's `launchd` label check in favour of this: a
+-- loaded `launchd` job proves only that `launchd` fired.
+CREATE TABLE dispatcher_state (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    last_tick_at TEXT NOT NULL
+);
+
+-- The run fields. Every one is nullable or carries a default, which is what
+-- makes this an `ALTER TABLE` rather than a rebuild.
+ALTER TABLE tasks ADD COLUMN template_id TEXT REFERENCES task_templates (id);
+
+-- §12.3's hook, frozen at creation: "that record does not change when the
+-- template is later revised."
+ALTER TABLE tasks ADD COLUMN template_version INTEGER;
+
+ALTER TABLE tasks ADD COLUMN schedule_id TEXT REFERENCES schedules (id);
+
+-- 'YYYY-MM-DDTHH:MM' in the schedule's own timezone. See the doc comment.
+ALTER TABLE tasks ADD COLUMN fired_for_minute TEXT;
+
+-- Added *after* the two columns it constrains, because a CHECK may only name
+-- columns that already exist.
+--
+-- The CHECK is what makes `tasks_one_run_per_schedule_minute` bite, and it is
+-- the same pairing migration 3 used for `running` and `assigned_session_id`.
+-- A partial unique index only indexes the rows its WHERE admits, so a cron row
+-- written with a NULL `fired_for_minute` is invisible to it: two such rows for
+-- one schedule would both insert, and "no more than one run for the same local
+-- minute" would be defeated by a dispatcher bug rather than enforced against
+-- one. Measured before this was written: without the CHECK both rows insert;
+-- with it the first is refused at the source.
+--
+-- It binds in both directions on purpose. A `manual` row may not carry a
+-- schedule or a minute either, so the columns cannot accumulate a stale
+-- schedule id from a row that is no longer a cron run.
+ALTER TABLE tasks ADD COLUMN triggered_by TEXT NOT NULL DEFAULT 'manual' CHECK (
+    (triggered_by = 'manual' AND schedule_id IS NULL AND fired_for_minute IS NULL)
+    OR (triggered_by = 'cron' AND schedule_id IS NOT NULL AND fired_for_minute IS NOT NULL)
+);
+
+-- §12.2's hook: the run this one reworks, and the finding that caused it.
+-- Self-referential, and it never modifies the run it points at.
+ALTER TABLE tasks ADD COLUMN reworks_task_id TEXT REFERENCES tasks (id);
+ALTER TABLE tasks ADD COLUMN rework_finding TEXT;
+
+-- §12.6's hook. All nullable: opencode reports nothing at all, and two of
+-- four live Pi sessions reported no metrics when this was measured.
+ALTER TABLE tasks ADD COLUMN cost_model TEXT;
+ALTER TABLE tasks ADD COLUMN cost_input_tokens INTEGER;
+ALTER TABLE tasks ADD COLUMN cost_output_tokens INTEGER;
+ALTER TABLE tasks ADD COLUMN cost_duration_ms INTEGER;
+
+-- The adapter-shaped sample taken at delivery, so a cumulative source stays
+-- subtractable across a daemon restart. ADR 0021 decision 6.
+ALTER TABLE tasks ADD COLUMN cost_baseline TEXT;
+
+-- Not a token count. ADR 0021 decision 7.
+ALTER TABLE tasks ADD COLUMN context_utilization_percent REAL;
+
+CREATE INDEX tasks_template_id ON tasks (template_id);
+
+-- ADR 0021 decision 3. The `WHERE` is what keeps every manual task — which
+-- has NULL in both columns — out of the constraint entirely.
+CREATE UNIQUE INDEX tasks_one_run_per_schedule_minute
+    ON tasks (schedule_id, fired_for_minute)
+    WHERE schedule_id IS NOT NULL AND fired_for_minute IS NOT NULL;
+"#;

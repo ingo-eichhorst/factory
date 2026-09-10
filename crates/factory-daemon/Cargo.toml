@@ -18,6 +18,12 @@ factory-registry = { path = "../factory-registry" }
 factory-session = { path = "../factory-session" }
 factory-store = { path = "../factory-store" }
 factory-task = { path = "../factory-task" }
+# The dispatcher stamps `schedules.last_fired_at` and renders
+# `tasks.fired_for_minute`, both of which are `chrono` values produced by
+# `factory_task::schedule`. Cron parsing itself is not here: ADR 0021 decision
+# 3a puts the one home of "does this expression match this minute" in
+# `factory_task::schedule`, and this crate calls it.
+chrono.workspace = true
 fd-lock.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

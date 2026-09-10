@@ -22,6 +22,7 @@ use factory_task::deliver::{
     DeliverError, OperatorPromptWriter, PromptWriteError, PromptWriter, authorise_resume, deliver,
     mark_running,
 };
+use factory_task::events::{EventType, for_task};
 
 /// A deterministic, distinct, syntactically valid UUID — mirrors
 /// `factory-task/tests/create.rs::uid`.
@@ -864,4 +865,255 @@ fn mark_running_refuses_a_task_whose_only_attempt_was_refused() {
     let err = mark_running(&mut store, task_id)
         .expect_err("a refused attempt is not evidence a prompt was received");
     assert!(matches!(err, DeliverError::NotDelivered(id) if id == task_id));
+}
+
+// events (station 11, `crate`'s own decision 3) ---------------------------
+
+/// A writer that opens its own connection and reads `task_events` for
+/// `task_id` at the instant it is called — the `SpyWriter` pattern above,
+/// aimed at the event log instead of `delivery_attempts`. Proves the
+/// `delivered`/`refused` event is written in transaction 2 (after the writer
+/// runs), not transaction 1 (before it): if it were ever moved earlier, this
+/// writer would observe a row that already exists.
+struct EventSpyWriter {
+    db_path: std::path::PathBuf,
+    task_id: uuid::Uuid,
+    fail: bool,
+    event_count_at_call: Option<i64>,
+}
+
+impl PromptWriter for EventSpyWriter {
+    fn write_prompt(
+        &mut self,
+        _session_id: uuid::Uuid,
+        _prompt: &str,
+    ) -> Result<(), PromptWriteError> {
+        let conn = rusqlite::Connection::open(&self.db_path).expect("open a separate connection");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = ?1",
+                [self.task_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("count task_events");
+        self.event_count_at_call = Some(count);
+        if self.fail {
+            Err(PromptWriteError::new("boom"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn the_delivered_event_is_written_after_the_writer_runs_not_before() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_assigned_task(&mut store, 3, scope_id, session_id, "do it");
+
+    let mut writer = EventSpyWriter {
+        db_path: store.path().to_path_buf(),
+        task_id,
+        fail: false,
+        event_count_at_call: None,
+    };
+    deliver(&mut store, task_id, &mut writer).expect("deliver succeeds");
+
+    assert_eq!(
+        writer.event_count_at_call,
+        Some(0),
+        "no event exists yet at the instant the writer runs — it is written in \
+         transaction 2, after the writer returns"
+    );
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one event once deliver has returned"
+    );
+    assert_eq!(events[0].event_type, EventType::Delivered);
+}
+
+/// A successful delivery writes exactly one `delivered` event, naming the
+/// `delivery_attempts` row it describes — "the attempt identity", per this
+/// task's brief.
+#[test]
+fn a_successful_delivery_writes_exactly_one_delivered_event_with_the_attempt_identity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_assigned_task(&mut store, 3, scope_id, session_id, "do it");
+
+    let mut writer = RecordingWriter::new();
+    deliver(&mut store, task_id, &mut writer).expect("deliver succeeds");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, EventType::Delivered);
+    assert_eq!(events[0].author_session_id, None);
+    let rows = delivery_attempts_for(&store, task_id);
+    let payload: serde_json::Value =
+        serde_json::from_str(events[0].payload.as_deref().expect("payload present"))
+            .expect("valid JSON");
+    assert_eq!(payload["delivery_attempt_id"], rows[0].0);
+    assert_eq!(payload["outcome"], "sent");
+}
+
+/// The exact case ADR 0021 decision 4a exists to name: `refused`, never
+/// `delivered`, and the task is still `queued` once `deliver` returns.
+#[test]
+fn a_refused_delivery_writes_refused_not_delivered_and_the_task_stays_queued() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_assigned_task(&mut store, 3, scope_id, session_id, "do it");
+
+    let mut refusing = RefusingWriter { calls: 0 };
+    deliver(&mut store, task_id, &mut refusing).expect_err("a refusal is still an error");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].event_type,
+        EventType::Refused,
+        "a refusal must never be recorded as delivered — station 10's whole point"
+    );
+
+    let task = factory_task::create::show(&store, task_id).expect("show");
+    assert_eq!(
+        task.status,
+        TaskStatus::Queued,
+        "nothing reached a terminal, so the task stays queued"
+    );
+}
+
+/// The deliberate choice this task's report calls out: an *ambiguous*
+/// writer failure (not a refusal) is grouped with a successful send, both as
+/// `delivered` — `ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL` already treats them
+/// the same way for the at-most-once budget, and decision 4a's own reasoning
+/// ("a task sitting queued with nothing in the log explaining why" is the
+/// wrong answer) applies just as much to a silently-unlogged failure as to a
+/// silently-unlogged refusal. The payload's `outcome` field is what keeps
+/// this from reading as a claim that the prompt definitely arrived.
+#[test]
+fn an_ambiguous_failed_delivery_also_writes_a_delivered_event_with_outcome_failed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_assigned_task(&mut store, 3, scope_id, session_id, "do it");
+
+    let mut failing = FailingWriter;
+    deliver(&mut store, task_id, &mut failing).expect_err("an ambiguous failure is still an error");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, EventType::Delivered);
+    let payload: serde_json::Value =
+        serde_json::from_str(events[0].payload.as_deref().expect("payload present"))
+            .expect("valid JSON");
+    assert_eq!(payload["outcome"], "failed");
+}
+
+/// The mutation this test catches: a refused transition leaves no event
+/// behind. `deliver` on a task that is not `queued` fails its own
+/// `NotQueued` guard in transaction 1, before either transaction 2 or an
+/// event write could ever run.
+#[test]
+fn deliver_of_a_task_that_is_not_queued_writes_no_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_assigned_task(&mut store, 3, scope_id, session_id, "do it");
+    let mut setup_writer = RecordingWriter::new();
+    deliver(&mut store, task_id, &mut setup_writer).expect("first delivery");
+    mark_running(&mut store, task_id).expect("mark running, so status is no longer queued");
+
+    let events_before = for_task(&store, task_id).expect("read events").len();
+
+    let mut writer = RecordingWriter::new();
+    let err = deliver(&mut store, task_id, &mut writer).expect_err("already running, not queued");
+    assert!(matches!(err, DeliverError::NotQueued { .. }));
+
+    let events_after = for_task(&store, task_id).expect("read events").len();
+    assert_eq!(
+        events_before, events_after,
+        "a refused deliver call must add no event"
+    );
+}
+
+/// `mark_running` writes exactly one `running` event, naming the session,
+/// in the same transaction as the status write.
+#[test]
+fn mark_running_writes_exactly_one_running_event_naming_the_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_assigned_task(&mut store, 3, scope_id, session_id, "do it");
+
+    let mut writer = RecordingWriter::new();
+    deliver(&mut store, task_id, &mut writer).expect("deliver succeeds");
+    mark_running(&mut store, task_id).expect("mark running");
+
+    let events = for_task(&store, task_id).expect("read events");
+    // `delivered`, then this function's own `running`.
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].event_type, EventType::Running);
+    assert_eq!(events[1].author_session_id, None);
+    let payload: serde_json::Value =
+        serde_json::from_str(events[1].payload.as_deref().expect("payload present"))
+            .expect("valid JSON");
+    assert_eq!(payload["session_id"], session_id.to_string());
+}
+
+/// `authorise_resume` moves `blocked → queued`, which design §11 counts as a
+/// material status transition and therefore something the log must carry.
+///
+/// It did not, at first. The audit log was wired before the vocabulary had a
+/// type for this edge, so the transition an operator most wants to find later
+/// — a human authorising one further delivery after a restart — was the one
+/// the log did not record. `resumed` was added for it.
+///
+/// The author is NULL because this edge has no session author by
+/// construction: a human authorises it, per ADR 0019.
+///
+/// Compared before and after rather than against an absolute count, because
+/// [`seed_blocked_task`] itself runs the task through `deliver`,
+/// `mark_running` and `complete::blocked`, each already writing its own
+/// event, before `authorise_resume` ever sees it.
+#[test]
+fn authorise_resume_writes_one_resumed_event_authored_by_no_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_blocked_task(&mut store, 3, scope_id, session_id, "do it");
+
+    let before = for_task(&store, task_id).expect("read events").len();
+
+    authorise_resume(&mut store, task_id).expect("resume a blocked task");
+
+    let after = for_task(&store, task_id).expect("read events");
+    assert_eq!(
+        after.len(),
+        before + 1,
+        "authorise_resume must add exactly one event"
+    );
+    let last = after.last().expect("at least one event");
+    assert_eq!(last.event_type, EventType::Resumed);
+    assert_eq!(
+        last.author_session_id, None,
+        "a human authorises a resume, so no session authored it"
+    );
+    assert_eq!(
+        last.payload, None,
+        "the edge itself is the whole fact; there is nothing else to carry"
+    );
 }

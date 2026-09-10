@@ -10,6 +10,7 @@ use factory_store::Store;
 use factory_task::complete::{
     CompleteError, acknowledge_cancellation, blocked, blocked_from_observation, done, fail,
 };
+use factory_task::events::{EventType, for_task};
 use factory_task::{BlockedReason, TaskError, TaskStatus};
 
 /// A deterministic, distinct, syntactically valid UUID — mirrors
@@ -571,4 +572,196 @@ fn acknowledge_cancellation_of_a_nonexistent_task_is_not_found() {
         err,
         CompleteError::Task(TaskError::NotFound(id)) if id == uid(999)
     ));
+}
+
+// events (station 11, `crate`'s own decision 3) ---------------------------
+
+/// `done` writes exactly one `done` event, saying that a result was reported
+/// and **not** repeating it.
+///
+/// The summary itself lives in `tasks.result_summary`, one join away by
+/// `task_id`. `task_events` is append-only and is never corrected or deleted,
+/// so a copy written here would outlive any later edit of the task's own, and
+/// a result summary can be 16 KiB of agent-authored free text. Crate decision
+/// 6 asks for short structured facts in a payload; this is the fact.
+///
+/// Mutation caught: putting the text back. The assertion below fails if
+/// `result_summary` reappears as a payload key.
+#[test]
+fn done_writes_one_done_event_that_records_a_result_without_copying_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_running_task(&mut store, 3, scope_id, session_id);
+
+    done(&mut store, task_id, Some("all done"), None).expect("done");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, EventType::Done);
+    assert_eq!(events[0].author_session_id, None);
+    let payload: serde_json::Value =
+        serde_json::from_str(events[0].payload.as_deref().expect("payload present"))
+            .expect("valid JSON");
+    assert_eq!(
+        payload["result_summary_present"], true,
+        "the event records that a result exists"
+    );
+    assert!(
+        payload.get("result_summary").is_none(),
+        "the summary text itself must not be copied into the append-only log; \
+         it is in tasks.result_summary, one join away"
+    );
+}
+
+/// `fail` with only artifact paths (no summary) writes a `failed` event with
+/// no payload — "a failed event carries a short summary **if one exists**";
+/// this is the case where one does not.
+#[test]
+fn fail_with_only_artifact_paths_writes_a_failed_event_with_no_payload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_running_task(&mut store, 3, scope_id, session_id);
+
+    let paths = vec!["out/log.txt".to_string()];
+    fail(&mut store, task_id, None, Some(&paths)).expect("fail");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, EventType::Failed);
+    assert_eq!(
+        events[0].payload, None,
+        "no summary was given, so nothing is recorded — not the artifact paths, \
+         which are not what the brief asks a failed event to carry"
+    );
+}
+
+/// The mutation this test catches: a refused completion (already terminal)
+/// leaves no event behind. `done` returns `TaskError::AlreadyTerminal`
+/// before it ever reaches a write.
+#[test]
+fn done_of_a_terminal_task_writes_no_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let task_id = seed_terminal_task(&mut store, 3, scope_id, "cancelled");
+
+    done(&mut store, task_id, Some("late"), None).expect_err("terminal");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(
+        events.len(),
+        0,
+        "this task was seeded directly by raw SQL, not through `create`, so it \
+         starts with no events, and the refused call must add none"
+    );
+}
+
+/// `blocked` writes exactly one `blocked` event, carrying the reason — the
+/// brief's own words: "a blocked event carries its reason."
+#[test]
+fn blocked_writes_exactly_one_blocked_event_with_the_reason() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_running_task(&mut store, 3, scope_id, session_id);
+
+    blocked(&mut store, task_id, BlockedReason::Permission).expect("blocked");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, EventType::Blocked);
+    let payload: serde_json::Value =
+        serde_json::from_str(events[0].payload.as_deref().expect("payload present"))
+            .expect("valid JSON");
+    assert_eq!(payload["reason"], "permission");
+}
+
+/// `blocked_from_observation` reaches the same one `blocked` call as
+/// `blocked` itself, so an authoritative observation must write the
+/// identical event, not a second kind.
+#[test]
+fn an_authoritative_blocked_observation_writes_a_blocked_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_running_task(&mut store, 3, scope_id, session_id);
+
+    let obs = observation(
+        factory_adapter::Confidence::Authoritative,
+        factory_adapter::TaskSignal::Blocked(factory_adapter::BlockedReason::Interrupted),
+    );
+    blocked_from_observation(&mut store, task_id, &obs).expect("blocked");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, EventType::Blocked);
+}
+
+/// The mutation this test catches: a refused transition (`blocked` is not
+/// its own valid target) leaves no additional event behind — the exact
+/// scenario `a_second_blocked_call_on_an_already_blocked_task_is_an_invalid_transition_not_terminal`
+/// above proves for the status column; this is the same proof for events.
+#[test]
+fn a_second_blocked_call_on_an_already_blocked_task_writes_no_additional_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_running_task(&mut store, 3, scope_id, session_id);
+
+    blocked(&mut store, task_id, BlockedReason::Permission).expect("first block succeeds");
+    blocked(&mut store, task_id, BlockedReason::Permission)
+        .expect_err("blocked is not its own valid target");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(
+        events.len(),
+        1,
+        "only the first, successful call may have written an event"
+    );
+}
+
+/// `acknowledge_cancellation` writes exactly one `cancelled` event, in the
+/// same transaction as the status write.
+#[test]
+fn acknowledge_cancellation_writes_exactly_one_cancelled_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_running_task_with_cancel_requested(&mut store, 3, scope_id, session_id);
+
+    acknowledge_cancellation(&mut store, task_id).expect("acknowledge");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, EventType::Cancelled);
+    assert_eq!(events[0].payload, None);
+}
+
+/// The mutation this test catches: the cooperative-cancellation guard
+/// refusing (no recorded request) must leave no event behind.
+#[test]
+fn acknowledge_cancellation_without_a_recorded_request_writes_no_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 1, "irrlicht", "/instance");
+    let session_id = seed_running_session(&mut store, dir.path(), 2, scope_id);
+    let task_id = seed_running_task(&mut store, 3, scope_id, session_id);
+
+    acknowledge_cancellation(&mut store, task_id).expect_err("no request was ever recorded");
+
+    let events = for_task(&store, task_id).expect("read events");
+    assert_eq!(
+        events.len(),
+        0,
+        "this task was seeded directly by raw SQL, not through `create`, so it \
+         starts with no events, and the refused call must add none"
+    );
 }

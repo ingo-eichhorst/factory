@@ -3,7 +3,7 @@
 
 mod common;
 
-use factory_store::Store;
+use factory_store::{Store, latest_schema_version};
 
 #[test]
 fn opening_twice_preserves_data_and_schema_version() {
@@ -12,13 +12,16 @@ fn opening_twice_preserves_data_and_schema_version() {
     let mut store = Store::open(dir.path()).expect("first open");
     let version_after_first_open = store.schema_version().expect("schema_version");
     assert_eq!(
-        version_after_first_open, 5,
-        "five migrations are released: schema 1 (Slice 2), schema 2, the \
-         registry projection columns on `scopes` (ADR 0016 / Slice 3), \
-         schema 3, the `tasks` columns and rules for single-session \
-         delivery (backlog §7), schema 4, `tasks.authorised_deliveries` \
-         (backlog §9), and schema 5, the `sessions` pane/harness identity \
-         columns (backlog §9)"
+        version_after_first_open,
+        latest_schema_version(),
+        "a first open must land on the latest released schema: 1 (Slice 2), \
+         2, the registry projection columns on `scopes` (ADR 0016 / Slice 3), \
+         3, the `tasks` columns and rules for single-session delivery \
+         (backlog §7), 4, `tasks.authorised_deliveries` (backlog §9), 5, the \
+         `sessions` pane/harness identity columns (backlog §9), and 6, task \
+         templates, run fields, the audit log and cron schedules \
+         (backlog §11 / ADR 0021). The count itself is pinned in \
+         `database_too_far_ahead.rs`, deliberately in one place"
     );
 
     {

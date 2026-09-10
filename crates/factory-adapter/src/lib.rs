@@ -156,6 +156,235 @@ pub struct StartedSession {
     pub confidence: Confidence,
 }
 
+/// A cost sample for one pane, or `None` when the harness reports nothing
+/// usable right now — design §12.6's model identifier, token counts, and
+/// duration, in the shape ADR 0021 decision 6 settles on.
+///
+/// Every field but `source` is nullable, and that is not caution for its own
+/// sake: two of four live Pi sessions and every `opencode` session reported
+/// no usable metrics when ADR 0021 measured this. "The harness told us
+/// nothing" is the ordinary case this type exists to carry, not the edge.
+///
+/// # A sample, not a run's own figures
+///
+/// The Claude Code source (Irrlicht's `metrics`) is cumulative for the life
+/// of the session — `cum_input_tokens` only grows. So "what did *this run*
+/// cost" can only be answered as a difference between two samples: one taken
+/// when a task is delivered, held in `tasks.cost_baseline` so the difference
+/// survives a daemon restart (ADR 0021 decision 6), and one taken when the
+/// run finishes. The Pi source is per-message and could be summed for just
+/// the messages one run's window covers, but [`sum_pi_transcript_usage`]
+/// sums the *whole transcript to date* instead, so both sources present the
+/// same "sample now, sample later, subtract" shape and that rule lives in
+/// one place, [`CostSample::since`], rather than two.
+///
+/// # Why `source` exists
+///
+/// Nothing about the type system stops a caller from handing
+/// [`CostSample::since`] two samples from different adapters — a Pi baseline
+/// and a Claude Code terminal reading, say, after a bug reassigns a task
+/// across harnesses. Subtracting their token counts anyway would produce a
+/// number that means nothing but looks like an answer, which this crate's
+/// own rule (see the module docs) says is worse than no number at all.
+/// `source` lets `since` catch that at the one place it can be caught: an
+/// `Err`, not a silently wrong figure.
+///
+/// # Why `context_utilization_percent` is its own nullable field
+///
+/// ADR 0021 decision 7, measured across all 8 live sessions carrying the
+/// three fields, with no exceptions: Irrlicht's `metrics.total_tokens`
+/// equals `context_window × context_utilization_percentage / 100`. It is how
+/// full the context window is *right now*, and it falls when a session
+/// compacts. It is never a token count, and it is never summed or
+/// subtracted like one — [`CostSample::since`] carries it through verbatim
+/// instead of diffing it.
+///
+/// # No currency field
+///
+/// ADR 0021 decision 8: Irrlicht's `estimated_cost_usd` is an estimate
+/// against Irrlicht's own price table, and Pi's per-message `cost` is its
+/// harness's own billing figure. They are not the same kind of number, and
+/// one field holding either would mean something different depending on
+/// which adapter wrote it. Model and tokens are stored; money is derived
+/// outside Factory, where the price table has one owner.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CostSample {
+    /// Which adapter produced this sample. [`CostSample::since`] refuses to
+    /// subtract two samples that disagree here.
+    pub source: CostSource,
+    /// The harness's own model identifier — Pi's `message.model`
+    /// (e.g. `"gpt-6-astra"`) or Irrlicht's `metrics.model_name`.
+    pub model: Option<String>,
+    /// Cumulative input tokens as of this sample. Claude Code:
+    /// `metrics.cum_input_tokens`, never `total_tokens` (ADR 0021 decision
+    /// 7). Pi: every message's `usage.input`, summed from the start of the
+    /// transcript, never `usage.cacheRead`/`cacheWrite`/`reasoning` — see
+    /// [`sum_pi_transcript_usage`] for why those are dropped rather than
+    /// folded in.
+    pub input_tokens: u64,
+    /// Cumulative output tokens as of this sample. See `input_tokens`.
+    pub output_tokens: u64,
+    /// Milliseconds, matching `tasks.cost_duration_ms`'s unit. `None` when
+    /// the source reports no duration — Pi's transcript does not (see this
+    /// crate's module docs' "measured facts"), so
+    /// [`sum_pi_transcript_usage`] leaves it `None` rather than guessing at
+    /// a field that was never measured.
+    pub duration_ms: Option<u64>,
+    /// How full the context window was when this sample was taken, 0-100.
+    /// Context *pressure*, never usage — see this struct's own docs. `None`
+    /// for Pi, which reports no window size to compute it against.
+    pub context_utilization_percent: Option<f64>,
+}
+
+/// Which adapter produced a [`CostSample`]. Distinct sources may never be
+/// subtracted from one another — see [`CostSample::since`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CostSource {
+    /// Summed from the harness's own session transcript — see [`PiAdapter`].
+    Pi,
+    /// Read from Irrlicht's `metrics` object — see [`ClaudeAdapter`].
+    ClaudeCode,
+}
+
+/// What can go wrong turning a stored `tasks.cost_baseline` value back into
+/// a [`CostSample`], or subtracting one sample from another.
+#[derive(Debug, thiserror::Error)]
+pub enum CostSampleError {
+    /// [`CostSample::since`] was asked to subtract two samples from
+    /// different adapters — see that method's doc comment for why this is a
+    /// caller bug rather than a runtime condition to degrade quietly.
+    #[error("cannot subtract a {baseline:?} baseline from a {later:?} sample\n  help: {help}")]
+    MismatchedSource {
+        later: CostSource,
+        baseline: CostSource,
+        help: String,
+    },
+
+    /// `tasks.cost_baseline` held something other than what [`CostSample`]'s
+    /// own `Display` produces — a hand-edited row, or a schema this adapter
+    /// version does not know.
+    #[error("cost sample is not valid JSON: {detail}\n  help: {help}")]
+    Malformed { detail: String, help: String },
+}
+
+/// One run's own cost figures — [`CostSample::since`]'s result, and the
+/// shape `tasks.cost_model`, `cost_input_tokens`, `cost_output_tokens`,
+/// `cost_duration_ms`, and `context_utilization_percent` are written from
+/// directly.
+///
+/// Deliberately not a [`CostSample`]: a `CostSample` carries `source` and is
+/// the *cumulative-to-date* shape `tasks.cost_baseline` stores, so a value
+/// that already **is** a difference must be a different type, or
+/// `delta.since(other)` would compile and produce a meaningless second
+/// difference. `RunCost` cannot be handed to [`CostSample::since`] at all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunCost {
+    /// The later sample's own model — not diffed. A model rarely changes
+    /// mid-run, and the terminal reading is what a run that just finished
+    /// actually used.
+    pub model: Option<String>,
+    /// `later.input_tokens - baseline.input_tokens`.
+    pub input_tokens: u64,
+    /// `later.output_tokens - baseline.output_tokens`.
+    pub output_tokens: u64,
+    /// `later.duration_ms - baseline.duration_ms`, when both sides have one.
+    pub duration_ms: Option<u64>,
+    /// The later sample's own context pressure — not diffed. It is
+    /// occupancy right now (ADR 0021 decision 7), never a cumulative
+    /// counter, so subtracting it would produce a number with no meaning at
+    /// all.
+    pub context_utilization_percent: Option<f64>,
+}
+
+impl CostSample {
+    /// The run's own figures: `self` (the later sample) minus `baseline`
+    /// (typically `tasks.cost_baseline`, taken at delivery). ADR 0021
+    /// decision 6: a cumulative source can only answer "what did *this run*
+    /// cost" as a difference between two samples, and this crate applies the
+    /// same "sample now, sample later, subtract" rule to Pi's per-message
+    /// sums too, so the rule has one home rather than two.
+    ///
+    /// `Err` is a caller bug: `baseline` was taken by a different adapter
+    /// than `self` (see [`CostSampleError::MismatchedSource`]) — a run's
+    /// baseline and terminal samples must come from the one adapter that
+    /// started it.
+    ///
+    /// `Ok(None)` is a real operating condition, not a bug: `self` reports
+    /// fewer tokens than `baseline`. That happens when a Claude Code session
+    /// compacts, or a Pi transcript is rotated, between the two samples.
+    /// Clamping to zero was considered and rejected: it would assert "this
+    /// run used zero tokens," a lie of the same shape ADR 0021 decision 7
+    /// already forbids for `total_tokens`. So this reports "no reliable run
+    /// figure" — the same shape every other `None` this trait returns
+    /// already means — rather than inventing a number. The caller still
+    /// holds `self`, so the run's own context-pressure reading is not lost
+    /// even when the token delta is; that is on the caller to read from
+    /// `self` directly, not something this method needs to preserve.
+    pub fn since(&self, baseline: &CostSample) -> Result<Option<RunCost>, CostSampleError> {
+        if self.source != baseline.source {
+            return Err(CostSampleError::MismatchedSource {
+                later: self.source,
+                baseline: baseline.source,
+                help: "a run's baseline and terminal cost samples must come from the same \
+                       adapter"
+                    .to_string(),
+            });
+        }
+
+        let (Some(input_tokens), Some(output_tokens)) = (
+            self.input_tokens.checked_sub(baseline.input_tokens),
+            self.output_tokens.checked_sub(baseline.output_tokens),
+        ) else {
+            return Ok(None);
+        };
+
+        // Duration is independently nullable throughout this type, so a
+        // duration that cannot be subtracted (missing on either side, or it
+        // would itself go negative) degrades to `None` for that one field
+        // rather than discarding token counts that are still trustworthy.
+        let duration_ms = match (self.duration_ms, baseline.duration_ms) {
+            (Some(later), Some(earlier)) => later.checked_sub(earlier),
+            _ => None,
+        };
+
+        Ok(Some(RunCost {
+            model: self.model.clone(),
+            input_tokens,
+            output_tokens,
+            duration_ms,
+            context_utilization_percent: self.context_utilization_percent,
+        }))
+    }
+}
+
+impl std::fmt::Display for CostSample {
+    /// Renders as JSON. This is Factory's own on-disk shape for
+    /// `tasks.cost_baseline` (TEXT), not a wire contract with Pi or
+    /// Irrlicht, so JSON is simply the least code to write: the struct
+    /// already derives `Serialize`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let json = serde_json::to_string(self).map_err(|_| std::fmt::Error)?;
+        f.write_str(&json)
+    }
+}
+
+impl std::str::FromStr for CostSample {
+    type Err = CostSampleError;
+
+    /// Parses a `tasks.cost_baseline` value back into a sample so it can be
+    /// subtracted from a later one — the whole reason that column exists
+    /// (ADR 0021 decision 6: a difference held only in memory does not
+    /// survive the daemon restart this project drills for).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(s).map_err(|source| CostSampleError::Malformed {
+            detail: source.to_string(),
+            help: "tasks.cost_baseline holds what CostSample's own Display produces; if this \
+                   came from anywhere else, that is the bug"
+                .to_string(),
+        })
+    }
+}
+
 /// What every harness adapter provides — design §3's adapter boundary in
 /// full.
 pub trait Adapter {
@@ -213,6 +442,27 @@ pub trait Adapter {
     /// The harness runtime's version, recorded with each session so that later
     /// behaviour changes are attributable.
     fn runtime_version(&self) -> Result<String, AdapterError>;
+
+    /// A point-in-time cost sample for `pane`, or `None` when the harness
+    /// reports nothing usable right now — see [`CostSample`] for the shape
+    /// and why `None` is the ordinary answer, not the edge.
+    ///
+    /// # No default, deliberately
+    ///
+    /// A `Ok(None)` default would let every implementor that simply forgot
+    /// this method report "no cost data" as if that were an answer, and one
+    /// implementor in this workspace makes that concrete: `ArcAdapter` in
+    /// `factory-daemon`'s `delivery_journal_order` suite is a forwarding
+    /// wrapper that delegates all seven other methods. Under a default it
+    /// would answer `None` while the adapter it wraps had real figures, and
+    /// nothing would fail. That is ADR 0017's own rule with a different
+    /// subject: a wrong observation is worse than none, because it looks like
+    /// an answer.
+    ///
+    /// Every other method on this trait is required, so this one is too. An
+    /// adapter whose harness reports nothing writes `Ok(None)` and says so in
+    /// one line, which is a statement rather than an omission.
+    fn cost_sample(&self, pane: &PaneId) -> Result<Option<CostSample>, AdapterError>;
 }
 
 /// The Herdr commands the Pi adapter needs, behind a trait so tests can supply
@@ -690,6 +940,90 @@ fn parse_created_pane(raw: &str) -> Result<PaneId, AdapterError> {
         .ok_or_else(|| unreadable("missing `result.root_pane.pane_id`"))
 }
 
+/// Sums every per-message `usage` record in a Pi transcript already read
+/// into memory. Pure, so tests supply fixed JSONL text instead of a real
+/// file — the disk read itself lives in [`PiAdapter::cost_sample`], the one
+/// part a test cannot exercise without a real file, mirroring this crate's
+/// own `HerdrCli` split (see this module's docs on the pure argv builders).
+///
+/// ADR 0021 decision 6: the Pi source is per-message, unlike Claude Code's
+/// cumulative session totals, but this function sums the *whole transcript
+/// to date* rather than a caller-supplied window — the same "sample now,
+/// sample later, subtract" rule this crate applies to the Claude Code source
+/// applies here too, so [`CostSample::since`] is the one place that rule
+/// lives, not two.
+///
+/// Only `usage.input` and `usage.output` are summed. `usage.cacheRead`,
+/// `usage.cacheWrite`, and `usage.reasoning` are read nowhere: folding them
+/// into `input_tokens`/`output_tokens` would make those two columns mean
+/// "input and output, plus Pi's cache and reasoning tokens" for Pi and
+/// "input and output, nothing else" for Claude Code (whose
+/// `cum_input_tokens`/`cum_output_tokens` carry no such extras) — one column
+/// meaning two different things depending on which adapter wrote it, ADR
+/// 0021 decision 8's defect worn as token composition instead of currency.
+/// `usage.totalTokens` is dropped for the same reason `total_tokens` is
+/// dropped on the Claude Code side (decision 7): it is not `input + output`,
+/// so it is not a token count this crate trusts.
+///
+/// Returns `None`, not a zeroed sample, when the transcript carries no
+/// `message.usage` record at all — ADR 0021 decision 6's "remains valid when
+/// the adapter reports none of them" is the ordinary case, not the edge.
+fn sum_pi_transcript_usage(jsonl: &str) -> Option<CostSample> {
+    let mut input_tokens: u64 = 0;
+    let mut output_tokens: u64 = 0;
+    let mut model: Option<String> = None;
+    let mut seen_any = false;
+
+    for line in jsonl.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // One unparseable line does not invalidate the rest of an
+        // append-only transcript — Pi may still be mid-write to the last
+        // line when this is read. Skipped, not fatal.
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(message) = record.get("message") else {
+            continue;
+        };
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+
+        input_tokens += usage.get("input").and_then(Value::as_u64).unwrap_or(0);
+        output_tokens += usage.get("output").and_then(Value::as_u64).unwrap_or(0);
+        seen_any = true;
+
+        // The most recently seen model wins — a session's model can change
+        // mid-transcript, and the terminal reading is what a run that ended
+        // just now actually used, mirroring `RunCost::model`'s own rule.
+        if let Some(name) = message.get("model").and_then(Value::as_str) {
+            model = Some(name.to_string());
+        }
+    }
+
+    if !seen_any {
+        return None;
+    }
+
+    Some(CostSample {
+        source: CostSource::Pi,
+        model,
+        input_tokens,
+        output_tokens,
+        // Pi's transcript carries no duration or context-window field (this
+        // crate's module docs' "measured facts") — both stay `None` rather
+        // than a fabricated value.
+        duration_ms: None,
+        context_utilization_percent: None,
+    })
+}
+
 impl<A: HerdrAccess> Adapter for PiAdapter<A> {
     fn start(&self, req: &StartRequest) -> Result<StartedSession, AdapterError> {
         let created = self.herdr.workspace_create(req.workspace.as_path())?;
@@ -853,6 +1187,30 @@ impl<A: HerdrAccess> Adapter for PiAdapter<A> {
 
     fn runtime_version(&self) -> Result<String, AdapterError> {
         self.herdr.version().map(|raw| raw.trim().to_string())
+    }
+
+    fn cost_sample(&self, pane: &PaneId) -> Result<Option<CostSample>, AdapterError> {
+        // Reuse `observe`'s own transcript-path resolution rather than
+        // re-deriving it — the same reasoning `start` already uses for
+        // reusing `observe`'s hook-authority parsing.
+        let observed = self.observe(pane)?;
+        let Some(transcript_path) = observed.transcript_path else {
+            // No transcript at all: Herdr unreachable, pane unknown, or a
+            // live reading with no `agent_session.value`. ADR 0021 decision
+            // 6: `None` is the ordinary answer here, not the edge.
+            return Ok(None);
+        };
+
+        let jsonl = std::fs::read_to_string(&transcript_path).map_err(|source| {
+            AdapterError::UnreadableOutput {
+                command: format!("read {}", transcript_path.display()),
+                detail: source.to_string(),
+                help: "confirm the Pi transcript Herdr reported still exists and is readable"
+                    .to_string(),
+            }
+        })?;
+
+        Ok(sum_pi_transcript_usage(&jsonl))
     }
 }
 
@@ -1169,6 +1527,28 @@ mod tests {
 
     fn pi_explain() -> String {
         fixture("agent-explain-pi-authoritative.txt")
+    }
+
+    /// One `{"type":"message", ...}` transcript line shaped exactly like
+    /// this crate's module docs' "measured facts" for Pi, `cacheRead`/
+    /// `cacheWrite`/`reasoning`/`totalTokens` included so tests can prove
+    /// they are read nowhere.
+    fn pi_message_line(input: u64, output: u64, model: &str) -> String {
+        serde_json::json!({
+            "type": "message",
+            "message": {
+                "usage": {
+                    "input": input,
+                    "output": output,
+                    "cacheRead": 1_408,
+                    "cacheWrite": 0,
+                    "reasoning": 0,
+                    "totalTokens": input + output + 1_408
+                },
+                "model": model
+            }
+        })
+        .to_string()
     }
 
     /// Builds a fresh `agent get` payload for a `pi` pane with `agent_status`
@@ -2024,5 +2404,398 @@ mod tests {
             1,
             "a non-transient failure must not be retried at all"
         );
+    }
+
+    // --- cost_sample: Pi (design §12.6, ADR 0021 decisions 6-8) -----------
+
+    // 1. A Pi transcript with three messages sums to the right totals.
+    #[test]
+    fn sum_pi_transcript_usage_sums_three_messages() {
+        let jsonl = [
+            pi_message_line(100, 50, "gpt-6-astra"),
+            pi_message_line(200, 75, "gpt-6-astra"),
+            pi_message_line(10, 5, "gpt-6-astra"),
+        ]
+        .join("\n");
+
+        let sample =
+            sum_pi_transcript_usage(&jsonl).expect("three usage records must sum, not None");
+        assert_eq!(sample.source, CostSource::Pi);
+        assert_eq!(sample.input_tokens, 310);
+        assert_eq!(sample.output_tokens, 130);
+        assert_eq!(sample.model.as_deref(), Some("gpt-6-astra"));
+        assert!(
+            sample.duration_ms.is_none(),
+            "Pi's transcript carries no duration field"
+        );
+        assert!(
+            sample.context_utilization_percent.is_none(),
+            "Pi's transcript carries no context-window field"
+        );
+    }
+
+    // 2. A Pi transcript with no usage records at all yields None, not
+    //    zeros.
+    #[test]
+    fn sum_pi_transcript_usage_with_no_usage_records_is_none_not_zeros() {
+        let jsonl = [
+            r#"{"type":"tool_call","tool":"bash"}"#,
+            r#"{"type":"message","message":{"model":"gpt-6-astra"}}"#,
+        ]
+        .join("\n");
+
+        assert_eq!(sum_pi_transcript_usage(&jsonl), None);
+    }
+
+    // ADR 0021 decision 7's defect in Pi's own vocabulary: `usage.totalTokens`
+    // is not `input + output` for one message (it also folds in cache and
+    // reasoning tokens), so it — and cacheRead/cacheWrite/reasoning
+    // themselves — must never contribute to `input_tokens`/`output_tokens`.
+    #[test]
+    fn sum_pi_transcript_usage_never_reads_total_tokens_cache_or_reasoning() {
+        let line = serde_json::json!({
+            "type": "message",
+            "message": {
+                "usage": {
+                    "input": 10,
+                    "output": 5,
+                    "cacheRead": 5_000,
+                    "cacheWrite": 5_000,
+                    "reasoning": 5_000,
+                    "totalTokens": 999_999
+                },
+                "model": "gpt-6-astra"
+            }
+        })
+        .to_string();
+
+        let sample = sum_pi_transcript_usage(&line).expect("one usage record must sum, not None");
+        assert_eq!(sample.input_tokens, 10, "must come from usage.input alone");
+        assert_eq!(sample.output_tokens, 5, "must come from usage.output alone");
+    }
+
+    #[test]
+    fn pi_cost_sample_reads_the_transcript_herdr_reported_and_sums_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transcript = dir.path().join("session.jsonl");
+        std::fs::write(
+            &transcript,
+            [
+                pi_message_line(100, 50, "gpt-6-astra"),
+                pi_message_line(20, 10, "gpt-6-astra"),
+            ]
+            .join("\n"),
+        )
+        .expect("write fixture transcript");
+
+        let mut value: Value = serde_json::from_str(&pi_get()).expect("fixture is valid JSON");
+        value["result"]["agent"]["agent_session"]["value"] =
+            Value::String(transcript.to_string_lossy().into_owned());
+        let get_body = value.to_string();
+
+        let herdr = FakeHerdr::new(always(get_body), always(pi_explain()));
+        let adapter = PiAdapter::new(herdr);
+
+        let sample = adapter
+            .cost_sample(&PaneId("wE:p1".to_string()))
+            .expect("a readable transcript must produce a sample")
+            .expect("a transcript with usage records must not be None");
+
+        assert_eq!(sample.source, CostSource::Pi);
+        assert_eq!(sample.input_tokens, 120);
+        assert_eq!(sample.output_tokens, 60);
+        assert_eq!(sample.model.as_deref(), Some("gpt-6-astra"));
+    }
+
+    #[test]
+    fn pi_cost_sample_is_none_when_agent_get_reports_no_transcript() {
+        let mut value: Value = serde_json::from_str(&pi_get()).expect("fixture is valid JSON");
+        value["result"]["agent"]["agent_session"] = Value::Null;
+        let get_body = value.to_string();
+
+        let herdr = FakeHerdr::new(always(get_body), always(pi_explain()));
+        let adapter = PiAdapter::new(herdr);
+
+        let sample = adapter
+            .cost_sample(&PaneId("wE:p1".to_string()))
+            .expect("a missing transcript path must not error");
+        assert!(sample.is_none());
+    }
+
+    // --- CostSample::since (ADR 0021 decision 6) ---------------------------
+
+    // 6. Subtracting a later sample from a baseline gives the run's own
+    //    figures.
+    #[test]
+    fn cost_sample_since_subtracts_tokens_and_duration_and_keeps_the_later_readings() {
+        let baseline = CostSample {
+            source: CostSource::ClaudeCode,
+            model: Some("claude-x".to_string()),
+            input_tokens: 1_000,
+            output_tokens: 400,
+            duration_ms: Some(5_000),
+            context_utilization_percent: Some(10.0),
+        };
+        let later = CostSample {
+            source: CostSource::ClaudeCode,
+            model: Some("claude-y".to_string()),
+            input_tokens: 1_500,
+            output_tokens: 620,
+            duration_ms: Some(47_000),
+            context_utilization_percent: Some(63.5),
+        };
+
+        let run = later
+            .since(&baseline)
+            .expect("same-source samples must not error")
+            .expect("a later sample larger than baseline must produce a run figure");
+
+        assert_eq!(run.input_tokens, 500);
+        assert_eq!(run.output_tokens, 220);
+        assert_eq!(run.duration_ms, Some(42_000));
+        assert_eq!(
+            run.model.as_deref(),
+            Some("claude-y"),
+            "the later sample's own model, not a diff"
+        );
+        assert_eq!(
+            run.context_utilization_percent,
+            Some(63.5),
+            "context pressure is the later sample's own reading, never subtracted"
+        );
+    }
+
+    #[test]
+    fn cost_sample_since_refuses_to_subtract_across_sources() {
+        let pi_sample = CostSample {
+            source: CostSource::Pi,
+            model: None,
+            input_tokens: 100,
+            output_tokens: 50,
+            duration_ms: None,
+            context_utilization_percent: None,
+        };
+        let claude_sample = CostSample {
+            source: CostSource::ClaudeCode,
+            model: None,
+            input_tokens: 200,
+            output_tokens: 90,
+            duration_ms: None,
+            context_utilization_percent: None,
+        };
+
+        let err = claude_sample
+            .since(&pi_sample)
+            .expect_err("a Claude Code sample must refuse to subtract a Pi baseline");
+        assert!(
+            matches!(err, CostSampleError::MismatchedSource { .. }),
+            "got {err:?}"
+        );
+    }
+
+    // 7. A later sample smaller than the baseline behaves the way this crate
+    //    documents: Ok(None), never a negative token count. A Claude Code
+    //    session compacting, or a Pi transcript being rotated, between the
+    //    two samples are both real ways this happens — see
+    //    `CostSample::since`'s own doc comment for why clamping to zero was
+    //    rejected instead.
+    #[test]
+    fn cost_sample_since_reports_none_rather_than_a_negative_token_count() {
+        let baseline = CostSample {
+            source: CostSource::Pi,
+            model: None,
+            input_tokens: 5_000,
+            output_tokens: 2_000,
+            duration_ms: None,
+            context_utilization_percent: None,
+        };
+        let later = CostSample {
+            source: CostSource::Pi,
+            model: None,
+            input_tokens: 100, // smaller than baseline: transcript rotated
+            output_tokens: 50,
+            duration_ms: None,
+            context_utilization_percent: None,
+        };
+
+        let run = later
+            .since(&baseline)
+            .expect("a smaller later sample is a documented condition, not an error");
+        assert_eq!(run, None);
+    }
+
+    #[test]
+    fn cost_sample_round_trips_through_its_string_form() {
+        let sample = CostSample {
+            source: CostSource::ClaudeCode,
+            model: Some("claude-x".to_string()),
+            input_tokens: 42,
+            output_tokens: 7,
+            duration_ms: Some(1_234),
+            context_utilization_percent: Some(55.5),
+        };
+
+        let text = sample.to_string();
+        let parsed: CostSample = text.parse().expect("what Display produces must parse back");
+        assert_eq!(parsed, sample, "tasks.cost_baseline round-trips exactly");
+    }
+
+    /// The actual daemon path decision 6 exists for: a baseline is written to
+    /// `tasks.cost_baseline` as text, read back after a restart, and *then*
+    /// subtracted from a later sample. The round-trip test above only proves
+    /// `to_string`/`parse` agree with each other — this proves the parsed
+    /// value is still subtractable and produces the same figures a baseline
+    /// held in memory across no restart at all would have.
+    #[test]
+    fn cost_sample_parsed_back_from_its_stored_string_is_still_subtractable() {
+        let baseline = CostSample {
+            source: CostSource::Pi,
+            model: Some("gpt-6-astra".to_string()),
+            input_tokens: 1_000,
+            output_tokens: 400,
+            duration_ms: None,
+            context_utilization_percent: None,
+        };
+        let later = CostSample {
+            source: CostSource::Pi,
+            model: Some("gpt-6-astra".to_string()),
+            input_tokens: 1_300,
+            output_tokens: 480,
+            duration_ms: None,
+            context_utilization_percent: None,
+        };
+
+        // What a fresh daemon process does with `tasks.cost_baseline`: read
+        // the TEXT column, parse it, subtract.
+        let stored = baseline.to_string();
+        let restored: CostSample = stored
+            .parse()
+            .expect("a baseline this crate wrote must parse back");
+
+        let from_memory = later
+            .since(&baseline)
+            .expect("same-source subtraction must not error");
+        let from_restart = later
+            .since(&restored)
+            .expect("subtracting a restart-restored baseline must not error");
+
+        assert_eq!(
+            from_memory, from_restart,
+            "a baseline that survived a daemon restart must produce the same run figures as \
+             one held in memory the whole time"
+        );
+    }
+
+    #[test]
+    fn cost_sample_from_str_reports_malformed_not_a_panic() {
+        let err = "not json at all {"
+            .parse::<CostSample>()
+            .expect_err("garbage must not parse as a CostSample");
+        assert!(
+            matches!(err, CostSampleError::Malformed { .. }),
+            "got {err:?}"
+        );
+    }
+
+    // Duration is independently nullable: a duration that cannot be
+    // subtracted must null out only that one field, not discard token counts
+    // that are still trustworthy.
+    #[test]
+    fn cost_sample_since_nulls_duration_alone_when_only_one_side_has_one() {
+        let baseline = CostSample {
+            source: CostSource::ClaudeCode,
+            model: None,
+            input_tokens: 100,
+            output_tokens: 40,
+            duration_ms: None,
+            context_utilization_percent: None,
+        };
+        let later = CostSample {
+            source: CostSource::ClaudeCode,
+            model: None,
+            input_tokens: 150,
+            output_tokens: 60,
+            duration_ms: Some(9_000),
+            context_utilization_percent: None,
+        };
+
+        let run = later
+            .since(&baseline)
+            .expect("same-source subtraction must not error")
+            .expect("larger token counts must still produce a run figure");
+        assert_eq!(run.input_tokens, 50);
+        assert_eq!(run.output_tokens, 20);
+        assert_eq!(
+            run.duration_ms, None,
+            "a duration missing on one side must null out only that field"
+        );
+    }
+
+    // The skip-unparseable-line branch this crate's docs describe ("Pi may
+    // still be mid-write to the last line when this is read") — a truncated
+    // final line must not stop the earlier, complete messages from summing.
+    #[test]
+    fn sum_pi_transcript_usage_skips_a_truncated_trailing_line() {
+        let jsonl = format!(
+            "{}\n{}\n{}",
+            pi_message_line(100, 50, "gpt-6-astra"),
+            pi_message_line(20, 10, "gpt-6-astra"),
+            r#"{"type":"message","message":{"usage":{"input":5,"#, // truncated mid-write
+        );
+
+        let sample =
+            sum_pi_transcript_usage(&jsonl).expect("the two complete messages must still sum");
+        assert_eq!(sample.input_tokens, 120);
+        assert_eq!(sample.output_tokens, 60);
+    }
+
+    /// An `Adapter` for a harness that reports no cost data at all, which
+    /// `opencode` really is: Irrlicht carries `metrics: null` for it.
+    ///
+    /// It answers `Ok(None)`, and it *writes that down*. There is no default
+    /// on the trait, so this arm cannot be inherited by forgetting it — the
+    /// compiler refuses. That guarantee is what this double stands for, and
+    /// it cannot be asserted at run time: deleting the arm below is a
+    /// compile error, not a failing test.
+    struct MinimalAdapter;
+
+    impl Adapter for MinimalAdapter {
+        fn start(&self, _req: &StartRequest) -> Result<StartedSession, AdapterError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn send(
+            &self,
+            _pane: &PaneId,
+            _task_id: uuid::Uuid,
+            _prompt: &str,
+        ) -> Result<(), AdapterError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn observe(&self, _pane: &PaneId) -> Result<Observation, AdapterError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn interrupt(&self, _pane: &PaneId) -> Result<(), AdapterError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn stop(&self, _pane: &PaneId) -> Result<(), AdapterError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn attach_command(&self, _pane: &PaneId) -> Result<Vec<String>, AdapterError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn runtime_version(&self) -> Result<String, AdapterError> {
+            unimplemented!("not exercised by this test")
+        }
+        fn cost_sample(&self, _pane: &PaneId) -> Result<Option<CostSample>, AdapterError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn an_adapter_whose_harness_reports_nothing_answers_none_rather_than_zeros() {
+        let sample = MinimalAdapter
+            .cost_sample(&PaneId("wE:p1".to_string()))
+            .expect("the default implementation must not error");
+        assert_eq!(sample, None);
     }
 }

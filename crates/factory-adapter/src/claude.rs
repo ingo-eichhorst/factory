@@ -85,6 +85,29 @@
 //! to answer, via [`claude_busy_status`]. [`ClaudeAdapter::observe`] itself
 //! still never touches Herdr at all — see
 //! [`tests::observe_never_touches_herdr_agent_get_or_explain`].
+//!
+//! # Cost samples share `observe`'s Irrlicht lookup, and never read `total_tokens`
+//!
+//! [`ClaudeAdapter::cost_sample`] answers design §12.6's model identifier,
+//! token counts, and duration from the same `metrics` object `observe`
+//! ignores entirely — Herdr reports none of it (this crate's own module
+//! docs: Irrlicht "remains the source of metrics ... Herdr does not
+//! report"). It shares `observe`'s pane lookup through [`find_claude_agent`]
+//! rather than re-deriving it, exactly the same reasoning this module's
+//! second section already gives for reusing `PiAdapter`'s helpers.
+//!
+//! It reads only `metrics.cum_input_tokens` and `metrics.cum_output_tokens`,
+//! never `metrics.total_tokens` — ADR 0021 decision 7, measured across all 8
+//! live sessions carrying the three fields, with no exceptions:
+//! `total_tokens == context_window × context_utilization_percentage / 100`.
+//! It is context occupancy, not a token count, and it falls when a session
+//! compacts; storing it in a field documented as "tokens this run used"
+//! would be a number of the right type in the wrong field. `metrics: null`
+//! — every `opencode` session, and two of four live Pi sessions when ADR
+//! 0021 measured this — yields `Ok(None)`, the ordinary case rather than the
+//! edge. See [`crate::CostSample`] for the full shape and
+//! [`crate::CostSample::since`] for how a cumulative sample like this one
+//! becomes one run's own figures.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -92,9 +115,9 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::{
-    Adapter, AdapterError, Confidence, HerdrAccess, Observation, PaneId, StartRequest,
-    StartedSession, TaskSignal, agent_name_for, attach_argv, is_transient_pane_not_ready,
-    parse_created_pane, unavailable_observation, unreadable_agent_get,
+    Adapter, AdapterError, Confidence, CostSample, CostSource, HerdrAccess, Observation, PaneId,
+    StartRequest, StartedSession, TaskSignal, agent_name_for, attach_argv,
+    is_transient_pane_not_ready, parse_created_pane, unavailable_observation, unreadable_agent_get,
 };
 
 /// Herdr's own name for what runs in a Claude pane — the value `herdr agent
@@ -267,6 +290,57 @@ fn unreadable_sessions(detail: impl Into<String>) -> AdapterError {
     }
 }
 
+/// `GET /api/v1/sessions` → parsed `groups` → the one agent whose
+/// `launcher.herdr_pane_id` matches `pane` and whose `adapter` is
+/// `claude-code`, or `None` when Irrlicht has no usable answer about this
+/// exact pane: unreachable, no session at that pane at all, or a session at
+/// that pane belonging to a different harness. `Err` only for schema drift —
+/// malformed JSON or a missing `groups` array.
+///
+/// [`ClaudeAdapter::observe`] and [`ClaudeAdapter::cost_sample`] both need
+/// exactly this lookup, and this crate has already paid three times for a
+/// rule with two homes drifting (this module's own docs, ADR 0011, ADR
+/// 0017) — so it has one home here instead of being re-derived in each
+/// method. Returns an owned [`Value`] rather than a borrow, because the
+/// parsed payload it is found in does not outlive this function.
+fn find_claude_agent<I: IrrlichtAccess>(
+    irrlicht: &I,
+    pane: &PaneId,
+) -> Result<Option<Value>, AdapterError> {
+    // "Irrlicht could not answer at all" — stopped, unreachable — is not an
+    // adapter failure, exactly as a stopped Herdr is not one for Pi (ADR
+    // 0011 decision 3: Factory degrades to manual confirmation without it).
+    let raw = match irrlicht.sessions() {
+        Ok(raw) => raw,
+        Err(_) => return Ok(None),
+    };
+
+    let payload: Value =
+        serde_json::from_str(&raw).map_err(|source| unreadable_sessions(source.to_string()))?;
+    let groups = payload
+        .get("groups")
+        .and_then(Value::as_array)
+        .ok_or_else(|| unreadable_sessions("missing `groups` array"))?;
+
+    let Some(agent) = find_by_pane(groups, &pane.0) else {
+        // Irrlicht answered, but has no session for this pane at all.
+        return Ok(None);
+    };
+
+    let adapter_kind = agent.get("adapter").and_then(Value::as_str).unwrap_or("");
+    if adapter_kind != CLAUDE_CODE_IRRLICHT_ADAPTER {
+        // Irrlicht says this exact pane belongs to a *different* harness
+        // than the one Factory recorded for this session — "no usable
+        // answer about the Claude session we asked about" (this crate's
+        // module docs: a wrong observation is worse than none), not
+        // `AdapterError::WrongHarness` — that variant's own message is
+        // written for Pi's vocabulary and is not this module's to reword.
+        return Ok(None);
+    }
+
+    Ok(Some(agent.clone()))
+}
+
 /// Reads `result.agent.agent_status` from `herdr agent get <pane>`'s JSON —
 /// the one field [`ClaudeAdapter::send`]'s busy precheck needs. Standalone
 /// rather than folded into `observe`: `observe` for Claude never touches
@@ -367,42 +441,15 @@ impl<H: HerdrAccess, I: IrrlichtAccess> Adapter for ClaudeAdapter<H, I> {
     }
 
     fn observe(&self, pane: &PaneId) -> Result<Observation, AdapterError> {
-        // "Irrlicht could not answer at all" — stopped, unreachable — is not
-        // an adapter failure, exactly as a stopped Herdr is not one for Pi
-        // (ADR 0011 decision 3: Factory degrades to manual confirmation
-        // without it).
-        let raw = match self.irrlicht.sessions() {
-            Ok(raw) => raw,
-            Err(_) => return Ok(unavailable_observation(pane)),
-        };
-
-        let payload: Value =
-            serde_json::from_str(&raw).map_err(|source| unreadable_sessions(source.to_string()))?;
-        let groups = payload
-            .get("groups")
-            .and_then(Value::as_array)
-            .ok_or_else(|| unreadable_sessions("missing `groups` array"))?;
-
-        let Some(agent) = find_by_pane(groups, &pane.0) else {
-            // Irrlicht answered, but has no session for this pane at all —
-            // `unavailable_observation`'s documented case ("Herdr could not
-            // answer at all", restated here for Irrlicht). A different
-            // failure mode from the "wrong harness" branch just below,
-            // which does find a matching pane.
+        // See `find_claude_agent`'s own doc comment for the full branch
+        // list this collapses onto `unavailable_observation` — unreachable
+        // Irrlicht, no session at this pane, or a session at this pane that
+        // belongs to a different harness. `unavailable_observation`'s
+        // documented case ("Herdr could not answer at all") restated here
+        // for Irrlicht.
+        let Some(agent) = find_claude_agent(&self.irrlicht, pane)? else {
             return Ok(unavailable_observation(pane));
         };
-
-        let adapter_kind = agent.get("adapter").and_then(Value::as_str).unwrap_or("");
-        if adapter_kind != CLAUDE_CODE_IRRLICHT_ADAPTER {
-            // Irrlicht says this exact pane belongs to a *different* harness
-            // than the one Factory recorded for this session. That is "no
-            // usable answer about the Claude session we asked about" (this
-            // crate's module docs: a wrong observation is worse than none),
-            // not `AdapterError::WrongHarness` — that variant's own message
-            // is written for Pi's `agent`/`pi` vocabulary and is not this
-            // module's to reword.
-            return Ok(unavailable_observation(pane));
-        }
 
         let state = agent
             .get("state")
@@ -482,6 +529,61 @@ impl<H: HerdrAccess, I: IrrlichtAccess> Adapter for ClaudeAdapter<H, I> {
 
     fn runtime_version(&self) -> Result<String, AdapterError> {
         self.herdr.version().map(|raw| raw.trim().to_string())
+    }
+
+    fn cost_sample(&self, pane: &PaneId) -> Result<Option<CostSample>, AdapterError> {
+        // Same lookup `observe` uses — see `find_claude_agent`'s doc
+        // comment. `None` here already covers everything `observe` degrades
+        // to `Confidence::Unavailable` for; there is no equivalent
+        // "unavailable cost sample" to construct, `None` already is it.
+        let Some(agent) = find_claude_agent(&self.irrlicht, pane)? else {
+            return Ok(None);
+        };
+
+        let Some(metrics) = agent.get("metrics").filter(|m| !m.is_null()) else {
+            // `metrics: null` — `opencode` sessions report exactly this, and
+            // two of four live Pi sessions reported no metrics at all when
+            // ADR 0021 measured this. `None` is the ordinary case, not the
+            // edge.
+            return Ok(None);
+        };
+
+        let (Some(input_tokens), Some(output_tokens)) = (
+            metrics.get("cum_input_tokens").and_then(Value::as_u64),
+            metrics.get("cum_output_tokens").and_then(Value::as_u64),
+        ) else {
+            // The cumulative counters are the only tokens this crate trusts
+            // (see `total_tokens` below); without both there is nothing to
+            // sum, whatever else `metrics` carries.
+            return Ok(None);
+        };
+
+        Ok(Some(CostSample {
+            source: CostSource::ClaudeCode,
+            model: metrics
+                .get("model_name")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            input_tokens,
+            output_tokens,
+            // `elapsed_seconds` is the only duration Irrlicht reports;
+            // converted to milliseconds to match `tasks.cost_duration_ms`'s
+            // unit.
+            duration_ms: metrics
+                .get("elapsed_seconds")
+                .and_then(Value::as_u64)
+                .map(|secs| secs.saturating_mul(1000)),
+            // ADR 0021 decision 7, measured across all 8 live sessions
+            // carrying the three fields with no exceptions: `total_tokens ==
+            // context_window × context_utilization_percentage / 100`. It is
+            // context occupancy, not usage, and it is read nowhere above
+            // this line — only `context_utilization_percentage`, the figure
+            // that measurement was actually about, lands here, under its
+            // own name.
+            context_utilization_percent: metrics
+                .get("context_utilization_percentage")
+                .and_then(Value::as_f64),
+        }))
     }
 }
 
@@ -1335,5 +1437,126 @@ mod tests {
             adapter.runtime_version().expect("version must be readable"),
             "herdr 0.8.0"
         );
+    }
+
+    // --- cost_sample (design §12.6, ADR 0021 decisions 6-8) ---------------
+
+    // A free complement to the explicit `metrics: null` test below: the real
+    // capture carries no `metrics` key at all, so `None` covers both "the
+    // key is absent" and "the key is present and null".
+    #[test]
+    fn cost_sample_on_the_real_fixture_is_none_metrics_key_absent() {
+        let herdr = FakeHerdr::new();
+        let irrlicht = FakeIrrlicht::always(sessions_fixture());
+        let adapter = ClaudeAdapter::new(herdr, irrlicht);
+
+        let sample = adapter
+            .cost_sample(&PaneId("wE:p2".to_string()))
+            .expect("an absent `metrics` key must not error");
+        assert!(sample.is_none());
+    }
+
+    // 3. An Irrlicht payload with `metrics: null` yields None.
+    #[test]
+    fn cost_sample_is_none_when_metrics_is_explicitly_null() {
+        // `opencode` sessions report exactly this shape (ADR 0021 decision
+        // 6).
+        let mut value: Value =
+            serde_json::from_str(&sessions_fixture()).expect("fixture is valid json");
+        value["groups"][1]["agents"][1]["metrics"] = Value::Null;
+        assert_eq!(
+            value["groups"][1]["agents"][1]["launcher"]["herdr_pane_id"],
+            "wE:p2"
+        );
+
+        let herdr = FakeHerdr::new();
+        let irrlicht = FakeIrrlicht::always(value.to_string());
+        let adapter = ClaudeAdapter::new(herdr, irrlicht);
+
+        let sample = adapter
+            .cost_sample(&PaneId("wE:p2".to_string()))
+            .expect("`metrics: null` must not error");
+        assert!(sample.is_none());
+    }
+
+    // 4. An Irrlicht payload whose pane is absent yields the same "not
+    //    found" outcome the existing code uses (observe()'s
+    //    Confidence::Unavailable), not an error.
+    #[test]
+    fn cost_sample_pane_absent_from_irrlicht_is_none_not_an_error() {
+        let herdr = FakeHerdr::new();
+        let irrlicht = FakeIrrlicht::always(sessions_fixture());
+        let adapter = ClaudeAdapter::new(herdr, irrlicht);
+
+        let sample = adapter
+            .cost_sample(&PaneId("zz:p9".to_string()))
+            .expect("a pane Irrlicht has never heard of must not error");
+        assert!(
+            sample.is_none(),
+            "the same 'not found' outcome observe() reports as Confidence::Unavailable"
+        );
+    }
+
+    // 5. total_tokens never appears in a token count -- the test that
+    //    catches ADR 0021 decision 7 being undone. `total_tokens` is set far
+    //    from `cum_input_tokens + cum_output_tokens`, and
+    //    `context_utilization_percentage` is set inconsistently with
+    //    `total_tokens / context_window` too, so neither field can leak in
+    //    through a derivation instead of a direct read.
+    #[test]
+    fn cost_sample_never_reads_total_tokens_as_a_token_count() {
+        let mut value: Value =
+            serde_json::from_str(&sessions_fixture()).expect("fixture is valid json");
+        value["groups"][1]["agents"][1]["metrics"] = serde_json::json!({
+            "model_name": "claude-opus-5",
+            "cum_input_tokens": 111,
+            "cum_output_tokens": 222,
+            "elapsed_seconds": 90,
+            "context_window": 200_000,
+            // Deliberately inconsistent with cum_input_tokens +
+            // cum_output_tokens (333) and with context_utilization_percentage
+            // below -- if either field were derived from this number instead
+            // of read directly, an assertion below goes wrong, not red.
+            "total_tokens": 190_000,
+            "context_utilization_percentage": 17.5
+        });
+        assert_eq!(
+            value["groups"][1]["agents"][1]["launcher"]["herdr_pane_id"],
+            "wE:p2"
+        );
+
+        let herdr = FakeHerdr::new();
+        let irrlicht = FakeIrrlicht::always(value.to_string());
+        let adapter = ClaudeAdapter::new(herdr, irrlicht);
+
+        let sample = adapter
+            .cost_sample(&PaneId("wE:p2".to_string()))
+            .expect("a real-shaped metrics object must not error")
+            .expect("cum_input_tokens/cum_output_tokens are present, so this must be Some");
+
+        assert_eq!(sample.input_tokens, 111, "must come from cum_input_tokens");
+        assert_eq!(
+            sample.output_tokens, 222,
+            "must come from cum_output_tokens"
+        );
+        assert_eq!(sample.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(sample.duration_ms, Some(90_000));
+        assert_eq!(
+            sample.context_utilization_percent,
+            Some(17.5),
+            "must come from context_utilization_percentage directly, never derived from \
+             total_tokens / context_window"
+        );
+    }
+
+    #[test]
+    fn cost_sample_never_touches_herdr() {
+        let herdr = FakeHerdr::new(); // every method defaults to unreachable!()
+        let irrlicht = FakeIrrlicht::always(sessions_fixture());
+        let adapter = ClaudeAdapter::new(herdr, irrlicht);
+
+        adapter
+            .cost_sample(&PaneId("wE:p2".to_string()))
+            .expect("cost_sample must succeed using only Irrlicht");
     }
 }

@@ -116,6 +116,17 @@ impl Adapter for SignalOnObserve {
     fn runtime_version(&self) -> Result<String, AdapterError> {
         Ok("signal-on-observe-1.0".to_string())
     }
+
+    /// This double reports no cost data. Stated rather than omitted: the
+    /// trait has no default, so an implementor cannot answer `None` by
+    /// forgetting the method. ADR 0021 decision 6 makes `None` a valid
+    /// answer, and it is this fake's real one.
+    fn cost_sample(
+        &self,
+        _pane: &PaneId,
+    ) -> Result<Option<factory_adapter::CostSample>, AdapterError> {
+        Ok(None)
+    }
 }
 
 /// Runs `join` on a helper thread and reports back over a channel, so the

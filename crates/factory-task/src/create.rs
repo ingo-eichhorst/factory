@@ -11,6 +11,7 @@
 
 use rusqlite::OptionalExtension;
 
+use crate::events::EventType;
 use crate::{BlockedReason, TaskError, TaskStatus, is_valid_transition, valid_targets};
 
 /// One `tasks` row, as read back by [`list`] and [`show`].
@@ -50,11 +51,23 @@ pub struct Task {
     pub result_artifact_paths: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// The template this run executed, if any — `None` for a task queued
+    /// directly (design §11's "extension of the existing `Task` primitive").
+    /// See [`create_from_template`] for how this is set and
+    /// [`Task::template_version`] for the field it is always paired with.
+    pub template_id: Option<uuid::Uuid>,
+    /// The template's `version` at the moment this run was created, frozen
+    /// from then on — ADR 0021 decision 2. `Some` exactly when
+    /// [`Task::template_id`] is `Some`; both are set together by
+    /// [`create_from_template`] and never touched again by anything in this
+    /// crate.
+    pub template_version: Option<i64>,
 }
 
 const TASK_COLUMNS: &str = "id, sender_scope_id, target_scope_id, target_session_id, \
      target_workspace_path, assigned_session_id, prompt, status, blocked_reason, \
-     cancel_requested_at, result_summary, result_artifact_paths, created_at, updated_at";
+     cancel_requested_at, result_summary, result_artifact_paths, created_at, updated_at, \
+     template_id, template_version";
 
 /// `tasks.id`, `.sender_scope_id`, `.target_scope_id`, `.target_session_id`,
 /// and `.assigned_session_id` are all UUIDs this crate — or `factory-session`
@@ -81,6 +94,8 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     let result_artifact_paths: Option<String> = row.get(11)?;
     let created_at: String = row.get(12)?;
     let updated_at: String = row.get(13)?;
+    let template_id: Option<String> = row.get(14)?;
+    let template_version: Option<i64> = row.get(15)?;
 
     Ok(Task {
         id: parse_uuid("id", &id),
@@ -103,15 +118,16 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         result_artifact_paths,
         created_at,
         updated_at,
+        template_id: template_id.as_deref().map(|s| parse_uuid("template_id", s)),
+        template_version,
     })
 }
 
-/// Commit `queued` in its own transaction and return the id it was written
-/// under.
-///
-/// Design §5 step 1: the row is durable *before* anything is entered into a
-/// terminal. This function is the entirety of that step — it does not choose
-/// a session and does not touch a harness or an adapter.
+/// Write the `queued` row and its delegation chain against an
+/// already-open transaction. The one INSERT this crate ever issues against
+/// `tasks` to create a run — [`create`] and [`create_from_template`] are
+/// both a `Store::transaction` plus whatever each needs to decide
+/// `template_id` / `template_version`, then this.
 ///
 /// `delegation_chain` is written in the *same* transaction as the task row.
 /// A task whose chain were committed separately could be read back, after a
@@ -121,7 +137,73 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 /// after a restart rather than only detectable while running." This function
 /// stores the chain it is given and judges none of it; deciding *what* the
 /// chain is, and whether the target may be appended to it at all, belongs to
-/// `factory_delegation`, which calls this.
+/// `factory_delegation`, which calls in through [`create`].
+///
+/// Takes `&rusqlite::Transaction` rather than `&mut Store`: [`create_from_template`]
+/// needs to read `task_templates.version` and write the row it freezes that
+/// value into inside one transaction (ADR 0021 decision 2 — see that
+/// function's doc comment), so the transaction has to be open before this is
+/// called, not inside it.
+///
+/// Writes the run's `created` event (`crate`'s station-11 decision 3) in the
+/// same transaction as the INSERT above — the one home for "a task was
+/// created" is here, since this is the one INSERT this crate ever issues for
+/// a run, and both [`create`] and [`create_from_template`] reach it through
+/// this function. No payload: the row this function just inserted already
+/// carries every fact about the creation, and `prompt` is exactly the kind
+/// of content decision 6 forbids from a payload, so nothing beyond the event
+/// type itself is recorded here.
+#[allow(clippy::too_many_arguments)]
+fn insert_task(
+    tx: &rusqlite::Transaction<'_>,
+    id: uuid::Uuid,
+    sender_scope_id: Option<uuid::Uuid>,
+    target_scope_id: uuid::Uuid,
+    target_session_id: Option<uuid::Uuid>,
+    target_workspace_path: Option<&str>,
+    prompt: &str,
+    delegation_chain: &[uuid::Uuid],
+    template_id: Option<uuid::Uuid>,
+    template_version: Option<i64>,
+) -> Result<(), TaskError> {
+    tx.execute(
+        "INSERT INTO tasks \
+         (id, sender_scope_id, target_scope_id, target_session_id, target_workspace_path, \
+          prompt, status, template_id, template_version) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8)",
+        (
+            id.to_string(),
+            sender_scope_id.map(|s| s.to_string()),
+            target_scope_id.to_string(),
+            target_session_id.map(|s| s.to_string()),
+            target_workspace_path,
+            prompt,
+            template_id.map(|t| t.to_string()),
+            template_version,
+        ),
+    )
+    .map_err(factory_store::StoreError::from)?;
+    for (position, scope_id) in delegation_chain.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO task_delegation_chain (task_id, position, scope_id) \
+             VALUES (?1, ?2, ?3)",
+            (id.to_string(), position as i64, scope_id.to_string()),
+        )
+        .map_err(factory_store::StoreError::from)?;
+    }
+    crate::events::append(tx, id, EventType::Created, None, None)?;
+    Ok(())
+}
+
+/// Commit `queued` in its own transaction and return the id it was written
+/// under.
+///
+/// Design §5 step 1: the row is durable *before* anything is entered into a
+/// terminal. This function is the entirety of that step — it does not choose
+/// a session and does not touch a harness or an adapter. `template_id` and
+/// `template_version` are left `NULL`: this is the plain, no-template path,
+/// unchanged from before this crate carried templates at all — see
+/// [`create_from_template`] for the other one.
 ///
 /// `id` is supplied by the caller rather than generated here, mirroring
 /// `factory_session::begin_start`'s own `id: uuid::Uuid` parameter: the
@@ -144,28 +226,97 @@ pub fn create(
     delegation_chain: &[uuid::Uuid],
 ) -> Result<uuid::Uuid, TaskError> {
     let tx = store.transaction()?;
-    tx.execute(
-        "INSERT INTO tasks \
-         (id, sender_scope_id, target_scope_id, target_session_id, target_workspace_path, prompt, status) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued')",
-        (
-            id.to_string(),
-            sender_scope_id.map(|s| s.to_string()),
-            target_scope_id.to_string(),
-            target_session_id.map(|s| s.to_string()),
-            target_workspace_path,
-            prompt,
-        ),
-    )
-    .map_err(factory_store::StoreError::from)?;
-    for (position, scope_id) in delegation_chain.iter().enumerate() {
-        tx.execute(
-            "INSERT INTO task_delegation_chain (task_id, position, scope_id) \
-             VALUES (?1, ?2, ?3)",
-            (id.to_string(), position as i64, scope_id.to_string()),
+    insert_task(
+        &tx,
+        id,
+        sender_scope_id,
+        target_scope_id,
+        target_session_id,
+        target_workspace_path,
+        prompt,
+        delegation_chain,
+        None,
+        None,
+    )?;
+    tx.commit().map_err(factory_store::StoreError::from)?;
+    Ok(id)
+}
+
+/// The template-backed twin of [`create`]: same row, same delegation-chain
+/// handling, plus `template_id` and `template_version` — crate docs, station
+/// 11 decision 1: "[a]nything that reads like 'create a task run' is
+/// [`create`] with `template_id` and `template_version` filled in." This is
+/// that filling-in, as a sibling entry point rather than a change to
+/// [`create`]'s own signature.
+///
+/// # Why a sibling function and not an extended `create`
+///
+/// `create` takes eight positional arguments, and both of its callers today
+/// —`factory_delegation::queue::queue_from_human` and `::queue_from_session`,
+/// each calling `factory_task::create::create` positionally — are outside
+/// this crate. Appending parameters to `create` would require editing both
+/// call sites, and neither is this slice's file to touch. A sibling function
+/// over the same insert ([`insert_task`]) keeps `create`'s signature and
+/// every existing caller exactly as they are, while sharing the one INSERT
+/// this crate issues for a run — not a second, parallel path that could
+/// drift from the first.
+///
+/// # The freezing rule (ADR 0021 decision 2)
+///
+/// Backlog §11: "every run records the template version it executed, and
+/// that record does not change when the template is later revised." This
+/// function reads `task_templates.version` and writes it into
+/// `tasks.template_version` inside **one** transaction — `Store::transaction`
+/// opens with `BEGIN IMMEDIATE`, which takes the write lock before the read,
+/// so no concurrent `template::revise` can land between the read and the
+/// write this function makes. Once committed, nothing else in this crate
+/// ever writes `tasks.template_version` again; [`template::revise`] only
+/// ever touches `task_templates.version`, a different column of a different
+/// table.
+///
+/// If `template_id` names no real template, the read below returns no row,
+/// `template_version` is `None`, and the INSERT is rejected by
+/// `tasks.template_id REFERENCES task_templates (id)` — the same backstop
+/// `a_failed_chain_insert_leaves_no_task_row_at_all` already proves for a
+/// chain entry naming an unregistered scope. This function does not
+/// duplicate that check in Rust; the schema already refuses it, and ADR 0021
+/// itself prefers a database constraint over "trusting application code to
+/// check first" wherever one is available (see the ADR's decision 3).
+#[allow(clippy::too_many_arguments)]
+pub fn create_from_template(
+    store: &mut factory_store::Store,
+    id: uuid::Uuid,
+    sender_scope_id: Option<uuid::Uuid>,
+    target_scope_id: uuid::Uuid,
+    target_session_id: Option<uuid::Uuid>,
+    target_workspace_path: Option<&str>,
+    prompt: &str,
+    delegation_chain: &[uuid::Uuid],
+    template_id: uuid::Uuid,
+) -> Result<uuid::Uuid, TaskError> {
+    let tx = store.transaction()?;
+
+    let template_version: Option<i64> = tx
+        .query_row(
+            "SELECT version FROM task_templates WHERE id = ?1",
+            [template_id.to_string()],
+            |row| row.get(0),
         )
+        .optional()
         .map_err(factory_store::StoreError::from)?;
-    }
+
+    insert_task(
+        &tx,
+        id,
+        sender_scope_id,
+        target_scope_id,
+        target_session_id,
+        target_workspace_path,
+        prompt,
+        delegation_chain,
+        Some(template_id),
+        template_version,
+    )?;
     tx.commit().map_err(factory_store::StoreError::from)?;
     Ok(id)
 }
@@ -298,6 +449,14 @@ fn describe_targets(from: TaskStatus) -> String {
 /// recorded time is always the *first* request, matching AGENTS.md's
 /// "[m]ake mutations transactional and idempotent where retries... are
 /// possible."
+///
+/// Only the immediate path writes a `cancelled` event (`crate`'s station-11
+/// decision 3): recording the *request* on a running task changes no column
+/// the schema's CHECK lists as material — `status` stays `running` — and
+/// there is no `cancel_requested` entry in that list to write. The
+/// `running → cancelled` edge itself is
+/// [`crate::complete::acknowledge_cancellation`]'s, not this function's, and
+/// that is where its own `cancelled` event is written.
 pub fn cancel(store: &mut factory_store::Store, id: uuid::Uuid) -> Result<TaskStatus, TaskError> {
     let tx = store.transaction()?;
 
@@ -337,6 +496,7 @@ pub fn cancel(store: &mut factory_store::Store, id: uuid::Uuid) -> Result<TaskSt
                 [id.to_string()],
             )
             .map_err(factory_store::StoreError::from)?;
+            crate::events::append(&tx, id, EventType::Cancelled, None, None)?;
             TaskStatus::Cancelled
         }
         TaskStatus::Running => {

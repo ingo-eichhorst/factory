@@ -11,10 +11,80 @@
 //! [`create`] is where creation, read-only inspection, and cancellation
 //! actually happen.
 
+//! # Station 11 — the coordinator's binding decisions
+//!
+//! ADR 0021 carries the reasoning. These are the parts an agent working in
+//! this crate must not re-decide.
+//!
+//! **1. A `tasks` row is a run.** There is no `task_runs` table and none is to
+//! be added. A template sits above a run, in [`template`]; a run is what this
+//! crate already manages. Anything that reads like "create a task run" is
+//! [`create::create`] with `template_id` and `template_version` filled in.
+//!
+//! **2. `template_version` is frozen at creation.** Backlog §11: "that record
+//! does not change when the template is later revised." No code path in this
+//! crate may write `tasks.template_version` after the insert that created the
+//! row. Revising a template raises `task_templates.version`; existing runs
+//! keep the number they executed.
+//!
+//! **3. Every material transition writes exactly one [`events`] row, and
+//! [`events`] is its one home.** "Material" means the set in the schema's own
+//! CHECK: created, assigned, delivered, refused, running, progress, blocked,
+//! done, failed, cancelled, verification, rework. No caller composes the event
+//! itself and no transition function writes the row inline — each calls
+//! [`events`]. The catching mutation for this is deleting an event write and
+//! finding a test that dies in every module claiming the rule.
+//!
+//! `refused` is in that list because station 10 decided a refusal is not a
+//! delivery: `Adapter::send` declines to submit into a busy session, nothing
+//! reaches a terminal, and the task stays `queued`. Recording it as
+//! `delivered` would put the confusion station 10 removed back into the one
+//! place an operator looks to find out what happened.
+//!
+//! There is no `assigned` *status*. A task that has been assigned but not yet
+//! delivered is still `queued`; assignment is `tasks.assigned_session_id` plus
+//! an `assigned` event. `tasks_one_running_per_session` depends on `running`
+//! being the one status that must name a session, so nothing is to be added to
+//! that CHECK.
+//!
+//! **4. A verification verdict annotates and never transitions.** [`verify`]
+//! writes one `verification` event and touches no other table and no column of
+//! `tasks`.
+//!
+//! Its one guard is independence, and it compares **scopes, not sessions**.
+//! Design §12.1: "a worker still cannot raise a verification run against
+//! another session of *its own scope*." So a verdict whose author is a session
+//! is refused when that session's scope is the run's `target_scope_id`; a
+//! verdict with no author session is a human's and is allowed. Comparing
+//! against `assigned_session_id` instead would both permit a sibling session
+//! of the same scope and pass trivially on every task no session ever ran —
+//! one a human closed, one cancelled while queued, one whose only delivery
+//! attempt was refused. `target_scope_id` is NOT NULL and has no such hole.
+//!
+//! **5. Nothing in this crate creates a verification *run*.** ADR 0021
+//! decision 5: version 1 has no agent-initiated inspection, so design §6 needs
+//! no exception and none is written. A rule with no caller is how
+//! `authorise_resume` sat unreachable for a whole station.
+//!
+//! **6. Events and decisions carry no secret and no copied private source.**
+//! Design §11 and `agent-task-scheduler-design.md`'s security section both say
+//! it outright. A payload is a short structured fact, never a transcript,
+//! never a file body, never an environment variable.
+//!
+//! **7. [`schedule`] stores rules; it never fires them.** Creating a run from
+//! a due schedule is the daemon's dispatcher (ADR 0021 decision 2). This
+//! module is CRUD plus "when would this next fire," and the next-run answer is
+//! computed, never stored.
+
 pub mod assign;
 pub mod complete;
 pub mod create;
+pub mod decisions;
 pub mod deliver;
+pub mod events;
+pub mod schedule;
+pub mod template;
+pub mod verify;
 
 /// Design §2.4's exact task-status vocabulary, matching `tasks.status`'s
 /// CHECK constraint in `factory_store::schema` byte for byte.

@@ -3,7 +3,7 @@
 //! companion to the unit tests in `src/migrations.rs` (which also cover
 //! this against real, seeded pre-release schemas and the read-only door).
 
-use factory_store::{Store, StoreError};
+use factory_store::{Store, StoreError, latest_schema_version};
 
 /// Mutation target: delete the fresh-database exemption
 /// (`from_version <= 0`) and this must fail — a brand-new database would
@@ -13,7 +13,10 @@ fn a_fresh_database_gets_no_pre_migration_snapshot() {
     let dir = tempfile::tempdir().expect("tempdir");
 
     let store = Store::open(dir.path()).expect("open a fresh company root");
-    assert_eq!(store.schema_version().expect("schema_version"), 5);
+    assert_eq!(
+        store.schema_version().expect("schema_version"),
+        latest_schema_version()
+    );
 
     let backups_dir = dir.path().join(".factory").join("backups");
     assert!(

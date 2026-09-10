@@ -35,6 +35,20 @@ use crate::{StoreError, schema, snapshot};
 /// COLUMN`, which neither drops nor recreates the table it targets. There is
 /// no reference to `tasks` or `sessions` that either statement could ever
 /// invalidate, unlike migrations 2 and 3's drop/rename dance.
+///
+/// Migration 6 (backlog §11 / ADR 0021, `schema::V6_SCHEMA`) carries none for
+/// the same reason, and it was given one by mistake first. Its shape is
+/// migrations 4 and 5's, not 2 and 3's: it creates tables that start empty and
+/// adds nullable columns to `tasks`, so every new reference it introduces
+/// holds NULL on every pre-existing row and cannot dangle.
+///
+/// Removing it matters because `rusqlite_migration` runs `SELECT * FROM
+/// pragma_foreign_key_check` with **no table argument** — read directly from
+/// 2.6.0's `fk_check.rs`, not assumed. That is a whole-database scan. A
+/// dangling reference left behind by any earlier schema would therefore make
+/// migration 6 refuse the upgrade, blaming a migration that neither caused it
+/// nor touches the table it is in. An operator would be told an unrelated true
+/// thing at the least useful moment.
 fn migrations() -> Migrations<'static> {
     Migrations::new(migration_list())
 }
@@ -48,6 +62,7 @@ fn migration_list() -> Vec<M<'static>> {
         M::up(schema::V3_SCHEMA).foreign_key_check(),
         M::up(schema::V4_SCHEMA),
         M::up(schema::V5_SCHEMA),
+        M::up(schema::V6_SCHEMA),
     ]
 }
 
@@ -187,15 +202,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
 
         let fresh = Store::open_at(dir.path().join("fresh.sqlite")).expect("open fresh store");
-        // Was `3` before migrations 4 and 5 (backlog §9) were appended; a
-        // fresh database now runs migrations 1 through 5, landing on
-        // `user_version = 5`.
-        assert_eq!(fresh.schema_version().unwrap(), 5);
+        // Was `3` before migrations 4 and 5 (backlog §9) were appended, and
+        // `5` before migration 6 (backlog §11). Asserted against
+        // `latest_schema_version()` rather than a literal, because what this
+        // test is about is the two databases *agreeing*, not the number.
+        assert_eq!(fresh.schema_version().unwrap(), latest_schema_version());
 
         let migrated_path = dir.path().join("migrated.sqlite");
         seed_schema_1_database(&migrated_path, "");
         let migrated = Store::open_at(&migrated_path).expect("open migrated store");
-        assert_eq!(migrated.schema_version().unwrap(), 5);
+        assert_eq!(migrated.schema_version().unwrap(), latest_schema_version());
 
         assert_eq!(
             schema_snapshot(&fresh),
@@ -227,8 +243,8 @@ mod tests {
 
         let store = Store::open_at(&path).expect("migration 2 must succeed against real rows");
         // Was `2`, then `3` (backlog §7); opening this schema-1 database now
-        // also runs migrations 3 through 5, landing on `user_version = 5`.
-        assert_eq!(store.schema_version().unwrap(), 5);
+        // and every migration appended since, landing on the latest schema.
+        assert_eq!(store.schema_version().unwrap(), latest_schema_version());
 
         // declared_path backfills from schema 1's only path fact.
         let (declared_path, canonical_path, dev, ino, parent_id): (
@@ -325,13 +341,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
 
         let fresh = Store::open_at(dir.path().join("fresh.sqlite")).expect("open fresh store");
-        // Was `3` before migrations 4 and 5 (backlog §9) were appended.
-        assert_eq!(fresh.schema_version().unwrap(), 5);
+        // Was `3` before migrations 4 and 5 (backlog §9), `5` before
+        // migration 6 (backlog §11). See the note in
+        // `fresh_and_migrated_from_v1_have_identical_schema`.
+        assert_eq!(fresh.schema_version().unwrap(), latest_schema_version());
 
         let migrated_path = dir.path().join("migrated.sqlite");
         seed_schema_2_database(&migrated_path, "");
         let migrated = Store::open_at(&migrated_path).expect("open migrated store");
-        assert_eq!(migrated.schema_version().unwrap(), 5);
+        assert_eq!(migrated.schema_version().unwrap(), latest_schema_version());
 
         assert_eq!(
             schema_snapshot(&fresh),
@@ -373,8 +391,8 @@ mod tests {
 
         let store = Store::open_at(&path).expect("migration 3 must succeed against real rows");
         // Was `3`; opening this schema-2 database now also runs migrations 4
-        // and 5 (backlog §9), landing on `user_version = 5`.
-        assert_eq!(store.schema_version().unwrap(), 5);
+        // and every migration appended since, landing on the latest schema.
+        assert_eq!(store.schema_version().unwrap(), latest_schema_version());
 
         // The queued row survives untouched, and the two new columns exist,
         // reading back NULL (schema 2 never wrote them).
@@ -460,12 +478,18 @@ mod tests {
                 // (a TEXT primary key is not the rowid alias, unlike an
                 // `INTEGER PRIMARY KEY`, so SQLite creates one implicitly).
                 "sqlite_autoindex_tasks_1".to_string(),
+                // Migration 6 (backlog §11).
+                "tasks_one_run_per_schedule_minute".to_string(),
                 "tasks_one_running_per_session".to_string(),
                 "tasks_status".to_string(),
                 "tasks_target_scope_id".to_string(),
+                // Migration 6 (backlog §11).
+                "tasks_template_id".to_string(),
             ],
-            "all three explicit tasks indexes, plus SQLite's own primary-key \
-             autoindex, must survive the drop/rename"
+            "migration 3's three explicit tasks indexes, plus SQLite's own \
+             primary-key autoindex, must survive the drop/rename -- and every \
+             later migration's indexes must be listed here deliberately, so \
+             that adding one cannot hide dropping another"
         );
     }
 
@@ -521,8 +545,8 @@ mod tests {
         let store = Store::open_at(&path)
             .expect("migration 3 must not abort on a pre-existing running row");
         // Was `3`; opening this schema-2 database now also runs migrations 4
-        // and 5 (backlog §9), landing on `user_version = 5`.
-        assert_eq!(store.schema_version().unwrap(), 5);
+        // and every migration appended since, landing on the latest schema.
+        assert_eq!(store.schema_version().unwrap(), latest_schema_version());
 
         let (status, blocked_reason, assigned_session_id): (
             String,
@@ -607,12 +631,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
 
         let fresh = Store::open_at(dir.path().join("fresh.sqlite")).expect("open fresh store");
-        assert_eq!(fresh.schema_version().unwrap(), 5);
+        assert_eq!(fresh.schema_version().unwrap(), latest_schema_version());
 
         let migrated_path = dir.path().join("migrated.sqlite");
         seed_schema_3_database(&migrated_path, "");
         let migrated = Store::open_at(&migrated_path).expect("open migrated store");
-        assert_eq!(migrated.schema_version().unwrap(), 5);
+        assert_eq!(migrated.schema_version().unwrap(), latest_schema_version());
 
         assert_eq!(
             schema_snapshot(&fresh),
@@ -659,7 +683,7 @@ mod tests {
         seed_schema_3_database(&path, &seed);
 
         let store = Store::open_at(&path).expect("migration 4 must succeed against real rows");
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), latest_schema_version());
 
         let authorised_deliveries: i64 = store
             .conn
@@ -732,12 +756,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
 
         let fresh = Store::open_at(dir.path().join("fresh.sqlite")).expect("open fresh store");
-        assert_eq!(fresh.schema_version().unwrap(), 5);
+        assert_eq!(fresh.schema_version().unwrap(), latest_schema_version());
 
         let migrated_path = dir.path().join("migrated.sqlite");
         seed_schema_4_database(&migrated_path, "");
         let migrated = Store::open_at(&migrated_path).expect("open migrated store");
-        assert_eq!(migrated.schema_version().unwrap(), 5);
+        assert_eq!(migrated.schema_version().unwrap(), latest_schema_version());
 
         assert_eq!(
             schema_snapshot(&fresh),
@@ -774,7 +798,7 @@ mod tests {
         seed_schema_4_database(&path, &seed);
 
         let store = Store::open_at(&path).expect("migration 5 must succeed against real rows");
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), latest_schema_version());
 
         let (herdr_pane_id, harness_session_id): (Option<String>, Option<String>) = store
             .conn
@@ -835,9 +859,13 @@ mod tests {
         // non-trivial database (schema 4) pinned one past what this
         // build's `migrations()` defines, not an actual sixth migration.
         seed_schema_4_database(&path, "");
+        // One past whatever this build defines, computed rather than written
+        // down: a literal here would silently stop testing "too far ahead"
+        // the moment the migration it names became a real migration.
+        let ahead = latest_schema_version() + 1;
         {
             let conn = Connection::open(&path).expect("open seed database");
-            conn.pragma_update(None, "user_version", 6_i64)
+            conn.pragma_update(None, "user_version", ahead)
                 .expect("pin the database one past the highest release migration");
         }
         let before_bytes = std::fs::read(&path).expect("read db bytes before the refused open");
@@ -851,11 +879,12 @@ mod tests {
                 database_schema,
             } => {
                 assert_eq!(
-                    built_schema, 5,
-                    "this build's migrations() defines exactly 5"
+                    built_schema,
+                    latest_schema_version(),
+                    "the error must name what this build understands"
                 );
                 assert_eq!(
-                    database_schema, 6,
+                    database_schema, ahead,
                     "the database's own version must be named"
                 );
             }
@@ -917,21 +946,28 @@ mod tests {
     }
 
     /// The positive half of the snapshot guard: seeds a real schema-4
-    /// database (so the migration this triggers -- migration 5, a plain
-    /// `ALTER TABLE ADD COLUMN` -- actually succeeds), opens it through
-    /// `Store::open_at`, and confirms the snapshot this produces is a
-    /// genuinely usable rollback artifact: opened through the read-only
-    /// door (ADR 0018 decision 1), it reports schema 4, not schema 5 -- the
-    /// version the source database was at the moment before migration 5
-    /// ran, not the version it ended up at.
+    /// database, opens it through `Store::open_at` (which runs every
+    /// migration appended since), and confirms the snapshot this produces is
+    /// a genuinely usable rollback artifact: opened through the read-only
+    /// door (ADR 0018 decision 1), it reports schema **4** -- the version the
+    /// source database was at the moment before migrating, not the version it
+    /// ended up at.
+    ///
+    /// One snapshot, not one per migration: `snapshot_before_migration` runs
+    /// once for the whole pending run, so its name spans `4-to-<latest>`
+    /// however many migrations that is. The name is asserted against
+    /// `latest_schema_version()` for that reason -- a literal here would need
+    /// editing with every migration, and an author who edited it without
+    /// thinking would not notice if the snapshot had started being taken
+    /// per-migration instead.
     #[test]
     fn pre_migration_snapshot_is_a_usable_schema_4_rollback_artifact() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("with_sessions.sqlite");
         seed_schema_4_database(&path, "");
 
-        let store = crate::Store::open_at(&path).expect("migration 5 must succeed");
-        assert_eq!(store.schema_version().unwrap(), 5);
+        let store = crate::Store::open_at(&path).expect("migrating from 4 must succeed");
+        assert_eq!(store.schema_version().unwrap(), latest_schema_version());
         drop(store);
 
         let backups_dir = dir.path().join("backups");
@@ -946,9 +982,10 @@ mod tests {
             "exactly one pre-migration snapshot must be written, got {entries:?}"
         );
         let name = entries[0].to_str().expect("utf8 filename").to_string();
+        let expected_prefix = format!("pre-migration-4-to-{}-", latest_schema_version());
         assert!(
-            name.starts_with("pre-migration-4-to-5-") && name.ends_with(".sqlite"),
-            "unexpected snapshot name: {name}"
+            name.starts_with(&expected_prefix) && name.ends_with(".sqlite"),
+            "unexpected snapshot name: {name} (expected prefix {expected_prefix})"
         );
 
         let snapshot_path = backups_dir.join(&name);
@@ -958,8 +995,7 @@ mod tests {
             snapshot.schema_version().unwrap(),
             4,
             "the snapshot must preserve the schema version the source database \
-             was at immediately before migration 5 ran, not the version it \
-             ended up at"
+             was at immediately before migrating, not the version it ended up at"
         );
     }
 
@@ -973,7 +1009,7 @@ mod tests {
         let path = dir.path().join("fresh.sqlite");
 
         let store = crate::Store::open_at(&path).expect("open fresh store");
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), latest_schema_version());
 
         let backups_dir = dir.path().join("backups");
         assert!(

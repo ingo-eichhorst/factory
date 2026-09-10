@@ -5,7 +5,7 @@
 
 mod common;
 
-use factory_store::Store;
+use factory_store::{Store, latest_schema_version};
 
 /// The mutation this guards against: `open_read_only` opening the
 /// connection with ordinary (read-write) flags instead of
@@ -61,7 +61,10 @@ fn open_read_only_does_not_migrate_an_old_snapshot() {
 
     {
         let store = Store::open_at(&db_path).expect("create and migrate to latest");
-        assert_eq!(store.schema_version().expect("schema_version"), 5);
+        assert_eq!(
+            store.schema_version().expect("schema_version"),
+            latest_schema_version()
+        );
     }
 
     // Simulate an old snapshot: roll `user_version` back by hand, bypassing
@@ -131,7 +134,10 @@ fn open_read_only_reads_a_live_wal_database_correctly() {
     // clean close.
     let read_only = Store::open_read_only(&db_path).expect("open_read_only while store is open");
 
-    assert_eq!(read_only.schema_version().expect("schema_version"), 5);
+    assert_eq!(
+        read_only.schema_version().expect("schema_version"),
+        latest_schema_version()
+    );
     assert_eq!(read_only.integrity_check().expect("integrity_check"), "ok");
 
     let count: i64 = read_only
