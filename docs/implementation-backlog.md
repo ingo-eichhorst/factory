@@ -785,6 +785,56 @@ must not become one: the task record is still the only durable unit of work
 exchanged, so design §2.4 and ADR 0010 decision 2 hold unchanged. A caller that
 would rather block than be told uses design §7's `task send --wait`.
 
+**Shipped, and what a live run found that 556 tests did not.** The command
+surface built is `init`, `start|stop|status`, `daemon run`, `doctor`, `scope
+reconcile|list`, `agent start|stop|status|attach`, `task
+send|cancel|done|fail|block|resume|list|show`, and `context show`, over
+eighteen daemon operations. `docs/slice-10-operator-guide.md` is the runbook,
+including the traceability table from each command to the domain function it
+calls.
+
+`factory scope add` is the one command that exists and is always refused
+(`internal.scope_add_unsupported`). ADR 0009 lets `config.yaml` carry keys
+this build does not know, and preserving them needs a round-tripping YAML
+*writer* that nothing in this tree has; a serializer emitting only today's
+struct fields would silently delete an operator's comments and any newer
+build's keys. The command names the manual remedy instead. Station 11 does
+not need it — a schedule is a database row, not a configuration key.
+
+Four defects were reachable only from a real terminal, and all four are now
+covered:
+
+- *The task id was rendered twice.* Design §5's line belongs to
+  `factory_task::deliver`, not to an adapter. The decisive case is
+  `OperatorPromptWriter` — a human pasting by hand, which never passes through
+  an adapter at all, and would have lost the id entirely if an adapter owned
+  the prefix.
+- *A refusal was counted as a delivery.* `Adapter::send` prechecks harness
+  state and refuses a busy session; that one error now records
+  `DeliveryOutcome::Refused`, which `ATTEMPT_MAY_HAVE_REACHED_THE_TERMINAL`
+  excludes. A task whose only attempt was refused stays `queued`, because
+  nothing was sent — it no longer sends an operator to `task resume` for a
+  prompt that never reached a terminal.
+- *An over-long socket path failed with the kernel's own `path must be shorter
+  than SUN_LEN`.* The limit is measured (103 bytes bind, 104 fail, on macOS)
+  and checked before anything on disk is touched, so an unbindable path can
+  never first delete a live daemon's socket.
+- *`--scope` demanded a UUID*, though design §7 addresses scopes by name in
+  every example it gives. A name now resolves through `scope.list`, and an
+  unknown one lists the scopes that exist.
+
+Two observed behaviours were checked and are correct, not defects: a
+`disconnected` session still counts against `max_sessions` (the harness
+process really is alive), and a session pre-existing a daemon restart
+reconciles to `disconnected` (ADR 0019's own rule, in production).
+
+Left open, and carried into later stations: `factory_recovery::reconnect`'s
+three restart classes are not wired into the daemon's startup or observe
+loop — only `restore::reconcile` is; `agent.stop` does not specially handle a
+task that is `queued` and assigned but undelivered to the stopping session;
+and `InstallationLock`'s `Box::leak` must be restructured before anything
+acquires the lock in a loop.
+
 ## 11. Shared task audit and cron dispatcher
 
 **Objective:** Extend the root task store with durable task runs, decisions,
