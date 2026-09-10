@@ -171,6 +171,98 @@ fn agent_stop_with_a_running_task_interrupts_it() {
     assert_eq!(shown.result["blocked_reason"], "interrupted");
 }
 
+/// `task.show` must say where a run came from.
+///
+/// Found by the station-11 live drill, not by review. Four cron runs and a
+/// hand-sent one were indistinguishable in `factory task list`: the columns
+/// were on the row and the drill had to read them straight out of SQLite,
+/// because neither `Task` nor `task_json` carried them. An operator could not
+/// answer "which of these came from a schedule?"
+///
+/// Asserts the manual case too. `triggered_by` defaults to `manual`, so a
+/// test that only looked at a cron run would pass against a `task_json` that
+/// hard-coded the string.
+#[test]
+fn task_show_says_whether_a_run_came_from_a_schedule_or_a_hand() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let scope_id = fixture.scope("alpha");
+    let (handler, _adapter) = new_handler(&fixture);
+
+    let manual_id = uid(7101);
+    {
+        let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+        factory_task::create::create(
+            &mut store,
+            manual_id,
+            None,
+            scope_id,
+            None,
+            None,
+            "by hand",
+            &[scope_id],
+        )
+        .expect("create a manual run");
+    }
+
+    let shown = handler
+        .handle_query(qry(
+            scope_id,
+            "task.show",
+            serde_json::json!({ "task_id": manual_id.to_string() }),
+        ))
+        .expect("task.show succeeds");
+    assert_eq!(shown.result["triggered_by"], "manual");
+    assert!(shown.result["schedule_id"].is_null());
+    assert!(shown.result["fired_for_minute"].is_null());
+
+    let (schedule_id, cron_id) = {
+        let mut store = factory_store::Store::open(fixture.instance_root()).expect("open store");
+        let template_id = uid(7102);
+        factory_task::template::create(
+            &mut store,
+            template_id,
+            "nightly",
+            scope_id,
+            None,
+            "do it",
+            None,
+        )
+        .expect("create a template");
+        let schedule_id = uid(7103);
+        factory_task::schedule::create(&mut store, schedule_id, template_id, "* * * * *", "UTC")
+            .expect("create a schedule");
+        let cron_id = uid(7104);
+        let fired = factory_task::create::create_from_schedule(
+            &mut store,
+            cron_id,
+            schedule_id,
+            template_id,
+            scope_id,
+            None,
+            "do it",
+            "2026-09-10T21:23",
+            chrono::Utc::now(),
+        )
+        .expect("fire the schedule");
+        assert!(matches!(
+            fired,
+            factory_task::create::ScheduleFire::Fired(_)
+        ));
+        (schedule_id, cron_id)
+    };
+
+    let shown = handler
+        .handle_query(qry(
+            scope_id,
+            "task.show",
+            serde_json::json!({ "task_id": cron_id.to_string() }),
+        ))
+        .expect("task.show succeeds");
+    assert_eq!(shown.result["triggered_by"], "cron");
+    assert_eq!(shown.result["schedule_id"], schedule_id.to_string());
+    assert_eq!(shown.result["fired_for_minute"], "2026-09-10T21:23");
+}
+
 #[test]
 fn agent_attach_command_returns_argv_naming_the_pane() {
     let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);

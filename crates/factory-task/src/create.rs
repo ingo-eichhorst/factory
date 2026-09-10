@@ -108,6 +108,23 @@ pub struct Task {
     /// empty finding, the same stance `decisions::record` takes toward
     /// `task_decisions.rationale`.
     pub rework_finding: Option<String>,
+    /// `manual` or `cron` — where this run came from. Read back so a caller
+    /// above SQL can tell the two apart at all.
+    ///
+    /// The station-11 live drill is why this is here. Every run it created
+    /// carried `triggered_by = 'cron'` with its schedule and local minute on
+    /// the row, and `factory task list` showed none of the three, so a cron
+    /// run and a hand-sent one were identical in every output an operator
+    /// has. The columns existed; nothing read them.
+    pub triggered_by: String,
+    /// The schedule that fired this run. `Some` exactly when
+    /// [`Task::triggered_by`] is `cron` — migration 6's own CHECK binds the
+    /// three together, so this cannot drift from that field.
+    pub schedule_id: Option<uuid::Uuid>,
+    /// The local minute this run was fired for, `YYYY-MM-DDTHH:MM` in the
+    /// schedule's own timezone. `Some` under the same condition as
+    /// [`Task::schedule_id`].
+    pub fired_for_minute: Option<String>,
 }
 
 const TASK_COLUMNS: &str = "id, sender_scope_id, target_scope_id, target_session_id, \
@@ -115,7 +132,7 @@ const TASK_COLUMNS: &str = "id, sender_scope_id, target_scope_id, target_session
      cancel_requested_at, result_summary, result_artifact_paths, created_at, updated_at, \
      template_id, template_version, cost_model, cost_input_tokens, cost_output_tokens, \
      cost_duration_ms, cost_baseline, context_utilization_percent, reworks_task_id, \
-     rework_finding";
+     rework_finding, triggered_by, schedule_id, fired_for_minute";
 
 /// `tasks.id`, `.sender_scope_id`, `.target_scope_id`, `.target_session_id`,
 /// and `.assigned_session_id` are all UUIDs this crate — or `factory-session`
@@ -152,6 +169,9 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     let context_utilization_percent: Option<f64> = row.get(21)?;
     let reworks_task_id: Option<String> = row.get(22)?;
     let rework_finding: Option<String> = row.get(23)?;
+    let triggered_by: String = row.get(24)?;
+    let schedule_id: Option<String> = row.get(25)?;
+    let fired_for_minute: Option<String> = row.get(26)?;
 
     Ok(Task {
         id: parse_uuid("id", &id),
@@ -186,6 +206,9 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
             .as_deref()
             .map(|s| parse_uuid("reworks_task_id", s)),
         rework_finding,
+        triggered_by,
+        schedule_id: schedule_id.as_deref().map(|s| parse_uuid("schedule_id", s)),
+        fired_for_minute,
     })
 }
 

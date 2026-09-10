@@ -731,6 +731,14 @@ fn task_json(t: &factory_task::create::Task) -> Value {
         // rework link is otherwise durable but unreachable from the CLI.
         "reworks_task_id": t.reworks_task_id.map(|id| id.to_string()),
         "rework_finding": t.rework_finding,
+        // Where the run came from. Without these three, a cron run and a
+        // hand-sent one are identical in every output an operator has —
+        // measured in the station-11 live drill, which had to read them
+        // straight out of SQLite to tell four scheduled runs from manual
+        // ones.
+        "triggered_by": t.triggered_by,
+        "schedule_id": t.schedule_id.map(|id| id.to_string()),
+        "fired_for_minute": t.fired_for_minute,
     })
 }
 

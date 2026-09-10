@@ -499,11 +499,12 @@ Found:
 - **Check 6 claimed two dispatchers where there was one.** The drill's
   throwaway instance is not the database the loaded prototype writes. Fixed;
   see Procedure 6's "Serves this root" column.
-- **A cron run is indistinguishable from a manual one in `task list`.** The
-  columns exist on the row — `triggered_by`, `schedule_id`, `fired_for_minute`
-  — and the drill read them straight out of SQLite, but the daemon's JSON does
-  not carry them. An operator cannot yet answer "which of these came from a
-  schedule?" without opening the database.
+- **A cron run was indistinguishable from a manual one in `task list`.** The
+  columns were on the row — `triggered_by`, `schedule_id`, `fired_for_minute`
+  — and the drill had to read them straight out of SQLite, because neither
+  `Task` nor the daemon's JSON carried them. An operator could not answer
+  "which of these came from a schedule?" Fixed; `task list` and `task show`
+  now carry all three, confirmed against the drill's own four runs.
 
 ## Open items this station leaves
 
