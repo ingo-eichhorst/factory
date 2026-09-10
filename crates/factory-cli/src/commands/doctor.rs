@@ -43,8 +43,11 @@ fn print_report(report: &DoctorReport) {
         report.backups.newest_modified
     );
     println!(
-        "scheduler: label={} loaded={} last_tick_at={:?}",
-        report.scheduler.label, report.scheduler.loaded, report.scheduler.last_tick_at
+        "scheduler: label={} loaded={} targets_this_root={} last_tick_at={:?}",
+        report.scheduler.label,
+        report.scheduler.loaded,
+        report.scheduler.targets_this_root,
+        report.scheduler.last_tick_at
     );
 
     if report.findings.is_empty() {
@@ -150,10 +153,10 @@ fn render(finding: &Finding) -> String {
             label,
             last_tick_at,
         } => format!(
-            "two dispatchers against one database: `{label}` is loaded under launchctl, and \
-             Factory's own dispatcher last ticked at {last_tick_at}\n  help: remove `{label}` \
-             (`launchctl remove {label}`) and follow the cut-over procedure in the slice-11 \
-             operator guide"
+            "two dispatchers against one database: `{label}` is loaded under launchctl and its \
+             own record names this instance root, and Factory's own dispatcher last ticked at \
+             {last_tick_at}\n  help: remove `{label}` (`launchctl remove {label}`) and follow \
+             the cut-over procedure in the slice-11 operator guide"
         ),
     }
 }

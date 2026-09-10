@@ -32,6 +32,8 @@
 //! - A row whose tick is fresh, and the foreign label is not loaded: the
 //!   healthy, cut-over state. Not a finding.
 
+use std::path::Path;
+
 use crate::{CheckName, Finding};
 
 /// The foreign, pre-station-11 Python prototype's `launchd` label — see the
@@ -92,8 +94,14 @@ impl LaunchdAccess for SystemLaunchd {
 pub struct SchedulerStatus {
     /// The foreign scheduler's label — see the module docs.
     pub label: String,
-    /// Whether `label` is loaded under `launchctl`.
+    /// Whether `label` is loaded under `launchctl`. A machine-wide fact: it
+    /// says nothing about *which* instance that job serves.
     pub loaded: bool,
+    /// Whether the loaded job names this instance's root in its own
+    /// `launchctl list` record. `false` while `loaded` is `true` means a
+    /// scheduler is loaded on this machine for some other instance, which is
+    /// not this instance's problem. See [`targets_root`].
+    pub targets_this_root: bool,
     /// Factory's own dispatcher's last tick, read from `dispatcher_state`.
     /// `None` means either no dispatcher has ever ticked against this
     /// database, or the row could not be read — see
@@ -157,7 +165,7 @@ fn read_last_tick(
 /// actually read.
 fn report_tick_health(
     last_tick_at: &str,
-    foreign_scheduler_loaded: bool,
+    foreign_scheduler_targets_this_root: bool,
     findings: &mut Vec<Finding>,
 ) {
     let Ok(tick) = chrono::DateTime::parse_from_rfc3339(last_tick_at) else {
@@ -186,7 +194,7 @@ fn report_tick_health(
             last_tick_at: last_tick_at.to_string(),
             age_seconds,
         });
-    } else if foreign_scheduler_loaded {
+    } else if foreign_scheduler_targets_this_root {
         // A stale dispatcher already got its own finding above and is, by
         // definition, not dispatching — so it is never also reported as
         // the second writer here.
@@ -197,33 +205,71 @@ fn report_tick_health(
     }
 }
 
+/// Does the loaded job's own `launchctl list` record name `company_root`?
+///
+/// Found by running the drill, not by review. `launchctl` is machine-wide,
+/// so "a job with this label is loaded" and "a second dispatcher is writing
+/// *this* database" are different statements. A throwaway instance under
+/// `/tmp` reported two dispatchers against one database while the loaded job
+/// was writing the company root's database and had never touched the
+/// throwaway one at all. ADR 0017's rule applies exactly: a wrong answer is
+/// worse than none, because it looks like an answer.
+///
+/// Measured on 2026-09-10: `launchctl list com.business-factory.scheduler`
+/// prints `ProgramArguments`, `StandardOutPath` and `StandardErrorPath`, all
+/// absolute, all under the instance root the job serves. So the record does
+/// carry the evidence; the earlier version simply threw it away.
+///
+/// This is still evidence, not proof — a script under a root could be made to
+/// open a database somewhere else. It is enough to *rule out* the case above,
+/// which is the one that produced a false finding, and the finding's wording
+/// claims no more than what this establishes.
+///
+/// The match must end on a path boundary. Without that, a root of `/tmp/f11`
+/// would match a job serving `/tmp/f11d`.
+fn targets_root(raw: &str, company_root: &Path) -> bool {
+    let canonical = std::fs::canonicalize(company_root)
+        .unwrap_or_else(|_| company_root.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    if canonical.is_empty() {
+        return false;
+    }
+    raw.match_indices(&canonical).any(|(at, _)| {
+        let rest = &raw[at + canonical.len()..];
+        rest.is_empty() || rest.starts_with('/') || rest.starts_with('"')
+    })
+}
+
 pub(crate) fn check(
     store: &factory_store::Store,
+    company_root: &Path,
     schema_version: i64,
     launchd: &dyn LaunchdAccess,
     findings: &mut Vec<Finding>,
 ) -> SchedulerStatus {
     let last_tick_at = read_last_tick(store, schema_version, findings);
 
-    let loaded = match launchd.list(SCHEDULER_LABEL) {
-        Ok(Some(_raw)) => true,
-        Ok(None) => false,
+    let (loaded, targets_this_root) = match launchd.list(SCHEDULER_LABEL) {
+        Ok(Some(raw)) => (true, targets_root(&raw, company_root)),
+        Ok(None) => (false, false),
         Err(error) => {
             findings.push(Finding::SchedulerQueryFailed {
                 label: SCHEDULER_LABEL.to_string(),
                 error,
             });
-            false
+            (false, false)
         }
     };
 
     if let Some(tick) = last_tick_at.as_deref() {
-        report_tick_health(tick, loaded, findings);
+        report_tick_health(tick, targets_this_root, findings);
     }
 
     SchedulerStatus {
         label: SCHEDULER_LABEL.to_string(),
         loaded,
+        targets_this_root,
         last_tick_at,
     }
 }

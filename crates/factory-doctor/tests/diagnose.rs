@@ -684,14 +684,17 @@ fn a_loaded_foreign_scheduler_next_to_a_fresh_tick_is_two_dispatchers() {
     open_db(company_root);
     write_dispatcher_tick(company_root, chrono::Utc::now());
 
+    // The record names *this* root, which is what makes it this instance's
+    // second dispatcher rather than some other instance's only one.
     let report = factory_doctor::diagnose_with(
         company_root,
         &FakePanes(vec![]),
-        &FakeLaunchd::Loaded("job details".to_string()),
+        &FakeLaunchd::Loaded(loaded_record_for(company_root)),
     )
     .expect("diagnose");
 
     assert!(report.scheduler.loaded);
+    assert!(report.scheduler.targets_this_root);
     assert!(
         report.findings.iter().any(|f| matches!(
             f,
@@ -700,6 +703,91 @@ fn a_loaded_foreign_scheduler_next_to_a_fresh_tick_is_two_dispatchers() {
         )),
         "expected TwoDispatchers, got {:#?}",
         report.findings
+    );
+}
+
+/// A `launchctl list` record shaped like the real one, measured on
+/// 2026-09-10 — `ProgramArguments` and the two log paths, all absolute, all
+/// under the instance root the job serves.
+fn loaded_record_for(company_root: &std::path::Path) -> String {
+    let root = std::fs::canonicalize(company_root)
+        .expect("canonicalize")
+        .to_string_lossy()
+        .into_owned();
+    format!(
+        "{{\n\t\"Label\" = \"com.business-factory.scheduler\";\n\t\"ProgramArguments\" = (\n\t\t\
+         \"/usr/bin/python3\";\n\t\t\"{root}/scripts/factory_tasks.py\";\n\t\t\"dispatch\";\n\t);\n\t\
+         \"StandardOutPath\" = \"{root}/.factory/logs/scheduler.log\";\n}};\n"
+    )
+}
+
+/// The defect the station-11 live drill found, and the reason
+/// `targets_this_root` exists at all.
+///
+/// `launchctl` is machine-wide. A throwaway instance under `/tmp` reported
+/// "two dispatchers against one database" while the loaded job was serving
+/// the company root and had never touched the throwaway database. The claim
+/// was about a database doctor had not checked — ADR 0017's "a wrong answer
+/// is worse than none, because it looks like an answer", in the check whose
+/// whole job is to notice a second writer.
+#[test]
+fn a_scheduler_loaded_for_another_instance_is_not_this_instances_second_dispatcher() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let company_root = dir.path();
+    open_db(company_root);
+    write_dispatcher_tick(company_root, chrono::Utc::now());
+
+    let elsewhere = "{\n\t\"ProgramArguments\" = (\n\t\t\"/usr/bin/python3\";\n\t\t\
+                     \"/Users/someone/another-instance/scripts/factory_tasks.py\";\n\t);\n}};\n";
+
+    let report = factory_doctor::diagnose_with(
+        company_root,
+        &FakePanes(vec![]),
+        &FakeLaunchd::Loaded(elsewhere.to_string()),
+    )
+    .expect("diagnose");
+
+    assert!(report.scheduler.loaded, "the job really is loaded");
+    assert!(
+        !report.scheduler.targets_this_root,
+        "but nothing in its record names this instance root"
+    );
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|f| matches!(f, factory_doctor::Finding::TwoDispatchers { .. })),
+        "a scheduler serving another instance is not this instance's second \
+         dispatcher: {:#?}",
+        report.findings
+    );
+}
+
+/// The boundary case that a plain substring search gets wrong: a root of
+/// `/tmp/f11` must not match a job serving `/tmp/f11d`.
+#[test]
+fn a_root_that_is_a_prefix_of_another_roots_path_does_not_match() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let company_root = dir.path();
+    open_db(company_root);
+    write_dispatcher_tick(company_root, chrono::Utc::now());
+
+    let root = std::fs::canonicalize(company_root)
+        .expect("canonicalize")
+        .to_string_lossy()
+        .into_owned();
+    let neighbour = format!("{{\n\t\"ProgramArguments\" = (\"{root}-other/scripts/x.py\");\n}};\n");
+
+    let report = factory_doctor::diagnose_with(
+        company_root,
+        &FakePanes(vec![]),
+        &FakeLaunchd::Loaded(neighbour),
+    )
+    .expect("diagnose");
+
+    assert!(
+        !report.scheduler.targets_this_root,
+        "`{root}-other` is a different root, not this one"
     );
 }
 

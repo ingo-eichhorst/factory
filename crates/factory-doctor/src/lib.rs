@@ -295,7 +295,7 @@ pub fn diagnose_with(
 
     panes::check(&store, schema_version, herdr, &mut findings)?;
 
-    let scheduler = scheduler::check(&store, schema_version, launchd, &mut findings);
+    let scheduler = scheduler::check(&store, company_root, schema_version, launchd, &mut findings);
 
     Ok(DoctorReport {
         schema_version,

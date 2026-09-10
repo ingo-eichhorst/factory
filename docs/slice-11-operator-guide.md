@@ -292,12 +292,22 @@ future-dated row cannot hide a dead dispatcher.
 **Is anything else dispatching against this database?** Read from `launchctl
 list com.business-factory.scheduler`.
 
-| Label loaded | Factory's tick | What doctor says |
-|---|---|---|
-| No | any | Nothing. Not loaded is the correct end state after the cut-over. |
-| Yes | never ticked | Nothing. This is every instance before its cut-over, including this machine today. |
-| Yes | stale | The stale finding, only. A dispatcher that stopped is not a second writer. |
-| Yes | fresh | **Two dispatchers against one database.** |
+| Label loaded | Serves this root | Factory's tick | What doctor says |
+|---|---|---|---|
+| No | — | any | Nothing. Not loaded is the correct end state after the cut-over. |
+| Yes | no | any | Nothing. A scheduler for some other instance is not this instance's problem. |
+| Yes | yes | never ticked | Nothing. This is every instance before its cut-over, including this machine today. |
+| Yes | yes | stale | The stale finding, only. A dispatcher that stopped is not a second writer. |
+| Yes | yes | fresh | **Two dispatchers against one database.** |
+
+"Serves this root" is read from the job's own `launchctl list` record, which
+prints its `ProgramArguments` and its two log paths, all absolute. Without
+that column the check would report two dispatchers for any instance on a
+machine where the prototype happens to be loaded — which is what the live
+drill did, from a throwaway root the prototype had never touched. It is
+evidence and not proof: a script under a root could open a database
+elsewhere. It is enough to rule out that case, and the finding claims no more
+than it establishes.
 
 That last row is what ADR 0014 forbids, and it is the state Procedure 7 exists
 to move you out of.
