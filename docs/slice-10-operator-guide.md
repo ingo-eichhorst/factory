@@ -45,20 +45,23 @@ like this one honest, and this document follows its shape.
 - **`factory scope add` is refused, not stubbed.** It returns
   `internal.scope_add_unsupported` and names the manual remedy. See
   "Registering a scope by hand" below for why.
-- **`secret`, `schedule`, `knowledge`, `memory` and `agent list` do not
-  exist** — station 13, station 11, and station 12 respectively. They are
-  absent, not stubbed: a stub that exits non-zero is a command that exists,
-  and an operator reads it as broken rather than as unbuilt.
+- **`secret`, `knowledge`, `memory` and `agent list` do not exist** — station
+  13 and station 12 respectively. They are absent, not stubbed: a stub that
+  exits non-zero is a command that exists, and an operator reads it as broken
+  rather than as unbuilt. (`schedule` was in this list. Station 11 shipped it;
+  see the slice-11 guide.)
 - **`opencode` is configurable but not driveable.** `factory start --harness
   opencode` is refused at startup with "no adapter", rather than starting a
   daemon that fails on the first session.
-- **Factory installs no `launchd` job.** `factory doctor`'s scheduler check
-  asks `launchctl` about `com.business-factory.scheduler` and reports what it
-  finds. On this machine it finds one **loaded**: the pre-Factory Python
-  prototype, `scripts/factory_tasks.py dispatch --deliver`, which writes to the
-  same `.factory/factory.sqlite`. Station 11 decides what happens to it
-  (ADR 0021 decision 10) and the scheduler design document gates installing a
-  new one behind explicit release.
+- **Factory installs no `launchd` job**, and after station 11 it never will:
+  its dispatcher is a thread the daemon owns (ADR 0021 decision 2). `factory
+  doctor`'s check 6 still asks `launchctl` about
+  `com.business-factory.scheduler`, but that label belongs to the pre-Factory
+  Python prototype, `scripts/factory_tasks.py dispatch --deliver`, which writes
+  to the same `.factory/factory.sqlite`. On this machine it is **loaded**.
+  Nothing here has cut over yet, so that is a fact check 6 reports rather than
+  a fault — until Factory's own dispatcher also ticks against this database,
+  at which point two dispatchers are writing one file and check 6 says so.
 - **A Claude Code session that reaches `disconnected` is returned to service
   by a human, never by its own adapter.** This is deliberate; see "Why Claude
   Code needs a human" below.
@@ -311,12 +314,32 @@ Six checks:
    longer in a lease-holding state.
 5. **The pane audit**, both directions — a live session whose pane is gone
    from Herdr, and a pane still alive for a session the database calls dead.
-6. **The scheduler** — whether a `launchd` job is loaded under
-   `com.business-factory.scheduler`. On this machine one **is** loaded: the
-   pre-Factory Python prototype. `last_fired` is always `None`, because neither
-   `launchctl list` nor `launchctl print` exposes a last-fired time and
-   `LastExitStatus` is an exit code, not a timestamp. Station 11 adds the half
-   that can answer it, from Factory's own dispatcher (ADR 0021 decision 10).
+6. **The scheduler** — two questions, not one. Station 11 replaced this
+   check's second half; ADR 0021 decision 10 has the rules and why each one
+   is what it is.
+
+   - **Factory's own dispatcher**, read from `dispatcher_state`. No row means
+     no dispatcher has ever ticked against this database, which is ordinary on
+     a fresh instance and is **not** a finding. A row older than five minutes
+     means one ran and stopped, which is. Below schema 6 the table does not
+     exist, and the check reports `CheckSkipped` rather than failing the whole
+     report.
+   - **The foreign scheduler**, from `launchctl list
+     com.business-factory.scheduler`. That label belongs to the pre-Factory
+     Python prototype, not to Factory: Factory's dispatcher is a thread the
+     daemon owns and installs no `launchd` job. **Not loaded is the desired
+     end state after the cut-over and is not a finding.** A loaded job beside a
+     *fresh* Factory tick is two dispatchers against one database, which is
+     the finding.
+
+   On this machine one **is** loaded, and Factory has never ticked here, so
+   check 6 reports it as a fact and nothing more. That is the documented state
+   of an instance that has not cut over yet.
+
+   `last_fired` is gone. It was always `None`, because neither `launchctl
+   list` nor `launchctl print` exposes a last-fired time and `LastExitStatus`
+   is an exit code, not a timestamp. `last_tick_at` replaces it and answers a
+   different question: when Factory's own dispatcher last ran.
 
 It always reports the backup summary too (count, total size, oldest and
 newest under `.factory/backups/`, per ADR 0019 decision 5). Purely

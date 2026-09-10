@@ -897,6 +897,96 @@ delegation exception. Allowing siblings does not settle this on its own, since
 the inspecting session would still have to live outside the scope under
 inspection.
 
+**The dispatcher is a thread the daemon owns, not a `launchd` job.** The risk
+above asks for a restart drill "before `launchd` is treated as unattended
+production automation." The answer is that `launchd` is not used at all.
+Design §11 named it, and ADR 0021 decision 2 replaces it: a thread has the
+daemon's own lifecycle, its own log, and dies with the process an operator can
+see, while a `launchd` job is a second lifecycle that survives a stopped
+daemon. It ticks every twenty seconds, not every minute — a schedule fires on
+a *match* against the current local minute, so a minute the loop never samples
+is a fire lost for good, while a minute sampled three times costs two "already
+fired" answers the unique index makes free.
+
+**A verification verdict annotates and never transitions** (ADR 0021 decision
+4). A verdict is an observation about a run, and a run's status is what the
+worker reported. Letting an inspector rewrite it would make the two
+indistinguishable afterwards.
+
+**Independence compares scopes, not sessions** (the same decision). Two
+sessions of the same scope are the same interest, so a sibling session is not
+an independent inspector. There is a hole test for the case that a
+session-based comparison would have passed: a run that was never assigned to
+any session at all.
+
+**Who may create a verification run needs no exception to §6, because nothing
+exists that would use one** (ADR 0021 decision 5). A verdict in version 1 is
+recorded against an already-finished run, by a human or by a session of a
+parent scope that may already target the child. An exception written now would
+be a rule with no caller — the mistake slice 9 made with `authorise_resume`.
+
+**Not every harness can report a token count, and absent is the ordinary
+case** (ADR 0021 decision 6). Measured on 2026-09-10 against live sessions:
+Claude Code reports cumulative session counters through Irrlicht, Pi reports
+per-message usage in its own transcript, opencode reports `metrics: null`, and
+two of four live Pi sessions reported no metrics at all. So every cost column
+is nullable, and a run with no figures is valid rather than incomplete. The
+counters accumulate, so a run's own cost is a difference: a baseline sample is
+stored on the run at delivery, and the terminal sample subtracts from it —
+without that column the figure would be silently wrong after every daemon
+restart. `metrics.total_tokens` is context occupancy, not usage, and has its
+own column so it can never be mistaken for one (decision 7). No currency
+figure is stored (decision 8): a price is a rate table that changes without
+notice, and a stale one in a database reads like a measurement.
+
+**Delivery is still cooperative, and this station does not change that.** The
+dispatcher now attempts assignment and delivery for a cron run, through the
+same `assign` and `deliver` path `task send` uses — including its at-most-once
+journal. What it does not do is retry: a run that could not be delivered stays
+`queued` for central assignment, exactly as design §11 says, and no tick ever
+marks one `failed`.
+
+**Shipped, and what accepting it found that the tests did not.** Migration 6
+adds `task_templates`, `schedules`, `task_events`, `task_decisions` and
+`dispatcher_state`, plus the run fields on `tasks`. The command surface gains
+`schedule create|list|enable|disable` and `task assign|progress|decision|
+verify`. `factory doctor`'s check 6 answers two questions instead of one.
+`docs/slice-11-operator-guide.md` is the runbook.
+
+Six defects were found by accepting the work rather than by running it, and
+each is worth naming because none would have failed a test:
+
+- *The dispatcher was never started.* `dispatch::spawn` was referenced only by
+  its own test file. No installed instance would have fired anything.
+- *Nothing delivered a cron run.* `assign` and `deliver` had one call site,
+  the manual path, so every cron run sat `queued` forever — the prototype's
+  actual job, left unreplaced.
+- *A paused template kept firing.* `factory schedule create --template`
+  refused a template that was not `open` while the dispatcher happily fired
+  one, so "paused" meant something at creation and nothing afterwards.
+- *`create --template` skipped cron validation and no test noticed.* The
+  validation test walked only the other creation form. An unvalidated
+  expression would have been stored, failed to read on every tick, and been
+  named in the log every twenty seconds, while the operator who typed it got a
+  success back.
+- *A module doc described an architecture that had been deleted*, including a
+  section explaining a closed defect as still open. `check.sh` does not run
+  `cargo doc`, so links to functions that no longer exist are not errors.
+- *Two comments in one file said opposite things about the same column.* A
+  NULL `task_templates.target_scope_id` was called both design §11's "queued
+  for the central agent" and a trap that could never fire. §11's sentence is
+  about the target *agent*; the column is now `NOT NULL`.
+
+Left open, and carried into later stations: **no live drill has run** — the
+cut-over from the Python prototype is a documented operator procedure that
+nobody has performed, and Factory's own migration 1 fails on that database by
+design; **a verdict recorded through the CLI carries no author session**,
+because Factory has no caller identity at all, so the independence guard is
+enforced everywhere an author is known and is unreachable from the CLI path;
+**a paused template's skipped minutes are recorded nowhere**; and `check.sh`
+runs no `cargo doc`, which today would report 70 errors across 8 of the 14
+crates.
+
 ## 12. Agent discovery and durable writing
 
 **Objective:** Let an agent find out who else exists and who it may delegate to,
