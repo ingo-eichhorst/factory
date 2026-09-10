@@ -15,11 +15,12 @@
 //!    one home of that predicate in `factory_task::schedule`, and the
 //!    `factory schedule list` preview and this dispatcher must never
 //!    disagree about what "due" means.
-//! 2. For each due schedule, create a run from its template, tag it with
-//!    `schedule_id` / `fired_for_minute` / `triggered_by = 'cron'`, and call
-//!    [`factory_task::schedule::mark_fired`]. See "The two-transaction gap"
-//!    below for exactly what "in one transaction" means here and where it
-//!    falls short of decision 3's ideal.
+//! 2. For each due schedule, call
+//!    [`factory_task::create::create_from_schedule`], which inserts the run
+//!    already carrying `schedule_id` / `fired_for_minute` /
+//!    `triggered_by = 'cron'`, appends its `created` event, and stamps
+//!    `schedules.last_fired_at` — all in one transaction. See "One
+//!    transaction, and why it had to move" below.
 //! 3. Record the tick in `dispatcher_state`, unconditionally — even a tick
 //!    that found nothing due, and even one where every fire failed. That
 //!    table answers one question only, "has the dispatcher run at all
@@ -37,54 +38,58 @@
 //! On the autumn clock change a repeated local minute matches
 //! [`factory_task::schedule::due`] twice, an hour apart, so this dispatcher
 //! genuinely tries to fire the same schedule twice for the same rendered
-//! `fired_for_minute` string. [`is_already_fired_violation`] is where that
-//! is told apart from every other way the tagging `UPDATE` in
-//! [`tag_and_mark_fired`] can fail — see that function's own doc comment for
-//! why matching the SQLite error code alone is not enough.
+//! `fired_for_minute` string. `factory_task::create::create_from_schedule`
+//! answers [`factory_task::create::ScheduleFire::AlreadyFired`] for that,
+//! and this module reports it as an ordinary outcome rather than a fault.
 //!
-//! # The two-transaction gap
+//! Telling that violation apart from every other way the INSERT can fail
+//! lives in `factory_task`, beside the INSERT itself, because that is the
+//! only place that can match the constraint by name. This crate could only
+//! have compared error text, and the same INSERT produces text of the same
+//! shape for a CHECK failure and for a foreign-key failure — both real
+//! faults that must never be swallowed as an ordinary duplicate.
+//!
+//! # One transaction, and why it had to move
 //!
 //! ADR 0021 decision 3 wants the run insert and `schedules.last_fired_at`
-//! written in **one** transaction. `factory_task::create::create_from_template`
-//! cannot be that transaction: it opens and commits its own
-//! (`Store::transaction` takes `&mut Store` for the `Transaction`'s whole
+//! written in **one** transaction. This module cannot be that transaction.
+//! `factory_task::create::create_from_template` opens and commits its own
+//! (`Store::transaction` holds `&mut Store` for the `Transaction`'s whole
 //! lifetime, so a caller already holding one open transaction cannot pass
-//! the same `&mut Store` into a function that wants to open a second), and
-//! `factory_task::events::append` — the crate's own "one place that INSERTs
-//! into [`task_events`]" — is `pub(crate)` to `factory_task`, unreachable
-//! from here. Writing `tasks` or `task_events` rows directly from this crate
-//! would be exactly the second-home problem decision 3 already names for
-//! `last_fired_at`, one layer further in, and duplicating `insert_task`'s
-//! INSERT here would silently drop the run's `created` event that crate
-//! decision 3 requires.
+//! the same `&mut Store` into a function that wants a second), and
+//! `factory_task::events::append` — that crate's one place that INSERTs into
+//! `task_events` — is `pub(crate)`, unreachable from here. Writing `tasks`
+//! or `task_events` rows directly from this crate would be the second-home
+//! problem decision 3 already names for `last_fired_at`, one layer further
+//! in.
 //!
-//! So [`fire`] does the closest available thing in two steps: a pre-check
-//! read for an existing `(schedule_id, fired_for_minute)` row (so an
-//! ordinary repeated tick never calls `create_from_template` a second time),
-//! then `create_from_template` on its own, then [`tag_and_mark_fired`] —
-//! **one** transaction covering the `UPDATE` that tags the new row and the
-//! `mark_fired` call, so the harm decision 3 actually names cannot happen: a
-//! rejected tag rolls back `last_fired_at` with it. What is not closed is a
-//! narrower one decision 3 does not name: a crash between
-//! `create_from_template`'s commit and `tag_and_mark_fired`'s leaves an
-//! untagged, `triggered_by = 'manual'` orphan row, invisible to the
-//! pre-check on every later tick because it carries no `schedule_id`. See
-//! this task's report for the exact API change that closes it —
-//! `create_from_template` (or a sibling) taking a caller's own
-//! `&rusqlite::Transaction` plus `schedule_id` / `fired_for_minute` /
-//! `triggered_by`.
+//! An earlier version of this module assembled the fire from a committing
+//! create plus a second tagging transaction. That leaves a real hole: a
+//! crash between the two commits strands a run with `triggered_by =
+//! 'manual'` and no `schedule_id`, which the unique index never sees and no
+//! later tick can find — so the schedule fires again for the same minute,
+//! defeating the one criterion the index exists to hold. A pre-check read
+//! cannot close it either, because the orphan carries nothing to find it by.
+//!
+//! So the whole fire moved into `factory_task`, where one transaction can
+//! cover all three writes. This module chooses *which* schedules fire and
+//! reports what happened; it no longer assembles the write.
 //!
 //! # A template with no target scope
 //!
-//! `factory_task::template::Template::target_scope_id` is `Option` — "`None`
-//! means 'no target' — design §11's run that 'remains queued for the
-//! central agent to assign.'" `tasks.target_scope_id` is `NOT NULL`, and
-//! `create_from_template`'s own `target_scope_id` parameter is a plain
-//! `uuid::Uuid`, not an `Option`. There is today no way to create a run for
-//! such a template at all. [`fire`] reports [`FireOutcome::NoTargetScope`]
-//! rather than guessing at a placeholder scope; see this task's report for
-//! why that is a defect in `factory_task`, not something this module can
-//! close.
+//! `factory_task::template::Template::target_scope_id` is still `Option`,
+//! but `factory_task::template::create` refuses to write a `None`: a run's
+//! own `tasks.target_scope_id` is `NOT NULL` and `schedules` carries no
+//! scope of its own, so a scope-less template could never fire at all.
+//! Design §11's "remains queued for the central agent to assign" is about
+//! the target *agent*, not the scope.
+//!
+//! So a row reaching [`fire`] with no scope can only have arrived by a hand
+//! edit or a foreign restore. It reports [`FireOutcome::NoTargetScope`]
+//! rather than guessing at a placeholder scope, and `log_failed_fires` names
+//! the schedule on every tick until an operator fixes it. The column itself
+//! should be `NOT NULL`, which would retire this outcome; that is on
+//! station 11's closeout list.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -116,13 +121,15 @@ enum DispatchError {
 /// What happened when [`tick`] tried to fire one due schedule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FireOutcome {
-    /// A new run was created, tagged, and `schedules.last_fired_at` was
-    /// stamped in the same transaction as the tag.
+    /// A new run was created with its cron columns already set, its
+    /// `created` event appended, and `schedules.last_fired_at` stamped —
+    /// all in one transaction.
     Fired { task_id: uuid::Uuid },
     /// A run for this schedule and this local minute already exists — the
     /// ordinary autumn-clock-change outcome ADR 0021 decision 3a names, not
-    /// a fault. Detected either by this function's own pre-check or by
-    /// [`is_already_fired_violation`]; either way nothing was written.
+    /// a fault. Reported by
+    /// [`factory_task::create::ScheduleFire::AlreadyFired`], which reads the
+    /// unique index's own constraint violation; nothing was written.
     AlreadyFired,
     /// The schedule's template has `target_scope_id = NULL`. See this
     /// module's doc comment, "A template with no target scope" — no run was
@@ -263,8 +270,8 @@ fn try_fire(
 /// right write, first tick or the thousandth.
 ///
 /// Runs in its own transaction, after every schedule's own attempt in this
-/// tick — never inside [`tag_and_mark_fired`]'s transaction, so a rolled-back
-/// fire can never roll back the tick record with it. Silently does nothing
+/// tick — never inside a fire's transaction, so a rolled-back fire can never
+/// roll back the tick record with it. Silently does nothing
 /// on a store error, the same "never panics" stance [`tick`] itself takes:
 /// a tick that could not even write its own heartbeat has nothing further
 /// useful to do, and the next tick tries again a minute later.
