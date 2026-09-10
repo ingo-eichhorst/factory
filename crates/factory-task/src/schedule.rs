@@ -347,10 +347,7 @@ pub fn list(store: &factory_store::Store) -> Result<Vec<Schedule>, ScheduleError
 /// (design §11; ADR 0021 decision 3a's predicate, decision 7's "provide what
 /// a dispatcher needs and stop"). Disabled schedules are excluded here, at
 /// the source, rather than left for every caller to filter back out.
-pub fn due(
-    store: &factory_store::Store,
-    instant: DateTime<Utc>,
-) -> Result<Vec<Schedule>, ScheduleError> {
+pub fn due(store: &factory_store::Store, instant: DateTime<Utc>) -> Result<Due, ScheduleError> {
     let mut stmt = store
         .connection()
         .prepare(&format!(
@@ -364,13 +361,50 @@ pub fn due(
         .collect::<Result<Vec<_>, _>>()
         .map_err(factory_store::StoreError::from)?;
 
+    // One unreadable schedule must not silence every other one for this
+    // minute. `create` validates both fields, so an unparseable row can only
+    // arrive by a hand edit or a restore from something that was not
+    // Factory. Propagating the error with `?` here would abort the whole
+    // query, and the dispatcher would then create no runs at all that minute
+    // and every minute after, with nothing in the log naming the row that
+    // caused it. That is the "a wrong answer looks like an answer" failure
+    // ADR 0017 argues against, in its quietest form: nothing happens.
+    //
+    // The bad schedule is returned in `unreadable` rather than dropped, so a
+    // caller can say which one it was.
     let mut due_now = Vec::new();
+    let mut unreadable = Vec::new();
     for schedule in enabled_schedules {
-        if matches(&schedule.cron, &schedule.timezone, instant)? {
-            due_now.push(schedule);
+        match matches(&schedule.cron, &schedule.timezone, instant) {
+            Ok(true) => due_now.push(schedule),
+            Ok(false) => {}
+            Err(error) => unreadable.push(UnreadableSchedule {
+                id: schedule.id,
+                reason: error.to_string(),
+            }),
         }
     }
-    Ok(due_now)
+    Ok(Due {
+        schedules: due_now,
+        unreadable,
+    })
+}
+
+/// What [`due`] found for one instant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Due {
+    /// Enabled schedules whose expression matches this minute.
+    pub schedules: Vec<Schedule>,
+    /// Enabled schedules whose `cron` or `timezone` could not be read at all.
+    /// Never empty in normal operation: [`create`] validates both.
+    pub unreadable: Vec<UnreadableSchedule>,
+}
+
+/// A schedule row that could not be interpreted, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableSchedule {
+    pub id: uuid::Uuid,
+    pub reason: String,
 }
 
 /// Turn a schedule on or off without touching anything else. Backlog §11:

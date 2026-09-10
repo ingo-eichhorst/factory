@@ -21,9 +21,27 @@ fn uid(seed: u32) -> uuid::Uuid {
 /// A minimal, valid `task_templates` row for a schedule's `template_id` to
 /// reference. What the template actually says is irrelevant to every test in
 /// this file — `schedule` never reads a template's `prompt`.
+/// Insert a scope row directly, bypassing `factory-registry` (which this
+/// crate does not depend on) — mirrors `tests/template.rs::seed_scope`.
+fn seed_scope(store: &mut Store, seed: u32, name: &str, canonical_path: &str) -> uuid::Uuid {
+    let id = uid(seed);
+    let tx = store.transaction().expect("begin");
+    tx.execute(
+        "INSERT INTO scopes (id, name, declared_path, canonical_path) VALUES (?1, ?2, ?3, ?3)",
+        (id.to_string(), name, canonical_path),
+    )
+    .expect("insert scope");
+    tx.commit().expect("commit");
+    id
+}
+
 fn seed_template(store: &mut Store, seed: u32, name: &str) -> uuid::Uuid {
     let id = uid(seed);
-    create_template(store, id, name, None, None, "do it", None).expect("create template");
+    // Every template names a target scope: a run's own `target_scope_id` is
+    // NOT NULL, so a template without one could never fire. Which scope it
+    // is does not matter to any test here, so this seeds its own.
+    let scope_id = seed_scope(store, seed + 900, "irrlicht", "/instance-for-template");
+    create_template(store, id, name, scope_id, None, "do it", None).expect("create template");
     id
 }
 
@@ -288,11 +306,66 @@ fn due_returns_only_enabled_schedules_matching_the_instant() {
 
     let instant = Utc.with_ymd_and_hms(2027, 1, 1, 10, 15, 0).unwrap();
     let due = schedule::due(&store, instant).expect("due");
-    let ids: Vec<uuid::Uuid> = due.iter().map(|s| s.id).collect();
+    let ids: Vec<uuid::Uuid> = due.schedules.iter().map(|s| s.id).collect();
     assert_eq!(
         ids,
         vec![matching_enabled],
         "only the enabled schedule whose expression matches this instant is due"
+    );
+    assert!(
+        due.unreadable.is_empty(),
+        "every schedule here was created through the validating path"
+    );
+}
+
+/// One unreadable schedule must not silence every other one for that minute.
+///
+/// `create` validates `cron` and `timezone`, so such a row can only arrive by
+/// a hand edit or a restore from something that was not Factory. `due` used
+/// to propagate that with `?`, which aborted the whole query: the dispatcher
+/// would then create no runs at all, that minute and every minute after,
+/// with nothing naming the row that caused it. Nothing happening is the
+/// quietest form of a wrong answer that looks like an answer.
+///
+/// Mutation caught: putting the `?` back inside the loop.
+#[test]
+fn a_hand_broken_schedule_is_named_and_the_others_still_come_back_due() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let template_id = seed_template(&mut store, 1, "nightly-report");
+
+    let good = uid(2);
+    schedule::create(&mut store, good, template_id, "15 10 * * *", "UTC").expect("create good");
+
+    // A timezone no validating path would ever have accepted.
+    let broken = uid(3);
+    schedule::create(&mut store, broken, template_id, "15 10 * * *", "UTC")
+        .expect("create, then break it");
+    {
+        let tx = store.transaction().expect("begin");
+        tx.execute(
+            "UPDATE schedules SET timezone = 'Mars/Olympus_Mons' WHERE id = ?1",
+            [broken.to_string()],
+        )
+        .expect("hand-edit the timezone");
+        tx.commit().expect("commit");
+    }
+
+    let instant = Utc.with_ymd_and_hms(2027, 1, 1, 10, 15, 0).unwrap();
+    let due = schedule::due(&store, instant).expect("due must not fail over one bad row");
+
+    let ids: Vec<uuid::Uuid> = due.schedules.iter().map(|s| s.id).collect();
+    assert_eq!(ids, vec![good], "the readable schedule is still due");
+    assert_eq!(
+        due.unreadable.len(),
+        1,
+        "the broken one is reported, not dropped"
+    );
+    assert_eq!(due.unreadable[0].id, broken);
+    assert!(
+        due.unreadable[0].reason.contains("Mars/Olympus_Mons"),
+        "the reason must name the value an operator has to fix, got {:?}",
+        due.unreadable[0].reason
     );
 }
 

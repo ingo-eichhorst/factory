@@ -103,6 +103,12 @@ pub fn task_error(e: factory_task::TaskError) -> ErrorBody {
         E::ResultSummaryTooLarge { .. } | E::ResultArtifactPathsTooLarge { .. } => {
             err("validation.result_too_large", e.to_string())
         }
+        // A schedule that vanished between being read as due and being
+        // stamped. The foreign key on the run just inserted rules this out
+        // in practice, so it gets its own code rather than reading as a
+        // database fault to an operator who would find nothing wrong with
+        // the database.
+        E::ScheduleVanished(_) => err("conflict.schedule_vanished", e.to_string()),
         E::Store(_) => err("internal.store_error", e.to_string()),
     }
 }

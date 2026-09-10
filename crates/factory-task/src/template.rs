@@ -92,6 +92,16 @@ pub struct Template {
     pub name: String,
     /// `None` means "no target" — design §11's run that "remains queued for
     /// the central agent to assign."
+    /// Read back as an `Option` because the column is nullable, and written
+    /// only as `Some` because [`create`] requires one.
+    ///
+    /// Design §11's "if a target agent is absent, the run remains queued for
+    /// the central agent to assign" is about the **agent**
+    /// ([`Template::target_agent_name`]), not the scope. A run's own
+    /// `tasks.target_scope_id` is `NOT NULL`, so a template without a scope
+    /// could never produce a run at all: an operator would be able to create
+    /// one that silently never fires. The column stays nullable so a later
+    /// station can relax the rule without a migration; version 1 does not.
     pub target_scope_id: Option<uuid::Uuid>,
     pub target_agent_name: Option<String>,
     pub prompt: String,
@@ -162,7 +172,7 @@ pub fn create(
     store: &mut factory_store::Store,
     id: uuid::Uuid,
     name: &str,
-    target_scope_id: Option<uuid::Uuid>,
+    target_scope_id: uuid::Uuid,
     target_agent_name: Option<&str>,
     prompt: &str,
     acceptance_criteria: Option<&str>,
@@ -188,7 +198,7 @@ pub fn create(
         (
             id.to_string(),
             name,
-            target_scope_id.map(|s| s.to_string()),
+            target_scope_id.to_string(),
             target_agent_name,
             prompt,
             acceptance_criteria,

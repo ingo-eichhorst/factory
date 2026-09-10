@@ -34,31 +34,41 @@ fn seed_scope(store: &mut Store, seed: u32, name: &str, canonical_path: &str) ->
 
 // create -----------------------------------------------------------------
 
-/// The plain path: a template with no target scope at all is legal —
-/// design §11's run that "remains queued for the central agent to assign."
-/// `version` starts at 1 (schema default) and `state` starts `open`.
+/// The plain path: a template names a target scope, carries no target agent,
+/// and starts at `version` 1 (schema default) in state `open`.
+///
+/// The absent half is the **agent**, not the scope. Design §11's run that
+/// "remains queued for the central agent to assign" is one whose target agent
+/// is unspecified; `tasks.target_scope_id` is NOT NULL, so a template without
+/// a scope could never produce a run at all.
 #[test]
-fn create_with_no_target_scope_starts_open_at_version_one() {
+fn create_with_no_target_agent_starts_open_at_version_one() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 700, "irrlicht", "/instance");
 
     let template_id = uid(1);
     create_template(
         &mut store,
         template_id,
         "nightly-report",
-        None,
+        scope_id,
         None,
         "write the nightly report",
         None,
     )
-    .expect("create a template with no target");
+    .expect("create a template with a scope but no named agent");
 
     let template = factory_task::template::get_by_id(&store, template_id).expect("get_by_id");
     assert_eq!(template.name, "nightly-report");
     assert_eq!(
-        template.target_scope_id, None,
-        "no target means central assignment, design §11"
+        template.target_scope_id,
+        Some(scope_id),
+        "a template always names the scope the work is for"
+    );
+    assert_eq!(
+        template.target_agent_name, None,
+        "no named agent means central assignment, design §11"
     );
     assert_eq!(template.prompt, "write the nightly report");
     assert_eq!(template.acceptance_criteria, None);
@@ -77,7 +87,7 @@ fn create_records_a_target_scope_and_agent_and_acceptance_criteria_when_given() 
         &mut store,
         template_id,
         "weekly-audit",
-        Some(scope_id),
+        scope_id,
         Some("auditor"),
         "audit the week",
         Some("every finding has a linked commit"),
@@ -100,12 +110,13 @@ fn create_records_a_target_scope_and_agent_and_acceptance_criteria_when_given() 
 fn a_duplicate_name_is_a_typed_error_not_a_panic() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 850, "irrlicht", "/instance");
 
     create_template(
         &mut store,
         uid(1),
         "nightly-report",
-        None,
+        scope_id,
         None,
         "first prompt",
         None,
@@ -116,7 +127,7 @@ fn a_duplicate_name_is_a_typed_error_not_a_panic() {
         &mut store,
         uid(2),
         "nightly-report",
-        None,
+        scope_id,
         None,
         "a different prompt entirely",
         None,
@@ -148,12 +159,13 @@ fn a_duplicate_name_is_a_typed_error_not_a_panic() {
 fn the_name_uniqueness_index_itself_refuses_a_duplicate_bypassing_the_typed_precheck() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 851, "irrlicht", "/instance");
 
     create_template(
         &mut store,
         uid(1),
         "nightly-report",
-        None,
+        scope_id,
         None,
         "first prompt",
         None,
@@ -197,11 +209,13 @@ fn get_by_name_of_a_nonexistent_template_is_not_found() {
 fn list_returns_every_template_oldest_first() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 800, "irrlicht", "/instance");
 
     let first = uid(1);
     let second = uid(2);
-    create_template(&mut store, first, "first", None, None, "do it", None).expect("create first");
-    create_template(&mut store, second, "second", None, None, "do it", None)
+    create_template(&mut store, first, "first", scope_id, None, "do it", None)
+        .expect("create first");
+    create_template(&mut store, second, "second", scope_id, None, "do it", None)
         .expect("create second");
 
     let templates = factory_task::template::list(&store).expect("list");
@@ -217,13 +231,14 @@ fn list_returns_every_template_oldest_first() {
 fn revise_bumps_version_from_one_to_two() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 701, "irrlicht", "/instance");
 
     let template_id = uid(1);
     create_template(
         &mut store,
         template_id,
         "nightly-report",
-        None,
+        scope_id,
         None,
         "first prompt",
         None,
@@ -250,13 +265,14 @@ fn revise_bumps_version_from_one_to_two() {
 fn revise_can_change_only_acceptance_criteria_and_leaves_prompt_untouched() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 702, "irrlicht", "/instance");
 
     let template_id = uid(1);
     create_template(
         &mut store,
         template_id,
         "nightly-report",
-        None,
+        scope_id,
         None,
         "the original prompt",
         None,
@@ -302,7 +318,7 @@ fn a_run_keeps_the_template_version_it_executed_across_later_revisions() {
         &mut store,
         template_id,
         "nightly-report",
-        Some(scope_id),
+        scope_id,
         None,
         "version 1 of the prompt",
         None,
@@ -433,13 +449,14 @@ fn a_run_created_without_a_template_has_null_template_fields_and_behaves_as_befo
 fn state_round_trips_through_the_typed_api_and_the_schema_check_is_a_backstop() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 703, "irrlicht", "/instance");
 
     let template_id = uid(1);
     create_template(
         &mut store,
         template_id,
         "nightly-report",
-        None,
+        scope_id,
         None,
         "do it",
         None,

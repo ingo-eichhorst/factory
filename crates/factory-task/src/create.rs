@@ -165,12 +165,28 @@ fn insert_task(
     delegation_chain: &[uuid::Uuid],
     template_id: Option<uuid::Uuid>,
     template_version: Option<i64>,
+    cron_origin: Option<CronOrigin<'_>>,
 ) -> Result<(), TaskError> {
+    // `triggered_by` is derived from `cron_origin` rather than passed
+    // separately, because migration 6's CHECK ties the three together: a
+    // `cron` row must carry both a schedule and a minute, and a `manual` row
+    // must carry neither. One argument that can only produce a legal
+    // combination is better than three that can produce an illegal one and
+    // learn about it from the database.
+    let (triggered_by, schedule_id, fired_for_minute) = match cron_origin {
+        Some(origin) => (
+            "cron",
+            Some(origin.schedule_id.to_string()),
+            Some(origin.fired_for_minute),
+        ),
+        None => ("manual", None, None),
+    };
     tx.execute(
         "INSERT INTO tasks \
          (id, sender_scope_id, target_scope_id, target_session_id, target_workspace_path, \
-          prompt, status, template_id, template_version) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8)",
+          prompt, status, template_id, template_version, \
+          triggered_by, schedule_id, fired_for_minute) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8, ?9, ?10, ?11)",
         (
             id.to_string(),
             sender_scope_id.map(|s| s.to_string()),
@@ -180,6 +196,9 @@ fn insert_task(
             prompt,
             template_id.map(|t| t.to_string()),
             template_version,
+            triggered_by,
+            schedule_id,
+            fired_for_minute,
         ),
     )
     .map_err(factory_store::StoreError::from)?;
@@ -235,6 +254,7 @@ pub fn create(
         target_workspace_path,
         prompt,
         delegation_chain,
+        None,
         None,
         None,
     )?;
@@ -316,6 +336,7 @@ pub fn create_from_template(
         delegation_chain,
         Some(template_id),
         template_version,
+        None,
     )?;
     tx.commit().map_err(factory_store::StoreError::from)?;
     Ok(id)
@@ -517,4 +538,139 @@ pub fn cancel(store: &mut factory_store::Store, id: uuid::Uuid) -> Result<TaskSt
 
     tx.commit().map_err(factory_store::StoreError::from)?;
     Ok(outcome)
+}
+
+/// Where a cron run came from: the schedule that fired and the local minute
+/// it fired for, exactly as `tasks.fired_for_minute` stores it.
+///
+/// Carried as one value rather than three loose arguments because migration
+/// 6's `triggered_by` CHECK binds them together. A `cron` row must have both
+/// a schedule and a minute; a `manual` row must have neither. There is no
+/// legal fourth combination, so there is no way to express one here.
+#[derive(Debug, Clone, Copy)]
+pub struct CronOrigin<'a> {
+    pub schedule_id: uuid::Uuid,
+    pub fired_for_minute: &'a str,
+}
+
+/// What [`create_from_schedule`] did.
+///
+/// `AlreadyFired` is an outcome, not an error. ADR 0021 decision 3a: on the
+/// autumn clock change both instants of a repeated local minute match, an
+/// hour apart, so a dispatcher genuinely tries to fire twice and the database
+/// rejects the second. A dispatcher told that was a failure would report a
+/// fault once a year, at 02:30, to nobody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleFire {
+    Fired(uuid::Uuid),
+    AlreadyFired,
+}
+
+/// Create one cron run and stamp its schedule, in **one transaction**.
+///
+/// ADR 0021 decision 3 requires the run insert and `schedules.last_fired_at`
+/// to commit together, and this is the only function that can honour it. The
+/// dispatcher lives in `factory-daemon`, which has no direct `rusqlite`
+/// dependency and cannot reach [`crate::events::append`] — so a dispatcher
+/// assembling this from [`create_from_template`] plus a second transaction
+/// leaves a window: a crash between the two commits strands a run with
+/// `triggered_by = 'manual'` and no `schedule_id`, which
+/// `tasks_one_run_per_schedule_minute` never indexes and no later tick can
+/// see. The schedule would then fire again for the same minute, which is
+/// exactly the acceptance criterion the index exists to hold.
+///
+/// Detecting "already fired" also belongs here rather than in the caller.
+/// This crate has `rusqlite` and can match
+/// [`rusqlite::ErrorCode::ConstraintViolation`] against the index by name; a
+/// caller without the dependency could only compare error text, and the same
+/// INSERT can fail the `triggered_by` CHECK or the `schedule_id` foreign key,
+/// both real faults that must not be swallowed as an ordinary duplicate.
+///
+/// `last_fired_at` is stamped only on a run that was actually created. A
+/// duplicate leaves it exactly as it was: a schedule that looks like it ran
+/// and did not is worse than one that looks like it has never run.
+#[allow(clippy::too_many_arguments)]
+pub fn create_from_schedule(
+    store: &mut factory_store::Store,
+    id: uuid::Uuid,
+    schedule_id: uuid::Uuid,
+    template_id: uuid::Uuid,
+    target_scope_id: uuid::Uuid,
+    target_agent_name: Option<&str>,
+    prompt: &str,
+    fired_for_minute: &str,
+    fired_at: chrono::DateTime<chrono::Utc>,
+) -> Result<ScheduleFire, TaskError> {
+    let _ = target_agent_name;
+    let tx = store.transaction()?;
+
+    let template_version: Option<i64> = tx
+        .query_row(
+            "SELECT version FROM task_templates WHERE id = ?1",
+            [template_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(factory_store::StoreError::from)?;
+
+    let inserted = insert_task(
+        &tx,
+        id,
+        None,
+        target_scope_id,
+        None,
+        None,
+        prompt,
+        &[target_scope_id],
+        Some(template_id),
+        template_version,
+        Some(CronOrigin {
+            schedule_id,
+            fired_for_minute,
+        }),
+    );
+
+    match inserted {
+        Ok(()) => {}
+        Err(e) if is_already_fired(&e) => {
+            // Dropping `tx` rolls the whole attempt back, including the
+            // `created` event, so a rejected duplicate leaves no trace at
+            // all rather than half of one.
+            return Ok(ScheduleFire::AlreadyFired);
+        }
+        Err(e) => return Err(e),
+    }
+
+    // `mark_fired` takes this transaction, so the stamp and the run commit
+    // or roll back together. Its only failure is a schedule that vanished
+    // between `due` and here, which the foreign key on the row just inserted
+    // has already ruled out, so the error is surfaced rather than absorbed.
+    crate::schedule::mark_fired(&tx, schedule_id, fired_at).map_err(|e| match e {
+        crate::schedule::ScheduleError::Store(store) => TaskError::from(store),
+        other => TaskError::ScheduleVanished(other.to_string()),
+    })?;
+
+    tx.commit().map_err(factory_store::StoreError::from)?;
+    Ok(ScheduleFire::Fired(id))
+}
+
+/// Is this the one constraint that means "this schedule already produced a
+/// run for this minute"?
+///
+/// Matched on `rusqlite`'s own structured error rather than on message text,
+/// and narrowed to the index by name. The same INSERT can violate
+/// `triggered_by`'s CHECK or the `schedule_id` foreign key, and both of those
+/// are real faults a dispatcher must not silently treat as an ordinary
+/// duplicate.
+fn is_already_fired(error: &TaskError) -> bool {
+    let TaskError::Store(factory_store::StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+        code,
+        Some(message),
+    ))) = error
+    else {
+        return false;
+    };
+    code.code == rusqlite::ErrorCode::ConstraintViolation
+        && message.contains("tasks.schedule_id")
+        && message.contains("tasks.fired_for_minute")
 }

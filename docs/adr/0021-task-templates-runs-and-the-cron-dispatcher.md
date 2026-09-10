@@ -109,12 +109,28 @@ outside that transaction would record a firing that did not happen — a
 schedule that looks like it ran and did not is worse than one that looks like
 it has never run.
 
-That has a shape consequence worth stating, because it was nearly missed. The
-dispatcher lives in `factory-daemon` and `schedules` is owned by
-`factory_task::schedule`, so the stamp cannot be a `&mut Store` function: it
-takes the caller's own `&Transaction` (`schedule::mark_fired`). Without it the
-dispatcher's only route would be raw SQL against a table another crate owns,
-which is the second-home problem this project keeps deciding against.
+That has a shape consequence worth stating, because it took two attempts to
+get right. `schedules` is owned by `factory_task::schedule` and `tasks` by
+`factory_task::create`, while the dispatcher lives in `factory-daemon` — so
+the stamp cannot be a `&mut Store` function. `schedule::mark_fired` therefore
+takes the caller's own `&Transaction`.
+
+That alone was not enough. A dispatcher assembling the fire from
+`create_from_template` (which commits) plus a second transaction that tagged
+the row and stamped the schedule still left a window: a crash between the two
+commits strands a run with `triggered_by = 'manual'` and no `schedule_id`,
+which `tasks_one_run_per_schedule_minute` never indexes and no later tick can
+find, so the schedule fires again for the same minute. A pre-check read cannot
+close it, because the orphan carries nothing to find it by.
+
+The whole fire is therefore one function in `factory-task`,
+`create::create_from_schedule`: insert the run with its schedule and minute,
+write the `created` event, stamp `last_fired_at`, one transaction. Detecting
+the duplicate moved with it, and improved by moving — `factory-task` has
+`rusqlite` as a direct dependency and matches
+`ErrorCode::ConstraintViolation` against the index by name, where the daemon
+could only have compared error text against a message that the same INSERT
+also produces for a CHECK or foreign-key failure.
 
 It matters most for the acceptance criterion that says "including after
 dispatcher restarts." A dispatcher that remembers in memory which minutes it

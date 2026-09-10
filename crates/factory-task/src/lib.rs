@@ -346,6 +346,14 @@ pub const MAX_RESULT_ARTIFACT_PATHS_BYTES: usize = 8 * 1024;
 /// in the style of `factory_session::SessionError`.
 #[derive(Debug, thiserror::Error)]
 pub enum TaskError {
+    /// A schedule disappeared between being read as due and being stamped.
+    /// The foreign key on the run just inserted makes this unreachable in
+    /// practice, so it is carried as a distinct variant rather than folded
+    /// into [`TaskError::Store`]: if it ever fires, the cause is not a
+    /// database error and should not read like one.
+    #[error("the schedule this run came from could not be stamped: {0}")]
+    ScheduleVanished(String),
+
     #[error("store error: {0}")]
     Store(#[from] factory_store::StoreError),
 
