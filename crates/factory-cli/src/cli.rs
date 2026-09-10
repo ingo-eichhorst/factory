@@ -286,6 +286,36 @@ pub enum TaskCommand {
         note: Option<String>,
     },
 
+    /// Create a new run that reworks an already-finished one (design §12.2's
+    /// hook). The referenced run must be terminal, and is never itself
+    /// changed — this only ever writes the new run's own row and its own
+    /// `rework` event.
+    ///
+    /// `--prompt` is required: a rework's prompt always comes from the
+    /// caller, never from the reworked run's template — see
+    /// `factory_task::create::create_rework`'s own doc comment. `--scope`
+    /// names the new run's target scope; it is never inherited from the run
+    /// being reworked, so a rework can land in a different scope on purpose.
+    /// Creates only — it never assigns or delivers, so a caller who wants
+    /// the new run worked follows up with `factory task assign`.
+    Rework {
+        #[arg(long)]
+        scope: crate::scope_ref::ScopeRef,
+        #[arg(long)]
+        prompt: String,
+        /// The finished run this one reworks.
+        #[arg(long)]
+        reworks_task_id: Uuid,
+        /// Why the referenced run is being reworked. Required — an empty
+        /// finding is refused (`factory_task::TaskError::ReworkFindingRequired`).
+        #[arg(long)]
+        rework_finding: String,
+        #[arg(long)]
+        target_session: Option<Uuid>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+
     /// List every task.
     List,
 

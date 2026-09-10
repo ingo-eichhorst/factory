@@ -729,6 +729,99 @@ fn task_verify_envelope_matches_decision_9s_payload_table() {
     assert!(request.get("idempotency_key").is_none());
 }
 
+// --- Station 11 gap 3: task rework ------------------------------------------
+
+/// `--scope` is a real UUID here (not a name), so it resolves client-side
+/// with no extra round trip — the same reason `task_send_envelope_matches_
+/// decision_9s_payload_table` above can assert exactly one request.
+#[test]
+fn task_rework_envelope_matches_decision_9s_payload_table() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| {
+        FakeResponse::Ok(json!({ "task_id": request["payload"]["task_id"], "status": "queued" }))
+    });
+
+    let reworks_task_id = "00000000-0000-4000-8000-000000000098";
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args([
+            "task",
+            "rework",
+            "--scope",
+            NIL_SCOPE,
+            "--prompt",
+            "redo it, this time handling the edge case",
+            "--reworks-task-id",
+            reworks_task_id,
+            "--rework-finding",
+            "missed the edge case",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["api"], "factory.command/v1");
+    assert_eq!(request["command"], "task.rework");
+    assert_eq!(request["scope_id"], NIL_SCOPE);
+    assert!(request["payload"]["task_id"].is_string());
+    assert_eq!(
+        request["payload"]["prompt"],
+        "redo it, this time handling the edge case"
+    );
+    assert_eq!(request["payload"]["reworks_task_id"], reworks_task_id);
+    assert_eq!(request["payload"]["rework_finding"], "missed the edge case");
+    // No stray fields, and none of the optional ones this call did not pass.
+    assert!(request["payload"].get("target_session_id").is_none());
+    assert!(request["payload"].get("target_workspace_path").is_none());
+    assert!(request.get("idempotency_key").is_none());
+}
+
+#[test]
+fn task_rework_sends_target_session_and_workspace_when_given() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| {
+        FakeResponse::Ok(json!({ "task_id": request["payload"]["task_id"], "status": "queued" }))
+    });
+
+    let reworks_task_id = "00000000-0000-4000-8000-000000000098";
+    let target_session = "00000000-0000-4000-8000-000000000097";
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args([
+            "task",
+            "rework",
+            "--scope",
+            NIL_SCOPE,
+            "--prompt",
+            "redo it",
+            "--reworks-task-id",
+            reworks_task_id,
+            "--rework-finding",
+            "missed the edge case",
+            "--target-session",
+            target_session,
+            "--workspace",
+            "/tmp/some-workspace",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["payload"]["target_session_id"], target_session);
+    assert_eq!(
+        request["payload"]["target_workspace_path"],
+        "/tmp/some-workspace"
+    );
+}
+
 #[test]
 fn agent_start_mints_a_session_id_and_reports_the_returned_state() {
     let dir = TempDir::new().unwrap();

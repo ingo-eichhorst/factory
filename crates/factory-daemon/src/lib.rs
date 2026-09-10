@@ -87,6 +87,7 @@
 //! | `task.progress` | `factory task progress` |
 //! | `task.decision` | `factory task decision` |
 //! | `task.verify` | `factory task verify` |
+//! | `task.rework` | `factory task rework` |
 //! | `schedule.create` | `factory schedule create` |
 //! | `schedule.enable`, `schedule.disable` | `factory schedule enable\|disable` |
 //!
@@ -103,7 +104,7 @@
 //! | `context.show` | `factory context show` |
 //! | `daemon.status` | `factory status` |
 //!
-//! Seven of these need saying out loud.
+//! Eight of these need saying out loud.
 //!
 //! **`factory init` is not here, because it cannot be.** It creates the
 //! configuration and the database that a daemon needs before one can run. It
@@ -164,6 +165,21 @@
 //! verify` is a human operation in version 1 (ADR 0021 decision 5) and takes
 //! no `--session` flag.
 //!
+//! **`task.rework` is station 11's gap 3 (§12.2), and reads its new run's
+//! target scope from the envelope's `scope_id` — the same stance `task.send`
+//! takes, and deliberately not `task.assign`'s.** `task.assign` reads
+//! `target_scope_id` back from the task it already names, so a caller cannot
+//! disagree with that row's own scope; a rework creates a **new** row, so
+//! there is no existing scope to defer to, and the caller names one instead.
+//! The new run's scope can therefore differ from the scope of the run it
+//! reworks — a deliberate choice, not an oversight; see
+//! `ops::task::rework`'s own doc comment and `factory-daemon`'s
+//! `tests/rework.rs::rework_can_land_in_a_different_scope_than_the_run_it_reworks`.
+//! The new run's prompt is likewise always supplied by the caller:
+//! `factory_task::create::create_rework` takes `prompt: &str` directly and
+//! never reads the reworked run's own template, so a reworked run with no
+//! template at all is not a special case here.
+//!
 //! # Station 10's `Handler`: [`handler::FactoryHandler`]
 //!
 //! [`handler::FactoryHandler`] is the `Handler` this crate's own docs (decision
@@ -193,8 +209,8 @@
 //!
 //! Every command and query's envelope carries `scope_id` (ADR 0003 §§2–3);
 //! this crate reads it as *the scope the operation concerns* — the target
-//! scope for `scope.*`/`agent.*`/`task.send`/`context.show`, and the scope a
-//! listing is filtered by for `agent.status`.
+//! scope for `scope.*`/`agent.*`/`task.send`/`task.rework`/`context.show`,
+//! and the scope a listing is filtered by for `agent.status`.
 //!
 //! | Operation | Payload | Result |
 //! |---|---|---|
@@ -214,6 +230,7 @@
 //! | `task.progress` | `{ "task_id": Uuid, "note": String }` | `{ "task_id", "recorded": true }` — an annotation; changes no column of `tasks` |
 //! | `task.decision` | `{ "decision_id": Uuid, "task_id": Uuid, "decision": String, "rationale": String, "alternatives": String?, "consequences": String? }` | `{ "task_id", "decision_id" }` — `rationale` empty is `validation.no_rationale`, refused before any row is written (`task_decisions.rationale` is `NOT NULL` on purpose, design §11) |
 //! | `task.verify` | `{ "task_id": Uuid, "verdict": String, "note": String? }` | `{ "task_id", "recorded": true }` — see the call-out below; this is the one command in this table that mutates the audit log and deliberately not the run |
+//! | `task.rework` | `{ "task_id": Uuid, "prompt": String, "reworks_task_id": Uuid, "rework_finding": String, "target_session_id": Uuid?, "target_workspace_path": String? }` (`task_id` names the *new* run; `reworks_task_id` names the finished run it reworks — see the call-out below on where `target_scope_id` comes from and why `prompt` is never derived from a template) | `{ "task_id", "status": "queued" }` |
 //! | `task.list` | `{}` | `{ "tasks": [Task] }` |
 //! | `task.show` | `{ "task_id": Uuid }` | `{ ...Task, "delegation_chain": [Uuid] }` |
 //! | `task.wait` | `{ "task_id": Uuid, "timeout_ms": u64? }` (default and maximum in `handler::task`) | `{ "task_id", "status", "timed_out": bool }` — never mutates; see the module docs above |

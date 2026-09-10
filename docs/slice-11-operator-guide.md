@@ -184,6 +184,40 @@ and version 1 records verdicts as a human operation.
 `assign` reports no change when it could not assign. A busy agent, or one with
 no idle session, leaves the run where it was.
 
+### Sending a finding back onto the line
+
+```sh
+factory task rework --scope demo \
+  --prompt "redo the report; the figures came from the wrong quarter" \
+  --reworks-task-id <id> \
+  --rework-finding "used Q2 data for a Q3 report"
+```
+
+This creates a **new** run. The run it references is not touched: not its
+status, not its result, not its own events.
+
+The referenced run must have finished — `done`, `failed` or `cancelled`. A
+`blocked` run is refused, because it is waiting for a human and can still
+resolve and finish; reworking it would put two runs on the same job. If you
+have decided a blocked run is over, `factory task cancel` it first. That is
+one act saying the work stopped and another saying what replaces it, rather
+than one act quietly meaning both.
+
+A run may not rework itself. Chains are fine: a rework may itself be
+reworked.
+
+The prompt is yours to write and is not taken from the template — a rework
+exists because something was wrong, and the instruction is often the thing to
+correct. For the same reason the new run records no template version: it is
+not another run of that template.
+
+The new run lands in the scope **you** name, which need not be the scope of
+the run it reworks. An inspection in a parent scope can find fault with a
+child's run; the finding travels, and where the corrective work belongs is
+your call.
+
+`rework` only creates. Run `factory task assign` next.
+
 ## Procedure 4 — what the dispatcher does, every twenty seconds
 
 The dispatcher starts with the daemon and does three things each tick.
@@ -414,10 +448,69 @@ Each of those has been mutated deliberately — the rule removed, the test
 watched to die, the rule restored. A rule with no test that dies for it is not
 enforced, whatever the code looks like.
 
+## Running the drill
+
+Run against a **throwaway root only**. Never the company root: migration 1
+fails there by design, and Factory's dispatcher would be writing the file the
+prototype is already writing.
+
+The socket path has a hard limit of 103 bytes, and it is
+`<root>/.factory/factory.sock`, so pick a short root. `/tmp/f11d` works; a
+path under a long temporary directory does not.
+
+```sh
+rm -rf /tmp/f11d && mkdir -p /tmp/f11d/projects/demo
+factory --root /tmp/f11d init --name drill
+$EDITOR /tmp/f11d/.factory/config.yaml          # add one scope with one agent
+factory --root /tmp/f11d start --harness pi
+factory --root /tmp/f11d scope reconcile --apply
+factory --root /tmp/f11d schedule create demo   --task "write the drill report" --name drill-report   --cron "* * * * *" --tz UTC --agent lead
+# wait a few minutes
+factory --root /tmp/f11d task list
+factory --root /tmp/f11d doctor
+factory --root /tmp/f11d stop && rm -rf /tmp/f11d
+```
+
+`scope reconcile` before the daemon is running fails with exit 3 and says how
+to start it. That is ADR 0014 working, not a fault: the CLI is a client.
+
+### What the first run of this drill proved, and what it found
+
+Run on 2026-09-10, on a real `factory` binary against `/tmp/f11d`.
+
+Proved:
+
+- **One run per schedule per minute.** Over four minutes, with the dispatcher
+  ticking three times a minute — twelve ticks — exactly four runs existed, one
+  per local minute, each tagged `cron` with its own `fired_for_minute`.
+- **A schedule fires within seconds of being created**, because the first tick
+  of a matching minute is the one that fires it, not the top of the next
+  minute.
+- **A run stays queued when nothing can take it.** The agent existed in the
+  configuration and had no session, so all four runs sat `queued`. Nothing was
+  failed and nothing was lost.
+- **Every refusal names what was wrong**: `validation.invalid_cron` quoting the
+  expression, `validation.invalid_timezone` quoting the zone, and
+  `validation.conflicting_fields` for both creation forms at once.
+- **The run records its template and the version it executed.**
+
+Found:
+
+- **Check 6 claimed two dispatchers where there was one.** The drill's
+  throwaway instance is not the database the loaded prototype writes. Fixed;
+  see Procedure 6's "Serves this root" column.
+- **A cron run is indistinguishable from a manual one in `task list`.** The
+  columns exist on the row — `triggered_by`, `schedule_id`, `fired_for_minute`
+  — and the drill read them straight out of SQLite, but the daemon's JSON does
+  not carry them. An operator cannot yet answer "which of these came from a
+  schedule?" without opening the database.
+
 ## Open items this station leaves
 
-- **The cut-over has not been performed**, and no live drill has run against a
-  real Herdr pane on a throwaway root.
+- **The delivery half of the drill has not run.** A cron run reaching a real
+  Herdr pane with a real harness needs a live session, which the first drill
+  did not create.
+- **The cut-over has not been performed.**
 - **`check.sh` does not run `cargo doc`**, so a doc comment linking to a
   function that no longer exists is not an error. Measured on 2026-09-10:
   70 such errors across 8 of the 14 crates.

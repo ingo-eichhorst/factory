@@ -153,6 +153,7 @@ fn dispatch_command(
         "task.progress" => crate::ops::task::progress(h, scope_id, payload),
         "task.decision" => crate::ops::task::decision(h, scope_id, payload),
         "task.verify" => crate::ops::task::verify(h, scope_id, payload),
+        "task.rework" => crate::ops::task::rework(h, scope_id, payload),
         "schedule.create" => crate::ops::schedule::create(h, scope_id, payload),
         "schedule.enable" => crate::ops::schedule::enable(h, scope_id, payload),
         "schedule.disable" => crate::ops::schedule::disable(h, scope_id, payload),

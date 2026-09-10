@@ -1,5 +1,6 @@
 //! `factory task send|cancel|done|fail|block|resume|list|show` (design §2.4,
-//! §5, §7), and station 11 gap 2's `assign|progress|decision|verify`.
+//! §5, §7), station 11 gap 2's `assign|progress|decision|verify`, and
+//! station 11 gap 3's `rework` (§12.2).
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -279,6 +280,42 @@ pub fn verify(root: &Path, task_id: Uuid, verdict: &str, note: Option<&str>) -> 
             &format!("factory: task {task_id} verdict recorded"),
             &result,
         );
+        exit::OK
+    })
+}
+
+/// Station 11 gap 3: create a new run that reworks an already-finished one.
+/// `task_id` (the new run's own id) is minted here, exactly like `send`'s own
+/// `task_id` and `decision`'s own `decision_id` — this crate never lets the
+/// daemon mint an id for a caller.
+#[allow(clippy::too_many_arguments)]
+pub fn rework(
+    root: &Path,
+    scope: Uuid,
+    prompt: &str,
+    reworks_task_id: Uuid,
+    rework_finding: &str,
+    target_session: Option<Uuid>,
+    workspace: Option<&Path>,
+) -> i32 {
+    let task_id = crate::ids::new_id();
+    let mut payload = json!({
+        "task_id": task_id.to_string(),
+        "prompt": prompt,
+        "reworks_task_id": reworks_task_id.to_string(),
+        "rework_finding": rework_finding,
+    });
+    if let Some(target_session) = target_session {
+        payload["target_session_id"] = json!(target_session.to_string());
+    }
+    if let Some(workspace) = workspace {
+        payload["target_workspace_path"] = json!(workspace.display().to_string());
+    }
+
+    let outcome = rpc::command(root, scope, "task.rework", payload);
+    rpc::report(root, outcome, |result| {
+        let status = field_str(&result, "status", "?").to_string();
+        rpc::print_result(&format!("factory: task {task_id} {status}"), &result);
         exit::OK
     })
 }

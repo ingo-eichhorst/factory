@@ -109,10 +109,8 @@ pub fn task_error(e: factory_task::TaskError) -> ErrorBody {
         // database fault to an operator who would find nothing wrong with
         // the database.
         E::ScheduleVanished(_) => err("conflict.schedule_vanished", e.to_string()),
-        // §12.2's hook (`create::create_rework`). No daemon operation calls
-        // that function today (station 11's own report explains why), but
-        // `TaskError` is one enum shared by every caller in this crate, so
-        // this match must stay exhaustive over it regardless.
+        // §12.2's hook (`create::create_rework`), reached through
+        // `task.rework` (station 11 gap 3).
         E::SelfRework(_) => err("validation.rework_self_reference", e.to_string()),
         E::ReworkTargetNotTerminal { .. } => {
             err("conflict.rework_target_not_terminal", e.to_string())

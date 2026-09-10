@@ -564,6 +564,45 @@ operator asked for it. It needs its own outcome, distinct from
 `FireOutcome::Failed`, and `factory schedule list` is where an operator should
 see that a schedule is enabled while its template is not.
 
+### 12. A rework carries a finding back onto the line, and only from a run that
+finished.
+
+Design §12.2 asks for "a new task run referencing the failed run and its
+finding as input", with "deciding to rework" left to a human. Three rules make
+that precise, because the section does not.
+
+**The referenced run must be terminal** — `done`, `failed` or `cancelled`. A
+finding presumes the work finished and went wrong.
+
+**`blocked` is excluded, and §12.2's own wording pulls the other way.** Its
+gap bullet calls `failed` and `blocked` alike "terminal states addressed to a
+human". They are not alike here: a blocked run is waiting for a human and can
+still resolve back to `queued` and finish. Reworking one would create a second
+run for work the first may yet complete, and the two would race. §12.2's
+composition sentence says "the **failed** run", which is the reading this
+follows.
+
+An operator who has decided a blocked run is finished has a path that keeps
+the record honest: `factory task cancel`, then `factory task rework`. That is
+one deliberate act saying the work stopped, followed by another saying what
+replaces it, rather than one act that silently means both.
+
+**A run may not rework itself**, and **chains are allowed** — A reworks B
+reworks C. A cycle is structurally impossible because `reworks_task_id` is
+written once at insert and never updated. Any future change that updates it
+must add cycle detection in the same commit.
+
+**The new run's prompt comes from the caller, never from the reworked run's
+template.** A rework exists because something was wrong, and the most likely
+correction is to the instruction itself. `create_rework` writes no
+`template_id`, so a rework is not counted as a run of that template's current
+version.
+
+**The new run's scope comes from the caller**, the way `task send`'s does, not
+from the run being reworked. The alternative — inherit it — reads well until
+the case that matters: an inspection in a parent scope finding fault with a
+child's run. The finding travels; the work may not belong where it was.
+
 ## Consequences
 
 - Migration 6 is additive: new tables, plus `ALTER TABLE tasks ADD COLUMN` for

@@ -1,10 +1,10 @@
 //! `task.send`, `task.cancel`, `task.done`, `task.fail`, `task.block`,
 //! `task.resume`, `task.list`, `task.show`, `task.wait` (design §2.4, §5,
-//! §7), and station 11's gap 2: `task.assign`, `task.progress`,
-//! `task.decision`, `task.verify`. Every one of the four wires straight into
-//! a `factory_task` domain function that already existed with no caller —
-//! this file adds no domain logic of its own, per ADR 0014's own division of
-//! labour.
+//! §7), station 11's gap 2: `task.assign`, `task.progress`,
+//! `task.decision`, `task.verify`, and station 11's gap 3: `task.rework`
+//! (§12.2). Every one of those five wires straight into a `factory_task`
+//! domain function that already existed with no caller — this file adds no
+//! domain logic of its own, per ADR 0014's own division of labour.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -372,6 +372,97 @@ pub(crate) fn verify(h: &FactoryHandler, _scope_id: uuid::Uuid, payload: Value) 
 
     h.success(
         json!({ "task_id": payload.task_id.to_string(), "recorded": true }),
+        true,
+    )
+}
+
+/// Station 11 gap 3 / §12.2's hook: `factory_task::create::create_rework` —
+/// the exact function ADR 0021 decision 5 named as this station's own
+/// warning ("slice 9 shipped `authorise_resume` with no caller and it
+/// stayed unreachable until station 10 built one"). This closes that gap the
+/// same way the four gap-2 ops above do: one call into a domain function
+/// that already existed, and nothing else.
+///
+/// # Where the new run's prompt comes from
+///
+/// `create_rework`'s own signature answers this: it takes `prompt: &str`
+/// directly, never a `template_id`, and its body passes `None`/`None` for
+/// `template_id`/`template_version` into `insert_task` regardless of
+/// whether the run it reworks was itself template-backed. So the new run's
+/// prompt is always supplied by the caller, here, in the payload — exactly
+/// like `task.send`'s own `prompt`. A referenced run created with no
+/// template at all (`Task::template_id == None`, the ordinary case for a
+/// manually created run) reworks no differently from a template-backed
+/// one — there is nothing to read back from it, so there is nothing to
+/// refuse.
+///
+/// # Where the new run's scope comes from
+///
+/// The envelope's own `scope_id` — the same stance `task.send` takes, and
+/// deliberately **not** the stance `task.assign` takes. `task.assign` reads
+/// `target_scope_id` back from the task it already names (`create::show`),
+/// so a caller cannot supply a scope that disagrees with that row's own —
+/// but that only works because the row already exists. A rework creates a
+/// **new** row, so there is no existing `target_scope_id` to defer to; the
+/// caller names one, exactly as `task.send` already does when creating any
+/// other task.
+///
+/// This means the new run's target scope is never inherited from the run it
+/// reworks, and the two can legitimately differ — escalating a finding to a
+/// different scope is an ordinary use of §12.2's chain, not a bug. See
+/// `rework_can_land_in_a_different_scope_than_the_run_it_reworks` in
+/// `factory-daemon`'s own `tests/rework.rs`. `target_session_id` and
+/// `target_workspace_path` are equally caller-supplied, mirroring `create`'s
+/// own signature; there is no agent-name equivalent to inherit or name at
+/// all — `tasks` carries no agent-name column at all (`send`'s own doc
+/// comment above), and `create_rework` takes none either.
+///
+/// # What this does not do
+///
+/// Creates only — never assigns, never delivers. Unlike `task.send`, this
+/// op stops the instant the row is durable; a caller who wants the new run
+/// assigned calls `factory task assign` next, exactly as it would for any
+/// other queued run.
+///
+/// `sender_scope_id` is always `None`: like `task.verify` (ADR 0021
+/// decision 5), `factory task rework` is a human operation, and the daemon
+/// has no caller identity to attribute the new run to. `delegation_chain` is
+/// `&[scope_id]` — the same single-scope chain `queue_from_human` builds for
+/// an ordinary human-sent task that carries no delegation history yet.
+pub(crate) fn rework(h: &FactoryHandler, scope_id: uuid::Uuid, payload: Value) -> HandlerOutcome {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Payload {
+        #[serde(with = "crate::serde_uuid::required")]
+        task_id: uuid::Uuid,
+        prompt: String,
+        #[serde(with = "crate::serde_uuid::required")]
+        reworks_task_id: uuid::Uuid,
+        rework_finding: String,
+        #[serde(default, with = "crate::serde_uuid::optional")]
+        target_session_id: Option<uuid::Uuid>,
+        #[serde(default)]
+        target_workspace_path: Option<String>,
+    }
+    let payload: Payload = errors::parse_payload(&payload)?;
+
+    let mut store = h.lock_store();
+    factory_task::create::create_rework(
+        &mut store,
+        payload.task_id,
+        None,
+        scope_id,
+        payload.target_session_id,
+        payload.target_workspace_path.as_deref(),
+        &payload.prompt,
+        &[scope_id],
+        payload.reworks_task_id,
+        &payload.rework_finding,
+    )
+    .map_err(errors::task_error)?;
+
+    h.success(
+        json!({ "task_id": payload.task_id.to_string(), "status": "queued" }),
         true,
     )
 }

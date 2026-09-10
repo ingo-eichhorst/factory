@@ -157,6 +157,28 @@ pub fn dispatch(cli: Cli) -> i32 {
             } => with_root(cli.root.as_deref(), |root| {
                 task::verify(root, task_id, &verdict, note.as_deref())
             }),
+            TaskCommand::Rework {
+                scope,
+                prompt,
+                reworks_task_id,
+                rework_finding,
+                target_session,
+                workspace,
+            } => with_root(cli.root.as_deref(), |root| {
+                let scope_id = match resolve_scope(root, &scope) {
+                    Ok(id) => id,
+                    Err(code) => return code,
+                };
+                task::rework(
+                    root,
+                    scope_id,
+                    &prompt,
+                    reworks_task_id,
+                    &rework_finding,
+                    target_session,
+                    workspace.as_deref(),
+                )
+            }),
             TaskCommand::List => with_root(cli.root.as_deref(), task::list),
             TaskCommand::Show { task_id } => {
                 with_root(cli.root.as_deref(), |root| task::show(root, task_id))
