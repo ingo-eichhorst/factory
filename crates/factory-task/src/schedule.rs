@@ -105,6 +105,32 @@ pub enum ScheduleError {
     /// `Result` and this module does not paper over it with `.expect()`.
     #[error("cron evaluation error: {0}")]
     Evaluation(#[from] croner::errors::CronError),
+
+    /// A template error surfacing through a schedule operation that reaches
+    /// into `task_templates` — [`create_for_named_template`]'s lookup and
+    /// [`create_with_new_template`]'s insert both go through
+    /// [`crate::template`], and this crate's own style keeps a wrapped
+    /// domain error rather than flattening it into [`ScheduleError::Store`]
+    /// (mirrors `create::TaskError`'s stance on the errors it forwards).
+    #[error("template error: {0}")]
+    Template(#[from] crate::template::TemplateError),
+
+    /// Refuses [`create_for_named_template`] against a template that is not
+    /// `open`, naming which state it is in.
+    ///
+    /// Not one of ADR 0021 decision 11's own rules — the ADR settles the two
+    /// *forms* `create` takes and the one-transaction requirement on the
+    /// second; this gate is the coordinator's own addition on top of it.
+    /// Starting a new recurring schedule against a template an operator has
+    /// paused or closed would silently reactivate intent they had turned
+    /// off, which the state exists to prevent.
+    #[error(
+        "template {name:?} is `{state}`, not `open`\n  help: a schedule can only be created against an open template. Reopen {name:?} (or point the schedule at a different template) before creating a schedule against it"
+    )]
+    TemplateNotOpen {
+        name: String,
+        state: crate::template::TemplateState,
+    },
 }
 
 /// One `schedules` row, as read back by [`get`], [`list`], and [`due`].
@@ -298,15 +324,116 @@ pub fn create(
     timezone: &str,
 ) -> Result<uuid::Uuid, ScheduleError> {
     validate(cron, timezone)?;
-
     let tx = store.transaction()?;
+    insert(&tx, id, template_id, cron, timezone)?;
+    tx.commit().map_err(factory_store::StoreError::from)?;
+    Ok(id)
+}
+
+/// Write one `schedules` row against `tx`, an already-open transaction —
+/// the transaction-taking half of [`create`]'s work, callable without
+/// paying for a second transaction. [`create_with_new_template`] is the
+/// other caller: it needs this insert and [`crate::template::insert`] to
+/// commit or roll back together.
+///
+/// Does not call [`validate`] itself — every caller already has, before
+/// opening its transaction. `create::insert_task` (the `tasks` table's own
+/// transaction-taking insert) makes the identical point about itself: the
+/// transaction has to be open before a shared insert like this one is
+/// called, not inside it.
+fn insert(
+    tx: &rusqlite::Transaction<'_>,
+    id: uuid::Uuid,
+    template_id: uuid::Uuid,
+    cron: &str,
+    timezone: &str,
+) -> Result<(), ScheduleError> {
     tx.execute(
         "INSERT INTO schedules (id, template_id, cron, timezone) VALUES (?1, ?2, ?3, ?4)",
         (id.to_string(), template_id.to_string(), cron, timezone),
     )
     .map_err(factory_store::StoreError::from)?;
+    Ok(())
+}
+
+/// The `--template <name>` form of `factory schedule create` (ADR 0021
+/// decision 11): find the template by its unique name and create a
+/// schedule against it. Refuses a template that is not `open`, naming which
+/// state it is in — [`ScheduleError::TemplateNotOpen`]'s own doc comment
+/// explains why this gate exists and that it is not itself part of the ADR.
+///
+/// The state read and the schedule insert share one transaction, opened
+/// before either: reading through `&Store` first and inserting afterward
+/// would leave a window for a concurrent `template::set_state` to land
+/// between the two, the same race [`template::insert`]'s own uniqueness
+/// check exists to close. See [`template::get_by_name_tx`]'s doc comment.
+pub fn create_for_named_template(
+    store: &mut factory_store::Store,
+    schedule_id: uuid::Uuid,
+    template_name: &str,
+    cron: &str,
+    timezone: &str,
+) -> Result<uuid::Uuid, ScheduleError> {
+    validate(cron, timezone)?;
+    let tx = store.transaction()?;
+
+    let template = crate::template::get_by_name_tx(&tx, template_name)?.ok_or_else(|| {
+        ScheduleError::Template(crate::template::TemplateError::NoSuchName(
+            template_name.to_string(),
+        ))
+    })?;
+    if template.state != crate::template::TemplateState::Open {
+        return Err(ScheduleError::TemplateNotOpen {
+            name: template_name.to_string(),
+            state: template.state,
+        });
+    }
+
+    insert(&tx, schedule_id, template.id, cron, timezone)?;
     tx.commit().map_err(factory_store::StoreError::from)?;
-    Ok(id)
+    Ok(schedule_id)
+}
+
+/// The `--task "<prompt>" --name <template-name>` form of `factory schedule
+/// create` (ADR 0021 decision 11): create the template and the schedule
+/// naming it, in **one transaction**. If either insert fails, neither
+/// exists — the ADR's own words: "[w]ithout it a failed schedule insert
+/// leaves a named template behind, and the operator's next attempt fails on
+/// the unique index with an error about a template they did not think they
+/// had created."
+///
+/// Lives here, not in `template`, for the same reason
+/// `create::create_from_schedule` lives in `create` rather than `schedule`:
+/// this crate's own station-11 rule is that a cross-table one-transaction
+/// write belongs to whichever operation it serves, calling into the other
+/// table's own `pub(crate)` insert rather than duplicating it.
+#[allow(clippy::too_many_arguments)]
+pub fn create_with_new_template(
+    store: &mut factory_store::Store,
+    schedule_id: uuid::Uuid,
+    template_id: uuid::Uuid,
+    template_name: &str,
+    target_scope_id: uuid::Uuid,
+    target_agent_name: Option<&str>,
+    prompt: &str,
+    acceptance_criteria: Option<&str>,
+    cron: &str,
+    timezone: &str,
+) -> Result<(uuid::Uuid, uuid::Uuid), ScheduleError> {
+    validate(cron, timezone)?;
+    let tx = store.transaction()?;
+    crate::template::insert(
+        &tx,
+        template_id,
+        template_name,
+        target_scope_id,
+        target_agent_name,
+        prompt,
+        acceptance_criteria,
+    )?;
+    insert(&tx, schedule_id, template_id, cron, timezone)?;
+    tx.commit().map_err(factory_store::StoreError::from)?;
+    Ok((template_id, schedule_id))
 }
 
 /// One schedule by id. Takes `&Store`, not `&mut Store` — mirrors

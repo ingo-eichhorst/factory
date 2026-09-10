@@ -9,7 +9,7 @@
 use chrono::{TimeZone, Utc};
 use factory_store::Store;
 use factory_task::schedule::{self, ScheduleError};
-use factory_task::template::create as create_template;
+use factory_task::template::{self, TemplateError, TemplateState, create as create_template};
 
 /// A deterministic, distinct, syntactically valid UUID — mirrors
 /// `tests/template.rs::uid`. `uuid` is pinned workspace-wide without the
@@ -267,6 +267,211 @@ fn get_of_a_nonexistent_schedule_is_not_found() {
 
     let err = schedule::get(&store, uid(999)).expect_err("no such schedule exists");
     assert!(matches!(err, ScheduleError::NotFound(id) if id == uid(999)));
+}
+
+// create_for_named_template / create_with_new_template (ADR 0021 decision 11) ---
+
+/// The `--template <name>` form: finds the template by name and creates a
+/// schedule against it.
+#[test]
+fn create_for_named_template_succeeds_against_an_open_template() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let template_id = seed_template(&mut store, 1, "nightly-report");
+
+    let schedule_id = uid(60);
+    schedule::create_for_named_template(
+        &mut store,
+        schedule_id,
+        "nightly-report",
+        "0 9 * * 1-5",
+        "Europe/Berlin",
+    )
+    .expect("an open template may be scheduled");
+
+    let got = schedule::get(&store, schedule_id).expect("get");
+    assert_eq!(got.template_id, template_id);
+    assert_eq!(got.cron, "0 9 * * 1-5");
+    assert_eq!(got.timezone, "Europe/Berlin");
+}
+
+/// Refused when the named template is not `open`, and the message names
+/// which state it is in — the coordinator's own gate on top of ADR 0021
+/// decision 11, not itself part of the ADR (see
+/// `ScheduleError::TemplateNotOpen`'s doc comment).
+#[test]
+fn create_for_named_template_refuses_a_paused_template_and_names_its_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let template_id = seed_template(&mut store, 2, "paused-report");
+    template::set_state(&mut store, template_id, TemplateState::Paused).expect("pause it");
+
+    let err = schedule::create_for_named_template(
+        &mut store,
+        uid(61),
+        "paused-report",
+        "0 9 * * *",
+        "UTC",
+    )
+    .expect_err("a paused template must be refused");
+    assert!(
+        matches!(
+            &err,
+            ScheduleError::TemplateNotOpen { name, state }
+                if name == "paused-report" && *state == TemplateState::Paused
+        ),
+        "expected TemplateNotOpen naming `paused-report` as `paused`, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("paused"),
+        "the message itself must name the state an operator would have to fix: {err}"
+    );
+
+    assert!(
+        schedule::list(&store).expect("list").is_empty(),
+        "a refused create must not have written a schedule row"
+    );
+}
+
+/// Naming a template that does not exist is a [`TemplateError::NoSuchName`],
+/// wrapped rather than read as a generic store error.
+#[test]
+fn create_for_named_template_refuses_an_unknown_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+
+    let err = schedule::create_for_named_template(
+        &mut store,
+        uid(62),
+        "no-such-template",
+        "0 9 * * *",
+        "UTC",
+    )
+    .expect_err("no template named this exists yet");
+    assert!(
+        matches!(&err, ScheduleError::Template(TemplateError::NoSuchName(name)) if name == "no-such-template"),
+        "expected a wrapped NoSuchName, got {err:?}"
+    );
+}
+
+/// The `--task "<prompt>" --name <template-name>` form: both rows are
+/// written by one call.
+#[test]
+fn create_with_new_template_creates_both_rows_in_one_call() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 70, "irrlicht", "/instance");
+
+    let template_id = uid(71);
+    let schedule_id = uid(72);
+    let (got_template_id, got_schedule_id) = schedule::create_with_new_template(
+        &mut store,
+        schedule_id,
+        template_id,
+        "weekly-status",
+        scope_id,
+        Some("writer"),
+        "Write the weekly status report.",
+        Some("Covers every open task."),
+        "0 9 * * 1",
+        "Europe/Berlin",
+    )
+    .expect("create_with_new_template");
+    assert_eq!(got_template_id, template_id);
+    assert_eq!(got_schedule_id, schedule_id);
+
+    let template = template::get_by_id(&store, template_id).expect("template exists");
+    assert_eq!(template.name, "weekly-status");
+    assert_eq!(template.target_scope_id, Some(scope_id));
+    assert_eq!(template.target_agent_name.as_deref(), Some("writer"));
+    assert_eq!(template.state, TemplateState::Open);
+
+    let schedule = schedule::get(&store, schedule_id).expect("schedule exists");
+    assert_eq!(schedule.template_id, template_id);
+    assert_eq!(schedule.cron, "0 9 * * 1");
+    assert_eq!(schedule.timezone, "Europe/Berlin");
+}
+
+/// ADR 0021 decision 11's own reasoning, proved directly: if the schedule
+/// insert fails, the template insert that ran first in the same transaction
+/// must not survive either. Forced here by reusing an already-taken
+/// `schedule_id`, so the second insert this function makes collides on
+/// `schedules`' own primary key.
+#[test]
+fn create_with_new_template_is_atomic_when_the_schedule_insert_fails() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 80, "irrlicht", "/instance");
+
+    // A schedule that already occupies the id the next call will collide on.
+    let existing_template_id = seed_template(&mut store, 81, "existing-template");
+    let colliding_schedule_id = uid(82);
+    schedule::create(
+        &mut store,
+        colliding_schedule_id,
+        existing_template_id,
+        "0 9 * * *",
+        "UTC",
+    )
+    .expect("seed an existing schedule to collide with");
+
+    let new_template_id = uid(83);
+    let err = schedule::create_with_new_template(
+        &mut store,
+        colliding_schedule_id, // reused on purpose: forces the schedule INSERT to fail
+        new_template_id,
+        "new-template",
+        scope_id,
+        None,
+        "a prompt nobody should keep",
+        None,
+        "0 10 * * *",
+        "UTC",
+    )
+    .expect_err("a duplicate schedule id must fail the insert");
+    assert!(
+        matches!(&err, ScheduleError::Store(_)),
+        "expected a primary-key collision surfaced as a store error, got {err:?}"
+    );
+
+    let lookup = template::get_by_name(&store, "new-template");
+    assert!(
+        matches!(lookup, Err(TemplateError::NoSuchName(_))),
+        "the template insert must have rolled back with the failed schedule insert, but \
+         get_by_name found: {lookup:?}"
+    );
+}
+
+/// The reverse direction of the same atomicity property: a template name
+/// collision refuses before the schedule insert is ever attempted, so no
+/// schedule is left behind either.
+#[test]
+fn create_with_new_template_refuses_a_duplicate_template_name_and_leaves_no_schedule_behind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let scope_id = seed_scope(&mut store, 90, "irrlicht", "/instance");
+    seed_template(&mut store, 91, "taken-name");
+
+    let err = schedule::create_with_new_template(
+        &mut store,
+        uid(92),
+        uid(93),
+        "taken-name",
+        scope_id,
+        None,
+        "prompt",
+        None,
+        "0 9 * * *",
+        "UTC",
+    )
+    .expect_err("the template name is already taken");
+    assert!(
+        matches!(&err, ScheduleError::Template(TemplateError::NameTaken(name)) if name == "taken-name"),
+    );
+    assert!(
+        schedule::list(&store).expect("list").is_empty(),
+        "no schedule may exist for a template that was never created"
+    );
 }
 
 /// The dispatcher's own query: only an *enabled* schedule whose expression

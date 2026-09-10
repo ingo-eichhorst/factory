@@ -6,13 +6,15 @@ mod context;
 mod daemon;
 mod doctor;
 mod init;
+mod schedule;
 mod scope;
 mod task;
 
 use std::path::Path;
 
 use crate::cli::{
-    AgentCommand, Cli, Command, ContextCommand, DaemonCommand, ScopeCommand, TaskCommand,
+    AgentCommand, Cli, Command, ContextCommand, DaemonCommand, ScheduleCommand, ScopeCommand,
+    TaskCommand,
 };
 use crate::exit;
 
@@ -127,6 +129,42 @@ pub fn dispatch(cli: Cli) -> i32 {
             TaskCommand::Show { task_id } => {
                 with_root(cli.root.as_deref(), |root| task::show(root, task_id))
             }
+        },
+
+        Command::Schedule { action } => match action {
+            ScheduleCommand::Create {
+                scope,
+                template,
+                task,
+                name,
+                cron,
+                tz,
+                agent,
+                acceptance,
+            } => with_root(cli.root.as_deref(), |root| {
+                let scope_id = match resolve_scope(root, &scope) {
+                    Ok(id) => id,
+                    Err(code) => return code,
+                };
+                schedule::create(
+                    root,
+                    scope_id,
+                    template.as_deref(),
+                    task.as_deref(),
+                    name.as_deref(),
+                    &cron,
+                    &tz,
+                    agent.as_deref(),
+                    acceptance.as_deref(),
+                )
+            }),
+            ScheduleCommand::List => with_root(cli.root.as_deref(), schedule::list),
+            ScheduleCommand::Enable { schedule_id } => with_root(cli.root.as_deref(), |root| {
+                schedule::enable(root, schedule_id)
+            }),
+            ScheduleCommand::Disable { schedule_id } => with_root(cli.root.as_deref(), |root| {
+                schedule::disable(root, schedule_id)
+            }),
         },
 
         Command::Context { action } => match action {

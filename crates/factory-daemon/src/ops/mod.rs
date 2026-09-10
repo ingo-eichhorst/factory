@@ -7,6 +7,7 @@
 
 pub(crate) mod agent;
 pub(crate) mod context;
+pub(crate) mod schedule;
 pub(crate) mod scope;
 pub(crate) mod status;
 pub(crate) mod task;

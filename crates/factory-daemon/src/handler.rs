@@ -149,6 +149,9 @@ fn dispatch_command(
         "task.fail" => crate::ops::task::fail(h, scope_id, payload),
         "task.block" => crate::ops::task::block(h, scope_id, payload),
         "task.resume" => crate::ops::task::resume(h, scope_id, payload),
+        "schedule.create" => crate::ops::schedule::create(h, scope_id, payload),
+        "schedule.enable" => crate::ops::schedule::enable(h, scope_id, payload),
+        "schedule.disable" => crate::ops::schedule::disable(h, scope_id, payload),
         other => Err(crate::errors::unknown_operation("command", other)),
     }
 }
@@ -166,6 +169,7 @@ fn dispatch_query(
         "task.list" => crate::ops::task::list(h, scope_id, payload),
         "task.show" => crate::ops::task::show(h, scope_id, payload),
         "task.wait" => crate::ops::task::wait(h, scope_id, payload),
+        "schedule.list" => crate::ops::schedule::list(h, scope_id, payload),
         "context.show" => crate::ops::context::show(h, scope_id, payload),
         "daemon.status" => crate::ops::status::daemon_status(h, scope_id, payload),
         other => Err(crate::errors::unknown_operation("query", other)),

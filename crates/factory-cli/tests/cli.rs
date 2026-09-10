@@ -191,7 +191,7 @@ fn doctor_exit_code_always_matches_whether_it_printed_any_findings() {
 
 #[test]
 fn out_of_scope_commands_do_not_exist() {
-    for name in ["secret", "schedule", "knowledge", "memory"] {
+    for name in ["secret", "knowledge", "memory"] {
         let output = factory_cmd().arg(name).output().unwrap();
         assert!(!output.status.success());
         assert_eq!(output.status.code(), Some(2), "{name}: {output:?}");
@@ -573,6 +573,185 @@ fn agent_start_mints_a_session_id_and_reports_the_returned_state() {
         "stdout must name the minted session id: {stdout}"
     );
     assert!(stdout.contains("starting"), "stdout: {stdout}");
+}
+
+#[test]
+fn schedule_create_with_template_sends_template_name_and_no_new_template_fields() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| {
+        let schedule_id = request["payload"]["schedule_id"].clone();
+        FakeResponse::Ok(json!({
+            "id": schedule_id,
+            "template_id": "00000000-0000-4000-8000-000000000001",
+            "template_name": "nightly-report",
+            "template_error": Value::Null,
+            "cron": "0 9 * * 1-5",
+            "timezone": "Europe/Berlin",
+            "enabled": true,
+            "last_fired_at": Value::Null,
+            "next_run": "2026-09-11T09:00:00+02:00",
+            "next_run_state": "scheduled",
+            "next_run_error": Value::Null,
+        }))
+    });
+
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args([
+            "schedule",
+            "create",
+            NIL_SCOPE,
+            "--template",
+            "nightly-report",
+            "--cron",
+            "0 9 * * 1-5",
+            "--tz",
+            "Europe/Berlin",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["command"], "schedule.create");
+    assert_eq!(request["scope_id"], NIL_SCOPE);
+    assert!(request["payload"]["schedule_id"].is_string());
+    assert_eq!(request["payload"]["template_name"], "nightly-report");
+    assert_eq!(request["payload"]["cron"], "0 9 * * 1-5");
+    assert_eq!(request["payload"]["timezone"], "Europe/Berlin");
+    // The `--task`/`--name` fields must be genuinely absent, not sent as
+    // `null` — this crate's own daemon refuses both forms given together,
+    // and a stray `null` would still count as "given" if a future payload
+    // change swapped `Option::is_none()` for a presence check.
+    assert!(request["payload"].get("template_id").is_none());
+    assert!(request["payload"].get("task").is_none());
+    assert!(request["payload"].get("name").is_none());
+}
+
+#[test]
+fn schedule_create_with_task_and_name_mints_a_template_id_distinct_from_the_schedule_id() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| {
+        let schedule_id = request["payload"]["schedule_id"].clone();
+        let template_id = request["payload"]["template_id"].clone();
+        FakeResponse::Ok(json!({
+            "id": schedule_id,
+            "template_id": template_id,
+            "template_name": "weekly-status",
+            "template_error": Value::Null,
+            "cron": "0 9 * * 1",
+            "timezone": "UTC",
+            "enabled": true,
+            "last_fired_at": Value::Null,
+            "next_run": "2026-09-14T09:00:00+00:00",
+            "next_run_state": "scheduled",
+            "next_run_error": Value::Null,
+        }))
+    });
+
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args([
+            "schedule",
+            "create",
+            NIL_SCOPE,
+            "--task",
+            "Write the weekly status report.",
+            "--name",
+            "weekly-status",
+            "--cron",
+            "0 9 * * 1",
+            "--tz",
+            "UTC",
+            "--agent",
+            "writer",
+            "--acceptance",
+            "Covers every open task.",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    let payload = &requests[0]["payload"];
+    assert!(payload.get("template_name").is_none());
+    assert_eq!(payload["task"], "Write the weekly status report.");
+    assert_eq!(payload["name"], "weekly-status");
+    assert_eq!(payload["agent_name"], "writer");
+    assert_eq!(payload["acceptance_criteria"], "Covers every open task.");
+
+    let schedule_id = payload["schedule_id"].as_str().unwrap();
+    let template_id = payload["template_id"].as_str().unwrap();
+    assert_ne!(
+        schedule_id, template_id,
+        "the CLI must mint two distinct ids, not reuse one for both rows"
+    );
+    uuid::Uuid::parse_str(schedule_id).expect("schedule_id is a real UUID");
+    uuid::Uuid::parse_str(template_id).expect("template_id is a real UUID");
+}
+
+#[test]
+fn schedule_list_and_enable_and_disable_send_the_documented_envelopes() {
+    let dir = TempDir::new().unwrap();
+    let schedule_id = "00000000-0000-4000-8000-00000000fefe";
+    let daemon = spawn_fake_daemon(dir.path(), move |request| {
+        FakeResponse::Ok(match op_name(request) {
+            "schedule.list" => json!({ "schedules": [] }),
+            "schedule.enable" | "schedule.disable" => json!({
+                "id": schedule_id,
+                "template_id": "00000000-0000-4000-8000-000000000001",
+                "template_name": "nightly-report",
+                "template_error": Value::Null,
+                "cron": "0 9 * * 1-5",
+                "timezone": "Europe/Berlin",
+                "enabled": op_name(request) == "schedule.enable",
+                "last_fired_at": Value::Null,
+                "next_run": Value::Null,
+                "next_run_state": if op_name(request) == "schedule.enable" { "scheduled" } else { "disabled" },
+                "next_run_error": Value::Null,
+            }),
+            _ => json!({}),
+        })
+    });
+
+    let list_output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args(["schedule", "list"])
+        .output()
+        .unwrap();
+    assert!(list_output.status.success(), "{list_output:?}");
+
+    let disable_output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args(["schedule", "disable", schedule_id])
+        .output()
+        .unwrap();
+    assert!(disable_output.status.success(), "{disable_output:?}");
+
+    let enable_output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args(["schedule", "enable", schedule_id])
+        .output()
+        .unwrap();
+    assert!(enable_output.status.success(), "{enable_output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0]["api"], "factory.query/v1");
+    assert_eq!(requests[0]["query"], "schedule.list");
+    assert_eq!(requests[1]["api"], "factory.command/v1");
+    assert_eq!(requests[1]["command"], "schedule.disable");
+    assert_eq!(requests[1]["payload"]["schedule_id"], schedule_id);
+    assert_eq!(requests[2]["command"], "schedule.enable");
+    assert_eq!(requests[2]["payload"]["schedule_id"], schedule_id);
 }
 
 #[test]

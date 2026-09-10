@@ -63,7 +63,12 @@ impl TemplateState {
     /// strings, so an unrecognised value read back from a row this module
     /// itself just selected is a broken invariant, not an input to handle —
     /// the same stance `TaskStatus::from_db_str` takes, for the same reason.
-    fn from_db_str(s: &str) -> Self {
+    ///
+    /// `pub(crate)`, not private: `schedule::create_for_named_template` reads
+    /// this column too, inside its own transaction, to refuse a schedule
+    /// against a template that is not `open`. This stays the one place the
+    /// three strings are parsed either way.
+    pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
             "open" => Self::Open,
             "paused" => Self::Paused,
@@ -146,12 +151,22 @@ fn row_to_template(row: &rusqlite::Row<'_>) -> rusqlite::Result<Template> {
     })
 }
 
-/// Commit a new template and return the id it was written under.
+/// Write one `task_templates` row against `tx`, an already-open
+/// transaction, including the uniqueness check — the transaction-taking
+/// half of [`create`]'s work.
 ///
-/// `name` must be unique (`task_templates_name`). The check runs inside this
-/// function's own transaction, which takes the write lock immediately
-/// (`Store::transaction`'s `BEGIN IMMEDIATE`) before either the uniqueness
-/// read or the insert — the same race-freedom argument
+/// Not private: `schedule::create_with_new_template` is this function's
+/// other caller. ADR 0021 decision 11 requires a new template and the
+/// schedule naming it to commit or roll back together ("[w]ithout it a
+/// failed schedule insert leaves a named template behind"), so that
+/// function opens the one transaction both inserts share and calls in here
+/// rather than through [`create`], which would open a second transaction of
+/// its own.
+///
+/// `name` must be unique (`task_templates_name`). The check runs inside
+/// `tx`, which a caller must already have opened with `BEGIN IMMEDIATE`
+/// (`Store::transaction`'s own behaviour) before either the uniqueness read
+/// or the insert — the same race-freedom argument
 /// `factory_session::begin_start` makes for its own pre-insert scan — so no
 /// concurrent `create` can land a same-named row between the check and the
 /// write. [`TemplateError::NameTaken`] is the typed result; a duplicate name
@@ -160,23 +175,16 @@ fn row_to_template(row: &rusqlite::Row<'_>) -> rusqlite::Result<Template> {
 ///
 /// `state` is left at its schema default, `'open'`: nothing pauses or closes
 /// a template at the moment it is created.
-///
-/// `id` is supplied by the caller, mirroring `create::create`'s own `id`
-/// parameter and for the identical reason recorded on that function's doc
-/// comment: the `uuid` crate is pinned workspace-wide without the `v4`
-/// feature.
 #[allow(clippy::too_many_arguments)]
-pub fn create(
-    store: &mut factory_store::Store,
+pub(crate) fn insert(
+    tx: &rusqlite::Transaction<'_>,
     id: uuid::Uuid,
     name: &str,
     target_scope_id: uuid::Uuid,
     target_agent_name: Option<&str>,
     prompt: &str,
     acceptance_criteria: Option<&str>,
-) -> Result<uuid::Uuid, TemplateError> {
-    let tx = store.transaction()?;
-
+) -> Result<(), TemplateError> {
     let existing: Option<String> = tx
         .query_row(
             "SELECT id FROM task_templates WHERE name = ?1",
@@ -203,7 +211,39 @@ pub fn create(
         ),
     )
     .map_err(factory_store::StoreError::from)?;
+    Ok(())
+}
 
+/// Commit a new template and return the id it was written under.
+///
+/// `id` is supplied by the caller, mirroring `create::create`'s own `id`
+/// parameter and for the identical reason recorded on that function's doc
+/// comment: the `uuid` crate is pinned workspace-wide without the `v4`
+/// feature.
+///
+/// A thin wrapper over [`insert`]: open the transaction, write the row,
+/// commit. See that function's doc comment for the uniqueness check and the
+/// race-freedom argument behind it.
+#[allow(clippy::too_many_arguments)]
+pub fn create(
+    store: &mut factory_store::Store,
+    id: uuid::Uuid,
+    name: &str,
+    target_scope_id: uuid::Uuid,
+    target_agent_name: Option<&str>,
+    prompt: &str,
+    acceptance_criteria: Option<&str>,
+) -> Result<uuid::Uuid, TemplateError> {
+    let tx = store.transaction()?;
+    insert(
+        &tx,
+        id,
+        name,
+        target_scope_id,
+        target_agent_name,
+        prompt,
+        acceptance_criteria,
+    )?;
     tx.commit().map_err(factory_store::StoreError::from)?;
     Ok(id)
 }
@@ -239,6 +279,32 @@ pub fn get_by_name(store: &factory_store::Store, name: &str) -> Result<Template,
         .optional()
         .map_err(factory_store::StoreError::from)?
         .ok_or_else(|| TemplateError::NoSuchName(name.to_string()))
+}
+
+/// The transaction-taking twin of [`get_by_name`]: `None` rather than
+/// [`TemplateError::NoSuchName`] when there is no such row, so a caller that
+/// wants a different error for "not found" (or none at all) is not forced
+/// through this module's own.
+///
+/// `schedule::create_for_named_template` is the one caller. It reads a
+/// template's `state` and refuses one that is not `open` before creating a
+/// schedule against it, and that check has to run inside the same
+/// transaction as the schedule insert it gates — reading through `&Store`
+/// first (as [`get_by_name`] does) would leave a window for a concurrent
+/// `set_state` to land between the read and the write, the same race
+/// [`insert`]'s own uniqueness check is careful to close.
+pub(crate) fn get_by_name_tx(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+) -> Result<Option<Template>, TemplateError> {
+    Ok(tx
+        .query_row(
+            &format!("SELECT {TEMPLATE_COLUMNS} FROM task_templates WHERE name = ?1"),
+            [name],
+            row_to_template,
+        )
+        .optional()
+        .map_err(factory_store::StoreError::from)?)
 }
 
 /// Every template, oldest first — read-only inspection before automation

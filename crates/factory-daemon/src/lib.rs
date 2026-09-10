@@ -83,6 +83,8 @@
 //! | `task.cancel` | `factory task cancel` |
 //! | `task.done`, `task.fail`, `task.block` | `factory task done\|fail\|block` |
 //! | `task.resume` | `factory task resume` |
+//! | `schedule.create` | `factory schedule create` |
+//! | `schedule.enable`, `schedule.disable` | `factory schedule enable\|disable` |
 //!
 //! Queries (read only):
 //!
@@ -93,10 +95,11 @@
 //! | `agent.attach_command` | `factory agent attach` |
 //! | `task.list`, `task.show` | `factory task list\|show` |
 //! | `task.wait` | `factory task send --wait` |
+//! | `schedule.list` | `factory schedule list` |
 //! | `context.show` | `factory context show` |
 //! | `daemon.status` | `factory status` |
 //!
-//! Three of these need saying out loud.
+//! Four of these need saying out loud.
 //!
 //! **`factory init` is not here, because it cannot be.** It creates the
 //! configuration and the database that a daemon needs before one can run. It
@@ -126,6 +129,15 @@
 //! **`agent.attach_command` returns argv; the CLI execs it.** The daemon
 //! cannot hand an operator's terminal to a harness from inside a worker
 //! thread, so the adapter says what to run and the client runs it.
+//!
+//! **`schedule.create`'s `scope_id` is read only when it creates a new
+//! template.** ADR 0021 decision 11 gives `factory schedule create` a
+//! positional `<scope>` regardless of which of its two forms is used, so it
+//! reaches this crate as `scope_id` like every other command's does. A
+//! schedule created against an *existing* `--template` runs in whatever
+//! scope that template already names (`factory_task::template`'s own
+//! `target_scope_id` column), never the operator's positional argument —
+//! see `ops::schedule`'s own module docs.
 //!
 //! # Station 10's `Handler`: [`handler::FactoryHandler`]
 //!
@@ -176,6 +188,9 @@
 //! | `task.list` | `{}` | `{ "tasks": [Task] }` |
 //! | `task.show` | `{ "task_id": Uuid }` | `{ ...Task, "delegation_chain": [Uuid] }` |
 //! | `task.wait` | `{ "task_id": Uuid, "timeout_ms": u64? }` (default and maximum in `handler::task`) | `{ "task_id", "status", "timed_out": bool }` — never mutates; see the module docs above |
+//! | `schedule.create` | `{ "schedule_id": Uuid, "cron": String, "timezone": String, "template_name": String? }` (`--template`) **or** `{ "schedule_id", "cron", "timezone", "template_id": Uuid, "name": String, "task": String, "agent_name": String?, "acceptance_criteria": String? }` (`--task`/`--name`) — exactly one of `template_name` or `template_id`+`name`+`task`, refused otherwise (`ops::schedule`'s own module docs); `scope_id` is read only by the second form | `{ "id", "template_id", "template_name": String?, "template_error": String?, "cron", "timezone", "enabled": bool, "last_fired_at": String?, "next_run": String?, "next_run_state": "scheduled"\|"disabled"\|"never"\|"unreadable", "next_run_error": String? }` — `next_run` is an RFC3339 timestamp only when `next_run_state` is `"scheduled"`; ADR 0021 decision 3a's `None` ("this expression can never fire") stays a distinct, machine-checkable state rather than a prose string sharing the field |
+//! | `schedule.enable`, `schedule.disable` | `{ "schedule_id": Uuid }` | same shape as `schedule.create`'s result |
+//! | `schedule.list` | `{}` | `{ "schedules": [same shape as `schedule.create`'s result] }` |
 //! | `context.show` | `{ "agent_name": String, "task_prompt": String? }` | `{ "text": String, "sources": [SourceReport] }` |
 //! | `daemon.status` | `{}` | `{ "schema_version": i64, "socket_path": String, "lock_path": String }` |
 //!

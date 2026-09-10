@@ -191,6 +191,39 @@ pub fn config_error(e: factory_config::ConfigError) -> ErrorBody {
     err("internal.config_error", e.to_string())
 }
 
+pub fn template_error(e: factory_task::template::TemplateError) -> ErrorBody {
+    use factory_task::template::TemplateError as E;
+    match e {
+        E::NotFound(id) => err(
+            "not_found.template",
+            format!("no task template with id {id}"),
+        ),
+        E::NoSuchName(name) => err(
+            "not_found.template",
+            format!("no task template named {name:?}"),
+        ),
+        E::NameTaken(_) => err("conflict.template_name_taken", e.to_string()),
+        E::Store(_) => err("internal.store_error", e.to_string()),
+    }
+}
+
+pub fn schedule_error(e: factory_task::schedule::ScheduleError) -> ErrorBody {
+    use factory_task::schedule::ScheduleError as E;
+    match e {
+        E::NotFound(id) => err("not_found.schedule", format!("no schedule with id {id}")),
+        E::InvalidCron { .. } => err("validation.invalid_cron", e.to_string()),
+        E::InvalidTimezone(_) => err("validation.invalid_timezone", e.to_string()),
+        // Not reachable in practice — `schedule::matches`'s own doc comment
+        // on `ScheduleError::Evaluation` says why — but every variant still
+        // gets a stable code rather than a wildcard arm that would silently
+        // start covering a real future case.
+        E::Evaluation(_) => err("internal.cron_evaluation_error", e.to_string()),
+        E::TemplateNotOpen { .. } => err("conflict.template_not_open", e.to_string()),
+        E::Template(inner) => template_error(inner),
+        E::Store(_) => err("internal.store_error", e.to_string()),
+    }
+}
+
 pub fn recovery_error(e: factory_recovery::restore::RecoveryError) -> ErrorBody {
     err("internal.recovery_error", e.to_string())
 }

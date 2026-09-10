@@ -495,6 +495,52 @@ failure would propagate out of `diagnose` as an error — doctor reporting
 gate reports `CheckSkipped` instead, which is the pattern checks 3 and 5
 already use for the same reason.
 
+### 11. `factory schedule create` names the template it creates.
+
+Design §7's example is `factory schedule create irrlicht --task "…" --cron
+"0 9 * * 1-5" --tz Europe/Berlin`. It passes a prompt and nothing else.
+
+Decision 1 puts a named template under every schedule, and `task_templates.name`
+is `NOT NULL` with a `UNIQUE` index, so that example has nothing to name the
+template it implies. The design predates templates being a named entity; it is
+not wrong about the shape of the command, only silent about a field that did
+not exist when it was written.
+
+So `create` takes exactly one of two forms, and refuses both-or-neither:
+
+- `--template <name>` uses an existing template, and refuses one whose state is
+  not `open`.
+- `--task "<prompt>" --name <template-name>` creates the template and the
+  schedule **in one transaction**.
+
+The alternative — deriving a template name from the prompt — was rejected. A
+derived name is either not unique, which the index refuses at a moment nobody
+is watching, or it is unique because it carries a timestamp or an id, which
+makes `factory schedule list` unreadable. Neither is better than asking the
+operator for a word.
+
+The transaction is not decoration. Without it a failed schedule insert leaves a
+named template behind, and the operator's next attempt fails on the unique
+index with an error about a template they did not think they had created.
+
+**`--template` refuses a template whose state is not `open`,** and the refusal
+names the state. A `paused` or `closed` template is one an operator has taken
+out of service, and a new schedule against it would be a rule written to be
+ignored.
+
+**The dispatcher does not yet honour that same state, and that is a defect.**
+`dispatch::try_fire` reads the template's scope and prompt and never its
+`state`, so a schedule created while a template was `open` keeps firing every
+minute after the template is paused. The gate above and the dispatcher must
+agree, or "paused" means one thing at creation and nothing afterwards. Both
+halves belong to the same rule, so the dispatcher's half is on station 11's
+closeout list rather than left to be discovered.
+
+Skipping a paused template is not a failure and must not be logged as one: the
+operator asked for it. It needs its own outcome, distinct from
+`FireOutcome::Failed`, and `factory schedule list` is where an operator should
+see that a schedule is enabled while its template is not.
+
 ## Consequences
 
 - Migration 6 is additive: new tables, plus `ALTER TABLE tasks ADD COLUMN` for

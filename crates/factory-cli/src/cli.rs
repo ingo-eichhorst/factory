@@ -1,8 +1,9 @@
 //! The `factory` command surface, wired to decision 9's operation
 //! vocabulary. Every subcommand here is one of `init`, `start|stop|status|
-//! doctor`, `scope`, `agent`, `task`, `context` — station 10's declared
-//! scope. `secret`, `schedule`, `knowledge`, `memory`, and `agent list` are
-//! absent, not stubbed: there is no variant for them anywhere below.
+//! doctor`, `scope`, `agent`, `task`, `schedule`, `context` — station 10's
+//! declared scope plus station 11's `schedule` group (ADR 0021 decision 11).
+//! `secret`, `knowledge`, `memory`, and `agent list` are still absent, not
+//! stubbed: there is no variant for them anywhere below.
 
 use std::path::PathBuf;
 
@@ -75,6 +76,14 @@ pub enum Command {
     Task {
         #[command(subcommand)]
         action: TaskCommand,
+    },
+
+    /// Durable cron rules against a task template (design §11; ADR 0021).
+    /// A schedule only creates a run; it never executes an untracked
+    /// prompt.
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleCommand,
     },
 
     /// Compiled context inspection (design §2.5).
@@ -237,6 +246,73 @@ pub enum TaskCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum ScheduleCommand {
+    /// Register a durable cron rule against a task template. Never itself
+    /// creates a run (design §11).
+    ///
+    /// Takes exactly one of `--template` or `--task`/`--name` (ADR 0021
+    /// decision 11) — both together, or neither, are refused by the daemon,
+    /// which owns this rule (ADR 0014).
+    Create {
+        /// The scope this schedule concerns, resolved the same way `task
+        /// send`'s own scope is (`scope_ref::resolve`). Used only when
+        /// `--task`/`--name` creates a new template — a schedule against an
+        /// existing `--template` runs in whatever scope that template
+        /// already names.
+        scope: crate::scope_ref::ScopeRef,
+
+        /// Use an existing task template by name. Refused when its state is
+        /// not `open`. Exactly one of this or `--task`/`--name` is required.
+        #[arg(long)]
+        template: Option<String>,
+
+        /// The new template's prompt. Requires `--name`; creates the
+        /// template and the schedule together, in one transaction.
+        #[arg(long)]
+        task: Option<String>,
+
+        /// The new template's name (`task_templates.name` is unique across
+        /// the instance). Requires `--task`.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Five-field cron expression (minute hour day-of-month month
+        /// day-of-week). Checked by the daemon (`factory_task::schedule::
+        /// validate`), never by this command.
+        #[arg(long)]
+        cron: String,
+
+        /// An IANA timezone name, e.g. `Europe/Berlin` — not a fixed
+        /// offset, which cannot express a rule that survives a
+        /// daylight-saving change. Checked by the daemon.
+        #[arg(long)]
+        tz: String,
+
+        /// The new template's target agent. Only meaningful with
+        /// `--task`/`--name`.
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// The new template's acceptance criteria. Only meaningful with
+        /// `--task`/`--name`.
+        #[arg(long)]
+        acceptance: Option<String>,
+    },
+
+    /// List every schedule: its template, its cron and timezone exactly as
+    /// typed, whether it is enabled, its last run, and its next run.
+    List,
+
+    /// Turn a schedule on. Does not touch its history or any run it already
+    /// produced.
+    Enable { schedule_id: Uuid },
+
+    /// Turn a schedule off. Does not touch its history or any run it
+    /// already produced.
+    Disable { schedule_id: Uuid },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ContextCommand {
     /// Print the context an agent would be started with.
     Show {
@@ -261,7 +337,7 @@ mod tests {
 
     #[test]
     fn out_of_scope_commands_are_absent_not_stubbed() {
-        for name in ["secret", "schedule", "knowledge", "memory"] {
+        for name in ["secret", "knowledge", "memory"] {
             let err = parse(&[name]).unwrap_err();
             assert_eq!(
                 err.kind(),
