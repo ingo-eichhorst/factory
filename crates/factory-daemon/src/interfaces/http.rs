@@ -108,6 +108,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/", get(index))
         .route("/ui/{*path}", get(asset))
         .route("/ws", get(ws_upgrade))
+        .route("/ws/term", get(term_upgrade))
         .route("/api/status", get(status))
         .route("/api/adapters", get(adapters))
         .route("/api/agents", get(agents))
@@ -407,6 +408,99 @@ async fn run_input(
 
 async fn ws_upgrade(State(engine): State<Arc<Engine>>, ws: WebSocketUpgrade) -> AxumResponse {
     ws.on_upgrade(move |socket| ws_stream(engine, socket))
+}
+
+#[derive(serde::Deserialize)]
+struct TermTarget {
+    /// `agent` or `run`.
+    kind: String,
+    id: String,
+}
+
+async fn term_upgrade(
+    State(engine): State<Arc<Engine>>,
+    Query(target): Query<TermTarget>,
+    ws: WebSocketUpgrade,
+) -> AxumResponse {
+    ws.on_upgrade(move |socket| term_stream(engine, socket, target))
+}
+
+/// A terminal, not a transcript.
+///
+/// The runtime renders whole frames, so this polls one and sends it only when
+/// it differs from the last. Each frame stands alone: a viewer that joins late
+/// or misses one is correct on the next tick, which is what lets a terminal be
+/// mirrored over a socket without replaying a byte stream.
+///
+/// What comes back the other way is bytes, exactly as a terminal would send
+/// them -- `ESC [ A` for an arrow, `\x03` for Ctrl-C. herdr passes them to the
+/// pane untouched, so there is no table of key names in the middle to fall
+/// behind what a keyboard can do.
+async fn term_stream(engine: Arc<Engine>, socket: WebSocket, target: TermTarget) {
+    /// Fast enough to feel live, slow enough that a person typing does not
+    /// race their own echo. One poll per viewer, which is the prototype's
+    /// trade: two people watching one agent is two polls.
+    const FRAME_MS: u64 = 220;
+
+    let (mut tx, mut rx) = socket.split();
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(FRAME_MS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last: Option<String> = None;
+
+    loop {
+        tokio::select! {
+            incoming = rx.next() => {
+                match incoming {
+                    Some(Ok(Message::Text(bytes))) => {
+                        let request = match target.kind.as_str() {
+                            "run" => Request::RunInput {
+                                id: target.id.clone(),
+                                text: Some(bytes.to_string()),
+                                keys: Vec::new(),
+                            },
+                            _ => Request::AgentInput {
+                                id: target.id.clone(),
+                                text: Some(bytes.to_string()),
+                                keys: Vec::new(),
+                            },
+                        };
+                        // A keystroke that cannot be delivered is worth saying
+                        // once, on the channel the viewer is already watching.
+                        if let Response::Error { message, .. } = engine.handle_request(request).await {
+                            let _ = tx.send(Message::Text(
+                                format!("{{\"error\":{}}}", serde_json::json!(message)).into(),
+                            )).await;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => return,
+                }
+            }
+            _ = ticker.tick() => {
+                let request = match target.kind.as_str() {
+                    "run" => Request::RunScreen { id: target.id.clone() },
+                    _ => Request::AgentScreen { id: target.id.clone() },
+                };
+                let text = match engine.handle_request(request).await {
+                    Response::Ok { data: Payload::Screen { screen } } => {
+                        let Ok(text) = serde_json::to_string(&screen) else { continue };
+                        text
+                    }
+                    // No session to show is a state, not a failure: say it once
+                    // and let the page decide what to put in its place.
+                    Response::Error { message, .. } => {
+                        let text = format!("{{\"error\":{}}}", serde_json::json!(message));
+                        if last.as_deref() == Some(text.as_str()) { continue }
+                        text
+                    }
+                    _ => continue,
+                };
+                if last.as_deref() == Some(text.as_str()) { continue }
+                if tx.send(Message::Text(text.clone().into())).await.is_err() { return }
+                last = Some(text);
+            }
+        }
+    }
 }
 
 /// Live events, plus a snapshot first so a page that connects late is not

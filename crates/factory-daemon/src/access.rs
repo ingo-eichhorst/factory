@@ -152,6 +152,8 @@ impl Engine {
             | Request::RunEntries { .. }
             | Request::RunOutput { .. }
             | Request::AgentOutput { .. }
+            | Request::AgentScreen { .. }
+            | Request::RunScreen { .. }
             | Request::Subscribe => return Ok(()),
             _ => {}
         }

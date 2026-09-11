@@ -325,6 +325,20 @@ the moment a run exists — live from the session while it runs, and the
 transcript kept at the end once it does not — so there is never a button to
 press to find out what an agent is doing.
 
+Both pages show a terminal, and it is a real one. The daemon asks the runtime
+for whole frames -- the grid herdr has already rendered, roughly four times a
+second, sent only when it changed -- and every keystroke goes back as the bytes
+a terminal would send. Arrows, Tab, Ctrl-C and an agent's own escape hatch all
+work, because herdr passes the bytes to the pane untouched and there is no
+table of key names in between to fall behind what a keyboard can do. Click the
+screen and type; the buttons underneath are for a phone with no Ctrl key. A run
+that has ended has no session left to mirror, and then what is shown is the
+transcript the daemon kept.
+
+There is no terminal emulator in the page. herdr's frames have already had
+every cursor move and scroll applied, so what arrives is text and colour, and
+eighty lines turn that into HTML.
+
 **Agents** has two views of the same thing. **Occupancy** is a chart: one row
 per agent, grouped by scope, drawn against a shared clock. Three layers, kept
 deliberately apart because they are different kinds of evidence:
@@ -369,10 +383,13 @@ already chosen. A task run's terminal takes the same input.
   callback token only stops one running agent from closing another's run by
   mistake. The HTTP interface has no authentication at all. It binds to
   loopback by default; `bind: 0.0.0.0:8787` puts it on the local network, where
-  anyone who can reach it can start a task **and type directly into a running
-  agent's terminal** — which bypasses the scope and agent config entirely, and
-  runs as whoever runs the daemon. The daemon warns on every start when it is
-  bound past loopback, and prints the address a person would actually type.
+  anyone who can reach it can start a task **and has a full keyboard on every
+  agent's terminal** — arrows, Ctrl-C, and whatever escape hatch the agent
+  itself offers, which for most of them is a shell. That bypasses the scope and
+  agent config entirely and runs as whoever runs the daemon. The daemon warns
+  on every start when it is bound past loopback, and prints the address a
+  person would actually type. The warning is the whole of the protection: put
+  this on a network you would hand a shell to, or leave it on loopback.
 - **First-run agent prompts.** An agent that has never seen a directory may ask
   a human to trust it before it will read the task. Factory cannot answer that
   for you — it will time the task out and tell you where to look.

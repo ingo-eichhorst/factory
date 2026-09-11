@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use factory_core::adapter::agent::LaunchKind;
-use factory_core::adapter::runtime::{AgentRuntime, RuntimeStatus, StartRequest};
+use factory_core::adapter::runtime::{AgentRuntime, RuntimeStatus, Screen, StartRequest};
 use factory_core::error::{FactoryError, Result};
 use factory_core::task::SessionRef;
 use serde_json::Value;
@@ -165,6 +165,28 @@ impl Default for HerdrRuntime {
     }
 }
 
+/// Drop the colour escapes and keep the characters. Only needed to measure a
+/// line; the frame itself is handed on with its escapes intact.
+fn strip_sgr(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 fn s(v: &str) -> String {
     v.to_string()
 }
@@ -312,6 +334,9 @@ impl AgentRuntime for HerdrRuntime {
         Ok(())
     }
 
+    /// Literal bytes into the pane. herdr passes them through untouched -- an
+    /// `ESC [ A` arrives at the agent as an arrow key and `\x03` as Ctrl-C --
+    /// which is what makes a real terminal in the browser possible at all.
     async fn send_text(&self, session: &SessionRef, text: &str) -> Result<()> {
         self.run(&[
             s("pane"),
@@ -383,6 +408,60 @@ impl AgentRuntime for HerdrRuntime {
         let all: Vec<&str> = text.lines().collect();
         let tail = &all[all.len().saturating_sub(wanted)..];
         Ok(tail.join("\n"))
+    }
+
+    async fn screen(&self, session: &SessionRef) -> Result<Option<Screen>> {
+        let pane = Self::pane_of(session);
+        // `visible` is the viewport -- the grid a person attached to this pane
+        // would be looking at. `recent`, which `read` uses, is scrollback and
+        // has no geometry to speak of.
+        let frame = self
+            .run_text(&[
+                s("pane"),
+                s("read"),
+                s(pane),
+                s("--source"),
+                s("visible"),
+                s("--format"),
+                s("ansi"),
+            ])
+            .await?;
+
+        // The grid's size is the pane's, not the browser window's: herdr owns
+        // the layout, and a viewer that guesses wrong wraps every line.
+        let (mut cols, mut rows) = (0u16, 0u16);
+        if let Ok(v) = self
+            .run(&[s("pane"), s("layout"), s("--pane"), s(pane)])
+            .await
+        {
+            let rect = v
+                .get("layout")
+                .and_then(|l| l.get("panes"))
+                .and_then(Value::as_array)
+                .and_then(|panes| {
+                    panes
+                        .iter()
+                        .find(|p| p.get("pane_id").and_then(Value::as_str) == Some(pane))
+                })
+                .and_then(|p| p.get("rect"));
+            if let Some(rect) = rect {
+                cols = rect.get("width").and_then(Value::as_u64).unwrap_or(0) as u16;
+                rows = rect.get("height").and_then(Value::as_u64).unwrap_or(0) as u16;
+            }
+        }
+        // A pane whose geometry we could not read still has a frame worth
+        // showing; the widest line is a lower bound good enough to lay it out.
+        if cols == 0 {
+            cols = frame
+                .lines()
+                .map(|l| strip_sgr(l).chars().count())
+                .max()
+                .unwrap_or(80) as u16;
+        }
+        if rows == 0 {
+            rows = frame.lines().count().max(1) as u16;
+        }
+        Ok(Some(Screen { cols, rows, frame }))
     }
 
     async fn stop(&self, session: &SessionRef) -> Result<()> {

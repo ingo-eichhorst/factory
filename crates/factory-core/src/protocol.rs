@@ -2,6 +2,7 @@
 //! sends it over a unix socket, the HTTP adapter maps REST onto it; adding a
 //! third interface means translating to this, not inventing a new API.
 
+use crate::adapter::Screen;
 use crate::agent::AgentSession;
 use crate::event::Event;
 use crate::occupancy::Occupancy;
@@ -40,6 +41,13 @@ pub enum Request {
         #[serde(default)]
         lines: Option<u32>,
     },
+    /// One frame of a standing agent's screen, for a viewer that wants the
+    /// terminal rather than the transcript.
+    #[serde(rename = "agent.screen")]
+    AgentScreen { id: String },
+    /// The same for a task run's session.
+    #[serde(rename = "run.screen")]
+    RunScreen { id: String },
     /// Type at a task run's session, for the same reason.
     #[serde(rename = "run.input")]
     RunInput {
@@ -134,6 +142,7 @@ pub enum Payload {
     Deleted { deleted: bool },
     Event { event: Event },
     Occupancy { occupancy: Occupancy },
+    Screen { screen: Screen },
 }
 
 /// A request plus who is making it.

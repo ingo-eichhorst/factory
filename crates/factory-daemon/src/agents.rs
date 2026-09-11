@@ -7,7 +7,7 @@
 
 use chrono::Utc;
 use factory_core::adapter::agent::AgentContext;
-use factory_core::adapter::runtime::{RuntimeStatus, StartRequest};
+use factory_core::adapter::runtime::{RuntimeStatus, Screen, StartRequest};
 use factory_core::agent::{AgentSession, AgentState, Lifetime};
 use factory_core::config::ScopeAgent;
 use factory_core::error::{FactoryError, Result};
@@ -218,6 +218,17 @@ impl Engine {
         };
         let runtime = self.registry.runtime(&session.runtime)?;
         Ok(runtime.read(session, lines).await.unwrap_or_default())
+    }
+
+    /// One frame of a standing agent's screen. A runtime that cannot render one
+    /// says so, and the caller shows the transcript instead.
+    pub async fn agent_screen(&self, id: &str) -> Result<Option<Screen>> {
+        let agent = self.require_agent(id).await?;
+        let Some(session) = &agent.session else {
+            return Ok(None);
+        };
+        let runtime = self.registry.runtime(&session.runtime)?;
+        runtime.screen(session).await
     }
 
     pub async fn require_agent(&self, id: &str) -> Result<AgentSession> {

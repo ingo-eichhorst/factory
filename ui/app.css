@@ -130,13 +130,24 @@
   .entry:last-child { border-bottom: 0; }
   .entry .when { color: var(--dim); font-size: 11.5px; font-variant-numeric: tabular-nums; }
   .entry .who { font-weight: 600; }
+  /* The terminal is a grid the runtime has already laid out, so it is sized by
+     its own content and never re-wrapped: a line broken here is a line the
+     agent did not draw. Height follows the frame; only the transcript, which
+     can be hundreds of lines, is allowed to scroll. */
   .term {
     background: var(--term-bg); color: var(--term-ink); border-radius: 6px; padding: 12px 14px;
-    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
-    height: 300px; overflow: auto; white-space: pre; margin: 0;
+    font: 12.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+    max-height: 62vh; overflow: auto; white-space: pre; margin: 0; outline: 0;
+    min-height: 120px;
+    /* The grid is as wide as the runtime made it, so the box does not resize
+       under the text every time a line happens to be short. */
+    min-width: min(100%, calc(var(--cols, 80) * 1ch));
   }
-  .term.idle { color: #8b857b; font-style: italic; white-space: pre-wrap; }
+  .term:focus-visible, .term.focused { box-shadow: 0 0 0 2px var(--accent); }
+  .term.idle { color: #8b857b; font-style: italic; white-space: pre-wrap; min-height: 0; }
   .live-tag { color: var(--warn); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+  .term-hint { color: var(--dim); font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .term.focused + .terminput .term-hint, .term.focused ~ * .term-hint { color: var(--accent); }
 
   /* ---------------------------------------------------------- occupancy
      One row per agent, one block per run, drawn against a shared clock.

@@ -3,7 +3,7 @@
 
 use chrono::Utc;
 use factory_core::adapter::agent::{AgentContext, TaskBinding};
-use factory_core::adapter::runtime::{RuntimeStatus, StartRequest};
+use factory_core::adapter::runtime::{RuntimeStatus, Screen, StartRequest};
 use factory_core::adapter::TaskStore;
 use factory_core::config::Factory;
 use factory_core::error::{FactoryError, Result};
@@ -122,6 +122,21 @@ impl Engine {
             Request::AgentOutput { id, lines } => Ok(Payload::Text {
                 text: self.agent_output(&id, lines.unwrap_or(200)).await?,
             }),
+            Request::AgentScreen { id } => match self.agent_screen(&id).await? {
+                Some(screen) => Ok(Payload::Screen { screen }),
+                None => Err(FactoryError::BadRequest(
+                    "this runtime cannot render a screen for that session".into(),
+                )),
+            },
+            Request::RunScreen { id } => {
+                let run = self.require_run(&id).await?;
+                match self.run_screen(&run).await? {
+                    Some(screen) => Ok(Payload::Screen { screen }),
+                    None => Err(FactoryError::BadRequest(
+                        "this run has no session to show".into(),
+                    )),
+                }
+            }
             Request::RunInput { id, text, keys } => {
                 self.run_input(&id, text.as_deref(), &keys).await?;
                 Ok(Payload::Ok)
@@ -949,6 +964,16 @@ impl Engine {
             .await?;
         self.bus.publish(Event::TaskUpdated { task: updated });
         Ok(())
+    }
+
+    /// One frame of a run's session. `None` once the run has ended and its
+    /// session is released -- what is left then is the transcript.
+    pub async fn run_screen(&self, run: &Run) -> Result<Option<Screen>> {
+        let Some(session) = &run.session else {
+            return Ok(None);
+        };
+        let runtime = self.registry.runtime(&session.runtime)?;
+        runtime.screen(session).await
     }
 
     pub async fn session_status(&self, run: &Run) -> RuntimeStatus {

@@ -62,6 +62,21 @@ impl RuntimeStatus {
     }
 }
 
+/// One frame of a session's screen: what a person attached to it would be
+/// looking at right now.
+///
+/// The frame is the rendered grid, not a byte stream -- the runtime has already
+/// applied every cursor move and scroll, and what is left is text plus colour.
+/// That is why it can be polled: each frame stands alone, so a dropped one
+/// costs nothing and a late viewer needs no replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Screen {
+    pub cols: u16,
+    pub rows: u16,
+    /// The visible grid, one line per row, carrying SGR escapes for colour.
+    pub frame: String,
+}
+
 /// Adapter seam 2: where agents actually run. Opens a session, hands it a
 /// prompt, and can be asked whether it is still alive.
 #[async_trait::async_trait]
@@ -97,6 +112,13 @@ pub trait AgentRuntime: Send + Sync {
 
     /// Recent terminal output, for the UI and for post-mortems.
     async fn read(&self, session: &SessionRef, lines: u32) -> Result<String>;
+
+    /// The screen as it looks now, for a viewer that wants the terminal rather
+    /// than the transcript. `None` is an honest answer from a runtime that can
+    /// only produce scrollback -- the caller falls back to `read`.
+    async fn screen(&self, _session: &SessionRef) -> Result<Option<Screen>> {
+        Ok(None)
+    }
 
     async fn stop(&self, session: &SessionRef) -> Result<()>;
 }

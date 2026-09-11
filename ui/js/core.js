@@ -16,7 +16,8 @@ export const state = {
   runs: [],            // runs of the open task
   run: null,           // selected run id
   term: null,          // {kind:'run'|'agent', id} the terminal is showing
-  poll: null,          // terminal poll timer
+  poll: null,          // terminal poll timer, for a transcript that is not live
+  termSocket: null,    // the live terminal's socket, while one is open
   agentPoll: null,
   agentView: "occupancy", // the agents page: the chart, or the roster with its controls
   occ: null,              // the occupancy answer, as the daemon assembled it
