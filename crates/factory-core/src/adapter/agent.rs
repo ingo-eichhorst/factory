@@ -33,6 +33,10 @@ pub struct LaunchSpec {
 #[derive(Debug, Clone)]
 pub struct AgentContext {
     pub task: Task,
+    /// The attempt this prompt is for. A retry is a different run of the same
+    /// task, and an adapter may want to say so.
+    pub run_id: String,
+    pub attempt: u32,
     /// Absolute working directory for the run.
     pub cwd: PathBuf,
     /// Absolute path to the `factory` binary the agent is to call back with.
@@ -69,6 +73,8 @@ impl AgentContext {
     pub fn env(&self) -> BTreeMap<String, String> {
         BTreeMap::from([
             ("FACTORY_TASK_ID".to_string(), self.task.id.clone()),
+            ("FACTORY_RUN_ID".to_string(), self.run_id.clone()),
+            ("FACTORY_RUN_ATTEMPT".to_string(), self.attempt.to_string()),
             ("FACTORY_TASK_TOKEN".to_string(), self.token.clone()),
             ("FACTORY_SOCKET".to_string(), self.socket.display().to_string()),
             ("FACTORY_BIN".to_string(), self.factory_bin.display().to_string()),

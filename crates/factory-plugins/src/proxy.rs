@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use factory_core::adapter::agent::{Agent, AgentContext, LaunchKind, LaunchSpec};
 use factory_core::adapter::store::TaskStore;
 use factory_core::error::{FactoryError, Result};
+use factory_core::run::{NewRun, Run, RunPatch};
 use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -152,6 +153,36 @@ impl TaskStore for PluginStore {
         self.proc.call("task.delete", json!({ "id": id })).await
     }
 
+    async fn create_run(&self, new: &NewRun) -> Result<Run> {
+        self.proc.call("run.create", json!({ "run": new })).await
+    }
+
+    async fn get_run(&self, id: &str) -> Result<Option<Run>> {
+        self.proc.call("run.get", json!({ "id": id })).await
+    }
+
+    async fn update_run(&self, id: &str, patch: &RunPatch) -> Result<Run> {
+        self.proc
+            .call("run.update", json!({ "id": id, "patch": patch }))
+            .await
+    }
+
+    async fn runs(&self, task_id: &str, limit: u32) -> Result<Vec<Run>> {
+        self.proc
+            .call("run.list", json!({ "task_id": task_id, "limit": limit }))
+            .await
+    }
+
+    async fn active_run(&self, task_id: &str) -> Result<Option<Run>> {
+        self.proc
+            .call("run.active", json!({ "task_id": task_id }))
+            .await
+    }
+
+    async fn active_runs(&self) -> Result<Vec<Run>> {
+        self.proc.call("run.active_all", json!({})).await
+    }
+
     async fn append_entry(&self, id: &str, entry: &TaskEntry) -> Result<()> {
         self.proc
             .call_raw("task.append_entry", json!({ "id": id, "entry": entry }))
@@ -162,6 +193,12 @@ impl TaskStore for PluginStore {
     async fn entries(&self, id: &str, limit: u32) -> Result<Vec<TaskEntry>> {
         self.proc
             .call("task.entries", json!({ "id": id, "limit": limit }))
+            .await
+    }
+
+    async fn run_entries(&self, run_id: &str, limit: u32) -> Result<Vec<TaskEntry>> {
+        self.proc
+            .call("run.entries", json!({ "run_id": run_id, "limit": limit }))
             .await
     }
 

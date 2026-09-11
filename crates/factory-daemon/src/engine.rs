@@ -8,7 +8,10 @@ use factory_core::adapter::TaskStore;
 use factory_core::config::Factory;
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
-use factory_core::protocol::{AdapterList, Payload, Request, Response, StatusInfo};
+use factory_core::protocol::{
+    AgentActivity, AgentView, Payload, Request, Response, StatusInfo,
+};
+use factory_core::run::{NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
     NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
 };
@@ -59,31 +62,34 @@ impl Engine {
 
     async fn dispatch_request(self: &Arc<Self>, req: Request) -> Result<Payload> {
         match req {
-            Request::Status => Ok(Payload::Status { status: self.status().await? }),
-            Request::Adapters => Ok(self.adapters().into()),
-            Request::TaskCreate(new) => Ok(Payload::Task { task: self.create(new).await?.redacted() }),
-            Request::TaskGet { id } => Ok(Payload::Task { task: self.require(&id).await?.redacted() }),
+            Request::Status => Ok(Payload::Status {
+                status: self.status().await?,
+            }),
+            Request::Adapters => Ok(self.registry.list().into()),
+            Request::Agents => Ok(Payload::Agents {
+                agents: self.agents().await?,
+            }),
+
+            Request::TaskCreate(new) => Ok(Payload::Task {
+                task: self.create(new).await?,
+            }),
+            Request::TaskGet { id } => Ok(Payload::Task {
+                task: self.require(&id).await?,
+            }),
             Request::TaskList(filter) => Ok(Payload::Tasks {
-                tasks: self
-                    .store
-                    .list(&filter)
-                    .await?
-                    .into_iter()
-                    .map(|t| t.redacted())
-                    .collect(),
+                tasks: self.store.list(&filter).await?,
             }),
             Request::TaskUpdate { id, patch } => {
-                // A caller must not be able to hand itself a task's token.
                 let mut patch = patch;
-                patch.token = None;
+                // A caller must not be able to rewrite the bookkeeping.
+                patch.runs = None;
                 let task = self.store.update(&id, &patch).await?;
                 self.bus.publish(Event::TaskUpdated { task: task.clone() });
-                Ok(Payload::Task { task: task.redacted() })
+                Ok(Payload::Task { task })
             }
             Request::TaskDelete { id } => {
-                let task = self.store.get(&id).await?;
-                if let Some(session) = task.and_then(|t| t.session) {
-                    let _ = self.stop_session(&session).await;
+                if let Some(run) = self.store.active_run(&id).await? {
+                    self.close_session(&run).await;
                 }
                 let deleted = self.store.delete(&id).await?;
                 if deleted {
@@ -92,59 +98,80 @@ impl Engine {
                 Ok(Payload::Deleted { deleted })
             }
             Request::TaskRun { id } => {
-                let task = self.require(&id).await?;
-                if !task.status.is_terminal() && task.status != TaskStatus::Pending {
+                self.require(&id).await?;
+                // A task is a standing intent; a run is one attempt at it. Two
+                // attempts at once would race for the same working directory.
+                if let Some(run) = self.store.active_run(&id).await? {
                     return Err(FactoryError::BadRequest(format!(
-                        "task {id} is already {}; cancel it before running it again",
-                        task.status.as_str()
+                        "attempt {} of this task is still {}; cancel it before starting another",
+                        run.attempt,
+                        run.status.as_str()
                     )));
                 }
                 let engine = self.clone();
-                // Dispatch can take a minute: starting a pane, waiting for an
+                // Dispatch can take a minute: opening a pane, waiting for an
                 // agent to be ready. The caller gets its answer now.
                 tokio::spawn(async move {
-                    if let Err(e) = engine.dispatch(&id).await {
-                        engine.fail(&id, &format!("dispatch failed: {e}")).await;
-                    }
+                    engine.start_run(&id, Trigger::Manual).await;
                 });
                 Ok(Payload::Ok)
             }
             Request::TaskCancel { id } => {
-                let task = self.require(&id).await?;
-                if let Some(session) = &task.session {
-                    let _ = self.stop_session(session).await;
-                }
-                let task = self
-                    .store
-                    .update(
-                        &id,
-                        &TaskPatch {
-                            status: Some(TaskStatus::Cancelled),
+                let run = self.store.active_run(&id).await?.ok_or_else(|| {
+                    FactoryError::BadRequest(format!("task {id} has no run to cancel"))
+                })?;
+                self.close_session(&run).await;
+                let run = self
+                    .finish_run(
+                        &run.id,
+                        RunStatus::Cancelled,
+                        RunPatch {
+                            status: Some(RunStatus::Cancelled),
                             ..Default::default()
                         },
+                        "cancelled by request",
                     )
                     .await?;
-                self.entry(&id, TaskEntry::new("daemon", "cancelled", "cancelled by request"))
-                    .await;
-                self.bus.publish(Event::TaskUpdated { task: task.clone() });
-                Ok(Payload::Task { task: task.redacted() })
+                Ok(Payload::Run { run: run.redacted() })
             }
-            Request::TaskReport { id, report } => {
-                Ok(Payload::Task { task: self.report(&id, report).await?.redacted() })
-            }
+            Request::TaskReport { id, report } => Ok(Payload::Run {
+                run: self.report(&id, report).await?.redacted(),
+            }),
             Request::TaskEntries { id, limit } => Ok(Payload::Entries {
                 entries: self.store.entries(&id, limit.unwrap_or(200)).await?,
             }),
             Request::TaskOutput { id, lines } => {
-                let task = self.require(&id).await?;
-                let session = task.session.ok_or_else(|| {
-                    FactoryError::BadRequest(format!("task {id} has no live session"))
-                })?;
-                let runtime = self.registry.runtime(&session.runtime)?;
+                let latest = self.store.runs(&id, 1).await?.into_iter().next();
                 Ok(Payload::Text {
-                    text: runtime.read(&session, lines.unwrap_or(120)).await?,
+                    text: match latest {
+                        Some(run) => self.output(&run, lines.unwrap_or(200)).await,
+                        None => String::new(),
+                    },
                 })
             }
+
+            Request::RunList { task_id, limit } => Ok(Payload::Runs {
+                runs: self
+                    .store
+                    .runs(&task_id, limit.unwrap_or(50))
+                    .await?
+                    .into_iter()
+                    .map(|r| r.redacted())
+                    .collect(),
+            }),
+            Request::RunGet { id } => Ok(Payload::Run {
+                run: self.require_run(&id).await?.redacted(),
+            }),
+            Request::RunEntries { id, limit } => Ok(Payload::Entries {
+                entries: self.store.run_entries(&id, limit.unwrap_or(200)).await?,
+            }),
+            Request::RunOutput { id, lines } => {
+                let run = self.require_run(&id).await?;
+                Ok(Payload::Text {
+                    text: self.output(&run, lines.unwrap_or(200)).await,
+                })
+            }
+
             Request::Subscribe => Err(FactoryError::BadRequest(
                 "this interface does not stream events on the request channel".into(),
             )),
@@ -160,18 +187,71 @@ impl Engine {
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_seconds: self.started.elapsed().as_secs(),
             tasks_total: tasks.len(),
-            tasks_active: tasks.iter().filter(|t| !t.status.is_terminal()).count(),
+            tasks_active: self.store.active_runs().await?.len(),
             subscribers: self.bus.subscriber_count(),
             interfaces: self.interfaces.clone(),
             scopes: self.factory.scope_names(),
         })
     }
 
-    fn adapters(&self) -> AdapterList {
-        self.registry.list()
+    /// Every agent adapter, what it is for, and what it is doing. One call,
+    /// because a page that had to join adapters, runs and tasks itself would
+    /// show three different moments in time.
+    async fn agents(&self) -> Result<Vec<AgentView>> {
+        let adapters = self.registry.list();
+        let active = self.store.active_runs().await?;
+
+        // Resolve each scope's agent the same way a new task would, so the page
+        // shows what would actually happen rather than only what is written
+        // down.
+        let instance_default = &self.factory.config.daemon.default_agent;
+        let mut default_for: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for scope in &self.factory.config.scopes {
+            let agent = scope
+                .agent_adapter()
+                .unwrap_or(instance_default.as_str())
+                .to_string();
+            default_for.entry(agent).or_default().push(scope.name.clone());
+        }
+
+        // A run names its agent; the task it belongs to names the rest.
+        let mut activity: std::collections::BTreeMap<String, Vec<AgentActivity>> =
+            Default::default();
+        for run in active {
+            let task = self.store.get(&run.task_id).await?;
+            activity.entry(run.agent.clone()).or_default().push(AgentActivity {
+                run_id: run.id.clone(),
+                task_id: run.task_id.clone(),
+                task_title: task
+                    .as_ref()
+                    .map(|t| t.title.clone())
+                    .unwrap_or_else(|| "(deleted task)".into()),
+                scope: task.map(|t| t.scope).unwrap_or_default(),
+                attempt: run.attempt,
+                status: run.status.as_str().to_string(),
+                runtime: run.runtime.clone(),
+                trigger: run.trigger.as_str().to_string(),
+                started_at: run.started_at,
+                session: run.session.as_ref().map(|s| s.handle.clone()),
+            });
+        }
+
+        Ok(adapters
+            .adapters
+            .into_iter()
+            .filter(|a| a.kind == "agent")
+            .map(|a| AgentView {
+                default_for: default_for.get(&a.name).cloned().unwrap_or_default(),
+                instance_default: &a.name == instance_default,
+                active: activity.remove(&a.name).unwrap_or_default(),
+                name: a.name,
+                description: a.description,
+                source: a.source,
+            })
+            .collect())
     }
 
-    // -- creating and running ----------------------------------------------
+    // -- creating ----------------------------------------------------------
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {
         if new.title.trim().is_empty() {
@@ -187,9 +267,7 @@ impl Engine {
                 .first()
                 .map(|s| s.name.clone())
                 .ok_or_else(|| {
-                    FactoryError::BadRequest(
-                        "no scope given and the instance declares none".into(),
-                    )
+                    FactoryError::BadRequest("no scope given and the instance declares none".into())
                 })?,
         };
         let declared = self.factory.scope(&scope)?.clone();
@@ -210,8 +288,7 @@ impl Engine {
         self.registry.agent(&agent)?;
         self.registry.runtime(&runtime)?;
 
-        let mut task =
-            factory_core::adapter::store::task_from_new(new, scope, agent, runtime);
+        let mut task = factory_core::adapter::store::task_from_new(new, scope, agent, runtime);
         if let Some(s) = &task.schedule {
             task.next_run_at = Some(schedule::next_after(s, Utc::now())?);
         }
@@ -226,10 +303,43 @@ impl Engine {
         Ok(task)
     }
 
-    /// Open a session, start the agent, hand it the task. Returns once the
-    /// prompt is in; the agent reports the rest itself.
-    pub async fn dispatch(self: &Arc<Self>, id: &str) -> Result<()> {
-        let task = self.require(id).await?;
+    // -- running -----------------------------------------------------------
+
+    /// Start one attempt at a task and hand it to an agent. Failures here end
+    /// the run rather than escaping, because nobody is waiting on the answer.
+    pub async fn start_run(self: &Arc<Self>, task_id: &str, trigger: Trigger) {
+        let run = match self.dispatch(task_id, trigger).await {
+            Ok(run) => run,
+            Err(e) => {
+                // The run may or may not exist yet; if it does, close it.
+                if let Ok(Some(run)) = self.store.active_run(task_id).await {
+                    self.fail_run(&run.id, &format!("dispatch failed: {e}")).await;
+                } else {
+                    self.entry(
+                        task_id,
+                        TaskEntry::new("daemon", "failed", format!("dispatch failed: {e}")),
+                    )
+                    .await;
+                    let _ = self
+                        .store
+                        .update(
+                            task_id,
+                            &TaskPatch {
+                                status: Some(TaskStatus::Failed),
+                                error: Some(e.to_string()),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                }
+                return;
+            }
+        };
+        tracing::info!(task = task_id, run = %run.id, attempt = run.attempt, "dispatched");
+    }
+
+    async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger) -> Result<Run> {
+        let task = self.require(task_id).await?;
         let agent = self.registry.agent(&task.agent)?;
         let runtime = self.registry.runtime(&task.runtime)?;
         let cwd = self.factory.scope_path(&task.scope)?;
@@ -242,22 +352,34 @@ impl Engine {
         }
 
         let token = factory_core::new_token();
-        let task = self
+        let run = self
             .store
-            .update(
-                id,
-                &TaskPatch {
-                    status: Some(TaskStatus::Dispatching),
-                    token: Some(token.clone()),
-                    last_run_at: Some(Utc::now()),
-                    ..Default::default()
-                },
-            )
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger,
+                agent: task.agent.clone(),
+                runtime: task.runtime.clone(),
+                token: token.clone(),
+            })
             .await?;
-        self.bus.publish(Event::TaskUpdated { task: task.clone() });
+
+        self.bus.publish(Event::RunStarted { run: run.clone() });
+        self.publish_task(task_id).await;
+        self.entry(
+            task_id,
+            TaskEntry::new(
+                "daemon",
+                "started",
+                format!("attempt {} started ({})", run.attempt, trigger.as_str()),
+            )
+            .in_run(&run.id),
+        )
+        .await;
 
         let ctx = AgentContext {
             task: task.clone(),
+            run_id: run.id.clone(),
+            attempt: run.attempt,
             cwd: cwd.clone(),
             factory_bin: self.factory_bin.clone(),
             socket: self.factory.socket_path(),
@@ -274,53 +396,57 @@ impl Engine {
             })
             .await?;
 
-        let task = self
+        let run = self
             .store
-            .update(
-                id,
-                &TaskPatch {
+            .update_run(
+                &run.id,
+                &RunPatch {
                     session: Some(session.clone()),
                     ..Default::default()
                 },
             )
             .await?;
-        self.bus.publish(Event::TaskUpdated { task });
+        self.bus.publish(Event::RunUpdated { run: run.clone() });
 
         let prompt = agent.prompt(&ctx).await?;
         runtime.submit(&session, &prompt).await?;
 
         self.entry(
-            id,
+            task_id,
             TaskEntry::new(
                 "daemon",
                 "dispatched",
-                format!("handed to {} on {}", ctx.task.agent, session.runtime),
+                format!("handed to {} on {}", task.agent, session.runtime),
             )
+            .in_run(&run.id)
             .with_data(serde_json::json!({ "session": session })),
         )
         .await;
-        Ok(())
+        Ok(run)
     }
 
-    /// What an agent says about its own task. The token is what makes this a
-    /// report rather than anyone on the socket closing anyone's task.
-    pub async fn report(&self, id: &str, report: TaskReport) -> Result<Task> {
-        let task = self.require(id).await?;
+    /// What an agent says about its own run. The token is what makes this a
+    /// report rather than anyone on the socket closing anyone's run.
+    pub async fn report(&self, task_id: &str, report: TaskReport) -> Result<Run> {
+        let run = self.store.active_run(task_id).await?.ok_or_else(|| {
+            FactoryError::BadRequest(format!(
+                "task {task_id} has no run in progress; reports are no longer accepted"
+            ))
+        })?;
 
-        if task.status.is_terminal() {
-            return Err(FactoryError::BadRequest(format!(
-                "task {id} is already {}; reports on it are no longer accepted",
-                task.status.as_str()
-            )));
-        }
-
-        if let Some(expected) = &task.token {
+        if let Some(expected) = &run.token {
             match &report.token {
                 Some(given) if given == expected => {}
-                Some(_) => return Err(FactoryError::Denied(format!("wrong token for task {id}"))),
+                Some(_) => {
+                    return Err(FactoryError::Denied(format!(
+                        "wrong token for attempt {} of task {task_id}",
+                        run.attempt
+                    )))
+                }
                 None => {
                     return Err(FactoryError::Denied(format!(
-                        "task {id} needs its token; pass --token or set FACTORY_TASK_TOKEN"
+                        "attempt {} of task {task_id} needs its token; pass --token or set FACTORY_TASK_TOKEN",
+                        run.attempt
                     )))
                 }
             }
@@ -335,7 +461,7 @@ impl Engine {
         });
 
         self.entry(
-            id,
+            task_id,
             TaskEntry::new(
                 "agent",
                 report
@@ -343,41 +469,82 @@ impl Engine {
                     .map(|s| s.as_str().to_string())
                     .unwrap_or_else(|| "note".into()),
                 message,
-            ),
+            )
+            .in_run(&run.id),
         )
         .await;
 
-        let terminal = report.status.map(TaskStatus::is_terminal).unwrap_or(false);
+        let patch = RunPatch {
+            status: report.status,
+            result: report.result,
+            error: report.error,
+            ..Default::default()
+        };
 
-        // Keep the last of what the agent saw before the session goes away.
-        if terminal {
-            if let Some(session) = &task.session {
-                if let Ok(runtime) = self.registry.runtime(&session.runtime) {
-                    if let Ok(text) = runtime.read(session, 200).await {
-                        self.entry(
-                            id,
-                            TaskEntry::new("daemon", "transcript", "final terminal output")
-                                .with_data(serde_json::json!({ "text": text })),
-                        )
-                        .await;
-                    }
-                }
-                let _ = self.stop_session(session).await;
+        match report.status {
+            Some(status) if status.is_terminal() => {
+                self.close_session(&run).await;
+                self.finish_run(&run.id, status, patch, &format!("attempt {} ended", run.attempt))
+                    .await
+            }
+            _ => {
+                let run = self.store.update_run(&run.id, &patch).await?;
+                self.bus.publish(Event::RunUpdated { run: run.clone() });
+                self.mirror_to_task(&run).await;
+                Ok(run)
             }
         }
+    }
 
-        // A recurring task goes back to pending rather than staying done: the
-        // scheduler only fires pending tasks, and its last result stays on it
-        // until the next run replaces it. One task, not one per firing -- the
-        // simplification this prototype makes instead of modelling runs.
-        let recurring = task.schedule.is_some();
-        let status = match (report.status, terminal, recurring) {
-            (Some(_), true, true) => Some(TaskStatus::Pending),
-            (other, _, _) => other,
+    /// End a run and settle the task behind it. A task with a schedule goes
+    /// back to `pending` so the scheduler will pick it up again; one without
+    /// keeps the run's own outcome.
+    async fn finish_run(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        patch: RunPatch,
+        _why: &str,
+    ) -> Result<Run> {
+        let run = self
+            .store
+            .update_run(
+                run_id,
+                &RunPatch {
+                    status: Some(status),
+                    clear_session: true,
+                    clear_token: true,
+                    ended_at: Some(Utc::now()),
+                    ..patch
+                },
+            )
+            .await?;
+        self.bus.publish(Event::RunUpdated { run: run.clone() });
+        self.mirror_to_task(&run).await;
+        Ok(run)
+    }
+
+    /// The task's own row carries the latest run's outcome, so a list does not
+    /// have to read every run.
+    async fn mirror_to_task(&self, run: &Run) {
+        let recurring = self
+            .store
+            .get(&run.task_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|t| t.schedule)
+            .is_some();
+
+        let status = if run.status.is_terminal() && recurring {
+            TaskStatus::Pending
+        } else {
+            run.status.as_task_status()
         };
-        if terminal && recurring {
+
+        if run.status.is_terminal() && recurring {
             self.entry(
-                id,
+                &run.task_id,
                 TaskEntry::new(
                     "daemon",
                     "rearmed",
@@ -387,33 +554,101 @@ impl Engine {
             .await;
         }
 
-        let updated = self
-            .store
-            .update(
-                id,
-                &TaskPatch {
-                    status,
-                    result: report.result,
-                    error: report.error,
-                    // A finished task has no more use for its token.
-                    token: if terminal { Some(String::new()) } else { None },
-                    // A session that has been closed must not be reported as live.
-                    clear_session: terminal,
-                    ..Default::default()
-                },
-            )
-            .await?;
-
-        self.bus.publish(Event::TaskUpdated {
-            task: updated.clone(),
-        });
-        Ok(updated)
+        // The task mirrors the newest run, not the union of every run: an
+        // attempt that succeeded must not leave the previous one's error
+        // standing next to its own result.
+        let patch = TaskPatch {
+            status: Some(status),
+            result: run.result.clone(),
+            clear_result: run.result.is_none(),
+            error: run.error.clone(),
+            clear_error: run.error.is_none(),
+            ..Default::default()
+        };
+        if let Ok(task) = self.store.update(&run.task_id, &patch).await {
+            self.bus.publish(Event::TaskUpdated { task });
+        }
     }
 
-    // -- what the scheduler and watchdog need -------------------------------
+    /// A run that will never report back.
+    pub async fn fail_run(&self, run_id: &str, why: &str) {
+        let Ok(run) = self.require_run(run_id).await else {
+            return;
+        };
+        self.close_session(&run).await;
+        self.entry(
+            &run.task_id,
+            TaskEntry::new("daemon", "failed", why.to_string()).in_run(run_id),
+        )
+        .await;
+        let _ = self
+            .finish_run(
+                run_id,
+                RunStatus::Failed,
+                RunPatch {
+                    error: Some(why.to_string()),
+                    ..Default::default()
+                },
+                why,
+            )
+            .await;
+    }
+
+    /// Keep the last of what the agent saw, then let the session go.
+    async fn close_session(&self, run: &Run) {
+        let Some(session) = &run.session else { return };
+        if let Ok(runtime) = self.registry.runtime(&session.runtime) {
+            if let Ok(text) = runtime.read(session, 400).await {
+                if !text.trim().is_empty() {
+                    self.entry(
+                        &run.task_id,
+                        TaskEntry::new("daemon", "transcript", "final terminal output")
+                            .in_run(&run.id)
+                            .with_data(serde_json::json!({ "text": text })),
+                    )
+                    .await;
+                }
+            }
+            let _ = runtime.stop(session).await;
+        }
+    }
+
+    /// Terminal output for a run: live while it is running, the transcript kept
+    /// at the end once it is not, and an empty string in the moment between a
+    /// run starting and its session existing. Never an error -- a view that
+    /// polls this should show a blank pane, not a red one.
+    pub async fn output(&self, run: &Run, lines: u32) -> String {
+        if let Some(session) = &run.session {
+            if let Ok(runtime) = self.registry.runtime(&session.runtime) {
+                if let Ok(text) = runtime.read(session, lines).await {
+                    return text;
+                }
+            }
+        }
+        let entries = self.store.run_entries(&run.id, 500).await.unwrap_or_default();
+        for entry in entries.iter().rev() {
+            if entry.kind == "transcript" {
+                if let Some(text) = entry
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("text"))
+                    .and_then(|v| v.as_str())
+                {
+                    return text.to_string();
+                }
+            }
+        }
+        String::new()
+    }
+
+    // -- what the scheduler needs ------------------------------------------
 
     pub async fn due_now(&self) -> Result<Vec<Task>> {
         self.store.due(Utc::now()).await
+    }
+
+    pub async fn active_runs(&self) -> Result<Vec<Run>> {
+        self.store.active_runs().await
     }
 
     /// Move a scheduled task's next firing forward so it is not picked up twice
@@ -437,47 +672,8 @@ impl Engine {
         Ok(())
     }
 
-    /// A task that will never report back. Closes the session and says why.
-    pub async fn fail(&self, id: &str, why: &str) {
-        if let Ok(Some(task)) = self.store.get(id).await {
-            if let Some(session) = &task.session {
-                let _ = self.stop_session(session).await;
-            }
-        }
-        self.entry(id, TaskEntry::new("daemon", "failed", why.to_string()))
-            .await;
-        let recurring = self
-            .store
-            .get(id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|t| t.schedule)
-            .is_some();
-        if let Ok(task) = self
-            .store
-            .update(
-                id,
-                &TaskPatch {
-                    status: Some(if recurring {
-                        TaskStatus::Pending
-                    } else {
-                        TaskStatus::Failed
-                    }),
-                    error: Some(why.to_string()),
-                    token: Some(String::new()),
-                    clear_session: true,
-                    ..Default::default()
-                },
-            )
-            .await
-        {
-            self.bus.publish(Event::TaskUpdated { task });
-        }
-    }
-
-    pub async fn session_status(&self, task: &Task) -> RuntimeStatus {
-        let Some(session) = &task.session else {
+    pub async fn session_status(&self, run: &Run) -> RuntimeStatus {
+        let Some(session) = &run.session else {
             return RuntimeStatus::Unknown;
         };
         match self.registry.runtime(&session.runtime) {
@@ -486,9 +682,7 @@ impl Engine {
         }
     }
 
-    async fn stop_session(&self, session: &factory_core::task::SessionRef) -> Result<()> {
-        self.registry.runtime(&session.runtime)?.stop(session).await
-    }
+    // -- small helpers ------------------------------------------------------
 
     async fn require(&self, id: &str) -> Result<Task> {
         self.store
@@ -497,12 +691,25 @@ impl Engine {
             .ok_or_else(|| FactoryError::TaskNotFound(id.to_string()))
     }
 
-    async fn entry(&self, id: &str, entry: TaskEntry) {
-        if let Err(e) = self.store.append_entry(id, &entry).await {
-            tracing::warn!(task = id, "could not record journal entry: {e}");
+    async fn require_run(&self, id: &str) -> Result<Run> {
+        self.store
+            .get_run(id)
+            .await?
+            .ok_or_else(|| FactoryError::TaskNotFound(format!("run {id}")))
+    }
+
+    async fn publish_task(&self, id: &str) {
+        if let Ok(Some(task)) = self.store.get(id).await {
+            self.bus.publish(Event::TaskUpdated { task });
+        }
+    }
+
+    async fn entry(&self, task_id: &str, entry: TaskEntry) {
+        if let Err(e) = self.store.append_entry(task_id, &entry).await {
+            tracing::warn!(task = task_id, "could not record journal entry: {e}");
         }
         self.bus.publish(Event::TaskEntry {
-            id: id.to_string(),
+            id: task_id.to_string(),
             entry,
         });
     }

@@ -7,12 +7,14 @@ pub mod config;
 pub mod error;
 pub mod event;
 pub mod protocol;
+pub mod run;
 pub mod task;
 
 pub use adapter::{Agent, AdapterKind, AgentRuntime, Interface, TaskStore};
 pub use config::{Config, Factory, Scope};
 pub use error::{FactoryError, Result};
 pub use event::{Event, EventBus};
+pub use run::{NewRun, Run, RunPatch, RunStatus, Trigger};
 pub use task::{
     NewTask, Schedule, SessionRef, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
 };

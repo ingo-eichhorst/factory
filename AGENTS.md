@@ -34,5 +34,9 @@ model call. Use it for anything that is not specifically about an AI harness.
 
 - A task's status comes from the agent calling `factory task report`, never from
   looking at a terminal and guessing. Runtime status is a liveness signal only.
+- A task is the standing intent; a run is one attempt at it. Sessions, tokens
+  and outcomes belong to the run. The task mirrors its newest run so lists stay
+  cheap -- if you add a field to that mirror, clear it too, or a successful
+  retry will show the previous attempt's error.
 - Nothing Factory owns is written inside a scope. State lives in `.factory/`.
 - A plugin that fails must never take the daemon down with it.

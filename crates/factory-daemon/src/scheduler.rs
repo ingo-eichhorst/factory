@@ -1,8 +1,9 @@
-//! Two loops on one timer: fire what is due, and notice what has gone quiet.
+//! Two loops on one timer: fire what is due, and notice which runs have gone
+//! quiet.
 
 use chrono::Utc;
 use factory_core::adapter::runtime::RuntimeStatus;
-use factory_core::task::{TaskFilter, TaskStatus};
+use factory_core::run::{RunStatus, Trigger};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,37 +39,31 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                     let engine = engine.clone();
                     let id = task.id.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = engine.dispatch(&id).await {
-                            engine.fail(&id, &format!("scheduled dispatch failed: {e}")).await;
-                        }
+                        engine.start_run(&id, Trigger::Schedule).await;
                     });
                 }
             }
             Err(e) => tracing::warn!("could not look for due tasks: {e}"),
         }
 
-        // -- tasks that stopped talking ----------------------------------
-        let active = match engine.store.list(&TaskFilter::default()).await {
-            Ok(tasks) => tasks,
+        // -- runs that stopped talking -----------------------------------
+        let active = match engine.active_runs().await {
+            Ok(runs) => runs,
             Err(e) => {
-                tracing::warn!("could not list tasks: {e}");
+                tracing::warn!("could not list active runs: {e}");
                 continue;
             }
         };
 
-        for task in active {
-            if !matches!(task.status, TaskStatus::Dispatching | TaskStatus::Running) {
-                continue;
-            }
-            let Some(started) = task.last_run_at else { continue };
-            let age = (Utc::now() - started).num_seconds();
+        for run in active {
+            let age = (Utc::now() - run.started_at).num_seconds();
 
             // Still `dispatching` means the agent was given the task and has
             // not said a word about it. Something is in front of it.
-            if task.status == TaskStatus::Dispatching && age > ack_secs {
+            if run.status == RunStatus::Dispatching && age > ack_secs {
                 engine
-                    .fail(
-                        &task.id,
+                    .fail_run(
+                        &run.id,
                         &format!(
                             "the agent never acknowledged the task within {ack_secs}s. \
                              Its session is usually still there -- look at it: an agent \
@@ -81,8 +76,8 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
 
             if age > timeout_secs {
                 engine
-                    .fail(
-                        &task.id,
+                    .fail_run(
+                        &run.id,
                         &format!(
                             "no report in {timeout_secs}s; giving up. The agent may still \
                              be working -- look at its session before starting it again."
@@ -94,9 +89,9 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
 
             // A session that is gone will never report. Give it a grace period
             // so a pane that is still coming up is not mistaken for a corpse.
-            if age > 30 && engine.session_status(&task).await == RuntimeStatus::Gone {
+            if age > 30 && engine.session_status(&run).await == RuntimeStatus::Gone {
                 engine
-                    .fail(&task.id, "the agent's session is gone and it never reported back")
+                    .fail_run(&run.id, "the agent's session is gone and it never reported back")
                     .await;
             }
         }

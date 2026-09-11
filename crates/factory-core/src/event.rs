@@ -1,3 +1,4 @@
+use crate::run::Run;
 use crate::task::{Task, TaskEntry};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -20,28 +21,31 @@ pub enum Event {
     TaskDeleted {
         id: String,
     },
-    /// A journal line was appended. Carries the task id so a UI can route it.
+    /// A journal line was appended. Carries the task id so a UI can route it,
+    /// and the entry carries the run it belongs to.
     TaskEntry {
         id: String,
         entry: TaskEntry,
     },
-    /// Raw terminal output sampled from a running session.
-    TaskOutput {
-        id: String,
-        at: DateTime<Utc>,
-        text: String,
+    RunStarted {
+        run: Run,
+    },
+    RunUpdated {
+        run: Run,
     },
 }
 
 impl Event {
-    /// Events carry whole tasks; strip the callback token before it leaves.
+    /// Events carry whole runs, and a run carries the callback token that is
+    /// the only thing stopping one agent from closing another's. Strip it
+    /// before the event leaves the daemon.
     pub fn redacted(self) -> Event {
         match self {
-            Event::TaskCreated { task } => Event::TaskCreated {
-                task: task.redacted(),
+            Event::RunStarted { run } => Event::RunStarted {
+                run: run.redacted(),
             },
-            Event::TaskUpdated { task } => Event::TaskUpdated {
-                task: task.redacted(),
+            Event::RunUpdated { run } => Event::RunUpdated {
+                run: run.redacted(),
             },
             other => other,
         }
@@ -50,9 +54,8 @@ impl Event {
     pub fn task_id(&self) -> Option<&str> {
         match self {
             Event::TaskCreated { task } | Event::TaskUpdated { task } => Some(&task.id),
-            Event::TaskDeleted { id }
-            | Event::TaskEntry { id, .. }
-            | Event::TaskOutput { id, .. } => Some(id),
+            Event::TaskDeleted { id } | Event::TaskEntry { id, .. } => Some(id),
+            Event::RunStarted { run } | Event::RunUpdated { run } => Some(&run.task_id),
             Event::DaemonStarted { .. } => None,
         }
     }

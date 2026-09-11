@@ -19,7 +19,7 @@ the daemon cannot tell a built-in implementation from a plugin:
 | --- | --- | --- |
 | **Agent** | how a harness is started, and what a task sounds like to it | `claude-code`, `pi`, `codex`, `opencode`, `shell` |
 | **Agent runtime** | where agents actually run | `herdr` |
-| **Task store** | where tasks live — the CRUD contract | `sqlite` |
+| **Task store** | where tasks and runs live — the CRUD contract | `sqlite` |
 | **Interface** | how the outside reaches the daemon | `cli` (unix socket), `http` (REST + WebSocket + UI) |
 
 The traits are in `crates/factory-core/src/adapter/`. Nothing in core knows
@@ -63,21 +63,46 @@ factory watch
 
 The web UI is at <http://127.0.0.1:8787>.
 
+## Tasks and runs
+
+A **task** is the standing intent: what to do, where, with which agent, and on
+what schedule. A **run** is one attempt at it — the session it opened, what it
+reported, when it ended.
+
+Running a task a second time makes a second run. A task that failed and is
+started again has two runs, numbered `attempt 1` and `attempt 2`, and both are
+kept with their own journal, their own outcome, and their own terminal
+transcript. The task itself mirrors the newest run, so a list stays cheap to
+read; the history lives on the runs.
+
+```sh
+factory task run <id>          # a retry is just another run
+factory run list <id>          # every attempt, newest first
+factory run show <run-id>
+factory run log <run-id>       # that attempt's journal
+factory run output <run-id>    # its terminal, live or from the transcript
+```
+
+Only one run of a task can be in progress at a time — two attempts at once
+would race for the same working directory — so starting a second is refused
+until the first ends or is cancelled.
+
 ## How a task actually runs
 
 1. `task.create` resolves the scope, agent, and runtime — from the request, then
    the scope's declaration, then the instance defaults — and refuses right away
    if any of them names an adapter that does not exist.
-2. `task.run` mints a callback token, marks the task `dispatching`, and asks the
-   runtime for a session in the scope's directory.
+2. `task.run` opens a run, mints a callback token for it, and asks the runtime
+   for a session in the scope's directory.
 3. The agent adapter produces the prompt. It carries the task, the working
    directory, and the reporting contract — the exact commands the agent is to
    run. The same values are in the session's environment as `FACTORY_TASK_ID`,
    `FACTORY_TASK_TOKEN`, `FACTORY_SOCKET`, and `FACTORY_BIN`.
 4. The agent runs `factory task report <id> --status running …`, then finishes
-   with `done`, `failed`, or `blocked`.
+   with `done`, `failed`, or `blocked`. The report lands on whichever run of
+   that task is in progress; the token says it is that run's agent speaking.
 5. On a terminal report the daemon keeps the last of the terminal output as a
-   journal entry and closes the session.
+   journal entry on the run and closes the session.
 
 **Status comes from the agent, not from the terminal.** A runtime can say
 whether a session is alive; it cannot say whether the work is finished, and
@@ -156,8 +181,10 @@ the `factory` binary, the callback token, and `reporting_contract` — the exact
 wording the built-in agents use. Paste it rather than rewriting it.
 
 A **task** plugin answers `task.create`, `task.get`, `task.list`, `task.update`,
-`task.delete`, `task.append_entry`, `task.entries`, and `task.due`, which is
-what it takes to back tasks with an issue tracker instead of the local database.
+`task.delete`, `task.append_entry`, `task.entries`, `task.due`, and the run
+side: `run.create`, `run.get`, `run.update`, `run.list`, `run.active`,
+`run.active_all`, and `run.entries`. That is what it takes to back tasks with an
+issue tracker instead of the local database.
 
 `examples/plugins/shell-plugin/` is a complete, working example in about eighty
 lines of Python. Copy it.
@@ -175,21 +202,34 @@ echo '{"op":"task.list","params":{}}' | nc -U .factory/factory.sock
 ```
 
 HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
-`POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/entries`, and `POST /api/rpc`
-for the raw envelope. `GET /ws` is the event stream: a snapshot of every task
-first, then one message per event.
+`POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`,
+`GET /api/runs/{id}/entries`, `GET /api/runs/{id}/output`, `GET /api/agents`,
+and `POST /api/rpc` for the raw envelope. `GET /ws` is the event stream: a
+snapshot of every task first, then one message per event.
 
 Adding an interface — mcp, or anything else — means translating to that
 envelope, not inventing a second API.
+
+## The web UI
+
+Two pages. **Tasks** is the list; clicking one opens it in a modal with its
+runs, the selected run's journal, and its terminal. The terminal is shown from
+the moment a run exists — live from the session while it runs, and the
+transcript kept at the end once it does not — so there is never a button to
+press to find out what an agent is doing.
+
+**Agents** is the other side of the same data: every agent adapter, what it is
+the default for, whether it came from a plugin, and what it is working on right
+now. Clicking a job opens that task.
 
 ## What this prototype does not do yet
 
 - **Runtime and interface plugins.** The manifest accepts `kind: runtime` and
   `kind: interface`, and the daemon says plainly that it will not load them.
   The traits are there; the proxies are not.
-- **Runs are not modelled.** A recurring task is one row that returns to
-  `pending` after each firing, carrying its most recent result. Per-firing
-  history lives in the journal rather than as its own record.
+- **No schema migrations.** The database carries a version; one written by a
+  different version is dropped and rebuilt. The daemon warns when it does this.
+  Fine for a prototype, not for anything you would miss.
 - **The socket is the security boundary.** It is `0600` in `.factory/`, and the
   callback token only stops one running agent from closing another's task by
   mistake. The HTTP interface has no authentication at all. It binds to

@@ -7,6 +7,7 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use factory_core::event::Event;
 use factory_core::protocol::{Payload, Request, Response};
+use factory_core::run::{Run, RunStatus};
 use factory_core::task::{NewTask, Schedule, Task, TaskFilter, TaskReport, TaskStatus};
 use std::path::PathBuf;
 
@@ -37,11 +38,40 @@ enum Command {
     Status,
     /// Which adapters are registered, and where each came from.
     Adapters,
+    /// The agents, and what each of them is doing right now.
+    Agents,
+    /// Look at individual runs.
+    #[command(subcommand)]
+    Run(RunCmd),
     /// Follow the event stream.
     Watch,
     /// Create, run, and report on tasks.
     #[command(subcommand)]
     Task(TaskCmd),
+}
+
+#[derive(Subcommand)]
+enum RunCmd {
+    /// The runs of a task, newest first.
+    List {
+        task_id: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// One run.
+    Show { id: String },
+    /// One run's journal.
+    Log {
+        id: String,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// One run's terminal: live while it runs, its transcript afterwards.
+    Output {
+        id: String,
+        #[arg(long, default_value_t = 200)]
+        lines: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -98,7 +128,7 @@ enum TaskCmd {
     Report {
         id: Option<String>,
         #[arg(long)]
-        status: Option<TaskStatus>,
+        status: Option<RunStatus>,
         #[arg(short, long)]
         message: Option<String>,
         #[arg(long)]
@@ -181,7 +211,109 @@ async fn main() -> Result<()> {
                 .await
         }
 
+        Command::Agents => {
+            let payload = client.send(Request::Agents).await?;
+            print(&payload, cli.json, |p| match p {
+                Payload::Agents { agents } => {
+                    let mut out = String::new();
+                    for a in agents {
+                        let mut tags = Vec::new();
+                        if a.instance_default {
+                            tags.push("instance default".to_string());
+                        }
+                        if !a.default_for.is_empty() {
+                            tags.push(format!("default in {}", a.default_for.join(", ")));
+                        }
+                        let tags = if tags.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  [{}]", tags.join("; "))
+                        };
+                        out.push_str(&format!(
+                            "{:<14} {}{}\n              {}\n",
+                            a.name, a.description, tags, a.source
+                        ));
+                        if a.active.is_empty() {
+                            out.push_str("              idle\n");
+                        } else {
+                            for w in &a.active {
+                                out.push_str(&format!(
+                                    "              {} attempt {} ({}) in {} -- {}  [{}]\n",
+                                    w.status,
+                                    w.attempt,
+                                    w.trigger,
+                                    w.scope,
+                                    w.task_title,
+                                    w.session.clone().unwrap_or_else(|| "no session".into()),
+                                ));
+                            }
+                        }
+                        out.push('\n');
+                    }
+                    Some(out.trim_end().to_string())
+                }
+                _ => None,
+            })
+        }
+
+        Command::Run(cmd) => run_cmd(cli.json, &client, cmd).await,
         Command::Task(cmd) => task(cli.json, &client, cmd).await,
+    }
+}
+
+async fn run_cmd(json: bool, client: &Client, cmd: RunCmd) -> Result<()> {
+    match cmd {
+        RunCmd::List { task_id, limit } => {
+            let payload = client
+                .send(Request::RunList {
+                    task_id: need_id(task_id)?,
+                    limit: Some(limit),
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Runs { runs } => Some(if runs.is_empty() {
+                    "no runs yet".into()
+                } else {
+                    runs.iter().map(run_line).collect::<Vec<_>>().join("\n")
+                }),
+                _ => None,
+            })
+        }
+        RunCmd::Show { id } => {
+            let payload = client.send(Request::RunGet { id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Run { run } => Some(run_detail(run)),
+                _ => None,
+            })
+        }
+        RunCmd::Log { id, limit } => {
+            let payload = client
+                .send(Request::RunEntries {
+                    id,
+                    limit: Some(limit),
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Entries { entries } => Some(entries_text(entries)),
+                _ => None,
+            })
+        }
+        RunCmd::Output { id, lines } => {
+            let payload = client
+                .send(Request::RunOutput {
+                    id,
+                    lines: Some(lines),
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Text { text } => Some(if text.trim().is_empty() {
+                    "(no terminal output yet)".into()
+                } else {
+                    text.clone()
+                }),
+                _ => None,
+            })
+        }
     }
 }
 
@@ -269,7 +401,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
         TaskCmd::Cancel { id } => {
             let payload = client.send(Request::TaskCancel { id: need_id(id)? }).await?;
             print(&payload, json, |p| match p {
-                Payload::Task { task } => Some(one_line(task)),
+                Payload::Run { run } => Some(run_line(run)),
                 _ => None,
             })
         }
@@ -295,23 +427,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 })
                 .await?;
             print(&payload, json, |p| match p {
-                Payload::Entries { entries } => Some(if entries.is_empty() {
-                    "no entries".into()
-                } else {
-                    entries
-                        .iter()
-                        .map(|e| {
-                            format!(
-                                "{}  {:<8} {:<12} {}",
-                                e.at.format("%H:%M:%S"),
-                                e.source,
-                                e.kind,
-                                e.message
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }),
+                Payload::Entries { entries } => Some(entries_text(entries)),
                 _ => None,
             })
         }
@@ -355,7 +471,11 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 })
                 .await?;
             print(&payload, json, |p| match p {
-                Payload::Task { task } => Some(format!("recorded; {} is {}", task.id, task.status.as_str())),
+                Payload::Run { run } => Some(format!(
+                    "recorded; attempt {} is {}",
+                    run.attempt,
+                    run.status.as_str()
+                )),
                 _ => None,
             })
         }
@@ -393,14 +513,81 @@ fn parse_schedule(text: &str) -> Result<Schedule> {
 }
 
 fn one_line(t: &Task) -> String {
+    let runs = match t.runs {
+        0 => "         ".to_string(),
+        1 => "  1 run  ".to_string(),
+        n => format!("{n:>3} runs "),
+    };
     format!(
-        "{}  {:<12} {:<10} {:<12} {}",
+        "{}  {:<12} {} {:<10} {:<12} {}",
         &t.id[..8.min(t.id.len())],
         t.status.as_str(),
+        runs,
         t.scope,
         t.agent,
         t.title
     )
+}
+
+fn run_line(r: &Run) -> String {
+    format!(
+        "{}  attempt {:<3} {:<12} {:<9} {}",
+        &r.id[..8.min(r.id.len())],
+        r.attempt,
+        r.status.as_str(),
+        r.trigger.as_str(),
+        r.started_at.format("%Y-%m-%d %H:%M:%S")
+    )
+}
+
+fn run_detail(r: &Run) -> String {
+    let mut s = format!(
+        "{}\n  task       {}\n  attempt    {}\n  status     {}\n  trigger    {}\n  agent      {} on {}\n  started    {}\n",
+        r.id,
+        r.task_id,
+        r.attempt,
+        r.status.as_str(),
+        r.trigger.as_str(),
+        r.agent,
+        r.runtime,
+        r.started_at.to_rfc3339(),
+    );
+    if let Some(ended) = r.ended_at {
+        s.push_str(&format!(
+            "  ended      {} ({}s)\n",
+            ended.to_rfc3339(),
+            (ended - r.started_at).num_seconds()
+        ));
+    }
+    if let Some(session) = &r.session {
+        s.push_str(&format!("  session    {} {}\n", session.runtime, session.handle));
+    }
+    if let Some(v) = &r.result {
+        s.push_str(&format!("\nresult:\n{v}\n"));
+    }
+    if let Some(v) = &r.error {
+        s.push_str(&format!("\nerror:\n{v}\n"));
+    }
+    s.trim_end().to_string()
+}
+
+fn entries_text(entries: &[factory_core::task::TaskEntry]) -> String {
+    if entries.is_empty() {
+        return "no entries".into();
+    }
+    entries
+        .iter()
+        .map(|e| {
+            format!(
+                "{}  {:<8} {:<12} {}",
+                e.at.format("%H:%M:%S"),
+                e.source,
+                e.kind,
+                e.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn detail(t: &Task) -> String {
@@ -420,8 +607,8 @@ fn detail(t: &Task) -> String {
     if let Some(next) = t.next_run_at {
         s.push_str(&format!("  next run   {}\n", next.to_rfc3339()));
     }
-    if let Some(session) = &t.session {
-        s.push_str(&format!("  session    {} {}\n", session.runtime, session.handle));
+    if t.runs > 0 {
+        s.push_str(&format!("  runs       {}\n", t.runs));
     }
     if !t.instructions.trim().is_empty() {
         s.push_str(&format!("\n{}\n", t.instructions.trim()));
@@ -454,7 +641,8 @@ fn describe_event(e: &Event) -> String {
             entry.source,
             entry.message
         ),
-        Event::TaskOutput { id, .. } => format!("output   {}", &id[..8.min(id.len())]),
+        Event::RunStarted { run } => format!("run      {}", run_line(run)),
+        Event::RunUpdated { run } => format!("run      {}", run_line(run)),
     }
 }
 

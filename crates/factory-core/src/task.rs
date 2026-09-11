@@ -88,15 +88,15 @@ pub struct Task {
     pub status: TaskStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<SessionRef>,
+    /// The most recent run's outcome, mirrored so a list does not have to read
+    /// every run. `Run` is where it actually lives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Shared secret the agent presents when reporting back on this task.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
+    /// How many times this task has been run.
+    #[serde(default)]
+    pub runs: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     pub created_at: DateTime<Utc>,
@@ -105,16 +105,6 @@ pub struct Task {
     pub last_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run_at: Option<DateTime<Utc>>,
-}
-
-impl Task {
-    /// The view that leaves the daemon over an interface. The callback token is
-    /// the one field a task carries that its own observers must not see.
-    pub fn redacted(&self) -> Task {
-        let mut t = self.clone();
-        t.token = None;
-        t
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -147,17 +137,18 @@ pub struct TaskPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<SessionRef>,
-    /// `None` means "leave alone" everywhere else in this struct, so removing a
-    /// session needs a field of its own.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub clear_session: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// `None` means "leave alone" here, so a run that succeeded needs a way to
+    /// say the previous attempt's error no longer describes this task.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_result: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_error: bool,
+    /// Set when a run is created, so `runs` counts without a second query.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
+    pub runs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +175,10 @@ pub struct TaskEntry {
     pub source: String,
     pub kind: String,
     pub message: String,
+    /// The run this happened during. `None` for things that are true of the
+    /// task itself, like its creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }
@@ -195,12 +190,18 @@ impl TaskEntry {
             source: source.into(),
             kind: kind.into(),
             message: message.into(),
+            run_id: None,
             data: None,
         }
     }
 
     pub fn with_data(mut self, data: serde_json::Value) -> Self {
         self.data = Some(data);
+        self
+    }
+
+    pub fn in_run(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = Some(run_id.into());
         self
     }
 }
@@ -210,7 +211,7 @@ impl TaskEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<TaskStatus>,
+    pub status: Option<crate::run::RunStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

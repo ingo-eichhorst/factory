@@ -108,6 +108,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/ws", get(ws_upgrade))
         .route("/api/status", get(status))
         .route("/api/adapters", get(adapters))
+        .route("/api/agents", get(agents))
         .route("/api/rpc", post(rpc))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}", get(get_task))
@@ -118,6 +119,10 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/tasks/{id}/report", post(report_task))
         .route("/api/tasks/{id}/entries", get(task_entries))
         .route("/api/tasks/{id}/output", get(task_output))
+        .route("/api/tasks/{id}/runs", get(task_runs))
+        .route("/api/runs/{id}", get(get_run))
+        .route("/api/runs/{id}/entries", get(run_entries))
+        .route("/api/runs/{id}/output", get(run_output))
         .with_state(engine)
 }
 
@@ -153,6 +158,10 @@ async fn status(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn adapters(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Adapters).await
+}
+
+async fn agents(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Agents).await
 }
 
 async fn list_tasks(
@@ -218,6 +227,41 @@ async fn task_output(
     Query(q): Query<Lines>,
 ) -> AxumResponse {
     run(&engine, Request::TaskOutput { id, lines: q.lines }).await
+}
+
+async fn task_runs(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Query(q): Query<Lines>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::RunList {
+            task_id: id,
+            limit: q.limit,
+        },
+    )
+    .await
+}
+
+async fn get_run(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::RunGet { id }).await
+}
+
+async fn run_entries(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Query(q): Query<Lines>,
+) -> AxumResponse {
+    run(&engine, Request::RunEntries { id, limit: q.limit }).await
+}
+
+async fn run_output(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Query(q): Query<Lines>,
+) -> AxumResponse {
+    run(&engine, Request::RunOutput { id, lines: q.lines }).await
 }
 
 async fn ws_upgrade(State(engine): State<Arc<Engine>>, ws: WebSocketUpgrade) -> AxumResponse {

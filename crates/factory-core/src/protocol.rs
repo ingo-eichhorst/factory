@@ -3,6 +3,7 @@
 //! third interface means translating to this, not inventing a new API.
 
 use crate::event::Event;
+use crate::run::Run;
 use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport};
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +14,9 @@ pub enum Request {
     Status,
     #[serde(rename = "adapters")]
     Adapters,
+    /// The agent adapters, with what each of them is doing right now.
+    #[serde(rename = "agents")]
+    Agents,
     #[serde(rename = "task.create")]
     TaskCreate(NewTask),
     #[serde(rename = "task.get")]
@@ -35,8 +39,31 @@ pub enum Request {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// Terminal output for the task's most recent run.
     #[serde(rename = "task.output")]
     TaskOutput {
+        id: String,
+        #[serde(default)]
+        lines: Option<u32>,
+    },
+    #[serde(rename = "run.list")]
+    RunList {
+        task_id: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    #[serde(rename = "run.get")]
+    RunGet { id: String },
+    #[serde(rename = "run.entries")]
+    RunEntries {
+        id: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Terminal output for one run: live from its session while it is running,
+    /// and the transcript kept at the end once it is not.
+    #[serde(rename = "run.output")]
+    RunOutput {
         id: String,
         #[serde(default)]
         lines: Option<u32>,
@@ -58,6 +85,9 @@ pub enum Payload {
     Adapters { adapters: Vec<AdapterEntry> },
     Task { task: Task },
     Tasks { tasks: Vec<Task> },
+    Run { run: Run },
+    Runs { runs: Vec<Run> },
+    Agents { agents: Vec<AgentView> },
     Entries { entries: Vec<TaskEntry> },
     Text { text: String },
     Deleted { deleted: bool },
@@ -116,4 +146,35 @@ impl From<AdapterList> for Payload {
     fn from(list: AdapterList) -> Self {
         Payload::Adapters { adapters: list.adapters }
     }
+}
+
+/// One thing an agent is doing right now.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentActivity {
+    pub run_id: String,
+    pub task_id: String,
+    pub task_title: String,
+    pub scope: String,
+    pub attempt: u32,
+    pub status: String,
+    pub runtime: String,
+    pub trigger: String,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// The runtime's handle for the session, so a person can find the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
+/// An agent adapter and its current work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentView {
+    pub name: String,
+    pub description: String,
+    /// `builtin` or `plugin:<manifest path>`.
+    pub source: String,
+    /// Scopes that run this agent unless a task says otherwise.
+    pub default_for: Vec<String>,
+    /// True when this is the instance-wide default.
+    pub instance_default: bool,
+    pub active: Vec<AgentActivity>,
 }
