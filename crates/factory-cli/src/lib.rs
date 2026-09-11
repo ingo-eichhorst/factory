@@ -77,7 +77,10 @@
 //! ancestor holding `.factory/`. `factory init` alone defaults to the
 //! current directory instead (ADR 0009 §3b: its root need not exist yet).
 
-mod cli;
+/// Public only so `tests/write_invariant.rs` can walk `Cli::command()`
+/// (ADR 0022 decision 10) — nothing else outside this crate should reach in
+/// here, and no behaviour changes with this visibility.
+pub mod cli;
 mod commands;
 pub mod exit;
 mod ids;
