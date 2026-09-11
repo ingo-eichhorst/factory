@@ -29,6 +29,7 @@
 //! This crate writes only inside a `.factory/` directory (design §4).
 
 mod backup;
+pub mod durable;
 mod init;
 mod migrations;
 pub use migrations::latest_schema_version;

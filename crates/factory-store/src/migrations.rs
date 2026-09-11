@@ -49,6 +49,14 @@ use crate::{StoreError, schema, snapshot};
 /// migration 6 refuse the upgrade, blaming a migration that neither caused it
 /// nor touches the table it is in. An operator would be told an unrelated true
 /// thing at the least useful moment.
+///
+/// Migration 7 (backlog §12 / ADR 0022, `schema::V7_SCHEMA`) carries none
+/// either, for a stronger version of migrations 4/5/6's reason: it creates
+/// exactly one table — `durable_writes` — and touches no existing one at all.
+/// An empty table has no rows yet, so it cannot be the dangling end of a
+/// foreign key; there is nothing for `PRAGMA foreign_key_check`'s
+/// whole-database scan to usefully confirm here that migrations 4 through 6
+/// did not already confirm.
 fn migrations() -> Migrations<'static> {
     Migrations::new(migration_list())
 }
@@ -63,6 +71,7 @@ fn migration_list() -> Vec<M<'static>> {
         M::up(schema::V4_SCHEMA),
         M::up(schema::V5_SCHEMA),
         M::up(schema::V6_SCHEMA),
+        M::up(schema::V7_SCHEMA),
     ]
 }
 

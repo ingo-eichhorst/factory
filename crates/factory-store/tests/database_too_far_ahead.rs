@@ -11,7 +11,7 @@ use factory_store::{Store, StoreError, latest_schema_version};
 /// is right for a test whose subject is "these two agree" but would make this
 /// one tautological -- it would pass however many migrations existed,
 /// including zero. Adding a migration means editing this number, on purpose.
-const MIGRATIONS_THIS_BUILD_DEFINES: i64 = 6;
+const MIGRATIONS_THIS_BUILD_DEFINES: i64 = 7;
 
 #[test]
 fn opening_a_database_too_far_ahead_fails_and_leaves_the_file_untouched() {

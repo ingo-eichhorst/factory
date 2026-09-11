@@ -883,3 +883,115 @@ CREATE UNIQUE INDEX tasks_one_run_per_schedule_minute
     ON tasks (schedule_id, fired_for_minute)
     WHERE schedule_id IS NOT NULL AND fired_for_minute IS NOT NULL;
 "#;
+
+/// Station 12 (ADR 0022) — `durable_writes`, the provenance record for
+/// `factory knowledge write` and `factory memory add`.
+///
+/// # Why not `task_events`
+///
+/// ADR 0022 decision 2. `task_events.task_id` is `NOT NULL REFERENCES tasks
+/// (id)` because it logs the transitions *of a particular task*, and design
+/// §11 projects that table into throughput and scrap figures (§12.5). A human
+/// writing a note at a terminal has transitioned no task, so the criterion
+/// "record it as a task event" is unsatisfiable for that caller rather than
+/// merely inconvenient, and a note that did have a task would still not be a
+/// unit of production. `durable_writes` carries `task_id` NULLABLE instead: a
+/// task id when a task is named, none when there is none, and no CHECK on a
+/// log that is never edited.
+///
+/// # Additive, like migrations 4, 5, and 6 — not 2 and 3
+///
+/// One `CREATE TABLE` and two `CREATE INDEX` statements. Nothing here alters
+/// an existing table, so no pre-existing row is touched and no existing
+/// `REFERENCES` clause could be invalidated. See `migrations.rs`'s own doc
+/// comment for why this migration therefore carries no `.foreign_key_check()`.
+///
+/// # `scope_id` is a foreign key, not free text
+///
+/// Every other "which scope does this belong to" column in this schema —
+/// `sessions.scope_id`, `tasks.target_scope_id`, `tasks.sender_scope_id`,
+/// `task_delegation_chain.scope_id`, `task_templates.target_scope_id` — is
+/// `REFERENCES scopes (id)`, never a name. `scopes.name` carries no
+/// uniqueness constraint of its own (`factory-config`'s validation only
+/// requires an *agent* name to be unique, and only within one scope), so a
+/// free-text scope column here could let two different scopes collide under
+/// one string, or go stale the moment a scope is renamed. `scope_id` closes
+/// that gap the same way it is closed everywhere else in this file, and
+/// nothing in this codebase deletes a `scopes` row, so the reference cannot
+/// be left dangling by anything Factory itself does.
+///
+/// It is nullable because `knowledge write` has no scope at all — a note
+/// lives in the company root's shared `.factory/knowledge/`, never under a
+/// scope directory. The CHECK on `scope_id` below pairs it with `kind`, one
+/// direction at a time, the same shape migration 6's `triggered_by` CHECK
+/// pairs with `schedule_id` and `fired_for_minute`: a `memory` row must name
+/// the scope it was written into, and a `knowledge` row must carry none, so a
+/// row can never silently mean the wrong thing. Each direction is written as
+/// an implication (`kind <> 'x' OR ...`), not as an exhaustive `(kind = 'x'
+/// AND ...) OR (kind = 'y' AND ...)`: the exhaustive form would itself reject
+/// every third `kind` string, which would make the separate vocabulary CHECK
+/// below untestable — removing it would change nothing, because this CHECK
+/// would already refuse the row. The implication form only ever fires when
+/// `kind` is exactly `'memory'` or exactly `'knowledge'`, leaving the
+/// vocabulary question entirely to the CHECK whose job that is.
+///
+/// A knowledge write's *authoring* scope is not lost by this — it is
+/// derivable from `author_session_id` via `sessions.scope_id` whenever a
+/// session did the writing. A write with no session names no caller at all,
+/// which is the same "Factory has no caller identity" stance ADR 0022 takes
+/// for `agent list`'s own `--session`.
+///
+/// # No `.foreign_key_check()`
+///
+/// See `migrations.rs`'s own doc comment: an empty new table can never be the
+/// dangling end of a foreign key, which is the one thing that pragma exists
+/// to catch.
+pub(crate) const V7_SCHEMA: &str = r#"
+-- ADR 0022 decision 2: recorded here, not in `task_events`, because a
+-- durable write is not a transition of a task and must not be counted as one
+-- in design §11's throughput/scrap projection (§12.5).
+CREATE TABLE durable_writes (
+    id                INTEGER PRIMARY KEY,
+    -- Constrained so a third string cannot be inserted by mistake, the same
+    -- reason `task_events.event_type` is constrained
+    -- (`schema.rs`'s own comment on that column).
+    kind              TEXT NOT NULL CHECK (kind IN ('knowledge', 'memory')),
+    -- The note name (`knowledge write --name`) or the memory entry's own
+    -- identifier. Not unique: `knowledge write --update` (ADR 0022 decision
+    -- 5) writes a second row for the same name on purpose, because this
+    -- table is a log of writes, not an index of current notes.
+    name              TEXT NOT NULL,
+    -- Relative to the instance root, so a row stays meaningful if the
+    -- instance is ever moved to a new absolute path — the same reason a
+    -- scope's own `declared_path` is stored rather than only a canonical,
+    -- absolute one.
+    path              TEXT NOT NULL,
+    -- See this migration's doc comment for why this is a foreign key and why
+    -- it is paired with `kind` by the CHECK below rather than by NOT NULL.
+    scope_id          TEXT REFERENCES scopes (id),
+    -- NULL means a human at a terminal, not a task — the reason this table
+    -- exists rather than a row in `task_events`. See this migration's doc
+    -- comment.
+    task_id           TEXT REFERENCES tasks (id),
+    -- NULL means the same thing it means on `task_events.author_session_id`:
+    -- a human or the daemon itself, not a session.
+    author_session_id TEXT REFERENCES sessions (id),
+    created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (kind <> 'memory' OR scope_id IS NOT NULL)
+        AND (kind <> 'knowledge' OR scope_id IS NULL)
+    )
+);
+
+-- "Every write for this task" -- the query this table's provenance promise
+-- exists to answer. `(task_id, id)` rather than `(task_id)`, the same
+-- composite `task_events_task_id` uses, so a task's writes come back in
+-- append order without a sort.
+CREATE INDEX durable_writes_task_id ON durable_writes (task_id, id);
+
+-- "Every memory entry for this scope" -- `memory list`'s own query. A
+-- `knowledge` row always has `scope_id IS NULL` (the CHECK above), so this
+-- index only ever serves `memory` rows in practice, and needs no `WHERE` to
+-- say so.
+CREATE INDEX durable_writes_scope_id ON durable_writes (scope_id, id);
+"#;
