@@ -301,6 +301,123 @@ fn an_unknown_path_is_not_found() {
     );
 }
 
+/// A listener that answers to one named host as well as the loopback, the way
+/// a reverse proxy in front of it needs.
+fn serve_behind_proxy(host: &str) -> SocketAddr {
+    let ui = factory_daemon::Ui::bind("127.0.0.1:0".parse().expect("a literal address parses"))
+        .expect("binding an ephemeral loopback port")
+        .allow_hosts([host.to_string()]);
+    let addr = ui.addr();
+    let _join = ui.spawn(Arc::new(StubHandler));
+    addr
+}
+
+const PROXY_HOST: &str = "factory.example.ts.net:8443";
+
+#[test]
+fn a_named_host_is_answered() {
+    let addr = serve_behind_proxy(PROXY_HOST);
+    // What `tailscale serve` actually forwards: the tailnet name, unrewritten.
+    let response = request(
+        addr,
+        &format!("GET / HTTP/1.1\r\nHost: {PROXY_HOST}\r\n\r\n"),
+    );
+
+    assert!(
+        status_line(&response).starts_with("HTTP/1.1 200"),
+        "expected 200, got {:?}",
+        status_line(&response)
+    );
+}
+
+#[test]
+fn a_named_host_is_matched_without_regard_to_case() {
+    let addr = serve_behind_proxy(PROXY_HOST);
+    let response = request(
+        addr,
+        "GET / HTTP/1.1\r\nHost: Factory.Example.TS.NET:8443\r\n\r\n",
+    );
+
+    assert!(status_line(&response).starts_with("HTTP/1.1 200"));
+}
+
+#[test]
+fn an_https_origin_from_the_named_host_is_accepted() {
+    // The proxy terminates TLS, so the page is served over https and the
+    // browser's Origin says so. Accepting the Host while refusing this scheme
+    // would render the page and then fail every command at 403.
+    let addr = serve_behind_proxy(PROXY_HOST);
+    let body = serde_json::json!({
+        "api": "factory.query/v1",
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "scope_id": "22222222-2222-4222-8222-222222222222",
+        "query": "scope.list",
+        "payload": {}
+    })
+    .to_string();
+    let response = request(
+        addr,
+        &format!(
+            "POST /api HTTP/1.1\r\nHost: {PROXY_HOST}\r\nOrigin: https://{PROXY_HOST}\r\n             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+
+    assert!(
+        status_line(&response).starts_with("HTTP/1.1 200"),
+        "expected 200, got {:?}",
+        status_line(&response)
+    );
+}
+
+#[test]
+fn a_host_outside_a_non_empty_allowlist_is_still_refused() {
+    // The whole point: naming one host must not admit every host. A suffix
+    // rule would let this through, which is the rebinding hole all over again.
+    let addr = serve_behind_proxy(PROXY_HOST);
+    for hostile in [
+        "rebind.example.com:8443",
+        "evil.factory.example.ts.net:8443",
+        "factory.example.ts.net.attacker.test:8443",
+        "factory.example.ts.net:9999",
+    ] {
+        let response = request(addr, &format!("GET / HTTP/1.1\r\nHost: {hostile}\r\n\r\n"));
+        assert!(
+            status_line(&response).starts_with("HTTP/1.1 421"),
+            "`{hostile}` must be refused, got {:?}",
+            status_line(&response)
+        );
+    }
+}
+
+#[test]
+fn the_loopback_still_answers_when_a_host_is_named() {
+    let addr = serve_behind_proxy(PROXY_HOST);
+    let response = request(
+        addr,
+        &format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", addr.port()),
+    );
+
+    assert!(status_line(&response).starts_with("HTTP/1.1 200"));
+}
+
+#[test]
+fn an_origin_from_a_host_that_is_not_named_is_refused() {
+    let addr = serve_behind_proxy(PROXY_HOST);
+    let response = request(
+        addr,
+        &format!(
+            "POST /api HTTP/1.1\r\nHost: {PROXY_HOST}\r\nOrigin: https://hostile.example\r\n             Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
+        ),
+    );
+
+    assert!(
+        status_line(&response).starts_with("HTTP/1.1 403"),
+        "expected 403, got {:?}",
+        status_line(&response)
+    );
+}
+
 #[test]
 fn a_routable_address_is_refused_at_bind() {
     let error = factory_daemon::Ui::bind("0.0.0.0:0".parse().expect("a literal address parses"))

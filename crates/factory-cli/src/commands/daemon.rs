@@ -132,6 +132,12 @@ fn serve_with<A: factory_adapter::Adapter + Send + Sync + 'static>(root: &Path, 
         Ok(Some(addr)) => match factory_daemon::Ui::bind(addr) {
             Ok(ui) => {
                 println!("factory: the browser UI is at http://{}", ui.addr());
+                for host in ui.allowed_hosts() {
+                    // Named so an operator can see, in the log, exactly which
+                    // Host values this daemon will answer to — the socket is
+                    // still loopback-only either way.
+                    println!("factory: it also answers to Host `{host}`");
+                }
                 // Method-call `.clone()` rather than the `Arc::clone(&x)`
                 // form used above: the unsized coercion to `dyn Handler`
                 // happens at this binding, and `Arc::clone` would resolve to

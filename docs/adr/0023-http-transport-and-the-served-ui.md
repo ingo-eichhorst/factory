@@ -100,6 +100,38 @@ already run code as this user can reach the Unix socket too. The guards close
 the one gap a TCP port opens that the socket did not: the *browser* acting on a
 hostile page's behalf.
 
+### Amendment, 2026-09-11: a host may be named
+
+Guard 2 as written above refuses every `Host` but the loopback, which also
+refuses the one case an operator actually wants: reaching their own control
+plane from their own other device, through a proxy they run. `tailscale serve`
+forwards the tailnet name unrewritten — measured — so the daemon answered 421
+to its owner.
+
+`FACTORY_UI_HOST` names additional `Host` values this transport answers to.
+Empty by default; entries match as whole strings, case-insensitively. A suffix
+rule would admit a name the operator never wrote, which is the rebinding hole
+itself, so there is none.
+
+This does not weaken guard 2 so much as state it correctly. Rebinding works
+*because the attacker picks the name*: they point a domain they control at
+`127.0.0.1` and the browser carries it here. A name this instance was
+explicitly told about is the opposite case, and the guard was never aimed at
+it.
+
+What does not change is **what is listening**. `Ui::bind` still refuses any
+address that is not loopback, so nothing here puts a socket on a network.
+Reaching this daemon from another machine still requires something in front of
+it, and the exposure is that thing's to control — Tailscale's ACLs, an SSH
+forward's credentials — rather than a permission granted here. Guard 3 accepts
+`https` alongside `http` for the same reason: such a proxy terminates TLS, and
+refusing the scheme while accepting the host would render the page and then
+fail every command at 403.
+
+It is still a widening, and worth saying plainly: with it set, every device on
+that private network can reach a control plane that starts agents. The default
+stays empty so that is a decision, not an inheritance.
+
 ## Decision 4: the UI never stops the daemon
 
 A port already in use — a second checkout, a stale process, a colleague's

@@ -70,6 +70,14 @@ pub const ADDR_ENV: &str = "FACTORY_UI_ADDR";
 /// Where the UI is served when nothing says otherwise.
 pub const DEFAULT_ADDR: &str = "127.0.0.1:7373";
 
+/// Additional `Host` values this transport will answer to, comma-separated —
+/// for a reverse proxy that terminates on a private network and forwards to
+/// the loopback port this daemon actually binds.
+///
+/// Empty by default. See [`HostPolicy`] for why naming a host explicitly is
+/// not the case the `Host` guard exists to refuse.
+pub const HOST_ENV: &str = "FACTORY_UI_HOST";
+
 /// The largest request body this transport will read. An ADR 0003 envelope is
 /// a few hundred bytes; a task prompt can be long, but not this long. The cap
 /// exists so a malformed `Content-Length` cannot make this process allocate on
@@ -79,11 +87,62 @@ const MAX_BODY: usize = 1 << 20;
 /// The largest request line or header line. Same reasoning as [`MAX_BODY`].
 const MAX_LINE: u64 = 8 * 1024;
 
+/// Which `Host` values this transport answers to.
+///
+/// The loopback at the bound port, always — and nothing else, unless an
+/// operator named it in [`HOST_ENV`].
+///
+/// # Why an allowlist does not reopen the rebinding hole
+///
+/// The `Host` guard exists to refuse a name the operator never configured: DNS
+/// rebinding works precisely because the attacker picks the name, points it at
+/// `127.0.0.1`, and the browser carries it here. A host this instance was
+/// explicitly told about is the opposite case.
+///
+/// What it does not do is change what is *listening*. [`Ui::bind`] still
+/// refuses any address that is not loopback, so nothing here puts a socket on
+/// a network. Reaching this daemon from another machine still requires
+/// something in front of it — `tailscale serve`, an SSH forward — and the
+/// exposure is that thing's to control, with its own authentication, not a
+/// permission granted here.
+///
+/// Entries match **whole strings**, case-insensitively. A suffix rule
+/// (`ends_with(".ts.net")`) would admit a name the operator never wrote, which
+/// is the very thing being guarded against.
+#[derive(Debug, Clone)]
+struct HostPolicy {
+    port: u16,
+    allowed: Vec<String>,
+}
+
+impl HostPolicy {
+    fn from_env(port: u16) -> Self {
+        let allowed = std::env::var(HOST_ENV)
+            .unwrap_or_default()
+            .split(',')
+            .map(|entry| entry.trim().to_ascii_lowercase())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        Self { port, allowed }
+    }
+
+    /// Is `value` — a `Host` header, or the authority part of an `Origin` —
+    /// one this transport answers to?
+    fn accepts(&self, value: &str) -> bool {
+        let lowered = value.trim().to_ascii_lowercase();
+        if self.allowed.contains(&lowered) {
+            return true;
+        }
+        host_is_loopback(&lowered, self.port)
+    }
+}
+
 /// A bound UI listener.
 #[derive(Debug)]
 pub struct Ui {
     listener: TcpListener,
     addr: SocketAddr,
+    policy: HostPolicy,
 }
 
 impl Ui {
@@ -103,7 +162,34 @@ impl Ui {
         let addr = listener
             .local_addr()
             .map_err(|source| UiError::Bind { addr, source })?;
-        Ok(Self { listener, addr })
+        let policy = HostPolicy::from_env(addr.port());
+        Ok(Self {
+            listener,
+            addr,
+            policy,
+        })
+    }
+
+    /// Replace the `Host` allowlist [`HOST_ENV`] produced.
+    ///
+    /// Entries are whole `host` or `host:port` strings, matched
+    /// case-insensitively. The loopback at the bound port is always accepted
+    /// and need not be listed.
+    #[must_use]
+    pub fn allow_hosts(mut self, hosts: impl IntoIterator<Item = String>) -> Self {
+        self.policy.allowed = hosts
+            .into_iter()
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect();
+        self
+    }
+
+    /// The extra hosts this listener answers to, for a caller that wants to
+    /// report them.
+    #[must_use]
+    pub fn allowed_hosts(&self) -> &[String] {
+        &self.policy.allowed
     }
 
     /// Resolve the configured address: [`DEFAULT_ADDR`], unless [`ADDR_ENV`]
@@ -140,12 +226,13 @@ impl Ui {
     /// `accept` itself fails; a failure serving one connection never stops the
     /// loop, exactly as on the socket transport.
     pub fn serve(&self, handler: Arc<dyn Handler>) -> std::io::Result<()> {
-        let port = self.addr.port();
+        let policy = self.policy.clone();
         loop {
             let (stream, _peer) = self.listener.accept()?;
             let handler = Arc::clone(&handler);
+            let policy = policy.clone();
             std::thread::spawn(move || {
-                let _ = serve_connection(stream, handler.as_ref(), port);
+                let _ = serve_connection(stream, handler.as_ref(), &policy);
             });
         }
     }
@@ -189,11 +276,15 @@ pub enum UiError {
 
 /// One request, then close. See the module docs for why there is no
 /// keep-alive.
-fn serve_connection(stream: TcpStream, handler: &dyn Handler, port: u16) -> std::io::Result<()> {
+fn serve_connection(
+    stream: TcpStream,
+    handler: &dyn Handler,
+    policy: &HostPolicy,
+) -> std::io::Result<()> {
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
 
-    let response = match read_request(&mut reader, port) {
+    let response = match read_request(&mut reader, policy) {
         Ok(request) => route(&request, handler),
         Err(response) => response,
     };
@@ -223,7 +314,10 @@ fn read_line_limited(reader: &mut BufReader<TcpStream>) -> std::io::Result<Strin
     Ok(line)
 }
 
-fn read_request(reader: &mut BufReader<TcpStream>, port: u16) -> Result<Request, Response> {
+fn read_request(
+    reader: &mut BufReader<TcpStream>,
+    policy: &HostPolicy,
+) -> Result<Request, Response> {
     let line =
         read_line_limited(reader).map_err(|_| Response::text(400, "malformed request line"))?;
 
@@ -261,8 +355,8 @@ fn read_request(reader: &mut BufReader<TcpStream>, port: u16) -> Result<Request,
         let name = name.trim().to_ascii_lowercase();
         let value = value.trim().to_string();
         match name.as_str() {
-            "host" => host_ok = host_is_loopback(&value, port),
-            "origin" => origin_ok = origin_is_self(&value, port),
+            "host" => host_ok = policy.accepts(&value),
+            "origin" => origin_ok = origin_is_allowed(&value, policy),
             "content-type" => {
                 json = value.split(';').next().unwrap_or("").trim() == "application/json";
             }
@@ -312,16 +406,25 @@ fn host_is_loopback(value: &str, port: u16) -> bool {
     name_ok && given_port.is_some_and(|p| p == port)
 }
 
-/// `Origin`, when the browser sends one, must be this server. See the module
-/// docs' guard 3.
-fn origin_is_self(value: &str, port: u16) -> bool {
+/// `Origin`, when the browser sends one, must be a host this transport answers
+/// to. See the module docs' guard 3.
+///
+/// `https` is accepted as well as `http` because a proxy in front of this
+/// daemon — the only way another machine reaches it at all — terminates TLS
+/// and the page is then served over `https`. Refusing the scheme while
+/// accepting the `Host` would render the page and then fail every command at
+/// 403, which looks like a bug rather than a refusal.
+fn origin_is_allowed(value: &str, policy: &HostPolicy) -> bool {
     if value == "null" {
         return false;
     }
-    let Some(rest) = value.strip_prefix("http://") else {
+    let rest = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"));
+    let Some(rest) = rest else {
         return false;
     };
-    host_is_loopback(rest, port)
+    policy.accepts(rest)
 }
 
 fn route(request: &Request, handler: &dyn Handler) -> Response {
