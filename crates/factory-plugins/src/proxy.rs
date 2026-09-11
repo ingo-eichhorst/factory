@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use factory_core::adapter::agent::{Agent, AgentContext, LaunchKind, LaunchSpec};
 use factory_core::adapter::store::TaskStore;
 use factory_core::error::{FactoryError, Result};
+use factory_core::agent::AgentSession;
 use factory_core::run::{NewRun, Run, RunPatch};
 use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch};
 use serde::{Deserialize, Serialize};
@@ -19,11 +20,22 @@ use crate::host::PluginProcess;
 /// look like this week.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WireContext {
-    task: Task,
+    scope: String,
     cwd: String,
     factory_bin: String,
     socket: String,
-    token: String,
+    /// `null` when the agent is being started to stand there rather than to do
+    /// something -- a plugin that only handles tasks should say so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task: Option<Task>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt: Option<u32>,
+    /// The token travels to the plugin because the plugin is what puts it in
+    /// front of the agent; it is stripped from everything else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
     /// The same contract the built-in agents put in their prompts, so a plugin
     /// can paste it instead of reconstructing the commands.
     reporting_contract: String,
@@ -33,13 +45,14 @@ struct WireContext {
 impl From<&AgentContext> for WireContext {
     fn from(ctx: &AgentContext) -> Self {
         Self {
-            // The token travels to the plugin because the plugin is what puts
-            // it in front of the agent; it is stripped from everything else.
-            task: ctx.task.clone(),
+            scope: ctx.scope.clone(),
             cwd: ctx.cwd.display().to_string(),
             factory_bin: ctx.factory_bin.display().to_string(),
             socket: ctx.socket.display().to_string(),
-            token: ctx.token.clone(),
+            task: ctx.task.as_ref().map(|b| b.task.clone()),
+            run_id: ctx.task.as_ref().map(|b| b.run_id.clone()),
+            attempt: ctx.task.as_ref().map(|b| b.attempt),
+            token: ctx.task.as_ref().map(|b| b.token.clone()),
             reporting_contract: ctx.reporting_contract(),
             env: ctx.env(),
         }
@@ -181,6 +194,25 @@ impl TaskStore for PluginStore {
 
     async fn active_runs(&self) -> Result<Vec<Run>> {
         self.proc.call("run.active_all", json!({})).await
+    }
+
+    async fn put_agent(&self, agent: &AgentSession) -> Result<()> {
+        self.proc
+            .call_raw("agent.put", json!({ "agent": agent }))
+            .await
+            .map(|_| ())
+    }
+
+    async fn get_agent(&self, id: &str) -> Result<Option<AgentSession>> {
+        self.proc.call("agent.get", json!({ "id": id })).await
+    }
+
+    async fn agents(&self) -> Result<Vec<AgentSession>> {
+        self.proc.call("agent.list", json!({})).await
+    }
+
+    async fn delete_agent(&self, id: &str) -> Result<bool> {
+        self.proc.call("agent.delete", json!({ "id": id })).await
     }
 
     async fn append_entry(&self, id: &str, entry: &TaskEntry) -> Result<()> {

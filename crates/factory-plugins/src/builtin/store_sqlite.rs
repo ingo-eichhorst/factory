@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use factory_core::adapter::TaskStore;
 use factory_core::error::{FactoryError, Result};
+use factory_core::agent::AgentSession;
 use factory_core::run::{NewRun, Run, RunPatch, RunStatus};
 use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -18,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 /// Bumped whenever the shape below changes. A database at any other version is
 /// discarded.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
@@ -54,9 +55,19 @@ CREATE TABLE IF NOT EXISTS task_entries (
 );
 CREATE INDEX IF NOT EXISTS entries_task ON task_entries(task_id, seq);
 CREATE INDEX IF NOT EXISTS entries_run ON task_entries(run_id, seq);
+
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    id    TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    name  TEXT NOT NULL,
+    state TEXT NOT NULL,
+    data  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agents_scope ON agent_sessions(scope, name);
 "#;
 
 const DROP_ALL: &str = r#"
+DROP TABLE IF EXISTS agent_sessions;
 DROP TABLE IF EXISTS task_entries;
 DROP TABLE IF EXISTS runs;
 DROP TABLE IF EXISTS tasks;
@@ -478,6 +489,61 @@ impl TaskStore for SqliteStore {
                 )
                 .map_err(adapter_err)?;
             collect(&mut stmt, params![])
+        })
+        .await
+    }
+
+    async fn put_agent(&self, agent: &AgentSession) -> Result<()> {
+        let agent = agent.clone();
+        self.with_conn(move |conn| {
+            let data = serde_json::to_string(&agent).map_err(adapter_err)?;
+            conn.execute(
+                "INSERT INTO agent_sessions (id, scope, name, state, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                     state = excluded.state,
+                     data = excluded.data",
+                params![agent.id, agent.scope, agent.name, agent.state.as_str(), data],
+            )
+            .map_err(adapter_err)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get_agent(&self, id: &str) -> Result<Option<AgentSession>> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let row: Option<String> = conn
+                .query_row(
+                    "SELECT data FROM agent_sessions WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(adapter_err)?;
+            row.map(decode).transpose()
+        })
+        .await
+    }
+
+    async fn agents(&self) -> Result<Vec<AgentSession>> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT data FROM agent_sessions ORDER BY scope, name")
+                .map_err(adapter_err)?;
+            collect(&mut stmt, params![])
+        })
+        .await
+    }
+
+    async fn delete_agent(&self, id: &str) -> Result<bool> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let n = conn
+                .execute("DELETE FROM agent_sessions WHERE id = ?1", params![id])
+                .map_err(adapter_err)?;
+            Ok(n > 0)
         })
         .await
     }

@@ -63,7 +63,8 @@ impl Interface<Engine> for HttpInterface {
             // address a person would actually type.
             tracing::warn!(
                 "http interface is reachable from the network and has no \
-                 authentication -- anyone who can reach it can run commands as you"
+                 authentication -- anyone who can reach it can start tasks and \
+                 type directly into running agents' terminals, as you"
             );
             for url in reachable_urls(addr.port()) {
                 tracing::info!(url = %url, "http interface listening");
@@ -109,6 +110,12 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/status", get(status))
         .route("/api/adapters", get(adapters))
         .route("/api/agents", get(agents))
+        // The id of a standing agent is `<scope>/<name>`, which has a slash in
+        // it, so these take it in the body rather than the path.
+        .route("/api/agents/start", post(agent_start))
+        .route("/api/agents/stop", post(agent_stop))
+        .route("/api/agents/input", post(agent_input))
+        .route("/api/agents/output", post(agent_output))
         .route("/api/rpc", post(rpc))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}", get(get_task))
@@ -123,6 +130,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/runs/{id}", get(get_run))
         .route("/api/runs/{id}/entries", get(run_entries))
         .route("/api/runs/{id}/output", get(run_output))
+        .route("/api/runs/{id}/input", post(run_input))
         .with_state(engine)
 }
 
@@ -262,6 +270,96 @@ async fn run_output(
     Query(q): Query<Lines>,
 ) -> AxumResponse {
     run(&engine, Request::RunOutput { id, lines: q.lines }).await
+}
+
+#[derive(serde::Deserialize)]
+struct StartAgent {
+    scope: String,
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AgentId {
+    id: String,
+    #[serde(default)]
+    lines: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+struct Input {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    keys: Vec<String>,
+}
+
+async fn agent_start(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<StartAgent>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::AgentStart {
+            scope: body.scope,
+            name: body.name,
+        },
+    )
+    .await
+}
+
+async fn agent_stop(State(engine): State<Arc<Engine>>, Json(body): Json<AgentId>) -> AxumResponse {
+    run(&engine, Request::AgentStop { id: body.id }).await
+}
+
+async fn agent_output(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<AgentId>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::AgentOutput {
+            id: body.id,
+            lines: body.lines,
+        },
+    )
+    .await
+}
+
+async fn agent_input(State(engine): State<Arc<Engine>>, Json(body): Json<Input>) -> AxumResponse {
+    let Some(id) = body.id else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(Response::error("bad_request", "which agent? pass `id`")),
+        )
+            .into_response();
+    };
+    run(
+        &engine,
+        Request::AgentInput {
+            id,
+            text: body.text,
+            keys: body.keys,
+        },
+    )
+    .await
+}
+
+async fn run_input(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<Input>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::RunInput {
+            id,
+            text: body.text,
+            keys: body.keys,
+        },
+    )
+    .await
 }
 
 async fn ws_upgrade(State(engine): State<Arc<Engine>>, ws: WebSocketUpgrade) -> AxumResponse {

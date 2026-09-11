@@ -1,6 +1,7 @@
 //! The daemon. Loads an instance, registers adapters, mounts interfaces, and
 //! runs until it is told to stop.
 
+mod agents;
 mod engine;
 mod interfaces;
 mod scheduler;
@@ -97,6 +98,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
             name: scope_name,
             path: scope,
             agent: None,
+            agents: Vec::new(),
             runtime: None,
             git: None,
         }],
@@ -204,6 +206,10 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     if mounted.is_empty() {
         anyhow::bail!("no interfaces mounted; the daemon would be unreachable");
     }
+
+    // Line up declared standing agents with whatever is still running before
+    // anything else can look at them.
+    engine.reconcile_agents().await;
 
     let sched = tokio::spawn(scheduler::run(engine.clone(), shutdown_rx.clone()));
 

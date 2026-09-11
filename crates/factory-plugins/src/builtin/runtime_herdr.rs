@@ -20,13 +20,19 @@ pub struct HerdrRuntime {
     bin: String,
     /// How long to wait for an agent to become ready for input.
     start_timeout: Duration,
+    /// Which herdr session this daemon talks to, so the attach command it
+    /// hands a person points at the same one.
+    herdr_session: Option<String>,
 }
 
 impl HerdrRuntime {
     pub fn new() -> Self {
+        let bin = std::env::var("FACTORY_HERDR_BIN").unwrap_or_else(|_| "herdr".into());
+        let herdr_session = detect_session(&bin);
         Self {
-            bin: std::env::var("FACTORY_HERDR_BIN").unwrap_or_else(|_| "herdr".into()),
+            bin,
             start_timeout: Duration::from_secs(60),
+            herdr_session,
         }
     }
 
@@ -140,6 +146,21 @@ fn s(v: &str) -> String {
     v.to_string()
 }
 
+/// `herdr status` prints the socket it is talking to; the directory above it is
+/// the session's name. Cheaper and more reliable than guessing "default".
+fn detect_session(bin: &str) -> Option<String> {
+    let out = std::process::Command::new(bin).arg("status").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let socket = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("socket:"))?
+        .trim();
+    std::path::Path::new(socket)
+        .parent()?
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+}
+
 #[async_trait]
 impl AgentRuntime for HerdrRuntime {
     fn name(&self) -> &str {
@@ -186,7 +207,7 @@ impl AgentRuntime for HerdrRuntime {
 
         match &req.launch.kind {
             LaunchKind::Named(harness) => {
-                let session_name = format!("factory-{}", &req.task_id[..8.min(req.task_id.len())]);
+                let session_name = req.name.clone();
                 let mut start = vec![
                     s("agent"),
                     s("start"),
@@ -255,6 +276,38 @@ impl AgentRuntime for HerdrRuntime {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn send_text(&self, session: &SessionRef, text: &str) -> Result<()> {
+        self.run(&[
+            s("pane"),
+            s("send-text"),
+            s(Self::pane_of(session)),
+            text.to_string(),
+        ])
+        .await
+        .map(|_| ())
+    }
+
+    async fn send_keys(&self, session: &SessionRef, keys: &[String]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec![s("pane"), s("send-keys"), s(Self::pane_of(session))];
+        args.extend(keys.iter().cloned());
+        self.run(&args).await.map(|_| ())
+    }
+
+    fn attach_command(&self, session: &SessionRef) -> Option<String> {
+        // Only a named agent can be attached to directly. A shell pane has no
+        // agent to name, and printing a command that fails is worse than
+        // admitting there isn't one.
+        let name = session.meta.get("agent_name")?;
+        let prefix = match &self.herdr_session {
+            Some(s) if s != "default" => format!("herdr --session {s} "),
+            _ => "herdr ".to_string(),
+        };
+        Some(format!("{prefix}agent attach {name}"))
     }
 
     async fn status(&self, session: &SessionRef) -> Result<RuntimeStatus> {

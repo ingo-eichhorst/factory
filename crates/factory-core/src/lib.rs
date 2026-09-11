@@ -3,6 +3,7 @@
 //! sqlite, herdr, axum, or any other concrete choice.
 
 pub mod adapter;
+pub mod agent;
 pub mod config;
 pub mod error;
 pub mod event;
@@ -13,6 +14,7 @@ pub mod task;
 pub use adapter::{Agent, AdapterKind, AgentRuntime, Interface, TaskStore};
 pub use config::{Config, Factory, Scope};
 pub use error::{FactoryError, Result};
+pub use agent::{AgentSession, AgentState, Lifetime};
 pub use event::{Event, EventBus};
 pub use run::{NewRun, Run, RunPatch, RunStatus, Trigger};
 pub use task::{

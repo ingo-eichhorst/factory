@@ -70,7 +70,8 @@ impl Agent for HarnessAgent {
     }
 
     async fn prompt(&self, ctx: &AgentContext) -> Result<String> {
-        let task = &ctx.task;
+        let binding = ctx.binding()?;
+        let task = &binding.task;
         let instructions = if task.instructions.trim().is_empty() {
             "(no further detail was given -- work from the title)"
         } else {
@@ -122,9 +123,10 @@ impl Agent for ShellAgent {
     }
 
     async fn prompt(&self, ctx: &AgentContext) -> Result<String> {
+        let binding = ctx.binding()?;
         let bin = ctx.factory_bin.display();
-        let id = &ctx.task.id;
-        let command = ctx.task.instructions.trim();
+        let id = &binding.task.id;
+        let command = binding.task.instructions.trim();
         let command = if command.is_empty() { "true" } else { command };
         // One line, because it is typed into a shell prompt. The report is part
         // of the same line so a task cannot be left open by a command that

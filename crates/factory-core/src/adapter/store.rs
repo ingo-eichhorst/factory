@@ -1,3 +1,4 @@
+use crate::agent::AgentSession;
 use crate::error::Result;
 use crate::run::{NewRun, Run, RunPatch};
 use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch};
@@ -33,6 +34,15 @@ pub trait TaskStore: Send + Sync {
     async fn active_run(&self, task_id: &str) -> Result<Option<Run>>;
     /// Every run anywhere that has not finished. What the watchdog walks.
     async fn active_runs(&self) -> Result<Vec<Run>>;
+
+    // -- standing agents ----------------------------------------------------
+
+    /// Written whole: there are few of them, they change rarely, and a partial
+    /// update has no meaning for something whose whole state is "is it up".
+    async fn put_agent(&self, agent: &AgentSession) -> Result<()>;
+    async fn get_agent(&self, id: &str) -> Result<Option<AgentSession>>;
+    async fn agents(&self) -> Result<Vec<AgentSession>>;
+    async fn delete_agent(&self, id: &str) -> Result<bool>;
 
     // -- journal ------------------------------------------------------------
 

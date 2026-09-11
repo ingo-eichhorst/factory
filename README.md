@@ -63,6 +63,55 @@ factory watch
 
 The web UI is at <http://127.0.0.1:8787>.
 
+## Task agents and standing agents
+
+Most agents exist for the length of one task. Some should just be there — an
+assistant to talk to, a session kept warm in a project you work in every day.
+Those are **standing agents**, and a scope declares them:
+
+```yaml
+scopes:
+  - name: demo
+    path: projects/demo
+    agents:
+      - name: watcher
+        harness: pi
+        lifetime: permanent     # started with the daemon, restarted if it dies
+      - name: scratch
+        harness: shell
+        lifetime: temporary     # startable, but nothing starts it on its own
+      - name: reviewer
+        harness: claude-code
+        lifetime: task          # not standing: offered for tasks in this scope
+```
+
+A permanent agent is **never failed for being quiet** — being quiet is what it
+is for. It is only ever checked for whether its session is still there, and
+restarted if it is not. The run watchdog, with its acknowledgement and run
+timeouts, does not touch it.
+
+On startup the daemon lines up what the config declares against what is still
+running, and says which of the three things happened: a session that outlived
+the daemon is **adopted** rather than duplicated, a declared agent that is not
+up is **started** if it wants starting, and a session whose agent the config no
+longer declares is **closed** rather than left for somebody to find next week.
+
+`lifetime` may also sit inside the singular `agent:` block, which is how
+instances written before standing agents existed already spell it.
+
+```sh
+factory agents                       # scopes, their agents, and what each is doing
+factory agent start demo watcher
+factory agent stop demo/watcher      # stays stopped until someone asks again
+factory agent output demo/watcher
+factory agent input demo/watcher --text "how is it going?" --key enter
+```
+
+Each standing agent also carries the command to get into its terminal yourself —
+`herdr --session factory agent attach factory-demo-watcher`. A shell session has
+no named agent to attach to, so Factory says so instead of printing a command
+that would fail.
+
 ## Tasks and runs
 
 A **task** is the standing intent: what to do, where, with which agent, and on
@@ -218,9 +267,13 @@ the moment a run exists — live from the session while it runs, and the
 transcript kept at the end once it does not — so there is never a button to
 press to find out what an agent is doing.
 
-**Agents** is the other side of the same data: every agent adapter, what it is
-the default for, whether it came from a plugin, and what it is working on right
-now. Clicking a job opens that task.
+**Agents** is arranged by scope: each scope, then the agents it declares, then
+what each one is doing. A standing agent can be started, stopped, and opened —
+its terminal is live, and there is a line to type into it with keys for Enter,
+Esc, ↑, ↓ and Ctrl-C. That is enough to answer the prompt an agent is sitting
+on, which is usually a first-run trust dialog or a login. Every agent also
+offers **Start task…**, which opens the create form with that scope and agent
+already chosen. A task run's terminal takes the same input.
 
 ## What this prototype does not do yet
 
@@ -231,12 +284,13 @@ now. Clicking a job opens that task.
   different version is dropped and rebuilt. The daemon warns when it does this.
   Fine for a prototype, not for anything you would miss.
 - **The socket is the security boundary.** It is `0600` in `.factory/`, and the
-  callback token only stops one running agent from closing another's task by
+  callback token only stops one running agent from closing another's run by
   mistake. The HTTP interface has no authentication at all. It binds to
   loopback by default; `bind: 0.0.0.0:8787` puts it on the local network, where
-  anyone who can reach it can start a task — and a task runs commands as
-  whoever runs the daemon. The daemon warns on every start when it is bound
-  past loopback, and prints the address a person would actually type.
+  anyone who can reach it can start a task **and type directly into a running
+  agent's terminal** — which bypasses the scope and agent config entirely, and
+  runs as whoever runs the daemon. The daemon warns on every start when it is
+  bound past loopback, and prints the address a person would actually type.
 - **First-run agent prompts.** An agent that has never seen a directory may ask
   a human to trust it before it will read the task. Factory cannot answer that
   for you — it will time the task out and tell you where to look.

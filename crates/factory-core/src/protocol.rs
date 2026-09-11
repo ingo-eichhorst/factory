@@ -2,6 +2,7 @@
 //! sends it over a unix socket, the HTTP adapter maps REST onto it; adding a
 //! third interface means translating to this, not inventing a new API.
 
+use crate::agent::AgentSession;
 use crate::event::Event;
 use crate::run::Run;
 use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport};
@@ -14,9 +15,39 @@ pub enum Request {
     Status,
     #[serde(rename = "adapters")]
     Adapters,
-    /// The agent adapters, with what each of them is doing right now.
+    /// The scopes, the agents each one declares, and what they are doing.
     #[serde(rename = "agents")]
     Agents,
+    /// Bring a declared standing agent up.
+    #[serde(rename = "agent.start")]
+    AgentStart { scope: String, name: String },
+    /// Take one down and leave it down.
+    #[serde(rename = "agent.stop")]
+    AgentStop { id: String },
+    /// Type at a standing agent's session.
+    #[serde(rename = "agent.input")]
+    AgentInput {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        keys: Vec<String>,
+        id: String,
+    },
+    #[serde(rename = "agent.output")]
+    AgentOutput {
+        id: String,
+        #[serde(default)]
+        lines: Option<u32>,
+    },
+    /// Type at a task run's session, for the same reason.
+    #[serde(rename = "run.input")]
+    RunInput {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        keys: Vec<String>,
+        id: String,
+    },
     #[serde(rename = "task.create")]
     TaskCreate(NewTask),
     #[serde(rename = "task.get")]
@@ -87,7 +118,8 @@ pub enum Payload {
     Tasks { tasks: Vec<Task> },
     Run { run: Run },
     Runs { runs: Vec<Run> },
-    Agents { agents: Vec<AgentView> },
+    Agent { agent: AgentSession },
+    Scopes { scopes: Vec<ScopeView> },
     Entries { entries: Vec<TaskEntry> },
     Text { text: String },
     Deleted { deleted: bool },
@@ -165,16 +197,51 @@ pub struct AgentActivity {
     pub session: Option<String>,
 }
 
-/// An agent adapter and its current work.
+/// One agent in one scope, as the agents page shows it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentView {
+    /// The standing agent's session id, when it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// What it is called in this scope.
     pub name: String,
+    /// The adapter behind it.
+    pub adapter: String,
     pub description: String,
     /// `builtin` or `plugin:<manifest path>`.
     pub source: String,
-    /// Scopes that run this agent unless a task says otherwise.
-    pub default_for: Vec<String>,
-    /// True when this is the instance-wide default.
-    pub instance_default: bool,
+    /// `permanent`, `temporary`, or `task`.
+    pub lifetime: String,
+    pub autostart: bool,
+    /// For a standing agent: `starting`, `ready`, `gone`, `stopped`.
+    /// For a task agent: `task`.
+    pub state: String,
+    /// True when tasks in this scope use it unless they say otherwise.
+    pub is_default: bool,
+    /// False once the config stops declaring it.
+    pub declared: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Task runs this agent is working on in this scope right now.
     pub active: Vec<AgentActivity>,
+}
+
+/// A scope and everything that runs in it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeView {
+    pub name: String,
+    pub path: String,
+    /// The adapter a task here runs on unless it says otherwise.
+    pub default_agent: String,
+    pub runtime: String,
+    pub agents: Vec<AgentView>,
+    /// Every agent adapter registered, so a task can be started with any of
+    /// them regardless of what the scope declares.
+    pub available: Vec<String>,
 }

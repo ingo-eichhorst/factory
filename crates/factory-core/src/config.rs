@@ -1,3 +1,4 @@
+use crate::agent::Lifetime;
 use crate::error::{FactoryError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -138,6 +139,13 @@ pub enum AgentRef {
         harness: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        /// `permanent` or `temporary` here makes this a standing agent as well
+        /// as the scope's default for tasks -- which is how instances written
+        /// before standing agents existed already spell it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lifetime: Option<Lifetime>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        autostart: Option<bool>,
     },
 }
 
@@ -150,6 +158,42 @@ impl AgentRef {
     }
 }
 
+/// One agent a scope declares. Both spellings below land here:
+///
+/// ```yaml
+/// agent:                    # the scope's default for tasks
+///   harness: pi
+///   lifetime: permanent     # ... and a standing agent, if it says so
+/// agents:                   # any number of further agents
+///   - name: watcher
+///     harness: claude-code
+///     lifetime: permanent
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeAgent {
+    /// Unique within the scope. Defaults to the harness name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub harness: String,
+    #[serde(default)]
+    pub lifetime: Lifetime,
+    /// Whether the daemon brings it up by itself. Permanent agents default to
+    /// yes, everything else to no.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autostart: Option<bool>,
+}
+
+impl ScopeAgent {
+    pub fn name(&self) -> String {
+        self.name.clone().unwrap_or_else(|| self.harness.clone())
+    }
+
+    pub fn autostart(&self) -> bool {
+        self.autostart
+            .unwrap_or(self.lifetime == Lifetime::Permanent)
+    }
+}
+
 /// A directory Factory can run agents in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scope {
@@ -158,6 +202,9 @@ pub struct Scope {
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentRef>,
+    /// Further agents in this scope. A scope can have as many as it likes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<ScopeAgent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,8 +212,47 @@ pub struct Scope {
 }
 
 impl Scope {
+    /// The adapter a task in this scope runs on unless it says otherwise.
     pub fn agent_adapter(&self) -> Option<&str> {
         self.agent.as_ref().map(AgentRef::adapter)
+    }
+
+    /// Every agent this scope declares, from either spelling, in the order a
+    /// person wrote them.
+    pub fn declared_agents(&self) -> Vec<ScopeAgent> {
+        let mut out = Vec::new();
+        if let Some(AgentRef::Declared {
+            harness,
+            name,
+            lifetime,
+            autostart,
+        }) = &self.agent
+        {
+            out.push(ScopeAgent {
+                name: name.clone(),
+                harness: harness.clone(),
+                lifetime: lifetime.unwrap_or_default(),
+                autostart: *autostart,
+            });
+        }
+        for a in &self.agents {
+            // The same agent named twice is the config's business, not ours --
+            // but the same *name* twice would collide on the session id, so the
+            // first one wins and the rest are ignored.
+            if out.iter().any(|e| e.name() == a.name()) {
+                continue;
+            }
+            out.push(a.clone());
+        }
+        out
+    }
+
+    /// Only the ones meant to exist between tasks.
+    pub fn standing_agents(&self) -> Vec<ScopeAgent> {
+        self.declared_agents()
+            .into_iter()
+            .filter(|a| a.lifetime.is_standing())
+            .collect()
     }
 }
 
@@ -294,6 +380,48 @@ mod tests {
                 plugins_dir: None,
             },
         }
+    }
+
+    #[test]
+    fn a_scope_collects_agents_from_both_spellings() {
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\nagent:\n  harness: pi\n  lifetime: permanent\n\
+             agents:\n  - name: watcher\n    harness: claude-code\n    lifetime: permanent\n\
+             \x20 - name: helper\n    harness: codex\n",
+        )
+        .unwrap();
+        let declared = s.declared_agents();
+        assert_eq!(declared.len(), 3);
+        assert_eq!(s.agent_adapter(), Some("pi"));
+        let standing: Vec<String> = s.standing_agents().iter().map(|a| a.name()).collect();
+        assert_eq!(standing, vec!["pi", "watcher"], "codex is a task agent, not standing");
+    }
+
+    #[test]
+    fn a_temporary_agent_parses_and_does_not_autostart() {
+        // Instances written before standing agents existed already say this.
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\nagent:\n  name: reviewer\n  harness: pi\n  max_sessions: 1\n  lifetime: temporary\n",
+        )
+        .unwrap();
+        let a = &s.standing_agents()[0];
+        assert_eq!(a.name(), "reviewer");
+        assert_eq!(a.lifetime, Lifetime::Temporary);
+        assert!(!a.autostart(), "temporary agents wait to be asked for");
+    }
+
+    #[test]
+    fn a_permanent_agent_autostarts_unless_told_not_to() {
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\nagents:\n  - harness: pi\n    lifetime: permanent\n",
+        )
+        .unwrap();
+        assert!(s.standing_agents()[0].autostart());
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\nagents:\n  - harness: pi\n    lifetime: permanent\n    autostart: false\n",
+        )
+        .unwrap();
+        assert!(!s.standing_agents()[0].autostart());
     }
 
     #[test]

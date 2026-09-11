@@ -46,6 +46,13 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
             Err(e) => tracing::warn!("could not look for due tasks: {e}"),
         }
 
+        // -- standing agents ---------------------------------------------
+        // Their own rule: only ever checked for whether the session is still
+        // there. A permanent agent that has said nothing all day is working
+        // exactly as intended, and must never be caught by the run timeouts
+        // below.
+        engine.supervise_agents().await;
+
         // -- runs that stopped talking -----------------------------------
         let active = match engine.active_runs().await {
             Ok(runs) => runs,

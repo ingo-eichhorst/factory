@@ -38,8 +38,11 @@ enum Command {
     Status,
     /// Which adapters are registered, and where each came from.
     Adapters,
-    /// The agents, and what each of them is doing right now.
+    /// The scopes, their agents, and what each is doing right now.
     Agents,
+    /// Start, stop and type at standing agents.
+    #[command(subcommand)]
+    Agent(AgentCmd),
     /// Look at individual runs.
     #[command(subcommand)]
     Run(RunCmd),
@@ -48,6 +51,29 @@ enum Command {
     /// Create, run, and report on tasks.
     #[command(subcommand)]
     Task(TaskCmd),
+}
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// Bring a declared standing agent up.
+    Start { scope: String, name: String },
+    /// Take one down and leave it down.
+    Stop { id: String },
+    /// What its terminal shows right now.
+    Output {
+        id: String,
+        #[arg(long, default_value_t = 200)]
+        lines: u32,
+    },
+    /// Type at it: text, then any keys. `--key enter` submits.
+    Input {
+        id: String,
+        #[arg(short, long)]
+        text: Option<String>,
+        /// Repeatable: `--key enter`, `--key esc`, `--key ctrl-c`.
+        #[arg(long = "key")]
+        keys: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -214,37 +240,40 @@ async fn main() -> Result<()> {
         Command::Agents => {
             let payload = client.send(Request::Agents).await?;
             print(&payload, cli.json, |p| match p {
-                Payload::Agents { agents } => {
+                Payload::Scopes { scopes } => {
                     let mut out = String::new();
-                    for a in agents {
-                        let mut tags = Vec::new();
-                        if a.instance_default {
-                            tags.push("instance default".to_string());
-                        }
-                        if !a.default_for.is_empty() {
-                            tags.push(format!("default in {}", a.default_for.join(", ")));
-                        }
-                        let tags = if tags.is_empty() {
-                            String::new()
-                        } else {
-                            format!("  [{}]", tags.join("; "))
-                        };
+                    for s in scopes {
                         out.push_str(&format!(
-                            "{:<14} {}{}\n              {}\n",
-                            a.name, a.description, tags, a.source
+                            "{}  {}\n              default {} on {}\n",
+                            s.name, s.path, s.default_agent, s.runtime
                         ));
-                        if a.active.is_empty() {
-                            out.push_str("              idle\n");
-                        } else {
+                        for a in &s.agents {
+                            let mut flags = vec![a.lifetime.clone()];
+                            if a.is_default {
+                                flags.push("default".into());
+                            }
+                            if a.autostart {
+                                flags.push("autostart".into());
+                            }
+                            if !a.declared {
+                                flags.push("undeclared".into());
+                            }
+                            out.push_str(&format!(
+                                "  {:<20} {:<12} [{}]\n",
+                                a.name,
+                                a.state,
+                                flags.join(", ")
+                            ));
+                            if let Some(cmd) = &a.attach {
+                                out.push_str(&format!("      attach: {cmd}\n"));
+                            }
+                            if let Some(err) = &a.error {
+                                out.push_str(&format!("      error:  {err}\n"));
+                            }
                             for w in &a.active {
                                 out.push_str(&format!(
-                                    "              {} attempt {} ({}) in {} -- {}  [{}]\n",
-                                    w.status,
-                                    w.attempt,
-                                    w.trigger,
-                                    w.scope,
-                                    w.task_title,
-                                    w.session.clone().unwrap_or_else(|| "no session".into()),
+                                    "      {} attempt {} ({}) -- {}\n",
+                                    w.status, w.attempt, w.trigger, w.task_title
                                 ));
                             }
                         }
@@ -256,9 +285,70 @@ async fn main() -> Result<()> {
             })
         }
 
+        Command::Agent(cmd) => agent_cmd(cli.json, &client, cmd).await,
         Command::Run(cmd) => run_cmd(cli.json, &client, cmd).await,
         Command::Task(cmd) => task(cli.json, &client, cmd).await,
     }
+}
+
+async fn agent_cmd(json: bool, client: &Client, cmd: AgentCmd) -> Result<()> {
+    match cmd {
+        AgentCmd::Start { scope, name } => {
+            let payload = client.send(Request::AgentStart { scope, name }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Agent { agent } => Some(agent_line(agent)),
+                _ => None,
+            })
+        }
+        AgentCmd::Stop { id } => {
+            let payload = client.send(Request::AgentStop { id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Agent { agent } => Some(agent_line(agent)),
+                _ => None,
+            })
+        }
+        AgentCmd::Output { id, lines } => {
+            let payload = client
+                .send(Request::AgentOutput {
+                    id,
+                    lines: Some(lines),
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Text { text } => Some(if text.trim().is_empty() {
+                    "(nothing on its terminal)".into()
+                } else {
+                    text.clone()
+                }),
+                _ => None,
+            })
+        }
+        AgentCmd::Input { id, text, keys } => {
+            if text.is_none() && keys.is_empty() {
+                return Err(anyhow!("nothing to send; pass --text or --key"));
+            }
+            client.send(Request::AgentInput { id, text, keys }).await?;
+            println!("sent");
+            Ok(())
+        }
+    }
+}
+
+fn agent_line(a: &factory_core::agent::AgentSession) -> String {
+    let mut s = format!(
+        "{}  {:<9} {} on {}",
+        a.id,
+        a.state.as_str(),
+        a.agent,
+        a.runtime
+    );
+    if let Some(cmd) = &a.attach {
+        s.push_str(&format!("\n  attach: {cmd}"));
+    }
+    if let Some(err) = &a.error {
+        s.push_str(&format!("\n  error:  {err}"));
+    }
+    s
 }
 
 async fn run_cmd(json: bool, client: &Client, cmd: RunCmd) -> Result<()> {
@@ -643,6 +733,10 @@ fn describe_event(e: &Event) -> String {
         ),
         Event::RunStarted { run } => format!("run      {}", run_line(run)),
         Event::RunUpdated { run } => format!("run      {}", run_line(run)),
+        Event::AgentUpdated { agent } => {
+            format!("agent    {}  {}", agent.id, agent.state.as_str())
+        }
+        Event::AgentRemoved { id } => format!("agent    {id}  removed"),
     }
 }
 

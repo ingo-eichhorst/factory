@@ -2,15 +2,16 @@
 //! and leaves as a `Response`; the interfaces themselves hold no logic.
 
 use chrono::Utc;
-use factory_core::adapter::agent::AgentContext;
+use factory_core::adapter::agent::{AgentContext, TaskBinding};
 use factory_core::adapter::runtime::{RuntimeStatus, StartRequest};
 use factory_core::adapter::TaskStore;
 use factory_core::config::Factory;
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
-    AgentActivity, AgentView, Payload, Request, Response, StatusInfo,
+    AgentActivity, AgentView, Payload, Request, Response, ScopeView, StatusInfo,
 };
+use factory_core::agent::{AgentSession, AgentState};
 use factory_core::run::{NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
     NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
@@ -66,9 +67,26 @@ impl Engine {
                 status: self.status().await?,
             }),
             Request::Adapters => Ok(self.registry.list().into()),
-            Request::Agents => Ok(Payload::Agents {
-                agents: self.agents().await?,
+            Request::Agents => Ok(Payload::Scopes {
+                scopes: self.scope_views().await?,
             }),
+            Request::AgentStart { scope, name } => Ok(Payload::Agent {
+                agent: self.start_agent(&scope, &name).await?,
+            }),
+            Request::AgentStop { id } => Ok(Payload::Agent {
+                agent: self.stop_agent(&id).await?,
+            }),
+            Request::AgentInput { id, text, keys } => {
+                self.agent_input(&id, text.as_deref(), &keys).await?;
+                Ok(Payload::Ok)
+            }
+            Request::AgentOutput { id, lines } => Ok(Payload::Text {
+                text: self.agent_output(&id, lines.unwrap_or(200)).await?,
+            }),
+            Request::RunInput { id, text, keys } => {
+                self.run_input(&id, text.as_deref(), &keys).await?;
+                Ok(Payload::Ok)
+            }
 
             Request::TaskCreate(new) => Ok(Payload::Task {
                 task: self.create(new).await?,
@@ -194,61 +212,189 @@ impl Engine {
         })
     }
 
-    /// Every agent adapter, what it is for, and what it is doing. One call,
-    /// because a page that had to join adapters, runs and tasks itself would
-    /// show three different moments in time.
-    async fn agents(&self) -> Result<Vec<AgentView>> {
+    /// The agents page: scopes first, then the agents each one declares, then
+    /// what they are doing. One call, because a page that had to join config,
+    /// adapters, standing agents, runs and tasks itself would be showing five
+    /// different moments in time.
+    async fn scope_views(&self) -> Result<Vec<ScopeView>> {
         let adapters = self.registry.list();
+        let described: std::collections::BTreeMap<String, (String, String)> = adapters
+            .adapters
+            .iter()
+            .filter(|a| a.kind == "agent")
+            .map(|a| (a.name.clone(), (a.description.clone(), a.source.clone())))
+            .collect();
+        let available: Vec<String> = described.keys().cloned().collect();
+
+        let standing = self.store.agents().await?;
         let active = self.store.active_runs().await?;
 
-        // Resolve each scope's agent the same way a new task would, so the page
-        // shows what would actually happen rather than only what is written
-        // down.
-        let instance_default = &self.factory.config.daemon.default_agent;
-        let mut default_for: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-        for scope in &self.factory.config.scopes {
-            let agent = scope
-                .agent_adapter()
-                .unwrap_or(instance_default.as_str())
-                .to_string();
-            default_for.entry(agent).or_default().push(scope.name.clone());
+        // Runs, grouped by the scope and adapter that are actually doing them.
+        let mut work: std::collections::BTreeMap<(String, String), Vec<AgentActivity>> =
+            Default::default();
+        for run in &active {
+            let task = self.store.get(&run.task_id).await?;
+            let scope = task.as_ref().map(|t| t.scope.clone()).unwrap_or_default();
+            work.entry((scope.clone(), run.agent.clone()))
+                .or_default()
+                .push(AgentActivity {
+                    run_id: run.id.clone(),
+                    task_id: run.task_id.clone(),
+                    task_title: task
+                        .map(|t| t.title)
+                        .unwrap_or_else(|| "(deleted task)".into()),
+                    scope,
+                    attempt: run.attempt,
+                    status: run.status.as_str().to_string(),
+                    runtime: run.runtime.clone(),
+                    trigger: run.trigger.as_str().to_string(),
+                    started_at: run.started_at,
+                    session: run.session.as_ref().map(|s| s.handle.clone()),
+                });
         }
 
-        // A run names its agent; the task it belongs to names the rest.
-        let mut activity: std::collections::BTreeMap<String, Vec<AgentActivity>> =
-            Default::default();
-        for run in active {
-            let task = self.store.get(&run.task_id).await?;
-            activity.entry(run.agent.clone()).or_default().push(AgentActivity {
-                run_id: run.id.clone(),
-                task_id: run.task_id.clone(),
-                task_title: task
-                    .as_ref()
-                    .map(|t| t.title.clone())
-                    .unwrap_or_else(|| "(deleted task)".into()),
-                scope: task.map(|t| t.scope).unwrap_or_default(),
-                attempt: run.attempt,
-                status: run.status.as_str().to_string(),
-                runtime: run.runtime.clone(),
-                trigger: run.trigger.as_str().to_string(),
-                started_at: run.started_at,
-                session: run.session.as_ref().map(|s| s.handle.clone()),
+        let instance_default = self.factory.config.daemon.default_agent.clone();
+        let mut views = Vec::new();
+
+        for scope in &self.factory.config.scopes {
+            let default_agent = scope
+                .agent_adapter()
+                .unwrap_or(&instance_default)
+                .to_string();
+            let runtime = scope
+                .runtime
+                .clone()
+                .unwrap_or_else(|| self.factory.config.daemon.default_runtime.clone());
+
+            let mut agents = Vec::new();
+            let mut covered = std::collections::BTreeSet::new();
+
+            for decl in scope.declared_agents() {
+                let name = decl.name();
+                covered.insert(decl.harness.clone());
+                let live = decl
+                    .lifetime
+                    .is_standing()
+                    .then(|| {
+                        standing
+                            .iter()
+                            .find(|a| a.id == AgentSession::id_for(&scope.name, &name))
+                    })
+                    .flatten();
+                let (description, source) = described
+                    .get(&decl.harness)
+                    .cloned()
+                    .unwrap_or_else(|| ("not registered".into(), "missing".into()));
+
+                agents.push(AgentView {
+                    id: live.map(|a| a.id.clone()),
+                    name,
+                    adapter: decl.harness.clone(),
+                    description,
+                    source,
+                    lifetime: decl.lifetime.as_str().to_string(),
+                    autostart: decl.autostart(),
+                    state: live
+                        .map(|a| a.state.as_str().to_string())
+                        .unwrap_or_else(|| {
+                            if decl.lifetime.is_standing() {
+                                AgentState::Stopped.as_str().to_string()
+                            } else {
+                                "task".into()
+                            }
+                        }),
+                    is_default: decl.harness == default_agent,
+                    declared: true,
+                    attach: live.and_then(|a| a.attach.clone()),
+                    session: live
+                        .and_then(|a| a.session.as_ref())
+                        .map(|s| s.handle.clone()),
+                    started_at: live.map(|a| a.started_at),
+                    error: live.and_then(|a| a.error.clone()),
+                    active: work
+                        .get(&(scope.name.clone(), decl.harness.clone()))
+                        .cloned()
+                        .unwrap_or_default(),
+                });
+            }
+
+            // The scope's default, when nothing above already named it.
+            if !covered.contains(&default_agent) {
+                let (description, source) = described
+                    .get(&default_agent)
+                    .cloned()
+                    .unwrap_or_else(|| ("not registered".into(), "missing".into()));
+                covered.insert(default_agent.clone());
+                agents.insert(
+                    0,
+                    AgentView {
+                        id: None,
+                        name: default_agent.clone(),
+                        adapter: default_agent.clone(),
+                        description,
+                        source,
+                        lifetime: "task".into(),
+                        autostart: false,
+                        state: "task".into(),
+                        is_default: true,
+                        declared: false,
+                        attach: None,
+                        session: None,
+                        started_at: None,
+                        error: None,
+                        active: work
+                            .get(&(scope.name.clone(), default_agent.clone()))
+                            .cloned()
+                            .unwrap_or_default(),
+                    },
+                );
+            }
+
+            // An agent working here that the scope never declared -- somebody
+            // started a task with `--agent`. It is doing work, so it belongs on
+            // the page whatever the config says.
+            for ((s, adapter), jobs) in &work {
+                if s != &scope.name || covered.contains(adapter) {
+                    continue;
+                }
+                let (description, source) = described
+                    .get(adapter)
+                    .cloned()
+                    .unwrap_or_else(|| ("not registered".into(), "missing".into()));
+                agents.push(AgentView {
+                    id: None,
+                    name: adapter.clone(),
+                    adapter: adapter.clone(),
+                    description,
+                    source,
+                    lifetime: "task".into(),
+                    autostart: false,
+                    state: "task".into(),
+                    is_default: false,
+                    declared: false,
+                    attach: None,
+                    session: None,
+                    started_at: None,
+                    error: None,
+                    active: jobs.clone(),
+                });
+            }
+
+            views.push(ScopeView {
+                name: scope.name.clone(),
+                path: self
+                    .factory
+                    .scope_path(&scope.name)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| scope.path.display().to_string()),
+                default_agent,
+                runtime,
+                agents,
+                available: available.clone(),
             });
         }
 
-        Ok(adapters
-            .adapters
-            .into_iter()
-            .filter(|a| a.kind == "agent")
-            .map(|a| AgentView {
-                default_for: default_for.get(&a.name).cloned().unwrap_or_default(),
-                instance_default: &a.name == instance_default,
-                active: activity.remove(&a.name).unwrap_or_default(),
-                name: a.name,
-                description: a.description,
-                source: a.source,
-            })
-            .collect())
+        Ok(views)
     }
 
     // -- creating ----------------------------------------------------------
@@ -377,19 +523,23 @@ impl Engine {
         .await;
 
         let ctx = AgentContext {
-            task: task.clone(),
-            run_id: run.id.clone(),
-            attempt: run.attempt,
+            scope: task.scope.clone(),
             cwd: cwd.clone(),
             factory_bin: self.factory_bin.clone(),
             socket: self.factory.socket_path(),
-            token,
+            task: Some(TaskBinding {
+                task: task.clone(),
+                run_id: run.id.clone(),
+                attempt: run.attempt,
+                token,
+            }),
         };
 
         let launch = agent.launch_spec(&ctx).await?;
         let session = runtime
             .start(&StartRequest {
-                task_id: task.id.clone(),
+                id: run.id.clone(),
+                name: format!("factory-run-{}", &run.id[..8.min(run.id.len())]),
                 label: format!("factory: {}", truncate(&task.title, 40)),
                 cwd,
                 launch,

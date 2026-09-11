@@ -84,18 +84,34 @@
   .err { color: var(--bad); font-size: 13px; margin-top: 8px; }
   code.id { font: 12px ui-monospace, Menlo, monospace; color: var(--dim); }
 
-  /* agents */
-  .agents { display: grid; gap: 14px; }
-  .agent { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
-  .agent h3 { margin: 0; font-size: 15px; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  /* agents, grouped by scope */
+  .agents { display: grid; gap: 18px; }
+  .scope { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .scope > .head { padding: 13px 16px; border-bottom: 1px solid var(--line); display: flex;
+    align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .scope > .head h3 { margin: 0; font-size: 15px; }
+  .agent { padding: 13px 16px; border-bottom: 1px solid var(--line); }
+  .agent:last-child { border-bottom: 0; }
+  .agent .line { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .agent .nm { font-weight: 600; }
   .tag { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim);
     border: 1px solid var(--line); border-radius: 99px; padding: 1px 8px; font-weight: 600; }
   .tag.plug { color: var(--accent); border-color: var(--accent); }
-  .work { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; display: grid; gap: 8px; }
+  .tag.perm { color: var(--ok); border-color: var(--ok); }
+  .attach { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .attach code { background: var(--code); padding: 3px 8px; border-radius: 5px;
+    font: 12px ui-monospace, Menlo, monospace; }
+  .work { margin-top: 9px; display: grid; gap: 7px; }
   .work .job { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; cursor: pointer; }
   .work .job:hover .jt { color: var(--accent); }
   .jt { font-weight: 500; }
-  .idle { color: var(--dim); font-size: 13px; font-style: italic; margin-top: 10px; }
+  .idle { color: var(--dim); font-size: 13px; font-style: italic; }
+
+  /* terminal input */
+  .terminput { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .terminput input { flex: 1 1 220px; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .keys { display: flex; gap: 5px; }
+  .keys button { font: 12px ui-monospace, Menlo, monospace; padding: 5px 9px; }
 
   /* modal */
   .scrim { position: fixed; inset: 0; background: rgba(20,19,17,.5); z-index: 20;
@@ -170,10 +186,13 @@ const TERMINAL = ["done", "failed", "cancelled"];
 const state = {
   tab: "tasks",
   tasks: new Map(),
-  agents: [],
+  scopes: [],          // the agents page: scopes, each with its agents
+  adapters: [],        // every agent adapter name, for the create form
+  scopeNames: [],
   open: null,          // task id shown in the modal
   runs: [],            // runs of the open task
   run: null,           // selected run id
+  term: null,          // {kind:'run'|'agent', id} the terminal is showing
   poll: null,          // terminal poll timer
   agentPoll: null,
 };
@@ -236,8 +255,10 @@ function onEvent(ev) {
       }
       break;
   }
-  // The agents page is a view over runs; any run change moves it.
-  if (state.tab === "agents" && ev.type.startsWith("run_")) loadAgents();
+  // The agents page is a view over runs and standing agents alike.
+  if (state.tab === "agents" && (ev.type.startsWith("run_") || ev.type.startsWith("agent_"))) {
+    loadAgents();
+  }
 }
 
 // ------------------------------------------------------------------- tasks
@@ -272,7 +293,8 @@ function renderTasks() {
 
 async function loadAgents() {
   try {
-    state.agents = (await api("/api/agents")).agents;
+    state.scopes = (await api("/api/agents")).scopes;
+    if (state.scopes.length) state.adapters = state.scopes[0].available;
     renderAgents();
   } catch (e) {
     $("agents").innerHTML = `<div class="err">${esc(e.message)}</div>`;
@@ -286,30 +308,101 @@ function since(iso) {
   return `${Math.round(secs / 3600)}h`;
 }
 
-function renderAgents() {
-  $("agents").innerHTML = state.agents.map(a => {
-    const tags = [];
-    if (a.source !== "builtin") tags.push(`<span class="tag plug">plugin</span>`);
-    if (a.instance_default) tags.push(`<span class="tag">instance default</span>`);
-    for (const s of a.default_for) tags.push(`<span class="tag">${esc(s)}</span>`);
-    const work = a.active.length ? `
-      <div class="work">${a.active.map(w => `
-        <div class="job" data-task="${esc(w.task_id)}" data-run="${esc(w.run_id)}">
-          ${statusBadge(w.status)}
-          <span class="jt">${esc(w.task_title)}</span>
-          <span class="sub">attempt ${w.attempt} · ${esc(w.trigger)} · ${esc(w.scope)} · ${esc(w.runtime)}${w.session ? " " + esc(w.session) : ""} · ${since(w.started_at)}</span>
-        </div>`).join("")}</div>`
-      : `<div class="idle">idle — nothing running</div>`;
-    return `<div class="agent">
-      <h3>${esc(a.name)} ${tags.join(" ")}</h3>
-      <div class="sub">${esc(a.description)}</div>
-      ${work}
-    </div>`;
-  }).join("") || `<div class="empty">No agent adapters registered.</div>`;
+function agentTags(a) {
+  const tags = [];
+  if (a.lifetime === "permanent") tags.push(`<span class="tag perm">permanent</span>`);
+  else if (a.lifetime === "temporary") tags.push(`<span class="tag">temporary</span>`);
+  if (a.is_default) tags.push(`<span class="tag">default</span>`);
+  if (a.source && a.source !== "builtin" && a.source !== "missing") tags.push(`<span class="tag plug">plugin</span>`);
+  if (!a.declared) tags.push(`<span class="tag">undeclared</span>`);
+  return tags.join(" ");
+}
 
+function renderAgents() {
+  $("agents").innerHTML = state.scopes.map(s => {
+    const rows = s.agents.map(a => {
+      const standing = a.lifetime !== "task";
+      const live = a.state === "ready" || a.state === "starting";
+      const buttons = [];
+      if (standing) {
+        buttons.push(`<button class="btn" data-act="start" data-scope="${esc(s.name)}" data-name="${esc(a.name)}" ${live ? "disabled" : ""}>Start</button>`);
+        buttons.push(`<button class="btn" data-act="stop" data-id="${esc(a.id || "")}" ${live ? "" : "disabled"}>Stop</button>`);
+        buttons.push(`<button class="btn" data-act="term" data-id="${esc(a.id || "")}" ${live ? "" : "disabled"}>Terminal</button>`);
+      }
+      buttons.push(`<button class="btn" data-act="task" data-scope="${esc(s.name)}" data-agent="${esc(a.adapter)}">Start task…</button>`);
+
+      const attach = a.attach
+        ? `<div class="attach"><span class="sub">attach</span><code>${esc(a.attach)}</code>
+             <button class="btn" data-act="copy" data-copy="${esc(a.attach)}">Copy</button></div>`
+        : (a.session ? `<div class="attach"><span class="sub">session</span><code>${esc(a.session)}</code></div>` : "");
+
+      const work = a.active.length
+        ? `<div class="work">${a.active.map(w => `
+            <div class="job" data-task="${esc(w.task_id)}" data-run="${esc(w.run_id)}">
+              ${statusBadge(w.status)} <span class="jt">${esc(w.task_title)}</span>
+              <span class="sub">attempt ${w.attempt} · ${esc(w.trigger)} · ${esc(w.runtime)}${w.session ? " " + esc(w.session) : ""} · ${since(w.started_at)}</span>
+            </div>`).join("")}</div>`
+        : (standing && live
+            ? `<div class="work idle">up and waiting${a.started_at ? " · " + since(a.started_at) : ""}</div>`
+            : `<div class="work idle">nothing running</div>`);
+
+      return `<div class="agent">
+        <div class="line">
+          <span class="nm">${esc(a.name)}</span>
+          ${a.adapter !== a.name ? `<span class="sub">${esc(a.adapter)}</span>` : ""}
+          ${standing ? statusBadge(a.state) : ""}
+          ${agentTags(a)}
+          <span style="margin-left:auto"></span>
+          <span class="row-btns">${buttons.join("")}</span>
+        </div>
+        <div class="sub">${esc(a.description)}</div>
+        ${a.error ? `<div class="err">${esc(a.error)}</div>` : ""}
+        ${attach}
+        ${work}
+      </div>`;
+    }).join("");
+
+    return `<div class="scope">
+      <div class="head">
+        <h3>${esc(s.name)}</h3>
+        <span class="sub">${esc(s.path)}</span>
+        <span style="margin-left:auto"></span>
+        <span class="sub">tasks default to ${esc(s.default_agent)} on ${esc(s.runtime)}</span>
+      </div>
+      ${rows || `<div class="empty">No agents declared.</div>`}
+    </div>`;
+  }).join("") || `<div class="empty">This instance declares no scopes.</div>`;
+
+  for (const el of $("agents").querySelectorAll("[data-act]")) {
+    el.onclick = (e) => { e.stopPropagation(); agentAction(el); };
+  }
   for (const job of $("agents").querySelectorAll(".job")) {
     job.onclick = () => openTask(job.dataset.task, job.dataset.run);
   }
+}
+
+async function agentAction(el) {
+  const act = el.dataset.act;
+  try {
+    if (act === "start") {
+      el.disabled = true;
+      await api("/api/agents/start", { method: "POST", body: JSON.stringify({ scope: el.dataset.scope, name: el.dataset.name }) });
+    } else if (act === "stop") {
+      el.disabled = true;
+      await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id: el.dataset.id }) });
+    } else if (act === "term") {
+      return openAgent(el.dataset.id);
+    } else if (act === "task") {
+      return openCreate({ scope: el.dataset.scope, agent: el.dataset.agent });
+    } else if (act === "copy") {
+      await navigator.clipboard.writeText(el.dataset.copy).catch(() => {});
+      const was = el.textContent; el.textContent = "Copied"; setTimeout(() => { el.textContent = was; }, 1200);
+      return;
+    }
+  } catch (e) {
+    alert(e.message);
+  }
+  loadAgents();
 }
 
 // ------------------------------------------------------------------- modal
@@ -327,9 +420,46 @@ function closeModal() {
   for (const el of document.querySelectorAll(".scrim")) el.remove();
   state.open = null; state.runs = []; state.run = null;
   stopTerminal();
+  state.term = null;
 }
 
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+document.addEventListener("keydown", (e) => {
+  // Escape closes the modal -- unless the terminal input has focus, where it is
+  // a key the agent is waiting for.
+  if (e.key !== "Escape") return;
+  if (document.activeElement && document.activeElement.id === "t-input") return;
+  closeModal();
+});
+
+/// The terminal plus the row that types into it. Same markup for a task run and
+/// for a standing agent; only the target differs.
+function terminalBlock(label) {
+  return `
+    <label>${label} <span class="live-tag" id="t-live" hidden>live</span></label>
+    <pre class="term" id="t-term">connecting…</pre>
+    <div class="terminput">
+      <input id="t-input" placeholder="type here, Enter sends" autocomplete="off">
+      <span class="keys">
+        <button class="btn" data-key="enter">⏎</button>
+        <button class="btn" data-key="esc">esc</button>
+        <button class="btn" data-key="up">↑</button>
+        <button class="btn" data-key="down">↓</button>
+        <button class="btn" data-key="ctrl-c">^C</button>
+      </span>
+    </div>
+    <div class="err" id="t-err"></div>`;
+}
+
+function wireTerminal() {
+  const input = $("t-input");
+  if (!input) return;
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); sendInput(input.value, ["enter"]); input.value = ""; }
+  };
+  for (const b of document.querySelectorAll("[data-key]")) {
+    b.onclick = () => sendInput("", [b.dataset.key]);
+  }
+}
 
 async function openTask(id, runId) {
   closeModal();
@@ -345,7 +475,6 @@ async function openTask(id, runId) {
         <button class="btn" id="m-run">Run</button>
         <button class="btn" id="m-cancel">Cancel</button>
         <button class="btn danger" id="m-delete">Delete</button>
-        <span class="sp"></span>
       </div>
       <div class="err" id="m-err"></div>
       <div id="m-meta"></div>
@@ -353,19 +482,66 @@ async function openTask(id, runId) {
       <div class="runs" id="m-runs"></div>
       <label>Journal</label>
       <div class="journal" id="m-journal"></div>
-      <label>Terminal <span class="live-tag" id="m-live" hidden>live</span></label>
-      <pre class="term" id="m-term">connecting…</pre>
+      ${terminalBlock("Terminal")}
     </div>`);
 
   $("m-close").onclick = closeModal;
   $("m-run").onclick = () => act(`/api/tasks/${state.open}/run`);
   $("m-cancel").onclick = () => act(`/api/tasks/${state.open}/cancel`);
   $("m-delete").onclick = () => act(`/api/tasks/${state.open}`, "DELETE");
+  wireTerminal();
 
   await loadRuns();
   renderModal();
   await loadJournal();
   retimeTerminal();
+}
+
+/// A standing agent's own window: what its terminal shows, and a way to answer
+/// it. This is what makes a trust dialog or a login something you can get past
+/// without leaving the page.
+async function openAgent(id) {
+  closeModal();
+  const found = findAgent(id);
+  scrim(`
+    <header>
+      <div><h2>${esc(found ? found.agent.name : id)}</h2>
+           <code class="id">${esc(id)}</code></div>
+      <button class="x" id="a-close">&times;</button>
+    </header>
+    <div class="body">
+      <div class="row-btns">
+        <button class="btn" id="a-stop">Stop</button>
+        <button class="btn" id="a-restart">Restart</button>
+      </div>
+      <div class="err" id="a-err"></div>
+      ${found && found.agent.attach
+        ? `<div class="attach"><span class="sub">attach</span><code>${esc(found.agent.attach)}</code></div>` : ""}
+      ${terminalBlock("Terminal")}
+    </div>`);
+  $("a-close").onclick = closeModal;
+  $("a-stop").onclick = async () => {
+    try { await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id }) }); closeModal(); loadAgents(); }
+    catch (e) { $("a-err").textContent = e.message; }
+  };
+  $("a-restart").onclick = async () => {
+    if (!found) return;
+    try {
+      await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id }) });
+      await api("/api/agents/start", { method: "POST", body: JSON.stringify({ scope: found.scope, name: found.agent.name }) });
+      loadAgents();
+      setTerminal("agent", id, true);
+    } catch (e) { $("a-err").textContent = e.message; }
+  };
+  wireTerminal();
+  setTerminal("agent", id, true);
+}
+
+function findAgent(id) {
+  for (const s of state.scopes) {
+    for (const a of s.agents) if (a.id === id) return { scope: s.name, agent: a };
+  }
+  return null;
 }
 
 async function act(path, method = "POST") {
@@ -439,40 +615,45 @@ async function loadJournal() {
 }
 
 // --------------------------------------------------------------- terminal
-// Shown from the moment a run exists: live from its session while it runs, its
-// kept transcript afterwards. The daemon answers with empty text rather than an
+// Shown from the moment there is a session: live while it runs, the kept
+// transcript afterwards. The daemon answers with empty text rather than an
 // error in the seconds before a session is up, so this never flashes red.
 
 function stopTerminal() {
   if (state.poll) { clearInterval(state.poll); state.poll = null; }
 }
 
-function retimeTerminal() {
+function setTerminal(kind, id, live) {
   stopTerminal();
-  const r = selectedRun();
-  if (!r) {
-    if ($("m-term")) { $("m-term").textContent = "No run yet. Press Run to start one."; $("m-term").classList.add("idle"); }
-    if ($("m-live")) $("m-live").hidden = true;
+  state.term = id ? { kind, id } : null;
+  if ($("t-live")) $("t-live").hidden = !live;
+  if ($("t-input")) $("t-input").disabled = !live;
+  if (!state.term) {
+    if ($("t-term")) { $("t-term").textContent = "No run yet. Press Run to start one."; $("t-term").classList.add("idle"); }
     return;
   }
-  const live = !TERMINAL.includes(r.status);
-  if ($("m-live")) $("m-live").hidden = !live;
   fetchTerminal();
   if (live) state.poll = setInterval(fetchTerminal, 1500);
 }
 
+function retimeTerminal() {
+  const r = selectedRun();
+  setTerminal("run", r ? r.id : null, r ? !TERMINAL.includes(r.status) : false);
+}
+
 async function fetchTerminal() {
-  const el = $("m-term");
-  const runId = state.run;
-  if (!el || !runId) return;
+  const el = $("t-term");
+  const target = state.term;
+  if (!el || !target) return;
   try {
-    const text = (await api(`/api/runs/${runId}/output?lines=400`)).text;
-    if (state.run !== runId || !$("m-term")) return;   // the view moved on
-    // Only follow the tail if the reader is already at it.
+    const data = target.kind === "run"
+      ? await api(`/api/runs/${target.id}/output?lines=400`)
+      : await api("/api/agents/output", { method: "POST", body: JSON.stringify({ id: target.id, lines: 400 }) });
+    if (!state.term || state.term.id !== target.id || !$("t-term")) return;  // the view moved on
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    if (text.trim()) {
+    if (data.text.trim()) {
       el.classList.remove("idle");
-      el.textContent = text;
+      el.textContent = data.text;
     } else {
       el.classList.add("idle");
       el.textContent = "Waiting for the session to come up…";
@@ -484,11 +665,27 @@ async function fetchTerminal() {
   }
 }
 
+async function sendInput(text, keys) {
+  const target = state.term;
+  if (!target) return;
+  if ($("t-err")) $("t-err").textContent = "";
+  try {
+    const body = JSON.stringify(target.kind === "run"
+      ? { text, keys }
+      : { id: target.id, text, keys });
+    await api(target.kind === "run" ? `/api/runs/${target.id}/input` : "/api/agents/input",
+              { method: "POST", body });
+    setTimeout(fetchTerminal, 250);
+  } catch (e) {
+    if ($("t-err")) $("t-err").textContent = e.message;
+  }
+}
+
 // -------------------------------------------------------------- create task
 
-function openCreate() {
+function openCreate(prefill) {
   closeModal();
-  const scopes = (state.scopes || []);
+  prefill = prefill || {};
   scrim(`
     <header><div><h2>New task</h2></div><button class="x" id="c-close">&times;</button></header>
     <div class="body">
@@ -499,10 +696,10 @@ function openCreate() {
       <div class="grid2">
         <div><label for="c-scope">Scope</label>
           <select id="c-scope"><option value="">(first scope)</option>${
-            scopes.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select></div>
+            state.scopeNames.map(s => `<option value="${esc(s)}" ${s === prefill.scope ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></div>
         <div><label for="c-agent">Agent</label>
           <select id="c-agent"><option value="">(scope default)</option>${
-            state.agents.map(a => `<option value="${esc(a.name)}">${esc(a.name)}</option>`).join("")}</select></div>
+            state.adapters.map(a => `<option value="${esc(a)}" ${a === prefill.agent ? "selected" : ""}>${esc(a)}</option>`).join("")}</select></div>
       </div>
       <label for="c-schedule">Schedule <span class="sub" style="text-transform:none">(blank = manual)</span></label>
       <input id="c-schedule" placeholder="every 5m  ·  0 9 * * 1-5">
@@ -576,10 +773,13 @@ async function boot() {
   try {
     const info = (await api("/api/status")).status;
     $("instance").textContent = `${info.instance} · ${info.root}`;
-    state.scopes = info.scopes || [];
+    state.scopeNames = info.scopes || [];
   } catch (e) { $("instance").textContent = e.message; }
 
-  try { state.agents = (await api("/api/agents")).agents; } catch { state.agents = []; }
+  try {
+    state.scopes = (await api("/api/agents")).scopes;
+    if (state.scopes.length) state.adapters = state.scopes[0].available;
+  } catch { state.scopes = []; }
 
   try {
     const tasks = (await api("/api/tasks")).tasks;
@@ -589,7 +789,7 @@ async function boot() {
 
   $("tab-tasks").onclick = () => showTab("tasks");
   $("tab-agents").onclick = () => showTab("agents");
-  $("newTask").onclick = openCreate;
+  $("newTask").onclick = () => openCreate();
 
   connect();
 }

@@ -1,3 +1,4 @@
+use crate::agent::AgentSession;
 use crate::run::Run;
 use crate::task::{Task, TaskEntry};
 use chrono::{DateTime, Utc};
@@ -33,6 +34,12 @@ pub enum Event {
     RunUpdated {
         run: Run,
     },
+    AgentUpdated {
+        agent: AgentSession,
+    },
+    AgentRemoved {
+        id: String,
+    },
 }
 
 impl Event {
@@ -56,6 +63,7 @@ impl Event {
             Event::TaskCreated { task } | Event::TaskUpdated { task } => Some(&task.id),
             Event::TaskDeleted { id } | Event::TaskEntry { id, .. } => Some(id),
             Event::RunStarted { run } | Event::RunUpdated { run } => Some(&run.task_id),
+            Event::AgentUpdated { .. } | Event::AgentRemoved { .. } => None,
             Event::DaemonStarted { .. } => None,
         }
     }

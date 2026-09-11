@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{FactoryError, Result};
 use crate::task::Task;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -29,31 +29,50 @@ pub struct LaunchSpec {
     pub env: BTreeMap<String, String>,
 }
 
+/// What ties a launch to one attempt at one task. Absent when the agent is
+/// being started to stand there rather than to do something.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskBinding {
+    pub task: Task,
+    pub run_id: String,
+    pub attempt: u32,
+    /// The secret the agent must present when reporting on this run.
+    pub token: String,
+}
+
 /// Everything an agent adapter needs to phrase a prompt and a launch.
 #[derive(Debug, Clone)]
 pub struct AgentContext {
-    pub task: Task,
-    /// The attempt this prompt is for. A retry is a different run of the same
-    /// task, and an adapter may want to say so.
-    pub run_id: String,
-    pub attempt: u32,
+    pub scope: String,
     /// Absolute working directory for the run.
     pub cwd: PathBuf,
     /// Absolute path to the `factory` binary the agent is to call back with.
     pub factory_bin: PathBuf,
     /// Absolute path to the daemon's control socket.
     pub socket: PathBuf,
-    /// The secret the agent must present when reporting on this task.
-    pub token: String,
+    /// `None` for a standing agent: it is being started to be there, and has
+    /// nothing to report on.
+    pub task: Option<TaskBinding>,
 }
 
 impl AgentContext {
+    pub fn binding(&self) -> Result<&TaskBinding> {
+        self.task.as_ref().ok_or_else(|| {
+            FactoryError::BadRequest(
+                "this agent was started without a task, so there is nothing to say to it".into(),
+            )
+        })
+    }
+
     /// The reporting contract, in the words every built-in agent puts in its
     /// prompt. Adapters are free to phrase it differently, but the commands
     /// have to be these.
     pub fn reporting_contract(&self) -> String {
+        let Some(binding) = &self.task else {
+            return String::new();
+        };
         let bin = self.factory_bin.display();
-        let id = &self.task.id;
+        let id = &binding.task.id;
         format!(
             "Report progress by running these commands in your shell. They are how \
              this task is tracked; nothing watches your terminal to guess.\n\
@@ -71,14 +90,18 @@ impl AgentContext {
 
     /// The same contract as environment, for adapters that would rather read it.
     pub fn env(&self) -> BTreeMap<String, String> {
-        BTreeMap::from([
-            ("FACTORY_TASK_ID".to_string(), self.task.id.clone()),
-            ("FACTORY_RUN_ID".to_string(), self.run_id.clone()),
-            ("FACTORY_RUN_ATTEMPT".to_string(), self.attempt.to_string()),
-            ("FACTORY_TASK_TOKEN".to_string(), self.token.clone()),
+        let mut env = BTreeMap::from([
+            ("FACTORY_SCOPE".to_string(), self.scope.clone()),
             ("FACTORY_SOCKET".to_string(), self.socket.display().to_string()),
             ("FACTORY_BIN".to_string(), self.factory_bin.display().to_string()),
-        ])
+        ]);
+        if let Some(b) = &self.task {
+            env.insert("FACTORY_TASK_ID".into(), b.task.id.clone());
+            env.insert("FACTORY_TASK_TOKEN".into(), b.token.clone());
+            env.insert("FACTORY_RUN_ID".into(), b.run_id.clone());
+            env.insert("FACTORY_RUN_ATTEMPT".into(), b.attempt.to_string());
+        }
+        env
     }
 }
 
@@ -93,8 +116,11 @@ pub trait Agent: Send + Sync {
         format!("{} agent", self.name())
     }
 
+    /// How to bring this agent up. Called for a task run and for a standing
+    /// agent alike; `ctx.task` says which.
     async fn launch_spec(&self, ctx: &AgentContext) -> Result<LaunchSpec>;
 
-    /// The text submitted to the agent once it is up.
+    /// The text submitted to the agent once it is up. Only called when there
+    /// is a task: a standing agent is started and then left alone.
     async fn prompt(&self, ctx: &AgentContext) -> Result<String>;
 }

@@ -6,8 +6,13 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartRequest {
-    pub task_id: String,
-    /// Human-readable name for the session, so a person looking at the runtime
+    /// What this session is for -- a run id or a standing agent's id. Used in
+    /// logs, not by the runtime.
+    pub id: String,
+    /// The name the runtime should give the agent, if it names agents. This is
+    /// what `attach_command` will point at, so it wants to be readable.
+    pub name: String,
+    /// Human-readable label for the session, so a person looking at the runtime
     /// can tell what it is.
     pub label: String,
     pub cwd: PathBuf,
@@ -47,6 +52,21 @@ pub trait AgentRuntime: Send + Sync {
     async fn submit(&self, session: &SessionRef, text: &str) -> Result<()>;
 
     async fn status(&self, session: &SessionRef) -> Result<RuntimeStatus>;
+
+    /// Type literal text into the session without submitting it.
+    async fn send_text(&self, session: &SessionRef, text: &str) -> Result<()>;
+
+    /// Press keys: `enter`, `esc`, `up`, `down`, `ctrl-c`, and whatever else
+    /// the runtime names. This is how a person answers a prompt the agent is
+    /// sitting on without leaving the page.
+    async fn send_keys(&self, session: &SessionRef, keys: &[String]) -> Result<()>;
+
+    /// The command a person types to get into this session themselves, when
+    /// the runtime can name one. `None` is an honest answer -- better than a
+    /// command that will not work.
+    fn attach_command(&self, _session: &SessionRef) -> Option<String> {
+        None
+    }
 
     /// Recent terminal output, for the UI and for post-mortems.
     async fn read(&self, session: &SessionRef, lines: u32) -> Result<String>;
