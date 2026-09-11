@@ -11,6 +11,8 @@
 //! a render mode that fails silently would be worse than one that is simply
 //! not offered.
 
+import { mb } from "./site.js";
+
 let T = null;
 let scene, cam, rr, sun, hemi, amb, ray, mouse;
 let cv, onSelect;
@@ -201,7 +203,7 @@ function hall(b, PAL) {
   );
   ring.rotation.x = -Math.PI / 2; ring.position.set(hw / 2, 0.24, hd / 2); g.add(ring);
 
-  const size = b.footprintKnown ? `${(b.sizeBytes / 1e6).toFixed(b.sizeBytes / 1e6 < 10 ? 1 : 0)} MB` : "size unknown";
+  const size = b.footprintKnown ? mb(b.sizeBytes) : "size unknown";
   const sub = `${size} · ${b.agents.length} agent${b.agents.length === 1 ? "" : "s"}`;
   const lt = labelTex(b.name, sub);
   const sp = new T.Sprite(new T.SpriteMaterial({ map: lt.tex, depthWrite: false, transparent: true, depthTest: false }));
