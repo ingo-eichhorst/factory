@@ -12,6 +12,9 @@ export const state = {
   scopes: [],          // the agents page: scopes, each with its agents
   adapters: [],        // every agent adapter name, for the create form
   scopeNames: [],
+  root: "",            // the instance root, so the rail can read a scope path
+                       // as the config wrote it and not as the disk spells it
+  scope: null,         // the rail's selection, by name; null is every scope
   open: null,          // task id shown in the modal
   runs: [],            // runs of the open task
   run: null,           // selected run id

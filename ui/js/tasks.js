@@ -2,6 +2,7 @@
 //! whichever run is selected.
 
 import { $, esc, api, state, since, statusBadge, TERMINAL } from "./core.js";
+import { inScope, scopeLabel } from "./scopes.js";
 import { scrim, closeModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openEdit, scheduleText } from "./task-form.js";
@@ -14,8 +15,15 @@ export function scheduleLabel(s) {
 }
 
 export function renderTasks() {
-  const rows = [...state.tasks.values()].sort((a, b) => b.created_at.localeCompare(a.created_at));
+  // The selection is applied here and not by asking the daemon for one scope:
+  // the socket sends the whole task list again on connect and after a lag, and
+  // replaces `state.tasks` with it. A fetched subset would be flooded away.
+  const rows = [...state.tasks.values()]
+    .filter(t => inScope(t.scope))
+    .sort((a, b) => b.created_at.localeCompare(a.created_at));
   $("noTasks").hidden = rows.length > 0;
+  // Empty under a selection is a fact about the scope, not about the instance.
+  $("noTasks").textContent = state.scope ? `No tasks in ${scopeLabel()}.` : "Nothing here yet.";
   $("tasks").innerHTML = rows.map(t => `
     <tr class="row" data-id="${esc(t.id)}">
       <td><div class="title">${esc(t.title)}</div>

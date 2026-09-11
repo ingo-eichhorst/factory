@@ -3,15 +3,40 @@
 //! file that knows about all of them.
 
 import { $, api, state, connect, setTheme, currentTheme, toggleTheme } from "./core.js";
+import { initRail, writeHash } from "./scopes.js";
 import { closeModal } from "./modal.js";
 import { renderTasks, renderModal, loadJournal, retimeTerminal } from "./tasks.js";
 import { loadAgents, renderAgents } from "./agents.js";
-import { loadOccupancy } from "./occupancy.js";
+import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { openCreate } from "./task-form.js";
+
+// ------------------------------------------------------------------- scope
+
+/// What the rail does when the selection changes. Nothing is refetched: every
+/// page already holds the whole answer and the scope only decides how much of it
+/// is drawn. Re-render, never reload -- `loadAgents` rebuilds the rail, and a
+/// reload here would send it straight round again.
+function rerender(route) {
+  // Back and forward move the tab as well as the selection. The rail hands the
+  // route over rather than reaching into the page, because which tab is showing
+  // is the page's business.
+  if (route && route.tab !== state.tab) showTab(route.tab);
+  if (state.tab === "tasks") { renderTasks(); return; }
+  if (state.agentView === "occupancy") renderOccupancy(); else renderAgents();
+}
+
+/// The rail is a view over `state.scopes`, so it is rebuilt wherever that is
+/// refreshed -- here at boot and in `loadAgents`, which is the other place that
+/// refetches /api/agents. Exported so that one does not have to know what the
+/// rail has to be rebuilt with.
+export function rebuildRail() {
+  initRail(rerender);
+}
 
 // ------------------------------------------------------------------- tabs
 function showTab(name) {
   state.tab = name;
+  writeHash(name);
   $("view-tasks").hidden = name !== "tasks";
   $("view-agents").hidden = name !== "agents";
   $("tab-tasks").classList.toggle("on", name === "tasks");
@@ -50,12 +75,22 @@ async function boot() {
     const info = (await api("/api/status")).status;
     $("instance").textContent = `${info.instance} · ${info.root}`;
     state.scopeNames = info.scopes || [];
+    // A scope's served path is absolute, and the rail wants it the way the
+    // config wrote it. This is the only endpoint that says where the instance
+    // is, and it answers before the rail is built. Unanswered leaves the paths
+    // whole, which draws a deeper tree but never a wrong one.
+    state.root = info.root || "";
   } catch (e) { $("instance").textContent = e.message; }
 
   try {
     state.scopes = (await api("/api/agents")).scopes;
     if (state.scopes.length) state.adapters = state.scopes[0].available;
   } catch { state.scopes = []; }
+
+  // /api/agents is the only endpoint that carries a scope's path, so the tree
+  // cannot be built before it has answered. The rail reads the hash on the way
+  // up, which is why the selection is in place before anything below draws.
+  rebuildRail();
 
   try {
     const tasks = (await api("/api/tasks")).tasks;

@@ -3,6 +3,7 @@
 //! and the only job here is to keep them visually apart.
 
 import { $, esc, api, state, shortSpan } from "./core.js";
+import { inScope, scopeLabel } from "./scopes.js";
 import { openTask } from "./tasks.js";
 
 export const OCC_STEPS = [
@@ -49,7 +50,9 @@ export function renderOccupancy() {
     ticks += `<span style="left:${((t - from) / span * 100).toFixed(3)}%">${clockLabel(new Date(t), coarse)}</span>`;
   }
 
-  const body = occ.scopes.map(sc => {
+  // Only the rows are narrowed. The window, its ticks and the now line are the
+  // same clock whichever scope is being looked at, so they are left above.
+  const body = occ.scopes.filter(sc => inScope(sc.name)).map(sc => {
     const rows = sc.rows.map(r => {
       const parts = [];
 
@@ -105,13 +108,18 @@ export function renderOccupancy() {
   }).join("");
 
   const nowLeft = clamp(((now - from) / span) * 100);
+  // An empty chart under a selection is a fact about the scope. Falling through
+  // to the instance line would claim something about the daemon that is false.
+  const nothing = state.scope
+    ? `No agents in ${esc(scopeLabel())}.`
+    : "This instance declares no scopes.";
   const since = occ.liveness_since
     ? `Liveness has been recorded since ${new Date(occ.liveness_since).toLocaleString()}.`
     : `No liveness recorded yet — the strip stays empty until the daemon has seen an agent change state.`;
 
   $("occ").innerHTML = `
     <div class="occ-axis">${ticks}</div>
-    <div class="occ-body">${body || `<div class="empty">This instance declares no scopes.</div>`}
+    <div class="occ-body">${body || `<div class="empty">${nothing}</div>`}
       <div class="occ-now" style="left:calc(var(--lab) + (100% - var(--lab) - 58px) * ${(nowLeft / 100).toFixed(4)})"><b>now</b></div>
     </div>
     <div class="occ-legend">
