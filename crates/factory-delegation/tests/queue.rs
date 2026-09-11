@@ -378,9 +378,15 @@ fn child_to_parent_is_refused() {
     );
 
     match result {
-        Err(DelegationError::NotEligible { sender, target, .. }) => {
+        Err(DelegationError::NotEligible {
+            sender,
+            target,
+            kinship,
+            ..
+        }) => {
             assert_eq!(sender, tree.child_a1);
             assert_eq!(target, tree.parent_a);
+            assert_eq!(kinship, factory_registry::Kinship::Ancestor);
         }
         other => panic!("expected DelegationError::NotEligible (Ancestor), got {other:?}"),
     }
@@ -415,9 +421,15 @@ fn scope_targeting_itself_is_refused() {
     );
 
     match result {
-        Err(DelegationError::NotEligible { sender, target, .. }) => {
+        Err(DelegationError::NotEligible {
+            sender,
+            target,
+            kinship,
+            ..
+        }) => {
             assert_eq!(sender, tree.child_a1);
             assert_eq!(target, tree.child_a1);
+            assert_eq!(kinship, factory_registry::Kinship::SameScope);
         }
         other => panic!("expected DelegationError::NotEligible (SameScope), got {other:?}"),
     }
@@ -479,9 +491,15 @@ fn scope_to_nephew_is_refused() {
     );
 
     match result {
-        Err(DelegationError::NotEligible { sender, target, .. }) => {
+        Err(DelegationError::NotEligible {
+            sender,
+            target,
+            kinship,
+            ..
+        }) => {
             assert_eq!(sender, tree.parent_a);
             assert_eq!(target, tree.child_b1);
+            assert_eq!(kinship, factory_registry::Kinship::Unrelated);
         }
         other => panic!("expected DelegationError::NotEligible (Unrelated), got {other:?}"),
     }
@@ -513,9 +531,15 @@ fn scope_to_cousin_is_refused() {
     );
 
     match result {
-        Err(DelegationError::NotEligible { sender, target, .. }) => {
+        Err(DelegationError::NotEligible {
+            sender,
+            target,
+            kinship,
+            ..
+        }) => {
             assert_eq!(sender, tree.child_a1);
             assert_eq!(target, tree.child_b1);
+            assert_eq!(kinship, factory_registry::Kinship::Unrelated);
         }
         other => panic!("expected DelegationError::NotEligible (Unrelated), got {other:?}"),
     }
@@ -663,4 +687,81 @@ fn three_step_cycle_is_refused() {
     }
 
     assert_eq!(table_counts(&store), before);
+}
+
+// ---------------------------------------------------------------------
+// Station 12 drill, defect 3: the refusal text must read as a sentence.
+// ---------------------------------------------------------------------
+
+/// The station 12 drill's own observation:
+/// `"scope …0001 may not target scope …0001 — …0001 is itself of …0001"`
+/// and its `Unrelated` sibling read as nonsense, because the old `Display`
+/// template appended `" of {sender}"` onto a `reason` that already said
+/// everything needed. This asserts the exact rendered sentence for all
+/// three refused kinships — the mutation this test exists to kill is
+/// putting that trailing clause back.
+///
+/// Calls `rule::check` directly rather than routing through `queue`: the
+/// wording lives entirely in `DelegationError`'s `Display`, which `queue`
+/// does not touch, so a task/session detour would test nothing extra.
+#[test]
+fn not_eligible_display_reads_as_a_grammatical_sentence_for_every_kinship() {
+    use factory_delegation::rule::{Sender, check};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(dir.path()).expect("open");
+    let tree = build_tree(&mut store);
+
+    let same_scope = check(
+        store.connection(),
+        Sender::Agent {
+            scope_id: tree.child_a1,
+        },
+        tree.child_a1,
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(
+        same_scope.to_string(),
+        format!(
+            "scope {a} may not target scope {a} — {a} is the sender itself\n  help: design §6: an agent may target only a registered descendant or sibling scope; a nephew or cousin is reached through its parent",
+            a = tree.child_a1,
+        )
+    );
+
+    let ancestor = check(
+        store.connection(),
+        Sender::Agent {
+            scope_id: tree.child_a1,
+        },
+        tree.parent_a,
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(
+        ancestor.to_string(),
+        format!(
+            "scope {sender} may not target scope {target} — {target} is an ancestor of the sender\n  help: design §6: an agent may target only a registered descendant or sibling scope; a nephew or cousin is reached through its parent",
+            sender = tree.child_a1,
+            target = tree.parent_a,
+        )
+    );
+
+    let unrelated = check(
+        store.connection(),
+        Sender::Agent {
+            scope_id: tree.child_a1,
+        },
+        tree.child_b1,
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(
+        unrelated.to_string(),
+        format!(
+            "scope {sender} may not target scope {target} — {target} is unrelated to the sender (a nephew or cousin scope — design §6 says such work goes through the target's parent)\n  help: design §6: an agent may target only a registered descendant or sibling scope; a nephew or cousin is reached through its parent",
+            sender = tree.child_a1,
+            target = tree.child_b1,
+        )
+    );
 }

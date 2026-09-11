@@ -48,19 +48,85 @@ fn validate_scope(scope: &str) -> Result<(), NoteError> {
     Ok(())
 }
 
+/// Turn an RFC 3339 timestamp into the compact, colon-free stamp used in a
+/// memory entry's filename — ISO 8601 basic format, e.g. `20260911T085505Z`
+/// for `2026-09-11T08:55:05+00:00`.
+///
+/// A colon in a filename is not cosmetic breakage. `rsync` reads everything
+/// before the first colon in a path argument as a remote host name, so
+/// syncing an instance directory by naming a file inside it directly
+/// misreads the path. Colons are outright illegal in a Windows filename, so
+/// the directory cannot be copied to or restored from a Windows machine or
+/// many network shares. And Finder displays a colon in a filename as `/`.
+/// Factory's own operator guides tell people to copy `.factory/` around
+/// with ordinary tools, so the name has to survive them. Do not "tidy" this
+/// back to plain RFC 3339 — that is the bug this function exists to avoid.
+///
+/// This is a textual transform, not a timestamp parse: `factory-knowledge`
+/// takes no `chrono` (or other datetime) dependency, and does not need one
+/// to strip a fixed set of punctuation. Deleting `-` and `:` can never
+/// reorder two timestamps relative to each other, so the result still sorts
+/// chronologically exactly when the input did. Every timestamp this crate's
+/// callers stamp is UTC, so a trailing `+00:00` (its colon already gone)
+/// collapses to the conventional `Z`.
+fn compact_timestamp(created_at: &str) -> String {
+    let mut compact: String = created_at
+        .chars()
+        .filter(|c| *c != '-' && *c != ':')
+        .collect();
+    if let Some(prefix) = compact.strip_suffix("+0000") {
+        compact = format!("{prefix}Z");
+    }
+    compact
+}
+
+/// The inverse of [`compact_timestamp`], best-effort: expands the on-disk
+/// stamp back into a hyphenated, colonic RFC 3339 string for
+/// [`list_entries`] to report — the entry's own `created_at`, as reported
+/// by `memory list`, stays readable; only the filename had to change.
+///
+/// Every stamp `stage_entry` produces today is exactly 16 bytes,
+/// `YYYYMMDDTHHMMSSZ`, since callers stamp UTC at second resolution. A
+/// stamp that does not match that shape — a directory carrying an older
+/// build's colon-named files, or one hand-edited — is returned unchanged
+/// rather than guessed at: a wrong reconstruction would be a wrong
+/// observation, and the compact string, while less pretty, is at least
+/// true (ADR 0017).
+fn expand_timestamp(compact: &str) -> String {
+    let bytes = compact.as_bytes();
+    let is_basic_utc_stamp = bytes.len() == 16
+        && bytes[8] == b'T'
+        && bytes[15] == b'Z'
+        && bytes[..8].iter().all(u8::is_ascii_digit)
+        && bytes[9..15].iter().all(u8::is_ascii_digit);
+    if !is_basic_utc_stamp {
+        return compact.to_string();
+    }
+    format!(
+        "{}-{}-{}T{}:{}:{}+00:00",
+        &compact[0..4],
+        &compact[4..6],
+        &compact[6..8],
+        &compact[9..11],
+        &compact[11..13],
+        &compact[13..15],
+    )
+}
+
 /// The directory one scope's entries live in, and the filename one entry
 /// occupies within it.
 ///
-/// `created_at` is the filename's sortable prefix — [`list_entries`] still
-/// sorts explicitly rather than trusting directory order, but naming files
-/// this way means a plain directory listing is *also* roughly
-/// chronological, which is worth having for an operator poking around with
-/// `ls`. `id` is the suffix, joined with `--`: a UUID's canonical string
-/// form never contains `--` (each group is separated by a single hyphen),
-/// so splitting from the right on the last `--` finds exactly this
-/// boundary regardless of what `created_at` itself contains — as long as
-/// `created_at` has no `/` in it, which [`stage_entry`] already checks
-/// before it ever reaches here.
+/// The filename's timestamp half is [`compact_timestamp`]'s output, not
+/// `created_at` itself — see that function's own doc comment for why a
+/// colon cannot appear here. [`list_entries`] still sorts explicitly
+/// rather than trusting directory order, but naming files this way means a
+/// plain directory listing is *also* roughly chronological, which is worth
+/// having for an operator poking around with `ls`. `id` is the suffix,
+/// joined with `--`: a UUID's canonical string form never contains `--`
+/// (each group is separated by a single hyphen), so splitting from the
+/// right on the last `--` finds exactly this boundary regardless of what
+/// the compact stamp contains — it has no `/`, and compaction has already
+/// removed every `-` from it.
 fn entry_path(
     memory_root: &Path,
     scope: &str,
@@ -69,7 +135,7 @@ fn entry_path(
 ) -> std::path::PathBuf {
     memory_root
         .join(scope)
-        .join(format!("{created_at}--{id}.md"))
+        .join(format!("{}--{id}.md", compact_timestamp(created_at)))
 }
 
 /// Stage one memory entry for `scope`. Nothing is visible under the
@@ -147,10 +213,10 @@ pub fn list_entries(memory_root: &Path, scope: &str) -> Result<Vec<MemoryEntry>,
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        // The last `--` is always the `created_at`/`id` boundary — see
-        // `entry_path`'s doc comment for why that holds regardless of
-        // what `created_at` contains.
-        let Some((created_at, id_str)) = stem.rsplit_once("--") else {
+        // The last `--` is always the compact-stamp/id boundary — see
+        // `entry_path`'s doc comment for why that holds regardless of what
+        // the compact stamp contains.
+        let Some((stamp, id_str)) = stem.rsplit_once("--") else {
             continue;
         };
         let Ok(id) = uuid::Uuid::parse_str(id_str) else {
@@ -159,7 +225,7 @@ pub fn list_entries(memory_root: &Path, scope: &str) -> Result<Vec<MemoryEntry>,
         let text = std::fs::read_to_string(&path)?;
         entries.push(MemoryEntry {
             id,
-            created_at: created_at.to_string(),
+            created_at: expand_timestamp(stamp),
             text,
         });
     }

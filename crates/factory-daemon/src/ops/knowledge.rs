@@ -79,12 +79,19 @@ struct WritePayload {
 /// uses for every other timestamp it produces (`ops::schedule`'s own
 /// `Utc::now()` calls), rendered as RFC3339 so it sorts and parses the same
 /// way every other daemon-produced timestamp does.
+///
+/// Second resolution, not `to_rfc3339`'s default microseconds: design §7
+/// and backlog §12 both call this an "updated *date*," nothing anywhere
+/// orders notes by sub-second time, and every other `created_at` this
+/// system stamps is SQLite's `CURRENT_TIMESTAMP` — also second-resolution.
+/// Sub-second digits in a note a person reads are noise that also disagrees
+/// with the rest of the system, for no gain.
 pub(crate) fn write(h: &FactoryHandler, _scope_id: uuid::Uuid, payload: Value) -> HandlerOutcome {
     let payload: WritePayload = errors::parse_payload(&payload)?;
 
     let name =
         factory_knowledge::note::NoteName::parse(&payload.name).map_err(errors::knowledge_error)?;
-    let updated = Utc::now().to_rfc3339();
+    let updated = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
     let frontmatter = factory_knowledge::note::Frontmatter {
         title: payload.title,
         status: payload.status,

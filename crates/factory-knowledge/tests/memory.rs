@@ -16,12 +16,17 @@ fn uuid(seed: u32) -> uuid::Uuid {
 #[test]
 fn stage_then_commit_makes_the_entry_readable() {
     let root = tempdir().unwrap();
+    // `+00:00`, matching what `ops::memory::add` actually stamps
+    // (`chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false)`) —
+    // the round trip through the compact filename always reconstructs this
+    // notation (see `expand_timestamp`'s own doc comment), so this is the
+    // one shape a caller gets back byte for byte.
     let staged = memory::stage_entry(
         root.path(),
         "team-alpha",
         "first entry",
         uuid(1),
-        "2026-09-11T10:00:00Z",
+        "2026-09-11T10:00:00+00:00",
     )
     .unwrap();
     staged.commit().unwrap();
@@ -30,7 +35,127 @@ fn stage_then_commit_makes_the_entry_readable() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].id, uuid(1));
     assert_eq!(entries[0].text, "first entry");
-    assert_eq!(entries[0].created_at, "2026-09-11T10:00:00Z");
+    assert_eq!(entries[0].created_at, "2026-09-11T10:00:00+00:00");
+}
+
+// ---------------------------------------------------------------------
+// Station 12 drill, defect 1: the filename must survive ordinary tooling.
+// ---------------------------------------------------------------------
+
+/// The exact shape observed on disk during the drill: microsecond
+/// precision, a `+00:00` offset — two colons in the time and one in the
+/// offset, none of which may reach the filename.
+#[test]
+fn the_filename_contains_no_character_ordinary_tooling_treats_specially() {
+    let root = tempdir().unwrap();
+    let staged = memory::stage_entry(
+        root.path(),
+        "team-alpha",
+        "entry",
+        uuid(1),
+        "2026-09-11T08:55:05.014184+00:00",
+    )
+    .unwrap();
+
+    let filename = staged
+        .path()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("staged path has a filename")
+        .to_string();
+
+    // `rsync` treats a colon specially (a remote host prefix); Windows
+    // refuses several of these outright; Finder renders `:` as `/`. None of
+    // them may appear, in a filename this crate produces itself.
+    const RESERVED: &[char] = &[':', '<', '>', '"', '/', '\\', '|', '?', '*'];
+    for reserved in RESERVED {
+        assert!(
+            !filename.contains(*reserved),
+            "filename {filename:?} must not contain {reserved:?}"
+        );
+    }
+}
+
+/// The mutation this test exists to kill: putting the colons back. A
+/// canonical UTC, second-resolution `created_at` (exactly what
+/// `ops::memory::add` stamps after the defect 2 fix) must compact to
+/// exactly the ISO 8601 basic form ADR 0022's own report names.
+#[test]
+fn a_canonical_utc_timestamp_compacts_to_the_exact_basic_form() {
+    let root = tempdir().unwrap();
+    let staged = memory::stage_entry(
+        root.path(),
+        "team-alpha",
+        "entry",
+        uuid(1),
+        "2026-09-11T08:55:05+00:00",
+    )
+    .unwrap();
+
+    let filename = staged
+        .path()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("staged path has a filename")
+        .to_string();
+
+    assert_eq!(
+        filename,
+        format!("20260911T085505Z--{}.md", uuid(1)),
+        "the filename must be the compact ISO 8601 basic stamp, not the raw RFC 3339 one"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Station 12 drill, defect 2: second-resolution timestamps can collide.
+// ---------------------------------------------------------------------
+
+/// Two entries stamped in the same second must still land in two distinct
+/// files (the `id` suffix, not the timestamp, is what makes a filename
+/// unique) and `list_entries` must still return both, in a total,
+/// deterministic order — the exact thing reducing `created_at` to second
+/// resolution makes far more likely to actually happen.
+#[test]
+fn same_second_entries_stay_distinct_and_totally_ordered() {
+    let root = tempdir().unwrap();
+    // `uuid(1) < uuid(2)` under `Uuid`'s own byte-wise `Ord` — this pins
+    // which order `list_entries` must return them in, rather than merely
+    // asserting both are present.
+    memory::stage_entry(
+        root.path(),
+        "team-alpha",
+        "second by id",
+        uuid(2),
+        "2026-09-11T08:55:05+00:00",
+    )
+    .unwrap()
+    .commit()
+    .unwrap();
+    memory::stage_entry(
+        root.path(),
+        "team-alpha",
+        "first by id",
+        uuid(1),
+        "2026-09-11T08:55:05+00:00",
+    )
+    .unwrap()
+    .commit()
+    .unwrap();
+
+    let scope_dir = root.path().join("team-alpha");
+    let file_count = std::fs::read_dir(&scope_dir).unwrap().count();
+    assert_eq!(
+        file_count, 2,
+        "same-second entries must land in two distinct files, not overwrite each other"
+    );
+
+    let entries = memory::list_entries(root.path(), "team-alpha").unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+        vec!["first by id", "second by id"],
+        "a tied created_at must still fall back to a total order, here by id"
+    );
 }
 
 #[test]

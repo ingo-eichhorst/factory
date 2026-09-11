@@ -73,6 +73,15 @@ fn write_then_show_round_trips() {
         .as_str()
         .expect("updated is a string");
     chrono::DateTime::parse_from_rfc3339(updated).expect("updated is RFC3339");
+    // Station 12 drill, defect 2: a stamped `updated` is a *date* a person
+    // reads, not a debugging timestamp. The mutation this assertion exists
+    // to kill is reverting `ops::knowledge::write`'s `to_rfc3339_opts` back
+    // to bare `to_rfc3339`, which reintroduces microseconds (a `.` before
+    // the offset) that this crate's own drill found on disk.
+    assert!(
+        !updated.contains('.'),
+        "updated must be second resolution, not sub-second: {updated}"
+    );
 
     let shown = handler
         .handle_query(qry(

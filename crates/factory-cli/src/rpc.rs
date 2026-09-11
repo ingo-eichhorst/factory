@@ -37,12 +37,16 @@ fn send(root: &Path, request: factory_daemon::Request) -> RpcOutcome {
         // "not running" rather than as an error, so a successful `factory
         // stop` does not report a failure on its way out.
         Err(factory_daemon::ClientError::ClosedWithoutResponse) => RpcOutcome::NotRunning(socket),
+        // `remote.details` is not echoed here. It stays on the wire — a
+        // caller reading `factory_daemon::client::call`'s own return value
+        // directly still gets it, in `RemoteError::details` — but a refusal
+        // that already explains itself in `message` (station 12's own
+        // `conflict.ambiguous_scope_name`, among others) does not need that
+        // structured data restated as a raw JSON blob on the human-facing
+        // line: it only repeats what the sentence already said and shows a
+        // person internals they cannot use.
         Err(factory_daemon::ClientError::Remote(remote)) => {
-            let mut message = format!("{}: {}", remote.code, remote.message);
-            if remote.details != serde_json::json!({}) {
-                message.push_str(&format!(" ({})", remote.details));
-            }
-            RpcOutcome::Error(message)
+            RpcOutcome::Error(format!("{}: {}", remote.code, remote.message))
         }
         Err(other) => RpcOutcome::Error(other.to_string()),
     }

@@ -401,6 +401,29 @@ pub(crate) fn list(h: &FactoryHandler, _scope_id: uuid::Uuid, payload: Value) ->
         );
         let (targetable, refusal_reason) = match check_result {
             Ok(()) => (true, None),
+            // `NotEligible` gets its own wording: this row already carries
+            // the target's `scope_name` a few lines down, and the caller
+            // (whoever passed `--session`/`--scope`) already knows who it
+            // is, so a reader should not have to cross-reference either
+            // scope's raw id to understand a listing that already shows
+            // both names (station 12 drill, defect 4). `kinship` comes
+            // straight off the error `rule::check` returned above — this
+            // never asks `factory_registry::kinship` a second time, which
+            // would make this function a second place that decides
+            // targetability rather than merely wording it (ADR 0022
+            // decision 8).
+            Err(factory_delegation::rule::DelegationError::NotEligible { kinship, .. }) => {
+                (false, Some(listing_refusal_reason(kinship).to_string()))
+            }
+            // `AlreadyInChain`, `Registry`, `Session`, and `Task` cannot
+            // actually happen here — the chain is always empty and
+            // `target_scope_id` is drawn straight from the `scopes` table —
+            // except that `caller_scope_id` can itself be an unregistered id
+            // when the caller passed a hypothetical `--scope`
+            // (`resolve_caller`'s own doc comment), which surfaces as
+            // `DelegationError::Registry`. That case is not this defect's
+            // concern, so it keeps the raw error text rather than growing
+            // its own wording.
             Err(e) => (false, Some(e.to_string())),
         };
 
@@ -437,6 +460,30 @@ pub(crate) fn list(h: &FactoryHandler, _scope_id: uuid::Uuid, payload: Value) ->
     }
 
     h.success(json!({ "scopes": scopes_json }), false)
+}
+
+/// [`factory_registry::Kinship`]'s three refused variants, worded for one
+/// row of `agent.list`'s own listing (station 12 drill, defect 4) — never
+/// used for `task send`'s refusal, which has no listing to lean on and so
+/// keeps `factory_delegation::rule::DelegationError`'s own id-based
+/// `Display` (`errors::delegation_error`).
+///
+/// Neither scope's id, nor even its name, appears here: the row this
+/// reason sits in already carries the target's `scope_name`, and "the
+/// calling scope" is unambiguous because a listing only ever answers on
+/// behalf of one caller.
+fn listing_refusal_reason(kinship: factory_registry::Kinship) -> &'static str {
+    use factory_registry::Kinship;
+    match kinship {
+        Kinship::SameScope => "the calling scope itself",
+        Kinship::Ancestor => "an ancestor of the calling scope",
+        Kinship::Unrelated => {
+            "unrelated to the calling scope — a nephew or cousin, reached through its parent"
+        }
+        Kinship::Descendant | Kinship::Sibling => unreachable!(
+            "rule::check only returns NotEligible for a kinship it refuses, and Descendant/Sibling are never refused"
+        ),
+    }
 }
 
 fn lifetime_str(l: factory_config::Lifetime) -> &'static str {

@@ -50,6 +50,19 @@ fn add_then_list_round_trips() {
         .expect("memory.add succeeds");
     assert_eq!(added.result["scope"], "alpha");
     assert_eq!(added.result["id"], entry_id.to_string());
+    // Station 12 drill, defect 2: a stamped `created_at` is second
+    // resolution, matching every other timestamp this system stamps
+    // (SQLite's own `CURRENT_TIMESTAMP`). The mutation this assertion
+    // exists to kill is reverting `ops::memory::add`'s `to_rfc3339_opts`
+    // back to bare `to_rfc3339`, which reintroduces microseconds.
+    let created_at = added.result["created_at"]
+        .as_str()
+        .expect("created_at is a string");
+    chrono::DateTime::parse_from_rfc3339(created_at).expect("created_at is RFC3339");
+    assert!(
+        !created_at.contains('.'),
+        "created_at must be second resolution, not sub-second: {created_at}"
+    );
 
     let listed = handler
         .handle_query(qry(alpha, "memory.list", serde_json::json!({})))

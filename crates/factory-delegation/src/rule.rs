@@ -78,15 +78,26 @@ pub enum DelegationError {
     Task(#[from] factory_task::TaskError),
 
     /// Kinship refused the target — the first gate in [`check`]. `reason`
-    /// is a fixed phrase for the refused [`Kinship`] variant (never
-    /// `Descendant`/`Sibling` — see [`refusal_reason`], this variant's only
-    /// producer).
+    /// is a fixed, already-complete phrase for the refused [`Kinship`]
+    /// variant (never `Descendant`/`Sibling` — see [`refusal_reason`], this
+    /// variant's only producer), plain enough that the `Display` impl only
+    /// has to drop it into "{target} is {reason}" without gluing on
+    /// anything else — an earlier version appended " of {sender}" here,
+    /// which read as nonsense (`"… is its own ancestor of …"`) precisely
+    /// because `reason` already names the sender itself where needed
+    /// (`"an ancestor of the sender"`, `"unrelated to the sender (…)"`).
+    /// `kinship` is kept alongside `reason` — not just derivable from it —
+    /// so a caller with its own idea of how to word a refusal for a human
+    /// (`ops::agent::list`, ADR 0022 decision 8) can match on the
+    /// structured value directly, rather than pattern-matching this
+    /// crate's own display text or re-deriving kinship a second time.
     #[error(
-        "scope {sender} may not target scope {target} — {target} is {reason} of {sender}\n  help: design §6: an agent may target only a registered descendant or sibling scope; a nephew or cousin is reached through its parent"
+        "scope {sender} may not target scope {target} — {target} is {reason}\n  help: design §6: an agent may target only a registered descendant or sibling scope; a nephew or cousin is reached through its parent"
     )]
     NotEligible {
         sender: uuid::Uuid,
         target: uuid::Uuid,
+        kinship: Kinship,
         reason: &'static str,
     },
 
@@ -110,10 +121,15 @@ pub enum DelegationError {
 /// `Descendant` and `Sibling`.
 fn refusal_reason(kinship: Kinship) -> &'static str {
     match kinship {
-        Kinship::SameScope => "itself",
-        Kinship::Ancestor => "its own ancestor",
+        // `target == sender` whenever this kinship is refused, but the
+        // `Display` template still shows both — "the sender itself" says
+        // plainly that they are the same scope, rather than trusting a bare
+        // "itself" to bind back to the right noun once dropped into a
+        // sentence with two ids already in it.
+        Kinship::SameScope => "the sender itself",
+        Kinship::Ancestor => "an ancestor of the sender",
         Kinship::Unrelated => {
-            "unrelated to it (a nephew or cousin scope — design §6 says such work goes through the target's parent)"
+            "unrelated to the sender (a nephew or cousin scope — design §6 says such work goes through the target's parent)"
         }
         Kinship::Descendant | Kinship::Sibling => {
             unreachable!("check() only calls refusal_reason for a kinship it is about to refuse")
@@ -178,6 +194,7 @@ pub fn check(
                     return Err(DelegationError::NotEligible {
                         sender: scope_id,
                         target: target_scope_id,
+                        kinship,
                         reason: refusal_reason(kinship),
                     });
                 }

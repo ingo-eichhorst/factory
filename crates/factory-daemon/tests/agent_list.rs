@@ -155,12 +155,15 @@ fn targetable_reflects_kinship_computed_by_the_shared_rule() {
         self_row["targetable"], false,
         "a scope may never target itself: {self_row:?}"
     );
-    assert!(
+    // Station 12 drill, defect 4: the exact wording, not merely a substring
+    // — a `.contains("itself")` check here would have passed against the
+    // drill's own broken text (`"…0001 is itself of …0001"`) just as
+    // happily as against the fix, so it would not have caught the defect.
+    assert_eq!(
         self_row["refusal_reason"]
             .as_str()
-            .expect("refusal_reason is set")
-            .contains("itself"),
-        "{self_row:?}"
+            .expect("refusal_reason is set"),
+        "the calling scope itself",
     );
 
     let ancestor_row = find_scope(scopes, root);
@@ -168,13 +171,22 @@ fn targetable_reflects_kinship_computed_by_the_shared_rule() {
         ancestor_row["targetable"], false,
         "an agent may not target its own ancestor: {ancestor_row:?}"
     );
-    assert!(
+    assert_eq!(
         ancestor_row["refusal_reason"]
             .as_str()
-            .expect("refusal_reason is set")
-            .contains("ancestor"),
-        "{ancestor_row:?}"
+            .expect("refusal_reason is set"),
+        "an ancestor of the calling scope",
     );
+
+    // The actual defect: raw scope ids in a field the reader has to
+    // cross-reference against ids the same row already spells out as
+    // names. Neither `alpha`'s nor `root`'s id may appear in either
+    // message now that both are worded generically.
+    for row in [self_row, ancestor_row] {
+        let reason = row["refusal_reason"].as_str().unwrap();
+        assert!(!reason.contains(&alpha.to_string()), "{row:?}");
+        assert!(!reason.contains(&root.to_string()), "{row:?}");
+    }
 
     let sibling_row = find_scope(scopes, beta);
     assert_eq!(
@@ -182,6 +194,47 @@ fn targetable_reflects_kinship_computed_by_the_shared_rule() {
         "a sibling is targetable: {sibling_row:?}"
     );
     assert!(sibling_row["refusal_reason"].is_null(), "{sibling_row:?}");
+}
+
+/// The third refused kinship `targetable_reflects_kinship_computed_by_the_shared_rule`
+/// cannot exercise: `common::build`'s scopes are all direct children of the
+/// fixture's root, so none of them are ever `Unrelated` to each other. A
+/// nested `path` (`factory_registry::resolve` derives `parent_id` from
+/// filesystem nesting, not from a field in `config.yaml`) builds the two
+/// two-level branches needed for a cousin pair.
+#[test]
+fn unrelated_scope_is_worded_as_a_nephew_or_cousin_reached_through_its_parent() {
+    let fixture = common::build(&[
+        common::ScopeSpec::new("parent-a", "parent-a"),
+        common::ScopeSpec::new("child-a1", "parent-a/child-a1"),
+        common::ScopeSpec::new("parent-b", "parent-b"),
+        common::ScopeSpec::new("child-b1", "parent-b/child-b1"),
+    ]);
+    let child_a1 = fixture.scope("child-a1");
+    let child_b1 = fixture.scope("child-b1");
+    let handler = new_handler(&fixture);
+
+    let listed = handler
+        .handle_query(qry(serde_json::json!({ "scope_id": child_a1.to_string() })))
+        .expect("agent.list succeeds");
+    let scopes = listed.result["scopes"]
+        .as_array()
+        .expect("scopes is an array");
+
+    let cousin_row = find_scope(scopes, child_b1);
+    assert_eq!(
+        cousin_row["targetable"], false,
+        "a cousin is not targetable: {cousin_row:?}"
+    );
+    assert_eq!(
+        cousin_row["refusal_reason"]
+            .as_str()
+            .expect("refusal_reason is set"),
+        "unrelated to the calling scope — a nephew or cousin, reached through its parent",
+    );
+    let reason = cousin_row["refusal_reason"].as_str().unwrap();
+    assert!(!reason.contains(&child_a1.to_string()), "{cousin_row:?}");
+    assert!(!reason.contains(&child_b1.to_string()), "{cousin_row:?}");
 }
 
 /// `agent.list` must call `rule::check` with `Sender::Agent { scope_id:

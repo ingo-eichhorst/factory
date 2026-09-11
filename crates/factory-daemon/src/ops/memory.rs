@@ -82,6 +82,16 @@ fn scope_name_and_collisions(
 
 /// The refusal decision 12 asks for, naming which scopes collided so an
 /// operator can actually fix it (rename one of them in `config.yaml`).
+///
+/// `message` already spells out `name` and every colliding id in prose —
+/// that is what a person reads. `details` carries the same two facts
+/// structured (`scope_name`, `scope_ids`) for a machine reader that would
+/// rather not parse the sentence — this crate's own `ErrorBody` keeps that
+/// on the wire regardless of how any particular client renders it. What
+/// changed for station 12's drill is `factory-cli`'s `rpc::send`, which used
+/// to also echo `details` back as a raw JSON parenthetical appended to the
+/// human-facing line; it no longer does, so this function does not need to
+/// withhold `details` to keep the printed text clean.
 fn ambiguous_scope_name(name: &str, collisions: &[uuid::Uuid]) -> ErrorBody {
     let ids: Vec<String> = collisions.iter().map(ToString::to_string).collect();
     errors::err_with_details(
@@ -125,7 +135,11 @@ pub(crate) fn add(h: &FactoryHandler, scope_id: uuid::Uuid, payload: Value) -> H
         return Err(ambiguous_scope_name(&scope_name, &collisions));
     }
 
-    let created_at = Utc::now().to_rfc3339();
+    // Second resolution, not `to_rfc3339`'s default microseconds — see
+    // `ops::knowledge::write`'s own comment on its `updated` stamp; the
+    // reasoning is identical, and this is the other of the two fields
+    // ADR 0022 decision 13's stamping stance covers.
+    let created_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
     let root = memory_root(h.instance_root());
 
     // Step 1: stage.

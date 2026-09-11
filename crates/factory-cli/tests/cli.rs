@@ -334,6 +334,11 @@ enum FakeResponse {
     Err {
         code: &'static str,
         message: &'static str,
+        /// Almost always `json!({})` (see [`spawn_fake_error_daemon`]) — a
+        /// non-empty value is how `remote_error_with_details_does_not_print_them_as_raw_json`
+        /// (station 12 drill, defect 5) reproduces a refusal that carries
+        /// structured `details` alongside its message.
+        details: Value,
     },
 }
 
@@ -376,10 +381,14 @@ fn spawn_fake_daemon(
                         "event_cursor": 1,
                         "result": result,
                     }),
-                    FakeResponse::Err { code, message } => json!({
+                    FakeResponse::Err {
+                        code,
+                        message,
+                        details,
+                    } => json!({
                         "api": "factory.error/v1",
                         "request_id": request_id,
-                        "error": { "code": code, "message": message, "retryable": false, "details": {} },
+                        "error": { "code": code, "message": message, "retryable": false, "details": details },
                     }),
                 };
                 let line = serde_json::to_string(&response).unwrap();
@@ -393,9 +402,15 @@ fn spawn_fake_daemon(
     FakeDaemon { requests }
 }
 
-/// A fake daemon whose every response is a `factory.error/v1` envelope.
+/// A fake daemon whose every response is a `factory.error/v1` envelope,
+/// with an empty `details` — the ordinary case, exercised by
+/// `remote_error_is_rendered_and_exits_distinctly`.
 fn spawn_fake_error_daemon(root: &Path, code: &'static str, message: &'static str) -> FakeDaemon {
-    spawn_fake_daemon(root, move |_request| FakeResponse::Err { code, message })
+    spawn_fake_daemon(root, move |_request| FakeResponse::Err {
+        code,
+        message,
+        details: json!({}),
+    })
 }
 
 fn op_name(request: &Value) -> &str {
@@ -1049,6 +1064,51 @@ fn remote_error_is_rendered_and_exits_distinctly() {
     assert_eq!(output.status.code(), Some(exit::REMOTE_ERROR), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not_found.task"), "stderr: {stderr}");
+}
+
+/// Station 12 drill, defect 5: a refusal whose `message` already ends at a
+/// `help:` line must not grow a trailing `({...})` echoing its own
+/// `details` back as raw JSON — reproduced with the exact shape
+/// `conflict.ambiguous_scope_name` sends (a message with a `help:` line,
+/// plus a non-empty `details`). The mutation this test exists to kill is
+/// restoring `rpc::send`'s `if remote.details != json!({}) { … }` append.
+#[test]
+fn remote_error_with_details_does_not_print_them_as_raw_json() {
+    let dir = TempDir::new().unwrap();
+    let message = "scope name `alpha` is registered for 2 scopes (a, b); a memory directory \
+                    named by scope would merge their entries into one unrecoverable pile\n  \
+                    help: rename one of the colliding scopes in `.factory/config.yaml` so each \
+                    has a unique name";
+    let daemon = spawn_fake_daemon(dir.path(), move |_request| FakeResponse::Err {
+        code: "conflict.ambiguous_scope_name",
+        message,
+        details: json!({ "scope_name": "alpha", "scope_ids": ["a", "b"] }),
+    });
+
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args(["task", "show", "--task-id", &uuid::Uuid::nil().to_string()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(exit::REMOTE_ERROR), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("help: rename one of the colliding scopes"),
+        "the help line must still print: {stderr}"
+    );
+    assert!(
+        !stderr.contains("scope_ids") && !stderr.contains("{\"scope_name\""),
+        "the structured `details` must not be echoed back as raw JSON: {stderr}"
+    );
+    assert_eq!(
+        stderr.trim_end(),
+        format!("factory: conflict.ambiguous_scope_name: {message}"),
+        "the printed line must end at the help text, nothing appended: {stderr}"
+    );
+
+    assert!(!daemon.requests().is_empty());
 }
 
 // --- Station 12: agent list, knowledge write|list|show, memory add|list ----
