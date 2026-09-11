@@ -52,9 +52,23 @@ impl Interface<Engine> for HttpInterface {
         })?;
         let addr = listener
             .local_addr()
-            .map(|a| a.to_string())
-            .unwrap_or(bind.clone());
-        tracing::info!(url = %format!("http://{addr}"), "http interface listening");
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("reading bound address: {e}")))?;
+
+        if addr.ip().is_loopback() {
+            tracing::info!(url = %format!("http://{addr}"), "http interface listening");
+        } else {
+            // Bound past loopback, and this interface has no authentication:
+            // anyone who can reach it can start a task, and a task runs
+            // commands as whoever runs the daemon. Say so every time, with the
+            // address a person would actually type.
+            tracing::warn!(
+                "http interface is reachable from the network and has no \
+                 authentication -- anyone who can reach it can run commands as you"
+            );
+            for url in reachable_urls(addr.port()) {
+                tracing::info!(url = %url, "http interface listening");
+            }
+        }
 
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -69,6 +83,23 @@ impl Interface<Engine> for HttpInterface {
 
         Ok(())
     }
+}
+
+/// The addresses a person on the same network would type. Asking a UDP socket
+/// where it would send from is how to learn the primary address without
+/// enumerating interfaces or taking a dependency; nothing is sent.
+fn reachable_urls(port: u16) -> Vec<String> {
+    let mut urls = vec![format!("http://localhost:{port}")];
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if sock.connect("8.8.8.8:80").is_ok() {
+            if let Ok(local) = sock.local_addr() {
+                if !local.ip().is_loopback() && !local.ip().is_unspecified() {
+                    urls.push(format!("http://{}:{port}", local.ip()));
+                }
+            }
+        }
+    }
+    urls
 }
 
 fn router(engine: Arc<Engine>) -> Router {

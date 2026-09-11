@@ -107,7 +107,7 @@ daemon:
   interfaces:
     - kind: cli              # unix socket at .factory/factory.sock
     - kind: http
-      bind: 127.0.0.1:8787
+      bind: 127.0.0.1:8787   # 0.0.0.0:8787 to reach it from the network
   tick_seconds: 5
   ack_timeout_seconds: 180
   task_timeout_seconds: 3600
@@ -192,7 +192,11 @@ envelope, not inventing a second API.
   history lives in the journal rather than as its own record.
 - **The socket is the security boundary.** It is `0600` in `.factory/`, and the
   callback token only stops one running agent from closing another's task by
-  mistake. The HTTP interface has no authentication and binds to loopback.
+  mistake. The HTTP interface has no authentication at all. It binds to
+  loopback by default; `bind: 0.0.0.0:8787` puts it on the local network, where
+  anyone who can reach it can start a task — and a task runs commands as
+  whoever runs the daemon. The daemon warns on every start when it is bound
+  past loopback, and prints the address a person would actually type.
 - **First-run agent prompts.** An agent that has never seen a directory may ask
   a human to trust it before it will read the task. Factory cannot answer that
   for you — it will time the task out and tell you where to look.
