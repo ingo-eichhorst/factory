@@ -12,6 +12,11 @@ factory-adapter = { path = "../factory-adapter" }
 factory-config = { path = "../factory-config" }
 factory-context = { path = "../factory-context" }
 factory-delegation = { path = "../factory-delegation" }
+# Station 12's two durable writing paths (ADR 0022 decision 1): the daemon
+# is the process that stages a note or a memory entry and commits the
+# `durable_writes` row around it, so the note-graph logic is a dependency of
+# this crate rather than of the CLI.
+factory-knowledge = { path = "../factory-knowledge" }
 factory-paths = { path = "../factory-paths" }
 factory-recovery = { path = "../factory-recovery" }
 factory-registry = { path = "../factory-registry" }

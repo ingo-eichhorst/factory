@@ -354,6 +354,7 @@ dependencies = [
  "factory-config",
  "factory-context",
  "factory-delegation",
+ "factory-knowledge",
  "factory-paths",
  "factory-recovery",
  "factory-registry",
@@ -419,6 +420,15 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "factory-knowledge"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror",
  "uuid",
 ]
 

@@ -9,6 +9,7 @@ members = [
     "crates/factory-delegation",
     "crates/factory-doctor",
     "crates/factory-e2e",
+    "crates/factory-knowledge",
     "crates/factory-paths",
     "crates/factory-recovery",
     "crates/factory-registry",

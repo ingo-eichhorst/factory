@@ -1,0 +1,18 @@
+[package]
+name = "factory-knowledge"
+description = "The two durable writing paths (design §7, backlog §12): the shared note graph and scope-local memory, with the atomic write both need (ADR 0022)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
