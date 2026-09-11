@@ -1,0 +1,7 @@
+name: file-store
+kind: task
+description: "example plugin: tasks in a single JSON file"
+command: ["python3", "adapter.py"]
+timeout_seconds: 20
+# env:
+#   FILE_STORE_PATH: tasks.json   # unset: sits next to adapter.py instead

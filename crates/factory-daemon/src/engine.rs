@@ -274,6 +274,14 @@ impl Engine {
             .map(|a| (a.name.clone(), (a.description.clone(), a.source.clone())))
             .collect();
         let available: Vec<String> = described.keys().cloned().collect();
+        let available_stores: Vec<String> = adapters
+            .adapters
+            .iter()
+            .filter(|a| a.kind == "task")
+            .map(|a| a.name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
 
         let standing = self.store.agents().await?;
         let active = self.store.active_runs().await?;
@@ -314,6 +322,7 @@ impl Engine {
                 .runtime
                 .clone()
                 .unwrap_or_else(|| self.factory.config.daemon.default_runtime.clone());
+            let task_store = self.factory.task_store_for(&scope.name).to_string();
 
             let mut agents = Vec::new();
             let mut covered = std::collections::BTreeSet::new();
@@ -449,6 +458,8 @@ impl Engine {
                 runtime,
                 agents,
                 available: available.clone(),
+                task_store,
+                available_stores: available_stores.clone(),
             });
         }
 

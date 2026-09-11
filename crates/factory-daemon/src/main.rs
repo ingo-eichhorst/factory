@@ -8,14 +8,18 @@ mod interfaces;
 mod occupancy;
 mod scheduler;
 mod schedule;
+mod stores;
 mod ui;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use factory_core::adapter::interface::{Interface, InterfaceContext};
+use factory_core::adapter::TaskStore;
 use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
 use factory_core::event::Event;
 use factory_plugins::registry::Registry;
 use factory_plugins::SqliteStore;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -103,6 +107,9 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
             agents: Vec::new(),
             runtime: None,
             git: None,
+            // A fresh instance has one engine, so the scope it writes names
+            // none of its own and takes the instance default.
+            task_store: None,
         }],
         plugins_dir: None,
     };
@@ -145,7 +152,32 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
         tracing::warn!("plugin not loaded -- {problem}");
     }
 
-    let store = registry.store(&factory.config.daemon.task_store)?;
+    // The instance default is the ledger: whatever engine a scope keeps its
+    // tasks in, the runs, the journal and the standing agents stay here.
+    let ledger = registry.store(&factory.config.daemon.task_store)?;
+
+    // A scope that names an engine nobody registered has to be a refusal now,
+    // in front of whoever started the daemon. Falling back to the default
+    // would put that project's tasks in the wrong database and say nothing.
+    let mut by_scope: HashMap<String, Arc<dyn TaskStore>> = HashMap::new();
+    for scope in &factory.config.scopes {
+        let Some(name) = &scope.task_store else { continue };
+        if name == &factory.config.daemon.task_store {
+            continue;
+        }
+        let picked = registry
+            .store(name)
+            .with_context(|| format!("scope {:?} names a task store that is not registered", scope.name))?;
+        by_scope.insert(scope.name.clone(), picked);
+    }
+
+    let store: Arc<dyn TaskStore> = if by_scope.is_empty() {
+        ledger
+    } else {
+        let scoped = stores::ScopedStores::new(ledger, by_scope);
+        tracing::info!("{}", scoped.description());
+        Arc::new(scoped)
+    };
 
     let interface_names: Vec<String> = factory
         .config

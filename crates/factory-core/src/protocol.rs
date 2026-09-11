@@ -286,9 +286,15 @@ pub struct ScopeView {
     pub default_agent: String,
     pub runtime: String,
     pub agents: Vec<AgentView>,
-    /// Every agent adapter registered, so a task can be started with any of
+    /// Every registered agent adapter, so a task can be started with any of
     /// them regardless of what the scope declares.
     pub available: Vec<String>,
+    /// Where this scope's tasks are kept. The instance default unless the
+    /// scope named something else.
+    pub task_store: String,
+    /// Every registered task-store adapter, so the page can say what the
+    /// alternatives are.
+    pub available_stores: Vec<String>,
 }
 
 #[cfg(test)]

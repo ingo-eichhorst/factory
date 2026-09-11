@@ -257,6 +257,10 @@ pub struct Scope {
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<String>,
+    /// Which task-store adapter holds this scope's tasks. Absent means the
+    /// instance default, `daemon.task_store`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_store: Option<String>,
 }
 
 impl Scope {
@@ -434,6 +438,31 @@ impl Factory {
             self.root.join(&scope.path)
         })
     }
+
+    /// The task-store adapter a scope's tasks live in. A scope that does not
+    /// name one uses the instance default.
+    pub fn task_store_for(&self, scope: &str) -> &str {
+        self.config
+            .scopes
+            .iter()
+            .find(|s| s.name == scope)
+            .and_then(|s| s.task_store.as_deref())
+            .unwrap_or(&self.config.daemon.task_store)
+    }
+
+    /// Every distinct task-store adapter this instance uses: the default,
+    /// plus whatever the scopes name. In a stable order, default first.
+    pub fn task_stores(&self) -> Vec<String> {
+        let mut out = vec![self.config.daemon.task_store.clone()];
+        for scope in &self.config.scopes {
+            if let Some(store) = &scope.task_store {
+                if !out.contains(store) {
+                    out.push(store.clone());
+                }
+            }
+        }
+        out
+    }
 }
 
 /// FNV-1a. Small, and -- unlike `DefaultHasher` -- defined to stay the same
@@ -574,5 +603,62 @@ mod tests {
         let a = format!("/tmp/{}a", "verylongsegment/".repeat(12));
         let b = format!("/tmp/{}b", "verylongsegment/".repeat(12));
         assert_ne!(factory(&a).socket_path(), factory(&b).socket_path());
+    }
+
+    #[test]
+    fn a_scope_that_names_a_task_store_gets_it() {
+        let mut f = factory("/tmp/x");
+        f.config.scopes = vec![
+            serde_yaml_ng::from_str("name: demo\npath: .\ntask_store: postgres\n").unwrap(),
+        ];
+        assert_eq!(f.task_store_for("demo"), "postgres");
+    }
+
+    #[test]
+    fn a_scope_without_a_task_store_uses_the_instance_default() {
+        let mut f = factory("/tmp/x");
+        f.config.scopes = vec![serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap()];
+        assert_eq!(f.task_store_for("demo"), "sqlite");
+    }
+
+    #[test]
+    fn an_unknown_scope_name_gets_the_instance_default() {
+        let f = factory("/tmp/x");
+        assert_eq!(f.task_store_for("ghost"), "sqlite");
+    }
+
+    #[test]
+    fn task_stores_lists_the_default_first_and_dedupes_the_rest() {
+        let mut f = factory("/tmp/x");
+        f.config.scopes = vec![
+            serde_yaml_ng::from_str("name: a\npath: .\ntask_store: sqlite\n").unwrap(),
+            serde_yaml_ng::from_str("name: b\npath: .\ntask_store: postgres\n").unwrap(),
+            serde_yaml_ng::from_str("name: c\npath: .\ntask_store: postgres\n").unwrap(),
+            serde_yaml_ng::from_str("name: d\npath: .\n").unwrap(),
+        ];
+        assert_eq!(
+            f.task_stores(),
+            vec!["sqlite".to_string(), "postgres".to_string()],
+            "the instance default leads, and postgres only appears once"
+        );
+    }
+
+    #[test]
+    fn a_config_with_no_scope_naming_a_task_store_still_parses() {
+        // The back-compat guarantee that matters: instances written before
+        // this field existed must keep loading unchanged.
+        let yaml = "version: 1\ninstance:\n  id: i\n  name: n\nscopes:\n  - name: demo\n    path: .\n";
+        let cfg: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(cfg.scopes[0].task_store, None);
+    }
+
+    #[test]
+    fn a_scopes_task_store_round_trips_and_stays_silent_when_unset() {
+        let named: Scope =
+            serde_yaml_ng::from_str("name: demo\npath: .\ntask_store: postgres\n").unwrap();
+        assert!(serde_yaml_ng::to_string(&named).unwrap().contains("task_store: postgres"));
+
+        let unnamed: Scope = serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap();
+        assert!(!serde_yaml_ng::to_string(&unnamed).unwrap().contains("task_store"));
     }
 }
