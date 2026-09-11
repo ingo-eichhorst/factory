@@ -2,15 +2,24 @@
 //! the buttons that start, stop and type at them.
 
 import { $, esc, api, state, since, statusBadge } from "./core.js";
+import { inScope, scopeLabel } from "./scopes.js";
 import { scrim, closeModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
+// The roster and the wiring open each other: the wiring builds the rail at
+// boot, and this is the other place /api/agents is refetched, which is the
+// only thing the rail's tree is made of. A cycle ES modules handle, because
+// nothing here runs until a page is shown.
+import { rebuildRail } from "./app.js";
 
 export async function loadAgents() {
   try {
     state.scopes = (await api("/api/agents")).scopes;
     if (state.scopes.length) state.adapters = state.scopes[0].available;
+    // A scope added or dropped in the config has to reach the rail, not just
+    // the roster underneath it.
+    rebuildRail();
     renderAgents();
   } catch (e) {
     $("agents").innerHTML = `<div class="err">${esc(e.message)}</div>`;
@@ -30,7 +39,12 @@ export function agentTags(a) {
 }
 
 export function renderAgents() {
-  $("agents").innerHTML = state.scopes.map(s => {
+  // Filtered down to nothing is a fact about the selection. An instance that
+  // declares no scopes at all is a different thing to say, and says it.
+  const nothing = state.scope
+    ? `No agents in ${esc(scopeLabel())}.`
+    : "This instance declares no scopes.";
+  $("agents").innerHTML = state.scopes.filter(s => inScope(s.name)).map(s => {
     const rows = s.agents.map(a => {
       const standing = a.lifetime !== "task";
       const live = a.state === "ready" || a.state === "starting";
@@ -82,7 +96,7 @@ export function renderAgents() {
       </div>
       ${rows || `<div class="empty">No agents declared.</div>`}
     </div>`;
-  }).join("") || `<div class="empty">This instance declares no scopes.</div>`;
+  }).join("") || `<div class="empty">${nothing}</div>`;
 
   for (const el of $("agents").querySelectorAll("[data-act]")) {
     el.onclick = (e) => { e.stopPropagation(); agentAction(el); };

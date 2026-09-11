@@ -33,6 +33,11 @@
 </header>
 
 <main>
+  <!-- The rail is a sibling of both views, not a part of either: the selected
+       scope is not a property of the tasks page or the agents page, and it has
+       to survive the tab switch. -->
+  <nav id="rail" aria-label="Scopes"></nav>
+  <div id="content">
   <div id="view-tasks">
     <div class="bar">
       <h2>Tasks</h2>
@@ -66,6 +71,7 @@
     </div>
     <section id="view-occupancy"><div class="occ" id="occ" style="--lab:186px">loading…</div></section>
     <div class="agents" id="agents" hidden></div>
+  </div>
   </div>
 </main>
 

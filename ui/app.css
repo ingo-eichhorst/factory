@@ -91,7 +91,15 @@ header h1 {
   padding: 6px 9px; border-radius: 3px; cursor: pointer;
 }
 .theme-switch:hover { border-color: var(--signal); color: var(--signal); }
-main { padding: 18px 18px 48px; max-width: 1560px; margin: 0 auto; }
+/* Two tracks: the scope rail, and whichever view is showing. The second one is
+   `minmax(0, 1fr)` and not `1fr` because a grid track is otherwise as wide as
+   its widest child, and a terminal frame is as wide as the runtime drew it --
+   one wide transcript would push the rail off the screen. */
+main {
+  padding: 18px 18px 48px; max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 16px; align-items: start;
+}
+#content { min-width: 0; }
 section { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
 .bar { display: flex; align-items: center; gap: 10px; margin-bottom: 11px; }
 .bar h2 {
@@ -331,3 +339,51 @@ code.id { font: 400 11px/1.4 var(--mono); color: var(--faint); }
 }
 .occ-note b { color: var(--ink); font-weight: 600; }
 @media (max-width: 720px) { .occ { --lab: 110px; } }
+
+/* --------------------------------------------------------------- the rail
+   The scope tree. Depth is a custom property rather than nesting, because the
+   narrow layout below lays the same rows out in a line and has to be able to
+   drop the indent without unpicking the markup. */
+#rail {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+  padding: 7px 6px 9px; min-width: 0;
+}
+#rail ul { list-style: none; margin: 0; padding: 0; }
+.rail-row {
+  display: block; width: 100%; text-align: left; border: 1px solid transparent;
+  background: none; border-radius: 3px; color: var(--ink-2);
+  padding: 5px 8px 5px calc(8px + var(--d, 0) * 9px);
+  font: 400 12px/1.35 var(--sans);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+button.rail-row { cursor: pointer; }
+button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
+.rail-row:focus-visible { outline: 1px solid var(--signal); outline-offset: -1px; }
+.rail-row[aria-current="true"] {
+  background: var(--signal-wash); color: var(--ink); font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--signal);
+}
+.rail-all { margin-bottom: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line-soft); border-radius: 3px 3px 0 0; }
+/* A path segment nobody registered a scope on. It is a label and not a
+   control: there is nothing the daemon could be asked about it. */
+.rail-row.group {
+  color: var(--faint); font: 600 9px/1 var(--cond); letter-spacing: .13em;
+  text-transform: uppercase; padding-top: 10px; padding-bottom: 4px;
+}
+.rail-empty { margin: 0; padding: 6px 8px 8px; color: var(--muted); font-size: 11.5px; }
+
+/* A tree cannot keep its indent lying on its side, so on a narrow screen the
+   rail becomes one strip of rows in tree order that scrolls sideways. */
+@media (max-width: 900px) {
+  main { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  #rail { display: flex; align-items: center; gap: 4px; overflow-x: auto; padding: 6px; }
+  #rail ul, #rail li { display: contents; }
+  /* `flex: 0 0 auto` is what makes the strip scroll instead of squeeze. A flex
+     item shrinks by default, and these rows are already told to ellipsize, so
+     without it a dozen scopes are compressed to a few pixels of first letter
+     each -- every name reads as "f…" and `overflow-x` never has anything to
+     scroll, because nothing ever overflows. */
+  .rail-row { width: auto; flex: 0 0 auto; padding: 5px 9px; }
+  .rail-row.group { padding: 5px 9px; }
+  .rail-all { margin-bottom: 0; padding-bottom: 5px; border-bottom: 0; border-right: 1px solid var(--line-soft); border-radius: 3px; }
+}

@@ -101,14 +101,20 @@ export function agentOptions(scopeName, selected) {
 }
 
 export function scopeOptions(selected) {
+  // Someone looking at one scope is almost certainly making a task for it, so
+  // the selection stands in for a prefill the caller did not give.
+  const on = selected || state.scope;
   return `<option value="">(first scope)</option>` + state.scopeNames.map(s =>
-    `<option value="${esc(s)}" ${s === selected ? "selected" : ""}>${esc(s)}</option>`).join("");
+    `<option value="${esc(s)}" ${s === on ? "selected" : ""}>${esc(s)}</option>`).join("");
 }
 
 /// The fields a task carries beyond its title. Shared by create and edit so the
 /// two cannot drift into offering different things.
 export function taskFields(v) {
   v = v || {};
+  // Which scope the agent list is for has to be the one the scope select shows,
+  // selection included, or the form offers agents that scope never declared.
+  const scope = v.scope || state.scope || state.scopeNames[0];
   return `
     <label for="c-title">Title</label>
     <input id="c-title" placeholder="What should happen" value="${esc(v.title || "")}">
@@ -118,7 +124,7 @@ export function taskFields(v) {
       <div><label for="c-scope">Scope</label>
         <select id="c-scope">${scopeOptions(v.scope)}</select></div>
       <div><label for="c-agent">Agent</label>
-        <select id="c-agent">${agentOptions(v.scope || state.scopeNames[0], v.agent)}</select></div>
+        <select id="c-agent">${agentOptions(scope, v.agent)}</select></div>
     </div>
     <label for="c-schedule">Schedule <span class="sub" style="text-transform:none">(blank = manual)</span></label>
     <input id="c-schedule" placeholder="every 5m  ·  0 9 * * 1-5" value="${esc(v.scheduleText || "")}">
