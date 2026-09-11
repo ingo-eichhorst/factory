@@ -9,6 +9,7 @@ use chrono::Utc;
 use factory_core::adapter::agent::AgentContext;
 use factory_core::adapter::runtime::{RuntimeStatus, Screen, StartRequest};
 use factory_core::agent::{AgentSession, AgentState, Lifetime};
+use factory_core::role::Role;
 use factory_core::config::ScopeAgent;
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
@@ -57,9 +58,10 @@ impl Engine {
         }
 
         let id = AgentSession::id_for(scope, name);
-        if let Some(existing) = self.store.get_agent(&id).await? {
-            if existing.state.is_live() && self.agent_alive(&existing).await {
-                return Ok(existing);
+        let existing = self.store.get_agent(&id).await?;
+        if let Some(existing) = &existing {
+            if existing.state.is_live() && self.agent_alive(existing).await {
+                return Ok(existing.clone());
             }
         }
 
@@ -80,8 +82,11 @@ impl Engine {
             &decl.harness,
             &runtime_name_,
             decl.lifetime,
-            decl.role,
+            decl.role.clone(),
         );
+        // A role somebody gave this agent outlives the session it was given in.
+        agent.assigned_role = existing.and_then(|a| a.assigned_role);
+        agent.role = agent.role_with(&decl.role);
         // A fresh token each time it comes up: an old session's token must not
         // still speak for the agent that replaced it.
         let identity = factory_core::new_token();
@@ -169,6 +174,40 @@ impl Engine {
         });
         self.record_gone(&agent.id, &agent.scope, &agent.name).await;
         tracing::info!(agent = %agent.id, "standing agent stopped");
+        Ok(agent)
+    }
+
+    /// Give a standing agent a role, or take the given one away and let the
+    /// config decide again.
+    ///
+    /// The session it is already in keeps running: a role is checked when the
+    /// agent asks for something, not when it starts, so the new one holds from
+    /// its next request. Only a person does this -- an agent that could hand
+    /// itself a role would not be bounded by the one it has.
+    ///
+    /// A standing agent, because that is what has a row to remember it in. A
+    /// task agent is whatever its scope declares for the length of one run, so
+    /// its role is a question for the config.
+    pub async fn set_agent_role(&self, id: &str, role: Option<Role>) -> Result<AgentSession> {
+        let mut agent = self.require_agent(id).await?;
+        if let Some(role) = &role {
+            if !self.roles.contains(role) {
+                return Err(FactoryError::BadRequest(format!(
+                    "no role named {:?}. This instance has: {}",
+                    role.as_str(),
+                    self.roles.names().join(", ")
+                )));
+            }
+        }
+        let declared = self.role_of(&agent.scope, &agent.name);
+        agent.assigned_role = role;
+        agent.role = agent.role_with(&declared);
+        agent.last_seen_at = Utc::now();
+        self.store.put_agent(&agent).await?;
+        self.bus.publish(Event::AgentUpdated {
+            agent: agent.clone(),
+        });
+        tracing::info!(agent = %agent.id, role = %agent.role, "role set");
         Ok(agent)
     }
 
@@ -273,7 +312,7 @@ impl Engine {
                         let mut a = existing.clone();
                         a.declared = true;
                         a.lifetime = decl.lifetime;
-                        a.role = decl.role;
+                        a.role = a.role_with(&decl.role);
                         a.last_seen_at = Utc::now();
                         let _ = self.store.put_agent(&a).await;
                         tracing::info!(agent = %id, "adopted a standing agent that outlived the daemon");
@@ -284,7 +323,7 @@ impl Engine {
                         let mut a = existing.clone();
                         a.declared = true;
                         a.lifetime = decl.lifetime;
-                        a.role = decl.role;
+                        a.role = a.role_with(&decl.role);
                         a.session = None;
                         if a.state != AgentState::Stopped {
                             a.state = AgentState::Gone;
@@ -303,7 +342,7 @@ impl Engine {
                             &decl.harness,
                             &self.runtime_for(&scope.name),
                             decl.lifetime,
-                            decl.role,
+                            decl.role.clone(),
                         );
                         let _ = self.store.put_agent(&a).await;
                         if decl.autostart() {

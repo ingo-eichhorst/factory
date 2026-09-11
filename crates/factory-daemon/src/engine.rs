@@ -11,7 +11,8 @@ use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
     AgentActivity, AgentView, Envelope, Payload, Request, Response, ScopeView, StatusInfo,
 };
-use factory_core::agent::{AgentSession, AgentState, Role};
+use factory_core::agent::{AgentSession, AgentState};
+use factory_core::role::{Role, Roles};
 use factory_core::run::{NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
     NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
@@ -26,6 +27,9 @@ use crate::schedule;
 pub struct Engine {
     pub factory: Factory,
     pub registry: Registry,
+    /// Every role this instance knows, resolved once. Nothing asks the config
+    /// again: two answers to "what may this agent do" is how they drift.
+    pub roles: Roles,
     pub store: Arc<dyn TaskStore>,
     pub bus: EventBus,
     pub factory_bin: PathBuf,
@@ -45,9 +49,17 @@ impl Engine {
         factory_bin: PathBuf,
         interfaces: Vec<String>,
     ) -> Self {
+        // `Factory::load` refuses a config whose roles do not resolve, so this
+        // can only fail for an instance assembled in code. Say so and carry on
+        // with the two that ship rather than taking the daemon down.
+        let roles = factory.config.roles().unwrap_or_else(|e| {
+            tracing::error!("{e}; falling back to the built-in roles");
+            Roles::presets()
+        });
         Self {
             factory,
             registry,
+            roles,
             store,
             bus: EventBus::default(),
             factory_bin,
@@ -105,6 +117,7 @@ impl Engine {
             Request::Adapters => Ok(self.registry.list().into()),
             Request::Agents => Ok(Payload::Scopes {
                 scopes: self.scope_views().await?,
+                roles: self.role_views(),
             }),
             Request::Occupancy { minutes } => Ok(Payload::Occupancy {
                 occupancy: self.occupancy(minutes).await?,
@@ -114,6 +127,12 @@ impl Engine {
             }),
             Request::AgentStop { id } => Ok(Payload::Agent {
                 agent: self.stop_agent(&id).await?.redacted(),
+            }),
+            Request::AgentRole { id, role } => Ok(Payload::Agent {
+                agent: self
+                    .set_agent_role(&id, role.map(Role::new))
+                    .await?
+                    .redacted(),
             }),
             Request::AgentInput { id, text, keys } => {
                 self.agent_input(&id, text.as_deref(), &keys).await?;
@@ -345,7 +364,14 @@ impl Engine {
                     description,
                     source,
                     lifetime: decl.lifetime.as_str().to_string(),
-                    role: decl.role.as_str().to_string(),
+                    role: live
+                        .map(|a| a.role_with(&decl.role))
+                        .unwrap_or_else(|| decl.role.clone())
+                        .as_str()
+                        .to_string(),
+                    assigned_role: live
+                        .and_then(|a| a.assigned_role.clone())
+                        .map(|r| r.as_str().to_string()),
                     autostart: decl.autostart(),
                     state: live
                         .map(|a| a.state.as_str().to_string())
@@ -390,7 +416,8 @@ impl Engine {
                         description,
                         source,
                         lifetime: "task".into(),
-                        role: Role::Worker.as_str().to_string(),
+                        role: Role::default().as_str().to_string(),
+                        assigned_role: None,
                         autostart: false,
                         state: "task".into(),
                         is_default: true,
@@ -425,7 +452,8 @@ impl Engine {
                     description,
                     source,
                     lifetime: "task".into(),
-                    role: Role::Worker.as_str().to_string(),
+                    role: Role::default().as_str().to_string(),
+                    assigned_role: None,
                     autostart: false,
                     state: "task".into(),
                     is_default: false,
@@ -453,6 +481,19 @@ impl Engine {
         }
 
         Ok(views)
+    }
+
+    /// Every role this instance knows, for a roster and for a picker.
+    pub fn role_views(&self) -> Vec<factory_core::protocol::RoleView> {
+        self.roles
+            .all()
+            .map(|r| factory_core::protocol::RoleView {
+                name: r.name.as_str().to_string(),
+                describe: r.describe.clone(),
+                grants: r.written().into_iter().map(str::to_string).collect(),
+                reach: r.reach.as_str().to_string(),
+            })
+            .collect()
     }
 
     // -- naming an agent ----------------------------------------------------

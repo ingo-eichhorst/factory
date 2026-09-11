@@ -124,6 +124,43 @@ An agent says which one it is by presenting the token Factory put in its
 session as `FACTORY_TOKEN`; the CLI sends it on every request. No token means
 the owner.
 
+Those two are not the whole list. A role is a **name**, a set of **grants**, and
+a **reach**, and an instance names as many as its way of working needs:
+
+```yaml
+roles:
+  runner:
+    describe: starts the work that is already on the board, and nothing else
+    grants: [task.run, task.cancel]
+    reach: scope          # own (its own work) or scope (everything in it)
+  reviewer:
+    describe: works its own tasks and says what it found
+    grants: [task.edit, task.report]
+    reach: own
+```
+
+The grants decide **which** requests an agent may make; the reach decides
+**whose** tasks, agents and sessions it may make them about. `task.*`,
+`agent.*` and `*` are wildcards; a grant that names nothing is refused at load
+rather than ignored, and so is an agent given a role the instance never defined
+— the message says which agent it was. The grants are:
+
+    task.create  task.edit  task.delete  task.run  task.cancel  task.report
+    agent.start  agent.stop  agent.input  run.input
+
+Reading is not among them, because reading is open to every agent: one that
+cannot see the board cannot coordinate with anyone.
+
+`worker` and `foreman` ship written in that same vocabulary — a worker is
+`[task.edit, task.report, run.input]` at `reach: own`, a foreman is everything
+at `reach: scope` — and neither can be redefined. An instance that could
+rewrite `worker` from one line would widen every agent that never asked for a
+role.
+
+What a grant cannot say is written out in `access.rs`, in the arm it belongs
+to: handing a task to somebody else is not editing it, so a role that reaches
+only its own work may change what its task says and never whose it is.
+
 > **This is not a security boundary.** Every agent runs as the owner of the
 > instance and can reach the same socket, so an agent that simply leaves the
 > token out is indistinguishable from a person. Roles keep an agent that
@@ -142,12 +179,28 @@ daemon:
 
 A scope that already declares an agent with `role: foreman` keeps its own.
 
+A role can also be given to a standing agent while it is running, from the
+roster or from the CLI, without editing the config:
+
+```sh
+factory agent role demo/watcher reviewer   # until somebody says otherwise
+factory agent role demo/watcher            # back to what the config says
+```
+
+The assignment is kept with the agent, not written into `config.yaml`: the file
+stays something a person owns, and the roster says when an agent is wearing a
+role its declaration does not give it. The session it is already in keeps
+running — a role is checked when an agent asks for something, so the new one
+holds from its next request. Only the owner may do this. An agent that could
+hand itself a role would not be bounded by the one it has.
+
 ```sh
 factory agents                       # scopes, their agents, and what each is doing
 factory agent start demo watcher
 factory agent stop demo/watcher      # stays stopped until someone asks again
 factory agent output demo/watcher
 factory agent input demo/watcher --text "how is it going?" --key enter
+factory agent role demo/watcher reviewer
 ```
 
 Each standing agent also carries the command to get into its terminal yourself —

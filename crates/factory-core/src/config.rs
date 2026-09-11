@@ -1,4 +1,5 @@
-use crate::agent::{Lifetime, Role};
+use crate::agent::Lifetime;
+use crate::role::{Role, RoleSpec, Roles};
 use crate::error::{FactoryError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,10 +20,43 @@ pub struct Config {
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub scopes: Vec<Scope>,
+    /// Roles this instance names for itself, on top of `worker` and `foreman`.
+    /// Keyed by the name an agent is given in its `role:`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub roles: BTreeMap<String, RoleSpec>,
     /// Where the daemon looks for out-of-process adapters, relative to
     /// `.factory/`. Defaults to `plugins`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugins_dir: Option<PathBuf>,
+}
+
+impl Config {
+    /// Every role this instance knows: the two built in, plus its own.
+    pub fn roles(&self) -> Result<Roles> {
+        Roles::resolve(&self.roles)
+    }
+
+    /// Refuse a config that gives an agent a role nothing defines, and say
+    /// which agent it was. Falling back to the default instead would demote an
+    /// agent on a typo and never mention it.
+    pub fn validate(&self) -> Result<()> {
+        let roles = self.roles()?;
+        for scope in &self.scopes {
+            for agent in scope.declared_agents() {
+                if !roles.contains(&agent.role) {
+                    return Err(FactoryError::BadRequest(format!(
+                        "scope {:?} gives {:?} the role {:?}, which this instance does not define. \
+                         The roles it has are: {}",
+                        scope.name,
+                        agent.name(),
+                        agent.role.as_str(),
+                        roles.names().join(", ")
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_version() -> u32 {
@@ -273,7 +307,7 @@ impl Scope {
             return out;
         }
         // A scope that already has a foreman of its own keeps it.
-        if out.iter().any(|a| a.role == Role::Foreman) {
+        if out.iter().any(|a| a.role.is(Role::FOREMAN)) {
             return out;
         }
         out.push(ScopeAgent {
@@ -284,7 +318,7 @@ impl Scope {
                 .or_else(|| self.agent_adapter().map(str::to_string))
                 .unwrap_or_else(default_agent),
             lifetime: Lifetime::Permanent,
-            role: Role::Foreman,
+            role: Role::foreman(),
             autostart: Some(true),
         });
         out
@@ -313,7 +347,7 @@ impl Scope {
                 name: name.clone(),
                 harness: harness.clone(),
                 lifetime: lifetime.unwrap_or_default(),
-                role: role.unwrap_or_default(),
+                role: role.clone().unwrap_or_default(),
                 autostart: *autostart,
             });
         }
@@ -374,6 +408,7 @@ impl Factory {
         let config: Config = serde_yaml_ng::from_str(&text).map_err(|e| {
             FactoryError::Other(anyhow::anyhow!("parsing {}: {e}", path.display()))
         })?;
+        config.validate()?;
         Ok(Self {
             root: root.to_path_buf(),
             config,
@@ -459,6 +494,7 @@ mod tests {
                 instance: Instance { id: "i".into(), name: "n".into() },
                 daemon: DaemonConfig::default(),
                 scopes: vec![],
+                roles: BTreeMap::new(),
                 plugins_dir: None,
             },
         }
@@ -474,7 +510,7 @@ mod tests {
         };
         let names: Vec<String> = s.agents_with(&cfg).iter().map(|a| a.name()).collect();
         assert_eq!(names, vec!["foreman"]);
-        assert_eq!(s.agents_with(&cfg)[0].role, Role::Foreman);
+        assert_eq!(s.agents_with(&cfg)[0].role, Role::foreman());
         assert!(s.agents_with(&cfg)[0].lifetime.is_standing());
         assert!(root.agents_with(&cfg).is_empty(), "root is excluded by default");
         assert!(s.agents_with(&ForemanConfig::default()).is_empty(), "off by default");
@@ -489,6 +525,41 @@ mod tests {
         let cfg = ForemanConfig { enabled: true, ..Default::default() };
         let names: Vec<String> = s.agents_with(&cfg).iter().map(|a| a.name()).collect();
         assert_eq!(names, vec!["chef"], "no second foreman is bolted on");
+    }
+
+    fn config_with(yaml: &str) -> Config {
+        serde_yaml_ng::from_str(&format!(
+            "instance:\n  id: i\n  name: n\n{yaml}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_role_nothing_defines_is_refused_with_the_agent_named() {
+        let c = config_with(
+            "scopes:\n  - name: demo\n    path: .\n    agents:\n      - name: watcher\n        harness: pi\n        role: reviewer\n",
+        );
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("watcher"), "{e}");
+        assert!(e.contains("reviewer"), "{e}");
+        assert!(e.contains("worker"), "it says what there is instead: {e}");
+    }
+
+    #[test]
+    fn a_role_the_instance_named_is_accepted() {
+        let c = config_with(
+            "roles:\n  reviewer:\n    grants: [task.report]\nscopes:\n  - name: demo\n    path: .\n    agents:\n      - name: watcher\n        harness: pi\n        role: reviewer\n",
+        );
+        c.validate().unwrap();
+        assert!(c.roles().unwrap().contains(&Role::new("reviewer")));
+    }
+
+    #[test]
+    fn the_two_that_ship_need_no_declaring() {
+        let c = config_with(
+            "scopes:\n  - name: demo\n    path: .\n    agents:\n      - name: boss\n        harness: pi\n        role: foreman\n",
+        );
+        c.validate().unwrap();
     }
 
     #[test]

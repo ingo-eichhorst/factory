@@ -104,6 +104,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
             runtime: None,
             git: None,
         }],
+        roles: Default::default(),
         plugins_dir: None,
     };
     std::fs::write(&config_path, serde_yaml_ng::to_string(&config)?)?;

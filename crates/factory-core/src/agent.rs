@@ -10,37 +10,9 @@ use crate::task::SessionRef;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// What an agent is allowed to do.
-///
-/// This bounds what an agent can do by accident, not what it could do if it
-/// tried: every agent runs as the owner of the instance and can reach the
-/// control socket, so one that simply omits its token is indistinguishable
-/// from the person sitting there. Treat it as a job description, not a wall.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Role {
-    /// Reads tasks, and updates the ones assigned to it. Nothing else.
-    Worker,
-    /// Runs a scope: creates tasks in it, edits any of them, hands them to the
-    /// other agents there. Its authority stops at the scope boundary.
-    Foreman,
-}
-
-impl Default for Role {
-    fn default() -> Self {
-        // Default closed: an agent nobody gave a role is a worker.
-        Self::Worker
-    }
-}
-
-impl Role {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Worker => "worker",
-            Self::Foreman => "foreman",
-        }
-    }
-}
+/// What an agent is allowed to do lives next door, in `role`. It is re-exported
+/// here because an agent is where a role is worn.
+pub use crate::role::Role;
 
 /// How long an agent is meant to stick around.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,10 +88,20 @@ pub struct AgentSession {
     pub agent: String,
     pub runtime: String,
     pub lifetime: Lifetime,
+    /// The role this agent is working under. It comes from the config unless
+    /// somebody gave it one, in which case `assigned_role` says so and this
+    /// mirrors it -- everything that asks what an agent may do reads this.
+    ///
     /// Defaulted on read: a row written before roles existed is a worker,
     /// which is the same answer default-closed gives anyway.
     #[serde(default)]
     pub role: Role,
+    /// A role a person gave this agent, which outlives a restart and wins over
+    /// the config until it is cleared. Absent means the config decides -- and
+    /// the roster shows the difference, so nobody has to wonder why the YAML
+    /// in front of them says something else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_role: Option<Role>,
     pub state: AgentState,
     /// What this agent presents to say which agent it is. Never leaves the
     /// daemon: `redacted` strips it, like a run's.
@@ -149,6 +131,13 @@ impl AgentSession {
         format!("{scope}/{name}")
     }
 
+    /// The role this agent works under, given what the config declares for it.
+    /// One rule, in one place: an assignment wins until it is cleared, and the
+    /// config decides for everything else.
+    pub fn role_with(&self, declared: &Role) -> Role {
+        self.assigned_role.clone().unwrap_or_else(|| declared.clone())
+    }
+
     pub fn redacted(&self) -> AgentSession {
         let mut a = self.clone();
         a.token = None;
@@ -172,6 +161,7 @@ impl AgentSession {
             runtime: runtime.to_string(),
             lifetime,
             role,
+            assigned_role: None,
             state: AgentState::Stopped,
             token: None,
             session: None,
