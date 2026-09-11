@@ -71,6 +71,10 @@ pub(crate) struct RawAgent {
     pub harness: Spanned<String>,
     pub max_sessions: Option<Spanned<u32>>,
     pub lifetime: Option<Spanned<String>>,
+    /// The model this agent's harness should be started with. Optional and
+    /// opaque: Factory never resolves it, never checks it against a
+    /// catalogue, and has no default of its own — see ADR 0024.
+    pub model: Option<Spanned<String>>,
 }
 
 /// The field names of a Factory-owned mapping, for two purposes:
@@ -86,7 +90,7 @@ pub(crate) fn mapping_name_for_fields(expected: &[&'static str]) -> &'static str
     match sorted.as_slice() {
         ["id", "name"] => "instance",
         ["agent", "agents", "git", "id", "name", "path"] => "scope",
-        ["harness", "lifetime", "max_sessions", "name"] => "agent",
+        ["harness", "lifetime", "max_sessions", "model", "name"] => "agent",
         _ => "configuration",
     }
 }

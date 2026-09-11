@@ -260,7 +260,7 @@ agent:
 ```text
 error: unknown field `max_sesions` in `agent`
   --> <file>:3:3
-  help: expected one of `harness`, `lifetime`, `max_sessions`, `name`; `max_sesions` looks like a typo for `max_sessions`
+  help: expected one of `harness`, `lifetime`, `max_sessions`, `model`, `name`; `max_sesions` looks like a typo for `max_sessions`
 ```
 
 This is ADR 0009 rule 3, and it is the rule that earns its keep: without it,

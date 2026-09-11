@@ -49,6 +49,7 @@ fn full_lifecycle_against_a_real_pi_session() {
             session_id,
             workspace,
             generated_context: String::new(),
+            model: None,
         })
         .expect("start must succeed against a real Herdr with `pi` installed");
     println!(

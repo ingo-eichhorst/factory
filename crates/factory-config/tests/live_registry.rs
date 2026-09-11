@@ -65,12 +65,14 @@ fn live_registry_loads_and_the_assistant_scope_names_both_real_agents() {
                 harness: Harness::Pi,
                 max_sessions: 1,
                 lifetime: Lifetime::Permanent,
+                model: None,
             },
             Agent {
                 name: "assistant-chat".to_string(),
                 harness: Harness::Pi,
                 max_sessions: 1,
                 lifetime: Lifetime::Permanent,
+                model: None,
             },
         ],
         "the assistant scope must declare exactly the two agents \

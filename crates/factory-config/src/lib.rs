@@ -124,6 +124,17 @@ pub struct Agent {
     /// `temporary` agent it caps concurrently live instances.
     pub max_sessions: u32,
     pub lifetime: Lifetime,
+    /// The model this agent's harness is started with, passed straight
+    /// through to the harness as its own `--model` argument. `None` leaves
+    /// the choice where it was before this field existed: with the harness's
+    /// own configuration.
+    ///
+    /// Deliberately a plain `String` and never an enum. Factory names a
+    /// model; the harness resolves it. A catalogue here would be a second
+    /// copy of every provider's model list, out of date the week it was
+    /// written, and it would reject a name the harness would have accepted.
+    /// ADR 0024.
+    pub model: Option<String>,
 }
 
 /// Design §2.2. ADR 0010 records that these name the same distinction as

@@ -299,6 +299,7 @@ impl ContractFixture for PiFixture {
             session_id: self.fresh_uuid(),
             workspace: self.fresh_workspace(),
             generated_context: "company\nscope\nagent\n".to_string(),
+            model: None,
         }
     }
 
@@ -309,6 +310,7 @@ impl ContractFixture for PiFixture {
             session_id: self.fresh_uuid(),
             workspace: self.fresh_workspace(),
             generated_context: String::new(),
+            model: None,
         }
     }
 }
@@ -663,6 +665,7 @@ impl ClaudeFixture {
             session_id: self.fresh_uuid(),
             workspace,
             generated_context: "company\nscope\nagent\n".to_string(),
+            model: None,
         }
     }
 

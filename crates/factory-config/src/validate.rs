@@ -326,11 +326,31 @@ fn validate_agent(
         None => Lifetime::default(),
     };
 
+    // The only thing checked about a model is that it is not blank. What the
+    // name means is the harness's question — but an empty string would be
+    // passed to it as an empty `--model`, which every harness rejects with a
+    // worse message than this one. ADR 0024.
+    let model = match &raw.model {
+        Some(spanned) if spanned.value.trim().is_empty() => {
+            return Err(ConfigError {
+                summary: format!("scope `{scope_name}` sets an empty `model`"),
+                location: to_location(origin, spanned.defined),
+                notes: Vec::new(),
+                help: "name a model the harness knows, or remove the key to leave the choice to \
+                       the harness's own configuration"
+                    .to_string(),
+            });
+        }
+        Some(spanned) => Some(spanned.value.clone()),
+        None => None,
+    };
+
     Ok(Agent {
         name: raw.name.clone(),
         harness,
         max_sessions,
         lifetime,
+        model,
     })
 }
 

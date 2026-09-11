@@ -36,6 +36,7 @@ fn the_registration_fixture_compiles_as_a_two_scope_chain() {
         harness: factory_config::Harness::Pi,
         max_sessions: 1,
         lifetime: factory_config::Lifetime::Permanent,
+        model: None,
     };
 
     let compiled = compile(&scopes, &agent, Some("Review the open pull request."))

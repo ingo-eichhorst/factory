@@ -256,6 +256,7 @@ fn live_claude_session_start_send_confirm_stop() {
             session_id,
             workspace,
             generated_context: String::new(),
+            model: None,
         })
         .expect("start must succeed against a real, freshly created Herdr pane");
     println!(

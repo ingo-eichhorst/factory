@@ -270,7 +270,7 @@ fn unknown_field_inside_agent() {
         format!(
             "error: unknown field `max_sesions` in `agent`\n\
              \x20\x20--> {p}:4:7\n\
-             \x20\x20help: expected one of `harness`, `lifetime`, `max_sessions`, `name`; `max_sesions` looks like a typo for `max_sessions`",
+             \x20\x20help: expected one of `harness`, `lifetime`, `max_sessions`, `model`, `name`; `max_sesions` looks like a typo for `max_sessions`",
             p = path.display()
         )
     );

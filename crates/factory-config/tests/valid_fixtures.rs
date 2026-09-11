@@ -42,6 +42,7 @@ fn root_shorthand_yields_exactly_one_agent() {
                 harness: Harness::Pi,
                 max_sessions: 3,
                 lifetime: Lifetime::Permanent,
+                model: None,
             }],
             id_location: Location {
                 file: path.clone(),
@@ -72,18 +73,21 @@ fn multi_agent_list_yields_several_in_order() {
                 harness: Harness::Pi,
                 max_sessions: 1,
                 lifetime: Lifetime::Permanent,
+                model: None,
             },
             Agent {
                 name: "Second".to_string(),
                 harness: Harness::ClaudeCode,
                 max_sessions: 4,
                 lifetime: Lifetime::Temporary,
+                model: None,
             },
             Agent {
                 name: "Third".to_string(),
                 harness: Harness::Opencode,
                 max_sessions: 1,
                 lifetime: Lifetime::Permanent,
+                model: None,
             },
         ]
     );
@@ -156,12 +160,14 @@ fn unknown_toplevel_runtime_block_is_ignored_not_rejected() {
                 harness: Harness::Pi,
                 max_sessions: 1,
                 lifetime: Lifetime::Permanent,
+                model: None,
             },
             Agent {
                 name: "assistant-chat".to_string(),
                 harness: Harness::Pi,
                 max_sessions: 1,
                 lifetime: Lifetime::Permanent,
+                model: None,
             }
         ]
     );
@@ -192,6 +198,7 @@ fn omitted_max_sessions_and_lifetime_take_their_defaults() {
             harness: Harness::Pi,
             max_sessions: 1,
             lifetime: Lifetime::Permanent,
+            model: None,
         }]
     );
     assert_eq!(

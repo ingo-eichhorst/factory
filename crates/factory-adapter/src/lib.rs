@@ -134,6 +134,15 @@ pub struct StartRequest {
     /// sent as a prompt, would consume Pi's first turn on context instead of a
     /// task. `PiAdapter::start` never reads this field; see its doc comment.
     pub generated_context: String,
+    /// The model the scope's configuration named for this agent, or `None`
+    /// when it named none.
+    ///
+    /// An adapter passes this to its harness as that harness's own `--model`
+    /// argument and does nothing else with it: Factory names a model, the
+    /// harness resolves it (ADR 0024). A name the harness does not know is
+    /// the harness's refusal to report, not a validation this crate performs
+    /// — there is no catalogue here to check it against.
+    pub model: Option<String>,
 }
 
 /// What `start` hands back: at minimum the pane design §3's architecture
@@ -656,16 +665,18 @@ impl<A: HerdrAccess> PiAdapter<A> {
     /// not a real failure, and `start`'s caller should not see it as one.
     /// Every other `agent_start` failure (Herdr down, `pi` not installed) is
     /// returned immediately, unretried.
-    fn start_pi_with_retry(&self, name: &str, pane: &PaneId) -> Result<String, AdapterError> {
+    fn start_pi_with_retry(
+        &self,
+        name: &str,
+        pane: &PaneId,
+        model: Option<&str>,
+    ) -> Result<String, AdapterError> {
         const ATTEMPTS: u32 = 5;
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
         let mut last_err = None;
         for attempt in 0..ATTEMPTS {
-            match self
-                .herdr
-                .agent_start(name, "pi", pane, &pi_extension_args())
-            {
+            match self.herdr.agent_start(name, "pi", pane, &pi_args(model)) {
                 Ok(raw) => return Ok(raw),
                 Err(err) => {
                     let is_last_attempt = attempt + 1 == ATTEMPTS;
@@ -872,6 +883,22 @@ fn pi_extension_args() -> Vec<String> {
     ]
 }
 
+/// Everything after `herdr agent start ... --` for a Pi session: the
+/// lifecycle-hook extension, and the model when the scope named one.
+///
+/// The model goes last, and only when there is one. Pi's own settings carry a
+/// `defaultModel`, so omitting the flag is not "no model" — it is "whatever
+/// this machine's Pi is configured for", which is exactly what every scope got
+/// before this field existed (ADR 0024).
+fn pi_args(model: Option<&str>) -> Vec<String> {
+    let mut args = pi_extension_args();
+    if let Some(model) = model {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    args
+}
+
 /// A Herdr agent name for `session_id`: `[a-z][a-z0-9_-]{0,31}`, unique among
 /// live agents (measured: `herdr --skill`). A bare UUID can start with a
 /// digit and is longer than the limit; the `factory-` prefix and an 8-hex-char
@@ -1030,7 +1057,7 @@ impl<A: HerdrAccess> Adapter for PiAdapter<A> {
         let pane = parse_created_pane(&created)?;
 
         let name = agent_name_for(req.session_id);
-        if let Err(err) = self.start_pi_with_retry(&name, &pane) {
+        if let Err(err) = self.start_pi_with_retry(&name, &pane, req.model.as_deref()) {
             // Nothing else will release a pane whose agent never started —
             // best-effort cleanup so a failed start does not leak a Herdr
             // pane. Its own failure is not reported: the caller already has
@@ -2005,6 +2032,36 @@ mod tests {
     }
 
     #[test]
+    fn pi_args_appends_the_model_when_the_scope_named_one() {
+        let args = pi_args(Some("business-factory-qwen3.8/qwen3.8-27b"));
+        let position = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("--model must be present");
+        assert_eq!(
+            args[position + 1],
+            "business-factory-qwen3.8/qwen3.8-27b",
+            "the value must follow its flag, unmodified: {args:?}"
+        );
+        assert!(
+            args.contains(&"--extension".to_string()),
+            "the lifecycle hook must survive the model being added: {args:?}"
+        );
+    }
+
+    #[test]
+    fn pi_args_passes_no_model_flag_at_all_when_none_was_named() {
+        // Not an empty `--model`: Pi's own settings carry a `defaultModel`,
+        // and an empty flag would override it with nothing (ADR 0024).
+        let args = pi_args(None);
+        assert!(
+            !args.iter().any(|a| a == "--model"),
+            "an unnamed model must leave the flag off entirely: {args:?}"
+        );
+        assert_eq!(args, pi_extension_args());
+    }
+
+    #[test]
     fn agent_name_for_is_a_valid_unique_herdr_name() {
         let a = agent_name_for(uid(1));
         let b = agent_name_for(uid(2));
@@ -2213,6 +2270,7 @@ mod tests {
             session_id: uid(2),
             workspace,
             generated_context: "company\nscope\nagent\n".to_string(),
+            model: None,
         };
 
         let started = adapter.start(&req).expect("start must succeed");
@@ -2246,6 +2304,7 @@ mod tests {
             session_id: uid(2),
             workspace,
             generated_context: String::new(),
+            model: None,
         };
 
         let started = adapter
@@ -2273,6 +2332,7 @@ mod tests {
             session_id: uid(2),
             workspace,
             generated_context: String::new(),
+            model: None,
         };
 
         adapter
@@ -2309,6 +2369,7 @@ mod tests {
             session_id: uid(2),
             workspace,
             generated_context: String::new(),
+            model: None,
         };
 
         adapter
@@ -2356,6 +2417,7 @@ mod tests {
             session_id: uid(2),
             workspace,
             generated_context: String::new(),
+            model: None,
         };
 
         adapter
@@ -2394,6 +2456,7 @@ mod tests {
             session_id: uid(2),
             workspace,
             generated_context: String::new(),
+            model: None,
         };
 
         adapter

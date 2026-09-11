@@ -162,7 +162,7 @@ mod tests {
         assert_eq!(
             closest_match(
                 "max_sesions",
-                &["harness", "lifetime", "max_sessions", "name"]
+                &["harness", "lifetime", "max_sessions", "model", "name"]
             ),
             Some("max_sessions")
         );
@@ -171,7 +171,10 @@ mod tests {
     #[test]
     fn unrelated_name_gets_no_invented_suggestion() {
         assert_eq!(
-            closest_match("kind", &["harness", "lifetime", "max_sessions", "name"]),
+            closest_match(
+                "kind",
+                &["harness", "lifetime", "max_sessions", "model", "name"]
+            ),
             None
         );
     }
@@ -179,7 +182,10 @@ mod tests {
     #[test]
     fn exact_match_is_not_a_typo() {
         assert_eq!(
-            closest_match("name", &["harness", "lifetime", "max_sessions", "name"]),
+            closest_match(
+                "name",
+                &["harness", "lifetime", "max_sessions", "model", "name"]
+            ),
             None
         );
     }

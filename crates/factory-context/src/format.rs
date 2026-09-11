@@ -133,6 +133,7 @@ mod tests {
             harness: factory_config::Harness::Pi,
             max_sessions: 3,
             lifetime: factory_config::Lifetime::Temporary,
+            model: None,
         };
         let rendered = agent_section(&agent);
         assert_eq!(

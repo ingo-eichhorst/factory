@@ -215,6 +215,21 @@ pub struct ClaudeAdapter<H: HerdrAccess, I: IrrlichtAccess> {
     irrlicht: I,
 }
 
+/// Everything after `herdr agent start ... --` for a Claude Code session:
+/// nothing at all, unless the scope named a model.
+///
+/// Unlike Pi's, this list is otherwise empty — Claude Code needs no extension
+/// argument from this crate. **Not exercised against a live Claude session:**
+/// `herdr agent start` forwards these arguments the same way for every kind,
+/// and `claude --model` is a documented flag, but the end-to-end path this
+/// crate's tests cover here is the argv it builds, not a session it started.
+fn claude_args(model: Option<&str>) -> Vec<String> {
+    match model {
+        Some(model) => vec!["--model".to_string(), model.to_string()],
+        None => Vec::new(),
+    }
+}
+
 impl<H: HerdrAccess, I: IrrlichtAccess> ClaudeAdapter<H, I> {
     #[must_use]
     pub fn new(herdr: H, irrlicht: I) -> Self {
@@ -229,13 +244,21 @@ impl<H: HerdrAccess, I: IrrlichtAccess> ClaudeAdapter<H, I> {
     /// to `kind: "pi"` plus the Herdr lifecycle-hook extension argument
     /// Claude does not use, and `PiAdapter` is not this module's to
     /// restructure into something both harnesses share.
-    fn start_claude_with_retry(&self, name: &str, pane: &PaneId) -> Result<String, AdapterError> {
+    fn start_claude_with_retry(
+        &self,
+        name: &str,
+        pane: &PaneId,
+        model: Option<&str>,
+    ) -> Result<String, AdapterError> {
         const ATTEMPTS: u32 = 5;
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
         let mut last_err = None;
         for attempt in 0..ATTEMPTS {
-            match self.herdr.agent_start(name, CLAUDE_HERDR_KIND, pane, &[]) {
+            match self
+                .herdr
+                .agent_start(name, CLAUDE_HERDR_KIND, pane, &claude_args(model))
+            {
                 Ok(raw) => return Ok(raw),
                 Err(err) => {
                     let is_last_attempt = attempt + 1 == ATTEMPTS;
@@ -367,7 +390,7 @@ impl<H: HerdrAccess, I: IrrlichtAccess> Adapter for ClaudeAdapter<H, I> {
         let pane = parse_created_pane(&created)?;
 
         let name = agent_name_for(req.session_id);
-        if let Err(err) = self.start_claude_with_retry(&name, &pane) {
+        if let Err(err) = self.start_claude_with_retry(&name, &pane, req.model.as_deref()) {
             // Nothing else releases a pane whose agent never started — see
             // `PiAdapter::start`'s identical cleanup and identical reasoning
             // for not reporting this close's own failure.
@@ -589,6 +612,18 @@ impl<H: HerdrAccess, I: IrrlichtAccess> Adapter for ClaudeAdapter<H, I> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn claude_args_are_empty_until_a_scope_names_a_model() {
+        assert!(
+            claude_args(None).is_empty(),
+            "Claude Code needs no argument from this crate by default"
+        );
+        assert_eq!(
+            claude_args(Some("claude-opus-5")),
+            ["--model", "claude-opus-5"]
+        );
+    }
     /// Measured live on 2026-09-09: for a second or two after `start`,
     /// Irrlicht reports `session_id` as a process placeholder (`proc-19040`)
     /// rather than the harness session UUID. Migration 5's column is
@@ -1212,6 +1247,7 @@ mod tests {
             session_id: uid(2),
             workspace,
             generated_context: "company\nscope\nagent\n".to_string(),
+            model: None,
         };
 
         let started = adapter.start(&req).expect("start must succeed");
@@ -1249,6 +1285,7 @@ mod tests {
             session_id: uid(2),
             workspace,
             generated_context: String::new(),
+            model: None,
         };
 
         adapter
@@ -1286,6 +1323,7 @@ mod tests {
             session_id: uid(2),
             workspace,
             generated_context: String::new(),
+            model: None,
         };
 
         adapter
@@ -1333,6 +1371,7 @@ mod tests {
             session_id: uid(2),
             workspace,
             generated_context: String::new(),
+            model: None,
         };
 
         adapter
@@ -1369,6 +1408,7 @@ mod tests {
             session_id: uid(2),
             workspace,
             generated_context: String::new(),
+            model: None,
         };
 
         adapter

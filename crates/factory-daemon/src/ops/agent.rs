@@ -82,6 +82,9 @@ pub(crate) fn start(h: &FactoryHandler, scope_id: uuid::Uuid, payload: Value) ->
         session_id: payload.session_id,
         workspace: workspace.clone(),
         generated_context: compiled.text,
+        // Straight off the scope's declaration. The adapter passes it to the
+        // harness and nothing here inspects it — ADR 0024.
+        model: agent.model.clone(),
     }) {
         Ok(started) => started,
         Err(e) => {
@@ -440,6 +443,10 @@ pub(crate) fn list(h: &FactoryHandler, _scope_id: uuid::Uuid, payload: Value) ->
                         "max_sessions": agent.max_sessions,
                         "lifetime": lifetime_str(agent.lifetime),
                         "availability": availability,
+                        // `null` is not "no model" but "whatever the harness
+                        // is configured for" — the state every agent was in
+                        // before this key existed (ADR 0024).
+                        "model": agent.model,
                     }));
                 }
                 agents

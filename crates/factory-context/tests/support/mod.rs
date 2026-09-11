@@ -12,6 +12,7 @@ pub fn sample_agent() -> factory_config::Agent {
         harness: factory_config::Harness::Pi,
         max_sessions: 1,
         lifetime: factory_config::Lifetime::Permanent,
+        model: None,
     }
 }
 
