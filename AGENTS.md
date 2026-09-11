@@ -14,6 +14,8 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/core.js              DOM helpers, client state, the HTTP call, the socket
     ui/js/app.js               the wiring: which page shows, what an event means
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
+    ui/js/{dashboard,activity,site,site-render}.js               the new views
+    ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
 
 `README.md` explains the architecture and the plugin protocol. Read it before

@@ -22,6 +22,11 @@
   --term-bg: #0D1316; --term-fg: #B9CAD1; --term-dim: #6C8189; --term-line: #1D272B;
   --on-signal: #08131C;
   --shadow: 0 16px 44px rgba(0,0,0,.55);
+  /* The site plan's own palette. Both renderers read these through
+     `getComputedStyle`, never a literal, so a theme switch repaints a scene
+     already on screen instead of needing a reload. */
+  --ground: #0A0E11; --ground2: #141B1F; --plate: #1C2429; --paint: #D9A445;
+  --roof: #2B363D; --roof2: #3A4750; --wallA: #232D33; --wallB: #1A2227;
 }
 
 :root[data-theme="foundry-light"] {
@@ -34,6 +39,8 @@
   --term-bg: #0D1316; --term-fg: #B9CAD1; --term-dim: #6C8189; --term-line: #1D272B;
   --on-signal: #FFFFFF;
   --shadow: 0 16px 44px rgba(16,22,25,.22);
+  --ground: #CBD3D8; --ground2: #D8E0E4; --plate: #E7ECEE; --paint: #9C6806;
+  --roof: #B9C3C9; --roof2: #9FACB3; --wallA: #CED8DC; --wallB: #B7C3C8;
 }
 
 /* The sixteen ANSI colours, so a terminal frame is coloured by the theme
@@ -397,3 +404,93 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
   .rail-row.group { padding: 5px 9px; }
   .rail-all { margin-bottom: 0; padding-bottom: 5px; border-bottom: 0; border-right: 1px solid var(--line-soft); border-radius: 3px; }
 }
+/* ------------------------------------------------------------- site plan
+   Two canvases over one stage, only one shown at a time -- Plan is a flat
+   2D isometric draw, Render is the lit three.js scene. Both read the hall
+   colours above through CSS custom properties, never a literal, so a theme
+   switch repaints whichever one is on screen. */
+.site-wrap { display: flex; gap: 12px; align-items: flex-start; }
+.stage {
+  position: relative; flex: 1; min-width: 0; min-height: 460px; height: 64vh; max-height: 720px;
+  background: var(--ground2); border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
+}
+.stage canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+.stage canvas.drag { cursor: grabbing; }
+.stage canvas.off { display: none !important; }
+.hud { position: absolute; pointer-events: none; }
+.hud.tl { top: 10px; left: 10px; display: flex; gap: 6px; flex-wrap: wrap; pointer-events: auto; }
+.hud.tr { top: 10px; right: 10px; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; pointer-events: auto; }
+.hud.bl { bottom: 10px; left: 10px; }
+.hud.br { bottom: 10px; right: 10px; display: flex; gap: 6px; align-items: flex-end; pointer-events: auto; }
+.render-only { display: none !important; }
+.stage.rm3 .render-only { display: flex !important; }
+.hbtn {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 5px 9px;
+  font: 500 10.5px/1 var(--sans); color: var(--ink-2); display: flex; align-items: center; gap: 6px; cursor: pointer;
+}
+.hbtn:hover { border-color: var(--signal); color: var(--signal); }
+.hbtn.on { background: var(--signal); border-color: var(--signal); color: var(--on-signal); }
+.hbtn.sq { width: 28px; height: 28px; justify-content: center; padding: 0; font: 500 14px/1 var(--mono); }
+.hbtn:disabled { opacity: .4; cursor: default; }
+.zoomlv {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 5px 9px;
+  font: 500 10.5px/1 var(--mono); color: var(--muted);
+}
+.tip {
+  position: absolute; pointer-events: none; background: var(--ink); color: var(--panel); border-radius: 3px;
+  padding: 6px 9px; font: 500 11px/1.45 var(--sans); max-width: 230px; opacity: 0; transition: opacity .1s; z-index: 5;
+}
+.tip .k { font: 400 10px/1.4 var(--mono); opacity: .72; display: block; }
+.slegend {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 6px 9px;
+  display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--muted);
+}
+.slegend .row { display: flex; align-items: center; gap: 7px; }
+.slegend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.tod { display: flex; flex-direction: column; gap: 5px; align-items: flex-end; }
+.todr { display: flex; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; background: var(--panel); }
+.todr button { padding: 5px 9px; font: 500 10.5px/1 var(--mono); color: var(--muted); background: transparent; border: 0; cursor: pointer; }
+.todr button + button { border-left: 1px solid var(--line); }
+.todr button.on { background: var(--signal); color: var(--on-signal); }
+.chint {
+  font: 400 10px/1.5 var(--mono); color: var(--faint); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 3px; padding: 4px 7px; text-align: right;
+}
+/* The inspector rail: the same vocabulary as the agents page -- a click on a
+   hall is a second door into the same facts, not a different data model. */
+.rail { flex: 0 0 300px; max-width: 340px; display: flex; flex-direction: column; gap: 10px; }
+.rail .scope, .rail .agent { font-size: 12px; }
+.rail .empty { padding: 14px; }
+@media (max-width: 980px) { .site-wrap { flex-direction: column; } .rail { flex: 1 1 auto; max-width: none; } }
+
+/* --------------------------------------------------------------- dashboard */
+.dash { display: flex; flex-direction: column; gap: 14px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.kpi {
+  border: 1px solid var(--line); border-radius: 4px; background: var(--panel); padding: 10px 12px 11px;
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+}
+.kpi .k { font: 600 9px/1 var(--cond); letter-spacing: .14em; text-transform: uppercase; color: var(--faint); }
+.kpi .v { font: 500 24px/1.15 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.kpi .v small { font-size: 11px; color: var(--muted); font-weight: 400; letter-spacing: 0; }
+.kpi .d { font: 400 10.5px/1.4 var(--sans); color: var(--muted); }
+.drow { display: grid; grid-template-columns: minmax(0,2fr) minmax(0,1fr); gap: 14px; }
+.dcard { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); padding: 12px 14px 14px; min-width: 0; }
+.dcard h3 {
+  margin: 0 0 11px; font: 600 9.5px/1 var(--cond); letter-spacing: .15em; text-transform: uppercase; color: var(--faint);
+  display: flex; align-items: baseline; gap: 9px;
+}
+.dcard h3 .r { margin-left: auto; font: 400 10px/1 var(--mono); letter-spacing: 0; text-transform: none; color: var(--faint); }
+.dcard table { font-size: 11.5px; }
+.inbox-item {
+  display: flex; align-items: baseline; gap: 9px; padding: 7px 0; border-bottom: 1px solid var(--line-soft);
+  font-size: 11.5px; cursor: pointer;
+}
+.inbox-item:last-child { border-bottom: 0; }
+.inbox-item:hover .it-t { color: var(--signal); }
+.inbox-item .it-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; margin-top: 3px; }
+.inbox-item .it-t { flex: 1; min-width: 0; color: var(--ink-2); }
+.inbox-item .it-t b { color: var(--ink); font-weight: 500; }
+.inbox-item .it-t .sub { display: block; }
+.inbox-item .it-age { flex: 0 0 auto; color: var(--faint); font: 400 10.5px/1.4 var(--mono); }
+@media (max-width: 980px) { .drow { grid-template-columns: 1fr; } }

@@ -125,6 +125,11 @@ pub enum Request {
         #[serde(default)]
         minutes: Option<u32>,
     },
+    /// How big each scope is on disk, for the site plan's hall sizes. Nothing
+    /// else needs this, which is why it is its own request rather than a field
+    /// every `agents` call would have to pay for.
+    #[serde(rename = "site.footprint")]
+    SiteFootprint,
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -157,6 +162,7 @@ pub enum Payload {
     Event { event: Event },
     Occupancy { occupancy: Occupancy },
     Screen { screen: Screen },
+    SiteFootprint { footprint: SiteFootprint },
 }
 
 /// A request plus who is making it.
@@ -319,6 +325,25 @@ pub struct ScopeView {
     /// Every agent adapter registered, so a task can be started with any of
     /// them regardless of what the scope declares.
     pub available: Vec<String>,
+}
+
+/// How big a scope is on disk, for the site plan's hall footprint. The
+/// prototype this is ported from sized a hall as `2.6 + sqrt(k) * 0.85`
+/// where `k` is the codebase's megabytes; this is where `k` comes from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeFootprint {
+    pub name: String,
+    /// `None` when the scope's directory could not be read -- gone, or a
+    /// permission the daemon does not have. A hall with no footprint is drawn
+    /// at a default size and says so, rather than claiming a number nobody
+    /// measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SiteFootprint {
+    pub scopes: Vec<ScopeFootprint>,
 }
 
 #[cfg(test)]

@@ -122,6 +122,9 @@ impl Engine {
             Request::Occupancy { minutes } => Ok(Payload::Occupancy {
                 occupancy: self.occupancy(minutes).await?,
             }),
+            Request::SiteFootprint => Ok(Payload::SiteFootprint {
+                footprint: self.site_footprint().await?,
+            }),
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),
             }),

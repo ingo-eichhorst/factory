@@ -113,6 +113,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/adapters", get(adapters))
         .route("/api/agents", get(agents))
         .route("/api/occupancy", get(occupancy))
+        .route("/api/site", get(site_footprint))
         // The id of a standing agent is `<scope>/<name>`, which has a slash in
         // it, so these take it in the body rather than the path.
         .route("/api/agents/start", post(agent_start))
@@ -215,6 +216,10 @@ async fn occupancy(
         },
     )
     .await
+}
+
+async fn site_footprint(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::SiteFootprint).await
 }
 
 async fn list_tasks(
