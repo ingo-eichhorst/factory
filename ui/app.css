@@ -182,6 +182,16 @@ code.id { font: 400 11px/1.4 var(--mono); color: var(--faint); }
 .tag.plug { color: var(--signal); border-color: var(--signal); }
 .tag.perm { color: var(--run); border-color: var(--run); }
 .tag.foreman { color: var(--wait); border-color: var(--wait); }
+.tag.role { color: var(--signal-ink); border-color: var(--signal); }
+
+/* The role an agent is working under, changed in place. */
+select.rolepick {
+  width: auto; background: var(--panel); color: var(--ink-2); cursor: pointer;
+  border: 1px solid var(--line); border-radius: 3px; padding: 5px 6px;
+  font: 500 11.5px/1 var(--sans); margin-right: 6px;
+}
+select.rolepick:hover:not(:disabled) { border-color: var(--signal); color: var(--signal); }
+select.rolepick:disabled { opacity: .38; cursor: default; }
 .attach { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
 .attach code {
   background: var(--sunk); border: 1px solid var(--line-soft); padding: 3px 7px; border-radius: 3px;

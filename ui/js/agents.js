@@ -15,7 +15,9 @@ import { rebuildRail } from "./app.js";
 
 export async function loadAgents() {
   try {
-    state.scopes = (await api("/api/agents")).scopes;
+    const board = await api("/api/agents");
+    state.scopes = board.scopes;
+    state.roles = board.roles || [];
     if (state.scopes.length) state.adapters = state.scopes[0].available;
     // A scope added or dropped in the config has to reach the rail, not just
     // the roster underneath it.
@@ -29,7 +31,11 @@ export async function loadAgents() {
 
 export function agentTags(a) {
   const tags = [];
-  if (a.role === "foreman") tags.push(`<span class="tag foreman">foreman</span>`);
+  // Every role shows, not just the one that used to be the only one worth
+  // saying. A role somebody gave says so, because the config says otherwise.
+  if (a.role && a.role !== "worker")
+    tags.push(`<span class="tag ${a.role === "foreman" ? "foreman" : "role"}">${esc(a.role)}</span>`);
+  if (a.assigned_role) tags.push(`<span class="tag">given</span>`);
   if (a.lifetime === "permanent") tags.push(`<span class="tag perm">permanent</span>`);
   else if (a.lifetime === "temporary") tags.push(`<span class="tag">temporary</span>`);
   if (a.is_default) tags.push(`<span class="tag">default</span>`);
@@ -56,6 +62,15 @@ export function renderAgents() {
       }
       buttons.push(`<button class="btn" data-act="task" data-scope="${esc(s.name)}" data-agent="${esc(a.adapter)}">Start task…</button>`);
 
+      const rolePicker = standing && a.id
+        ? `<select class="rolepick" data-act="role" data-id="${esc(a.id)}" title="What this agent is allowed to do">
+             ${(state.roles || []).map(r => `
+               <option value="${esc(r.name)}" ${r.name === a.role ? "selected" : ""}
+                       title="${esc(r.describe)}">${esc(r.name)}</option>`).join("")}
+             ${a.assigned_role ? `<option value="">use the config's</option>` : ""}
+           </select>`
+        : "";
+
       const attach = a.attach
         ? `<div class="attach"><span class="sub">attach</span><code>${esc(a.attach)}</code>
              <button class="btn" data-act="copy" data-copy="${esc(a.attach)}">Copy</button></div>`
@@ -78,6 +93,7 @@ export function renderAgents() {
           ${standing ? statusBadge(a.state) : ""}
           ${agentTags(a)}
           <span style="margin-left:auto"></span>
+          ${rolePicker}
           <span class="row-btns">${buttons.join("")}</span>
         </div>
         <div class="sub">${esc(a.description)}</div>
@@ -99,7 +115,8 @@ export function renderAgents() {
   }).join("") || `<div class="empty">${nothing}</div>`;
 
   for (const el of $("agents").querySelectorAll("[data-act]")) {
-    el.onclick = (e) => { e.stopPropagation(); agentAction(el); };
+    if (el.tagName === "SELECT") el.onchange = (e) => { e.stopPropagation(); agentAction(el); };
+    else el.onclick = (e) => { e.stopPropagation(); agentAction(el); };
   }
   for (const job of $("agents").querySelectorAll(".job")) {
     job.onclick = () => openTask(job.dataset.task, job.dataset.run);
@@ -115,6 +132,9 @@ export async function agentAction(el) {
     } else if (act === "stop") {
       el.disabled = true;
       await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id: el.dataset.id }) });
+    } else if (act === "role") {
+      el.disabled = true;
+      await api("/api/agents/role", { method: "POST", body: JSON.stringify({ id: el.dataset.id, role: el.value }) });
     } else if (act === "term") {
       return openAgent(el.dataset.id);
     } else if (act === "task") {

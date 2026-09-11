@@ -7,6 +7,7 @@ export const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({'&':'&amp;',
 export const TERMINAL = ["done", "failed", "cancelled"];
 
 export const state = {
+  roles: [],
   tab: "tasks",
   tasks: new Map(),
   scopes: [],          // the agents page: scopes, each with its agents

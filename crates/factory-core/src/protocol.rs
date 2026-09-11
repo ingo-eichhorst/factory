@@ -26,6 +26,15 @@ pub enum Request {
     /// Take one down and leave it down.
     #[serde(rename = "agent.stop")]
     AgentStop { id: String },
+    /// Give a standing agent a role, or take the given one away and let the
+    /// config decide again. The owner's to do, and nobody else's.
+    #[serde(rename = "agent.role")]
+    AgentRole {
+        id: String,
+        /// `None` clears an assignment rather than naming one.
+        #[serde(default)]
+        role: Option<String>,
+    },
     /// Type at a standing agent's session.
     #[serde(rename = "agent.input")]
     AgentInput {
@@ -136,7 +145,12 @@ pub enum Payload {
     Run { run: Run },
     Runs { runs: Vec<Run> },
     Agent { agent: AgentSession },
-    Scopes { scopes: Vec<ScopeView> },
+    Scopes {
+        scopes: Vec<ScopeView>,
+        /// Every role this instance knows, so a picker can offer them.
+        #[serde(default)]
+        roles: Vec<RoleView>,
+    },
     Entries { entries: Vec<TaskEntry> },
     Text { text: String },
     Deleted { deleted: bool },
@@ -255,8 +269,13 @@ pub struct AgentView {
     pub source: String,
     /// `permanent`, `temporary`, or `task`.
     pub lifetime: String,
-    /// `worker` or `foreman`.
+    /// The role it is working under -- the config's, unless somebody gave it
+    /// another.
     pub role: String,
+    /// Set when a person gave it this role, so the roster can say that the
+    /// config says something else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_role: Option<String>,
     pub autostart: bool,
     /// For a standing agent: `starting`, `ready`, `gone`, `stopped`.
     /// For a task agent: `task`.
@@ -275,6 +294,17 @@ pub struct AgentView {
     pub error: Option<String>,
     /// Task runs this agent is working on in this scope right now.
     pub active: Vec<AgentActivity>,
+}
+
+/// One role, as the roster and the pickers show it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleView {
+    pub name: String,
+    pub describe: String,
+    /// What it may do, written the way the config writes it.
+    pub grants: Vec<String>,
+    /// `own` or `scope`.
+    pub reach: String,
 }
 
 /// A scope and everything that runs in it.

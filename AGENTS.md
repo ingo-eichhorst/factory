@@ -48,6 +48,9 @@ model call. Use it for anything that is not specifically about an AI harness.
 - Roles bound what an agent does by accident, not what it could do. Every agent
   runs as the owner and can reach the socket; one that omits its token is the
   owner. Never write anything that implies otherwise.
+- A role is data, not a match arm: grants and reach live in `factory-core/src/role.rs`
+  and are checked in one place. A new request has to say which grant it needs --
+  the match in `access.rs` has no wildcard arm, so the compiler asks.
 - A permanent agent is quiet by design. It is checked for whether its session is
   still there and nothing else -- never for whether it has said anything. The
   run timeouts must not reach it.

@@ -117,6 +117,7 @@ fn router(engine: Arc<Engine>) -> Router {
         // it, so these take it in the body rather than the path.
         .route("/api/agents/start", post(agent_start))
         .route("/api/agents/stop", post(agent_stop))
+        .route("/api/agents/role", post(agent_role))
         .route("/api/agents/input", post(agent_input))
         .route("/api/agents/output", post(agent_output))
         .route("/api/rpc", post(rpc))
@@ -323,6 +324,13 @@ struct StartAgent {
 }
 
 #[derive(serde::Deserialize)]
+struct AgentRole {
+    id: String,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 struct AgentId {
     id: String,
     #[serde(default)]
@@ -355,6 +363,22 @@ async fn agent_start(
 
 async fn agent_stop(State(engine): State<Arc<Engine>>, Json(body): Json<AgentId>) -> AxumResponse {
     run(&engine, Request::AgentStop { id: body.id }).await
+}
+
+async fn agent_role(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<AgentRole>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::AgentRole {
+            id: body.id,
+            // An empty pick from a `<select>` means "back to the config's",
+            // which is the same thing as naming none.
+            role: body.role.filter(|r| !r.is_empty()),
+        },
+    )
+    .await
 }
 
 async fn agent_output(
