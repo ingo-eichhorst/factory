@@ -1,0 +1,5 @@
+name: shell-plugin
+kind: agent
+description: "example plugin: runs the instructions as a shell command"
+command: ["python3", "adapter.py"]
+timeout_seconds: 20

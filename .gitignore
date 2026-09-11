@@ -1,0 +1,6 @@
+/target
+# A Factory instance's runtime state is local to the machine it runs on.
+.factory/factory.sqlite
+.factory/factory.sqlite-*
+.factory/factory.sock
+.factory/logs/

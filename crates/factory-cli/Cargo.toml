@@ -1,0 +1,20 @@
+[package]
+name = "factory-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "factory"
+path = "src/main.rs"
+
+[dependencies]
+factory-core = { path = "../factory-core" }
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tokio.workspace = true
+uuid.workspace = true

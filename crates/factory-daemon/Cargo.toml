@@ -1,0 +1,27 @@
+[package]
+name = "factory-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "factory-daemon"
+path = "src/main.rs"
+
+[dependencies]
+factory-core = { path = "../factory-core" }
+factory-plugins = { path = "../factory-plugins" }
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+clap.workspace = true
+croner.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
