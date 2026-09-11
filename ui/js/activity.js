@@ -14,10 +14,32 @@ const LIMIT = 500;
 let log = [];
 let kind = "all";
 let q = "";
+/// When the socket actually opened, not when this view first happened to be
+/// shown. app.js's boot() connects the socket once, before anyone can have
+/// clicked anything, so an event can already be sitting in `log` by the time
+/// a person opens this tab -- stamping "now" at that point would claim a
+/// narrower window than what was really captured, which is the same kind of
+/// overclaiming the banner exists to rule out.
+let watchSince = null;
+
+/// Called from app.js the moment the socket opens. Idempotent: a reconnect
+/// re-opens the same socket, but the watch itself started at the first open,
+/// not the latest one.
+export function markWatching() {
+  if (!watchSince) watchSince = new Date();
+  updateNote();
+}
+
+function updateNote() {
+  const el = $("activity-note");
+  if (!el) return;
+  el.textContent = watchSince
+    ? `watching live since ${watchSince.toLocaleTimeString()} — nothing earlier is shown`
+    : "connecting…";
+}
 
 export function initActivity() {
-  const opened = new Date();
-  $("activity-note").textContent = `watching live since ${opened.toLocaleTimeString()} — nothing earlier is shown`;
+  updateNote();
   for (const b of $("activity-kind").querySelectorAll("button")) {
     b.onclick = () => {
       for (const o of $("activity-kind").querySelectorAll("button")) o.classList.remove("on");

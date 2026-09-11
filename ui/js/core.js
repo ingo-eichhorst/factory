@@ -39,10 +39,17 @@ export async function api(path, opts) {
 }
 
 /// The socket, and nothing about what is on it. `handlers.snapshot` gets the
-/// task list the daemon sends on connect, `handlers.event` every event after.
+/// task list the daemon sends on connect, `handlers.event` every event after,
+/// and the optional `handlers.open` fires the moment the socket is live --
+/// which is the true start of "what this page has seen", for anything that
+/// needs to say so honestly rather than counting from when its own view
+/// happened to first be shown.
 export function connect(handlers) {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
-  ws.onopen = () => { $("dot").classList.add("live"); $("conn").textContent = "live"; };
+  ws.onopen = () => {
+    $("dot").classList.add("live"); $("conn").textContent = "live";
+    if (handlers.open) handlers.open();
+  };
   ws.onclose = () => {
     $("dot").classList.remove("live"); $("conn").textContent = "reconnecting";
     setTimeout(() => connect(handlers), 1500);

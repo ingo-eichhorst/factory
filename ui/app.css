@@ -461,7 +461,17 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 .rail { flex: 0 0 300px; max-width: 340px; display: flex; flex-direction: column; gap: 10px; }
 .rail .scope, .rail .agent { font-size: 12px; }
 .rail .empty { padding: 14px; }
-@media (max-width: 980px) { .site-wrap { flex-direction: column; } .rail { flex: 1 1 auto; max-width: none; } }
+/* In a column flex container, `align-items: flex-start` on .site-wrap governs
+   the cross axis -- width, now -- so without an explicit stretch here .stage
+   shrinks to the width of its content. Its only children are two absolutely
+   positioned canvases, which contribute none, so it silently computes to 0px:
+   no canvas, no HUD, no error, nothing a person could tell from an empty
+   instance. Stretching it is the fix, not a resize of anything inside it. */
+@media (max-width: 980px) {
+  .site-wrap { flex-direction: column; }
+  .stage { align-self: stretch; }
+  .rail { flex: 1 1 auto; max-width: none; }
+}
 
 /* --------------------------------------------------------------- dashboard */
 .dash { display: flex; flex-direction: column; gap: 14px; }

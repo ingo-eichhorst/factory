@@ -10,7 +10,7 @@ import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { openCreate } from "./task-form.js";
 import { loadDashboard, renderDashboard, wireDashboard } from "./dashboard.js";
-import { initActivity, recordEvent } from "./activity.js";
+import { initActivity, recordEvent, markWatching } from "./activity.js";
 import { showSite, hideSite, refreshSite } from "./site.js";
 
 // ------------------------------------------------------------------ views
@@ -147,6 +147,7 @@ async function boot() {
   connect({
     snapshot: (tasks) => { state.tasks = new Map(tasks.map(t => [t.id, t])); renderTasks(); if (state.tab === "dashboard") renderDashboard(); },
     event: onEvent,
+    open: markWatching,
   });
 }
 

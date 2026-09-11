@@ -452,9 +452,16 @@ function label(b) {
   ctx.restore();
 }
 
-function mb(bytes) {
+/// Scaled to whichever unit reads as a real number: a scope under 1 kB or
+/// under 1 MB rounding to "0" would look exactly like the empty-scope case
+/// `footprintKnown` already exists to tell apart from -- the whole reason
+/// that flag exists is so this function is never the thing doing the lying.
+export function mb(bytes) {
+  if (bytes < 1000) return `${bytes} B`;
+  const k = bytes / 1e3;
+  if (k < 1000) return `${Math.round(k)} kB`;
   const m = bytes / 1e6;
-  return m >= 1 ? `${m.toFixed(m < 10 ? 1 : 0)} MB` : `${Math.round(bytes / 1e3)} kB`;
+  return `${m.toFixed(m < 10 ? 1 : 0)} MB`;
 }
 
 function draw(now) {
