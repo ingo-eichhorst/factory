@@ -8,7 +8,9 @@ use clap::{Parser, Subcommand};
 use factory_core::event::Event;
 use factory_core::protocol::{Payload, Request, Response};
 use factory_core::run::{Run, RunStatus};
-use factory_core::task::{NewTask, Schedule, Task, TaskFilter, TaskReport, TaskStatus};
+use factory_core::task::{
+    NewTask, Schedule, Task, TaskFilter, TaskPatch, TaskReport, TaskStatus,
+};
 use std::path::PathBuf;
 
 use client::Client;
@@ -27,6 +29,11 @@ struct Cli {
     /// Print the daemon's answer as JSON.
     #[arg(long, global = true)]
     json: bool,
+
+    /// Say which agent is calling. Factory sets FACTORY_TOKEN in every session
+    /// it opens, so an agent rarely has to pass this.
+    #[arg(long, global = true, env = "FACTORY_TOKEN")]
+    token: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -119,6 +126,7 @@ enum TaskCmd {
         instructions: String,
         #[arg(long)]
         scope: Option<String>,
+        /// An agent the scope declares (`assistant`), or any adapter (`pi`).
         #[arg(long)]
         agent: Option<String>,
         #[arg(long)]
@@ -126,9 +134,47 @@ enum TaskCmd {
         /// `every 300`, `every 5m`, or a cron expression.
         #[arg(long)]
         schedule: Option<String>,
+        /// Seconds this task's agent has to acknowledge a run.
+        #[arg(long)]
+        ack_timeout: Option<u64>,
+        /// Seconds a run of this task may take.
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Repeatable: `--label area=infra`.
+        #[arg(long = "label")]
+        labels: Vec<String>,
         /// Dispatch it immediately as well.
         #[arg(long)]
         run: bool,
+    },
+    /// Change a task. Only what you pass is touched.
+    Edit {
+        id: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(short, long)]
+        instructions: Option<String>,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        runtime: Option<String>,
+        #[arg(long)]
+        schedule: Option<String>,
+        /// Drop the schedule and go back to manual.
+        #[arg(long)]
+        no_schedule: bool,
+        #[arg(long)]
+        ack_timeout: Option<u64>,
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Go back to the instance defaults.
+        #[arg(long)]
+        default_timeouts: bool,
+        /// Repeatable; replaces the whole set.
+        #[arg(long = "label")]
+        labels: Vec<String>,
     },
     /// Show one task.
     Show { id: Option<String> },
@@ -161,8 +207,9 @@ enum TaskCmd {
         result: Option<String>,
         #[arg(long)]
         error: Option<String>,
-        /// Defaults to FACTORY_TASK_TOKEN, which the daemon sets in the session.
-        #[arg(long, env = "FACTORY_TASK_TOKEN")]
+        /// Defaults to FACTORY_TASK_TOKEN, which the daemon sets in the
+        /// session alongside FACTORY_TOKEN.
+        #[arg(long = "run-token", env = "FACTORY_TASK_TOKEN")]
         token: Option<String>,
     },
 }
@@ -170,7 +217,7 @@ enum TaskCmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = Client::locate(cli.socket.clone(), cli.root.clone())?;
+    let client = Client::locate(cli.socket.clone(), cli.root.clone(), cli.token.clone())?;
 
     match cli.command {
         Command::Status => {
@@ -248,7 +295,7 @@ async fn main() -> Result<()> {
                             s.name, s.path, s.default_agent, s.runtime
                         ));
                         for a in &s.agents {
-                            let mut flags = vec![a.lifetime.clone()];
+                            let mut flags = vec![a.role.clone(), a.lifetime.clone()];
                             if a.is_default {
                                 flags.push("default".into());
                             }
@@ -438,6 +485,9 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             agent,
             runtime,
             schedule,
+            ack_timeout,
+            timeout,
+            labels,
             run,
         } => {
             let schedule = schedule.as_deref().map(parse_schedule).transpose()?;
@@ -449,7 +499,9 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     agent,
                     runtime,
                     schedule,
-                    labels: Default::default(),
+                    ack_timeout_seconds: ack_timeout,
+                    timeout_seconds: timeout,
+                    labels: parse_labels(&labels)?,
                 }))
                 .await?;
             let created = match &payload {
@@ -469,6 +521,51 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     task.id,
                     one_line(task)
                 )),
+                _ => None,
+            })
+        }
+
+        TaskCmd::Edit {
+            id,
+            title,
+            instructions,
+            scope,
+            agent,
+            runtime,
+            schedule,
+            no_schedule,
+            ack_timeout,
+            timeout,
+            default_timeouts,
+            labels,
+        } => {
+            let patch = TaskPatch {
+                title,
+                instructions,
+                scope,
+                agent,
+                runtime,
+                schedule: schedule.as_deref().map(parse_schedule).transpose()?,
+                clear_schedule: no_schedule,
+                ack_timeout_seconds: ack_timeout,
+                timeout_seconds: timeout,
+                clear_ack_timeout: default_timeouts,
+                clear_timeout: default_timeouts,
+                labels: if labels.is_empty() {
+                    None
+                } else {
+                    Some(parse_labels(&labels)?)
+                },
+                ..Default::default()
+            };
+            let payload = client
+                .send(Request::TaskUpdate {
+                    id: need_id(id)?,
+                    patch,
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Task { task } => Some(detail(task)),
                 _ => None,
             })
         }
@@ -576,6 +673,17 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
 fn need_id(id: Option<String>) -> Result<String> {
     id.or_else(|| std::env::var("FACTORY_TASK_ID").ok().filter(|s| !s.is_empty()))
         .ok_or_else(|| anyhow!("no task id given and FACTORY_TASK_ID is not set"))
+}
+
+fn parse_labels(pairs: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    pairs
+        .iter()
+        .map(|p| {
+            p.split_once('=')
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                .ok_or_else(|| anyhow!("labels look like key=value, not {p:?}"))
+        })
+        .collect()
 }
 
 fn parse_schedule(text: &str) -> Result<Schedule> {
@@ -699,6 +807,16 @@ fn detail(t: &Task) -> String {
     }
     if t.runs > 0 {
         s.push_str(&format!("  runs       {}\n", t.runs));
+    }
+    if let Some(v) = t.ack_timeout_seconds {
+        s.push_str(&format!("  ack after  {v}s\n"));
+    }
+    if let Some(v) = t.timeout_seconds {
+        s.push_str(&format!("  timeout    {v}s\n"));
+    }
+    if !t.labels.is_empty() {
+        let labels: Vec<String> = t.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        s.push_str(&format!("  labels     {}\n", labels.join(" ")));
     }
     if !t.instructions.trim().is_empty() {
         s.push_str(&format!("\n{}\n", t.instructions.trim()));

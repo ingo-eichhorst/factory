@@ -99,6 +99,49 @@ longer declares is **closed** rather than left for somebody to find next week.
 `lifetime` may also sit inside the singular `agent:` block, which is how
 instances written before standing agents existed already spell it.
 
+Every agent has a **role**, and a task names a **concrete agent**, not a
+harness. `assistant` and `scratch` are different agents even when both are pi.
+
+```yaml
+scopes:
+  - name: demo
+    path: projects/demo
+    agents:
+      - name: assistant
+        harness: pi
+        lifetime: permanent
+        role: foreman        # worker is the default
+```
+
+- **worker** reads tasks, and updates the ones assigned to it — its own scope,
+  its own name. It cannot create tasks, start or cancel runs, or hand its work
+  to somebody else.
+- **foreman** runs a scope: it creates tasks there, edits any of them, and
+  assigns them to the other agents in that scope. Its authority stops at the
+  scope boundary — a foreman in `demo` cannot touch `root`.
+
+An agent says which one it is by presenting the token Factory put in its
+session as `FACTORY_TOKEN`; the CLI sends it on every request. No token means
+the owner.
+
+> **This is not a security boundary.** Every agent runs as the owner of the
+> instance and can reach the same socket, so an agent that simply leaves the
+> token out is indistinguishable from a person. Roles keep an agent that
+> follows its instructions inside its job. They do not stop one that does not.
+
+To give every scope a foreman without writing one into each:
+
+```yaml
+daemon:
+  foreman:
+    enabled: true        # off by default: this starts one agent per scope
+    harness: pi
+    name: foreman
+    exclude: [root]      # the instance root is the company, not a project
+```
+
+A scope that already declares an agent with `role: foreman` keeps its own.
+
 ```sh
 factory agents                       # scopes, their agents, and what each is doing
 factory agent start demo watcher
@@ -123,6 +166,21 @@ started again has two runs, numbered `attempt 1` and `attempt 2`, and both are
 kept with their own journal, their own outcome, and their own terminal
 transcript. The task itself mirrors the newest run, so a list stays cheap to
 read; the history lives on the runs.
+
+Everything a task carries can be set when it is created and changed afterwards
+— scope, agent, schedule, labels, and how patient the daemon is with it:
+
+```sh
+factory task create "nightly sweep" -i "..." \
+  --scope demo --agent assistant \
+  --schedule "0 3 * * *" --timeout 1800 --ack-timeout 120 --label area=infra
+
+factory task edit <id> --agent scratch --schedule "every 15m"
+factory task edit <id> --no-schedule --default-timeouts
+```
+
+`--ack-timeout` is how long the agent has to say it has started; `--timeout` is
+how long the whole run may take. Both fall back to the instance defaults.
 
 ```sh
 factory task run <id>          # a retry is just another run
@@ -283,6 +341,9 @@ already chosen. A task run's terminal takes the same input.
 - **No schema migrations.** The database carries a version; one written by a
   different version is dropped and rebuilt. The daemon warns when it does this.
   Fine for a prototype, not for anything you would miss.
+- **A task always opens its own session**, even when it names a standing agent.
+  Sending work into an agent's existing session — so it keeps its context — is
+  a different feature, with its own questions about whose transcript is whose.
 - **The socket is the security boundary.** It is `0600` in `.factory/`, and the
   callback token only stops one running agent from closing another's run by
   mistake. The HTTP interface has no authentication at all. It binds to

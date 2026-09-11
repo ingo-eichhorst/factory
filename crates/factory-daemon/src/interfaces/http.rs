@@ -13,7 +13,7 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use factory_core::adapter::interface::{Interface, InterfaceContext};
 use factory_core::error::{FactoryError, Result};
-use factory_core::protocol::{Payload, Request, Response};
+use factory_core::protocol::{Envelope, Payload, Request, Response};
 use factory_core::task::{NewTask, TaskFilter, TaskPatch, TaskReport};
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use std::sync::Arc;
@@ -143,8 +143,18 @@ async fn index() -> impl IntoResponse {
 
 /// Every route funnels through here, so REST and the socket cannot drift apart.
 async fn run(engine: &Arc<Engine>, request: Request) -> AxumResponse {
-    let response = engine.handle(request).await;
-    let code = match &response {
+    run_as(engine, request, None).await
+}
+
+/// The same, for a caller that presented a token.
+async fn run_as(engine: &Arc<Engine>, request: Request, token: Option<String>) -> AxumResponse {
+    let response = engine.handle(Envelope { request, token }).await;
+    let code = status_for(&response);
+    (code, Json(response)).into_response()
+}
+
+fn status_for(response: &Response) -> StatusCode {
+    match response {
         Response::Ok { .. } => StatusCode::OK,
         Response::Error { code, .. } => match code.as_str() {
             "task_not_found" | "no_such_adapter" | "no_such_scope" => StatusCode::NOT_FOUND,
@@ -152,12 +162,15 @@ async fn run(engine: &Arc<Engine>, request: Request) -> AxumResponse {
             "denied" => StatusCode::FORBIDDEN,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         },
-    };
-    (code, Json(response)).into_response()
+    }
 }
 
-async fn rpc(State(engine): State<Arc<Engine>>, Json(req): Json<Request>) -> AxumResponse {
-    run(&engine, req).await
+/// The raw envelope, token and all. This is the one route an agent uses when
+/// it is not going through the CLI.
+async fn rpc(State(engine): State<Arc<Engine>>, Json(env): Json<Envelope>) -> AxumResponse {
+    let response = engine.handle(env).await;
+    let code = status_for(&response);
+    (code, Json(response)).into_response()
 }
 
 async fn status(State(engine): State<Arc<Engine>>) -> AxumResponse {
@@ -372,7 +385,9 @@ async fn ws_stream(engine: Arc<Engine>, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
     let mut events = engine.bus.subscribe();
 
-    let snapshot = engine.handle(Request::TaskList(TaskFilter::default())).await;
+    let snapshot = engine
+        .handle_request(Request::TaskList(TaskFilter::default()))
+        .await;
     if let Ok(text) = serde_json::to_string(&snapshot) {
         if tx.send(Message::Text(text.into())).await.is_err() {
             return;
@@ -400,7 +415,7 @@ async fn ws_stream(engine: Arc<Engine>, socket: WebSocket) {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // Re-send the whole list rather than leave the page
                         // showing state that skipped a step.
-                        let snapshot = engine.handle(Request::TaskList(TaskFilter::default())).await;
+                        let snapshot = engine.handle_request(Request::TaskList(TaskFilter::default())).await;
                         let Ok(text) = serde_json::to_string(&snapshot) else { continue };
                         if tx.send(Message::Text(text.into())).await.is_err() {
                             return;

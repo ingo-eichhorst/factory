@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use factory_core::adapter::interface::{Interface, InterfaceContext};
 use factory_core::error::{FactoryError, Result};
-use factory_core::protocol::{Payload, Request, Response};
+use factory_core::protocol::{Envelope, Payload, Request, Response};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -109,7 +109,7 @@ async fn serve_connection(engine: Arc<Engine>, stream: UnixStream) -> anyhow::Re
             continue;
         }
 
-        let request: Request = match serde_json::from_str(line) {
+        let envelope: Envelope = match serde_json::from_str(line) {
             Ok(r) => r,
             Err(e) => {
                 let response = Response::error("bad_request", format!("unreadable request: {e}"));
@@ -122,7 +122,7 @@ async fn serve_connection(engine: Arc<Engine>, stream: UnixStream) -> anyhow::Re
 
         // Subscribe takes over the connection: from here it is one event per
         // line until the client goes away.
-        if matches!(request, Request::Subscribe) {
+        if matches!(envelope.request, Request::Subscribe) {
             let ack = Response::ok(Payload::Ok);
             write_half
                 .write_all(format!("{}\n", serde_json::to_string(&ack)?).as_bytes())
@@ -157,7 +157,7 @@ async fn serve_connection(engine: Arc<Engine>, stream: UnixStream) -> anyhow::Re
             }
         }
 
-        let response = engine.handle(request).await;
+        let response = engine.handle(envelope).await;
         write_half
             .write_all(format!("{}\n", serde_json::to_string(&response)?).as_bytes())
             .await?;

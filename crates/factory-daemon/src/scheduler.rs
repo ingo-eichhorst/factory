@@ -11,8 +11,8 @@ use crate::engine::Engine;
 
 pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     let tick = Duration::from_secs(engine.factory.config.daemon.tick_seconds.max(1));
-    let timeout_secs = engine.factory.config.daemon.task_timeout_seconds as i64;
-    let ack_secs = engine.factory.config.daemon.ack_timeout_seconds as i64;
+    let default_timeout = engine.factory.config.daemon.task_timeout_seconds as i64;
+    let default_ack = engine.factory.config.daemon.ack_timeout_seconds as i64;
     let mut ticker = tokio::time::interval(tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -64,6 +64,21 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
 
         for run in active {
             let age = (Utc::now() - run.started_at).num_seconds();
+
+            // A task may set its own patience. Read it per run rather than
+            // once before the loop, or an override would only take effect
+            // after the daemon was restarted.
+            let task = engine.store.get(&run.task_id).await.ok().flatten();
+            let ack_secs = task
+                .as_ref()
+                .and_then(|t| t.ack_timeout_seconds)
+                .map(|v| v as i64)
+                .unwrap_or(default_ack);
+            let timeout_secs = task
+                .as_ref()
+                .and_then(|t| t.timeout_seconds)
+                .map(|v| v as i64)
+                .unwrap_or(default_timeout);
 
             // Still `dispatching` means the agent was given the task and has
             // not said a word about it. Something is in front of it.

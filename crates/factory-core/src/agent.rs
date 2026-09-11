@@ -10,6 +10,38 @@ use crate::task::SessionRef;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// What an agent is allowed to do.
+///
+/// This bounds what an agent can do by accident, not what it could do if it
+/// tried: every agent runs as the owner of the instance and can reach the
+/// control socket, so one that simply omits its token is indistinguishable
+/// from the person sitting there. Treat it as a job description, not a wall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// Reads tasks, and updates the ones assigned to it. Nothing else.
+    Worker,
+    /// Runs a scope: creates tasks in it, edits any of them, hands them to the
+    /// other agents there. Its authority stops at the scope boundary.
+    Foreman,
+}
+
+impl Default for Role {
+    fn default() -> Self {
+        // Default closed: an agent nobody gave a role is a worker.
+        Self::Worker
+    }
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Foreman => "foreman",
+        }
+    }
+}
+
 /// How long an agent is meant to stick around.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,7 +116,12 @@ pub struct AgentSession {
     pub agent: String,
     pub runtime: String,
     pub lifetime: Lifetime,
+    pub role: Role,
     pub state: AgentState,
+    /// What this agent presents to say which agent it is. Never leaves the
+    /// daemon: `redacted` strips it, like a run's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionRef>,
     /// The command a person types to get into this agent's terminal, when the
@@ -109,7 +146,20 @@ impl AgentSession {
         format!("{scope}/{name}")
     }
 
-    pub fn new(scope: &str, name: &str, agent: &str, runtime: &str, lifetime: Lifetime) -> Self {
+    pub fn redacted(&self) -> AgentSession {
+        let mut a = self.clone();
+        a.token = None;
+        a
+    }
+
+    pub fn new(
+        scope: &str,
+        name: &str,
+        agent: &str,
+        runtime: &str,
+        lifetime: Lifetime,
+        role: Role,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: Self::id_for(scope, name),
@@ -118,7 +168,9 @@ impl AgentSession {
             agent: agent.to_string(),
             runtime: runtime.to_string(),
             lifetime,
+            role,
             state: AgentState::Stopped,
+            token: None,
             session: None,
             attach: None,
             declared: true,

@@ -100,9 +100,13 @@ pub struct Run {
     pub attempt: u32,
     pub status: RunStatus,
     pub trigger: Trigger,
-    /// The adapters this run used, copied at dispatch: a task whose agent is
-    /// changed later must not rewrite what an old run actually did.
+    /// What the task asked for -- an agent the scope declares, or an adapter
+    /// name. Copied at dispatch: a task whose agent is changed later must not
+    /// rewrite what an old run actually did.
     pub agent: String,
+    /// The adapter that actually ran, once the name above was resolved.
+    #[serde(default)]
+    pub adapter: String,
     pub runtime: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionRef>,
@@ -135,6 +139,7 @@ pub struct NewRun {
     pub task_id: String,
     pub trigger: Trigger,
     pub agent: String,
+    pub adapter: String,
     pub runtime: String,
     pub token: String,
 }

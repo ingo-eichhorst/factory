@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 /// Bumped whenever the shape below changes. A database at any other version is
 /// discarded.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
@@ -298,8 +298,33 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.status {
                 task.status = v;
             }
+            if patch.clear_schedule {
+                task.schedule = None;
+                task.next_run_at = None;
+            }
             if let Some(v) = patch.schedule {
                 task.schedule = Some(v);
+            }
+            if let Some(v) = patch.scope {
+                task.scope = v;
+            }
+            if let Some(v) = patch.agent {
+                task.agent = v;
+            }
+            if let Some(v) = patch.runtime {
+                task.runtime = v;
+            }
+            if patch.clear_ack_timeout {
+                task.ack_timeout_seconds = None;
+            }
+            if let Some(v) = patch.ack_timeout_seconds {
+                task.ack_timeout_seconds = Some(v);
+            }
+            if patch.clear_timeout {
+                task.timeout_seconds = None;
+            }
+            if let Some(v) = patch.timeout_seconds {
+                task.timeout_seconds = Some(v);
             }
             if patch.clear_result {
                 task.result = None;
@@ -370,6 +395,7 @@ impl TaskStore for SqliteStore {
                 status: RunStatus::Dispatching,
                 trigger: new.trigger,
                 agent: new.agent.clone(),
+                adapter: new.adapter.clone(),
                 runtime: new.runtime.clone(),
                 session: None,
                 token: Some(new.token.clone()),

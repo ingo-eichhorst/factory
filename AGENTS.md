@@ -40,6 +40,9 @@ model call. Use it for anything that is not specifically about an AI harness.
   retry will show the previous attempt's error.
 - Nothing Factory owns is written inside a scope. State lives in `.factory/`.
 - A plugin that fails must never take the daemon down with it.
+- Roles bound what an agent does by accident, not what it could do. Every agent
+  runs as the owner and can reach the socket; one that omits its token is the
+  owner. Never write anything that implies otherwise.
 - A permanent agent is quiet by design. It is checked for whether its session is
   still there and nothing else -- never for whether it has said anything. The
   run timeouts must not reach it.

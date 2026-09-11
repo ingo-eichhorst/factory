@@ -14,7 +14,7 @@ pub mod task;
 pub use adapter::{Agent, AdapterKind, AgentRuntime, Interface, TaskStore};
 pub use config::{Config, Factory, Scope};
 pub use error::{FactoryError, Result};
-pub use agent::{AgentSession, AgentState, Lifetime};
+pub use agent::{AgentSession, AgentState, Lifetime, Role};
 pub use event::{Event, EventBus};
 pub use run::{NewRun, Run, RunPatch, RunStatus, Trigger};
 pub use task::{

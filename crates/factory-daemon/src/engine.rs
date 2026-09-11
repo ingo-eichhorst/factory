@@ -9,9 +9,9 @@ use factory_core::config::Factory;
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
-    AgentActivity, AgentView, Payload, Request, Response, ScopeView, StatusInfo,
+    AgentActivity, AgentView, Envelope, Payload, Request, Response, ScopeView, StatusInfo,
 };
-use factory_core::agent::{AgentSession, AgentState};
+use factory_core::agent::{AgentSession, AgentState, Role};
 use factory_core::run::{NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
     NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
@@ -54,11 +54,42 @@ impl Engine {
 
     // -- the API every interface speaks ------------------------------------
 
-    pub async fn handle(self: &Arc<Self>, req: Request) -> Response {
-        match self.dispatch_request(req).await {
+    /// Every request goes through here: who is asking, may they, then do it.
+    pub async fn handle(self: &Arc<Self>, envelope: Envelope) -> Response {
+        let caller = match self.caller_for(envelope.token.as_deref()).await {
+            Ok(c) => c,
+            Err(e) => return Response::error(e.code(), e.to_string()),
+        };
+        let request = self.bind_caller(&caller, envelope.request);
+        if let Err(e) = self.authorize(&caller, &request).await {
+            return Response::error(e.code(), e.to_string());
+        }
+        match self.dispatch_request(request).await {
             Ok(payload) => Response::ok(payload),
             Err(e) => Response::error(e.code(), e.to_string()),
         }
+    }
+
+    /// An agent's own scope is the one it means. A foreman that creates a task
+    /// without naming a scope means its own, not the instance's first.
+    fn bind_caller(&self, caller: &crate::access::Caller, request: Request) -> Request {
+        let Some(scope) = caller.scope() else {
+            return request;
+        };
+        match request {
+            Request::TaskCreate(mut new) => {
+                if new.scope.is_none() {
+                    new.scope = Some(scope.to_string());
+                }
+                Request::TaskCreate(new)
+            }
+            other => other,
+        }
+    }
+
+    /// For callers inside the daemon, which are always the owner.
+    pub async fn handle_request(self: &Arc<Self>, request: Request) -> Response {
+        self.handle(Envelope::from(request)).await
     }
 
     async fn dispatch_request(self: &Arc<Self>, req: Request) -> Result<Payload> {
@@ -71,10 +102,10 @@ impl Engine {
                 scopes: self.scope_views().await?,
             }),
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
-                agent: self.start_agent(&scope, &name).await?,
+                agent: self.start_agent(&scope, &name).await?.redacted(),
             }),
             Request::AgentStop { id } => Ok(Payload::Agent {
-                agent: self.stop_agent(&id).await?,
+                agent: self.stop_agent(&id).await?.redacted(),
             }),
             Request::AgentInput { id, text, keys } => {
                 self.agent_input(&id, text.as_deref(), &keys).await?;
@@ -97,14 +128,9 @@ impl Engine {
             Request::TaskList(filter) => Ok(Payload::Tasks {
                 tasks: self.store.list(&filter).await?,
             }),
-            Request::TaskUpdate { id, patch } => {
-                let mut patch = patch;
-                // A caller must not be able to rewrite the bookkeeping.
-                patch.runs = None;
-                let task = self.store.update(&id, &patch).await?;
-                self.bus.publish(Event::TaskUpdated { task: task.clone() });
-                Ok(Payload::Task { task })
-            }
+            Request::TaskUpdate { id, patch } => Ok(Payload::Task {
+                task: self.update(&id, patch).await?,
+            }),
             Request::TaskDelete { id } => {
                 if let Some(run) = self.store.active_run(&id).await? {
                     self.close_session(&run).await;
@@ -269,9 +295,12 @@ impl Engine {
             let mut agents = Vec::new();
             let mut covered = std::collections::BTreeSet::new();
 
-            for decl in scope.declared_agents() {
+            for decl in scope.agents_with(&self.factory.config.daemon.foreman) {
                 let name = decl.name();
-                covered.insert(decl.harness.clone());
+                // Runs are keyed by the name a task asked for, which is this
+                // name -- not the harness behind it. Key both sides the same
+                // way or live runs quietly stop appearing here.
+                covered.insert(name.clone());
                 let live = decl
                     .lifetime
                     .is_standing()
@@ -288,11 +317,12 @@ impl Engine {
 
                 agents.push(AgentView {
                     id: live.map(|a| a.id.clone()),
-                    name,
+                    name: name.clone(),
                     adapter: decl.harness.clone(),
                     description,
                     source,
                     lifetime: decl.lifetime.as_str().to_string(),
+                    role: decl.role.as_str().to_string(),
                     autostart: decl.autostart(),
                     state: live
                         .map(|a| a.state.as_str().to_string())
@@ -303,7 +333,10 @@ impl Engine {
                                 "task".into()
                             }
                         }),
-                    is_default: decl.harness == default_agent,
+                    // "default" means a task that names no agent lands here --
+                    // which is a question about the name, not the harness.
+                    // Three agents sharing a harness are not all the default.
+                    is_default: name == default_agent,
                     declared: true,
                     attach: live.and_then(|a| a.attach.clone()),
                     session: live
@@ -312,7 +345,7 @@ impl Engine {
                     started_at: live.map(|a| a.started_at),
                     error: live.and_then(|a| a.error.clone()),
                     active: work
-                        .get(&(scope.name.clone(), decl.harness.clone()))
+                        .get(&(scope.name.clone(), name.clone()))
                         .cloned()
                         .unwrap_or_default(),
                 });
@@ -334,6 +367,7 @@ impl Engine {
                         description,
                         source,
                         lifetime: "task".into(),
+                        role: Role::Worker.as_str().to_string(),
                         autostart: false,
                         state: "task".into(),
                         is_default: true,
@@ -368,6 +402,7 @@ impl Engine {
                     description,
                     source,
                     lifetime: "task".into(),
+                    role: Role::Worker.as_str().to_string(),
                     autostart: false,
                     state: "task".into(),
                     is_default: false,
@@ -395,6 +430,80 @@ impl Engine {
         }
 
         Ok(views)
+    }
+
+    // -- naming an agent ----------------------------------------------------
+
+    /// Turn what a task asked for into the agent it will actually run as.
+    ///
+    /// A task names a concrete agent in its scope -- `assistant`, `scratch` --
+    /// and the adapter behind it follows from the config. An adapter name
+    /// still works for a scope that declares nothing, or for a one-off with
+    /// `--agent claude-code`.
+    pub fn resolve_agent(&self, scope_name: &str, name: &str) -> Result<(String, String)> {
+        let scope = self.factory.scope(scope_name)?;
+        let declared_here = scope.agents_with(&self.factory.config.daemon.foreman);
+        if let Some(declared) = declared_here.iter().find(|a| a.name() == name).cloned() {
+            // The name resolves; the adapter behind it still has to exist.
+            self.registry.agent(&declared.harness)?;
+            return Ok((declared.name(), declared.harness));
+        }
+        if self.registry.agent(name).is_ok() {
+            return Ok((name.to_string(), name.to_string()));
+        }
+
+        let declared: Vec<String> = declared_here.iter().map(|a| a.name()).collect();
+        let adapters: Vec<String> = self
+            .registry
+            .list()
+            .adapters
+            .into_iter()
+            .filter(|a| a.kind == "agent")
+            .map(|a| a.name)
+            .collect();
+        Err(FactoryError::BadRequest(format!(
+            "scope {scope_name:?} has no agent named {name:?}. It declares: {}. \
+             Any adapter also works: {}.",
+            if declared.is_empty() { "none".into() } else { declared.join(", ") },
+            adapters.join(", "),
+        )))
+    }
+
+    /// Edit a task. Anything that has to stay true of a task is checked here
+    /// rather than in the store: an agent that does not resolve, a scope that
+    /// does not exist, and -- the one that is easy to miss -- a schedule set
+    /// after creation, which would otherwise never fire because nothing
+    /// recomputed when it is next due.
+    pub async fn update(&self, id: &str, mut patch: TaskPatch) -> Result<Task> {
+        let current = self.require(id).await?;
+        // The bookkeeping is the daemon's, not a caller's.
+        patch.runs = None;
+
+        let scope = patch.scope.clone().unwrap_or_else(|| current.scope.clone());
+        if patch.scope.is_some() {
+            self.factory.scope(&scope)?;
+        }
+        match &patch.agent {
+            Some(agent) => {
+                let (name, _) = self.resolve_agent(&scope, agent)?;
+                patch.agent = Some(name);
+            }
+            // A task moved to another scope must still have an agent there.
+            None if patch.scope.is_some() => {
+                self.resolve_agent(&scope, &current.agent)?;
+            }
+            None => {}
+        }
+        if let Some(rt) = &patch.runtime {
+            self.registry.runtime(rt)?;
+        }
+        if let Some(s) = &patch.schedule {
+            patch.next_run_at = Some(schedule::next_after(s, Utc::now())?);
+        }
+
+        let task = self.store.update(id, &patch).await?;
+        self.bus.publish(Event::TaskUpdated { task: task.clone() });
+        Ok(task)
     }
 
     // -- creating ----------------------------------------------------------
@@ -429,9 +538,9 @@ impl Engine {
             .or_else(|| declared.runtime.clone())
             .unwrap_or_else(|| self.factory.config.daemon.default_runtime.clone());
 
-        // Refuse now, with the list of what exists, rather than at dispatch
-        // time when whoever asked has stopped watching.
-        self.registry.agent(&agent)?;
+        // Refuse now, with the list of what this scope offers, rather than at
+        // dispatch time when whoever asked has stopped watching.
+        let (agent, _adapter) = self.resolve_agent(&scope, &agent)?;
         self.registry.runtime(&runtime)?;
 
         let mut task = factory_core::adapter::store::task_from_new(new, scope, agent, runtime);
@@ -486,7 +595,10 @@ impl Engine {
 
     async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger) -> Result<Run> {
         let task = self.require(task_id).await?;
-        let agent = self.registry.agent(&task.agent)?;
+        // Resolve again rather than trusting what was written down: the config
+        // may have changed since the task was created.
+        let (agent_name, adapter_name) = self.resolve_agent(&task.scope, &task.agent)?;
+        let agent = self.registry.agent(&adapter_name)?;
         let runtime = self.registry.runtime(&task.runtime)?;
         let cwd = self.factory.scope_path(&task.scope)?;
         if !cwd.is_dir() {
@@ -503,7 +615,8 @@ impl Engine {
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger,
-                agent: task.agent.clone(),
+                agent: agent_name.clone(),
+                adapter: adapter_name.clone(),
                 runtime: task.runtime.clone(),
                 token: token.clone(),
             })
@@ -533,6 +646,7 @@ impl Engine {
                 attempt: run.attempt,
                 token,
             }),
+            identity_token: None,
         };
 
         let launch = agent.launch_spec(&ctx).await?;
@@ -566,7 +680,7 @@ impl Engine {
             TaskEntry::new(
                 "daemon",
                 "dispatched",
-                format!("handed to {} on {}", task.agent, session.runtime),
+                format!("handed to {agent_name} ({adapter_name}) on {}", session.runtime),
             )
             .in_run(&run.id)
             .with_data(serde_json::json!({ "session": session })),
@@ -595,7 +709,7 @@ impl Engine {
                 }
                 None => {
                     return Err(FactoryError::Denied(format!(
-                        "attempt {} of task {task_id} needs its token; pass --token or set FACTORY_TASK_TOKEN",
+                        "attempt {} of task {task_id} needs its run token; it is FACTORY_TASK_TOKEN in the session, or pass --run-token",
                         run.attempt
                     )))
                 }

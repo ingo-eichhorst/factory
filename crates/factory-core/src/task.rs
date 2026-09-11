@@ -81,7 +81,10 @@ pub struct Task {
     pub instructions: String,
     /// Name of the scope (working directory) the task runs in.
     pub scope: String,
-    /// Name of the agent adapter.
+    /// The agent this task runs as: the name of an agent the scope declares
+    /// (`assistant`, `scratch`), or an adapter name (`pi`, `claude-code`) for
+    /// one the scope does not name. The adapter behind it is resolved at
+    /// dispatch, so renaming a harness in the config does not rewrite history.
     pub agent: String,
     /// Name of the agent-runtime adapter.
     pub runtime: String,
@@ -97,6 +100,12 @@ pub struct Task {
     /// How many times this task has been run.
     #[serde(default)]
     pub runs: u32,
+    /// How long this task's agent has to acknowledge a run, and how long the
+    /// whole run may take. `None` uses the instance's defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     pub created_at: DateTime<Utc>,
@@ -120,6 +129,10 @@ pub struct NewTask {
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
 }
@@ -149,6 +162,24 @@ pub struct TaskPatch {
     /// Set when a run is created, so `runs` counts without a second query.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    /// `None` means "leave alone", so going back to the instance default and
+    /// dropping a schedule each need a field that can say so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_ack_timeout: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_timeout: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_schedule: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

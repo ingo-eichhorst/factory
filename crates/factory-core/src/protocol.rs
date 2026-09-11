@@ -126,6 +126,30 @@ pub enum Payload {
     Event { event: Event },
 }
 
+/// A request plus who is making it.
+///
+/// The token is how an agent says which agent it is. Absent means the owner --
+/// the person at the socket. That is not a security boundary: every agent runs
+/// as the owner and can read the socket, so one that leaves the token out is
+/// indistinguishable from a person. It keeps agents inside their role by
+/// accident, not against intent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    #[serde(flatten)]
+    pub request: Request,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+impl From<Request> for Envelope {
+    fn from(request: Request) -> Self {
+        Self {
+            request,
+            token: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
@@ -212,6 +236,8 @@ pub struct AgentView {
     pub source: String,
     /// `permanent`, `temporary`, or `task`.
     pub lifetime: String,
+    /// `worker` or `foreman`.
+    pub role: String,
     pub autostart: bool,
     /// For a standing agent: `starting`, `ready`, `gone`, `stopped`.
     /// For a task agent: `task`.
@@ -244,4 +270,42 @@ pub struct ScopeView {
     /// Every agent adapter registered, so a task can be started with any of
     /// them regardless of what the scope declares.
     pub available: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `flatten` over an adjacently tagged enum routes through a content buffer,
+    // which is a rough edge in serde. Prove it round-trips before anything is
+    // built on top of it.
+    #[test]
+    fn an_envelope_carries_a_request_and_a_token() {
+        let json = r#"{"op":"task.list","params":{},"token":"abc"}"#;
+        let env: Envelope = serde_json::from_str(json).expect("envelope parses");
+        assert_eq!(env.token.as_deref(), Some("abc"));
+        assert!(matches!(env.request, Request::TaskList(_)));
+
+        let back = serde_json::to_string(&env).unwrap();
+        let again: Envelope = serde_json::from_str(&back).unwrap();
+        assert_eq!(again.token.as_deref(), Some("abc"));
+        assert!(matches!(again.request, Request::TaskList(_)));
+    }
+
+    #[test]
+    fn a_request_without_a_token_still_parses() {
+        let env: Envelope = serde_json::from_str(r#"{"op":"status"}"#).expect("no token is fine");
+        assert!(env.token.is_none());
+        assert!(matches!(env.request, Request::Status));
+    }
+
+    #[test]
+    fn a_request_with_params_survives_the_flatten() {
+        let json = r#"{"op":"task.get","params":{"id":"t1"},"token":"t"}"#;
+        let env: Envelope = serde_json::from_str(json).unwrap();
+        match env.request {
+            Request::TaskGet { id } => assert_eq!(id, "t1"),
+            other => panic!("wrong request: {other:?}"),
+        }
+    }
 }

@@ -1,6 +1,7 @@
 //! The daemon. Loads an instance, registers adapters, mounts interfaces, and
 //! runs until it is told to stop.
 
+mod access;
 mod agents;
 mod engine;
 mod interfaces;

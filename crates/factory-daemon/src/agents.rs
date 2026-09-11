@@ -30,7 +30,7 @@ impl Engine {
     fn declared(&self, scope: &str, name: &str) -> Result<ScopeAgent> {
         self.factory
             .scope(scope)?
-            .declared_agents()
+            .agents_with(&self.factory.config.daemon.foreman)
             .into_iter()
             .find(|a| a.name() == name)
             .ok_or_else(|| {
@@ -74,8 +74,18 @@ impl Engine {
             )));
         }
 
-        let mut agent =
-            AgentSession::new(scope, name, &decl.harness, &runtime_name_, decl.lifetime);
+        let mut agent = AgentSession::new(
+            scope,
+            name,
+            &decl.harness,
+            &runtime_name_,
+            decl.lifetime,
+            decl.role,
+        );
+        // A fresh token each time it comes up: an old session's token must not
+        // still speak for the agent that replaced it.
+        let identity = factory_core::new_token();
+        agent.token = Some(identity.clone());
         agent.state = AgentState::Starting;
         agent.started_at = Utc::now();
         agent.error = None;
@@ -91,6 +101,7 @@ impl Engine {
             factory_bin: self.factory_bin.clone(),
             socket: self.factory.socket_path(),
             task: None,
+            identity_token: Some(identity),
         };
 
         let launch = match adapter.launch_spec(&ctx).await {
@@ -149,6 +160,7 @@ impl Engine {
         }
         agent.session = None;
         agent.attach = None;
+        agent.token = None;
         agent.state = AgentState::Stopped;
         agent.last_seen_at = Utc::now();
         self.store.put_agent(&agent).await?;
@@ -232,7 +244,7 @@ impl Engine {
         let mut seen = std::collections::BTreeSet::new();
 
         for scope in &self.factory.config.scopes {
-            for decl in scope.standing_agents() {
+            for decl in scope.standing_agents_with(&self.factory.config.daemon.foreman) {
                 let id = AgentSession::id_for(&scope.name, &decl.name());
                 seen.insert(id.clone());
 
@@ -243,6 +255,7 @@ impl Engine {
                         let mut a = existing.clone();
                         a.declared = true;
                         a.lifetime = decl.lifetime;
+                        a.role = decl.role;
                         a.last_seen_at = Utc::now();
                         let _ = self.store.put_agent(&a).await;
                         tracing::info!(agent = %id, "adopted a standing agent that outlived the daemon");
@@ -253,6 +266,7 @@ impl Engine {
                         let mut a = existing.clone();
                         a.declared = true;
                         a.lifetime = decl.lifetime;
+                        a.role = decl.role;
                         a.session = None;
                         if a.state != AgentState::Stopped {
                             a.state = AgentState::Gone;
@@ -271,6 +285,7 @@ impl Engine {
                             &decl.harness,
                             &self.runtime_for(&scope.name),
                             decl.lifetime,
+                            decl.role,
                         );
                         let _ = self.store.put_agent(&a).await;
                         if decl.autostart() {

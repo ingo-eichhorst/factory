@@ -53,6 +53,9 @@ pub struct AgentContext {
     /// `None` for a standing agent: it is being started to be there, and has
     /// nothing to report on.
     pub task: Option<TaskBinding>,
+    /// What this agent presents to say which agent it is, when it is a standing
+    /// one. A task run says so with its run token instead.
+    pub identity_token: Option<String>,
 }
 
 impl AgentContext {
@@ -95,6 +98,16 @@ impl AgentContext {
             ("FACTORY_SOCKET".to_string(), self.socket.display().to_string()),
             ("FACTORY_BIN".to_string(), self.factory_bin.display().to_string()),
         ]);
+        // One variable says which agent is calling, whether it is standing
+        // there or working a task. The CLI sends it on every request.
+        if let Some(token) = self
+            .task
+            .as_ref()
+            .map(|b| b.token.clone())
+            .or_else(|| self.identity_token.clone())
+        {
+            env.insert("FACTORY_TOKEN".into(), token);
+        }
         if let Some(b) = &self.task {
             env.insert("FACTORY_TASK_ID".into(), b.task.id.clone());
             env.insert("FACTORY_TASK_TOKEN".into(), b.token.clone());

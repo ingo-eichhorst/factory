@@ -1,4 +1,4 @@
-use crate::agent::Lifetime;
+use crate::agent::{Lifetime, Role};
 use crate::error::{FactoryError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -60,6 +60,47 @@ pub struct DaemonConfig {
     pub default_agent: String,
     #[serde(default = "default_runtime")]
     pub default_runtime: String,
+    /// Give every scope a foreman without writing one into each of them.
+    #[serde(default)]
+    pub foreman: ForemanConfig,
+}
+
+/// A foreman per scope, synthesised rather than written out.
+///
+/// Off by default, and deliberately so: switching it on starts one real agent
+/// session per scope. An instance with ten scopes gets ten of them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForemanConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// The name the synthesised agent gets in each scope.
+    #[serde(default = "default_foreman_name")]
+    pub name: String,
+    /// Which adapter it runs on.
+    #[serde(default = "default_agent")]
+    pub harness: String,
+    /// Scopes that get none. The instance root is the usual one: it is the
+    /// company, not a project.
+    #[serde(default = "default_foreman_exclude")]
+    pub exclude: Vec<String>,
+}
+
+fn default_foreman_name() -> String {
+    "foreman".into()
+}
+fn default_foreman_exclude() -> Vec<String> {
+    vec!["root".into()]
+}
+
+impl Default for ForemanConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            name: default_foreman_name(),
+            harness: default_agent(),
+            exclude: default_foreman_exclude(),
+        }
+    }
 }
 
 fn default_store() -> String {
@@ -103,6 +144,7 @@ impl Default for DaemonConfig {
             ack_timeout_seconds: default_ack_timeout(),
             default_agent: default_agent(),
             default_runtime: default_runtime(),
+            foreman: ForemanConfig::default(),
         }
     }
 }
@@ -146,6 +188,8 @@ pub enum AgentRef {
         lifetime: Option<Lifetime>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         autostart: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<Role>,
     },
 }
 
@@ -177,6 +221,8 @@ pub struct ScopeAgent {
     pub harness: String,
     #[serde(default)]
     pub lifetime: Lifetime,
+    #[serde(default)]
+    pub role: Role,
     /// Whether the daemon brings it up by itself. Permanent agents default to
     /// yes, everything else to no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,6 +263,34 @@ impl Scope {
         self.agent.as_ref().map(AgentRef::adapter)
     }
 
+    /// Every agent this scope declares, plus the foreman the instance adds to
+    /// each scope when it is configured to.
+    pub fn agents_with(&self, foreman: &ForemanConfig) -> Vec<ScopeAgent> {
+        let mut out = self.declared_agents();
+        if !foreman.enabled || foreman.exclude.iter().any(|e| e == &self.name) {
+            return out;
+        }
+        // A scope that already has a foreman of its own keeps it.
+        if out.iter().any(|a| a.role == Role::Foreman) {
+            return out;
+        }
+        out.push(ScopeAgent {
+            name: Some(foreman.name.clone()),
+            harness: foreman.harness.clone(),
+            lifetime: Lifetime::Permanent,
+            role: Role::Foreman,
+            autostart: Some(true),
+        });
+        out
+    }
+
+    pub fn standing_agents_with(&self, foreman: &ForemanConfig) -> Vec<ScopeAgent> {
+        self.agents_with(foreman)
+            .into_iter()
+            .filter(|a| a.lifetime.is_standing())
+            .collect()
+    }
+
     /// Every agent this scope declares, from either spelling, in the order a
     /// person wrote them.
     pub fn declared_agents(&self) -> Vec<ScopeAgent> {
@@ -226,12 +300,14 @@ impl Scope {
             name,
             lifetime,
             autostart,
+            role,
         }) = &self.agent
         {
             out.push(ScopeAgent {
                 name: name.clone(),
                 harness: harness.clone(),
                 lifetime: lifetime.unwrap_or_default(),
+                role: role.unwrap_or_default(),
                 autostart: *autostart,
             });
         }
@@ -380,6 +456,33 @@ mod tests {
                 plugins_dir: None,
             },
         }
+    }
+
+    #[test]
+    fn a_foreman_is_added_to_every_scope_but_the_excluded_ones() {
+        let s: Scope = serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap();
+        let root: Scope = serde_yaml_ng::from_str("name: root\npath: .\n").unwrap();
+        let cfg = ForemanConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let names: Vec<String> = s.agents_with(&cfg).iter().map(|a| a.name()).collect();
+        assert_eq!(names, vec!["foreman"]);
+        assert_eq!(s.agents_with(&cfg)[0].role, Role::Foreman);
+        assert!(s.agents_with(&cfg)[0].lifetime.is_standing());
+        assert!(root.agents_with(&cfg).is_empty(), "root is excluded by default");
+        assert!(s.agents_with(&ForemanConfig::default()).is_empty(), "off by default");
+    }
+
+    #[test]
+    fn a_scope_that_names_its_own_foreman_keeps_it() {
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: demo\npath: .\nagents:\n  - name: chef\n    harness: pi\n    lifetime: permanent\n    role: foreman\n",
+        )
+        .unwrap();
+        let cfg = ForemanConfig { enabled: true, ..Default::default() };
+        let names: Vec<String> = s.agents_with(&cfg).iter().map(|a| a.name()).collect();
+        assert_eq!(names, vec!["chef"], "no second foreman is bolted on");
     }
 
     #[test]

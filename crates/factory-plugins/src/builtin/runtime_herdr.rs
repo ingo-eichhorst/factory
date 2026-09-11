@@ -131,6 +131,29 @@ impl HerdrRuntime {
         }
     }
 
+    /// An agent herdr already knows by this name, if there is one.
+    async fn adopt_named(&self, name: &str) -> Option<SessionRef> {
+        let got = self.run(&[s("agent"), s("get"), s(name)]).await.ok()?;
+        let agent = got.get("agent").unwrap_or(&got);
+        let pane = agent.get("pane_id").and_then(Value::as_str)?.to_string();
+        let workspace = agent
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Some(SessionRef {
+            runtime: ADAPTER.into(),
+            handle: pane.clone(),
+            meta: BTreeMap::from([
+                ("workspace_id".to_string(), workspace),
+                ("pane_id".to_string(), pane),
+                ("mode".to_string(), "agent".to_string()),
+                ("agent_name".to_string(), name.to_string()),
+                ("adopted".to_string(), "true".to_string()),
+            ]),
+        })
+    }
+
     fn pane_of(session: &SessionRef) -> &str {
         &session.handle
     }
@@ -172,6 +195,17 @@ impl AgentRuntime for HerdrRuntime {
     }
 
     async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
+        // A standing agent's name is stable, so an agent already carrying it is
+        // ours -- left behind by a daemon that stopped, or by a database that
+        // was rebuilt under it. Adopt it instead of failing with
+        // `agent_name_taken` and leaving the real session orphaned.
+        if matches!(req.launch.kind, LaunchKind::Named(_)) {
+            if let Some(session) = self.adopt_named(&req.name).await {
+                tracing::info!(name = %req.name, "adopting an agent that was already running");
+                return Ok(session);
+            }
+        }
+
         let mut args = vec![
             s("workspace"),
             s("create"),
