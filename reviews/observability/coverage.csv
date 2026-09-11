@@ -1,0 +1,76 @@
+stressor_id;state_ids;analysis_status;reason
+S201;OB02 OB01;conditional;OBT201: Monitoring independence includes power network identity and a reachable human. Disk survival is a separate assumption and no data-loss conclusion follows from power loss alone
+S202;OB03 OB16 OB01;conditional;OBT202: Daemon process health is distinct from host uptime. Restart does not necessarily restart already-running external workers
+S203;OB30 OB06 OB07 OB01 OB17;source-supported;OBT203: Source-supported only for an explicit restore call and its attempted versus unattempted task branches. Automatic wake and business freshness remain conditional.
+S204;OB02 OB01;conditional;OBT204: Shared outlet is stipulated. An upstream observer and its communication route must not share the outage
+S205;OB04 OB02 OB20;conditional;OBT205: Distinguish account access denial from physical deletion. Shared provider identity may correlate otherwise different services
+S206;OB02 OB04 OB01;conditional;OBT206: Persistence depends on external regional conditions and responder availability. Permanent destruction is not stipulated
+S207;OB02 OB03;conditional;OBT207: OB03 arises only if missing detector data is displayed as green. A truthful unknown display is OB02 without false health
+S208;OB04 OB01;conditional;OBT208: Transport acceptance is not inbox placement or acknowledgement. No assumption that a human checks spam eventually
+S209;OB05 OB01;conditional;OBT209: Need actual wall-clock monotonic restart and persisted-expiry semantics to distinguish configuration error from repeated renewal
+S210;OB03 OB13;conditional;OBT210: The probe must truly bypass the blocked critical path. Alternative is a busy or slow kernel not a deadlock
+S211;OB08 OB03 OB11;conditional;OBT211: Assume readable old pages and failed durable writes rather than complete device failure. Busy timeout is not an fsync deadline
+S212;OB07 OB34;conditional;OBT212: Legitimate holds need not imply healthy underlying service either. A real outage can coexist with blocked work
+S213;OB03 OB02;conditional;OBT213: Proxy receipt time must not be mistaken for host observation time. Freshness behavior is unspecified
+S214;OB12 OB03 OB02;conditional;OBT214: Requires separate generation identity ordering and arrival time. A thousand messages are finite and not automatically a storm attractor
+S215;OB19 OB03 OB01;conditional;OBT215: Identity uniqueness and source epoch semantics are unspecified. C6 confidence gate is not a monitor identity protocol
+S216;OB27 OB25 OB02;conditional;OBT216: Need retention period allocation per label total memory and isolation boundaries. Agent throughput need not remain constant after pressure rises
+S217;OB13 OB03 OB01;conditional;OBT217: Placement relative to durable commit matters. A post-commit timeout can leave an applied mutation despite caller error and must not imply rollback
+S218;none;unresolved;OBT218: Missing competing-access timing instrumentation placement race frequency and number of trials. No convergence inferred
+S219;OB09 OB01;conditional;OBT219: The 72-second branch requires serial non-overlapping work. Eight layers may be nested overlapping waits rather than additive work
+S220;OB09 OB15 OB01;conditional;OBT220: Need contractual deadline origin. Forty-eight hours alone does not prove a five-second-from-creation contract existed
+S221;OB07 OB01 OB09;conditional;OBT221: Need approval validity expiry business deadline and whether resources stay reserved. Deadline loss only if a finite business promise exists
+S222;OB15 OB03 OB10;conditional;OBT222: Dashboard and resource retention are stipulated separately. Missing samples do not prove missing underlying records
+S223;OB15;conditional;OBT223: Need generator concurrency timeout and actual production arrival process. The measurement is biased for an open-loop claim not for every closed-loop client population
+S224;none;unresolved;OBT224: Missing definition of availability sampling frame independence confidence target outage duration and non-completions. A quantile and time availability are not interchangeable
+S225;OB13 OB10 OB01 OB15;conditional;OBT225: Need all-of contract deadline slot retention and partial-failure semantics. One wait alone does not imply all system slots are lost
+S226;OB17 OB16 OB01;conditional;OBT226: Speculative performance benefit says nothing about business idempotency. This is hypothetical only and no invoice action was executed
+S227;OB15 OB17 OB01;conditional;OBT227: Need semantic role of omitted check and downstream action gate. Speed alone does not make partial output incorrect if the declared contract is partial
+S228;OB10 OB01;conditional;OBT228: Probability independence stationary rate and perpetual retention are model assumptions not empirical findings. One request does not immediately fill all slots
+S229;OB09 OB03 OB13;conditional;OBT229: Need scope queue topology lock residence and per-scope traffic weighting. Global mean is not evidence of each scope's tail
+S230;none;unresolved;OBT230: Missing collector trigger period jitter deadline cadence sample count and causal timing. Do not infer an attractor from the word always
+S231;OB28 OB16 OB17 OB01;conditional;OBT231: Need local and participant retention horizons reply correlation and whether a retry occurred. Expired local history need not imply erased external evidence
+S232;OB17 OB07 OB01;conditional;OBT232: Need expiration authority scope succession recipient identity and offline queue semantics. No claim that present Factory automatically executes such buffers
+S233;OB28 OB16 OB21 OB25;conditional;OBT233: Need lawful retention policy quarantine capability and content-handling path. Retaining every old mapping may violate the scenario's deletion obligation
+S234;OB17 OB16 OB01;conditional;OBT234: Timing order at participant is decisive. Reversibility must be judged from operation semantics not cancellation response text
+S235;OB18 OB32 OB17 OB01;conditional;OBT235: Need process-group inheritance detached grandchildren authority lifetime and actual lease-release precondition. Two days is a finite execution tail not an attractor
+S236;OB35 OB01 OB17;conditional;OBT236: Need actual stdin/stdout direction queue scheduling parsing and cancel processing topology. D2 bidirectional framing does not establish this stall in code
+S237;OB12 OB11 OB17;conditional;OBT237: Multiplication needs nested independent retries with no shared budget short-circuit or deduplication. OB17 only if repeated effectful acceptance escapes participant deduplication
+S238;OB12 OB11 OB01;conditional;OBT238: Need retry rounds admission bounds arrival synchronization service curve and whether clients retain identical phase
+S239;OB11 OB07;conditional;OBT239: Budget reset or new authorization is external forcing rather than autonomous recovery. OB07 denotes an explicit spending hold not identity failure
+S240;OB12 OB26 OB11 OB01;conditional;OBT240: Need model sharing peak memory eviction policy startup deadline and restart budget. D2 restart quarantine is a promised limiting branch
+S241;OB26 OB13 OB11 OB01;conditional;OBT241: Need actual dependency graph cache working set warm rate and fallback policy. Optional configuration does not prove optional critical-path behavior
+S242;OB26 OB09 OB01 OB11;conditional;OBT242: Need deadline start cancellation of setup DNS cache persistence and whether connection establishment is reused
+S243;OB13 OB09 OB01;conditional;OBT243: Need disk/network rate queue placement preemption and control workload. Export size does not give an exact duration without throughput
+S244;OB14 OB09 OB01;conditional;OBT244: Need priority discipline service share and emergency arrival rate. Months of forcing are not an autonomous basin
+S245;OB06 OB32 OB01;source-supported;OBT245: Source-supported disconnected lease retention and caller-owned termination precondition. TTL release with live writers is a counterfactual branch.
+S246;OB27 OB15 OB25 OB01;conditional;OBT246: Need caller-supplied scope chain/name listing and harness handling of over-window input. Store capacity and message capacity are different limits
+S247;OB27 OB25 OB35;conditional;OBT247: Need limit enforcement before allocation total decoded size incremental parsing and channel isolation. No actual oversized payload generated
+S248;OB27 OB11 OB25;conditional;OBT248: Need subscriber cap per-queue bytes cursor replay policy and shared resource pool. Slow consumers alone do not establish a restart loop
+S249;OB23 OB09 OB01;conditional;OBT249: Need throughput history volume snapshot availability upcaster costs and arrival rates. Event replay is not established by current row-based libraries
+S250;OB23 OB01 OB08;conditional;OBT250: Need peak live-set timeline copy-on-write behavior index construction scratch and rollback requirements. Nominal final database size is insufficient
+S251;OB28 OB17 OB01;conditional;OBT251: Need stable retry identity and both local and participant retention. Duplicate effect is stipulated by scenario but mechanism must identify which deduplication boundary failed
+S252;OB30 OB12 OB07 OB01 OB09;conditional;OBT252: Need catch-up skip/coalesce semantics cursor arithmetic materialization bounds business validity and service rate. No live schedule touched
+S253;OB12 OB11 OB01;conditional;OBT253: Need common unblock trigger admission policy provider capacity and retry phasing. One synchronized cohort is not by itself an attractor
+S254;OB36 OB11 OB30 OB25;conditional;OBT254: Need branching factor permitted scope count chain inheritance total admission budget and cost-report lag. No claim of infinite recursion through the same scope under source rules
+S255;OB31 OB09 OB11 OB01;conditional;OBT255: Need thermal lag cooling curve service demand admission rate and actual timeout policy. Scenario deadline elongation interpreted as elapsed work not automatic modification of contractual expiry
+S256;OB16 OB06 OB01;source-supported;OBT256: Source-supported commit-before-manual-writer ambiguity. General external send and UPS acceptance timing are conditional analogies.
+S257;OB02 OB03 OB01;conditional;OBT257: Need actual electrical/network dependency and load-shed priority. Monitoring importance labels do not confer independence
+S258;OB35 OB11 OB01;conditional;OBT258: Need stop admission dispatch scheduling timer execution and kill mechanism outside the saturated path. No stop issued
+S259;OB20 OB33 OB21;conditional;OBT259: Need locally available credentials session expiry offline authorization and operator reachability. Account recovery is external intervention
+S260;OB29 OB08 OB16;source-supported;OBT260: Source-supported counterexample: direct stop/cancel commit errors precede success. A falsely acknowledging wrapper is not established.
+S261;OB33 OB17 OB21 OB25;conditional;OBT261: Need credential lookup inputs capability binding and destination authorization. No secrets inspected
+S262;OB33 OB17 OB21 OB25 OB07;conditional;OBT262: Need resolution time recipient version approval contents and external API identity semantics
+S263;OB33 OB17 OB25;conditional;OBT263: Need importer trust boundary lookup scope and whether approvals are distinct authoritative records. No task-import implementation inspected
+S264;OB25 OB33 OB21;conditional;OBT264: Need model behavior actual secret access independent approval enforcement and egress rights. Text separators are not a security sandbox
+S265;OB33 OB17 OB21 OB25;conditional;OBT265: Need log provenance recovery-agent instruction boundaries and actual dispatch gate. No logs containing customer data read
+S266;OB33 OB17 OB21 OB25 OB07;conditional;OBT266: Need artifact trust level reviewer capability and approval provenance. A content reference alone does not prevent instruction following
+S267;OB21 OB22 OB25;conditional;OBT267: Need code execution authority data access egress and persistence. Exfiltration can be a one-shot absorbing loss without an attractor
+S268;OB21 OB22 OB25 OB23;conditional;OBT268: Need artifact pinning trust-root availability content retention and whether restore executes dependencies. Age alone does not make all archives malicious
+S269;OB03 OB22 OB21;conditional;OBT269: Need both updates installed update authority and observer's evidence generation powers. No deployed updater inspected
+S270;OB20 OB02 OB01 OB03;conditional;OBT270: Need key epochs overlap expiry secure clock and authority for rekey. Permanent fail-closed state is a policy hold not proven attraction
+S271;OB06 OB24;conditional;OBT271: Need key inventory escrow trusted hardware dependencies cipher longevity and evidence all alternatives are unavailable
+S272;OB21;conditional;OBT272: Need retained adversarial copy vulnerable algorithm useful plaintext and actual decryption capability. Security horizon differs from operational restore horizon
+S273;OB21 OB25;conditional;OBT273: Need UID permissions sandbox mounts process inspection and secret access. No cross-scope content read for this test
+S274;none;unresolved;OBT274: Need attacker observation model victim base rate scheduling isolation repeated trials and inference accuracy beyond prior knowledge
+S275;OB21 OB22 OB03 OB25;conditional;OBT275: Need actual shell account privileges reachable secrets persistence and observer compromise assumption. No shell access granted or used

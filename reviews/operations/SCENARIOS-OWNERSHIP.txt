@@ -1,0 +1,1 @@
+Only docs/residuality/a6/prepare_inputs.py owns scenarios.csv in this directory.

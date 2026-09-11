@@ -529,7 +529,9 @@ fn the_served_pages_own_query_sequence_answers_over_http() {
         );
     }
 
-    // 5. task.list and 6. schedule.list — L4 and the rest of L1.
+    // 5. task.list and 6. schedule.list — L4's two halves: the runs, and the
+    //    rules. `schedule.list` takes no scope and returns none, which is why
+    //    the page renders schedules as instance-wide rather than per scope.
     let tasks = ask("task.list", serde_json::json!({}), &nil);
     assert!(tasks["tasks"].is_array(), "task.list must carry `tasks`");
     let schedules = ask("schedule.list", serde_json::json!({}), &nil);

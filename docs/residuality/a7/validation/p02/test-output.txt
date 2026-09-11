@@ -1,0 +1,12 @@
+   Compiling factory-recovery v0.1.0 (/Users/factory/business-factory/projects/factory/crates/factory-recovery)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running tests/residuality_p02.rs (target/debug/deps/residuality_p02-9abb6189af745334)
+
+running 4 tests
+test resume_increases_budget_without_resolving_ambiguous_receipt ... ok
+test retained_attempt_also_blocks_when_writer_received_nothing ... ok
+test retained_attempt_blocks_after_receipt_with_lost_ack ... ok
+test old_snapshot_cannot_distinguish_no_receipt_from_later_receipt ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+

@@ -1,0 +1,51 @@
+id;quality;strategy;question;source_basis
+Q01;Verfügbarkeit;Den ganzen Rechner verschwinden lassen;Wer bemerkt den Ausfall wenn Factory selbst schweigt;B02 B06 Nutzerfrage
+Q02;Unabhängigkeit;Gemeinsame Ausfallquellen suchen;Teilen Rechner Beobachter und Alarmweg doch Strom Netz oder Account;B02 B06
+Q03;Beobachtbarkeit;Den Beobachter ausschalten;Wer entdeckt eine kaputte Alarmkette statt nur kaputte Worker;B06
+Q04;Diagnostizierbarkeit;Grünmeldung gegen echten Fortschritt stellen;Welche gesund aussehenden Komponenten leisten keine nützliche Arbeit;B02
+Q05;Aktualität;Beobachtungen zeitversetzen und wiederholen;Kann ein altes Lebenszeichen einen heutigen Ausfall verdecken;B02 A3
+Q06;Messökonomie;Den Messapparat selbst überlasten;Wann verursacht Monitoring die Störung die es beobachten soll;B02 B03
+Q07;Zeitverhalten;Das Latenzbudget durch alle Schichten verfolgen;Kann jede Teilfrist passen während die Gesamtfrist längst abgelaufen ist;B03 B04
+Q08;Messgültigkeit;Die unsichtbaren langsamen Anfragen zählen;Welche Wartenden Abbrüche und nie gestarteten Aufgaben fehlen im Histogramm;B02 eigene Gegenprobe
+Q09;Skalierung;Den langsamsten Ast eines Fan-outs vergrößern;Was geschieht wenn ein Auftrag tausende heterogene Antworten braucht;B04
+Q10;Tail-Latenz;Eine winzige dauerhaft hängende Teilpopulation einführen;Kann fast alles schnell sein und trotzdem alle Plätze belegt bleiben;B03 B04
+Q11;Wirkungssicherheit;Antworten nach dem Vergessen eintreffen lassen;Was passiert wenn Antwort oder Wirkung später kommt als die lokale Historie reicht;A3 B03
+Q12;Abbrechbarkeit;Abbruch und Außenwirkung gegeneinander laufen lassen;Was bedeutet Cancel wenn der andere Teilnehmer schon angenommen hat;B03 A3
+Q13;Stabilität;Retries auf allen Ebenen multiplizieren;Wie wird eine kleine Störung durch Wiederholungen zur Lastlawine;B03
+Q14;Anlaufverhalten;Alle warmen Zustände gleichzeitig entfernen;Ist ein kalter Start noch tragfähig oder nur der eingespielte Betrieb;B03
+Q15;Fairness;Eine unendlich lange Aufgabe vor kurze Aufgaben setzen;Wer verhungert durch Reihenfolge Priorität oder blockierte Reservierungen;B03 eigene Gegenprobe
+Q16;Kapazität;Jede Mengendimension einzeln um Größenordnungen erhöhen;Welches Limit bricht zuerst bei IDs Bytes Prozessen oder Abonnenten;B01 B03
+Q17;Langzeitbetrieb;Jahre an Geschichte in ein kleines Recoveryfenster pressen;Ist ein replaybares System noch rechtzeitig und mit realem Speicher aufbaubar;A3 B01
+Q18;Elastizität;Lange Stille in einen synchronen Nachfragepuls verwandeln;Was geschieht wenn alle verpassten Termine und Nutzer gleichzeitig zurückkommen;B03
+Q19;Energieeffizienz;Thermik und Strom als geteilte Ressource behandeln;Welche Annahmen zerbrechen bei Drosselung Batterieende oder Lastabwurf;B01 eigene Gegenprobe
+Q20;Steuerbarkeit;Im Notfall den Kontrollpfad benötigen;Bleibt Stop und Diagnose gerade unter maximalem Druck verfügbar;B02 A3
+Q21;Security und Autorisierung;Einen berechtigten Vermittler für fremde Ziele missbrauchen;Kann ein gültiger Actor den falschen Scope oder Empfänger handeln lassen;B05
+Q22;Instruktionsintegrität;Daten als scheinbare Befehle verkleiden;Werden Inhalte Logs oder Toolantworten ungewollt zu Autorität;B05 eigene Agent-Gegenprobe
+Q23;Lieferkettensicherheit;Korrekte Signatur mit bösartigem Inhalt kombinieren;Welche Sicherheit bleibt wenn Herkunft stimmt aber der Lieferant kompromittiert ist;B05 A3
+Q24;Schlüsselkontinuität;Rotation Wiederherstellung und Kryptoperioden kollidieren lassen;Was geschieht wenn alte Belege und heutige Schlüssel nicht mehr zusammenpassen;B05 A3
+Q25;Isolation;Kooperative Regeln durch feindliche Gleichzeitigkeit ersetzen;Was kann ein Mitnutzer über OS Speicher Zeit oder Zugangsdaten umgehen;B05 A3
+Q26;Datenschutz;Aus harmlosen Messwerten sensible Zusammenhänge rekonstruieren;Welche Information verraten Labels Heartbeats und Exporte zusammengenommen;B01 B05
+Q27;Datenintegrität;Gültig aussehende gemeinsame Beschädigung erzeugen;Wie wird ein Fehler bemerkt den Prüfsumme Kopie und Prüfer gemeinsam teilen;A3 eigene Gegenprobe
+Q28;Wiederherstellbarkeit;Eine alte Welt in die heutige Außenwelt zurücksetzen;Welche längst erledigten oder verbotenen Aktionen erscheinen wieder offen;A3
+Q29;Kompatibilität;Alle Versionskombinationen statt nur latest gegen latest betrachten;Wo zerbricht ein formal gültiger Vertrag semantisch;B01 A3
+Q30;Änderbarkeit;Rollback nach irreversibler Vorwärtswirkung verlangen;Welche Änderung kann ein altes Binary nicht rückgängig machen;B01 A3
+Q31;Wartbarkeit;Den Wissenden und seine Werkzeuge entfernen;Kann jemand ohne Maintainer Cloudkonto und alte Toolchain sicher reparieren;B01 A3
+Q32;Modularität;Eine kleine Änderung durch den Abhängigkeitsgraphen schicken;Wie groß ist der tatsächliche statt behauptete Ausfallradius;B01
+Q33;Testbarkeit;Den Testapparat zum Mitverursacher machen;Welche Fehler verschwinden nur weil der Test Scheduler Uhr und Reihenfolge kontrolliert;B01 eigene Gegenprobe
+Q34;Funktionale Richtigkeit;Transporterfolg mit falscher Bedeutung kombinieren;Was passiert bei falscher Einheit Zielperson Rundung oder Teilantwort;B01 A3
+Q35;Bedienbarkeit und Zugänglichkeit;Unter Stress ohne übliche Anzeige handeln;Sind Zuständigkeit Unsicherheit und Folgen ohne Farbe Maus oder Muttersprache erkennbar;B01 B02
+Q36;Betriebsfähigkeit;Den Menschen in den langen Latenzschwanz setzen;Was bleibt wenn jede technische Prüfung schnell ist aber niemand entscheidet;B02 A3
+Q37;Verantwortbarkeit;Mehrere legitime Nachfolger mit Konflikt erzeugen;Wer darf während Nachfolge Befangenheit oder Vertretung tatsächlich handeln;A3 eigene Gegenprobe
+Q38;Austauschbarkeit;Unabhängige Anbieter auf ihren gemeinsamen Eigentümer zurückführen;Wie viele Ausfalldomänen bleiben hinter Marken Accounts und Zahlungssystemen;A3 eigene Gegenprobe
+Q39;Kostenkontrolle;Kosten später als die Budgetentscheidung sichtbar machen;Kann ein scheinbar billiger Auftrag bereits ein großes offenes Kostenrisiko besitzen;B01 A3
+Q40;Rechtliche Steuerbarkeit;Widersprechende Mandate durch große Verzögerungen schicken;Welche Aktion ist bei Annahme anders erlaubt als bei Auftrag oder Urteil;A3 eigene Gegenprobe
+Q41;Safety;Eine Softwareaktion an irreversible physische Folgen koppeln;Wo ist später stoppen oder kompensieren fachlich unzureichend;B01 A3
+Q42;Netztoleranz;Asymmetrische und tagelange Partitionen statt Totalausfall erzeugen;Was sieht jeder Teilnehmer wenn nur eine Richtung und nur manchmal funktioniert;B03 eigene Gegenprobe
+Q43;Zeitrobustheit;Die Uhrgeometrie verändern;Welche Frist überlebt Suspend Uhrsprung Datumsgrenze oder lange Isolation;A3
+Q44;Erkenntnisqualität;Widersprüchliche Zeugen ohne gemeinsamen Richter zulassen;Welche Behauptung kann Factory wirklich belegen statt nur auswählen;A3 eigene Gegenprobe
+Q45;Anreizfestigkeit;Die Messzahl zum Optimierungsziel machen;Kann ein Agent schneller grüner oder billiger erscheinen indem er Nutzen versteckt;B02 eigene Gegenprobe
+Q46;Nachhaltigkeit;Sparziele gegen Verfügbarkeit und Fristen stellen;Welche legitimen Qualitätsziele lassen sich nicht gleichzeitig maximieren;B01 eigene Gegenprobe
+Q47;Portabilität;Auf fremder Hardware und nach Jahrzehnten neu anfangen;Was bleibt ohne identische Architektur Pfadsemantik und Laufzeit;B01 A3
+Q48;Beendbarkeit;Das System sauber verlassen wollen;Was muss beim Ende noch nachweisbar sein obwohl niemand weiterbetreiben will;A3
+Q49;Grenzprüfung;Alle unabhängigen Anker zugleich entziehen;Welche Versprechen werden logisch unmöglich statt nur teuer;eigene bewusste Extremprobe
+Q50;Sequenzangriff;Dem Gegner die Reihenfolge der Störungen überlassen;Welche sichere Einzelmaßnahme wird durch eine zweite und dritte Störung gefährlich;B03 eigene Gegenprobe

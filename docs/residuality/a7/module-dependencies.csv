@@ -1,0 +1,29 @@
+source;target;phase;contract;failure_response
+M01;M07;bootstrap;Geprüfte .factory-Wurzel und sichere primitive Dateiöffnung vor Storezugriff;Keine unkontrollierten Schreibpfade und präziser Startfehler
+M02;M01;bootstrap;Lesbarer Identitäts- und Grantstand beziehungsweise ausdrücklich eingeschränkter lokaler Bootstrapkontext;Keine erfundene Agentenidentität und keine Außenfreigabe
+M03;M01;bootstrap;Bestand und bestätigte Reservierungen plus konservative feste Bootstraplimits;Keine neue Arbeit bei nicht begründbarer Aufnahme
+M04;M01;bootstrap;Gespeicherte Terminabsichten ohne sofortige Nachholausführung;Unklare Termine bleiben gehalten
+M10;M07;bootstrap;Begrenzte Prüfung gebündelter Inhalte ohne optionale Pluginhooks;Unpassendes Objekt nicht starten
+M05;M10;bootstrap;Nur geprüfter gebündelter IPC-Transport und Hostprotokoll;Konkreter lokaler Startfehler statt optionalem Ersatz mit mehr Rechten
+M05;M03;bootstrap;Kleine vorab reservierte Kontroll- und Frameressourcen;Keine unbegrenzte Startschleife oder Vorallokation
+M05;M02;bootstrap;Lokaler vertrauenswürdiger Aufrufkontext ohne externe IdP-Startpflicht;Keine anonyme Safe-mode-Umgehung
+M11;M01;bootstrap;Begrenzter lesbarer Faktenstand oder explizite Defektauskunft;Kein allgemeines Grün aus fehlender oder alter Evidenz
+M06;M02;command;Konkrete aktuelle Zulassungsentscheidung mit Inhalts- und Zielbindung;Unklare Berechtigung hält neue Handlung
+M06;M03;command;Reservierung von Arbeit Versuchen und bekannten Ausgaben;Keine neue Sendung ohne tragfähige Aufnahme
+M06;M04;command;Unverjüngte Frist und bekannte Gültigkeitsgrenze;Abgelaufene oder unbestimmbare Erlaubnis wird nicht erneuert
+M06;M01;command;Intent und Ergebnisfakten atomar vor beziehungsweise nach Grenzübertritt;Commitfehler verbietet Erfolgsbehauptung und nötigen neuen Dispatch
+M06;M05;command;Begrenzter Aufruf an eindeutig gebundene Aktivierung;Verbindungsverlust bleibt unbekannter Ausgang
+M06;M16;command;Operationenspezifische Annahme- Reconcile- und Kompensationsverträge;Keine universelle Exactly-once- oder Rollbackzusage
+M08;M07;command;Konkrete zugängliche Eingabe- und Ergebnisbytes mit Herkunft;Fehlende Datei bleibt fehlend und wird nicht abgenommen
+M08;M11;command;Begrenzte bekannte Messbasis einschließlich Nichtabschlüssen;Fehlende Vergleichbarkeit bleibt offen
+M09;M07;command;Erhaltene Quellinhalte Decoderbezug und kollisionsfreier Zielplan;Letzte Quelle vor geprüftem Ersatz nicht zerstören
+M09;M14;command;Tatsächlich legitim nutzbarer Schlüssel- und Zugangspfad;Ciphertext nur verwahren nicht als Klartextwiederherstellung ausgeben
+M09;M15;command;Zulässiger Umfang von Wiederherstellung und Weitergabe;Rechtlich nicht entschiedene Verfügung halten
+M10;M16;optional;Nur ausdrücklich aktivierter geprüfter Anbieter- oder Fachvertrag;Betroffene Fähigkeit fehlt unabhängiger Kern bleibt startbar
+M11;M12;optional;Minimaler begrenzter Telemetrieexport ohne Commitabhängigkeit;Externe Beobachtungslücke sichtbar keine Kernelblockade
+M13;M12;optional;Begrenzte Vorfallsbenachrichtigung und getrennte Quittung;Keinen Empfang oder Reparaturabschluss erfinden
+M13;M02;command;Anerkannte zuständige Rolle für konkrete Entscheidung;Mangelnde legitime Vertretung offen halten
+M14;M02;command;Scope Zweck und Ziel aus vertrauenswürdigem Kontext;Fremde Credentialreferenz verweigern
+M15;M02;command;Kompetent entschiedene rechtliche Verfügung und Geltungsbereich;Keine technische Erfindung rechtlicher Vorrangregeln
+M16;M14;command;Nur für Factory-vermittelte Adapteraufrufe zweckgebundene Geheimnisnutzung nicht für autonome lokale Sicherheitsreaktionen oder unabhängige externe Administration;Kein Ausweichen auf fremde Credentials und keine Abhängigkeit des lokalen Notstopps von Factory
+M02;M16;command;Nur für den ausdrücklich aktivierten GVR011-Vertrag frische Abfrage einer unabhängig verwalteten AuthoritySource mit eigener enger Abfrageberechtigung;Fehlende Gegenquelle hält die neue Handlung und darf keinen selbstabhängigen Autorisierungszyklus durch einen alten Grant umgehen

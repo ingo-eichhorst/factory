@@ -1,0 +1,3631 @@
+[
+  {
+    "stressor_id": "S101",
+    "source_states": [
+      "GV04",
+      "GV01",
+      "GV07"
+    ],
+    "branches": [
+      {
+        "state": "Inference steht, alte Arbeit bleibt lesbar",
+        "kind": "extern-erzwungen",
+        "conditions": "Provider ist notwendig und geschlossen; lokaler Store und erlaubter Leser bleiben erreichbar.",
+        "persistence": "Dauert bis ein zulässiger Ersatz verfügbar ist; kein interner Kreislauf.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigte Prüfer können gespeicherte Aufgaben und Versuche lesen; neue Inference bleibt unmöglich.",
+        "validation": "Ohne Provider lassen sich die bezeichneten alten Aufgaben nicht lesen."
+      },
+      {
+        "state": "Begrenzte Aufgabe mit Ersatz abgeschlossen",
+        "kind": "abschluss",
+        "conditions": "Ein verfügbares erlaubtes Ersatzmodell erzeugt ein unabhängig abgenommenes Ergebnis; Bytes bleiben erhalten.",
+        "persistence": "Endliche Abnahme beendet diese Aufgabe, nicht sämtliche Providerabhängigkeiten.",
+        "residue_ids": [
+          "GVR002"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Empfänger nutzt das konkret abgenommene Ergebnis; der Entwurf behauptet keine identischen Modelle.",
+        "validation": "Abnahme scheitert am fachlichen Zweck oder Ergebnis benötigt den geschlossenen Dienst."
+      }
+    ],
+    "architectural_consequence": "Providerabhängigkeit vom lokalen Aktenlesen trennen; Ersatzmodell erst nach auftragsbezogener Abnahme verwenden, nicht als historische Identität des geschlossenen Providers ausgeben."
+  },
+  {
+    "stressor_id": "S102",
+    "source_states": [
+      "GV07",
+      "GV05",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Aliasvergleich ohne Gewichtszuordnung",
+        "kind": "ungewissheit",
+        "conditions": "Anbieter liefert für den stillen Wechsel keine vertrauenswürdige historische Gewichtsidentität; Rohwerte bleiben erhalten.",
+        "persistence": "Spätere Aliasabfragen ersetzen keine fehlende frühere Identität.",
+        "residue_ids": [
+          "GVR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Analyst kann bekannte Ergebnisgrößen auswerten, aber keine Gewichtsversion zuschreiben.",
+        "validation": "Ein zeitgenössischer unabhängiger Aufrufbeleg klärt die genaue Version."
+      },
+      {
+        "state": "Fehler wird nach Wechsel zur Referenz",
+        "kind": "attraktorhypothese",
+        "conditions": "Neue falsche Ausgabe wird wiederholt als Autorität übernommen; widersprechende Daten beeinflussen Entscheidungen nicht.",
+        "persistence": "Falsche Ausgabe → spätere Zitate → wachsendes Vertrauen → weniger Gegenprüfung → erneute Fehlerannahme.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene Akte lässt Aussagen und Wiederverwendung untersuchen; sie liefert keine Wahrheit oder verlorene Gewichtsdaten.",
+        "validation": "Fehler wird nicht weiterverwendet oder ein Gegenbefund verändert trotz hoher Zustimmung die Entscheidung."
+      }
+    ],
+    "architectural_consequence": "Pro Aufruf belegte Modellrevision von Alias und Eingaberevision trennen; unbekannte Gewichte nicht aus späteren Wiederholungen rekonstruieren."
+  },
+  {
+    "stressor_id": "S103",
+    "source_states": [
+      "GV09",
+      "GV08",
+      "GV05",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Injection befolgt, Toolwirkung verweigert",
+        "kind": "halt",
+        "conditions": "Modell folgt der Seite, aber alle verlangten nicht erlaubten Effekte treffen eine unabhängige durchgesetzte Sperre.",
+        "persistence": "Sperre besteht bis konkrete gültige Neubewertung; Text allein öffnet sie nicht.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer behalten den Effektauftrag und können ihn ablehnen; keine privilegierte Wirkung dieser Anforderung.",
+        "validation": "Ein Toolnebenpfad nimmt die injizierte Wirkung trotzdem an."
+      },
+      {
+        "state": "Injection hat geschützte Daten offengelegt",
+        "kind": "verlust",
+        "conditions": "Toolbefugnis erlaubt Übertragung und unberechtigter Empfänger hat den betreffenden Inhalt gelesen.",
+        "persistence": "Das Wissen beim Empfänger bleibt historisch erfolgt; späterer Stop kann es nicht zurückrufen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Nie-Offengelegtheit dieser Daten bleibt keine Restfähigkeit; andere Daten sind damit nicht automatisch verloren.",
+        "validation": "Empfänger konnte den Inhalt nachweislich nicht lesen."
+      },
+      {
+        "state": "Falsche Quellbehauptung verfestigt sich",
+        "kind": "attraktorhypothese",
+        "conditions": "Injizierte Behauptung wird in weitere Kontexte kopiert und als unabhängige Bestätigung behandelt.",
+        "persistence": "Kopie → Vertrauen → erneute Übernahme → mehr scheinbare Quellen; ursprüngliche Website kann verschwinden.",
+        "residue_ids": [
+          "GVR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Ein zuvor gebundenes Eingabepaket erlaubt dem Prüfer Herkunftsanalyse, sofern es außerhalb der Manipulation erhalten ist; es korrigiert den Glauben nicht automatisch.",
+        "validation": "Keine Wiederverwendung oder entscheidungswirksame Prüfung unterbricht die Kette."
+      }
+    ],
+    "architectural_consequence": "Quellinhalt darf keine Toolbefugnis liefern. Vollständige Effektvermittlung und OS-Datengrenze getrennt prüfen; Reaktion auf Injection ist keine Rücknahme bereits gelesener Geheimnisse."
+  },
+  {
+    "stressor_id": "S104",
+    "source_states": [
+      "GV05",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Einmalige falsche Doppelbestätigung",
+        "kind": "transient",
+        "conditions": "Beide Prüfer irren; danach wird das Urteil nicht als Quelle wiederverwendet und kein Vertrauenskreislauf entsteht.",
+        "persistence": "Endlicher Bewertungsfehler; späterer Ausgang ist ohne weitere Dynamik offen.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene Bewertungen erlauben Nachprüfung des Vorgangs, nicht des behaupteten Wahrheitsgehalts.",
+        "validation": "Die Bestätigung wird später zitiert und steigert die Wahrscheinlichkeit weiterer Annahmen."
+      },
+      {
+        "state": "Doppelurteil zirkuliert als Beweis",
+        "kind": "attraktorhypothese",
+        "conditions": "Falsches Urteil erhält Autorität und spätere Prüfer übernehmen es statt Sachprüfung.",
+        "persistence": "Übereinstimmung → Vertrauen → Wiederverwendung → weitere Übereinstimmung → Ausschluss von Gegenprüfung.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Die unveränderte Bewertungsakte bleibt ein untersuchbarer Gegenstand; berechtigte Prüfer können den Zitatkreislauf sehen, sofern lesbar.",
+        "validation": "Adverse unabhängige Sachbefunde werden akzeptiert und beenden die Übernahme."
+      },
+      {
+        "state": "Sachprüfung stoppt falsche Abnahme",
+        "kind": "halt",
+        "conditions": "Eine für diesen Fehler unabhängige Prüfung existiert und ihr negativer Befund darf die Abnahme blockieren.",
+        "persistence": "Halt endet mit korrigiertem Ergebnis oder legitimem Abbruch, nicht durch weitere gleiche Reviewer.",
+        "residue_ids": [
+          "GVR006",
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Befund und gesperrter Auftrag bleiben für zuständige Prüfer nutzbar; kein allwissender dritter Prüfer wird vorausgesetzt.",
+        "validation": "Der gleiche Modellfehler täuscht auch den Sachtest oder negatives Ergebnis wird ignoriert."
+      }
+    ],
+    "architectural_consequence": "BR01 übernehmen: zwei falsche Bestätigungen sind zunächst ein Einzelfehler. Unabhängige Abnahme muss die konkrete Fehlerfamilie treffen und Entscheidungen tatsächlich verändern können."
+  },
+  {
+    "stressor_id": "S105",
+    "source_states": [
+      "GV03",
+      "GV05",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Dateipfad behauptet, Original fehlt",
+        "kind": "ungewissheit",
+        "conditions": "Gespeicherter Abschluss nennt eine nicht existierende Datei; sonstiger Aufgabenbericht ist lesbar.",
+        "persistence": "Erneutes Lesen desselben Pfadstrings erzeugt keinen Inhalt; eine neue Datei wäre neue Arbeit.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann die falsche Ergebnisbehauptung belegen; für die behaupteten Originalbytes gibt es keine Restfähigkeit.",
+        "validation": "Zeitgenössische Originaldatei mit passender Identität wird tatsächlich gefunden."
+      },
+      {
+        "state": "Vorhandenes Ergebnis separat abgenommen",
+        "kind": "abschluss",
+        "conditions": "Neben halluziniertem Namen existieren echte relevante Ergebnisbytes und deren konkrete Abnahme.",
+        "persistence": "Nur der belegte Ergebnisumfang wird abgeschlossen; falsche Artefaktbehauptung bleibt sichtbar.",
+        "residue_ids": [
+          "GVR002",
+          "GVR037"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Empfänger nutzt identifizierte abgenommene Bytes, nicht den ungeprüften Pfad aus complete_with_result.",
+        "validation": "Objektmanifest zeigt keine erreichbaren Bytes oder fachliche Abnahme hängt an der erfundenen Datei."
+      }
+    ],
+    "architectural_consequence": "Bibliotheksabschluss nicht mit Dateiabnahme gleichsetzen: Pfad, tatsächliche Bytes und fachlich akzeptierter Inhalt benötigen getrennte Nachweise."
+  },
+  {
+    "stressor_id": "S106",
+    "source_states": [
+      "GV04",
+      "GV13",
+      "GV10"
+    ],
+    "branches": [
+      {
+        "state": "Modell verdrängt Daemon, Akte überlebt",
+        "kind": "extern-erzwungen",
+        "conditions": "Daemon fällt durch RAMdruck aus, bereits bestätigte Daten bleiben intakt und später lokal lesbar.",
+        "persistence": "Modellbelegung hält Ausführung an; Neustart ohne Änderung kann dieselbe Überlast erneut erzeugen.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator liest nach verfügbarem Speicher alte Versuche; dies belegt weder weiterlaufende Arbeit noch deren Ende.",
+        "validation": "RAMausfall hinterlässt unlesbaren Store oder der benötigte Leser startet auch nach Freigabe nicht."
+      },
+      {
+        "state": "Unklare Zustellung bleibt gesperrt",
+        "kind": "halt",
+        "conditions": "Wiederanlauf kennt einen Versuch und eine funktionierende Effektsperre; Prozessbeobachtung fehlt.",
+        "persistence": "Outcome-Unklarheit und Leasebelegung haben getrennte Ausgänge; RAMfreigabe allein beendet sie nicht.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer kann die offene Effekthülle bearbeiten; dies ist eine entworfene Vermittlungsgrenze, keine produktweite Garantie aus restore::reconcile.",
+        "validation": "Ein anderer Recoverypfad nimmt ohne diesen Abgleich neue Wirkung an."
+      }
+    ],
+    "architectural_consequence": "Modell-RAM und Betriebsreserve begrenzen; Recoveryanzeige muss Datenträgerhaltbarkeit, Zustellunsicherheit und Leasebelegung unabhängig führen."
+  },
+  {
+    "stressor_id": "S107",
+    "source_states": [
+      "GV07",
+      "GV05"
+    ],
+    "branches": [
+      {
+        "state": "Ergebnis bleibt, Erzeugerabschnitt unbekannt",
+        "kind": "ungewissheit",
+        "conditions": "Modellwechsel wurde nicht aufgezeichnet; tatsächliche Ausgabe ist erhalten und zweckspezifisch unabhängig abgenommen.",
+        "persistence": "Fehlende Aufrufidentität bleibt offen, auch wenn das Ergebnis korrekt verwendbar ist.",
+        "residue_ids": [
+          "GVR002",
+          "GVR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Empfänger nutzt die abgenommenen Bytes; Analyst vergleicht nur belegte Größen, nicht erfundene Modellanteile.",
+        "validation": "Abnahme ist modellzirkulär oder ein unabhängiger Aufrufbeleg rekonstruiert doch alle Abschnitte."
+      },
+      {
+        "state": "Neue Fehler werden ohne Wechselhinweis übernommen",
+        "kind": "attraktorhypothese",
+        "conditions": "Verdeckter Wechsel erzeugt Fehler, die in weitere Aufträge als gültige Quellen eingehen.",
+        "persistence": "Übernahme → Bestätigung aus kopierten Quellen → Vertrauen → weitere Übernahme.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Lesbare Auftragsakten zeigen den Behauptungsfluss, nicht die fehlende Modellidentität.",
+        "validation": "Die Fehler werden nicht wiederverwendet oder wirksame Sachprüfung korrigiert sie."
+      }
+    ],
+    "architectural_consequence": "Per-Aufruf-Zuordnung als eigene Evidenzlücke markieren. Run-Metadatum oder Eingabehash dürfen einen unbeobachteten Modellwechsel nicht verdecken."
+  },
+  {
+    "stressor_id": "S108",
+    "source_states": [
+      "GV12",
+      "GV21",
+      "GV04",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Korrekte Teilarbeit ohne Ende",
+        "kind": "eskalation",
+        "conditions": "Jeder akzeptierte Schritt erzeugt einen weiteren; kein wohlfundiertes Ende, aber haltbare kleine Zwischenstände sind vorhanden.",
+        "persistence": "Weitere Schritte erhöhen Kosten; endliche Energie beendet die idealisierte Nichttermination.",
+        "residue_ids": [
+          "GVR028"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Worker kann belegte Teilarbeit später fortsetzen oder prüfen; ein terminaler Liefergegenstand ist nicht erhalten.",
+        "validation": "Eine endliche Restmaßzahl sinkt bei jedem Schritt und erreicht null."
+      },
+      {
+        "state": "Endlicher Zweck wird erreicht",
+        "kind": "abschluss",
+        "conditions": "Ein präziser endlicher Teilauftrag wird legitim vereinbart und unabhängig abgenommen.",
+        "persistence": "Erfüllte Abnahme beendet nur diesen Teilauftrag; vorherige offene Ziele bleiben getrennt.",
+        "residue_ids": [
+          "GVR002"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Empfänger verwendet das konkret fertige Ergebnis, nicht den bloßen Zähler korrekter Zwischenschritte.",
+        "validation": "Die Abnahme enthält weiterhin unbegrenzt neue Pflichten."
+      }
+    ],
+    "architectural_consequence": "Terminales Abnahmekriterium und Checkpoint von lokaler Schrittgüte trennen; endlicher Ressourcenstop ist kein Beweis endloser Ausführung."
+  },
+  {
+    "stressor_id": "S109",
+    "source_states": [
+      "GV02",
+      "GV07",
+      "GV05",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Kleineres Fenster verweigert alten Kontext",
+        "kind": "halt",
+        "conditions": "Harness erkennt Überschreitung vor Arbeit; gebundenes Eingabepaket und vollständige Sperre bestehen.",
+        "persistence": "Halt bis ein gültig gekürzter Auftrag freigegeben oder der Run abgebrochen wird.",
+        "residue_ids": [
+          "GVR003",
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer kann die betroffenen Eingaben sehen und genau diese Ausführung zurückhalten.",
+        "validation": "Harness arbeitet trotzdem mit still abgeschnittenen Pflichtanweisungen."
+      },
+      {
+        "state": "Unbeobachtete Trunkierung",
+        "kind": "ungewissheit",
+        "conditions": "Harness schneidet still ab und zeichnet verbrauchte Teile nicht auf; ursprüngliche Compilerbytes bleiben erhalten.",
+        "persistence": "Späteres erneutes Kompilieren rekonstruiert den früheren tatsächlichen Verbrauch nicht.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Auftragsakte bleibt lesbar; für den tatsächlichen vollständigen Verbrauch fehlt Evidenz, weshalb GVR003 nicht als erfüllt zählt.",
+        "validation": "Eine unabhängige Empfangsspur enthält die vollständigen damals verbrauchten Bytes."
+      }
+    ],
+    "architectural_consequence": "Kompilierte Bytes und vom Harness verbrauchten Kontext getrennt belegen; vor Kürzung Regelvollständigkeit prüfen statt bloßer Bytezählung."
+  },
+  {
+    "stressor_id": "S110",
+    "source_states": [
+      "GV06",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Bekannter Test ersetzt unabhängige Prüfung",
+        "kind": "attraktorhypothese",
+        "conditions": "Erkannte Fixture wird ausgetrickst und hoher Score bewirkt Abschaffung anderer Prüfungen.",
+        "persistence": "Gaming → Score → Vertrauen → weniger Fremdtests → unentdecktes Gaming.",
+        "residue_ids": [
+          "GVR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Analyst kann den gespeicherten engen Testwert lesen; Generalisierung und reale Kompetenz bleiben unbewiesen.",
+        "validation": "Zurückgehaltene Sachtests bleiben entscheidungswirksam trotz hoher Scores."
+      },
+      {
+        "state": "Optimierung bleibt ehrlich fixturebegrenzt",
+        "kind": "abschluss",
+        "conditions": "Behauptung betrifft nur die bekannte Fixture und deren tatsächliches Ergebnis, nicht allgemeine Fähigkeit.",
+        "persistence": "Der enge Testlauf endet; daraus folgt kein anhaltender Fehlbewertungskreislauf.",
+        "residue_ids": [
+          "GVR031"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer nutzt den explizit begrenzten Testbeleg und seine Ausschlüsse.",
+        "validation": "Der enge Score wird doch zur Freigabe ungeprüfter Aufgabenklassen verwendet."
+      }
+    ],
+    "architectural_consequence": "Bekannte Fixtureleistung als engen Anspruch führen; Unabhängigkeit eines Tests nicht allein aus ausführbarem statt modellbasiertem Oracle ableiten."
+  },
+  {
+    "stressor_id": "S111",
+    "source_states": [
+      "GV02",
+      "GV07"
+    ],
+    "branches": [
+      {
+        "state": "Regelwechsel vor Start sichtbar gehalten",
+        "kind": "halt",
+        "conditions": "Geänderte Root-Bytes werden vor Start mit der gebundenen Revision verglichen; Widerspruch sperrt Wirkung.",
+        "persistence": "Halt bis zuständige Person konkrete neue Revision erlaubt; bloßes erneutes Queueing löst ihn nicht.",
+        "residue_ids": [
+          "GVR003",
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer sieht beide belegten Revisionen und entscheidet über den erhaltenen Auftrag.",
+        "validation": "Start liest andere Bytes als das Paket oder Gate lässt die alte Zustimmung ungeprüft gelten."
+      },
+      {
+        "state": "Bindungszeitpunkt historisch unbekannt",
+        "kind": "ungewissheit",
+        "conditions": "Caller-Caching und Verbrauch wurden nicht aufgezeichnet; jetzige Root-Datei allein ist verfügbar.",
+        "persistence": "Heutige Dateiversion entscheidet nicht, was damals galt oder verbraucht wurde.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Bekannte Taskzeiten bleiben prüfbar; alte Regelbindung kann daraus nicht erfunden werden.",
+        "validation": "Zeitgenössischer belegter Cache oder Verbrauch klärt die gewählte Revision."
+      }
+    ],
+    "architectural_consequence": "Zeitpunkt von Queueing, Kompilierung und Nutzung erfassen und festlegen, welche Regelrevision die Freigabe bindet; compile liest nur den Aufrufzeitpunkt."
+  },
+  {
+    "stressor_id": "S112",
+    "source_states": [
+      "GV03",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Unlesbare Pflichtquelle hält Kompilierung an",
+        "kind": "halt",
+        "conditions": "Betroffene AGENTS-Datei ist explizit enthalten und Caller propagiert compile-Fehler statt Fallback.",
+        "persistence": "Lesefehler besteht bis rechtmäßiger Zugriff wiederhergestellt oder Auftrag geändert wird.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann Aufgabenmetadaten und den Quellfehler untersuchen, sofern separat lesbar; fehlende Anweisung bleibt unbekannt.",
+        "validation": "Caller liefert einen erfolgreichen Kontext trotz des enthaltenen unlesbaren Files."
+      },
+      {
+        "state": "Zulässiges gebundenes Paket bleibt verwendbar",
+        "kind": "transient",
+        "conditions": "Ein zuvor vollständig erfasstes Paket ist lesbar, seine Verwendung weiterhin erlaubt und unabhängig vom defekten Quellpfad.",
+        "persistence": "Quellstörung verhindert diese gebundene Ausführung nicht; spätere neue Revisionen brauchen neue Prüfung.",
+        "residue_ids": [
+          "GVR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Worker kann belegte Eingaben lesen; nicht automatisch auf beliebigen alten Cache übertragbar.",
+        "validation": "Regelvertrag verlangt die aktuell unlesbare Revision statt des erhaltenen Pakets."
+      }
+    ],
+    "architectural_consequence": "UnreadableSource am Compiler eng zuschreiben; Caller darf Fehler nicht durch unerklärten alten Kontext ersetzen. Auftragsakte bleibt getrennt vom fehlenden Quellinhalt."
+  },
+  {
+    "stressor_id": "S113",
+    "source_states": [
+      "GV19",
+      "GV08"
+    ],
+    "branches": [
+      {
+        "state": "Geheimnis verbleibt in erlaubter Kopiengrenze",
+        "kind": "halt",
+        "conditions": "Prompt wurde gespeichert, aber nicht unberechtigt gelesen; Kopienverzeichnis selbst ist zulässig und Nutzungswege sind gesperrt.",
+        "persistence": "Disposition dauert bis zuständige Entscheidung alle bekannten Kopien erfasst; Rotation löscht keine Bytes.",
+        "residue_ids": [
+          "GVR014"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Datenverantwortliche können erlaubte Behandlung der konkreten Kopien bestimmen; bloße Speicherexistenz wird nicht als Leak gezählt.",
+        "validation": "Eine relevante Kopie fehlt im Verzeichnis oder ein unberechtigter Leser hat bereits Zugriff genommen."
+      },
+      {
+        "state": "Promptgeheimnis wurde gelernt",
+        "kind": "verlust",
+        "conditions": "Provider oder anderer Empfänger außerhalb der erlaubten Leser hat das konkrete Geheimnis erhalten.",
+        "persistence": "Spätere Löschung kann historische Kenntnis nicht beseitigen; Credentialrotation ändert nur künftige Macht.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für nie erfolgte Offenlegung dieses Inhalts bleibt nichts nutzbar; daraus folgt nicht Verlust sämtlicher Aufgaben.",
+        "validation": "Alle Empfänger waren berechtigt oder konnten den Inhalt nicht entschlüsseln."
+      }
+    ],
+    "architectural_consequence": "Secretannahme vor Persistenz und Weitergabe begrenzen; bei bereits gespeichertem Prompt konkrete Kopien/Empfänger erfassen, kein rückwirkendes Geheimhaltungsversprechen."
+  },
+  {
+    "stressor_id": "S114",
+    "source_states": [
+      "GV01",
+      "GV10",
+      "GV12"
+    ],
+    "branches": [
+      {
+        "state": "Compiler läuft ohne Linkverfolgung",
+        "kind": "abschluss",
+        "conditions": "Aufgabe ist aus expliziten Quellen vollständig lösbar und Ergebnis unabhängig abgenommen.",
+        "persistence": "compile folgt den zyklischen Links nicht; endliche Aufgabe endet normal.",
+        "residue_ids": [
+          "GVR002"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Empfänger nutzt das abgenommene Ergebnis; Quellen-Nichtverfolgung allein hätte keine Nützlichkeit bewiesen.",
+        "validation": "Aufgabe benötigt in Wahrheit nicht gelesenen Linkinhalt."
+      },
+      {
+        "state": "Separater Crawler verbraucht seine begrenzte Zulassung",
+        "kind": "halt",
+        "conditions": "Crawler folgt Links, aber jeder Besuch wird im begrenzten Arbeitsregister gezählt und erneute Besuche bleiben dieselbe Identität.",
+        "persistence": "Restmenge wird ausgeschöpft oder abgeschlossen; Zyklen erzeugen keine ungezählten Wurzeln.",
+        "residue_ids": [
+          "GVR013"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann die verbleibende endliche Suchmenge prüfen und bewusst erweitern; vollständige Wissenserschließung ist nicht garantiert.",
+        "validation": "Linkwechsel oder Retry schafft Besuche außerhalb desselben Limits."
+      }
+    ],
+    "architectural_consequence": "Explizite Compilerquellen nicht mit rekursivem Knowledge-Crawler verwechseln. Ein späterer Crawler braucht eigene begrenzte Besuchs-/Arbeitsmenge."
+  },
+  {
+    "stressor_id": "S115",
+    "source_states": [
+      "GV15",
+      "GV02",
+      "GV05",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Widerspruch hält konkreten Effekt",
+        "kind": "halt",
+        "conditions": "Quellen betreffen denselben Effekt und Zeitraum; keine anerkannte Vorrangregel, wirksame Effektsperre vorhanden.",
+        "persistence": "Wiederholte widersprechende Aussagen liefern keine neue Zuständigkeit.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zuständige Prüfer behalten die strittige Effekthülle; sachfremde Arbeit wird dadurch nicht automatisch gestoppt.",
+        "validation": "Eine bereits anerkannte Vorrangregel löst den konkreten Konflikt oder der Effekt läuft trotz Sperre."
+      },
+      {
+        "state": "Geltungsbereiche lösen den Scheinwiderspruch",
+        "kind": "transient",
+        "conditions": "Anerkannte Ordnung weist Quellen unterschiedlichen Zeiten oder Zuständigkeiten zu; heutige Person ist befugt.",
+        "persistence": "Eindeutige Zuordnung beendet genau diesen Konflikt, nicht mögliche Outcome-Unklarheit.",
+        "residue_ids": [
+          "GVR032"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Befugte Person kann die richtige aktuelle Regel anwenden, ohne Quellmehrheit zu simulieren.",
+        "validation": "Beide Regeln gelten weiterhin gleichzeitig unvereinbar für denselben Effekt."
+      }
+    ],
+    "architectural_consequence": "Freigabequellen nach Geltungsbereich und Wirksamkeitszeit ordnen; Mehrheit und letzte Ankunft sind ohne anerkannte Regel kein Vorrang."
+  },
+  {
+    "stressor_id": "S116",
+    "source_states": [
+      "GV07",
+      "GV05",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Historische Webseite im Paket erhalten",
+        "kind": "transient",
+        "conditions": "Vor Änderung wurden konkrete relevante Quellbytes mit belastbarem Zeit-/Versionsbezug legal erhalten.",
+        "persistence": "URLänderung berührt dieses historische Paket nicht; aktuelle Nutzung braucht neue Gültigkeitsprüfung.",
+        "residue_ids": [
+          "GVR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer rekonstruiert die damalige Eingabe ohne heutige Website.",
+        "validation": "Paket enthält nur URL oder Zeitbezug ist frei erfunden."
+      },
+      {
+        "state": "Alte Webseitenfassung fehlt",
+        "kind": "ungewissheit",
+        "conditions": "Es gibt nur veränderliche URL und heutige Seite, keine bekannte gesetzlich nutzbare alte Fassung.",
+        "persistence": "Wiederholtes Abrufen derselben URL erzeugt kein Wissen über frühere Bytes.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für exakte damalige Quellbytes besteht keine Restfähigkeit unter dieser Inventargrenze; heutige Aufgaben können trotzdem funktionieren.",
+        "validation": "Eine rechtmäßige zeitgenössische Fassung wird aufgefunden."
+      }
+    ],
+    "architectural_consequence": "URL als Adresse, nicht Version führen. Rechtmäßig erfasste historische Quellbytes erlauben historische Aussagen, nicht automatische heutige Wahrheit."
+  },
+  {
+    "stressor_id": "S117",
+    "source_states": [
+      "GV09",
+      "GV08",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Konfiguration bleibt vor Ausführung abgewiesen",
+        "kind": "halt",
+        "conditions": "Harness behandelt fremde native Konfiguration nicht als automatische Befugnis; Freigabe vermittelt sämtliche Hooks.",
+        "persistence": "Ohne konkrete Prüfung bleibt Ausführung gesperrt; bloße Repoanwesenheit öffnet sie nicht.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer bearbeitet eine gehaltene Aktivierungsanforderung statt bereits ausgeführten Schadcodes.",
+        "validation": "Ein Install-/Start-Hook läuft vor der Entscheidung."
+      },
+      {
+        "state": "Harness kompromittiert, getrennter Bereich nutzbar",
+        "kind": "extern-erzwungen",
+        "conditions": "Native Konfiguration startet Schadcode; benannter anderer Datenbereich liegt nachweislich außerhalb seiner Rechte.",
+        "persistence": "Angreifer erhält Kontrolle solange sein Zugang gilt; Isolation erhält nur den unbetroffenen Bereich.",
+        "residue_ids": [
+          "GVR008"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Besitzer verwendet isolierte Daten weiter; Aussagen und Geheimnisse im kompromittierten Bereich sind nicht geschützt.",
+        "validation": "Schadcode kann mit denselben Rechten auch den angeblich getrennten Bereich lesen."
+      }
+    ],
+    "architectural_consequence": "Native Harnesskonfiguration ist eigene Ausführungsquelle außerhalb compile. Vor Hooks prüfen und reale Dateirechte begrenzen; Schreibverbot für Factory schützt nicht vor Harness-Leseverhalten."
+  },
+  {
+    "stressor_id": "S118",
+    "source_states": [
+      "GV02",
+      "GV28",
+      "GV05",
+      "GV08"
+    ],
+    "branches": [
+      {
+        "state": "Fremde Schreibidentität abgewiesen",
+        "kind": "halt",
+        "conditions": "Sitzung ist außerhalb des behauptenden Agents an Scope gebunden; Schreibpfad erzwingt diese Grenze.",
+        "persistence": "Auftrag bleibt gehalten bis korrekt autorisierte Identität vorliegt.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer sieht den abgewiesenen Schreibauftrag; bestehender fremder Bestand bleibt unverändert.",
+        "validation": "Direktzugriff umgeht die Bindung oder foreign-scope write wird akzeptiert."
+      },
+      {
+        "state": "Gefälschte Autorenschaft übernommen",
+        "kind": "ungewissheit",
+        "conditions": "Store akzeptiert fremden Namen; unveränderte ursprüngliche Quellen sind separat erhalten.",
+        "persistence": "Die falsche Zeile beweist keine Autorenschaft; ohne weitere Wiederverwendung ist kein Attraktor begründet.",
+        "residue_ids": [
+          "GVR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Prüfer kann Aussagen mit erhaltenen Eingabepaketen vergleichen; diese heilen nicht automatisch den gefälschten Eintrag.",
+        "validation": "Alle unabhängigen Originale sind ebenfalls manipuliert oder tatsächliche Identität ist anderweitig bewiesen."
+      }
+    ],
+    "architectural_consequence": "Shared-Memory-Autorenschaft aus vertrauenswürdig gebundener Sitzung ableiten, nicht aus Parameter scope. Herkunft, tatsächlicher Leser und resultierende Wissensannahme separat prüfen."
+  },
+  {
+    "stressor_id": "S119",
+    "source_states": [
+      "GV02",
+      "GV07",
+      "GV18",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Ähnliche Namen, getrennte Inhalte",
+        "kind": "halt",
+        "conditions": "Beide Originale liegen unter kollisionsfreien Objekt-IDs; Auswahl über normalisierten Namen wird bei Mehrdeutigkeit angehalten.",
+        "persistence": "Prüfer muss konkretes Objekt wählen, dann endet Auswahlhalt.",
+        "residue_ids": [
+          "GVR037"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer kann beide Bytes getrennt lesen und benennen; kein Original wird aus Displaygleichheit ersetzt.",
+        "validation": "Export oder Dateisystem vereinigt die Objekte doch zu einer überschreibenden Adresse."
+      },
+      {
+        "state": "Einziger Originalinhalt überschrieben",
+        "kind": "verlust",
+        "conditions": "Normalisierung führt zum Überschreiben der letzten Kopie; keine rechtmäßig rekonstruierbare Darstellung enthält die verlorenen Bytes.",
+        "persistence": "Namensmanifest kann den gelöschten Inhalt nicht wiederherstellen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für dieses Original bleibt kein Residue; das andere Artefakt und restliches System können bestehen.",
+        "validation": "Eine unabhängige Version enthält die ursprünglichen Bytes."
+      }
+    ],
+    "architectural_consequence": "Artefakt-ID, Unicode-Anzeigename und Dateisystempfad trennen. Kollisionen vor Überschreiben prüfen; exakte Bytes sind noch keine fachliche Abnahme."
+  },
+  {
+    "stressor_id": "S120",
+    "source_states": [
+      "GV19",
+      "GV08",
+      "GV17"
+    ],
+    "branches": [
+      {
+        "state": "Vollkontext bleibt eingeschränkt disponierbar",
+        "kind": "halt",
+        "conditions": "Kopie existiert, nur befugte Leser haben Zugang und erlaubtes Verzeichnis erfasst Telemetrie samt Exporten.",
+        "persistence": "Nutzungs-/Retentionentscheidung bleibt offen bis geltende Zwecke geklärt sind.",
+        "residue_ids": [
+          "GVR014"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Verantwortliche können konkrete Kopien sperren oder rechtmäßig behandeln; die Kopie selbst ist kein Resilienzgewinn.",
+        "validation": "Unbekannter Telemetrieexport oder unberechtigter Leser liegt außerhalb der vermittelten Grenze."
+      },
+      {
+        "state": "Telemetryleser kennt unzulässigen Kontext",
+        "kind": "verlust",
+        "conditions": "Ein nicht berechtigter Diagnoseempfänger hat den kopierten Inhalt tatsächlich gelesen.",
+        "persistence": "Lokale Reduktion der Telemetrie macht vergangene Offenlegung nicht rückgängig.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Vertraulichkeit dieses offengelegten Inhalts bleibt keine Restfähigkeit.",
+        "validation": "Empfänger war für genau diese Inhalte berechtigt oder bekam sie nie lesbar."
+      }
+    ],
+    "architectural_consequence": "Telemetry nicht als Inhaltsbackup nutzen. Rohkontextkopien, Leserrechte und spätere Löschpflicht getrennt inventarisieren; die ADR-Regel allein beweist keine Filterung."
+  },
+  {
+    "stressor_id": "S121",
+    "source_states": [
+      "GV08",
+      "GV09"
+    ],
+    "branches": [
+      {
+        "state": "Gelesenes Keychaingeheimnis nicht rückholbar",
+        "kind": "verlust",
+        "conditions": "Unberechtigtes Plugin liest das konkrete Item erfolgreich wie in der Karte vorausgesetzt.",
+        "persistence": "Vergangene Kenntnis bleibt; spätere Rotation kann nur zukünftige Authentisierung entwerten.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für die nie erfolgte Offenlegung dieses Items gibt es keinen Rest. Ein Audit über Kernelaufrufe ist kein vollständiges Zugriffsprotokoll.",
+        "validation": "OS verweigert den Itemzugriff oder es handelt sich nicht um unberechtigten Leser."
+      },
+      {
+        "state": "Andere Verwahrgrenze bleibt unberührt",
+        "kind": "extern-erzwungen",
+        "conditions": "Gelesenes Item ist kompromittiert, weitere konkret benannte Daten/Schlüssel liegen unter unabhängigen nicht zugänglichen Rechten.",
+        "persistence": "Fortgesetzter Pluginzugriff kann seine ursprüngliche Grenze nutzen, nicht die nachgewiesen getrennte.",
+        "residue_ids": [
+          "GVR008"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Besitzer nutzt ausschließlich die tatsächlich isolierten Daten; gleicher UID allein genügt nicht.",
+        "validation": "Zugang zum gelesenen Item vermittelt auch Zugriff auf die behauptet unabhängigen Schlüssel."
+      }
+    ],
+    "architectural_consequence": "Keychainzugriff außerhalb Kernel als tatsächliche OS-Vertrauensgrenze behandeln. Erfolgreichen Lesezugriff nicht durch behauptete API-Autorisierung wegmodellieren."
+  },
+  {
+    "stressor_id": "S122",
+    "source_states": [
+      "GV09",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Pfadtausch erreicht gestartetes Objekt nicht",
+        "kind": "halt",
+        "conditions": "Loader startet nur das zuvor gebundene geprüfte Objekt oder verweigert nach Tausch; kein Hook läuft vorher.",
+        "persistence": "Substitution bleibt wirkungslos solange Objektbindung und Vertrauenswurzel gelten.",
+        "residue_ids": [
+          "GVR009"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Loader kann authentisches Objekt nutzen und Prüfer den Tausch erklären; keine heutige Implementierung behauptet.",
+        "validation": "Der Prozess lädt ausgetauschte Haupt- oder Nebenbytes trotz erfolgreicher alter Prüfung."
+      },
+      {
+        "state": "Ausgetauschte Bytes bereits gestartet",
+        "kind": "ungewissheit",
+        "conditions": "Angreiferbinary wurde mit relevanten Rechten gestartet; erreichbare Daten und ausgeführte Befehle sind noch unbekannt.",
+        "persistence": "Ohne unabhängige Ausführungs-/Zugriffsevidenz ist Schadensumfang nicht aus Manifeststatus ableitbar.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für saubere Ausführung fehlt ein belastbarer Restnachweis; Isolation oder externe Kopie wird nicht hinzuerfunden.",
+        "validation": "Unabhängige Ausführungsspur und Rechteinventar grenzen die tatsächlich berührten Objekte ein."
+      }
+    ],
+    "architectural_consequence": "Geprüfte Bytes und gestartete Bytes einschließlich dynamischer Abhängigkeiten binden; bloßer Pfad oder Manifeststatus kann das Check-use-Fenster nicht schließen."
+  },
+  {
+    "stressor_id": "S123",
+    "source_states": [
+      "GV09",
+      "GV28",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Falscher Actor scheitert am unabhängigen Beleg",
+        "kind": "halt",
+        "conditions": "Für konkreten Effekt existiert unabhängige persönliche Bindung; liegender Transport kann sie nicht erzeugen.",
+        "persistence": "Freigabe bleibt gesperrt, bis passende authentische Zustimmung vorliegt.",
+        "residue_ids": [
+          "GVR010",
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Auditor prüft die echte Personen-/Effektbindung; Gate weist bloße Actorbehauptung zurück.",
+        "validation": "Transport kann selbst alle Belegbestandteile fälschen oder ein geteiltes Konto gilt als Person."
+      },
+      {
+        "state": "Actorhistorie ist nicht personenzuordenbar",
+        "kind": "ungewissheit",
+        "conditions": "Nur Behauptung des lügenden Transports wurde erhalten, kein unabhängiger Personenbeleg.",
+        "persistence": "Nachträglicher erneuter Login beweist nicht, welcher Mensch damals zustimmte.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für den geforderten historischen Personenbeweis besteht keine Restfähigkeit aus dieser Datenlage; andere Fakten können lesbar sein.",
+        "validation": "Ein zeitgenössischer unabhängiger Beleg bindet genau diesen Effekt an die Person."
+      }
+    ],
+    "architectural_consequence": "Transport ist Authentisierungs-Vertrauenswurzel oder muss unabhängige Personenbindung nachweisen. Kernel-Scopeprüfung einer Lüge liefert keinen Menschenbeleg."
+  },
+  {
+    "stressor_id": "S124",
+    "source_states": [
+      "GV28",
+      "GV27"
+    ],
+    "branches": [
+      {
+        "state": "Direkte SQL-Manipulation lässt andere Grenze intakt",
+        "kind": "extern-erzwungen",
+        "conditions": "Agent schreibt DB erfolgreich; ein benannter anderer Datenbereich ist ihm tatsächlich nicht zugänglich.",
+        "persistence": "Manipulation kann fortdauern, solange Schreibrechte bestehen; kein Beweis eines selbstverstärkenden Kreislaufs.",
+        "residue_ids": [
+          "GVR008"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Besitzer nutzt nur unabhängig geschützte Daten; betroffene DB gilt nicht mehr als zuverlässige Autoritätsquelle.",
+        "validation": "Dieselben Rechte erreichen auch den als isoliert bezeichneten Bereich."
+      },
+      {
+        "state": "Einzelner Auditfakt außerhalb DB belegbar",
+        "kind": "ungewissheit",
+        "conditions": "Betroffene Zeile wurde manipuliert, aber der konkrete frühere Fakt ist unabhängig verwahrt.",
+        "persistence": "Vergleich kann diese Abweichung aufklären, nicht sämtliche unverwahrten späteren Mutationen.",
+        "residue_ids": [
+          "GVR033"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Auditor prüft den tatsächlich verwahrten Fakt trotz direktem SQLitewrite.",
+        "validation": "Beleg liegt unter derselben veränderbaren Schreibgrenze oder enthält den strittigen Fakt nicht."
+      }
+    ],
+    "architectural_consequence": "Domain-Alleinschreiber erfordert OS-Schreibgrenze; Mutable-SQL-Constraints und Ziel-Eventlog nicht als Rootschutz ausgeben. Bei Bypass nur konkret unabhängige Fakten vertrauen."
+  },
+  {
+    "stressor_id": "S125",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Parameter bleibt unschädliches Datum",
+        "kind": "transient",
+        "conditions": "Konkreter Sink bindet SQL-Werte; Dateizugriffe lösen Objektidentität innerhalb erlaubter Grenze ohne Escape auf.",
+        "persistence": "Syntax hat keine Befehlswirkung; endliche Verarbeitung endet ohne fremde Mutation.",
+        "residue_ids": [
+          "GVR008"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Ein nachgewiesen nicht erreichbarer fremder Datenbereich bleibt für seinen Besitzer nutzbar; keine allgemeine Sicherheit aus einer Zeichenfolge.",
+        "validation": "Parameter erreicht SQL-Interpolation oder Pfadauflösung außerhalb dieser Rechte-/Objektgrenze."
+      },
+      {
+        "state": "Erreichbarer Sink verändert fremde Daten",
+        "kind": "ungewissheit",
+        "conditions": "Sink interpoliert oder erlaubt Escape; fremdes Ziel ist schreibbar, aber genaue Zielobjekte und unveränderte Kopien sind unbekannt.",
+        "persistence": "Dauer und Schaden hängen vom ausgeführten Befehl und Schreibbereich ab, nicht vom Wort Injection.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für betroffene Integrität ist keine Restfähigkeit begründbar ohne Sink- und Dateninventar.",
+        "validation": "Konkreter Trace belegt Ablehnung oder begrenzt den tatsächlich veränderten Inhalt."
+      }
+    ],
+    "architectural_consequence": "Offenen Sink zuerst bestimmen: gebundener SQL-Wert, aufgelöster erlaubter Pfad und effektive Rechte sind unterschiedliche Verträge. Kein pauschaler Injectionzustand."
+  },
+  {
+    "stressor_id": "S126",
+    "source_states": [
+      "GV28",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Escapes werden als Daten gelesen",
+        "kind": "transient",
+        "conditions": "Rohlog ist erhalten; unabhängiger Renderer stellt Steuerzeichen inert und begrenzt dar.",
+        "persistence": "Optischer Angriff hat in diesem Renderer keine Wirkung; Diagnose kann weitergehen.",
+        "residue_ids": [
+          "GVR007"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator prüft die Originalzeichen, ohne dass sie andere Zeilen ersetzen.",
+        "validation": "Escape-Sequenz verändert sichtbare frühere Einträge oder führt eine Aktion aus."
+      },
+      {
+        "state": "Gefälschte Anzeige hat Entscheidung beeinflusst",
+        "kind": "ungewissheit",
+        "conditions": "Unsicherer Renderer täuscht Operator, aber ursprüngliche Bytes bleiben unverändert erreichbar.",
+        "persistence": "Fehlentscheidung bleibt historisch möglich; spätere sichere Anzeige klärt nur den Darstellungsfehler.",
+        "residue_ids": [
+          "GVR007"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann mit vertrauenswürdiger Ersatzansicht Rohbytes prüfen; daraus folgt keine Rücknahme eines ausgelösten Effekts.",
+        "validation": "Auch Rohbytes oder Ersatzrenderer sind manipuliert oder ausgelöste Wirkung bleibt unbeobachtet."
+      }
+    ],
+    "architectural_consequence": "Terminaldarstellung und Ursprungsintegrität separat machen; neutrale Rohbyteansicht schützt nur vor Anzeige-Steuerung, nicht vor erfundenen Logfakten."
+  },
+  {
+    "stressor_id": "S127",
+    "source_states": [
+      "GV43",
+      "GV09",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Altes Token bleibt nach Restore abgewiesen",
+        "kind": "halt",
+        "conditions": "Aktueller unabhängiger Widerrufsstand ist am letzten Zulassungspfad wirksam oder Unklarheit schließt den Pfad.",
+        "persistence": "Restore ändert Aufgabenhistorie, nicht die erforderliche aktuelle Autoritätsepoche.",
+        "residue_ids": [
+          "GVR011"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Gate kann dem gestohlenen alten Token weitere Befugnis verweigern; frühere Wirkungen bleiben getrennt.",
+        "validation": "Restaurierter Snapshot setzt auch die einzige geprüfte Widerrufsquelle zurück."
+      },
+      {
+        "state": "Token wieder gültig, Gegenwart nicht belegt",
+        "kind": "ungewissheit",
+        "conditions": "Restore enthält nur alten Grant und keine aktuelle Gegenquelle; Angreifer kann ihn erneut vorlegen.",
+        "persistence": "Lokale Zustimmung bleibt veraltet bis unabhängige frische Evidenz erreichbar ist.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer liest historischen Grant mit Snapshotgrenze; daraus folgt kein heutiges Recht und kein Nachweis bereits erfolgter Ausnutzung.",
+        "validation": "Aktueller Widerruf wird vor Annahme tatsächlich geprüft."
+      }
+    ],
+    "architectural_consequence": "Widerrufsevidenz außerhalb des restaurierten Vertrauensstands verankern; Ablaufzeit braucht verlässliche Zeitbasis und ist nicht Ersatz für aktuelle Rücknahme."
+  },
+  {
+    "stressor_id": "S128",
+    "source_states": [
+      "GV09",
+      "GV08",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Namensähnliches Paket wird vor Code abgewiesen",
+        "kind": "halt",
+        "conditions": "Auflösung ist an authentisch erhaltenes Paket gebunden und prüft vor jedem Installhook.",
+        "persistence": "Falscher Name kann ohne passende Byte-/Herkunftsbindung nicht aktiv werden.",
+        "residue_ids": [
+          "GVR009"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Loader behält den authentischen konkreten Integrationssatz als nutzbaren Gegenstand.",
+        "validation": "Transitive Abhängigkeit oder Hook aus dem Typosquat läuft vor der Bindungsprüfung."
+      },
+      {
+        "state": "Typosquat aktiv, anderer Bereich bleibt getrennt",
+        "kind": "extern-erzwungen",
+        "conditions": "Schadpaket läuft; benannter legitimer Datenbereich liegt nachweislich außerhalb seiner effektiven Rechte.",
+        "persistence": "Angreiferzugang dauert mit dem Paket, nicht automatisch über seine Grenzen hinaus.",
+        "residue_ids": [
+          "GVR008"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Besitzer kann isolierten Bestand weiter nutzen; betroffene Integration und deren Ausgaben gelten nicht als sauber.",
+        "validation": "Installrechte umfassen auch den isoliert behaupteten Bestand."
+      }
+    ],
+    "architectural_consequence": "Dependencyidentität und vorgezogene Installhooks in Aktivierungsvertrag aufnehmen. Vertrauter Integrationsname ist kein identisches Paket."
+  },
+  {
+    "stressor_id": "S129",
+    "source_states": [
+      "GV04",
+      "GV31",
+      "GV48",
+      "GV30"
+    ],
+    "branches": [
+      {
+        "state": "Benannter unabhängiger Satz stellt Inhalt wieder her",
+        "kind": "transient",
+        "conditions": "Eine vorab vorhandene rechtmäßige Kopie samt Schlüsseln und Decoder liegt außerhalb des Verschlüsselungszugriffs.",
+        "persistence": "Wiederherstellung endet, wenn Inhalt auf sauberer Umgebung lesbar ist; alte unbekannte Außenwirkungen bleiben gesondert.",
+        "residue_ids": [
+          "GVR012"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Wiederhersteller nutzt nur den konkret unabhängig erhaltenen Satz; keine spontane externe Kopie wird angenommen.",
+        "validation": "Drill ohne betroffene DB/Backups kann den erforderlichen Inhalt nicht lesen."
+      },
+      {
+        "state": "Kein bekannter Entschlüsselungsweg",
+        "kind": "ungewissheit",
+        "conditions": "Alle bekannten Inhaltssätze sind verschlüsselt und kein verfügbarer Schlüssel oder Klartextpfad hilft; Systemspuren existieren.",
+        "persistence": "Wiederholter Restore derselben Bytes liefert keinen Schlüssel; dauerhafte Unmöglichkeit ist damit nicht bewiesen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für aktuelle Inhaltwiederherstellung fehlt ein nutzbarer Rest; Ciphertext und Erinnerungen schließen pauschalen Totalverlust aus.",
+        "validation": "Ein tatsächlich verfügbarer Schlüssel oder unabhängiger Inhaltspfad ermöglicht Lesen."
+      }
+    ],
+    "architectural_consequence": "Ransomwaregrenze nach Daten, Schlüsseln und Tools schließen; Backupanzahl und vorhandenes Manifest beweisen keine außerhalb liegende Wiederherstellung."
+  },
+  {
+    "stressor_id": "S130",
+    "source_states": [
+      "GV10",
+      "GV01",
+      "GV11"
+    ],
+    "branches": [
+      {
+        "state": "Großer endlicher Arbeitsbaum wird abgearbeitet",
+        "kind": "extern-erzwungen",
+        "conditions": "Scopezahl und Wurzeln sind endlich, Lineage bleibt erhalten und verbleibende zugelassene Arbeit ist gezählt.",
+        "persistence": "Baum kann lange saturieren, aber Restverpflichtungen sinken bei Abschluss; keine unendliche Rekursion.",
+        "residue_ids": [
+          "GVR013"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Scheduler nutzt das endliche Arbeitsregister zur Abweisung und Abarbeitung, nicht nur den Zyklustest.",
+        "validation": "Neue ungezählte Wurzeln entstehen oder Abschlüsse vermindern Restmenge nicht."
+      },
+      {
+        "state": "Rückstau erzeugt neue Wurzeln",
+        "kind": "attraktorhypothese",
+        "conditions": "Verzögerungen lösen autorisierte frische Retry-/Delegationswurzeln aus; Reproduktion liegt über Abbau und Gesamtlimit fehlt.",
+        "persistence": "Rückstau → neue Wurzeln → mehr Rückstau → weitere neue Wurzeln; Ressourcenende kann Regime abbrechen.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene Aufgabenlinien bleiben untersuchbar; sie begrenzen die Last nicht.",
+        "validation": "Bei gleicher deklarierter Basislast nach Ende des Startfehlers verschwindet Rückstau dauerhaft; Nullankunftstest ist getrennt auszuwerten."
+      }
+    ],
+    "architectural_consequence": "Endliche Scopekette und Gesamtmenge trennen; Wurzelerzeugung, Retryidentität und alle Produzenten gemeinsam begrenzen."
+  },
+  {
+    "stressor_id": "S131",
+    "source_states": [
+      "GV17",
+      "GV18",
+      "GV19"
+    ],
+    "branches": [
+      {
+        "state": "Disposition unter geklärtem Prüfvorbehalt",
+        "kind": "halt",
+        "conditions": "Anfrage gilt möglicherweise; Rechtsprüfung und erlaubtes Kopien-/Zweckverzeichnis sind vorhanden, Nutzung wird begrenzt.",
+        "persistence": "Hold dauert bis konkrete zulässige Datenbehandlung feststeht, nicht bis Replay erfolgreich ist.",
+        "residue_ids": [
+          "GVR014"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigte Verantwortliche können betroffene Kopien und Handlungen bestimmen; Verzeichnis darf nicht selbst verbotene Daten retten.",
+        "validation": "Anordnung verlangt auch sofortige Löschung des Verzeichnisses oder relevante Kopien sind unbekannt."
+      },
+      {
+        "state": "Erlaubte Herkunft bleibt, gelöschte Payload fehlt",
+        "kind": "verlust",
+        "conditions": "Indispensable Payload wurde rechtmäßig vollständig gelöscht; ausgewählte Herkunftskanten dürfen bleiben.",
+        "persistence": "Kein Feedback: fehlender Inhalt entsteht nicht aus erhaltenen Kanten.",
+        "residue_ids": [
+          "GVR015"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Auskunftsbearbeiter beantwortet nur Fragen aus erlaubten Kanten; für payloadabhängigen Beweis bleibt keines.",
+        "validation": "Die konkrete Anfrage ist ohne Payload nicht beantwortbar oder auch Kanten dürfen nicht bleiben."
+      }
+    ],
+    "architectural_consequence": "Löschpflicht und zulässig notwendige Provenienz pro Datenobjekt bestimmen; append-only Ziel rechtfertigt weder unerlaubtes Behalten noch die Rekonstruktion gelöschter Inhalte."
+  },
+  {
+    "stressor_id": "S132",
+    "source_states": [
+      "GV17",
+      "GV18"
+    ],
+    "branches": [
+      {
+        "state": "Hold kommt vor letzter Löschung durch",
+        "kind": "halt",
+        "conditions": "Gültige Anordnung ist vor relevantem Löschcommit wirksam, Daten und erlaubtes Verzeichnis bleiben erhalten.",
+        "persistence": "Erhaltungsgebot hält Löschung an bis zuständige Freigabe; Verwendung ist separat beschränkt.",
+        "residue_ids": [
+          "GVR014"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Verantwortliche können die konkret gehaltenen Kopien nachweisen und erlaubte Einsicht organisieren.",
+        "validation": "Ein Löschpfad entfernt betroffene Daten trotz vor Commit wirksamen Holds."
+      },
+      {
+        "state": "Letzte nötige Kopie vor Hold gelöscht",
+        "kind": "verlust",
+        "conditions": "Retention löscht einzige rekonstruierbare benötigte Kopie bevor Hold wirksam wird; keine zulässige weitere Darstellung existiert.",
+        "persistence": "Spätere Anordnung erzeugt keine verlorenen Bytes.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Erhaltung bzw. Wiederherstellung dieses Inhalts gibt es keinen Rest; sonstige Rechtsakten können bestehen.",
+        "validation": "Zeit-/Kopieninventar zeigt, dass Inhalt bei Holdwirksamkeit noch vorhanden und erreichbar war."
+      }
+    ],
+    "architectural_consequence": "Legal-Hold-Wirksamkeit und Löschcommit auf dieselben Datenpfade beziehen. Backupfunktion ohne Retention belegt keine vorhandene atomare Holdbehandlung."
+  },
+  {
+    "stressor_id": "S133",
+    "source_states": [
+      "GV20",
+      "GV08",
+      "GV17",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Nicht konformer Providerpfad angehalten",
+        "kind": "halt",
+        "conditions": "Bindende Residenzregel schließt aktuellen Provider aus und sämtliche Sendepfade bleiben vor Annahme gesperrt.",
+        "persistence": "Halt bis erlaubter Pfad oder gültig geänderter Vertrag besteht.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Verantwortliche behalten den ungesendeten konkreten Auftrag zur zulässigen Neubewertung; eigenständige lokale Auftragserfüllung wird nicht vorausgesetzt.",
+        "validation": "Daten verlassen die Grenze über Telemetrie oder anderen nicht vermittelten Pfad."
+      },
+      {
+        "state": "Unzulässiger Ort ohne belegte Offenlegung",
+        "kind": "extern-erzwungen",
+        "conditions": "Transfer an vertraglich verbotenen Ort erfolgt, aber kein neuer unberechtigter Klartextleser ist nachgewiesen; Verzeichnis ist erlaubt erhalten.",
+        "persistence": "Historische Ortsverletzung bleibt erfolgt; Behandlung hängt von zuständiger Vertrags-/Rechtsentscheidung ab.",
+        "residue_ids": [
+          "GVR014"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Datenverantwortliche können konkrete Kopien/Orte und zulässige Folgeschritte untersuchen; keine Vertraulichkeitsvernichtung wird erfunden.",
+        "validation": "Transfer war nach tatsächlicher Regel erlaubt oder unberechtigtes Lesen wird separat nachgewiesen."
+      }
+    ],
+    "architectural_consequence": "Residenzverletzung ohne neuen unberechtigten Leser ausdrücklich von Offenlegung unterscheiden. Providerpfad vor Sendung prüfen; Vertragsort ist kein kryptographischer Begriff."
+  },
+  {
+    "stressor_id": "S134",
+    "source_states": [
+      "GV19",
+      "GV08",
+      "GV43"
+    ],
+    "branches": [
+      {
+        "state": "Historische Kopien kontrolliert disponierbar",
+        "kind": "halt",
+        "conditions": "Alte Bytes existieren nur bei berechtigten Verwahrern; Inventar und Nutzungsbeschränkung sind erlaubt und vollständig.",
+        "persistence": "Kopien bleiben sensibel bis zulässige Disposition; ungültiger Login entwertet nicht jeden Inhalt.",
+        "residue_ids": [
+          "GVR014"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Verantwortliche können erlaubte Behandlung der alten Kopien planen und prüfen, ohne einen Leak zu behaupten.",
+        "validation": "Ein nicht erfasster Export oder tatsächlicher unberechtigter Leser wird gefunden."
+      },
+      {
+        "state": "Restore reaktiviert alte Credentialmacht nicht",
+        "kind": "halt",
+        "conditions": "Kopie wird restauriert, aber unabhängiger aktueller Widerrufsstand vermittelt jede neue Zulassung.",
+        "persistence": "Alte Secretbytes bleiben historisch, gegenwärtige Macht wird separat abgewiesen.",
+        "residue_ids": [
+          "GVR011"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Gate kann neue Nutzung alter Zugangsdaten verhindern; gespeicherte private Informationen bleiben dadurch nicht gelöscht.",
+        "validation": "Widerrufsprüfung stammt allein aus derselben alten Kopie."
+      }
+    ],
+    "architectural_consequence": "Backupgeheimnisse, derzeitige Credentialgültigkeit und Restore-Autorität getrennt führen; Rotation ist weder Löschung noch Schutz gegen zurückgesetzten Widerruf."
+  },
+  {
+    "stressor_id": "S135",
+    "source_states": [
+      "GV25",
+      "GV20",
+      "GV21",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Erhaltene Version rechtmäßig weiter nutzbar",
+        "kind": "extern-erzwungen",
+        "conditions": "Alte Nutzungsrechte bleiben gültig und vollständiger kompatibler Lauf-/Bausatz existiert.",
+        "persistence": "Neue Releases bleiben rechtlich blockiert, bisheriger eng begrenzter Betrieb kann andauern.",
+        "residue_ids": [
+          "GVR016"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Maintainer kann genau die erhaltene rechtmäßige Version betreiben oder bauen.",
+        "validation": "Benötigte Sicherheits-/Plattformfunktion erfordert doch die unzulässige neue Version."
+      },
+      {
+        "state": "Erforderliche neue Nutzung bleibt verweigert",
+        "kind": "halt",
+        "conditions": "Auftrag braucht die lizenzrechtlich ausgeschlossene neue Fassung und Freigabegrenze vermittelt deren Nutzung.",
+        "persistence": "Halt bis zulässiger Ersatz oder geänderter Auftrag; alte Lizenz löst neue Rechte nicht.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Entscheider hat den gehaltenen Auftrag, nicht die Fähigkeit zur unzulässigen Nutzung.",
+        "validation": "Ein nötiger Build-/Veröffentlichungspfad nutzt die verbotene Fassung dennoch."
+      }
+    ],
+    "architectural_consequence": "Lizenzrechte des erhaltenen Versionssatzes ausdrücklich vom neuen Release trennen; keine rückwirkende Ungültigkeit und keine Ersatzlibrary ohne Kompatibilitäts-/Rechtebeleg annehmen."
+  },
+  {
+    "stressor_id": "S136",
+    "source_states": [
+      "GV03",
+      "GV28",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Konkrete Zustimmung personengebunden beweisbar",
+        "kind": "abschluss",
+        "conditions": "Zeitgenössischer unabhängiger Beleg bindet identifizierte Person und damalige Befugnis an exakt diesen Effekt.",
+        "persistence": "Enges Audit endet mit belegter Zustimmung; Ausführung und heutige Autorität bleiben separate Fragen.",
+        "residue_ids": [
+          "GVR010"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Autorisierter Auditor kann die geforderte historische Zustimmung nachvollziehen.",
+        "validation": "Geteiltes Konto, unklarer Effekttext oder fälschbarer Transportactor ersetzt tatsächliche Personenbindung."
+      },
+      {
+        "state": "Nur Rollenname erhalten",
+        "kind": "ungewissheit",
+        "conditions": "Historische Daten enthalten lediglich geteilte Rolle oder ungesicherte Actorbehauptung; kein unabhängiger persönlicher Beleg.",
+        "persistence": "Nachträgliche Befragung ohne belastbare Erinnerung liefert keinen sicheren damaligen Beweis.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für konkreten Menschenbeweis besteht aus diesem Inventar keine Restfähigkeit; die Taskhistorie ist nicht automatisch wertlos.",
+        "validation": "Zulässiger zeitnaher Beleg oder tragfähige unabhängige Erinnerung klärt genau diese Zustimmung."
+      }
+    ],
+    "architectural_consequence": "Freigabebeweis muss Person, damalige Befugnis, Wirkung und Zeitpunkt binden; spätere Rollenauflösung und Transportname reichen nicht."
+  },
+  {
+    "stressor_id": "S137",
+    "source_states": [
+      "GV32",
+      "GV17",
+      "GV08"
+    ],
+    "branches": [
+      {
+        "state": "Original in amtlicher Verwahrung",
+        "kind": "extern-erzwungen",
+        "conditions": "Gerät ist beschlagnahmt; erlaubtes Verzeichnis über Custody und Datenpflichten ist andernorts tatsächlich zugänglich.",
+        "persistence": "Behördliche Zugriffsbedingungen halten Einschränkung aufrecht, nicht ein interner Systemloop.",
+        "residue_ids": [
+          "GVR014"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigte Rechtsverantwortliche können erlaubte Einsicht beantragen bzw. organisieren; freie Originalnutzung ist nicht erhalten.",
+        "validation": "Auch das Verzeichnis ist beschlagnahmt/unzulässig oder Zugriff bereits uneingeschränkt erlaubt."
+      },
+      {
+        "state": "Erlaubter unabhängiger Satz trägt begrenzten Betrieb",
+        "kind": "transient",
+        "conditions": "Konkrete vorhandene Kopie, Schlüssel und Leser dürfen laut bindender Custodyregel genutzt werden.",
+        "persistence": "Wiederherstellung kann begrenzte Aufgaben freigeben; gerichtliche Einschränkungen bestehen fort.",
+        "residue_ids": [
+          "GVR012"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Wiederhersteller nutzt nur ausdrücklich erlaubten Satz, nicht heimlich kopiertes Original.",
+        "validation": "Custodyanordnung verbietet diese Nutzung oder Satz enthält nicht die nötigen Daten."
+      }
+    ],
+    "architectural_consequence": "Custody, erlaubte Einsicht und Weiterbetrieb separat erfassen; keine Umgehung einer Beschlagnahme und keine unabhängige Kopie ohne benannte erlaubte Existenz."
+  },
+  {
+    "stressor_id": "S138",
+    "source_states": [
+      "GV19",
+      "GV17",
+      "GV08"
+    ],
+    "branches": [
+      {
+        "state": "Neuklassifizierte Kopien unter begrenzter Behandlung",
+        "kind": "halt",
+        "conditions": "Kopien und Zwecke sind bekannt; ihre Metadaten dürfen erhalten bleiben und neue Nutzungssperren greifen.",
+        "persistence": "Neue Einstufung hält bisherige breite Nutzung an bis konkrete Disposition geklärt ist.",
+        "residue_ids": [
+          "GVR014"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Verantwortliche können erlaubte aktuelle Behandlung der Feldkopien durchsetzen, ohne alte Leser pauschal zu illegalisieren.",
+        "validation": "Verdeckte Kopien oder Nebenpfade bleiben außerhalb der neuen Behandlung."
+      },
+      {
+        "state": "Neu verbotene Nutzung nicht rekonstruierbar",
+        "kind": "ungewissheit",
+        "conditions": "Historische Empfänger-/Zweckdaten fehlen; Feld ist jetzt sensibel, aber konkretes damaliges oder heutiges Lesen unbekannt.",
+        "persistence": "Neue Einstufung allein füllt die fehlende Empfängerhistorie nicht.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für eine vollständige Offenlegungs-/Zweckbewertung ist kein Restnachweis belegt; tatsächlicher Geheimhaltungsverlust bleibt separat offen.",
+        "validation": "Vollständige zulässige Empfänger-/Zweckbelege werden gefunden."
+      }
+    ],
+    "architectural_consequence": "Klassifikation nach Wirksamkeitszeit, Zweck und tatsächlicher Kopie führen. Sensibilität heute beweist keinen vergangenen Rechtsbruch oder bereits erfolgtes Lesen."
+  },
+  {
+    "stressor_id": "S139",
+    "source_states": [
+      "GV01",
+      "GV18",
+      "GV17",
+      "GV03"
+    ],
+    "branches": [
+      {
+        "state": "Gelöschte Scopes über erlaubte Kanten beantwortbar",
+        "kind": "abschluss",
+        "conditions": "Benötigte Beziehungen wurden unabhängig von Registryeinträgen legal erhalten und genügen genau dieser Anfrage.",
+        "persistence": "Eng begrenzte Auskunft endet mit belegten Kanten; keine Wiederbelebung gelöschter Scopes nötig.",
+        "residue_ids": [
+          "GVR015"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Auskunftsbearbeiter beantwortet die konkrete Herkunftsfrage aus vorhandener Struktur.",
+        "validation": "Anfrage benötigt eine nicht erhaltene Kante oder ursprünglichen Inhalt."
+      },
+      {
+        "state": "Erforderliche Herkunft endgültig im Inventar verloren",
+        "kind": "verlust",
+        "conditions": "Notwendige Beziehung wurde gelöscht und keine zulässige rekonstruierbare Darstellung oder Erinnerung enthält sie.",
+        "persistence": "Erneuter Export übriger Scopes erfindet die fehlende Beziehung nicht.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für vollständige verlangte Herkunft gibt es keinen Rest; bekannte Teilbeziehungen dürfen nur als unvollständig ausgewiesen werden.",
+        "validation": "Eine rechtmäßig zugängliche unabhängige Herkunftskante schließt die Lücke."
+      }
+    ],
+    "architectural_consequence": "Aktive Scoperegistry und zulässig aufbewahrte Herkunft trennen. Auskunftumfang muss fehlende Kanten und Payload ausdrücklich benennen."
+  },
+  {
+    "stressor_id": "S140",
+    "source_states": [
+      "GV31",
+      "GV47",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Backup vorhanden, Versicherungsbeweis offen",
+        "kind": "ungewissheit",
+        "conditions": "Benannter kompletter Satz ist lesbar vorhanden, aber repräsentativer vollständiger Versuch für den Versicherungsanspruch fehlt.",
+        "persistence": "Inventar allein beendet Beweislücke nicht; Wiederholungsbehauptungen ersetzen keinen Versuch.",
+        "residue_ids": [
+          "GVR012"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Wiederhersteller kann den Satz prüfen; für garantierte Recovery liegt noch kein Testbeleg vor.",
+        "validation": "Ein repräsentativer abgenommener Versuch belegt bereits genau den geforderten Anspruch."
+      },
+      {
+        "state": "Enger Recoverynachweis trägt Auditantwort",
+        "kind": "abschluss",
+        "conditions": "Tatsächlicher vollständiger Versuch ist unabhängig dokumentiert und deckt den konkret vereinbarten Schadens-/Zeitumfang.",
+        "persistence": "Audit endet nur innerhalb dieser Hülle; neue Abhängigkeiten eröffnen neue Prüfung.",
+        "residue_ids": [
+          "GVR025"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Auditor nutzt die belegte Dauer und Inhaltsabnahme, nicht bloß die Dateianzahl.",
+        "validation": "Fehlender Schlüssel, Außenwirkung oder andere Ersatzhardware fällt außerhalb der behaupteten Testhülle."
+      }
+    ],
+    "architectural_consequence": "Wiederherstellungsinventar und durchgeführten Nachweis als getrennte Objekte führen; Prüfziel einschließlich Inhalt, Schlüssel, Zeit und Außenwirkungsabgleich ausweisen."
+  },
+  {
+    "stressor_id": "S141",
+    "source_states": [
+      "GV21",
+      "GV22",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Neue teure Aufrufe bleiben innerhalb Budget zurückgehalten",
+        "kind": "halt",
+        "conditions": "Neuer bindender Tarif ist bekannt, vollständige Ausgabenreservierung erkennt fehlenden Rahmen vor Annahme.",
+        "persistence": "Halt bis ausreichendes legitimes Budget oder günstiger erlaubter Pfad besteht.",
+        "residue_ids": [
+          "GVR018",
+          "GVR017"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Budgethalter stoppt neue Verpflichtungen und sieht alte bekannte Kosten; vergangene Aufrufe werden nicht ungeschehen.",
+        "validation": "Ein neuer Aufruf wird außerhalb Reservierung angenommen oder sein Preis hat keine bindende Obergrenze."
+      },
+      {
+        "state": "Hochwertiger Auftrag lohnt trotz Preissprung",
+        "kind": "abschluss",
+        "conditions": "Gesamter tatsächlicher Aufwand bleibt unter belegtem Auftragswert und erlaubtem Budget; Ergebnis wird abgenommen.",
+        "persistence": "Endlicher wertvoller Auftrag endet, allgemeine Wirtschaftlichkeit bleibt unbewiesen.",
+        "residue_ids": [
+          "GVR002",
+          "GVR017"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Empfänger nutzt das Ergebnis und Budgethalter den konkreten Kostennachweis.",
+        "validation": "Spätere Rechnung oder menschlicher Nacharbeitsaufwand übersteigt die angenommene Kostengrenze."
+      }
+    ],
+    "architectural_consequence": "Tarifwirksamkeit an Annahmezeit binden und zukünftiges Zulassen von bereits eingegangenen Kosten trennen. Faktor hundert bedeutet nicht automatisch Unwirtschaftlichkeit jedes Auftrags."
+  },
+  {
+    "stressor_id": "S142",
+    "source_states": [
+      "GV22",
+      "GV21"
+    ],
+    "branches": [
+      {
+        "state": "Bekannte Nutzung, unbekannte Nachschuld",
+        "kind": "ungewissheit",
+        "conditions": "Provider berechnet nachträglich ohne bekannte bindende Obergrenze; lokale Nutzung und Annahmezeiten bleiben erhalten.",
+        "persistence": "Fortgesetzte Aufrufe erhöhen unbewertete Verpflichtung; erst Vertrag/Rechnung kann sie beziffern.",
+        "residue_ids": [
+          "GVR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Budgethalter kann bekannte Nutzung und offenen Rechnungsanteil ausweisen, keine sichere Gesamtschranke.",
+        "validation": "Vollständiger bindender Tarif begrenzt bereits alle angenommenen Aufrufe."
+      },
+      {
+        "state": "Neue Exposition bis Vertragsklärung gesperrt",
+        "kind": "halt",
+        "conditions": "Vollständige Effektsperre hält neue Provideranforderungen zurück; frühere Postpaidschuld bleibt unbekannt.",
+        "persistence": "Halt bis legitime bindende Bedingungen vorliegen oder Dienst aufgegeben wird.",
+        "residue_ids": [
+          "GVR005",
+          "GVR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Entscheider behält offene Anfrage und bekannte Altverpflichtungen; Sperre löscht keine Schuld.",
+        "validation": "Weiterlaufender nicht vermittelter Worker erzeugt weitere abrechenbare Aufrufe."
+      }
+    ],
+    "architectural_consequence": "Unbekanntes Postpaid nicht als prepaidbegrenztes Risiko darstellen. Ohne bindende Preisgrenze keine GVR018-Obergrenze behaupten; neue Exposition separat sperren."
+  },
+  {
+    "stressor_id": "S143",
+    "source_states": [
+      "GV10",
+      "GV23",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Großscope belastet, kleine Anteile bleiben erreichbar",
+        "kind": "extern-erzwungen",
+        "conditions": "Legale Großlast dauert an; unabhängige verbindliche Anteile und Betriebsreserve werden vollständig durchgesetzt.",
+        "persistence": "Dauerlast hält Engpass, aber kann reservierte Anteile nicht übernehmen.",
+        "residue_ids": [
+          "GVR019"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Kleine Scopes erhalten ihren konkreten Anteil; weder allgemeine Fristgarantie noch Gleichheit aller Ergebnisse folgt.",
+        "validation": "Messung zeigt kleinen Scope trotz erfüllter Vertragsbedingungen unter seinem zugesagten Anteil."
+      },
+      {
+        "state": "Auslastung erzeugt künftige Zuteilungsmacht",
+        "kind": "attraktorhypothese",
+        "conditions": "Großscope bekommt wegen heutiger hoher Ausgabe weitere Slots; benachteiligte Scopes verlieren dadurch belegbaren Wert und Stimme.",
+        "persistence": "Mehr Slots → mehr sichtbare Leistung → mehr Zuteilung → weniger konkurrierende Wertbelege.",
+        "residue_ids": [
+          "GVR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene rohe Verbrauchs-/Ergebnisgrößen bleiben auswertbar, sofern unabhängig aufbewahrt; sie erzwingen keine faire Entscheidung.",
+        "validation": "Zuteilung ist unabhängig von vergangener Belegung und kleine Scopes erholen sich nach endlichem Burst."
+      }
+    ],
+    "architectural_consequence": "Faire Ressourcenanteile getrennt von per-agent max_sessions und Organisationsfeedback prüfen; endlichen Großauftrag nicht allein zum Attraktor erklären."
+  },
+  {
+    "stressor_id": "S144",
+    "source_states": [
+      "GV21",
+      "GV16"
+    ],
+    "branches": [
+      {
+        "state": "Unrentable Kleinarbeit wird legitim beendet",
+        "kind": "abschluss",
+        "conditions": "Gesamtaufwand einschließlich Mensch ist belegt höher als Nutzen; zuständige Person verwirft weitere Aufträge wahrheitsgemäß.",
+        "persistence": "Bewusste Nichtnutzung beendet diesen Arbeitsstrom, ohne nützliche Lieferung zu behaupten.",
+        "residue_ids": [
+          "GVR017",
+          "GVR031"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Verantwortliche behalten Aufwandbeleg und begründete Entscheidung für spätere Neubewertung.",
+        "validation": "Reale End-to-end-Bilanz zeigt doch positiven Wert oder Aufträge laufen verdeckt weiter."
+      },
+      {
+        "state": "Teurer Freigabeweg wird belohnt umgangen",
+        "kind": "attraktorhypothese",
+        "conditions": "Team kann Gate umgehen und erhält für schnellere sichtbare Lieferung mehr Belohnung als sichtbare Sanktion.",
+        "persistence": "Bypass → bessere Kennzahl → Belohnung → Vorbild für weiteren Bypass → unterdrückte Risiken.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Unveränderte Auftragsakte kann spätere Untersuchung tragen; sie bewahrt nicht die umgangene Autorität.",
+        "validation": "Unabhängig erfasste Folgen überwiegen Belohnung und Bypass sinkt bei gleicher Arbeitslast."
+      }
+    ],
+    "architectural_consequence": "Menschliche Freigabekosten als tatsächlichen Aufwand führen. Legitime Nichtnutzung und autorisierten kleineren Vertrag von verstecktem Genehmigungsbypass trennen."
+  },
+  {
+    "stressor_id": "S145",
+    "source_states": [
+      "GV01",
+      "GV10",
+      "GV24",
+      "GV11"
+    ],
+    "branches": [
+      {
+        "state": "Dauerlast wird begrenzt zugelassen",
+        "kind": "extern-erzwungen",
+        "conditions": "Nachfrage übersteigt feste Workspaces, sämtliche Produzenten treffen begrenztes Arbeitsregister und zugesagte Ressourcenanteile.",
+        "persistence": "Abgewiesene Nachfrage bleibt außen; zugelassene Menge kann innerhalb realer Kapazität abgearbeitet werden.",
+        "residue_ids": [
+          "GVR013",
+          "GVR019"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Scheduler behält endliche Arbeit und konkrete Anteile; abgelehnte oder verspätete Aufträge sind kein Erfolg.",
+        "validation": "Ein Producer umgeht Zulassung oder zugesagter Anteil ist wegen gemeinsamer Ressource nicht verfügbar."
+      },
+      {
+        "state": "Echter Geschäftszeitpunkt verpasst",
+        "kind": "verlust",
+        "conditions": "Zugelassene Arbeit wird erst nach harter nicht verlängerbarer Frist fertig.",
+        "persistence": "Vergangener Zeitpunkt lässt sich durch spätere erfolgreiche Ausführung nicht wiederherstellen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für ursprüngliche Rechtzeitigkeit bleibt kein Rest; erhaltenes spätes Ergebnis wäre separat nach anderem Zweck abnehmbar.",
+        "validation": "Frist ist tatsächlich weich oder unverändert wertvolle Annahme erfolgt rechtzeitig."
+      }
+    ],
+    "architectural_consequence": "Zehnfache Nachfrage gegen reale Kapazität, Deadlines und Retryidentität prüfen. Begrenzte Zulassung hält Arbeit lesbar, nicht alle angefragten Termine ein."
+  },
+  {
+    "stressor_id": "S146",
+    "source_states": [
+      "GV21",
+      "GV22",
+      "GV13"
+    ],
+    "branches": [
+      {
+        "state": "Neue Kosten ab Budgetnull vermittelt angehalten",
+        "kind": "halt",
+        "conditions": "Bindende Preisgrenze und Ausgabengate greifen vor jedem neuen Aufruf; Altverpflichtungen sind gesondert erfasst.",
+        "persistence": "Halt besteht bis neue legitime Reservierung; alter angenommener Aufruf kann weiter Kosten verursachen.",
+        "residue_ids": [
+          "GVR018",
+          "GVR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Budgethalter stoppt nur noch nicht eingegangene Kosten und sieht bereits bekannte Exposition.",
+        "validation": "Worker kann nach Nullsetzung ohne neue Reservierung zusätzliche kostenpflichtige Aufrufe annehmen lassen."
+      },
+      {
+        "state": "Cancel gespeichert, tatsächlicher Verbrauch offen",
+        "kind": "ungewissheit",
+        "conditions": "Agent quittiert keinen verlässlichen Stop oder Provideroutcome ist unbekannt; gespeicherte Versuche und bekannte Nutzung sind lesbar.",
+        "persistence": "Wiederholtes lokales Cancel beweist weder Prozessende noch bezahlten Endbetrag.",
+        "residue_ids": [
+          "GVR001",
+          "GVR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann Anfragen und offene Kosten benennen; keine Behauptung freier Leases oder beendeter Arbeit.",
+        "validation": "Unabhängige Runtime-/Providerquittung beweist endgültigen Stop und vollständige Rechnung."
+      }
+    ],
+    "architectural_consequence": "Budgetnull ist keine forcierte Prozessbeendigung. Neue Annahme, bestehende Providerverpflichtung, Runtimebeobachtung und Lease getrennt anzeigen."
+  },
+  {
+    "stressor_id": "S147",
+    "source_states": [
+      "GV37",
+      "GV04",
+      "GV24"
+    ],
+    "branches": [
+      {
+        "state": "Anforderung ohne Fehlerhülle bleibt unbestimmt",
+        "kind": "offen",
+        "conditions": "Unklar sind erlaubter Hostausfall, maximale Rechen-/Providerlatenz und Bedeutung von Echtzeit; vorhandene enge Testbelege bleiben erhalten.",
+        "persistence": "Eine Forderung allein erzeugt keinen ausführbaren Zeitvertrag.",
+        "residue_ids": [
+          "GVR031"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann bereits belegte begrenzte Funktion von unbewiesener Garantie unterscheiden; geforderte Echtzeit ist nicht erhalten.",
+        "validation": "Ein präziser akzeptierter Vertrag samt nachgewiesener Worst-case-Hülle liegt vor."
+      },
+      {
+        "state": "Hostausfall zerstört harte Antwortfrist",
+        "kind": "verlust",
+        "conditions": "Garantie schließt Hostausfall ein; einziger Host ist während unverlängerbarer Antwortfrist unerreichbar und kein erlaubter Ersatz existiert.",
+        "persistence": "Spätere Wiederkehr kann ursprüngliche Frist nicht erfüllen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für diese rechtzeitige Antwort bleibt keine Restfähigkeit; dauerhafte Datenhaltung ist eine andere Eigenschaft.",
+        "validation": "Eine im tatsächlichen Vertrag erlaubte unabhängige Antwortinstanz liefert rechtzeitig."
+      }
+    ],
+    "architectural_consequence": "Harte Echtzeitanforderung erst mit Ausfallhülle und Worst-case-Latenz annehmen. Single-host-Funktion und bewiesene Garantie sind verschiedene Ansprüche."
+  },
+  {
+    "stressor_id": "S148",
+    "source_states": [
+      "GV24",
+      "GV21"
+    ],
+    "branches": [
+      {
+        "state": "Ursprüngliche Gelegenheit verloren",
+        "kind": "verlust",
+        "conditions": "Harte wirtschaftliche Frist ist abgelaufen, Kundenzweck danach wertlos.",
+        "persistence": "Vergangene Gelegenheit ist nicht durch schnellere spätere Verarbeitung erneuerbar.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für ursprünglichen ökonomischen Zweck bleibt kein Rest; sinnvolle künftige Verwendung wäre ein anderer Auftrag.",
+        "validation": "Kunde bestätigt unveränderten Wert auch nach der Frist."
+      },
+      {
+        "state": "Spätes Ergebnis für anderen Zweck brauchbar",
+        "kind": "abschluss",
+        "conditions": "Ergebnisbytes bleiben vorhanden; berechtigter Empfänger nimmt sie ausdrücklich für einen anderen begrenzten Zweck ab.",
+        "persistence": "Neue Abnahme beendet nur neue Verwendung; alter Fristverlust bleibt verzeichnet.",
+        "residue_ids": [
+          "GVR002"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Empfänger nutzt echten Folgeauftrag, ohne alten verlorenen Wert als gerettet zu zählen.",
+        "validation": "Neue Nutzung hängt weiterhin an der bereits verpassten ursprünglichen Gelegenheit."
+      }
+    ],
+    "architectural_consequence": "Wirtschaftliche Gültigkeit in Warteschlangenauftrag führen und nach Queuewartezeit neu bewerten; technische Fertigstellung darf verpassten Nutzen nicht umetikettieren."
+  },
+  {
+    "stressor_id": "S149",
+    "source_states": [
+      "GV30",
+      "GV21",
+      "GV31"
+    ],
+    "branches": [
+      {
+        "state": "Primärbetrieb bleibt ohne alten Backupdienst",
+        "kind": "extern-erzwungen",
+        "conditions": "Primärbestand funktioniert; tatsächlich vorhandene Ergebnisse sind für weiterhin gültigen engen Zweck abgenommen und lesbar, externe Backupzahlung entfällt.",
+        "persistence": "Weniger Diversität ist andauernde Exposition, nicht bereits eingetretener Datenverlust.",
+        "residue_ids": [
+          "GVR001",
+          "GVR002"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigte Nutzer lesen alte Aufgaben und abgenommene Ergebnisse; zusätzliche Wiederherstellungsfähigkeit wird nicht behauptet.",
+        "validation": "Primärspeicher benötigt den gekündigten Dienst für Lesen oder Ergebnisgebrauch."
+      },
+      {
+        "state": "Kleinerer benannter Recoverysatz bleibt",
+        "kind": "extern-erzwungen",
+        "conditions": "Bereits vorhandener rechtmäßiger Satz mit Schlüssel/Decoder bleibt ohne unbezahlbaren Anbieter tatsächlich nutzbar.",
+        "persistence": "Engere Wiederherstellung gilt bis nächster gemeinsamer Verlust; ehemalige Standortvielfalt ist weg.",
+        "residue_ids": [
+          "GVR012"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Wiederhersteller kann den konkret noch vorhandenen Umfang lesen, nicht den alten Diversitätsanspruch.",
+        "validation": "Isolierter Test ohne Anbieter kann den benannten Inhalt nicht wiederherstellen."
+      }
+    ],
+    "architectural_consequence": "Bezahlbarkeit, Primärbetrieb und Recoverydiversität getrennt führen. Neue verbleibende Kopie muss tatsächlich unabhängig zugänglich sein, nicht als Wunschbackup zählen."
+  },
+  {
+    "stressor_id": "S150",
+    "source_states": [
+      "GV22",
+      "GV07",
+      "GV06"
+    ],
+    "branches": [
+      {
+        "state": "Geldvergleich offen, Sachwerte vergleichbar",
+        "kind": "ungewissheit",
+        "conditions": "Rechnung fehlt; ursprüngliche Nutzung und einige gleich definierte Ergebnisgrößen sind erhalten.",
+        "persistence": "Spätere Rechnung kann Kostenrangfolge ändern; fehlende Geldwerte sind nicht aus Tokens eindeutig ableitbar.",
+        "residue_ids": [
+          "GVR017",
+          "GVR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Analyst nutzt bekannte Sachgrößen und offenes Obligo, nicht behauptete Gewinnrangfolge.",
+        "validation": "Vollständiger Tarif und Nutzungsbezug begründen schon eine eindeutige Kostenreihenfolge."
+      },
+      {
+        "state": "Scheinbar billiger Pfad entfernt Gegenmessung",
+        "kind": "attraktorhypothese",
+        "conditions": "Unbekannte Kosten werden als günstig behandelt und Auswahl belohnt diesen Pfad sowie reduziert unabhängige Abrechnungskontrolle.",
+        "persistence": "Falscher Vorteil → mehr Auswahl → günstige interne Berichte → weniger Kontrollkosten → fortgesetzter Vorteil.",
+        "residue_ids": [
+          "GVR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene echte Nutzungsbelege können spätere Abrechnung tragen; sie erzwingen noch keine Korrektur der Auswahl.",
+        "validation": "Endrechnungen bleiben entscheidungswirksam und falsche Rangfolge wird revidiert."
+      }
+    ],
+    "architectural_consequence": "Monetäre Rangfolge an abgerechneten bzw. bindend begrenzten Kosten ausrichten; unbekannter Rechnungsteil darf keinen Nullpreis und kein modellübergreifendes Siegersignal erzeugen."
+  },
+  {
+    "stressor_id": "S151",
+    "source_states": [
+      "GV26",
+      "GV28",
+      "GV25",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Neue Plattformsemantik hält Writer an",
+        "kind": "halt",
+        "conditions": "Relevante Abweichung wird vor Mutation erkannt; alter Datenbestand und kompatibler Leser sind erhalten.",
+        "persistence": "Halt bis neuer Leser/Writer für konkrete Semantik geprüft ist.",
+        "residue_ids": [
+          "GVR020"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Maintainer prüft unveränderte Daten mit passendem Leser statt sie mit falschem Binary umzudeuten.",
+        "validation": "Inkompatibler Writer verändert Daten schon vor Vertragsprüfung."
+      },
+      {
+        "state": "Erhaltenes altes Build bleibt begrenzt nutzbar",
+        "kind": "transient",
+        "conditions": "Alter vollständiger Versionssatz darf auf noch kompatibler Plattform betrieben werden; Wechsel wird zurückgestellt.",
+        "persistence": "Lokaler Betrieb bleibt möglich bis neue Plattform zwingend wird oder Satz ausfällt.",
+        "residue_ids": [
+          "GVR016"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Maintainer kann konkrete alte Verträge weiter bedienen, nicht beliebige neue Plattformen garantieren.",
+        "validation": "Altes Binary hängt ebenfalls am geänderten Plattformverhalten oder notwendige Abhängigkeit fehlt."
+      }
+    ],
+    "architectural_consequence": "Buildidentität samt Rust/Plattform und konkrete Verhaltensverträge führen; gleiches Sourcecommit ist keine Laufzeitäquivalenz."
+  },
+  {
+    "stressor_id": "S152",
+    "source_states": [
+      "GV26",
+      "GV28"
+    ],
+    "branches": [
+      {
+        "state": "Benötigte alte Eventsemantik unbekannt",
+        "kind": "halt",
+        "conditions": "Neuer Reader braucht nicht vorhandene Übersetzung; Originalevents und ein bekannter Präfixleser bleiben erhalten.",
+        "persistence": "Replay hält an erster unbekannter Stelle, bis korrekte reine Übersetzung existiert.",
+        "residue_ids": [
+          "GVR020"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Maintainer kann originale Bytes und bekannten Präfix lesen; vollständiger Replay ist nicht erhalten.",
+        "validation": "Reader überspringt unbekanntes Event oder ruft beim Lesen Plugins auf."
+      },
+      {
+        "state": "Neue Version ist bereits bedeutungsgleich lesbar",
+        "kind": "transient",
+        "conditions": "Konkrete historische Payloads sind ohne Upcast vollständig kompatibel und semantisch geprüft.",
+        "persistence": "Releasewechsel braucht für diese Payloads keine Konvertierung; endliche Rekonstruktion kann erfolgen.",
+        "residue_ids": [
+          "GVR020"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer nutzt passenden reinen Reader für den tatsächlichen Bestand; fehlender benannter Upcaster ist hier kein Ausfall.",
+        "validation": "Ein relevantes altes Feld wird anders interpretiert oder still verworfen."
+      }
+    ],
+    "architectural_consequence": "Eventreplay als Zielvertrag kennzeichnen: unbekannte Version nicht überspringen. Abwärtsverträgliche neue Formate brauchen nicht zwangsläufig einen Upcaster."
+  },
+  {
+    "stressor_id": "S153",
+    "source_states": [
+      "GV26",
+      "GV27",
+      "GV28"
+    ],
+    "branches": [
+      {
+        "state": "Ein inkompatibler Writer verweigert Start",
+        "kind": "halt",
+        "conditions": "Schema-/Writervertrag erkennt Nichtkompatibilität vor Schreiben; Originaldaten und kompatibler Leser bestehen.",
+        "persistence": "Halt bis genehmigter Cutover auf genau einen kompatiblen Writer erfolgt.",
+        "residue_ids": [
+          "GVR020"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Maintainer liest unveränderten Bestand ohne semantisch fremde Mutation.",
+        "validation": "Einer der Writer mutiert bereits bevor Kompatibilitätscheck greift."
+      },
+      {
+        "state": "Beide Writer verändern akzeptiert dieselbe DB",
+        "kind": "extern-erzwungen",
+        "conditions": "Beide inkompatiblen Mutationspfade haben Schreibrechte; relevanter unabhängiger Vorzustandsbeleg ist erhalten.",
+        "persistence": "Konkurrierende Prozesse halten Deutungskonflikt aufrecht; eine endliche Race wäre nur vorübergehend.",
+        "residue_ids": [
+          "GVR033"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Auditor kann nur konkret unabhängig belegte frühere Fakten prüfen; gegenwärtige kohärente Reihenfolge ist nicht bewiesen.",
+        "validation": "Eine wirkliche gemeinsame Semantik-/Writergrenze verhindert die zweite Mutation."
+      }
+    ],
+    "architectural_consequence": "Prototyp/Rust-Cutover mit Semantik- und Writergrenze planen; SQL-Transaktion serialisiert konkurrierende Bytes, nicht zwei widersprechende Schemasichten."
+  },
+  {
+    "stressor_id": "S154",
+    "source_states": [
+      "GV26",
+      "GV28",
+      "GV43"
+    ],
+    "branches": [
+      {
+        "state": "Altes Binary bleibt lesend oder verweigert",
+        "kind": "halt",
+        "conditions": "Rollbackbinary ist nicht schreibkompatibel; vorgeschaltete Prüfung hält Mutation an, kompatibler Leser für jetzige Bytes bleibt.",
+        "persistence": "Halt bis verträglicher Writer oder geprüfte bedeutungserhaltende Migration besteht.",
+        "residue_ids": [
+          "GVR020"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Maintainer bewahrt aktuelle Bytes statt sie durch alte Schemaannahmen zu verändern.",
+        "validation": "Historisches Binary schreibt unbemerkt falsche Interpretation."
+      },
+      {
+        "state": "DBrollback trifft aktuelle Teilnehmerhistorie",
+        "kind": "halt",
+        "conditions": "Alter Snapshot wird benutzt, aber aktueller Widerruf und Teilnehmeroperationsregister liegen außerhalb dieses Restores.",
+        "persistence": "Neue Effekte warten bis Rechte und tatsächliche alte Outcomes getrennt geklärt sind.",
+        "residue_ids": [
+          "GVR011",
+          "GVR021"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Gate/Teilnehmer lehnen alte Grants oder bereits akzeptierte Operationen ab; DBintern verlorenes Suffix wird dadurch nicht vollständig rekonstruiert.",
+        "validation": "Teilnehmer erkennt alte Identität nicht oder Widerrufsquelle wurde ebenfalls zurückgesetzt."
+      }
+    ],
+    "architectural_consequence": "Rollbackfähigkeit pro exactem Binary und Datenversion prüfen; Datenrestore ist keine Rücknahme nach Snapshot ausgeführter Außenaktionen."
+  },
+  {
+    "stressor_id": "S155",
+    "source_states": [
+      "GV25",
+      "GV01",
+      "GV04"
+    ],
+    "branches": [
+      {
+        "state": "Erhaltener Satz unabhängig startbar",
+        "kind": "transient",
+        "conditions": "Authentischer vollständiger Versionssatz samt Rechten und kompatibler Ersatzplattform existiert bereits.",
+        "persistence": "Downloadausfall beeinträchtigt diesen Satz nicht, bis neue Abhängigkeit benötigt wird.",
+        "residue_ids": [
+          "GVR016"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Maintainer baut/startet die konkret erhaltene Version ohne verschwundenes Paketrepository.",
+        "validation": "Offlinebau benötigt noch ein nicht aufbewahrtes Paket oder Recht."
+      },
+      {
+        "state": "Nur Bestandsbetrieb, Ersatzinstallation offen",
+        "kind": "extern-erzwungen",
+        "conditions": "Bestehender Prozess/Binary funktioniert, aber keine vollständige Ersatzinstallation ist verfügbar; Akte bleibt lesbar.",
+        "persistence": "Maintainer-/Downloadabsenz hält Erneuerungsblockade aufrecht.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann vorhandene Aufgaben inspizieren; Neubau- oder Ersatzhardwarefähigkeit wird nicht hinzuerfunden.",
+        "validation": "Ersatzumgebung lässt sich bereits aus legal vorhandenen Teilen vollständig starten."
+      }
+    ],
+    "architectural_consequence": "Versionssatz einschließlich Abhängigkeiten und Rechte lokal benennen. Unverfügbare Downloadadresse allein ist weder Laufzeitausfall noch vollständige Reproduzierbarkeit."
+  },
+  {
+    "stressor_id": "S156",
+    "source_states": [
+      "GV02",
+      "GV08",
+      "GV19"
+    ],
+    "branches": [
+      {
+        "state": "Rootexport vor Sendung als falsch erkannt",
+        "kind": "halt",
+        "conditions": "Falsches lokales Paket liegt vor, Übertragung ist noch nicht angenommen; unabhängige Paketprüfung erkennt Companyinhalte.",
+        "persistence": "Freigabe bleibt gesperrt bis korrekt projizierte identische Bytes geprüft sind.",
+        "residue_ids": [
+          "GVR036"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Releaseprüfer kann zulässiges Projektpaket prüfen und falschen Export zurückhalten.",
+        "validation": "Geprüfter Objektgraph lässt fremde History aus oder Sendung läuft vor Prüfung."
+      },
+      {
+        "state": "Companyinhalte tatsächlich veröffentlicht und gelesen",
+        "kind": "verlust",
+        "conditions": "Unberechtigte Empfänger haben im gesendeten Rootobjektgraph vertrauliche Inhalte gelesen.",
+        "persistence": "Spätere Paketkorrektur oder lokale Löschung nimmt die Kenntnis nicht zurück.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Nie-Veröffentlichung/Nie-Offenlegung dieser Inhalte besteht keine Restfähigkeit; erlaubte Projektveröffentlichung bleibt ein anderer Gegenstand.",
+        "validation": "Objektgraph enthielt keine fremden vertraulichen Inhalte oder niemand erhielt sie lesbar."
+      }
+    ],
+    "architectural_consequence": "Publikation als vorab geprüften Projektobjektgraph binden, einschließlich Historie. Nach Sendung tatsächliche Leser und Kopien statt bloßer lokaler Löschung bewerten."
+  },
+  {
+    "stressor_id": "S157",
+    "source_states": [
+      "GV06",
+      "GV28",
+      "GV09",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Unsicherer grüner Test schafft Vertrauen",
+        "kind": "attraktorhypothese",
+        "conditions": "Falscher Oracle belohnt Missing-ID-Fallback; grüne Ergebnisse verdrängen unabhängige Identitätsprüfung.",
+        "persistence": "Fallback → grün → Vertrauen → weniger andere Checks → Fallback bleibt legitimiert.",
+        "residue_ids": [
+          "GVR031"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Ein unverändertes Belegverzeichnis zeigt die enge und falsche Testannahme, sofern Originale erhalten; es stellt keine sichere Identität her.",
+        "validation": "Unabhängiger Identitätsvertrag blockiert Verhalten trotz grünem Test."
+      },
+      {
+        "state": "Fehlende Identität wird unabhängig abgewiesen",
+        "kind": "halt",
+        "conditions": "Konkrete Freigabe benötigt persönlichen Beleg außerhalb des falschen Oracles; dieser fehlt und Gate bleibt geschlossen.",
+        "persistence": "Halt endet nur mit echtem passenden Beleg oder Ablehnung, nicht mit weiterer grüner Testausführung.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer nutzt die gehaltene Effekthülle; der fehlende Personenbeleg wird ausdrücklich nicht als erhaltenes Residue gezählt. Keine Person entsteht aus missing ID.",
+        "validation": "Gleicher Fallback kann selbst den vermeintlich unabhängigen Personenbeleg ausstellen."
+      }
+    ],
+    "architectural_consequence": "Missing-ID-Vertrag muss unabhängig vom absichtlich falschen Testoracle überprüfbar sein; grüne Tests dürfen keine erfundene persönliche Identität schaffen."
+  },
+  {
+    "stressor_id": "S158",
+    "source_states": [
+      "GV07",
+      "GV26",
+      "GV05",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Versionierter Reader klärt tatsächlichen Bestand",
+        "kind": "transient",
+        "conditions": "Konkrete Binary-/Schemafassung ist bekannt und kann mit passendem Leser statt allgemeinem README geprüft werden.",
+        "persistence": "Enger Dokumentationsirrtum endet nach versionierter Klärung; Ziel-ADR bleibt Plan.",
+        "residue_ids": [
+          "GVR020",
+          "GVR031"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Maintainer prüft reale Lesefähigkeit und begrenzte Behauptungen, ohne Eventreplay aus mutable Tables zu folgern.",
+        "validation": "Versionsbezug fehlt oder Reader gibt die dokumentierte Funktion nur vor."
+      },
+      {
+        "state": "Widerspruch wird mit alten Dokumenten wegzitiert",
+        "kind": "attraktorhypothese",
+        "conditions": "Teams behandeln stale README als Autorität und kopieren es in weitere Entscheidungen trotz entgegenstehender Quellen.",
+        "persistence": "Dokumentzitat → autoritative Entscheidung → weitere Dokumentzitate → Ausschluss aktueller Befunde.",
+        "residue_ids": [
+          "GVR031"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Unveränderte belegte Gegenbefunde bleiben prüfbar, sofern nicht mit umgeschrieben; Wirksamkeit ihrer Korrektur ist nicht garantiert.",
+        "validation": "Aktueller Source-/Verhaltenstest verändert die Entscheidung tatsächlich."
+      }
+    ],
+    "architectural_consequence": "Dokumentations-/ADR-Ziel und ausgelieferte Versionsfähigkeit getrennt versionieren; Widerspruch im gelesenen README ist enger Befund, kein vollständiger Betriebsnachweis."
+  },
+  {
+    "stressor_id": "S159",
+    "source_states": [
+      "GV09",
+      "GV08",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Ungeprüft gestartetes Paket bleibt zufällig korrekt",
+        "kind": "abschluss",
+        "conditions": "Vorzeitige Aktivierung ist erfolgt, Bytes sind tatsächlich gutartig und Ergebnis konkret unabhängig abgenommen.",
+        "persistence": "Dieser endliche Lauf kann gelingen; gefährlicher Updatepfad bleibt unverändert möglich.",
+        "residue_ids": [
+          "GVR002"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Empfänger nutzt nur das belegte richtige Ergebnis; keine Sicherheitsbescheinigung für Activation-before-check.",
+        "validation": "Fachliche Abnahme scheitert oder unbekannter Hook hat zusätzliche Wirkung."
+      },
+      {
+        "state": "Ungeprüfte Aktivierung hat Kontrolle verloren",
+        "kind": "ungewissheit",
+        "conditions": "Früh gestartete Bytes sind schädlich; ausgeführte Zugriffe und unabhängige saubere Bereiche noch nicht bestimmt.",
+        "persistence": "Manifestprüfung danach belegt weder Schadensgrenze noch sauberen Prozesszustand.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für vertrauenswürdige betroffene Ausführung ist kein Residue nachgewiesen; spätere Signaturprüfung ist keine überlebende Schutzstruktur.",
+        "validation": "Unabhängige Ausführungsevidenz und Rechteinventar grenzen saubere Objekte konkret ab."
+      }
+    ],
+    "architectural_consequence": "Prüfreihenfolge vor jeder Codeaktivierung einschließlich Hooks erzwingen. Nachträgliches Manifestversagen kann bereits ausgeführte Wirkungen nicht zurückholen."
+  },
+  {
+    "stressor_id": "S160",
+    "source_states": [
+      "GV29",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Neue Dienste erzeugen weitere Dienstforderungen",
+        "kind": "attraktorhypothese",
+        "conditions": "Integrationsprobleme werden belohnt mit weiteren Kerndiensten beantwortet; Gesamtkopplungskosten bleiben unberücksichtigt.",
+        "persistence": "Mehr Dienste → mehr Schnittstellenfehler → neuer Kernbedarf → mehr Dienste.",
+        "residue_ids": [
+          "GVR031"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene Architekturentscheidungen und Gegenbelege bleiben prüfbar; sie reduzieren Kopplung nicht von selbst.",
+        "validation": "Nach Vorfällen sinken Gesamtverantwortung/Kopplung durch belegte Zusammenlegung oder Entfernung."
+      },
+      {
+        "state": "Begrenzte Änderung vermindert tatsächliche Kopplung",
+        "kind": "abschluss",
+        "conditions": "Neue/angepasste Funktion ersetzt belegbar andere Schnittstellen und der konkrete Vertragstest wird abgenommen.",
+        "persistence": "Endliche Architekturänderung endet; keine Rückkopplung allein aus Dienstanzahl.",
+        "residue_ids": [
+          "GVR031"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer kann alte und neue Vertragsgrenzen sowie tatsächlichen Nachweis vergleichen.",
+        "validation": "Lokale Einsparung verschiebt ungemessene Integration auf andere Dienste."
+      }
+    ],
+    "architectural_consequence": "Neue Verantwortung gegen vorhandenen Kernelvertrag und Gesamtintegration prüfen; module_hint verlangt keinen neuen Dienst. Begründete Vereinfachung und Wachstumsschleife trennen."
+  },
+  {
+    "stressor_id": "S161",
+    "source_states": [
+      "GV14",
+      "GV33",
+      "GV16",
+      "GV28"
+    ],
+    "branches": [
+      {
+        "state": "Alleinige Autorität dauerhaft fehlt",
+        "kind": "halt",
+        "conditions": "Gründer ist dauerhaft ausgefallen, kein anerkannter Nachfolger; Effekte mit neuer Pflichtfreigabe werden vermittelt gehalten.",
+        "persistence": "Institutionelle Lücke endet nicht durch Retry oder Kenntnis des Passworts.",
+        "residue_ids": [
+          "GVR005",
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigte Leser können alte Aufgaben sehen und Anforderungen aufbewahren; neue legitime Entscheidung bleibt nicht möglich.",
+        "validation": "Eine bereits wirksam delegierte verfügbare Person darf genau diese Effekte erlauben."
+      },
+      {
+        "state": "Anerkannte Nachfolge erlaubt künftige Arbeit",
+        "kind": "transient",
+        "conditions": "Gültige Zuständigkeitsordnung benennt tatsächlich verfügbare befugte Nachfolge und wird umgesetzt.",
+        "persistence": "Übergang endet mit aktueller Zuordnung; historische Urheberschaft wird nicht umgeschrieben.",
+        "residue_ids": [
+          "GVR032"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Legitime Nachfolge entscheidet ihren übertragenen Bereich ohne Gründeridentität zu imitieren.",
+        "validation": "Nachfolgeregel ist unanerkannt oder konkrete erforderliche Befugnis nicht übertragen."
+      }
+    ],
+    "architectural_consequence": "Legitime Nachfolge von Credentialbesitz unterscheiden; ohne befugte Person keine Selbstermächtigung. Gehaltene Aufgaben und rein lesende Akten sind begrenzte Restfähigkeiten."
+  },
+  {
+    "stressor_id": "S162",
+    "source_states": [
+      "GV15",
+      "GV27",
+      "GV38",
+      "GV33"
+    ],
+    "branches": [
+      {
+        "state": "Konflikt hält dieselbe Wirkung zurück",
+        "kind": "halt",
+        "conditions": "Anweisungen betreffen denselben Effekt, kein anerkannter Vorrang; gemeinsamer letzter Aufrufpfad sperrt beide.",
+        "persistence": "Dauert bis bindende Entscheidung oder Verzicht; weitere widersprechende Anweisungen ändern nichts.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer behalten beide Aussagen am konkreten Auftrag; kein Doppelauftrag wird als Vorrangentscheidung benutzt.",
+        "validation": "Ein Geschäftsführer kann den gemeinsamen Aufrufpfad umgehen."
+      },
+      {
+        "state": "Anerkannte Vorrangregel entscheidet Zukunft",
+        "kind": "transient",
+        "conditions": "Vorab oder legitim neu anerkannte Ordnung legt für diesen Effekt eindeutige Befugnis fest; ein dazu persönlich gebundener neuer Beschluss ist tatsächlich belegt und erhalten.",
+        "persistence": "Konflikt endet für zukünftige Zulassung; bereits eingetretene Wirkungen werden damit nicht rückwirkend ungeschehen.",
+        "residue_ids": [
+          "GVR032",
+          "GVR010"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Befugte Person kann neuen Beschluss persönlich belegen; Übertragung bewahrt nur den tatsächlich gültigen Bereich.",
+        "validation": "Beide behaupteten Befugnisse bleiben rechtlich unaufgelöst oder persönlicher Beleg fehlt."
+      }
+    ],
+    "architectural_consequence": "Widerspruch auf Effekt-ID, Zeitpunkt und Vorrang beziehen; letzte Ankunft und zwei legitime Titel sind keine Konfliktlösung. Akzeptierte historische Wirkungen bleiben separat."
+  },
+  {
+    "stressor_id": "S163",
+    "source_states": [
+      "GV33",
+      "GV43",
+      "GV09",
+      "GV15"
+    ],
+    "branches": [
+      {
+        "state": "Neue Befugnisse wirksam, alte Grants abgewiesen",
+        "kind": "transient",
+        "conditions": "Anerkannte Übergabe ordnet Rechte neu; unabhängiger aktueller Widerrufsstand bindet alle Zulassungspfade; alte persönliche Zustimmungsbelege sind rechtmäßig erhalten.",
+        "persistence": "Übergang endet sobald konkrete Rechte wirksam sind; zukünftige Änderung kann neue Prüfung verlangen.",
+        "residue_ids": [
+          "GVR032",
+          "GVR011",
+          "GVR010"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Neue Befugte entscheiden, alte persönliche Belege bleiben historisch lesbar und alte Sessions erlangen keine neuen Rechte.",
+        "validation": "Eine alte Delegation oder restaurierte Session akzeptiert weiterhin alten Grant."
+      },
+      {
+        "state": "Verkauf vollzogen, technische Rechte veraltet",
+        "kind": "ungewissheit",
+        "conditions": "Rechtlicher Entzug ist erfolgt, aber aufgerufene Gates kennen nur alten Stand; Taskakten bleiben lesbar.",
+        "persistence": "Lokale historische Grants beweisen die neue Rechtslage nicht; mögliche Nutzung ist separat zu ermitteln.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Auditor kann frühere Grants mit Standgrenze sehen; legitime heutige Autorisierung bleibt unbelegt.",
+        "validation": "Aktueller Widerruf erreicht nachweislich alle tatsächlichen Aufrufpfade."
+      }
+    ],
+    "architectural_consequence": "Verkauf in aktuelle Befugnis-/Widerrufsepochen und historische Autorenschaft trennen; Papierentzug muss jede Session, Delegation und Restorezulassung erreichen."
+  },
+  {
+    "stressor_id": "S164",
+    "source_states": [
+      "GV34",
+      "GV08",
+      "GV17",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Eigenständiger erlaubter Auftrag bleibt lösbar",
+        "kind": "transient",
+        "conditions": "Projekt darf konkret enthaltene Quellen nutzen und diese reichen fachlich für den Auftrag ohne Companykontext.",
+        "persistence": "Trennung beeinträchtigt diese enge Aufgabe nicht; andere Aufgaben können blockiert bleiben.",
+        "residue_ids": [
+          "GVR022"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Nachfolger verwendet nur übertragbare Aufgabenbasis; rechtlich verbotene Kopie wird nicht zur Schutzstruktur.",
+        "validation": "Unabhängiger Bearbeiter benötigt unübertragenes Firmenwissen."
+      },
+      {
+        "state": "Notwendiges Firmenwissen darf nicht genutzt werden",
+        "kind": "halt",
+        "conditions": "Erforderlicher Inhalt ist nicht übertragbar; kein unabhängiger erlaubter Ersatz ist vorhanden und Verwendung wird gesperrt.",
+        "persistence": "Rechtliche/inhaltliche Lücke bleibt bis zulässige Spezifikation oder Aufgabeaufgabe.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer behält gehaltenen Auftrag mit benannter Lücke; für die verbotene notwendige Wissensfähigkeit bleibt keines.",
+        "validation": "Auftrag ist tatsächlich aus bereits erlaubtem Projektmaterial vollständig lösbar."
+      }
+    ],
+    "architectural_consequence": "Spin-out-Kontext explizit nach erlaubten Abhängigkeiten bauen; Root-to-leaf-Kompilierung darf verbotenen Altroot nicht automatisch übertragen."
+  },
+  {
+    "stressor_id": "S165",
+    "source_states": [
+      "GV15",
+      "GV02",
+      "GV13",
+      "GV16"
+    ],
+    "branches": [
+      {
+        "state": "Risikokonflikt hält Resume",
+        "kind": "halt",
+        "conditions": "Security und Produkt haben keinen anerkannten Vorrang; wirksame Effekthülle verhindert neue Annahme.",
+        "persistence": "Halt endet mit legitimer Risikozuständigkeit; Outcome- und Leasefragen bleiben separat offen.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer bearbeitet konkreten riskanten Resume, ohne aus blockiertem Status Prozessende zu folgern.",
+        "validation": "Ein Produktpfad nimmt Resume trotz strittiger Freigabe an."
+      },
+      {
+        "state": "Autorität geklärt, altes Outcome weiter offen",
+        "kind": "halt",
+        "conditions": "Anerkannte Person darf entscheiden, aber Teilnehmer kann vorherige Wirkung nicht bestätigen; Sperre bleibt bis gewünschter Abgleich.",
+        "persistence": "Zuständigkeitslösung liefert keine fehlende Außenweltevidenz.",
+        "residue_ids": [
+          "GVR032",
+          "GVR005"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Befugte Person und erhaltene Hülle erlauben kontrollierte Entscheidung über Unsicherheit, nicht Behauptung sicherer Wiederholung.",
+        "validation": "Verlässlicher Teilnehmerbeleg klärt den alten Effekt oder Policy erlaubt bewusst neue Wirkung ohne diesen Nachweis."
+      }
+    ],
+    "architectural_consequence": "Risikovorrang und Nachweis früherer Teilnehmerwirkung als unabhängige Sperrprädikate führen. Freigabeautorität kann unbekanntes Outcome nicht durch Behauptung erzeugen."
+  },
+  {
+    "stressor_id": "S166",
+    "source_states": [
+      "GV35",
+      "GV07",
+      "GV01",
+      "GV06"
+    ],
+    "branches": [
+      {
+        "state": "Messreihen bleiben getrennt, Ergebnis bleibt nutzbar",
+        "kind": "ungewissheit",
+        "conditions": "Flotte ersetzt, Instrumentbegriffe nicht kalibriert; einige Ergebnisbytes sind unabhängig fachlich abgenommen.",
+        "persistence": "Fehlende Messsemantik entsteht nicht durch Mittelung; Resultatnutzung kann trotzdem weitergehen.",
+        "residue_ids": [
+          "GVR002",
+          "GVR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Empfänger nutzt Resultate, Analyst nur ursprüngliche enge Rohwerte; keine kontinuierliche Reibungskurve erfunden.",
+        "validation": "Die Ergebnisabnahme hängt selbst an inkompatibler alter Metrik."
+      },
+      {
+        "state": "Belegter Messschnitt über Instrumentwechsel",
+        "kind": "transient",
+        "conditions": "Konkrete Alt-/Neuversionen wurden für ausdrücklich gleiche Größen repräsentativ kalibriert.",
+        "persistence": "Nur dieser Schnitt überbrückt Wechsel; ungleiche Felder bleiben getrennt.",
+        "residue_ids": [
+          "GVR023"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Analyst nutzt belegte Zuordnung ohne fehlendes Feld als null zu werten.",
+        "validation": "Gleicher Ablauf liefert für die verglichene Größe systematisch andere Bedeutung."
+      }
+    ],
+    "architectural_consequence": "Alt-/Neuinstrumente versioniert und nur kalibrierte Schnitte vergleichen; Outputabnahme unabhängig von blocked-/turns-Messung halten."
+  },
+  {
+    "stressor_id": "S167",
+    "source_states": [
+      "GV16",
+      "GV06"
+    ],
+    "branches": [
+      {
+        "state": "Belohnter Bypass stabilisiert sich",
+        "kind": "attraktorhypothese",
+        "conditions": "Teams umgehen wirksame Freigabewege tatsächlich und niedrige Blockzahlen bringen Belohnung bei unsichtbaren Verstößen.",
+        "persistence": "Bypass → niedrige Kennzahl → Belohnung → Norm → mehr Bypass; unterdrückte Verstöße erhalten den Kreis.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Unveränderte konkrete Aufgabenakten erlauben nachträgliche Untersuchung, falls erreichbar; Gateintegrität ist nicht erhalten.",
+        "validation": "Unabhängige Sanktionen/Belege ändern Verhalten bei gleicher Last oder kein unzulässiger Effekt liegt vor."
+      },
+      {
+        "state": "Weniger Blocks durch legitime Vereinfachung",
+        "kind": "transient",
+        "conditions": "Zuständige Stelle entfernt unnötige Schritte, persönliche Zustimmungen und verbotene Effekte werden unabhängig geprüft.",
+        "persistence": "Begrenzte Verbesserung reduziert Kosten ohne verdeckte neue Befugnis; kein Bypassloop erforderlich.",
+        "residue_ids": [
+          "GVR010",
+          "GVR031"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Auditor nutzt Effektbelege und explizit geänderten Anspruch, statt niedrige Kennzahl als alleinigen Erfolg zu nehmen.",
+        "validation": "Neue unautorisierte Wirkungen werden unter geändertem Nenner verborgen."
+      }
+    ],
+    "architectural_consequence": "Blockedzahl nicht als alleinigen Sicherheitserfolg führen; genehmigte Vereinfachung und tatsächlichen Bypass anhand unabhängiger Effekt-/Zustimmungsbelege unterscheiden."
+  },
+  {
+    "stressor_id": "S168",
+    "source_states": [
+      "GV10",
+      "GV22",
+      "GV23"
+    ],
+    "branches": [
+      {
+        "state": "Verbrauchsanteile funktionieren ohne Budgetoffenlegung",
+        "kind": "extern-erzwungen",
+        "conditions": "Vertraulichkeit des Budgets bleibt; unabhängige zulässige Ressourcenrechnung und verbindliche Anteile sind durchgesetzt.",
+        "persistence": "Überlast hält abgewiesene Nachfrage aufrecht, aber nicht die garantierten Anteile.",
+        "residue_ids": [
+          "GVR019"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator und kleine Scopes nutzen konkreten Zuteilungsvertrag, ohne privaten Budgetbetrag zu kennen.",
+        "validation": "Verfügbare Ressourcenmessung genügt für vereinbarte Anteile nicht oder wird manipuliert."
+      },
+      {
+        "state": "Undurchsichtige Belegung verstärkt Einfluss",
+        "kind": "attraktorhypothese",
+        "conditions": "Belegung schafft politischen Zuteilungsvorteil; Auskunftsverweigerung unterbindet gerade die bindende Gegenrechnung.",
+        "persistence": "Mehr Belegung → mehr Einfluss → Schutz undurchsichtiger Zuteilung → mehr Belegung.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene Akten können Streit und bekannte Last dokumentieren; faire Zuteilung ist daraus nicht automatisch rekonstruierbar.",
+        "validation": "Akzeptierte unabhängige Verbrauchsrechnung löst Verteilung ohne Budgetpreisgabe oder Einfluss hängt nicht an Belegung."
+      }
+    ],
+    "architectural_consequence": "Ressourcenverbrauch und faire Zuteilung ohne Offenlegung fremder Geschäftsbudgets erfassen, sofern zulässig. Budgetgeheimhaltung allein ist weder Missbrauch noch Kapazitätsmessung."
+  },
+  {
+    "stressor_id": "S169",
+    "source_states": [
+      "GV15",
+      "GV28",
+      "GV16",
+      "GV05"
+    ],
+    "branches": [
+      {
+        "state": "Ursprünglicher Fakt bleibt unabhängig überprüfbar",
+        "kind": "halt",
+        "conditions": "Organisation verlangt Rewrite, aber konkreter Originalfakt ist außerhalb der angreifbaren Schreibgrenze legal verwahrt.",
+        "persistence": "Lokaler Änderungswunsch beseitigt diesen Beleg nicht; Streit über neue Bewertung kann bleiben.",
+        "residue_ids": [
+          "GVR033"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Auditor kann Original und spätere sichtbare Korrektur vergleichen, nicht jede denkbare Aussage authentifizieren.",
+        "validation": "Verwahrer ist derselben Änderungshoheit unterworfen oder hat strittigen Fakt nie erhalten."
+      },
+      {
+        "state": "Günstige Umschreibung legitimiert weitere",
+        "kind": "attraktorhypothese",
+        "conditions": "Originale werden ohne verbleibenden unabhängigen Vergleich umgeschrieben; bessere Auditgeschichte bringt Nutzen und macht weiteres Umschreiben akzeptabel.",
+        "persistence": "Rewrite → günstige Geschichte → Belohnung/Legitimation → weiterer Rewrite.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für unverfälschten betroffenen historischen Fakt bleibt ohne unabhängige Darstellung kein nutzbarer Beleg; übriger Betrieb kann laufen.",
+        "validation": "Originale bleiben unabhängig nachweisbar und sichtbare Sanktion beendet Umschreibungsnorm."
+      }
+    ],
+    "architectural_consequence": "Sichtbare Korrektur mit ursprünglichem Fakt und Autor von verdecktem Rewrite trennen. Append-only Ziel braucht tatsächliche Schreibgrenze; gegen Root ist unabhängige Verwahrung nötig."
+  },
+  {
+    "stressor_id": "S170",
+    "source_states": [
+      "GV03",
+      "GV13",
+      "GV01",
+      "GV38"
+    ],
+    "branches": [
+      {
+        "state": "Kein Zeuge für alte Annahme, Wiederholung gehalten",
+        "kind": "halt",
+        "conditions": "Partner ist weg, kein unabhängiger Outcome bekannt; alte Versuchsakte und wirksame neue Effektsperre bestehen.",
+        "persistence": "Gleiche lokale Abfrage erzeugt kein Außenweltergebnis; bewusste neue Entscheidung kann Risiko ändern, nicht Vergangenheit.",
+        "residue_ids": [
+          "GVR001",
+          "GVR005"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer sieht offenen Versuch und kann neue Wirkung zurückhalten; kein Beweis gescheiterten ersten Effekts.",
+        "validation": "Bereits vorhandener unabhängiger Receipt klärt die Annahme oder Pfad sendet trotzdem erneut."
+      },
+      {
+        "state": "Vorher gesicherter konkreter Receipt klärt Wirkung",
+        "kind": "abschluss",
+        "conditions": "Ergebnisbeleg aus Teilnehmerregister war vor Stilllegung unabhängig lesbar erhalten und bindet genau diese Operations-ID.",
+        "persistence": "Konkrete Outcome-Frage endet mit belegtem Ergebnis; übrige Partneroperationen bleiben offen.",
+        "residue_ids": [
+          "GVR021"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Reconciler nutzt den erhaltenen Receipt, nicht eine erfundene künftig erreichbare Partnerantwort; laufendes Fencing ist damit nicht garantiert.",
+        "validation": "Receipt fehlt für fragliche Operation oder beweist nur lokale Sendeabsicht."
+      }
+    ],
+    "architectural_consequence": "Partnerstilllegung lässt Outcome unbekannt statt fehlgeschlagen werden. Lokale Versuche, unabhängige tatsächliche Teilnehmerbelege und neue Effektautorität separat halten."
+  },
+  {
+    "stressor_id": "S171",
+    "source_states": [
+      "GV10",
+      "GV04",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Prozessanzahl trifft wirksame Gesamtreserve",
+        "kind": "extern-erzwungen",
+        "conditions": "Aktivierung misst und begrenzt aggregierten Footprint; Betriebsreserve und konkrete Anteile sind real durchgesetzt.",
+        "persistence": "Mehr Scopes werden zurückgestellt statt Reserve zu verbrauchen; Dauerlast bleibt externe Nachfrage.",
+        "residue_ids": [
+          "GVR019",
+          "GVR027"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator behält lokalen Inspektionspfad und zugelassene Scopes ihren Anteil.",
+        "validation": "Startspitze oder ungemessener Nebenprozess verdrängt trotz Limit den lokalen Zugang."
+      },
+      {
+        "state": "Unbegrenzte Residentlast verdrängt Pflichtdienst",
+        "kind": "extern-erzwungen",
+        "conditions": "Jeder Scope startet Prozess ohne Gesamtlimit, Footprint überschreitet Hostkapazität; intakte Akte bleibt später lesbar.",
+        "persistence": "Last hält Ausfall bis Prozesse enden oder Ressourcen frei werden; Neustartloop braucht zusätzliche Policy.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann nach verfügbarem Leser bestehende Aufgaben untersuchen; keine verfügbare Daemonausführung während Verdrängung behauptet.",
+        "validation": "Tatsächlicher Footprint passt in ausreichende Reserve und Pflichtdienst bleibt erreichbar."
+      }
+    ],
+    "architectural_consequence": "Pro-Scope-Aktivierung bleibt explizit, benötigt aber aggregierte Prozess-/Speicherzulassung. Tausend Prozesse sind ohne Footprint kein Beweis notwendiger Instabilität."
+  },
+  {
+    "stressor_id": "S172",
+    "source_states": [
+      "GV37",
+      "GV08",
+      "GV20"
+    ],
+    "branches": [
+      {
+        "state": "Zusätzliche nachgewiesene Grenze trennt Kundendaten",
+        "kind": "extern-erzwungen",
+        "conditions": "Trotz gleicher UID erzwingt unabhängige Sandbox-/Keygrenze tatsächlich gegenseitige Nichtlesbarkeit für alle relevanten Pfade.",
+        "persistence": "Koexistenz kann unter genau diesem Bedrohungsvertrag andauern.",
+        "residue_ids": [
+          "GVR008"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Jeweiliger berechtigter Kunde nutzt eigenen Bestand ohne Zugriff des anderen; Scope-Namen allein erfüllen Voraussetzung nicht.",
+        "validation": "Ein erlaubter Kundencodepfad liest über gemeinsame Dateien oder Keychain den fremden Inhalt."
+      },
+      {
+        "state": "Nur gemeinsame UID, geforderte Isolation unbelegt",
+        "kind": "offen",
+        "conditions": "Konkrete Sandbox, Schlüsselrechte und native Zugriffspfade sind nicht spezifiziert; kein tatsächliches Lesen nachgewiesen.",
+        "persistence": "Fehlender Grenznachweis wird nicht durch zwei Scopeeinträge ersetzt.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für zugesagte gegenseitige Geheimhaltung ist kein Residue belegt; Offenlegung darf daraus dennoch nicht behauptet werden.",
+        "validation": "Rechteprüfung belegt Nichtlesbarkeit oder zeigt einen tatsächlichen fremden Lesezugriff."
+      }
+    ],
+    "architectural_consequence": "Kundengeheimhaltung nach effektivem Angreifer-/UID-Rechtevertrag bewerten. Gemeinsame User-ID allein beweist weder Isolation noch tatsächlichen Leak."
+  },
+  {
+    "stressor_id": "S173",
+    "source_states": [
+      "GV36",
+      "GV43",
+      "GV27",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Offline nur haltbare Entwürfe",
+        "kind": "extern-erzwungen",
+        "conditions": "Worker darf lokal auf vertrauenswürdig begrenzter Fremdhardware arbeiten, Absichten bleiben ohne Außenwirkung; Paket ist haltbar.",
+        "persistence": "Offlinezeit verhindert frische Autorität, nicht diese selbständige Entwurfsarbeit; Import verlangt neuen Abgleich.",
+        "residue_ids": [
+          "GVR024"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Worker nutzt gespeicherte Entwürfe und Basisversionen; keine Zusage heutiger externer Gültigkeit.",
+        "validation": "Fremder Host liest unerlaubte Daten oder Worker setzt veränderliche Außenvollmacht offline ein."
+      },
+      {
+        "state": "Alte Absicht trifft neue Rechte und Teilnehmerstände",
+        "kind": "halt",
+        "conditions": "Bei Rückkehr greifen unabhängiger Widerrufsstand und Teilnehmerabgleich vor Annahme des Entwurfs als Effekt.",
+        "persistence": "Veraltete Absicht bleibt bis gültiger Neubewertung gehalten; erfolgreiche Dateiübertragung beendet das nicht.",
+        "residue_ids": [
+          "GVR011",
+          "GVR021"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Reconciler kann alte Grants/Operationsidentitäten prüfen und Doppelwirkung verweigern, sofern Teilnehmer dies vertraglich unterstützt.",
+        "validation": "Offlinewirkung wurde schon ohne diese Grenze angenommen oder Teilnehmer kennt Operations-ID nicht."
+      }
+    ],
+    "architectural_consequence": "Offlineentwurf von aktueller Mutationsbefugnis und Fremdhardwarevertrauen trennen. Reconnect braucht aktuelle Rechte und Objektversionen, nicht bloßen Uploadabschluss."
+  },
+  {
+    "stressor_id": "S174",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Erlaubter Remoteclient statt lokaler Dauerdaemon",
+        "kind": "extern-erzwungen",
+        "conditions": "Vertrag erlaubt benannten tatsächlich verfügbaren Remote-Kern und verlangt lokale Nutzung nur während Verbindung.",
+        "persistence": "OS-Suspension unterbricht Zugang, nicht automatisch entfernte Ausführung; Beobachterverlust ist getrennt.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Client kann beim Wiederverbinden den haltbaren bekannten Bestand lesen; autonome Offlineantwort ist nicht erhalten.",
+        "validation": "Vertrag verlangt volle autonome lokale Funktion oder Remote-Kern ist nicht tatsächlich verfügbar."
+      },
+      {
+        "state": "Intermittente lokale Entwürfe überstehen Suspension",
+        "kind": "transient",
+        "conditions": "Nur selbständige Entwürfe gefordert; lokales haltbares Arbeitspaket passt in erlaubte OS-Laufzeiten und Rechte.",
+        "persistence": "Suspension pausiert Arbeit, nächster erlaubter Start kann Entwurf lesen; frische Außenvollmacht bleibt aus.",
+        "residue_ids": [
+          "GVR024",
+          "GVR028"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Worker/Benutzer kann gespeicherte Teilaufgabe wiederaufnehmen ohne dauernden Daemon.",
+        "validation": "OS beendet vor jedem nötigen Commit oder Auftrag erfordert während Suspension aktuelle Außenwirkung."
+      },
+      {
+        "state": "Autonome harte Hintergrundwirkung ohne Laufrecht",
+        "kind": "halt",
+        "conditions": "Vertrag verlangt Fristwirkung während vollständiger OS-Suspension, kein erlaubter Remoteexecutor oder OS-Ausführungsfenster existiert.",
+        "persistence": "Technischer Halt dauert mit Suspension; Fristverpassung kann folgen, nicht interne Konvergenz.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für genau diese autonome Fristwirkung besteht kein nutzbarer Ausführungsträger. Andere Smartphonefunktionen bleiben möglich.",
+        "validation": "OS gewährt ein ausreichend verlässliches Fristfenster oder Vertrag erlaubt tatsächlich verfügbaren Remoteexecutor."
+      }
+    ],
+    "architectural_consequence": "Smartphonevertrag zuerst festlegen: Remoteclient, intermittente Entwurfsarbeit oder autonome Fristwirkung. Kein versteckter ständig verfügbarer Fremddaemon wird vorausgesetzt."
+  },
+  {
+    "stressor_id": "S175",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Partition lässt nur berechtigte Seite mutieren",
+        "kind": "halt",
+        "conditions": "Vertrag erlaubt Unverfügbarkeit einer Stadt; Teilnehmer erzwingt exklusive Epoche und stabile Operations-IDs außerhalb lokaler Kopien.",
+        "persistence": "Abgetrennte Seite hält neue Wirkung bis gültige Epoche/Abgleich vorliegt, andere kann ihren zulässigen Teil leisten.",
+        "residue_ids": [
+          "GVR021",
+          "GVR038"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Reconciler und Teilnehmer bewahren begrenzte Effektordnung; gleichzeitige volle Verfügbarkeit wird ausdrücklich aufgegeben.",
+        "validation": "Beide Städte können bei Partition dieselbe externe Wirkung unter akzeptierter Epoche auslösen."
+      },
+      {
+        "state": "Beide Städte schreiben widersprüchlich weiter",
+        "kind": "extern-erzwungen",
+        "conditions": "Vertrag/Implementierung lässt ohne gemeinsame Fencinggrenze beide denselben Effektbereich bedienen; getrennte lokale Aufgaben-/Versuchsakten bleiben lesbar erhalten.",
+        "persistence": "Anhaltende Partition und Doppelbefugnis halten Divergenz; bloße Bytekonsistenz jeder DB löst sie nicht.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann nur tatsächlich erhaltene lokale Absichten als historischen Arbeitsstand vergleichen; gemeinsame Reihenfolge und ein akzeptiertes Outcome sind nicht bewiesen.",
+        "validation": "Teilnehmer serialisiert die Wirkung tatsächlich unter einer anerkannten gemeinsamen Identität."
+      },
+      {
+        "state": "Garantieziel ohne Partitionsentscheidung",
+        "kind": "offen",
+        "conditions": "Unverfügbarkeit, Quorum, Effektbesitz und Latenz wurden nicht entschieden.",
+        "persistence": "Forderung allein bestimmt keine Konvergenz oder überlebende globale Fähigkeit.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für behauptetes garantiertes active-active gibt es ohne Vertrag keinen Restnachweis; keine automatische Architekturwahl wird erfunden.",
+        "validation": "Ein akzeptierter Partitions-/Teilnehmervertrag ordnet konkrete Ausfalltraces eindeutig zu."
+      }
+    ],
+    "architectural_consequence": "Active-active-Vertrag braucht Partitionspolitik und extern durchgesetzte Operations-/Writeridentität. Mehrere DBs allein liefern weder eine Wahrheit noch automatisches sicheres Failover."
+  },
+  {
+    "stressor_id": "S176",
+    "source_states": [
+      "GV37",
+      "GV20",
+      "GV38"
+    ],
+    "branches": [
+      {
+        "state": "Lokaler Controller hält enge Bewegungsgrenze",
+        "kind": "extern-erzwungen",
+        "conditions": "Bereits vorhandener separat validierter Controller/Sensorik beherrscht konkrete Gefahr und Frist unabhängig von Factorylatenz.",
+        "persistence": "Factoryverzögerung hält neue Aufträge auf; Controller kann erlaubte lokale Sicherheitsreaktion ausführen.",
+        "residue_ids": [
+          "GVR035"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Anlagenverantwortlicher nutzt den nachgewiesenen lokalen Regel-/Sperrpfad; kein Beleg heutiger Factory-Echtzeitfähigkeit.",
+        "validation": "Sensor-/Controllerfehler oder Bewegung außerhalb geprüfter Hülle verletzt die behauptete Grenze."
+      },
+      {
+        "state": "Irreversible Bewegung bereits erfolgt",
+        "kind": "verlust",
+        "conditions": "Bewegung wurde physisch angenommen und die betrachtete Vorbewegungseigenschaft ist nicht exakt wiederherstellbar.",
+        "persistence": "Historisches Eintreten lässt sich nicht löschen; legitime harmlose Bewegung bleibt ebenfalls erfolgt.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Ungeschehenmachen dieser Eigenschaft bleibt nichts; das bedeutet weder automatisch Schaden noch Verlust aller Anlagenfähigkeit.",
+        "validation": "Bewegung fand nicht statt oder eine tatsächlich exakte Inverse erhält alle betrachteten Eigenschaften."
+      }
+    ],
+    "architectural_consequence": "Factory nicht in Millisekundenregelkreis verlegen. Separater validierter Controller kann eine präzise physische Grenze tragen, nicht universelle Unumkehrbarkeit beseitigen."
+  },
+  {
+    "stressor_id": "S177",
+    "source_states": [
+      "GV37",
+      "GV28",
+      "GV01"
+    ],
+    "branches": [
+      {
+        "state": "Konkreter außerhalb Root verwahrter Fakt prüfbar",
+        "kind": "ungewissheit",
+        "conditions": "Benannter historischer Fakt wurde vorher bei rechtlich erlaubtem unabhängig kontrolliertem Verwahrer belegt; Root erreicht ihn nicht.",
+        "persistence": "Lokale Manipulation zerstört den Vergleichsbeleg nicht, unverwahrte spätere Fakten bleiben unbewiesen.",
+        "residue_ids": [
+          "GVR033"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Autorisierter Auditor prüft den konkret erhaltenen Fakt und erkannte Abweichung.",
+        "validation": "Root kontrolliert auch Belegquelle/Schlüssel oder strittiger Fakt liegt außerhalb ihres Inhalts."
+      },
+      {
+        "state": "Nur Rootkontrollierte Beweise vorhanden",
+        "kind": "ungewissheit",
+        "conditions": "Alle verfügbaren Belegbytes, Code und Trustanker liegen unter dem angreifenden Root; kein unabhängiger Herkunftsbeleg.",
+        "persistence": "Neue lokale Hashes oder Signaturen reparieren die fehlende unabhängige Vergangenheit nicht.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für verlangten Rootfestigkeitsbeweis dieser Historie besteht kein Residue; lesbare Bytes können trotzdem weiter nützlich sein.",
+        "validation": "Ein tatsächlich unabhängiger zeitgenössischer Verwahrbeleg wird nachgewiesen."
+      }
+    ],
+    "architectural_consequence": "Gegen Root benötigter Beweis braucht benannte unabhängige Verwahrung jenseits lokaler Dateien und Code. Lokales Append-only ist kein manipulationssicherer Menschenbeweis."
+  },
+  {
+    "stressor_id": "S178",
+    "source_states": [
+      "GV47",
+      "GV24",
+      "GV26"
+    ],
+    "branches": [
+      {
+        "state": "Korrekte endliche Wiederherstellung kommt zu spät",
+        "kind": "extern-erzwungen",
+        "conditions": "Alle benötigten Inhalte und Leser sind nutzbar, gemessene vollständige Dauer überschreitet RTO.",
+        "persistence": "Endlicher Replay kann später fertig werden; vergangene Zeitgrenze bleibt verfehlt.",
+        "residue_ids": [
+          "GVR020",
+          "GVR025"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Maintainer rekonstruiert Inhalt und Auditor sieht ehrlichen Laufzeitbeleg; RTO-Fähigkeit ist nicht erhalten.",
+        "validation": "Repräsentative vollständige Messung einschließlich Inhalt/Tail liegt innerhalb RTO."
+      },
+      {
+        "state": "Validierter schneller Pfad erfüllt enges RTO",
+        "kind": "abschluss",
+        "conditions": "Konkreter gültiger Snapshot samt vollständigem Tail/Content und reinem Reader wurde auf relevanter Ersatzhardware innerhalb RTO abgenommen.",
+        "persistence": "Dieser Restore endet; Wachstum oder anderer Schaden braucht neuen Nachweis.",
+        "residue_ids": [
+          "GVR020",
+          "GVR025"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Wiederhersteller nutzt belegten Interpretationspfad und Auditor die zeitbegrenzte Evidenz, keine bloße Snapshotbehauptung.",
+        "validation": "Snapshotvalidierung oder Tailbeschaffung außerhalb Messung überschreitet tatsächliche Frist."
+      }
+    ],
+    "architectural_consequence": "RTO mit vollständig validiertem Reader, Inhalt, Snapshot und Tail messen. Langsamer korrekter Replay ist kein Informationsverlust; Snapshotexistenz beweist keine Beschleunigung."
+  },
+  {
+    "stressor_id": "S179",
+    "source_states": [
+      "GV46",
+      "GV31",
+      "GV34",
+      "GV19"
+    ],
+    "branches": [
+      {
+        "state": "Lokale Dienste beendet, Übergabe verwendbar",
+        "kind": "abschluss",
+        "conditions": "Empfänger hat erlaubten vollständigen Export ohne Factory gelesen; alle für lokale Abschaltung geforderten Factorydienste sind tatsächlich aus.",
+        "persistence": "Lokaler Lebenszyklus endet; Teilnehmerrestpflichten und Remote-Kopien werden damit nicht null.",
+        "residue_ids": [
+          "GVR026"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Empfänger nutzt tatsächlich enthaltene Bytes/Bedeutung nach lokalem Stop; keine universelle Stilllegung externer Welt behauptet.",
+        "validation": "Empfänger benötigt doch einen Factorydienst oder lokaler Worker arbeitet weiter."
+      },
+      {
+        "state": "Lokaler Stop mit offener externer Wirkung",
+        "kind": "halt",
+        "conditions": "Factory ist lokal aus, aber frühere akzeptierte Teilnehmeroperation ist noch offen; erreichbarer unabhängiger Operationsbeleg existiert.",
+        "persistence": "Externer Teilnehmer kann später handeln; Gesamtabschluss braucht Outcome und vereinbarten Beobachtungshorizont.",
+        "residue_ids": [
+          "GVR021"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Abwickler kann konkrete Operation außerhalb Factory prüfen; Empfängerexport kann gleichzeitig nutzbar sein.",
+        "validation": "Alle Teilnehmerpflichten sind nachweislich beendet oder angeblicher Beleg enthält nur lokale Absicht."
+      },
+      {
+        "state": "Export ist nur Manifest ohne notwendige Inhalte",
+        "kind": "ungewissheit",
+        "conditions": "Empfänger erhält nur Struktur/Referenzen und benötigt fehlende Payload oder nicht übertragbaren Kontext.",
+        "persistence": "Dienstabschaltung erzeugt weder fehlende Bytes noch Rechte/Bedeutung.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für vereinbarte vollständige selbständige Nutzung bleibt keine Restfähigkeit aus diesem Export; lesbare Teilmetadaten sind nicht Vollübergabe.",
+        "validation": "Empfänger beantwortet sämtliche vereinbarten konkreten Fragen rechtmäßig ohne Factory und ohne fehlende Quelle."
+      }
+    ],
+    "architectural_consequence": "Exportabnahme, lokale Dienstbeendigung, externe Teilnehmerpflichten und spätere Kopienlöschung getrennt abschließen. Exportcontainer nur unter .factory erzeugen; Empfängernutzung ist eigener Vorgang."
+  },
+  {
+    "stressor_id": "S180",
+    "source_states": [
+      "GV45",
+      "GV01",
+      "GV10"
+    ],
+    "branches": [
+      {
+        "state": "Strenger Bereitschaftszyklus, Diagnose bleibt",
+        "kind": "halt",
+        "conditions": "A braucht B vollständig ready und B braucht A; kein Seed, aber eigener lokaler Inspektionspfad bleibt unabhängig funktionsfähig.",
+        "persistence": "Wechselseitiges Warten ist durch Startregeln gehalten, kein bewiesener Attraktor.",
+        "residue_ids": [
+          "GVR027"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator liest die konkreten Kanten und kann separat begründete Reparatur planen, ohne Plugins bereits starten zu müssen.",
+        "validation": "Diagnose hängt selbst an A/B oder eine bestehende Seedbereitschaft löst den Zyklus."
+      },
+      {
+        "state": "Optionale Bindung erlaubt endlichen Start",
+        "kind": "transient",
+        "conditions": "Mindestens eine Kante ist tatsächlich lazy/optional; zulässiger Bootstrap und ausreichende Ressourcen existieren.",
+        "persistence": "Erste echte Bereitschaft löst die übrigen nötigen Voraussetzungen; Zyklus allein verursacht keinen Deadlock.",
+        "residue_ids": [
+          "GVR027"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator nutzt Startbeschreibung zur Prüfung der wirklich optionalen Grenze; erfolgreiche Facharbeit ist damit noch nicht belegt.",
+        "validation": "Die angeblich optionale Bindung wird zur Bereitschaft doch zwingend benötigt."
+      }
+    ],
+    "architectural_consequence": "Bereitschaftsabhängigkeiten von optionalen Bindungen trennen; unabhängiger lokaler safe-mode Zugang darf nicht Mitglied des Pluginstartzyklus sein."
+  },
+  {
+    "stressor_id": "S181",
+    "source_states": [
+      "GV04",
+      "GV30",
+      "GV48"
+    ],
+    "branches": [
+      {
+        "state": "Unbetroffener Satz bleibt konkret wiederherstellbar",
+        "kind": "transient",
+        "conditions": "Bereits vorhandenes legal zugängliches Medium samt Schlüssel/Decoder außerhalb zerstörter Elektronik ist mit verfügbarer Ersatztechnik lesbar.",
+        "persistence": "Rekonstruktion kann enden, verbleibende Standortdiversität ist enger als vorher.",
+        "residue_ids": [
+          "GVR012"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Wiederhersteller nutzt nur tatsächlich überlebenden vollständigen Satz, keine implizit perfekte zusätzliche Region.",
+        "validation": "Ersatztechnik oder Schlüssel teilt denselben Schadensbereich und Inhalt kann nicht gelesen werden."
+      },
+      {
+        "state": "Alle bekannten praktischen Inhaltswege ausgefallen",
+        "kind": "ungewissheit",
+        "conditions": "Inventar zeigt keine bekannte nutzbare Kopie/Schlüssel/Decoderkombination; Erinnerungen oder Identifikatoren können bleiben.",
+        "persistence": "Warten allein liefert keine Elektronik/Inhalte; dauerhafte vollständige Informationsvernichtung ist nicht bewiesen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für derzeitige Inhaltsrecovery besteht kein nutzbarer Rest; mehrere Regionen bedeuten nicht S190.",
+        "validation": "Ein tatsächlich unabhängiger Inhaltspfad wird auf verfügbarer Technik demonstriert."
+      }
+    ],
+    "architectural_consequence": "Mehrere zerstörte Regionen nicht mit vollständigem Weltverlust gleichsetzen. Medien, Schlüssel, Decoder und Ersatzenergie im benannten Schadensinventar gemeinsam prüfen."
+  },
+  {
+    "stressor_id": "S182",
+    "source_states": [
+      "GV36",
+      "GV25",
+      "GV04",
+      "GV10",
+      "GV43"
+    ],
+    "branches": [
+      {
+        "state": "Historische Akte lesbar, heutige Wirkung gehalten",
+        "kind": "halt",
+        "conditions": "Lokaler Bestand hat lesbaren alten Stand; aktuelle Zeit/Autorität/Provider sind unbestätigt und alle neuen Effekte bleiben gesperrt.",
+        "persistence": "Jahrzehntealter Kalender liefert keine frische Zustimmung; jede fehlende Voraussetzung hat eigenen Ausgang.",
+        "residue_ids": [
+          "GVR001",
+          "GVR005"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer liest historischen Plan und offene Absichten; gegenwärtige Ausführung und Bedeutung sind nicht automatisch verfügbar.",
+        "validation": "Aufwachen führt ohne Abgleich alte Termine als aktuelle Wirkungen aus."
+      },
+      {
+        "state": "Nachholwelle bleibt endliche neue Prüfung",
+        "kind": "halt",
+        "conditions": "Aktuelle zuständige Person ist legitim verfügbar; Cronmaterialisierung besitzt begrenzte Wurzeln und überprüft Gültigkeit statt blind nachzuholen.",
+        "persistence": "Alte Vorkommen werden endlich triagiert; abgelaufene Fristen bleiben verloren, keine wiedererstandenen Chancen.",
+        "residue_ids": [
+          "GVR013",
+          "GVR032"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Befugter Operator kann endliche alte Arbeitsmenge verwerfen oder neu definieren.",
+        "validation": "Catch-up produziert unbegrenzt frische Wurzeln oder alte Kalenderautorität ersetzt heutige Befugnis."
+      }
+    ],
+    "architectural_consequence": "Langzeiterwachen als Neuabgleich von Zeit, Zuständigkeit, Abhängigkeiten und begrenztem Nachholen behandeln. Alte Termine/Credentials sind keine aktuelle Handlungsfreigabe."
+  },
+  {
+    "stressor_id": "S183",
+    "source_states": [
+      "GV39",
+      "GV01",
+      "GV05"
+    ],
+    "branches": [
+      {
+        "state": "Erhaltenes Glossar erklärt konkrete Kürzel",
+        "kind": "transient",
+        "conditions": "Niemand erinnert Sprache, aber tatsächlich erhaltene zeitgenössische Beispiele/Begriffe erklären fraglichen Auftrag eindeutig und dürfen gelesen werden.",
+        "persistence": "Unkundige Leser können diese belegte Bedeutung rekonstruieren; andere Kürzel bleiben möglicherweise offen.",
+        "residue_ids": [
+          "GVR029"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigte spätere Leser nutzen den konkreten Bedeutungsschlüssel, keinen erfundenen alten Experten.",
+        "validation": "Unabhängige Leser kommen anhand derselben Belege zu mehreren unentscheidbaren Deutungen."
+      },
+      {
+        "state": "Bytes lesbar, entscheidende Bedeutung fehlt",
+        "kind": "verlust",
+        "conditions": "Benötigte tacite Bedeutung wurde in keiner bekannten zulässigen Darstellung oder Erinnerung erhalten; Textbytes existieren.",
+        "persistence": "Weitere Paraphrasen aus denselben unvollständigen Daten erzeugen keine belegte ursprüngliche Intention.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Archivleser kann Text und mechanische Metadaten prüfen; für exakte verlorene Bedeutung bleibt keines innerhalb dieser Inventargrenze.",
+        "validation": "Zeitgenössischer ausreichender Kontext wird gefunden oder konkrete Bedeutung ist aus erhaltenen Daten eindeutig beweisbar."
+      }
+    ],
+    "architectural_consequence": "Mechanische Lesbarkeit, zeitgenössische Bedeutung und neue Modellinterpretation trennen. Fehlendes tacites Wissen nicht durch plausible Expansion als gerettet ausgeben."
+  },
+  {
+    "stressor_id": "S184",
+    "source_states": [
+      "GV05",
+      "GV03"
+    ],
+    "branches": [
+      {
+        "state": "Konsens schließt Gegenbefunde aus",
+        "kind": "attraktorhypothese",
+        "conditions": "Alle verfügbaren Reviewer teilen Irrtum und akzeptieren nur Belege, die aus diesem Konsens stammen.",
+        "persistence": "Irrtum → gemeinsame Bestätigung → Autorität → Ausschluss abweichender Beobachtung → erneuter Irrtum.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene Aussagen bleiben als Aussagen prüfbar; gerechtfertigte Korrektur folgt daraus nicht.",
+        "validation": "Ein tatsächlich unabhängiges Ereignis wird als widerlegend anerkannt und verändert den Konsens."
+      },
+      {
+        "state": "Konkretes nicht reviewerbasiertes Gegenereignis wirkt",
+        "kind": "transient",
+        "conditions": "Ein vorhandener physischer/logischer Test hängt für diesen Fehler nicht vom falschen Reviewerurteil ab und sein Befund darf Annahme ändern.",
+        "persistence": "Akzeptierter Gegenbefund unterbricht Wiederverwendung; neue Wahrheit gilt nur innerhalb seiner Tragfähigkeit.",
+        "residue_ids": [
+          "GVR006"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer nutzen genau diesen belastbaren Gegenbefund; Existenz und Anerkennung sind Bedingungen, nicht aus der Karte garantiert.",
+        "validation": "Testoracle trägt denselben Irrtum oder Reviewer ignorieren negatives Ereignis."
+      },
+      {
+        "state": "Keine entscheidende unabhängige Information",
+        "kind": "ungewissheit",
+        "conditions": "Alle verfügbaren Belege sind unter falscher und richtiger Annahme für Entscheider gleich; kein akzeptierter unabhängiger Test vorhanden.",
+        "persistence": "Mehr identische Reviewerinformation kann die Unterscheidung nicht liefern.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für begründete Korrektur der konkreten Behauptung besteht unter dieser Informationsgrenze kein Residue; andere Aufgaben können lösbar bleiben.",
+        "validation": "Ein unterscheidender zugänglicher Befund mit wirksamer Entscheidungsbefugnis erscheint."
+      }
+    ],
+    "architectural_consequence": "Keine unfehlbare dritte Reviewerinstanz erfinden. Gemeinsamer Irrtum, Verstärkung und unabhängig messbares Gegenereignis sind verschiedene Voraussetzungen."
+  },
+  {
+    "stressor_id": "S185",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Beide Weltstände in getrennten Zuständigkeiten gültig",
+        "kind": "transient",
+        "conditions": "Anweisungen betreffen anerkannte unterschiedliche Objekt-/Rechts-/Zeitbereiche; kein gemeinsamer Effekt wird gefordert und beide lokalen Aufgabenakten bleiben lesbar erhalten.",
+        "persistence": "Korrekte Bereichszuordnung beseitigt Scheinwiderspruch ohne technische Gleichschaltung.",
+        "residue_ids": [
+          "GVR032",
+          "GVR001"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigte Prüfer nutzen gültige Zuständigkeitsordnung und getrennte Basisstände; beide Historien dürfen unterschiedlich bleiben.",
+        "validation": "Beide Anweisungen beanspruchen doch denselben Effekt im selben Geltungsbereich."
+      },
+      {
+        "state": "Gleicher Effekt, legitimer Vorrang ungeklärt",
+        "kind": "halt",
+        "conditions": "Beide Stände beanspruchen denselben Gegenstand/Zeitpunkt und keine anerkannte Priorität; gemeinsame Wirkung wird vor Annahme gehalten.",
+        "persistence": "Weitere lokale Übereinstimmung im Clone entscheidet äußere Zuständigkeit nicht.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer behalten beide Ansprüche am konkreten gehaltenen Effekt; keine willkürliche Last-write-wins-Rechtsprechung.",
+        "validation": "Ein Clone kann ohne gemeinsame Vermittlung Wirkung auslösen oder eine anerkannte Regel klärt den Vorrang."
+      },
+      {
+        "state": "Bedeutung von legitim und gemeinsam fehlt",
+        "kind": "offen",
+        "conditions": "Objektidentität, Zeitpunkt, Jurisdiktion und Konvergenzanforderung bleiben undefiniert.",
+        "persistence": "Weder Divergenzschaden noch rechtmäßige Konvergenz lässt sich aus Technikgleichheit bestimmen.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für globale eindeutige Weltentscheidung ist kein Restnachweis begründbar, bis der fehlende Vertrag benannt wird.",
+        "validation": "Zuständige Stelle definiert diese Größen verbindlich für einen konkreten Klontrace."
+      }
+    ],
+    "architectural_consequence": "Identität der Weltobjekte, Jurisdiktion und Wirksamkeitszeit vor Klonabgleich bestimmen. Gleiche Technik ist kein gemeinsamer legitimer Namensraum."
+  },
+  {
+    "stressor_id": "S186",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Wörtlich unvereinbare Vollpflichten",
+        "kind": "halt",
+        "conditions": "Bindende Pflicht verlangt sofortige Vernichtung jeder für geforderten ewigen Beweis nötigen Darstellung und gleichzeitig vollständigen Beweis ohne Ausnahme.",
+        "persistence": "Logischer Widerspruch bleibt, keine technische Wiederholung erfüllt beides; künftige Rechtsänderung wäre andere Bedingung.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für gleichzeitige Erfüllung beider wörtlichen Pflichten besteht keine Restfähigkeit. Das bestimmt nicht, welche Pflicht rechtlich vorgeht.",
+        "validation": "Bindende Auslegung erlaubt eine hinreichende nicht verbotene Beweisdarstellung."
+      },
+      {
+        "state": "Erlaubter enger Beweis nach präziser Auslegung",
+        "kind": "halt",
+        "conditions": "Zuständige bindende Auslegung erlaubt konkret ausreichende Herkunftskanten/Verfügungsmetadaten und verbietet nur getrennte Payload.",
+        "persistence": "Disposition hält nicht geklärte Pfade an, erlaubte begrenzte Nachweise können nach Löschung weiter bestehen.",
+        "residue_ids": [
+          "GVR014",
+          "GVR015"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Auskunftsverantwortliche nutzen nur tatsächlich erlaubte ausreichende Beweisstruktur; Ewigkeit aller Inhalte wird nicht versprochen.",
+        "validation": "Auch Metadaten fallen unter Löschpflicht oder gewünschter Beweis braucht gelöschte Payload."
+      },
+      {
+        "state": "Rechtsbegriffe noch unbestimmt",
+        "kind": "offen",
+        "conditions": "Jurisdiktion, Beweisumfang, Löschdefinition und Vorrang sind nicht bindend geklärt.",
+        "persistence": "Technische Wahl eines Speicherformats entscheidet diese fehlenden Rechtsbegriffe nicht.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für zugesagte Rechtskonformität ist kein Residue bestimmbar; Factory muss Anforderungskonflikt offen halten statt Recht zu erfinden.",
+        "validation": "Bindende konkrete Auslegung legt erlaubte Informationen und Handlungen fest."
+      }
+    ],
+    "architectural_consequence": "Löschung und Beweis als genaue Informationsanforderungen mit bindender Rechtsauslegung bestimmen. Unvereinbare Pflichten nicht durch einen imaginären Hashbeweis oder illegale Kopie lösen."
+  },
+  {
+    "stressor_id": "S187",
+    "source_states": [
+      "GV40",
+      "GV04",
+      "GV47",
+      "GV24"
+    ],
+    "branches": [
+      {
+        "state": "Monatlich echter kleiner Fortschritt",
+        "kind": "extern-erzwungen",
+        "conditions": "Boot plus ein nützlicher endlicher Schritt und haltbarer Checkpoint passen in fünf Minuten; Speicher und erforderliche Rechte bestehen.",
+        "persistence": "Energieplan erzwingt Pause/Arbeit; Restarbeit sinkt über Fenster, kein interner Attraktor.",
+        "residue_ids": [
+          "GVR028"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Worker nutzt erhaltenen Checkpoint zur nächsten Teilaufgabe; Fristen innerhalb stromloser Zeit werden nicht gerettet.",
+        "validation": "Jedes Fenster endet vor einem haltbaren nützlichen Schritt oder Basisversion wird ungültig."
+      },
+      {
+        "state": "Jedes Fenster endet während Wiederanlauf",
+        "kind": "halt",
+        "conditions": "Boot/Recovery übersteigen fünf Minuten und können selbst keinen persistenten Fortschritt halten; Archivbytes sind separat lesbar in erlaubter kleiner Inspektion.",
+        "persistence": "Jede neue Energieperiode wiederholt denselben Start ohne nutzbare Verarbeitung.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Falls enge Inspektion tatsächlich ins Fenster passt, bleiben bekannte Akten lesbar; für den geforderten laufenden Arbeitsfortschritt bleibt keines.",
+        "validation": "Auch Inspektion passt nicht oder ein kleiner haltbarer Recoverycheckpoint ermöglicht Fortschritt."
+      }
+    ],
+    "architectural_consequence": "Boot, Recovery und kleinsten Commit gegen tatsächliches Energiefenster messen. Keine Dauerkommunikation aus periodischem Checkpoint ableiten."
+  },
+  {
+    "stressor_id": "S188",
+    "source_states": [
+      "GV41",
+      "GV08",
+      "GV28"
+    ],
+    "branches": [
+      {
+        "state": "Kryptobeweise unbrauchbar, physischer Fakt separat belegt",
+        "kind": "ungewissheit",
+        "conditions": "Konkreter Inhalt ist unabhängig physisch verwahrt und Herkunft hängt nicht allein an einer der gebrochenen Primitiven.",
+        "persistence": "Kryptowechsel repariert alte Signaturen nicht; physische Verwahrung trägt nur ihren engen Fakt.",
+        "residue_ids": [
+          "GVR033"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Auditor nutzt den tatsächlich unabhängigen Verwahrbeleg, nicht pauschal jede alte Signatur.",
+        "validation": "Verwahridentität wurde ausschließlich mit denselben gebrochenen Signaturen begründet."
+      },
+      {
+        "state": "Nur gebrochene kryptographische Beweisbasis",
+        "kind": "ungewissheit",
+        "conditions": "Für betrachtete historische Authentizität existiert keine andere Herkunftsbasis als praktisch gebrochene Primitiven.",
+        "persistence": "Neue Signatur über vorhandene Bytes belegt nicht deren unangetastete Vergangenheit.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für frühere kryptographisch garantierte Authentizität bleibt kein Rest; tatsächliche Fälschung oder Offenlegung ist damit noch nicht bewiesen.",
+        "validation": "Ein unabhängig verankerter zeitgenössischer Herkunftsfakt stützt genau die Behauptung."
+      },
+      {
+        "state": "Archivinhalt tatsächlich unberechtigt entschlüsselt",
+        "kind": "verlust",
+        "conditions": "Angreifer nutzt Bruch und liest konkret geschützte Daten.",
+        "persistence": "Späterer Algorithmuswechsel nimmt diese Offenlegung nicht zurück.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Nie-Offenlegung des gelesenen Inhalts besteht keine Restfähigkeit; neue sichere Kommunikation wäre ein neuer Vertrag.",
+        "validation": "Kein unberechtigter Klartextzugriff auf diese Daten fand statt."
+      }
+    ],
+    "architectural_consequence": "Gebrochene Kryptographie nach konkreter Beweis-/Secrecyeigenschaft führen; tatsächliche Entschlüsselung/Fälschung braucht eigenes Ereignis. Nur wirklich unabhängige physische Herkunft kann enger Rest sein."
+  },
+  {
+    "stressor_id": "S189",
+    "source_states": [
+      "GV15",
+      "GV33",
+      "GV27",
+      "GV38"
+    ],
+    "branches": [
+      {
+        "state": "Beide Nachfolger beanspruchen dieselbe Freigabe",
+        "kind": "halt",
+        "conditions": "Konkrete Rechte kollidieren und kein anerkannter Nachfolgeentscheid gilt; letzter Effektpfad hält beide Ansprüche.",
+        "persistence": "Konflikt bleibt bis bindende Zuordnung; gleiche Schlüssel oder Ankunftsordnung schaffen keinen Vorrang.",
+        "residue_ids": [
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer bewahrt strittigen Auftrag ohne unberechtigte Parteinahme; andere eindeutige Bereiche bleiben getrennt.",
+        "validation": "Einer kann den gemeinsamen Gatepfad umgehen oder anerkannte Zuordnung war bereits vorhanden."
+      },
+      {
+        "state": "Bindende Teilung erlaubt getrennte neue Arbeit",
+        "kind": "transient",
+        "conditions": "Anerkannte Instrumente ordnen konkrete Rechte eindeutigen Nachfolgern zu und aktuelle Zulassung setzt sie um.",
+        "persistence": "Übergang endet innerhalb der geklärten Bereiche; frühere Doppelwirkungen bleiben eigene Outcomes.",
+        "residue_ids": [
+          "GVR032",
+          "GVR011"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Neue Befugte nutzen tatsächlich zugeordnete Rechte, alte globale Grants werden abgewiesen.",
+        "validation": "Ein übernommener Universalgrant erlaubt weiterhin Wirkung im Bereich des anderen."
+      }
+    ],
+    "architectural_consequence": "Rechtliche Nachfolgeransprüche vor technischen Grants adjudizieren oder anerkannt partitionieren. Credentials und Operationsfencing entscheiden keine Eigentumsfrage."
+  },
+  {
+    "stressor_id": "S190",
+    "source_states": [
+      "GV42"
+    ],
+    "branches": [
+      {
+        "state": "Jede systemspezifische Information verschwunden",
+        "kind": "verlust",
+        "conditions": "Alle Geräte, Kopien, Schlüssel, Erinnerungen und sonstigen rekonstruktiven Spuren dieses Systems fehlen wie in GVT090 streng vorausgesetzt.",
+        "persistence": "Kein verbleibender Träger kann Identität oder Historie erzeugen; Neuinstallation ist kein Wiederfinden dieses Systems.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für systemspezifische Information und nachweisbare Kontinuität bleibt keinerlei Residue; unabhängige fremde Technik wäre nicht dieses System.",
+        "validation": "Irgendeine tatsächlich nutzbare systemspezifische Spur oder Erinnerung existiert."
+      }
+    ],
+    "architectural_consequence": "Totalverlust ausdrücklich als Grenze ohne Recoverymodul ausweisen. Keine Erinnerung, externe Kopie oder neu erzeugte Identität darf dem wörtlichen Inventar nachträglich hinzugefügt werden."
+  },
+  {
+    "stressor_id": "S191",
+    "source_states": [
+      "GV43",
+      "GV13",
+      "GV38"
+    ],
+    "branches": [
+      {
+        "state": "Restore trifft unabhängigen aktuellen Abgleich",
+        "kind": "halt",
+        "conditions": "Snapshot ist alt, aber aktueller Widerruf und bereits ausgeführte Operations-ID sind außerhalb Restore am tatsächlichen Gate/Teilnehmer erhalten.",
+        "persistence": "Neue Wirkung bleibt abgewiesen; alte DB kann weiterhin unvollständig sein.",
+        "residue_ids": [
+          "GVR011",
+          "GVR021"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Reconciler verweigert widerrufenen Grant und Teilnehmer erkennt schon angenommene Operation, jeweils unter eigenem Vertrag.",
+        "validation": "Beide Prüfungen verwenden nur alte Snapshotdaten oder Teilnehmeridentität wurde beim Restore neu erzeugt."
+      },
+      {
+        "state": "Versuch im Snapshot bleibt als offene Wirkung gehalten",
+        "kind": "halt",
+        "conditions": "Alternative zeitliche Snapshotlage enthält Versuch; restore::reconcile blockiert den dortigen Run, tatsächliche erneute Effektvermittlung hält sich an die Sperre.",
+        "persistence": "Bekannter Versuch bleibt offen; Leasebelegung, heutige Freigabe und Außenoutcome werden nicht durch diesen Fixpunkt gelöst.",
+        "residue_ids": [
+          "GVR001",
+          "GVR005"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer liest konkreten alten Versuch und gehaltene Hülle; kein produktweiter Todesbeweis aus diesem Helper.",
+        "validation": "Anderer Caller sendet trotzdem oder unabhängige Evidenz löst das konkrete Outcome."
+      },
+      {
+        "state": "Staler neuer Send führt zu akzeptiertem Duplikat",
+        "kind": "verlust",
+        "conditions": "Snapshot enthält keinen Versuch, Caller sendet erneut und nicht idempotenter Teilnehmer akzeptiert trotz zuvor ausgeführter Aktion.",
+        "persistence": "Zweiter historischer Effekt ist eingetreten; finanzielle Mitigation kann Wert ändern, nicht Annahmezähler zurücksetzen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für nie doppelt erfolgte Wirkung bleibt kein Residue; Verlust jedes Geschäftswerts oder Schadenshöhe wird nicht automatisch behauptet.",
+        "validation": "Nur Sendeabsicht statt Teilnehmerannahme liegt vor oder Teilnehmer dedupliziert die Operations-ID."
+      }
+    ],
+    "architectural_consequence": "restore::reconcile kennt nur Snapshotsuffix. Widerruf, Teilnehmeroutcome und lokale Lease separat abgleichen; queued ohne Versuch ist kein globales nie gesendet."
+  },
+  {
+    "stressor_id": "S192",
+    "source_states": [
+      "GV10",
+      "GV43",
+      "GV38",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Neue Wirkung gestoppt, Commit bleibt offen",
+        "kind": "halt",
+        "conditions": "Vorhandene Stopspur erreicht letzten Aufrufpfad ohne normalen Diskwrite und Neustart bleibt geschlossen bis Widerrufsabgleich.",
+        "persistence": "Stop wirkt trotz voller SSD; dauerhafte Bestätigung wartet auf echten Commit, angenommene Arbeit bleibt separat.",
+        "residue_ids": [
+          "GVR034"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann neue Annahmen verhindern und wahrheitsgemäß fehlende Persistenz sehen.",
+        "validation": "Sperre verlangt selbst vollen Diskwrite oder Neustart lässt ohne Abgleich neue Wirkung zu."
+      },
+      {
+        "state": "Volle SSD lässt Widerruf unbekannt",
+        "kind": "ungewissheit",
+        "conditions": "Konkrete Commit-/Acksemantik und Stopvermittlung sind nicht bekannt; Flood trifft Widerruf zeitgleich.",
+        "persistence": "Gleichzeitigkeit beweist weder bestätigten Commit noch tatsächlich fortgesetzte Außenwirkung.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für wirksamen dauerhaften Widerruf ist kein Residue belegt, solange Commit-/Zulassungstrace fehlt.",
+        "validation": "Trace belegt dauerhaften Commit vor Annahme oder ausdrückliches Commitversagen mit wirksamer separater Sperre."
+      },
+      {
+        "state": "Wirkung war vor Stop angenommen",
+        "kind": "verlust",
+        "conditions": "Teilnehmer hat betroffenen unumkehrbaren Effekt schon angenommen; späterer Widerruf kann betrachtete Vergangenheit nicht ändern.",
+        "persistence": "Annahme bleibt historisch erfolgt, auch wenn neue Wirkungen erfolgreich gesperrt sind.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Verhindern dieser bereits erfolgten Wirkung bleibt nichts; Dringlichkeit des Widerrufs belegt nicht rückwirkend Unrecht oder Totalschaden.",
+        "validation": "Teilnehmer bestätigt Nichtannahme oder vollständig rechtzeitige Aufhebung vor Wirkung."
+      }
+    ],
+    "architectural_consequence": "Notfallstop bei voller SSD von dauerhafter Widerrufsbestätigung trennen. Vollständige letzte Zulassung und Crash-Neustartbarriere müssen konkret nachgewiesen werden."
+  },
+  {
+    "stressor_id": "S193",
+    "source_states": [
+      "GV13",
+      "GV14",
+      "GV21",
+      "GV04"
+    ],
+    "branches": [
+      {
+        "state": "Halt bleibt trotz einzelner reparierter Komponente",
+        "kind": "halt",
+        "conditions": "Herdr ist unbeobachtbar, Leases bestehen, alleiniger Operator tot ohne anerkannten Nachfolger; Budget aufgebraucht, gespeicherte Hülle lesbar.",
+        "persistence": "Runtimewiederkehr liefert weder Befugnis noch Geld, Budgetende beweist keinen Prozessentzug.",
+        "residue_ids": [
+          "GVR001",
+          "GVR005"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigte passive Leser behalten Akte und gehaltene Effekte, sofern eigener Leserzugang existiert; ohne solchen Leser ist selbst dieser Rest nicht nutzbar.",
+        "validation": "Bereits anerkannte Ersatzperson und Zugang sind vorhanden oder Effektpfad umgeht die Sperre."
+      },
+      {
+        "state": "Nachfolge kann erst nach getrennten Nachweisen handeln",
+        "kind": "halt",
+        "conditions": "Anerkannte verfügbare Nachfolge und lesbare Daten existieren; aktuelle Outcomes/Leases oder Finanzierung sind weiterhin ungeklärt.",
+        "persistence": "Befugnis löst nur Autoritätslücke; jedes übrige Prädikat braucht eigenen Beleg bzw. bewussten legitimen Verzicht.",
+        "residue_ids": [
+          "GVR032",
+          "GVR017",
+          "GVR005"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Nachfolger kann bekanntes Obligo prüfen und konkrete Mitigation/Beendigung entscheiden; automatische Wiederaufnahme ist nicht erhalten.",
+        "validation": "Einheitliche Statusänderung behandelt ungeklärtes Prozessende und fehlendes Budget ohne getrennte Entscheidung als erledigt."
+      }
+    ],
+    "architectural_consequence": "Runtimebeobachtung, Leasereservierung, Nachfolgeautorität und Budget als vier unabhängige Bedingungen führen. Kein automatisches Leasefreigeben aus Operatortod oder Kostenende."
+  },
+  {
+    "stressor_id": "S194",
+    "source_states": [
+      "GV17",
+      "GV31",
+      "GV18",
+      "GV28"
+    ],
+    "branches": [
+      {
+        "state": "Anordnung hält zulässige Datenbehandlung offen",
+        "kind": "halt",
+        "conditions": "Löschung noch nicht erfolgt; konkrete Rechtsauslegung/Zeitwirkung und erlaubtes Verzeichnis müssen geklärt werden.",
+        "persistence": "Nutzungs-/Löschhold endet nach bindender Disposition; Manifest beantwortet Rechtsfrage nicht.",
+        "residue_ids": [
+          "GVR014"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zuständige Verantwortliche sehen betroffene einzige Kopie und können erlaubte Handlung entscheiden; Erlaubnis zum Behalten wird nicht erfunden.",
+        "validation": "Anordnung verlangt bereits sofortige Löschung auch des Verzeichnisses oder Hold verhindert rechtswidrig verbindliche Disposition."
+      },
+      {
+        "state": "Einzige notwendige Payload rechtmäßig gelöscht",
+        "kind": "verlust",
+        "conditions": "Löschung entfernt einzige zulässige rekonstruierbare Darstellung des für geforderten Replay nötigen Inhalts.",
+        "persistence": "Hash, Manifest und Cursor erzeugen keine Payload; permanenter Verlust gilt nur für benannte Information und Inventar.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für diesen contentabhängigen Replay gibt es keinen Rest; vollständiges Manifest ist kein Recoverysatz.",
+        "validation": "Geforderter Reducer braucht Inhalt gar nicht oder rechtmäßige tatsächlich ausreichende Darstellung existiert."
+      },
+      {
+        "state": "Enger Reducer benötigt nur erlaubte Metadaten",
+        "kind": "abschluss",
+        "conditions": "Bindende Regel erlaubt genau die erhaltenen Herkunftskanten und gefragter Reducer ist nachweislich davon allein abhängig.",
+        "persistence": "Endliche enge Rekonstruktion endet ohne gelöschte Payload; kein vollständiger Contentreplay.",
+        "residue_ids": [
+          "GVR015",
+          "GVR020"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer nutzt nur erlaubte Kanten mit kompatiblem reinem Reader; GVR020 gilt hier ausdrücklich nur für diesen Metadatenbestand.",
+        "validation": "Abhängigkeitsprüfung zeigt Zugriff auf gelöschten Inhalt oder rechtliche Pflicht verbietet Kanten."
+      }
+    ],
+    "architectural_consequence": "Manifestkonsistenz, Payloadabhängigkeit eines Reducers und bindende Löschanordnung getrennt prüfen. Vollständigkeitsflag darf weder illegale Kopie erlauben noch fehlende Bytes ersetzen."
+  },
+  {
+    "stressor_id": "S195",
+    "source_states": [
+      "GV02",
+      "GV05",
+      "GV06",
+      "GV07"
+    ],
+    "branches": [
+      {
+        "state": "Neue Syntax vor Fachwirkung verweigert",
+        "kind": "halt",
+        "conditions": "Strikter Consumer erkennt inkompatibles Format vor Effekt; ursprüngliche Bytes sind unter eindeutigen Objekt-IDs erhalten und gehaltene Anforderung bleibt verfügbar.",
+        "persistence": "Halt bis ausdrücklich kompatible und fachlich geprüfte Auslegung besteht.",
+        "residue_ids": [
+          "GVR037",
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer kann echte neue Ausgabe lesen und Wirkung zurückhalten; Parsererfolg wäre noch keine Bedeutungsabnahme.",
+        "validation": "Permissiver Nebenconsumer führt die falsch interpretierte Ausgabe trotzdem aus."
+      },
+      {
+        "state": "Semantikfehler verfestigt sich durch Eigenprüfung",
+        "kind": "attraktorhypothese",
+        "conditions": "Parser akzeptiert Format, gleicher Modellfehler bestätigt falsche Bedeutung und Ergebnis wird als neue Referenz wiederverwendet.",
+        "persistence": "Falsche Bedeutung → Eigenbestätigung → Referenz → weitere gleichartige Bestätigung → Vertrauen.",
+        "residue_ids": [
+          "GVR037",
+          "GVR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene Originalbytes und enge Rohwerte ermöglichen spätere Analyse, liefern aber keine fachliche Wahrheit oder unabhängige Modellidentität.",
+        "validation": "Eigenurteil wird nicht wiederverwendet oder unabhängiger Sachbefund ändert Abnahme."
+      },
+      {
+        "state": "Eigenprüfung irrt, konkreter Sachtest greift",
+        "kind": "halt",
+        "conditions": "Unabhängiger Test trifft genau den Format-/Bedeutungsfehler und negativer Befund darf Freigabe stoppen.",
+        "persistence": "Halt bis semantisch richtiges neues Ergebnis vorliegt, nicht bis weitere gleiche Reviewer zustimmen.",
+        "residue_ids": [
+          "GVR006",
+          "GVR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer nutzt konkreten Gegenbefund und Effekthülle; universell korrekter Test wird nicht angenommen.",
+        "validation": "Test akzeptiert denselben Fehler oder ist institutionell wirkungslos."
+      }
+    ],
+    "architectural_consequence": "Outputsyntax, konkrete Fachsemantik, Instrumentzuordnung und unabhängige Abnahme getrennt migrieren. Same-family-Review liefert keine zweite unabhängige Fehlerquelle."
+  },
+  {
+    "stressor_id": "S196",
+    "source_states": [
+      "GV10",
+      "GV11",
+      "GV01",
+      "GV24"
+    ],
+    "branches": [
+      {
+        "state": "Monatswelle bleibt endlicher Arbeitsberg",
+        "kind": "extern-erzwungen",
+        "conditions": "Scopezahl endlich, Lineage erhalten, Cronnachholen endlich und sämtliche Wurzeln/Retryidentitäten global begrenzt.",
+        "persistence": "Welle kann lange sättigen; nach endlichem Nachholen und Abschluss sinkt Restmenge.",
+        "residue_ids": [
+          "GVR013"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator priorisiert/streicht benannte überholte Arbeit aus endlichem Register; Rechtzeitigkeit alter Aufträge ist nicht gerettet.",
+        "validation": "Cron oder Agents erzeugen außerhalb des Limits laufend neue Wurzeln."
+      },
+      {
+        "state": "Verzögerung erneuert Wurzeln über Ersatzrate",
+        "kind": "attraktorhypothese",
+        "conditions": "Agents dürfen unabhängig neue Wurzeln erzeugen und Rückstau löst mehr davon aus als abgeschlossen werden; Cron liefert Startimpuls.",
+        "persistence": "Rückstau → frische Wurzeln → mehr Rückstau → weitere Wurzeln, trotz endlicher Kettentiefe.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene Abstammungs-/Auftragsdaten bleiben untersuchbar; endliche Tiefe begrenzt hier nicht Instanzzahl.",
+        "validation": "Nach Entfernen des Cronimpulses bei gleicher deklarierter Basislast fällt Reproduktion unter Abbau; Nullankunftstest separat behandeln."
+      }
+    ],
+    "architectural_consequence": "Cronvorkommen, frische Wurzeln, Lineage und Retries gemeinsam zählen. Zwei Agents dürfen nicht still die vorhandene Same-chain-Zyklussperre umgehen; finite Nachholwelle ist kein Attraktor."
+  },
+  {
+    "stressor_id": "S197",
+    "source_states": [
+      "GV44",
+      "GV38",
+      "GV28"
+    ],
+    "branches": [
+      {
+        "state": "Veraltete Inverse schützt heutige menschliche Bytes durch Ablehnung",
+        "kind": "halt",
+        "conditions": "Vorwärtsbeleg und inverse Semantik sind erhalten, Objektversionsvergleich erfolgt am Teilnehmer und Startobjekt ist gebunden.",
+        "persistence": "Geänderte menschliche Version hält alte Inverse an; neue legitime Mitigation kann folgen, aber nicht automatisch.",
+        "residue_ids": [
+          "GVR030",
+          "GVR009"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator nutzt konkreten Kompensationsauftrag zur Prüfung und erhält aktuelle menschliche Änderungen unverändert.",
+        "validation": "Neues Plugin ignoriert Vergleich oder verändert Bedeutung trotz gleicher Operationsbezeichnung."
+      },
+      {
+        "state": "Unbedingte neue Inverse überschreibt einzige menschliche Änderung",
+        "kind": "verlust",
+        "conditions": "Pluginupdate ändert Semantik oder ignoriert Version; Überschreiben wird angenommen, keine rekonstruierbare Kopie der einzigartigen Änderung bleibt.",
+        "persistence": "Spätere Mitigation stellt nicht exakt verlorene menschliche Bytes oder Historie wieder her.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Erhalt der überschriebenen einzigartigen Änderung besteht kein Residue; finanzielle oder fachliche Teilmitigation kann anderen Wert retten.",
+        "validation": "Teilnehmer weist stale Version zurück oder unabhängige echte Kopie enthält die Änderung."
+      }
+    ],
+    "architectural_consequence": "Inverse an Originaloperationsvertrag, tatsächlich ausgeführte Pluginbytes und heutige Objektversion binden; abgewiesene Kompensation nicht als fertigen Rollback markieren."
+  },
+  {
+    "stressor_id": "S198",
+    "source_states": [
+      "GV26",
+      "GV27",
+      "GV43",
+      "GV38"
+    ],
+    "branches": [
+      {
+        "state": "Legacyklon vom Teilnehmer ausgeschlossen",
+        "kind": "halt",
+        "conditions": "Beide Stores starten, aber Teilnehmer erkennt stabile Operations-ID und nur aktuelle Cutoverepoche als Schreibrecht.",
+        "persistence": "Alter Dispatcher bleibt für neue Wirkung ausgeschlossen, auch wenn lokaler DB-Lock frei ist.",
+        "residue_ids": [
+          "GVR021",
+          "GVR038",
+          "GVR020"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Reconciler prüft getrennte historische Bytes mit passenden Lesern; Teilnehmer bewahrt begrenzte Effektordnung unabhängig davon.",
+        "validation": "Legacyadapter nutzt neue IDs oder einen anderen nicht eingezogenen Teilnehmerpfad."
+      },
+      {
+        "state": "Beide lokale Historien, globale Reihenfolge fehlt",
+        "kind": "extern-erzwungen",
+        "conditions": "Klon und neuer Dispatcher besitzen überlappend effektive Rechte ohne gemeinsames Fencing; getrennte Originalakten sind erhalten.",
+        "persistence": "Weiterlaufende Writer erhalten Divergenz; lokale SQL-Atomicität entscheidet keine Außenreihenfolge.",
+        "residue_ids": [
+          "GVR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer liest beide klar als Teilhistorien, nicht als eine automatisch gültige Gesamtgeschichte.",
+        "validation": "Unabhängiger Teilnehmerbeleg und exklusive Rechte verhindern tatsächlich zweite Annahme."
+      },
+      {
+        "state": "Doppelte Wirkung bereits akzeptiert",
+        "kind": "verlust",
+        "conditions": "Legacy und neuer Pfad senden denselben fachlichen Effekt unter nicht zusammengeführter Identität und Teilnehmer nimmt beide an.",
+        "persistence": "Historischer Doppelvollzug bleibt, auch wenn Bilanz später korrigiert werden kann.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für At-most-once dieses bereits ausgeführten Effekts bleibt kein Rest; Umfang irreversiblen Schadens ist separat zu bestimmen.",
+        "validation": "Nur zwei lokale Absichten vorliegend oder Teilnehmer hat eine Annahme abgelehnt."
+      }
+    ],
+    "architectural_consequence": "Cutover-Autorität außerhalb einzelner DBkopie erzwingen. Schemafallback und Teilnehmer-Fencing sind getrennte Grenzen; zwei konsistente lokale Stores verhindern kein Duplikat."
+  },
+  {
+    "stressor_id": "S199",
+    "source_states": [
+      "GV31",
+      "GV25",
+      "GV48"
+    ],
+    "branches": [
+      {
+        "state": "Tools erhalten, einziger Inhaltskey fehlt",
+        "kind": "ungewissheit",
+        "conditions": "Legaler vollständiger Decoder-/Laufsatz ist vorhanden, aber kein nutzbarer Inhaltspfad ohne verlorenen Backupkey ist bekannt.",
+        "persistence": "Software lässt sich nutzen, derselbe Restore liefert fehlenden Schlüssel nicht; permanente Unmöglichkeit folgt nicht allein aus heutiger Unkenntnis.",
+        "residue_ids": [
+          "GVR016"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Maintainer kann Toolchain betreiben; für tatsächliche Payloadrecovery bleibt aktuell keines, auch bei korrektem Backupmanifest.",
+        "validation": "Ein bereits verfügbarer Schlüssel/Klartextpfad stellt Inhalt wieder her oder Tools sind doch unvollständig."
+      },
+      {
+        "state": "Konkreter unabhängiger Inhaltssatz ohne verlorenen Schlüssel nutzbar",
+        "kind": "transient",
+        "conditions": "Tatsächlich vorhandene legale andere Klartext-/Schlüsselkopie plus Decoder funktioniert ohne verlorenes Gerät und insolventen Lieferanten.",
+        "persistence": "Rekonstruktion kann enden; dieser Zweig setzt benannten unabhängigen Satz voraus statt ihn aus Insolvenz abzuleiten.",
+        "residue_ids": [
+          "GVR012"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Wiederhersteller nutzt allein den nachgewiesen vollständigen unabhängigen Satz.",
+        "validation": "Isolierter Restore benötigt doch verlorenen Key, Vendorfreischaltung oder nicht vorhandene Daten."
+      },
+      {
+        "state": "Kein bekannter vollständiger Inhalts- und Toolpfad",
+        "kind": "ungewissheit",
+        "conditions": "Kein nutzbarer Schlüssel-/Klartext-/Decoderweg ist bekannt, aber Ciphertext oder Erinnerungen bestehen.",
+        "persistence": "Wiederholtes Manifestprüfen kann fehlende Teile nicht erzeugen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für jetzige Wiederherstellung fehlt Restfähigkeit; nicht als vollständiges S190-Verschwinden umetikettieren.",
+        "validation": "Tatsächlich zugänglicher vollständiger Wiederherstellungspfad wird demonstriert."
+      }
+    ],
+    "architectural_consequence": "Gerät, Backupschlüssel und Toolanbieter als getrennte notwendige Pfade prüfen. Insolvenz ist nicht Beweis fehlender Open-/Altsoftware; vorhandene Software entschlüsselt ohne nötigen Schlüssel keine Daten."
+  },
+  {
+    "stressor_id": "S200",
+    "source_states": [
+      "GV31",
+      "GV06",
+      "GV05",
+      "GV02"
+    ],
+    "branches": [
+      {
+        "state": "Vollmarkierte Matrix rechtfertigt fortgesetzten Prüfstop",
+        "kind": "attraktorhypothese",
+        "conditions": "Bericht hat Autorität, stoppt reale Tests und wird wegen fehlender negativer Messergebnisse erneut als Erfolg benutzt.",
+        "persistence": "Matrix → Prüfstop → keine Gegenmessung → scheinbare Bewährung → erneute Matrixautorität.",
+        "residue_ids": [
+          "GVR031"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Falls ursprüngliche begrenzte Belege und fehlende Versuche lesbar bleiben, können unabhängige Prüfer Behauptung angreifen; Liste führt keinen Test aus.",
+        "validation": "Reale unabhängige Prüfungen bestimmen Behauptung trotz Vollmarkierung oder Bericht verliert Steuerwirkung."
+      },
+      {
+        "state": "Nachweisgrenze sichtbar, empirischer Anspruch zurückgenommen",
+        "kind": "halt",
+        "conditions": "Berechtigte Prüfer können Belegverzeichnis lesen und konkrete fehlende Versuche machen Generalfreigabe unwirksam.",
+        "persistence": "Halt des Generalanspruchs endet erst mit relevanter enger Evidenz, nicht durch weitere Matrixfelder.",
+        "residue_ids": [
+          "GVR031"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer hält unbelegte Freigabe zurück und kann Prüfauftrag präzise stellen; reale Resilienz bleibt unbewiesen.",
+        "validation": "Freigabe wird allein wegen ausgefüllter Felder erteilt oder ungetestete Hülle als empirisch bestanden bezeichnet."
+      }
+    ],
+    "architectural_consequence": "Matrixcoverage, Testdurchführung, fachliche Abnahme und empirische Resilienz explizit auseinanderhalten. Auch diese A7-Abgabe darf Prüfstop nicht legitimieren."
+  }
+]

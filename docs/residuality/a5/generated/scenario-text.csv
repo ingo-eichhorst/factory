@@ -1,0 +1,351 @@
+stressor,scenario
+S001,Netzstrom fällt während Commit und Prompt-Übergabe aus
+S002,Akku bläht sich auf und Gerät muss sofort außer Betrieb
+S003,Thermal Throttling macht alle Deadline-Schätzungen falsch
+S004,RAM-Fehler korrumpiert ein Ergebnis ohne Prozesscrash
+S005,Einbruch entwendet den entsperrten einzigen Mac
+S006,Brand vernichtet Gerät und daneben gelagerte Backupplatte
+S007,Externe SSD trennt sich bei Scope-Kanonisierung
+S008,macOS startet mitten in einer Freigabe ungefragt neu
+S009,Hardware ersetzt Apple Silicon durch inkompatible Plattform
+S010,Wohnort verliert eine Woche Strom und Internet
+S011,SSD ist vor dem Intent-Commit voll
+S012,Bitrot beschädigt einen alten kanonischen Event
+S013,Projektionsmigration endet nach halber Tabellenänderung
+S014,WAL-Datei wird beim Dateikopieren vergessen
+S015,Restore stellt eine Woche alte Tasks ohne spätere Versuche her
+S016,Referenziertes Artefakt wurde manuell gelöscht
+S017,Backup-Key ist verloren obwohl alle Backups intakt sind
+S018,Reduktor liest heutige Registry beim historischen Replay
+S019,Schema enthält neueren Payload-Typ als installiertes Binary
+S020,Backup-Retention löscht die einzige Kopie benötigter Inhalte
+S021,Sommerzeit wiederholt dieselbe lokale Cron-Minute
+S022,Sommerzeit überspringt geplanten Zeitpunkt
+S023,NTP setzt Uhr zwölf Stunden zurück
+S024,Laptop erwacht nach sechs Wochen mit tausenden fälligen Runs
+S025,Zeitzonenregeln ändern sich nach Schedule-Erstellung
+S026,Zwei Teilnehmer bestätigen Wirkungen mit widersprüchlichen Uhrzeiten
+S027,Freigabe läuft während langem Plugin-Start ab
+S028,Ein Task verarbeitet einen inzwischen abgelaufenen Preis
+S029,Maschine geht während monotonic-basierter Frist in Sleep
+S030,Cron-Plugin feuert denselben Trigger nach jedem Neustart erneut
+S031,Herdr ist unerreichbar während der Harness weiter Dateien schreibt
+S032,Pane-ID wird nach Neustart einer anderen Session gegeben
+S033,Transcript-Dateiname verliert die erwartete UUID
+S034,Hook fehlt aber Screen-Parser meldet idle
+S035,Harness meldet done nach einem Zwischenturn
+S036,Alte autoritative Beobachtung trifft nach neuer Session ein
+S037,Zwei Case-Varianten desselben Workspace werden parallel reserviert
+S038,Ein untergeordneter Prozess überlebt den gestoppten Harness
+S039,Temporärer Worker wartet tagelang auf Permission
+S040,Herdr-Restart wird fälschlich als kompletter Maschinenneustart klassifiziert
+S041,Plugin schreibt Debugtext auf stdout zwischen Protokollframes
+S042,Plugin meldet einen Frame von mehreren Terabytes an
+S043,Plugin beantwortet Healthchecks aber blockiert jede Geschäftsoperation
+S044,Plugin crasht sofort nach jedem automatischen Restart
+S045,Optionales Pluginmanifest ist syntaktisch kaputt
+S046,Plugin liefert Erfolg vor dauerhaftem Commit beim Teilnehmer
+S047,Plugin-Unterprozess verbraucht alle File Descriptors
+S048,Kompatibles Major-Protokoll ändert die Bedeutung eines optionalen Felds
+S049,Ein Scope deaktiviert Plugin während dessen Effekt in flight ist
+S050,Plugin behauptet reversibel aber inverse Operation verliert Daten
+S051,Netz partitioniert nach externer Annahme vor Response
+S052,Provider DNS zeigt auf falschen Endpunkt
+S053,TLS-Zertifikat läuft ab während langer Offlinephase
+S054,WebSocket-Client liest nie seine Events
+S055,HTTP-Transport fällt aus während lokaler Betrieb intakt ist
+S056,Remote-Client zeigt tagelang gecachten Status running
+S057,Netzwerk-Antworten kommen doppelt und vertauscht
+S058,Ein nicht-lokaler Listener wird versehentlich öffentlich gebunden
+S059,Tailscale und SSH fallen gemeinsam aus während Operator fern ist
+S060,Teilnehmer drosselt alle Anfragen über Tage mit Rate Limit
+S061,Registry benennt Zielagent um nachdem Task queued wurde
+S062,Scope-Verzeichnis wird gelöscht und am selben Pfad ersetzt
+S063,Symlink ändert Ziel zwischen Validierung und Dateischreibzugriff
+S064,Parent-Scope verschiebt sich und ändert Delegationsrechte
+S065,Zwei Klone derselben Installation starten auf getrennten Macs
+S066,Client zeigt legitime Session-ID eines anderen Agents vor
+S067,Task delegiert A nach B nach C nach A
+S068,Agent erzeugt statt Weiterdelegation immer neue identische Tasks
+S069,Scope wird stillgelegt während alte Tasks und Memory existieren
+S070,Case-sensitive Export wird auf case-insensitive Dateisystem restauriert
+S071,CLI wiederholt create nach verlorener Antwort
+S072,Cancel trifft nach Zustellcommit aber vor Writer-Aufruf ein
+S073,Zwei Assignments sehen denselben idle Worker
+S074,Blocked Task wird requeued ohne neue Zustellautorisierung
+S075,Worker liefert Artefaktpfad der auf später überschreibbare Datei zeigt
+S076,Taskergebnis enthält mehrere Gigabytes Text
+S077,Permanent Agent bearbeitet neue Aufgabe während alte auf Permission wartet
+S078,Process-Executor Exitcode null obwohl Output leer ist
+S079,Taskprompts enthalten Shell-Metazeichen für Process-Executor
+S080,Worker stirbt nach fertigem Artefakt vor Result-Commit
+S081,Zahlungsprovider ignoriert Idempotency-Key
+S082,Email wurde gesendet aber Versandplugin crasht
+S083,Mensch genehmigt Rechnung A während Payload auf Rechnung B wechselt
+S084,Freigabe wird nach Annahme beim Teilnehmer widerrufen
+S085,Saga kompensiert Änderung die inzwischen ein Mensch weiterbearbeitet hat
+S086,Kompensation schlägt wiederholt fehl
+S087,Zwei verschiedene Tasks bestellen fachlich dasselbe Produkt
+S088,Provider berechnet beim Retry einen neuen Preis
+S089,Geplanter Reportversand enthält nach Refresh neue vertrauliche Zeilen
+S090,Teilnehmer löscht Operationhistorie bevor Factory rekonziliert
+S091,Einziger Operator ist drei Tage offline
+S092,Operator bestätigt hundert Dialoge im Alarmsturm reflexhaft
+S093,Vertreter übernimmt ohne Wissen über laufende Außenwirkungen
+S094,Operator verwechselt Produktions- und Fixture-Instanz
+S095,Operator kopiert Backup per Hand statt Restore-Prozess
+S096,Mensch beendet pane manuell und schreibt später im selben Workspace
+S097,Nur zuständiger Owner versteht eine Blockerbeschreibung
+S098,Operator ist bei Abnahme seines eigenen fehlerhaften Ergebnisses befangen
+S099,Mensch fordert Sofortstart trotz unklarer alter Lease
+S100,Operator verliert alle Zugänge und Recoveryanweisungen liegen nur auf dem Gerät
+S101,Modellanbieter schließt über Nacht
+S102,Modellalias wird still auf andere Gewichte umgestellt
+S103,Modell folgt Prompt Injection in einer Quellseite
+S104,Zwei Prüfer nutzen denselben Modellfehler und bestätigen falsches Ergebnis
+S105,Modell halluziniert nicht existierende Ergebnisdateien
+S106,Lokales Modell belegt gesamten RAM und verdrängt Daemon
+S107,Modell wechselt mitten im Run ohne Telemetriehinweis
+S108,Modell produziert unendlich viele korrekte Zwischenschritte
+S109,Kontextfenster schrumpft nach Harnessupgrade
+S110,Benchmarkfixture wird vom Modell erkannt und speziell ausgetrickst
+S111,Root-AGENTS wird zwischen Queueing und Start geändert
+S112,Ein AGENTS-Quellfile ist plötzlich unlesbar
+S113,Human schreibt Geheimnis in Taskprompt
+S114,Knowledge-Link führt zyklisch durch tausende Notizen
+S115,Zwei Quellen widersprechen sich über aktuelle Freigaberegel
+S116,Quellwebsite ändert Inhalt ohne URLänderung
+S117,Repo enthält bösartige native Harnesskonfiguration
+S118,Agent schreibt Shared Memory im Namen fremden Scopes
+S119,Artefaktnamen unterscheiden sich nur durch Unicode-Normalisierung
+S120,Context wird zum Debuggen vollständig in Telemetrie kopiert
+S121,Plugin läuft als gleicher User und liest Keychain außerhalb Kernel
+S122,Angreifer ersetzt Pluginbinary nach Manifestprüfung
+S123,Transportplugin behauptet falschen authentifizierten Actor
+S124,Agent schreibt absichtlich direkt in SQLite
+S125,SQL-/Pfadinjection steckt in neuem Pluginparameter
+S126,Log enthält Terminalescapes die Diagnoseanzeige fälschen
+S127,Altes gestohlenes Capability-Token wird nach Restore erneut gültig
+S128,Bekannte Integration wird per Dependency-Typosquatting ersetzt
+S129,Ransomware verschlüsselt DB Backups und Knowledge gleichzeitig
+S130,Task erzeugt riesige gültige Delegationsketten ohne Zyklus
+S131,Betroffene Person verlangt Löschung aus append-only History
+S132,Gericht verlangt Legal Hold während Retention löschbereit ist
+S133,Kunde verlangt Datenresidenz die aktueller Modellprovider nicht erfüllt
+S134,Backup enthält Geheimnisse die im Original schon rotiert wurden
+S135,Lizenz einer notwendigen Library wird für neue Releases unbrauchbar
+S136,Audit muss beweisen welcher Mensch konkret freigegeben hat
+S137,Behörde beschlagnahmt Originalgerät und fordert Einsicht
+S138,Ein ursprünglich harmloses Feld wird später als sensibel eingestuft
+S139,Auskunftsanfrage verlangt Provenienz über gelöschte Scopes hinweg
+S140,Versicherer verlangt beweisbare Recovery statt vorhandener Backups
+S141,Tokenpreise steigen über Nacht um Faktor hundert
+S142,Provider ersetzt Prepaid durch unbekannte nachträgliche Abrechnung
+S143,Ein großer Scope monopolisiert alle Slots mit legalen Tasks
+S144,Jeder kleine Task kostet mehr menschliche Freigabe als er spart
+S145,Nachfrage verzehnfacht sich ohne weitere Workspaces
+S146,Budget wird während langer Agentarbeit auf null gesetzt
+S147,Geschäftskunde verlangt garantierte Echtzeitantwort bei lokalem Single-Host
+S148,Ein Fachauftrag ist nach Queuewartezeit wirtschaftlich wertlos
+S149,Unternehmen kann keinen externen Backupdienst mehr bezahlen
+S150,Unbekannte Providerrechnung macht Metrikvergleich irreführend
+S151,Rust-Update ändert Plattformverhalten trotz unverändertem Code
+S152,Release enthält neue Eventversion aber keinen alten Upcaster
+S153,Python-Prototyp und Rust mutieren denselben Tabellennamen mit anderem Schema
+S154,Rollback des Binaries trifft auf bereits migriertes Schema
+S155,Ein Versionspaket ist nach Maintainerwechsel nicht mehr herunterladbar
+S156,Veröffentlichung exportiert versehentlich Company-root statt Projekt
+S157,Tests bestätigen absichtlich unsicheren Missing-ID-Fallback
+S158,README und ADR widersprechen dem aktuellen Library-Schema
+S159,Automatischer Updater aktiviert Plugin vor Manifestverifikation
+S160,Jedes Architekturproblem wird durch weiteren Kerndienst beantwortet
+S161,Firmengründer fällt dauerhaft aus und niemand besitzt Freigabeautorität
+S162,Zwei Geschäftsführer geben widersprüchliche Anweisungen zum selben Effekt
+S163,Unternehmen wird verkauft und bisherige Mitarbeiter verlieren Zugriffsrechte
+S164,Projekt wird ausgegliedert und darf Company-Kontext nicht mitnehmen
+S165,Sicherheitsverantwortlicher und Produktowner streiten über riskanten Resume
+S166,Dienstleister ersetzt komplette Agentflotte mit anderen Instrumenten
+S167,Teams optimieren auf möglichst wenige blocked Runs und umgehen Freigaben
+S168,Scope-Besitzer verweigert Budgetauskunft obwohl gemeinsame Maschine überlastet ist
+S169,Organisation verlangt nachträgliches Umschreiben eines unbequemen Auditfakts
+S170,Ein Partner stellt Betrieb ein und niemand kann seine alten Operationen bestätigen
+S171,Tausend neue Scopes erzeugen je einen Pluginprozess
+S172,Zwei Kunden fordern gegenseitige Geheimhaltung auf derselben User-ID
+S173,Remote-Worker laufen über Tage offline auf fremder Hardware
+S174,Produkt muss auf Smartphone ohne Daemon-Dauerbetrieb laufen
+S175,Firma verlangt Active-active mit automatischem Failover zwischen Städten
+S176,Robotikplugin steuert irreversible Bewegung mit Millisekundenfrist
+S177,Regulierter Betrieb verlangt manipulationssichere Beweise gegen Root-Admin
+S178,Ereignisbestand wächst auf Jahrzehnte und Replay dauert länger als RTO
+S179,Kunde fordert vollständigen Export und Abschaltung aller Factorydienste
+S180,Pluginlandschaft entwickelt wechselseitige Abhängigkeiten mit Startzyklus
+S181,Extremer Sonnensturm zerstört Elektronik in mehreren Backupregionen
+S182,Mac erwacht im Jahr 2046 und alle Termine Zertifikate und Anbieter sind historisch
+S183,Nach zwanzig Jahren versteht niemand mehr Sprache und Geschäftskürzel der Taskprompts
+S184,Alle verfügbaren Modelle und menschlichen Prüfer teilen denselben überzeugenden Irrtum
+S185,Zwei technisch identische Instanzklone erhalten widersprüchliche legitime Weltzustände
+S186,Neue Rechtslage verlangt sofortige Löschung aller Geschäftsdaten und zugleich ewige Beweisbarkeit
+S187,Energie steht künftig nur fünf Minuten pro Monat zur Verfügung
+S188,Alle genutzten Kryptoprimitiven gelten plötzlich als praktisch gebrochen
+S189,Firma spaltet sich rechtlich in zwei Nachfolger die beide alle Freigaberechte beanspruchen
+S190,Alle Geräte Backups Schlüssel und Erinnerungen an das System verschwinden
+S191,Alter Restore trifft auf widerrufene Freigabe und inzwischen ausgeführte queued-Aktion
+S192,Pluginflood füllt SSD genau als dringender Widerruf eingeht
+S193,Herdrausfall hält Leases und einziger Operator stirbt während Rechenbudget ausläuft
+S194,Restoremanifest ist vollständig aber einzige Contentkopie unterliegt gerichtlich angeordneter Löschung
+S195,Providerwechsel verändert Outputformat und derselbe Modelltyp verifiziert seinen Fehler
+S196,Zwei Scopeagenten vervielfachen Tasks während Cron eine monatelange Nachholwelle erzeugt
+S197,Compensation läuft gegen vom Menschen veränderte Daten während ihr Plugin geupdatet wird
+S198,Migrationscutover wird unterbrochen und Backupklon startet parallel den Legacydispatcher
+S199,Geräteverlust trifft auf verlorenen Backup-Key und insolventen Softwarelieferanten
+S200,Incidentbericht behauptet volle Resilienz weil alle Matrixfelder markiert sind und stoppt reale Tests
+S201,Der ganze Mac verliert Strom und kann keinen Ausfallalarm mehr senden
+S202,Der Rechner läuft aber der Factory-Daemon ist seit Stunden beendet
+S203,Der Rechner wacht nach drei Monaten mit alten wartenden Aufträgen auf
+S204,Factory und Monitoring-Mini-PC hängen an derselben ausgefallenen Steckdose
+S205,Monitor Alarmemail und Backups werden durch dieselbe Accountsperre unzugänglich
+S206,Ein regionales Ereignis trennt Rechner Mobilfunk und den einzigen Operator
+S207,Der Monitor fällt eine Stunde vor Factory aus und bleibt stumm
+S208,Der Alarmdienst bestätigt Versand aber die Nachricht landet im Spam
+S209,Ein Wartungsfenster von einer Stunde bleibt nach einem Fehler zehn Jahre stumm
+S210,Ein freier Health-Thread meldet grün während der Kernel im Deadlock steckt
+S211,Reads funktionieren aber die SSD nimmt seit gestern keinen Commit mehr an
+S212,Alle Tasks sind legitim blockiert und ein Fortschrittsalarm erzeugt dauernd Lärm
+S213,Ein Proxy liefert nach dem Rechnerausfall noch eine Woche gecachte Lebenszeichen
+S214,Nach Netzrückkehr treffen tausend alte Heartbeats schneller als echte ein
+S215,Ein restaurierter Klon sendet dieselbe alte Monitoridentität wie das Original
+S216,Ein Agent erzeugt pro Token ein neues Metriklabel bis das Monitoring abstürzt
+S217,Ein Tracingexport wartet bei jedem Commit auf einen ausgefallenen Cloudcollector
+S218,Ein Debugmodus verdoppelt die Latenz und beseitigt zugleich das untersuchte Rennen
+S219,Acht Schichten brauchen jeweils neun Sekunden bei einer Gesamtfrist von zehn
+S220,Ein Auftrag wartet 48 Stunden in der Queue und bekommt danach eine frische Fünfsekundenfrist
+S221,Ein 200-Millisekunden-Task wartet zwölf Jahre auf menschliche Freigabe
+S222,Das Dashboard zeigt nur abgeschlossene Tasks und verschweigt den seit Wochen hängenden Rest
+S223,Der Lasttest sendet erst nach jeder Antwort und erzeugt während des Hängers keine neue Last
+S224,Aus tausend schnellen Samples wird ein p99.999-Verfügbarkeitsversprechen abgeleitet
+S225,Ein Task wartet auf alle zehntausend Pluginantworten und eine kommt nie
+S226,Ein Optimierer verdoppelt langsame Rechnungsaktionen spekulativ um das Tail zu verkürzen
+S227,Ein Aggregator erklärt 999 von 1000 Prüfergebnissen für vollständig um schnell zu antworten
+S228,Eine von hunderttausend Anfragen hängt unbegrenzt und belegt über Jahre alle Slots
+S229,Nur ein bestimmter Scope erlebt minutenlange fsync-Pausen während globale Mittelwerte grün sind
+S230,Eine zufällige Speicherbereinigung trifft immer dieselbe Geschäftsdeadline
+S231,Die Antwort auf einen Versand kommt 90 Tage nach Ablauf der Idempotenzhistorie
+S232,Ein offline gepufferter Auftrag wird 2046 ausgeführt nachdem Empfänger und Firma gewechselt haben
+S233,Ein Ergebnis trifft nach legaler Löschung seiner Zuordnung ein und enthält sensible Daten
+S234,Cancel erreicht den Teilnehmer eine Mikrosekunde nach irreversibler Annahme
+S235,Der Parent stirbt nach Timeout aber ein Enkelprozess schreibt zwei Tage weiter
+S236,Ein Cancel steckt hinter Gigabytes stdout im selben Kanal fest
+S237,CLI Kernel Plugin und SDK wiederholen jeweils viermal denselben Fehler
+S238,Eine Million Clients versuchen nach identischer Pause exakt gleichzeitig erneut
+S239,Nach Quotenfehler retryt ein Plugin aggressiver und verbraucht das letzte Budget
+S240,Nach Stromrückkehr laden alle Agenten gleichzeitig ihre riesigen Modelle
+S241,Ein leerer Cache macht eine bisher optionale Suche zum Kapazitätsengpass
+S242,Kalte DNS- und TLS-Aufbauten verbrauchen die gesamte Erstaufruffrist
+S243,Ein 8-Terabyte-Export steht vor allen kleinen Kontrollabfragen
+S244,Ständig eintreffende Notfalltasks verdrängen normale Aufgaben über Monate
+S245,Unklare Agenten halten alle Workspace-Reservierungen und der Operator fordert TTL-Freigabe
+S246,Zehn Millionen registrierte Namen passen in den Store aber nicht in jede Kontextnachricht
+S247,Ein einziges Ergebnis enthält hundert Gigabytes in einem gültigen JSON-Feld
+S248,Hunderttausend langsame Subscriber halten je eine eigene Queue offen
+S249,Zwanzig Jahre Ereignisse brauchen drei Wochen Replay bei vereinbartem RTO von einer Stunde
+S250,Der Restore passt nur wenn Original Export temporäre Kopie und Index nie gleichzeitig existieren
+S251,Um Platz zu sparen werden nur Operationstombstones gelöscht und der nächste Retry dupliziert Wirkung
+S252,Nach zehn Jahren Pause sind eine Milliarde Schedule-Occurrences nachzuholen
+S253,Eine Providerstörung endet und alle blockierten Scopes starten im selben Millisekundenfenster
+S254,Ein viraler Auftrag erzeugt rekursiv Millionen Kinder bevor die Rechnung sichtbar wird
+S255,Dauerlast drosselt die CPU auf ein Zehntel und verlängert alle Fristen gleichzeitig
+S256,Die USV reicht für den Commit aber nicht für den nachfolgenden externen Versand
+S257,Lastabwurf schaltet zuerst den als unwichtig eingestuften Monitoringrouter ab
+S258,Stop wartet hinter sämtlichen überlasteten Pluginaufrufen
+S259,Der Notfallzugang verlangt einen Login beim gerade gesperrten einzigen Identitätsanbieter
+S260,Die SSD ist voll und Factory bestätigt einen Stopp den es nicht speichern konnte
+S261,Ein korrekt authentifizierter Pluginaufruf verwendet das Credential eines anderen Scopes
+S262,Ein menschenlesbarer Empfängername wird kurz vor Dispatch auf eine andere Identität umgebogen
+S263,Eine importierte Task-ID wird als Beleg einer fremden Freigabe akzeptiert
+S264,Ein Dokument behauptet Systemregel zu sein und verlangt den Upload aller Secrets
+S265,Ein Fehlerlog enthält gefälschte Bestätigungen die ein Recovery-Agent für Operatorfreigaben hält
+S266,Ein Ergebnisartefakt schmuggelt eine neue externe Aktion in seine Prüfanweisung
+S267,Ein gültig signiertes Pluginupdate exfiltriert Daten
+S268,Ein zurückgezogenes Paket wird zwanzig Jahre später für Restore aus einem übernommenen Namen geladen
+S269,Das unabhängige Monitoring erhält denselben kompromittierten Auto-Updater wie Factory
+S270,Heartbeat-Schlüsselrotation und Netzpartition überlappen sodass beide Seiten den jeweils anderen Key ablehnen
+S271,Ein zwanzig Jahre alter Vault ist lesbar aber niemand besitzt den Entschlüsselungsweg
+S272,Ein späterer kryptografischer Durchbruch macht alte sensible Exporte lesbar
+S273,Ein feindlicher Agent liest andere Scopes direkt über das Betriebssystem
+S274,Ein Mitnutzer rekonstruiert fremde Aktivität aus geteilten CPU- und Queuezeiten
+S275,Der externe Monitor erhält aus Bequemlichkeit Shellzugriff auf Factory
+S276,Heartbeat-Labels verraten Kundennamen und vertrauliche Geschäftszeiten
+S277,Ein Debugexport für Monitoring enthält die vollständige AGENTS-Konversation
+S278,Ein Angreifer löst gezielt Fehlalarme aus um Alarmempfänger und Bereitschaftsmuster zu lernen
+S279,Ein fehlerhafter Exporter erzeugt identisch falsche Daten und passende Prüfsummen in allen Backups
+S280,Ein einzelner Bitfehler verwandelt einen Betrag in eine andere noch gültige Zahl
+S281,Zwei signierte Journale widersprechen sich nach einer Split-Brain-Phase
+S282,Ein altes Backup kennt weder gestern versandte Rechnungen noch heutige Widerrufe
+S283,Original und restaurierter Klon senden gleichzeitig plausible Lebenszeichen
+S284,Der Recoverylauf dauert so lange dass seine zu Beginn geprüften Rechte schon wieder verfallen
+S285,Neuer Client und altes Plugin interpretieren dieselbe gültige Zahl mit verschiedener Einheit
+S286,Ein optionales Plugin verlangt plötzlich eine globale Kernmigration für alle Scopes
+S287,Altes Binary öffnet einen neuen Store und ersetzt unverstandene Felder durch Defaults
+S288,Rollback startet den alten Code nachdem der neue schon eine irreversible Außenaktion ausgelöst hat
+S289,Eine Migration verliert die Verbindung genau zwischen Übergabe und Start des neuen Writers
+S290,Eine Notfallkorrektur benötigt gerade das kaputte Plugin um dessen Konfiguration zu lesen
+S291,Der einzige Maintainer verschwindet und ein Nachfolger kennt die verdeckten Betriebsannahmen nicht
+S292,Eine winzige Reparatur braucht eine nicht mehr erhältliche Toolchain und einen gelöschten Cloudaccount
+S293,Nach tausend Sonderfällen versteht niemand mehr welche Ausnahme Außenwirkung erlaubt
+S294,Ein Update der gemeinsamen JSON-Bibliothek verändert gleichzeitig Plugins Replay und Monitoring
+S295,Ein Monitoringfeature macht einen Cloudaccount zur Startvoraussetzung aller Kindscopes
+S296,Eine hilfreiche automatische Reparatur wächst zum zweiten schreibenden Kernel
+S297,Alle Tests verwenden sofortige Antworten und verpassen jede verspätete Annahme
+S298,Die virtuelle Testuhr friert Timeout und externen Monitor gemeinsam ein
+S299,Ein Mock bestätigt Fencing obwohl der reale Provider alte Generationen akzeptiert
+S300,Ein erfolgreicher Bericht vertauscht Euro Cent und Dezimalkomma
+S301,Ein schneller Cache liefert eine alte aber plausibel richtige Preisliste für heutige Bestellung
+S302,Ein Auftrag wird vollständig für die falsche reale Person mit gleichem Namen erledigt
+S303,Im Incident ist die rote Warnung für einen farbfehlsichtigen Operator nicht erkennbar
+S304,Ein langer Scopepfad wird im Mobilalarm gekürzt und der Operator stoppt die falsche Instanz
+S305,Eine übersetzte Schaltfläche macht aus unklar scheinbar sicher fehlgeschlagen
+S306,Der Alarm erreicht nachts ein ausgeschaltetes Telefon und niemand bemerkt ihn für Tage
+S307,Ein Flapping-Link erzeugt zehntausend Meldungen und verdeckt den späteren echten Totalausfall
+S308,Der Operator bestätigt einen Alarm sofort aber die Reparatur liegt drei Monate in seiner Queue
+S309,Zwei rechtmäßige Vertreter erteilen gleichzeitig gegensätzliche Freigaben
+S310,Der ausgeschiedene Betreiber kontrolliert noch den einzigen Monitoringaccount
+S311,Ein befangenes Team schaltet Alarme stumm um eigene Fehlaktionen unsichtbar zu machen
+S312,Zwei Modellanbieter Monitor und Pager nutzen denselben gestörten Cloudunterbau
+S313,Eine Zahlungssperre stoppt Modelle Backups und Alarme am selben Tag
+S314,Der einzige Provider stellt den Dienst mit 24 Stunden Frist endgültig ein
+S315,Ein Provider meldet Tokenkosten erst eine Woche nach Überschreitung des Monatsbudgets
+S316,Ein p99.999-Latenzziel führt zu hundert spekulativen Kopien pro Auftrag
+S317,Aufmerksamkeit für Fehlalarme kostet mehr als sämtliche Modellaufrufe
+S318,Eine behördliche Untersagung trifft zwischen Freigabe und später Teilnehmerannahme ein
+S319,Zwei Rechtsräume verlangen gleichzeitig Löschung und unveränderte Beweisaufbewahrung
+S320,Ein Monitoringprovider verlagert sensible Betriebsmetadaten unangekündigt in einen anderen Rechtsraum
+S321,Ein alter Auftrag öffnet nach Tagen ein physisches Ventil in einer inzwischen anderen Situation
+S322,Eine Notfallabschaltung hängt von einer Cloudantwort ab die erst morgen kommt
+S323,Ein Menschenleben wird gegen monatliches Rechenbudget automatisch abgewogen
+S324,Factory erreicht den Dienst aber keine Antwort erreicht Factory zurück
+S325,Eine Satellitenverbindung liefert signierte Pakete nach 30 Tagen stark umgeordnet
+S326,Monitoring sieht Factory nicht aber Factory erreicht weiterhin alle Businessdienste
+S327,Ein Laptop schläft ein Jahr und seine lokale monotone Uhr behandelt Suspend anders als erwartet
+S328,Die Wallclock springt rückwärts und verlängert eine Wartungsstummschaltung scheinbar um Jahre
+S329,Eine globale Zeitzonenreform ändert die Bedeutung bereits geplanter lokaler Termine
+S330,Runtime sagt beendet Dateibeobachtung zeigt neue Writes und der Agent behauptet bereit
+S331,Drei unabhängige Prüfer verwenden dieselbe fehlerhafte externe Grundtabelle
+S332,Der Provider attestiert Erfolg aber der Empfänger bestreitet jede Wirkung und Logs fehlen
+S333,Ein Agent verbessert seine Durchlaufzeit indem er schwierige Tasks vor Messbeginn ablehnt
+S334,Ein Team benennt Fehler als Wartung um die Verfügbarkeit auf hundert Prozent zu heben
+S335,Ein Modell schreibt fertige Artefakte ohne Prüfung um das Erfolgsziel zu erfüllen
+S336,Energiesparmodus schaltet nachts den Rechner ab und erzeugt täglich einen Totalausfallalarm
+S337,CO2-optimiertes Verschieben lässt eine genehmigte Aktion erst nach ihrem Verfallsdatum starten
+S338,Drei zusätzliche Monitoringcluster verbrauchen mehr als das kleine überwachte System
+S339,Restore auf anderer CPU interpretiert ein natives Binärartefakt anders
+S340,Ein Dateisystem mit anderer Großschreibung vereinigt zwei vormals verschiedene Workspacepfade
+S341,Im Jahr 2080 existieren weder heutige Modellformate noch Netzwerkprotokolle
+S342,Factory wird abgeschaltet während ein Dienst noch alte Aktionen gepuffert hat
+S343,Der Monitoringvertrag endet vor dem letzten genehmigten Exportlauf
+S344,Der Nutzer verlangt vollständige Löschung und zugleich beweissicheren Export aller früheren Geheimnisse
+S345,Rechner Monitor Mobilfunk alle Backups und alle legitimierten Empfänger verschwinden gleichzeitig
+S346,Alle vertrauenswürdigen Quellen liefern gemeinsam eine perfekt konsistente falsche Welt
+S347,Eine Außenaktion kann jederzeit in unendlicher Zukunft ankommen während Speicherung endlich bleiben muss
+S348,Monitor wird stummgeschaltet dann Mac zerstört dann der einzige Vertreterkonto gesperrt
+S349,Nach Restore erzeugt kalter Cache Retrylawine und eine späte alte Zahlung trifft ein
+S350,Ein signiertes Update fälscht Health löscht Historie und liefert perfekte Prüfberichte

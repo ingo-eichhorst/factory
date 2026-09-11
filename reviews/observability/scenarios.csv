@@ -1,0 +1,76 @@
+stressor_id;scenario
+S201;Der ganze Mac verliert Strom und kann keinen Ausfallalarm mehr senden
+S202;Der Rechner läuft aber der Factory-Daemon ist seit Stunden beendet
+S203;Der Rechner wacht nach drei Monaten mit alten wartenden Aufträgen auf
+S204;Factory und Monitoring-Mini-PC hängen an derselben ausgefallenen Steckdose
+S205;Monitor Alarmemail und Backups werden durch dieselbe Accountsperre unzugänglich
+S206;Ein regionales Ereignis trennt Rechner Mobilfunk und den einzigen Operator
+S207;Der Monitor fällt eine Stunde vor Factory aus und bleibt stumm
+S208;Der Alarmdienst bestätigt Versand aber die Nachricht landet im Spam
+S209;Ein Wartungsfenster von einer Stunde bleibt nach einem Fehler zehn Jahre stumm
+S210;Ein freier Health-Thread meldet grün während der Kernel im Deadlock steckt
+S211;Reads funktionieren aber die SSD nimmt seit gestern keinen Commit mehr an
+S212;Alle Tasks sind legitim blockiert und ein Fortschrittsalarm erzeugt dauernd Lärm
+S213;Ein Proxy liefert nach dem Rechnerausfall noch eine Woche gecachte Lebenszeichen
+S214;Nach Netzrückkehr treffen tausend alte Heartbeats schneller als echte ein
+S215;Ein restaurierter Klon sendet dieselbe alte Monitoridentität wie das Original
+S216;Ein Agent erzeugt pro Token ein neues Metriklabel bis das Monitoring abstürzt
+S217;Ein Tracingexport wartet bei jedem Commit auf einen ausgefallenen Cloudcollector
+S218;Ein Debugmodus verdoppelt die Latenz und beseitigt zugleich das untersuchte Rennen
+S219;Acht Schichten brauchen jeweils neun Sekunden bei einer Gesamtfrist von zehn
+S220;Ein Auftrag wartet 48 Stunden in der Queue und bekommt danach eine frische Fünfsekundenfrist
+S221;Ein 200-Millisekunden-Task wartet zwölf Jahre auf menschliche Freigabe
+S222;Das Dashboard zeigt nur abgeschlossene Tasks und verschweigt den seit Wochen hängenden Rest
+S223;Der Lasttest sendet erst nach jeder Antwort und erzeugt während des Hängers keine neue Last
+S224;Aus tausend schnellen Samples wird ein p99.999-Verfügbarkeitsversprechen abgeleitet
+S225;Ein Task wartet auf alle zehntausend Pluginantworten und eine kommt nie
+S226;Ein Optimierer verdoppelt langsame Rechnungsaktionen spekulativ um das Tail zu verkürzen
+S227;Ein Aggregator erklärt 999 von 1000 Prüfergebnissen für vollständig um schnell zu antworten
+S228;Eine von hunderttausend Anfragen hängt unbegrenzt und belegt über Jahre alle Slots
+S229;Nur ein bestimmter Scope erlebt minutenlange fsync-Pausen während globale Mittelwerte grün sind
+S230;Eine zufällige Speicherbereinigung trifft immer dieselbe Geschäftsdeadline
+S231;Die Antwort auf einen Versand kommt 90 Tage nach Ablauf der Idempotenzhistorie
+S232;Ein offline gepufferter Auftrag wird 2046 ausgeführt nachdem Empfänger und Firma gewechselt haben
+S233;Ein Ergebnis trifft nach legaler Löschung seiner Zuordnung ein und enthält sensible Daten
+S234;Cancel erreicht den Teilnehmer eine Mikrosekunde nach irreversibler Annahme
+S235;Der Parent stirbt nach Timeout aber ein Enkelprozess schreibt zwei Tage weiter
+S236;Ein Cancel steckt hinter Gigabytes stdout im selben Kanal fest
+S237;CLI Kernel Plugin und SDK wiederholen jeweils viermal denselben Fehler
+S238;Eine Million Clients versuchen nach identischer Pause exakt gleichzeitig erneut
+S239;Nach Quotenfehler retryt ein Plugin aggressiver und verbraucht das letzte Budget
+S240;Nach Stromrückkehr laden alle Agenten gleichzeitig ihre riesigen Modelle
+S241;Ein leerer Cache macht eine bisher optionale Suche zum Kapazitätsengpass
+S242;Kalte DNS- und TLS-Aufbauten verbrauchen die gesamte Erstaufruffrist
+S243;Ein 8-Terabyte-Export steht vor allen kleinen Kontrollabfragen
+S244;Ständig eintreffende Notfalltasks verdrängen normale Aufgaben über Monate
+S245;Unklare Agenten halten alle Workspace-Reservierungen und der Operator fordert TTL-Freigabe
+S246;Zehn Millionen registrierte Namen passen in den Store aber nicht in jede Kontextnachricht
+S247;Ein einziges Ergebnis enthält hundert Gigabytes in einem gültigen JSON-Feld
+S248;Hunderttausend langsame Subscriber halten je eine eigene Queue offen
+S249;Zwanzig Jahre Ereignisse brauchen drei Wochen Replay bei vereinbartem RTO von einer Stunde
+S250;Der Restore passt nur wenn Original Export temporäre Kopie und Index nie gleichzeitig existieren
+S251;Um Platz zu sparen werden nur Operationstombstones gelöscht und der nächste Retry dupliziert Wirkung
+S252;Nach zehn Jahren Pause sind eine Milliarde Schedule-Occurrences nachzuholen
+S253;Eine Providerstörung endet und alle blockierten Scopes starten im selben Millisekundenfenster
+S254;Ein viraler Auftrag erzeugt rekursiv Millionen Kinder bevor die Rechnung sichtbar wird
+S255;Dauerlast drosselt die CPU auf ein Zehntel und verlängert alle Fristen gleichzeitig
+S256;Die USV reicht für den Commit aber nicht für den nachfolgenden externen Versand
+S257;Lastabwurf schaltet zuerst den als unwichtig eingestuften Monitoringrouter ab
+S258;Stop wartet hinter sämtlichen überlasteten Pluginaufrufen
+S259;Der Notfallzugang verlangt einen Login beim gerade gesperrten einzigen Identitätsanbieter
+S260;Die SSD ist voll und Factory bestätigt einen Stopp den es nicht speichern konnte
+S261;Ein korrekt authentifizierter Pluginaufruf verwendet das Credential eines anderen Scopes
+S262;Ein menschenlesbarer Empfängername wird kurz vor Dispatch auf eine andere Identität umgebogen
+S263;Eine importierte Task-ID wird als Beleg einer fremden Freigabe akzeptiert
+S264;Ein Dokument behauptet Systemregel zu sein und verlangt den Upload aller Secrets
+S265;Ein Fehlerlog enthält gefälschte Bestätigungen die ein Recovery-Agent für Operatorfreigaben hält
+S266;Ein Ergebnisartefakt schmuggelt eine neue externe Aktion in seine Prüfanweisung
+S267;Ein gültig signiertes Pluginupdate exfiltriert Daten
+S268;Ein zurückgezogenes Paket wird zwanzig Jahre später für Restore aus einem übernommenen Namen geladen
+S269;Das unabhängige Monitoring erhält denselben kompromittierten Auto-Updater wie Factory
+S270;Heartbeat-Schlüsselrotation und Netzpartition überlappen sodass beide Seiten den jeweils anderen Key ablehnen
+S271;Ein zwanzig Jahre alter Vault ist lesbar aber niemand besitzt den Entschlüsselungsweg
+S272;Ein späterer kryptografischer Durchbruch macht alte sensible Exporte lesbar
+S273;Ein feindlicher Agent liest andere Scopes direkt über das Betriebssystem
+S274;Ein Mitnutzer rekonstruiert fremde Aktivität aus geteilten CPU- und Queuezeiten
+S275;Der externe Monitor erhält aus Bequemlichkeit Shellzugriff auf Factory

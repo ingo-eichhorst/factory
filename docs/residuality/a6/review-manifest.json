@@ -1,0 +1,14 @@
+{
+  "coordinator_run": "8f83af48-f692-47e6-bec2-cf69f55ac040",
+  "phase": "completed-review-and-synthesis",
+  "temporary_sessions": "All six task sessions ended after their run results and artifacts were captured; five background workspaces remain at shells",
+  "registered_review_scopes": "Retained in the instance registry; no scope or workspace deletion performed",
+  "cross_review": {"task":"a8a22587-9dfa-4f76-ae40-aa11ff603315","run":"9f4e9113-83ce-4464-94db-c2adaabfd932","agent":"factory-review-skeptic-analyst","workspace":"wJ","pane":"wJ:p1","session":"01a08709-33ee-7b53-804e-d1e8fac5af21"},
+  "reviewers": [
+    {"role":"operations","scope":"factory-review-operations","agent":"factory-review-operations-ai","workspace":"wG","pane":"wG:p1","task":"96c1fe3f-959d-43ee-85e5-77d3395aebff","run":"ad6de62d-17ea-42c3-b119-70357426b6a8","range":"S001-S100","prefix":"OP"},
+    {"role":"governance","scope":"factory-review-governance","agent":"factory-review-governance-ai","workspace":"wM","pane":"wM:p1","task":"38ca48c8-9200-4523-8070-43768092e9ac","run":"5438a2d2-2cce-4c1f-ada8-57f9d5ad47ae","range":"S101-S200","prefix":"GV"},
+    {"role":"observability","scope":"factory-review-observability","agent":"factory-review-observability-ai","workspace":"wH","pane":"wH:p1","task":"5bc13888-9f44-451b-a7b9-d230d56cdbc0","run":"c5009bc2-2c67-42d7-874e-929d9c3a4106","range":"S201-S275","prefix":"OB"},
+    {"role":"boundaries","scope":"factory-review-boundaries","agent":"factory-review-boundaries-ai","workspace":"wK","pane":"wK:p1","task":"78586823-e787-4795-8a14-3b4bd7f38956","run":"ac373bc5-f57e-44fb-aca3-feb20895edb6","range":"S276-S350","prefix":"BD"},
+    {"role":"skeptic","scope":"factory-review-skeptic","agent":"factory-review-skeptic-analyst","workspace":"wJ","pane":"wJ:p1","task":"eded5311-68b8-44c5-83c7-9c6e7e946702","run":"f0720d4c-9639-4201-a33f-7261031b113a","range":"A5 methods audit","prefix":"SK"}
+  ]
+}

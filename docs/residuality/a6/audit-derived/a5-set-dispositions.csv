@@ -1,0 +1,39 @@
+set_id,case,source_kind,source_regimes,review_disposition,retained_claim,excluded_inference
+D01.1,D01,escape-not-attractor,G03,qualified,Queue exceeds observation window; do not turn divergence into a capped fixed point,No empirical Factory attractor or preserved architectural structure established
+D01.2,D01,model-attractor,G01,qualified,Empty-backlog projection under this case input; productive ongoing demand is not present in every case,No empirical Factory attractor or preserved architectural structure established
+D01.3,D01,fixed-without-local-attraction,none,explicitly-excluded-from-residue-evidence,Separator fixed state without demonstrated local attraction,Not silently dropped and not merged with the neutral D04 family
+D01.4,D01,fixed-without-local-attraction,none,explicitly-excluded-from-residue-evidence,Separator fixed state without demonstrated local attraction,Not silently dropped and not merged with the neutral D04 family
+D02.1,D02,model-attractor,G01,qualified,Empty-backlog projection under this case input; productive ongoing demand is not present in every case,No empirical Factory attractor or preserved architectural structure established
+D03.1,D03,escape-not-attractor,G03,qualified,Queue exceeds observation window; do not turn divergence into a capped fixed point,No empirical Factory attractor or preserved architectural structure established
+D03.2,D03,model-attractor,G01,qualified,Empty-backlog projection under this case input; productive ongoing demand is not present in every case,No empirical Factory attractor or preserved architectural structure established
+D04.1,D04,model-attractor,G01,qualified,Empty-backlog projection under this case input; productive ongoing demand is not present in every case,No empirical Factory attractor or preserved architectural structure established
+D04.2,D04,fixed-without-local-attraction,G04,qualified,Neutral queue balance under exact equality of fresh arrivals and degraded service,Not the separator behavior of D01; not evidence that recovery is draining
+D04.3,D04,fixed-without-local-attraction,G04,qualified,Neutral queue balance under exact equality of fresh arrivals and degraded service,Not the separator behavior of D01; not evidence that recovery is draining
+D04.4,D04,fixed-without-local-attraction,G04,qualified,Neutral queue balance under exact equality of fresh arrivals and degraded service,Not the separator behavior of D01; not evidence that recovery is draining
+D04.5,D04,fixed-without-local-attraction,G04,qualified,Neutral queue balance under exact equality of fresh arrivals and degraded service,Not the separator behavior of D01; not evidence that recovery is draining
+D04.6,D04,fixed-without-local-attraction,G04,qualified,Neutral queue balance under exact equality of fresh arrivals and degraded service,Not the separator behavior of D01; not evidence that recovery is draining
+D04.7,D04,fixed-without-local-attraction,G04,qualified,Neutral queue balance under exact equality of fresh arrivals and degraded service,Not the separator behavior of D01; not evidence that recovery is draining
+D04.8,D04,fixed-without-local-attraction,G04,qualified,Neutral queue balance under exact equality of fresh arrivals and degraded service,Not the separator behavior of D01; not evidence that recovery is draining
+D05.1,D05,model-attractor,G02,qualified,Pending queue 2,No empirical Factory attractor or preserved architectural structure established
+D06.1,D06,model-attractor,G06,qualified,Process running after bootstrap,Ordinal capped pressure and chosen cooling law do not prove physical boundedness; see SK05
+D06.2,D06,model-attractor,G05,qualified,Repeated failed starts; backoff may only change the period,Ordinal capped pressure and chosen cooling law do not prove physical boundedness; see SK05
+D07.1,D07,model-attractor,G06,qualified,Process running after bootstrap,Ordinal capped pressure and chosen cooling law do not prove physical boundedness; see SK05
+D08.1,D08,model-attractor,G07,qualified,Repeated failed starts; backoff may only change the period,Ordinal capped pressure and chosen cooling law do not prove physical boundedness; see SK05
+D09.1,D09,policy-hold,G08,qualified,No automatic restart; host resources can cool,No empirical Factory attractor or preserved architectural structure established
+D10.1,D10,model-attractor,G09,qualified,Disposable notification-counter behavior with reset/grouping; no unresolved-incident preservation established; permanent mute is policy-maintained suppression,Do not infer durable incidents or retained human backlog; see SK01
+D11.1,D11,model-attractor,G10,qualified,Disposable notification-counter behavior with reset/grouping; no unresolved-incident preservation established,Do not infer durable incidents or retained human backlog; see SK01
+D12.1,D12,model-attractor,G11,qualified,Disposable notification-counter behavior with reset/grouping; no unresolved-incident preservation established,Do not infer durable incidents or retained human backlog; see SK01
+D13.1,D13,externally-maintained-hold,G12,qualified,Disposable notification-counter behavior with reset/grouping; no unresolved-incident preservation established,Do not infer durable incidents or retained human backlog; see SK01
+D14.1,D14,model-attractor,G13,qualified,Confidence reinforces around a fixed artifact while post-acceptance review continues,No attraction of artifact content toward falsehood; see SK06
+D15.1,D15,policy-hold,G14,qualified,Wrong artifact retained but not accepted,No empirical Factory attractor or preserved architectural structure established
+D16.1,D16,model-attractor,G15,qualified,Stipulated oracle correction plus continued review; work-level completion is an alternative projection,No demonstrated independent real oracle or autonomous productive service
+D17.1,D17,externally-driven-cycle,G16,qualified,Alternating writers overwrite one another,No empirical Factory attractor or preserved architectural structure established
+D18.1,D18,clock-cycle-only,G17,qualified,Writer turn still alternates but business value is stable under enforced fencing,No empirical Factory attractor or preserved architectural structure established
+D19.1,D19,information-starved-hold,G18,qualified,Outcome unknown; no new call is made,No empirical Factory attractor or preserved architectural structure established
+D20.1,D20,absorbing-damage-fact,G20,qualified,At least two effects happened; future service state is not modelled,No empirical Factory attractor or preserved architectural structure established
+D21.1,D21,ordinary-completion,G21,qualified,One effect confirmed after delay; not evidence of autonomous attraction,No empirical Factory attractor or preserved architectural structure established
+D22.1,D22,information-starved-hold,G19,qualified,Outcome unknown; repeated calls are deduplicated but still consume resources,No empirical Factory attractor or preserved architectural structure established
+D23.1,D23,absorbing-damage-fact,G20,qualified,At least two effects happened; future service state is not modelled,No empirical Factory attractor or preserved architectural structure established
+D24.1,D24,absorbing-damage-fact,G20,qualified,At least two effects happened; future service state is not modelled,No empirical Factory attractor or preserved architectural structure established
+D25.1,D25,policy-hold,G22,qualified,Restored intent cannot dispatch automatically,No empirical Factory attractor or preserved architectural structure established
+D26.1,D26,model-attractor,G01,qualified,Empty-backlog projection under this case input; productive ongoing demand is not present in every case,No empirical Factory attractor or preserved architectural structure established

@@ -1,0 +1,89 @@
+{
+  "base_freeze_sha256": "b70f2f068b525e15a323d5fc46accfe1fad5967a00090cc76c0c7e89a68a8ff9",
+  "patches": [
+    {
+      "branch_id": "S156.B01", "finding": "A7S01",
+      "expected": {"residue_ids": ["GVR036"]},
+      "set": {
+        "conditions": "Falsches lokales Rootpaket liegt vor, korrektes Projektpaket ist noch nicht erzeugt. Ein konkreter Publikationsauftrag und sein Ablehnungsgrund sind rechtmäßig dauerhaft erhalten. Die Prüfung erkennt Companyinhalte und alle betroffenen noch nicht angenommenen Publikationspfade bleiben tatsächlich gesperrt.",
+        "residue_ids": ["GVR005"],
+        "reason": "Nutzbar ist nur die erhaltene gesperrte Publikationsabsicht mit dem konkreten Prüfbedarf. Ein sauberes Projektpaket existiert in diesem Zweig noch nicht und wird nicht als Residue gezählt.",
+        "validation": "Nur falsches Rootpaket und gehaltenen Auftrag bereitstellen: Inspektion und Nichtsendung müssen ohne jemals erzeugtes korrektes Paket möglich sein. Fehlt die gespeicherte Hülle oder ist ein Sendepfad ungesperrt, trägt auch GVR005 nicht."
+      }
+    },
+    {
+      "branch_id": "S074.B02", "finding": "A7S02",
+      "expected": {"residue_ids": ["OPR002", "OPR001"]},
+      "set": {
+        "residue_ids": ["KOR001", "OPR001"],
+        "reason": "Der erhaltene Task und seine unverbrauchte gültige Zustellrevision erlauben die ursprüngliche begrenzte Aufnahme. Es gibt ausdrücklich noch keinen historischen Versuchsrecord und daher kein OPR002."
+      }
+    },
+    {
+      "branch_id": "S074.B03", "finding": "A7S02",
+      "expected": {"residue_ids": ["OPR002"]},
+      "set": {
+        "conditions": "Mindestens ein früherer Versuch ist dauerhaft belegt und seine damalige Autorisierung verbraucht. Nach Einsicht entscheidet ein berechtigter Operator über eine zusätzliche Zustellrevision. Historie bleibt unverändert und neuer Rest wird atomar mit der neuen Entscheidung erhalten; übrige Guards gelten weiter.",
+        "residue_ids": ["OPR002", "KOR001"],
+        "reason": "OPR002 erhält die frühere Versuchsevidenz und deren verbrauchte Erlaubnis. KOR001 bezeichnet ausschließlich den zusätzlichen gültigen Rest der neuen Revision. Keines klärt frühere Außenwirkung oder Workspacebesitz."
+      }
+    },
+    {
+      "branch_id": "S054.B01", "finding": "A7S03",
+      "expected": {"residue_ids": ["OPR018", "OPR014"]},
+      "set": {"residue_ids": ["OPR018", "OBR029"], "reason": "Die Kernreserve und der begrenzte autorisierte Subscriber-Cursor bleiben nutzbar. Der Cursor bezeichnet vorhandenen Ereignisbereich und mögliche Retentionslücke, nicht eine Runtime-Sessiongeneration."}
+    },
+    {
+      "branch_id": "S054.B02", "finding": "A7S03",
+      "expected": {"residue_ids": ["OPR014", "OPR004"]},
+      "set": {"residue_ids": ["OBR029", "OPR004"], "reason": "Der Subscriber liest den tatsächlich erhaltenen Ereignissuffix zu seinem autorisierten Cursor. Kanonische Eingaben erlauben die Rekonstruktion innerhalb dieses Horizonts, ohne eine Runtimeobservation zu benötigen."}
+    },
+    {"branch_id": "S130.B02", "finding": "A7S04", "expected": {"kind": "attraktorhypothese"}, "set": {"kind": "eskalation"}},
+    {"branch_id": "S196.B02", "finding": "A7S04", "expected": {"kind": "attraktorhypothese"}, "set": {"kind": "eskalation"}},
+    {"branch_id": "S235.B02", "finding": "A7S04", "expected": {"kind": "eskalation"}, "set": {"kind": "konflikt"}},
+    {"branch_id": "S245.B02", "finding": "A7S04", "expected": {"kind": "eskalation"}, "set": {"kind": "konflikt"}},
+    {
+      "branch_id": "S127.B01", "finding": "A7S07",
+      "expected": {"conditions": "Aktueller unabhängiger Widerrufsstand ist am letzten Zulassungspfad wirksam oder Unklarheit schließt den Pfad."},
+      "set": {
+        "conditions": "Ein ausdrücklich verwaltetes maßgebliches Widerrufsregister außerhalb des zurückgesetzten Factory-Stores ist aktuell und authentisch abfragbar. Der Autoritätsadapter bindet Antwort an Principal Scope Grantrevision und Gültigkeit; der letzte kontrollierte Zulassungspfad weist das alte Token anhand dieses tatsächlich verfügbaren Stands ab.",
+        "reason": "M02 nutzt den tatsächlich verfügbaren aktuellen Stand aus dem unabhängig verwalteten Register über M16. M01 liefert nur historische lokale Fakten. Der Zweig behauptet GVR011 nicht bei ausgefallener Gegenquelle; frühere Wirkungen bleiben getrennt."
+      }
+    }
+  ],
+  "appends": [
+    {
+      "stressor_id": "S156", "after_count": 2, "finding": "A7S01",
+      "branches": [{
+        "state": "Tatsächlich vorhandenes geprüftes Projektpaket bleibt nutzbar", "kind": "abschluss",
+        "conditions": "Ein separates korrekt auf den erlaubten Projektumfang begrenztes Paket ist tatsächlich erzeugt und geprüft. Seine unveränderten Bytes sind rechtmäßig erhalten und außerhalb der Fehlwahl des Rootpakets eindeutig adressierbar. Eine Sendefreigabe wird daraus nicht abgeleitet.",
+        "persistence": "Die begrenzte Inhaltsprüfung ist abgeschlossen. Das Paket bleibt für berechtigte Nachprüfung oder spätere gesondert erlaubte Veröffentlichung nutzbar, solange Inhalt Rechte und Abnahmegrenze gelten.",
+        "residue_ids": ["GVR036"], "residue_status": "bedingt",
+        "reason": "Erst hier existiert der von GVR036 bezeichnete saubere Projektobjektgraph. M07 hält die Bytes, M15 den erlaubten Umfang und M02 eine davon getrennte aktuelle Sendefreigabe.",
+        "validation": "Wenn nur das falsche Rootpaket vorhanden ist oder die geprüften Bytes später ausgetauscht werden, fehlt dieses Residue. Ohne gesonderte gültige Freigabe darf das vorhandene Paket nicht versandt werden."
+      }]
+    },
+    {
+      "stressor_id": "S350", "after_count": 4, "finding": "A7S05",
+      "branches": [{
+        "state": "Unabhängiger Zeuge erkennt Abweichung ohne Eingriffsgewalt", "kind": "ungewissheit",
+        "conditions": "Ein anders verwalteter Nur-Lese-Zeuge besitzt eine passende unabhängig erhaltene Vergleichsgrundlage und erkennt eine konkrete Fälschung. Eine legitime handlungsfähige externe Entzugsstelle ist aber nicht erreichbar oder hat keinen wirksamen Zugriff auf den betroffenen OS-/Teilnehmerpfad.",
+        "persistence": "Der Gegenbeleg kann erhalten bleiben, während der bösartige Code weiter wirksam ist. Mehr Beobachtung verleiht dem Zeugen keine Eingriffsbefugnis und stellt keinen sicheren Betrieb her.",
+        "residue_ids": ["OBR038"], "residue_status": "teilweise",
+        "reason": "Es bleibt nur die begrenzte unabhängige Beobachtungsfähigkeit. Der zusammengesetzte Vergleichs- und Entzugsvertrag BDR037 ist mangels Akteur oder wirksamem Entzug gerade nicht erfüllt.",
+        "validation": "Kontrollierter Zeuge entdeckt die Fälschung bei bewusst fehlendem Shell-, Schreib- und Reparaturrecht. Die Ausgabe darf keinen Entzug oder Behebung behaupten."
+      }]
+    },
+    {
+      "stressor_id": "S127", "after_count": 2, "finding": "A7S07",
+      "branches": [{
+        "state": "Gegenquelle fehlt und eine konkrete neue Handlung bleibt gehalten", "kind": "halt",
+        "conditions": "Der alte lokale Grant ist lesbar, aber aktueller externer Widerrufsstand ist nicht verfügbar oder nicht frisch belegbar. Eine konkrete neue Effekthülle ist rechtmäßig erhalten und die vollständige Vermittlung hält sie vor Annahme an, statt den alten Grant als aktuell zu verwenden.",
+        "persistence": "Die Handlung bleibt bis zu tragfähiger aktueller Befugnis ungeklärt und gesperrt. Aus dem Halt entsteht kein Wissen darüber, ob und wann extern widerrufen wurde.",
+        "residue_ids": ["GVR001", "GVR005"], "residue_status": "teilweise",
+        "reason": "Historischer Bestand und konkrete gehaltene Absicht sind nutzbar. Der aktuelle Widerrufsstand GVR011 ist in diesem Zweig ausdrücklich nicht verfügbar.",
+        "validation": "Nach altem Snapshot einen Widerruf setzen und anschließend die unabhängige Quelle unerreichbar machen: neue vermittelte Handlung bleibt aus, aber kein aktueller Widerrufsbeleg wird erfunden."
+      }]
+    }
+  ]
+}

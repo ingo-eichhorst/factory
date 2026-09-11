@@ -1,0 +1,1 @@
+Generated exclusively by docs/residuality/a4/build.py.

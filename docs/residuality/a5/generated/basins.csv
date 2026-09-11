@@ -1,0 +1,39 @@
+set_id,case,model,kind,recurrent_states,seed_count,perturbation_count,returned_count,meaning
+D01.1,D01,queue,escape-not-attractor,"[[""outside-observation-window""]]",7,0,0,Queue exceeds observation window; do not turn divergence into a capped fixed point
+D01.2,D01,queue,model-attractor,[[0]],4,1,1,Pending queue 0
+D01.3,D01,queue,fixed-without-local-attraction,[[4]],1,2,0,Pending queue 4
+D01.4,D01,queue,fixed-without-local-attraction,[[5]],1,2,0,Pending queue 5
+D02.1,D02,queue,model-attractor,[[0]],13,1,1,Pending queue 0
+D03.1,D03,queue,escape-not-attractor,"[[""outside-observation-window""]]",7,0,0,Queue exceeds observation window; do not turn divergence into a capped fixed point
+D03.2,D03,queue,model-attractor,[[0]],6,1,1,Pending queue 0
+D04.1,D04,queue,model-attractor,[[0]],6,1,1,Pending queue 0
+D04.2,D04,queue,fixed-without-local-attraction,[[10]],1,2,0,Pending queue 10
+D04.3,D04,queue,fixed-without-local-attraction,[[11]],1,2,0,Pending queue 11
+D04.4,D04,queue,fixed-without-local-attraction,[[12]],1,2,0,Pending queue 12
+D04.5,D04,queue,fixed-without-local-attraction,[[6]],1,2,0,Pending queue 6
+D04.6,D04,queue,fixed-without-local-attraction,[[7]],1,2,0,Pending queue 7
+D04.7,D04,queue,fixed-without-local-attraction,[[8]],1,2,0,Pending queue 8
+D04.8,D04,queue,fixed-without-local-attraction,[[9]],1,2,0,Pending queue 9
+D05.1,D05,queue,model-attractor,[[2]],13,2,2,Pending queue 2
+D06.1,D06,restart,model-attractor,"[[1, 0, 0, ""run""]]",3,2,2,Process running after bootstrap
+D06.2,D06,restart,model-attractor,"[[6, 0, 0, ""boot""]]",4,1,1,Repeated failed starts; backoff may only change the period
+D07.1,D07,restart,model-attractor,"[[1, 0, 0, ""run""]]",7,2,2,Process running after bootstrap
+D08.1,D08,restart,model-attractor,"[[0, 0, 0, ""boot""], [2, 3, 0, ""boot""], [1, 2, 0, ""boot""], [0, 1, 0, ""boot""]]",7,6,6,Repeated failed starts; backoff may only change the period
+D09.1,D09,restart,policy-hold,"[[0, 0, 3, ""quarantine""]]",7,1,1,No automatic restart; host resources can cool
+D10.1,D10,alarm,model-attractor,"[[0, -1]]",7,1,1,Permanent suppression induced by the assumed overload response
+D11.1,D11,alarm,model-attractor,"[[0, 0], [3, 0], [6, 0], [0, 3], [0, 2], [0, 1]]",7,7,7,Alarm flood and mute alternate
+D12.1,D12,alarm,model-attractor,"[[0, 0]]",7,1,1,Alert queue serviceable under the assumed arrival grouping
+D13.1,D13,alarm,externally-maintained-hold,"[[1, 0]]",7,2,2,Bounded pending incident but no human service
+D14.1,D14,verification,model-attractor,"[[4, true, ""accepted""]]",5,1,1,Wrong artifact confidently accepted
+D15.1,D15,verification,policy-hold,"[[0, true, ""held""]]",5,1,0,Wrong artifact retained but not accepted
+D16.1,D16,verification,model-attractor,"[[4, false, ""accepted""]]",5,1,1,Corrected artifact accepted under a stipulated perfect repair oracle
+D17.1,D17,writer,externally-driven-cycle,"[[0, 1], [1, 0]]",4,2,2,Alternating writers overwrite one another
+D18.1,D18,writer,clock-cycle-only,"[[0, 0], [0, 1]]",4,2,2,Writer turn still alternates but business value is stable under enforced fencing
+D19.1,D19,effect,information-starved-hold,"[[""unknown"", 1, 3]]",1,1,1,Outcome unknown; no new call is made
+D20.1,D20,effect,absorbing-damage-fact,"[[""damage"", 2, 0]]",1,0,0,At least two effects happened; future service state is not modelled
+D21.1,D21,effect,ordinary-completion,"[[""confirmed"", 1, 3]]",1,1,0,One effect confirmed after delay; not evidence of autonomous attraction
+D22.1,D22,effect,information-starved-hold,"[[""unknown"", 1, 3]]",1,1,1,Outcome unknown; repeated calls are deduplicated but still consume resources
+D23.1,D23,effect,absorbing-damage-fact,"[[""damage"", 2, 0]]",1,0,0,At least two effects happened; future service state is not modelled
+D24.1,D24,effect,absorbing-damage-fact,"[[""damage"", 2, 0]]",1,0,0,At least two effects happened; future service state is not modelled
+D25.1,D25,effect,policy-hold,"[[""quarantine"", 1, 0]]",1,0,0,Restored intent cannot dispatch automatically
+D26.1,D26,queue,model-attractor,[[0]],13,1,1,Pending queue 0

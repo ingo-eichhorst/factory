@@ -1,0 +1,101 @@
+stressor_id;scenario
+S001;Netzstrom fällt während Commit und Prompt-Übergabe aus
+S002;Akku bläht sich auf und Gerät muss sofort außer Betrieb
+S003;Thermal Throttling macht alle Deadline-Schätzungen falsch
+S004;RAM-Fehler korrumpiert ein Ergebnis ohne Prozesscrash
+S005;Einbruch entwendet den entsperrten einzigen Mac
+S006;Brand vernichtet Gerät und daneben gelagerte Backupplatte
+S007;Externe SSD trennt sich bei Scope-Kanonisierung
+S008;macOS startet mitten in einer Freigabe ungefragt neu
+S009;Hardware ersetzt Apple Silicon durch inkompatible Plattform
+S010;Wohnort verliert eine Woche Strom und Internet
+S011;SSD ist vor dem Intent-Commit voll
+S012;Bitrot beschädigt einen alten kanonischen Event
+S013;Projektionsmigration endet nach halber Tabellenänderung
+S014;WAL-Datei wird beim Dateikopieren vergessen
+S015;Restore stellt eine Woche alte Tasks ohne spätere Versuche her
+S016;Referenziertes Artefakt wurde manuell gelöscht
+S017;Backup-Key ist verloren obwohl alle Backups intakt sind
+S018;Reduktor liest heutige Registry beim historischen Replay
+S019;Schema enthält neueren Payload-Typ als installiertes Binary
+S020;Backup-Retention löscht die einzige Kopie benötigter Inhalte
+S021;Sommerzeit wiederholt dieselbe lokale Cron-Minute
+S022;Sommerzeit überspringt geplanten Zeitpunkt
+S023;NTP setzt Uhr zwölf Stunden zurück
+S024;Laptop erwacht nach sechs Wochen mit tausenden fälligen Runs
+S025;Zeitzonenregeln ändern sich nach Schedule-Erstellung
+S026;Zwei Teilnehmer bestätigen Wirkungen mit widersprüchlichen Uhrzeiten
+S027;Freigabe läuft während langem Plugin-Start ab
+S028;Ein Task verarbeitet einen inzwischen abgelaufenen Preis
+S029;Maschine geht während monotonic-basierter Frist in Sleep
+S030;Cron-Plugin feuert denselben Trigger nach jedem Neustart erneut
+S031;Herdr ist unerreichbar während der Harness weiter Dateien schreibt
+S032;Pane-ID wird nach Neustart einer anderen Session gegeben
+S033;Transcript-Dateiname verliert die erwartete UUID
+S034;Hook fehlt aber Screen-Parser meldet idle
+S035;Harness meldet done nach einem Zwischenturn
+S036;Alte autoritative Beobachtung trifft nach neuer Session ein
+S037;Zwei Case-Varianten desselben Workspace werden parallel reserviert
+S038;Ein untergeordneter Prozess überlebt den gestoppten Harness
+S039;Temporärer Worker wartet tagelang auf Permission
+S040;Herdr-Restart wird fälschlich als kompletter Maschinenneustart klassifiziert
+S041;Plugin schreibt Debugtext auf stdout zwischen Protokollframes
+S042;Plugin meldet einen Frame von mehreren Terabytes an
+S043;Plugin beantwortet Healthchecks aber blockiert jede Geschäftsoperation
+S044;Plugin crasht sofort nach jedem automatischen Restart
+S045;Optionales Pluginmanifest ist syntaktisch kaputt
+S046;Plugin liefert Erfolg vor dauerhaftem Commit beim Teilnehmer
+S047;Plugin-Unterprozess verbraucht alle File Descriptors
+S048;Kompatibles Major-Protokoll ändert die Bedeutung eines optionalen Felds
+S049;Ein Scope deaktiviert Plugin während dessen Effekt in flight ist
+S050;Plugin behauptet reversibel aber inverse Operation verliert Daten
+S051;Netz partitioniert nach externer Annahme vor Response
+S052;Provider DNS zeigt auf falschen Endpunkt
+S053;TLS-Zertifikat läuft ab während langer Offlinephase
+S054;WebSocket-Client liest nie seine Events
+S055;HTTP-Transport fällt aus während lokaler Betrieb intakt ist
+S056;Remote-Client zeigt tagelang gecachten Status running
+S057;Netzwerk-Antworten kommen doppelt und vertauscht
+S058;Ein nicht-lokaler Listener wird versehentlich öffentlich gebunden
+S059;Tailscale und SSH fallen gemeinsam aus während Operator fern ist
+S060;Teilnehmer drosselt alle Anfragen über Tage mit Rate Limit
+S061;Registry benennt Zielagent um nachdem Task queued wurde
+S062;Scope-Verzeichnis wird gelöscht und am selben Pfad ersetzt
+S063;Symlink ändert Ziel zwischen Validierung und Dateischreibzugriff
+S064;Parent-Scope verschiebt sich und ändert Delegationsrechte
+S065;Zwei Klone derselben Installation starten auf getrennten Macs
+S066;Client zeigt legitime Session-ID eines anderen Agents vor
+S067;Task delegiert A nach B nach C nach A
+S068;Agent erzeugt statt Weiterdelegation immer neue identische Tasks
+S069;Scope wird stillgelegt während alte Tasks und Memory existieren
+S070;Case-sensitive Export wird auf case-insensitive Dateisystem restauriert
+S071;CLI wiederholt create nach verlorener Antwort
+S072;Cancel trifft nach Zustellcommit aber vor Writer-Aufruf ein
+S073;Zwei Assignments sehen denselben idle Worker
+S074;Blocked Task wird requeued ohne neue Zustellautorisierung
+S075;Worker liefert Artefaktpfad der auf später überschreibbare Datei zeigt
+S076;Taskergebnis enthält mehrere Gigabytes Text
+S077;Permanent Agent bearbeitet neue Aufgabe während alte auf Permission wartet
+S078;Process-Executor Exitcode null obwohl Output leer ist
+S079;Taskprompts enthalten Shell-Metazeichen für Process-Executor
+S080;Worker stirbt nach fertigem Artefakt vor Result-Commit
+S081;Zahlungsprovider ignoriert Idempotency-Key
+S082;Email wurde gesendet aber Versandplugin crasht
+S083;Mensch genehmigt Rechnung A während Payload auf Rechnung B wechselt
+S084;Freigabe wird nach Annahme beim Teilnehmer widerrufen
+S085;Saga kompensiert Änderung die inzwischen ein Mensch weiterbearbeitet hat
+S086;Kompensation schlägt wiederholt fehl
+S087;Zwei verschiedene Tasks bestellen fachlich dasselbe Produkt
+S088;Provider berechnet beim Retry einen neuen Preis
+S089;Geplanter Reportversand enthält nach Refresh neue vertrauliche Zeilen
+S090;Teilnehmer löscht Operationhistorie bevor Factory rekonziliert
+S091;Einziger Operator ist drei Tage offline
+S092;Operator bestätigt hundert Dialoge im Alarmsturm reflexhaft
+S093;Vertreter übernimmt ohne Wissen über laufende Außenwirkungen
+S094;Operator verwechselt Produktions- und Fixture-Instanz
+S095;Operator kopiert Backup per Hand statt Restore-Prozess
+S096;Mensch beendet pane manuell und schreibt später im selben Workspace
+S097;Nur zuständiger Owner versteht eine Blockerbeschreibung
+S098;Operator ist bei Abnahme seines eigenen fehlerhaften Ergebnisses befangen
+S099;Mensch fordert Sofortstart trotz unklarer alter Lease
+S100;Operator verliert alle Zugänge und Recoveryanweisungen liegen nur auf dem Gerät

@@ -1,0 +1,53 @@
+{
+  "result": "PASS",
+  "scope": "Mechanical CSV headers, nonempty cells, exact scenario coverage, unique IDs, destination and inline state references, coverage/trajectory agreement, no unused states, report existence and evidence disclaimer.",
+  "not_validated": "Semantic truth, completeness of every causal branch, empirical attraction, implementation safety, legal authority, or real-world recoverability.",
+  "counts": {
+    "scenarios": 75,
+    "states": 37,
+    "trajectories": 75,
+    "coverage": 75
+  },
+  "coverage_statuses": {
+    "conditional": 69,
+    "unresolved": 6
+  },
+  "state_kinds": {
+    "ordinary completion": 1,
+    "policy hold": 4,
+    "information-starved wait": 6,
+    "erroneous completion": 1,
+    "attractor hypothesis": 8,
+    "absorbing loss": 3,
+    "externally driven cycle": 2,
+    "transient exposure": 1,
+    "dependency deadlock": 1,
+    "externally sustained outage": 1,
+    "unresolved dynamics": 1,
+    "externally sustained control regime": 1,
+    "service loss relative to a boundary": 1,
+    "transient with uncertain horizon": 1,
+    "policy-retained timing error": 1,
+    "absorbing loss conditional on overwrite": 1,
+    "epistemic indistinguishability": 1,
+    "externally sustained partial partition": 1,
+    "externally sustained wait": 1
+  },
+  "unresolved_stressors": [
+    "S319",
+    "S323",
+    "S338",
+    "S341",
+    "S344",
+    "S347"
+  ],
+  "sha256": {
+    "scenarios.csv": "fdd0478d2067d77dc29a5829941fb11940d742200c0fefd0f29ebca46b23ffb2",
+    "states.csv": "5a03856392e7dab9a35cf596a087d9aa3b239015c27bf476c2dd3bf60b30ee3f",
+    "trajectories.csv": "fb92f85494cfc2009828dace17ee2d23ac86ceeee7783b9092a11f46e6a46f1f",
+    "coverage.csv": "8a4c5d89d482f8c5c321b6c6eed3e7ed8b29d4397190da30d21b5c37eb09deec",
+    "report.md": "cf164edbc8a96097fec44de01d06842c7a28ecee3970f168b5d2db9f76f907ef",
+    "build_review.py": "77af9b5c49a6cdc3066fc1ad00b4792b7ba392fb8930f6d7898d8f74037d01fb",
+    "validate_review.py": "f53a36c209d41969daa93108999068940e337f752abf79a696bb3963ba775af7"
+  }
+}

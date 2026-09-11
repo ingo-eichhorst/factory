@@ -1,0 +1,1 @@
+Generated exclusively by docs/residuality/a7/build.py. Not evidence of product resilience.

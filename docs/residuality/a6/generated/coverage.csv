@@ -1,0 +1,351 @@
+reviewer,stressor_id,state_ids,analysis_status,reason
+operations,S001,OP002 OP001 OP014 OP006,conditional,Cut position separates no write from possibly delivered work and hardware loss.
+operations,S002,OP002 OP014 OP001 OP006,conditional,Forced shutdown need not destroy readable disk or independent copies.
+operations,S003,OP001 OP003 OP004,conditional,Reduced service and retry amplification require different load conditions.
+operations,S004,OP005 OP026 OP001,conditional,Silent wrong bytes persist only if semantic validation accepts them.
+operations,S005,OP002 OP007 OP001 OP006,conditional,Owner outage and exposed authority are separate consequences of theft.
+operations,S006,OP006 OP002 OP011 OP001,conditional,Absorbing loss requires verifying the all-copies inventory.
+operations,S007,OP008 OP026 OP025 OP001,conditional,Disconnect timing separates failed validation from later identity substitution.
+operations,S008,OP002 OP017 OP014 OP022 OP028,conditional,Approval persistence and external acceptance have separate restart cut points.
+operations,S009,OP002 OP001,conditional,Runtime portability and data readability are independent missing prerequisites.
+operations,S010,OP002 OP033 OP001 OP003 OP022,conditional,Shared power/network failure preserves only independently available paths.
+operations,S011,OP008 OP001,conditional,Failed prerequisite commit prevents this delivery writer from being called.
+operations,S012,OP009 OP005 OP006,conditional,Detected replay failure differs from valid-looking undetected corruption.
+operations,S013,OP001 OP009,conditional,Halfway execution of transactional statements is not half-committed schema.
+operations,S014,OP011 OP009 OP001,conditional,Omitted WAL can mean missing tail inconsistent copy or harmless checkpointed data.
+operations,S015,OP011 OP023 OP001 OP028 OP014,conditional,Restore cannot infer later attempts that were never in its snapshot.
+operations,S016,OP012 OP001 OP006,conditional,A stored path can survive while exact artifact content is gone.
+operations,S017,OP013 OP001 OP006,conditional,Lost known key differs from proven absence of every recovery key.
+operations,S018,OP010 OP001 OP009,conditional,Present registry affects replay only if reducer output actually depends on it.
+operations,S019,OP009 OP001 OP005,conditional,Relational schema migration does not establish new event-payload decoding.
+operations,S020,OP012 OP006 OP001,conditional,Retention loss is irreversible only for needed unique content.
+operations,S021,none,unresolved,Missing DST-fold occurrence identity and durable trigger-key policy.
+operations,S022,none,unresolved,Missing nonexistent-local-time policy and intended misfire behavior.
+operations,S023,none,unresolved,Missing wall/monotonic clock mapping and backward-step handling.
+operations,S024,OP001 OP003 OP004,conditional,A finite wake backlog drains unless arrivals or endogenous generation sustain it.
+operations,S025,none,unresolved,Missing timezone-rule pinning and already-materialized occurrence policy.
+operations,S026,none,unresolved,Missing remote causal evidence and business relevance of timestamp order.
+operations,S027,OP017 OP027 OP028 OP022,conditional,Approval expiry must be compared with acceptance not merely plugin readiness.
+operations,S028,OP005 OP027 OP017 OP001,conditional,Expired price can be invalid current work or valid intended historical data.
+operations,S029,none,unresolved,Missing concrete monotonic primitive suspend accounting and restart semantics.
+operations,S030,OP026 OP001 OP023 OP003,conditional,Restart trigger repetition is harmless only with retained occurrence identity.
+operations,S031,OP015 OP001 OP016,conditional,Observer outage leaves possible continuing file work and workspace uncertainty.
+operations,S032,OP015 OP025 OP016,conditional,Known UUID mismatch is rejected but missing identity takes another branch.
+operations,S033,OP025 OP001 OP015,conditional,Filename parsing failure removes a discriminating identity comparison.
+operations,S034,OP001 OP015 OP024,conditional,Adapter suppresses hook-absent task signals but caller/UI behavior may differ.
+operations,S035,OP001 OP005,conditional,Intermediate done does not complete a task through the inspected adapter.
+operations,S036,none,unresolved,Missing observation generation/order and caller binding beyond UUID comparison.
+operations,S037,OP026 OP001,source-supported,One-store stable-FileId reservations serialize and reject the second alias.
+operations,S038,OP016 OP001 OP034,conditional,Parent exit is not proof surviving descendants lack write capability.
+operations,S039,OP017 OP031 OP026 OP001,conditional,Blocked nonterminal assignment still occupies a temporary worker.
+operations,S040,OP001 OP016 OP015,conditional,Common presumed-gone recovery can recreate records without proving old writer death.
+operations,S041,OP018 OP022,conditional,Designed framing failure and in-flight effect uncertainty are independent.
+operations,S042,OP018 OP021 OP008 OP002,conditional,Frame containment depends on checking declared size before allocation.
+operations,S043,OP020 OP022 OP004 OP021,conditional,Health success need not imply useful business-operation progress.
+operations,S044,OP019 OP018,conditional,Finite restart budget bounds cycle unless policy resets the budget.
+operations,S045,OP018 OP026 OP021 OP002,conditional,Optional manifest isolation and safe-mode parse ordering remain design assumptions.
+operations,S046,OP005 OP022 OP001 OP028,conditional,Participant durability cannot be created by persisting its premature success claim.
+operations,S047,OP018 OP021 OP008 OP002,conditional,Subprocess isolation does not by itself prove per-process resource limits.
+operations,S048,none,unresolved,Missing changed field semantics schema compatibility and affected invariant.
+operations,S049,OP028 OP022 OP001,conditional,Disabling new dispatch does not undo already accepted in-flight work.
+operations,S050,OP030 OP006 OP026 OP017,conditional,Lossy inverse contradicts declared reversibility rather than proving rollback.
+operations,S051,OP022 OP028 OP001 OP023,conditional,Accepted effect and lost response create knowledge uncertainty not known failure.
+operations,S052,OP020 OP021 OP007 OP027,conditional,Wrong DNS is not impersonation when peer authentication rejects it.
+operations,S053,OP020 OP021 OP007 OP001,conditional,Expired certificate blocks strict clients but unsafe bypass is a different branch.
+operations,S054,OP021 OP024 OP003 OP008 OP001,conditional,Slow-client containment requires bounded buffers across the entire delivery path.
+operations,S055,OP021 OP001 OP031,conditional,Given intact local operation HTTP-only failure is a partial-service case.
+operations,S056,OP024 OP001 OP017 OP034 OP023,conditional,Cached running is an observer claim not a task's actual persistent state.
+operations,S057,OP026 OP001 OP024 OP025 OP023,conditional,Duplicate/reordered responses cause duplicate effects only with extra bad handling.
+operations,S058,OP001 OP007 OP027,conditional,Public reachability alone does not prove unauthorized capability or disclosure.
+operations,S059,OP033 OP001 OP031,conditional,Independent local work may continue while every remote control path is gone.
+operations,S060,OP020 OP003 OP001 OP004,conditional,Continued rate limiting is external forcing unless retries worsen the condition.
+operations,S061,OP001 OP026 OP031 OP025,conditional,Queued scope identity and later agent-name selection are distinct bindings.
+operations,S062,OP025 OP026 OP015 OP012,conditional,Same path after deletion is not proof of the original directory object.
+operations,S063,OP025 OP027 OP026 OP001,conditional,Canonical validation alone does not establish descriptor-bound later writes.
+operations,S064,OP026 OP031 OP010 OP025,conditional,Historical authorization and future current-policy authorization must be separated.
+operations,S065,OP023 OP025 OP016 OP001,conditional,One-database lease exclusivity does not fence two independent clones.
+operations,S066,OP026 OP007 OP025,conditional,An existing session UUID is not evidence of authenticated ownership.
+operations,S067,OP026 OP001,source-supported,Preserved chain membership is refused before a new delegated task is written.
+operations,S068,OP004 OP023 OP026 OP001,conditional,Fresh-task reproduction is outside simple retained-chain loop rejection.
+operations,S069,none,unresolved,Missing retirement task disposition tombstone memory retention and access semantics.
+operations,S070,OP026 OP012 OP025 OP001,conditional,Only actual colliding case-sensitive names enter the lossy-restore basin.
+operations,S071,OP026 OP023 OP001,conditional,Current helper duplicate-ID rejection differs from promised idempotent API response.
+operations,S072,OP035 OP024 OP028 OP026,conditional,Queued cancel can commit between delivery intent and unguarded writer invocation.
+operations,S073,OP026 OP001,source-supported,Transactional idle check includes already assigned queued or blocked tasks.
+operations,S074,OP014 OP026 OP001,source-supported,Consumed delivery attempts remain counted after an unauthorized requeue.
+operations,S075,OP012 OP005 OP001,conditional,Mutable result path does not retain immutable original bytes.
+operations,S076,OP026 OP001 OP034,source-supported,Oversized completion is refused before mutation but ingress allocation is separate.
+operations,S077,OP026 OP017 OP001 OP016,conditional,Normal assignment rejects occupied permanent session while manual bypass differs.
+operations,S078,OP026 OP005 OP001,conditional,Zero exit and nonempty summary do not demonstrate task-specific output validity.
+operations,S079,OP001 OP026 OP027 OP016,conditional,Metacharacters require shell interpretation to change executable meaning.
+operations,S080,OP034 OP014 OP001 OP012 OP006,conditional,Durable orphan artifact and durable accepted completion are separate boundaries.
+operations,S081,OP022 OP028 OP001 OP023,conditional,Preserved local key cannot force participant payment deduplication.
+operations,S082,OP028 OP022 OP023,conditional,Actual irreversible send can coexist with locally unknown acceptance.
+operations,S083,OP017 OP026 OP027 OP028,conditional,Approval for A cannot establish consent for changed B without content binding.
+operations,S084,OP028 OP022 OP029,conditional,Post-acceptance revocation is not retroactive cancellation of an irreversible fact.
+operations,S085,OP029 OP030 OP006 OP001,conditional,Stale inverse can destroy intervening human work without external preconditions.
+operations,S086,OP029 OP004,conditional,Compensation failure is a disposition wait unless retry feedback is additionally shown.
+operations,S087,OP023 OP026 OP001,conditional,Per-task idempotency does not identify one business intention across two tasks.
+operations,S088,OP001 OP027 OP023 OP017 OP022,conditional,Retry repricing must satisfy the actual authorized terms and old acceptance state.
+operations,S089,OP017 OP027 OP028 OP001,conditional,Refreshed confidential rows need current content and recipient authorization.
+operations,S090,OP022 OP029 OP023 OP001 OP028,conditional,Expired operation history makes not-found ambiguous rather than never-accepted proof.
+operations,S091,OP031 OP017 OP001 OP003 OP005,conditional,Operator absence blocks human-dependent work not every authorized operation.
+operations,S092,OP027 OP005 OP032 OP003 OP001,conditional,Approval-degradation trap requires errors to generate further approval load.
+operations,S093,OP031 OP022 OP023 OP027 OP001,conditional,A substitute needs usable operation evidence not merely account authority.
+operations,S094,OP026 OP027 OP028 OP024,conditional,Correct authentication to wrong instance can still violate human intended target.
+operations,S095,OP024 OP011 OP014 OP015,conditional,Manual snapshot open leaves stale rows and reconcile cannot fill omitted tail.
+operations,S096,OP015 OP016 OP001,conditional,Pane closure does not account for later human writers or all descendants.
+operations,S097,OP031 OP001,conditional,Durable opaque blocker text need not be usable by an authorized substitute.
+operations,S098,OP005 OP026 OP001,conditional,Self-review bias is conditional and not evidence of an autonomous error loop.
+operations,S099,OP026 OP015 OP016 OP001,conditional,Urgency does not discharge old lease or surviving-writer uncertainty.
+operations,S100,OP013 OP031 OP001 OP006,conditional,Recovery instructions behind lost access form a dependency not a recovery path.
+governance,S101,GV04 GV01 GV07,conditional,Provider independence of local records is assumed; substitute availability and compatibility are not given.
+governance,S102,GV07 GV05 GV02,conditional,"Alias is not immutable model identity; a feedback loop requires reuse of error, not the weight change alone."
+governance,S103,GV09 GV08 GV05 GV02,conditional,"Following text is stipulated, but privileged execution, disclosure and persistence depend on actual capabilities and destinations."
+governance,S104,GV05 GV02,conditional,Reviewer count supplies no independence; persistent regime requires circular reuse or suppression of contradictory outcomes.
+governance,S105,GV03 GV05 GV01,source-supported,"Source supports acceptance of unverified path strings in this function, not a deployed hallucination or persistent false-belief loop."
+governance,S106,GV04 GV13 GV10,conditional,"OS eviction behavior, memory limits and restart ordering determine duration; committed storage survival is not guaranteed by RAM pressure alone."
+governance,S107,GV07 GV05,conditional,No per-call identity evidence is available. ADR 0020 explicitly leaves attribution across switches open.
+governance,S108,GV12 GV21 GV04 GV01,conditional,An ideal endless sequence is distinct from any finite observed trace; a growing useful partial result may be economically rational.
+governance,S109,GV02 GV07 GV05 GV01,conditional,Compiler reports bytes but sets no model-window bound; actual rejection or truncation behavior belongs to the uninspected harness.
+governance,S110,GV06 GV02,conditional,"An executable oracle removes model grading, not test leakage or a wrong oracle. Fixture-specific optimization may be harmless if the claim is fixture-specific."
+governance,S111,GV02 GV07,source-supported,Source-supported timing boundary only; actual queue-to-start integration and required policy revision remain unspecified.
+governance,S112,GV03 GV01,source-supported,Explicit source error is implemented; propagation to a deployed scheduler and recovery duration were not observed.
+governance,S113,GV19 GV08,conditional,Compiler includes supplied task text without a secret classifier; durable intake path and recipient authorization determine actual exposure.
+governance,S114,GV01 GV10 GV12,source-supported,Non-traversal is source-supported. Any crawler branch is a separate explicitly hypothetical executor.
+governance,S115,GV15 GV02 GV05 GV01,conditional,The sources may differ in jurisdiction or effective time rather than one simply being false.
+governance,S116,GV07 GV05 GV01,conditional,Mutable address and immutable content identity are different. The scenario does not prove anyone relies on the changed page.
+governance,S117,GV09 GV08 GV02,conditional,"Native configuration semantics and harness trust settings are not inspected, so execution is a conditional branch."
+governance,S118,GV02 GV28 GV05 GV08,conditional,Actual shared-memory authorization is not established by scope naming; a genuine write is not necessarily disclosure unless readers differ.
+governance,S119,GV02 GV07 GV18 GV01,conditional,"Artifact store normalization, filesystem behavior and collision policy are missing; path identity of scope directories would not settle artifact identity."
+governance,S120,GV19 GV08 GV17,conditional,"ADR 0020 forbids production full transcripts but is a design rule, not proof of redaction or safe telemetry."
+governance,S121,GV08 GV09,conditional,"Same user is not a complete sandbox; keychain ACL, unlock status and recipient authorization still matter to the exact exposure."
+governance,S122,GV09 GV02,conditional,Manifest validation is promised; binding the bytes checked to bytes executed is not established in inspected source.
+governance,S123,GV09 GV28 GV02,conditional,Design assigns peer authentication to transport; domain validation does not independently prove which human spoke.
+governance,S124,GV28 GV27,conditional,Inspected schema is mutable rather than a tamper-proof event log; local connection access is not an OS isolation boundary.
+governance,S125,none,unresolved,"Existing backup code escapes SQL quotes, but it is not the unnamed new plugin parameter. No general injection outcome can be inferred."
+governance,S126,GV28 GV02,conditional,"Rendering and subsequent operator reliance, not merely storage of escapes, cause the diagnostic failure."
+governance,S127,GV43 GV09 GV02,conditional,"Token format, epochs, clock and revocation location are unspecified; a restore-local check cannot know a missing later revocation."
+governance,S128,GV09 GV08 GV02,conditional,"Name similarity alone is not execution; install scripts, selection and executable trust determine entry."
+governance,S129,GV04 GV31 GV48 GV30,conditional,Encryption is not logically permanent loss merely because no key is currently known; paying or contacting attacker is not authorized or assumed.
+governance,S130,GV10 GV01 GV11,conditional,"rule::check prevents revisiting a chain scope, not aggregate fan-out. Fixed finite scopes bound chain depth but not the number of task instances."
+governance,S131,GV17 GV18 GV19,conditional,"Append-only event history is a target design, not the inspected mutable implementation. Neither unconditional deletion nor unconditional retention is inferred as law."
+governance,S132,GV17 GV18,conditional,"Race ordering, service of the order and precise data scope decide the branch. Inspected backup library does not implement automatic retention."
+governance,S133,GV20 GV08 GV17 GV01,conditional,"Processing location, contractual exceptions and what data was transmitted are required; all cloud use is not assumed unlawful."
+governance,S134,GV19 GV08 GV43,conditional,Credential validity and information sensitivity differ; rotation need not erase personal data or prevent decryption with a retained key.
+governance,S135,GV25 GV20 GV21 GV01,conditional,The new license is not presumed to revoke rights already granted for older releases; redistribution and dependency necessity need legal review.
+governance,S136,GV03 GV28 GV01,conditional,"Design promises authenticated actors, not proof that a shared credential maps uniquely to one physical person or proves intent."
+governance,S137,GV32 GV17 GV08,conditional,"Legal authority, access terms, encryption and existence of independent lawful copies determine availability and exposure; no evasion is assumed."
+governance,S138,GV19 GV17 GV08,conditional,"Need classification effective date, recipient inventory and retention purpose; current restrictions do not imply identical historic law."
+governance,S139,GV01 GV18 GV17 GV03,conditional,Deleting a registry entry is not necessarily deleting provenance. Actual schema and retained content determine what can be answered.
+governance,S140,GV31 GV47 GV01,conditional,"SQLite integrity and snapshot existence do not demonstrate content, keys, tools, authority or external-effect reconciliation. No drill was executed in this review."
+governance,S141,GV21 GV22 GV01,conditional,"The multiplier alone does not imply insolvency; volume, preexisting commitments and enforceable caps determine loss."
+governance,S142,GV22 GV21,conditional,"Must know contract effective time, provider-side cap and pending usage to bound actual liability."
+governance,S143,GV10 GV23 GV01,conditional,Max sessions per agent is not a demonstrated cross-scope fairness rule. Feedback requires endogenous allocation advantage.
+governance,S144,GV21 GV16,conditional,Human attention and opportunity cost count as service cost; batching authority is not presumed valid for every effect.
+governance,S145,GV01 GV10 GV24 GV11,conditional,"Baseline utilization, task service times, arrival duration and retry behavior are unspecified; tenfold does not itself prove overload."
+governance,S146,GV21 GV22 GV13,conditional,Recorded cancellation is not forcible termination and cannot recall accepted external calls. Budget enforcement was not established in inspected code.
+governance,S147,GV37 GV04 GV24,conditional,"Need worst-case computation, external inference latency and whether outage intervals count; local presence alone gives no hard bound."
+governance,S148,GV24 GV21,conditional,"Loss concerns the original business objective, not necessarily the truth or reusability of late output."
+governance,S149,GV30 GV21 GV31,conditional,"Provider deletion timing, retained exports and alternative custody determine recovery diversity; no cancellation was performed."
+governance,S150,GV22 GV07 GV06,conditional,Token counts are not universal prices and objective outcome comparison may remain valid while monetary comparison fails.
+governance,S151,GV26 GV28 GV25 GV01,conditional,Concrete changed behavior and test oracle are unspecified; unchanged code does not imply unchanged executable environment.
+governance,S152,GV26 GV28,conditional,An upcaster is necessary only when required historical payloads are incompatible; additive backward-compatible events may need none.
+governance,S153,GV26 GV27 GV28,conditional,"SQL transactions serialize bytes within one database, not incompatible semantic interpretations or effects outside it."
+governance,S154,GV26 GV28 GV43,conditional,Forward-only migration list does not prove historical binary behavior. The old release and data shapes must be tested offline.
+governance,S155,GV25 GV01 GV04,conditional,"Download availability, installed runtime, source buildability and legal redistribution rights are separate variables."
+governance,S156,GV02 GV08 GV19,conditional,README documents the subtree boundary but a documented command is not proof of every publisher invoking it correctly. No publication occurred here.
+governance,S157,GV06 GV28 GV09 GV02,conditional,The scenario stipulates a wrong oracle; no particular current missing-ID implementation is accused without inspection.
+governance,S158,GV07 GV26 GV05 GV01,source-supported,Static README/source mismatch was observed. Operational impact and stable belief dynamics remain conditional.
+governance,S159,GV09 GV08 GV01,conditional,This violates the design ordering but is not an observed updater implementation in the inspected libraries.
+governance,S160,GV29 GV01,conditional,Service count alone is not coupling or a demonstrated feedback loop; ownership and removal decisions determine persistence.
+governance,S161,GV14 GV33 GV16 GV28,conditional,Ability to authenticate is distinct from legal or organizational authority; succession provisions are unspecified.
+governance,S162,GV15 GV27 GV38 GV33,conditional,"Legitimate titles do not settle quorum, delegation, timing or scope; last instruction arrival is not automatically valid precedence."
+governance,S163,GV33 GV43 GV09 GV15,conditional,Rights changing on paper and revocation reaching every session or restore are different events; historic authorship should not be relabeled.
+governance,S164,GV34 GV08 GV17 GV01,conditional,"Compiler concatenation establishes what it reads, not the legal transferability of those bytes. Not all company instructions are necessarily needed."
+governance,S165,GV15 GV02 GV13 GV16,conditional,Both authority over risk and knowledge of prior effects are necessary; either can remain absent after the other is resolved.
+governance,S166,GV35 GV07 GV01 GV06,conditional,Agent replacement does not necessarily break output contracts; incomparable observation fields are not zero-valued measurements.
+governance,S167,GV16 GV06,conditional,Need actual ability to bypass and reward asymmetry. Legitimately eliminating unnecessary blocks is a competing beneficial interpretation.
+governance,S168,GV10 GV22 GV23,conditional,Privacy or contractual confidentiality may justify nondisclosure; neither resource use nor fair entitlement can be inferred from budget secrecy alone.
+governance,S169,GV15 GV28 GV16 GV05,conditional,Design append-only promises and mutable local implementation differ. A correction appended with provenance is not equivalent to concealed rewriting.
+governance,S170,GV03 GV13 GV01 GV38,conditional,"Partner absence removes one witness, not necessarily all evidence; timeouts do not establish failure."
+governance,S171,GV10 GV04 GV01,conditional,"Per-scope explicit activation bounds dependencies semantically, not aggregate resource use. Actual process footprint and sharing are missing."
+governance,S172,GV37 GV08 GV20,conditional,"Same UID is a trust-boundary warning, not proof of a particular leak. OS sandbox and key access restrictions could provide additional boundaries."
+governance,S173,GV36 GV43 GV27 GV01,conditional,"Need what work may execute offline, who controls hardware, and whether credentials or sensitive data can be inspected by that owner."
+governance,S174,none,unresolved,"Missing offline functionality, OS suspension rules, permissible remote daemon, latency and background-effect requirements."
+governance,S175,none,unresolved,"Missing partition behavior, permissible unavailability, global effect ownership, quorum placement, latency bounds and authority to fail over."
+governance,S176,GV37 GV20 GV38,conditional,"No control-loop period, plant state, safety interlock or worst-case delay is supplied. Approval before motion is not a real-time safety proof."
+governance,S177,GV37 GV28 GV01,conditional,Root can control local files and code under the stated model; whether an independent trust anchor exists is unspecified.
+governance,S178,GV47 GV24 GV26,conditional,"Event replay is target design. Snapshot existence alone does not show bounded validation, tail processing or content retrieval time."
+governance,S179,GV46 GV31 GV34 GV19,conditional,"Completeness includes interpretation, scope lineage and required artifacts, not just a SQL dump; export and legal deletion are separate requests."
+governance,S180,GV45 GV01 GV10,conditional,A graph cycle alone is insufficient for deadlock; readiness semantics and independent bootstrap determine entry.
+governance,S181,GV04 GV30 GV48,conditional,"Need geography, media exposure, keys and replacement tool availability. Correlation weakens the inference from copy count to independence."
+governance,S182,GV36 GV25 GV04 GV10 GV43,conditional,"Clock correctness, missed-occurrence policy and surviving legal entity are unknown; normal chronological processing need not be meaningful after decades."
+governance,S183,GV39 GV01 GV05,conditional,Natural-language fluency is not proof of original business meaning; missing tacit context may be unrecoverable even with intact encodings.
+governance,S184,GV05 GV03,conditional,"Universal reviewer agreement is stipulated, not universal failure of all experiments. No meta-reviewer outside the premise is invented."
+governance,S185,none,unresolved,"Missing meaning of legitimate, common object identity, effective time, jurisdiction and whether clones must converge at all."
+governance,S186,none,unresolved,"Missing jurisdiction, precise data and proof definitions, exception rules and authoritative precedence; literal mutually exclusive obligations have no joint technical solution."
+governance,S187,GV40 GV04 GV47 GV24,conditional,"Energy availability does not specify energy quantity, startup time, durable checkpoints or useful task granularity."
+governance,S188,GV41 GV08 GV28,conditional,Practical breaks undermine capability claims but do not themselves prove an attacker used them; independent physical provenance may survive.
+governance,S189,GV15 GV33 GV27 GV38,conditional,Legal succession and credential possession are separate. No arrival-order or majority rule is presumed to settle ownership.
+governance,S190,GV42,conditional,"Total loss is conditional on the stated complete information boundary, including no external reconstructive trace. This is logical loss, not an empirical attractor."
+governance,S191,GV43 GV13 GV38,source-supported,Source directly supports snapshot-local queued/no-attempt behavior; actual later dispatch and duplicate external effects remain conditional.
+governance,S192,GV10 GV43 GV38 GV02,conditional,"Need write-failure handling, acknowledgement semantics, current in-flight effects and whether stopping needs disk. Flood plus timing alone does not prove the revocation was lost."
+governance,S193,GV13 GV14 GV21 GV04,conditional,Restoring runtime alone does not resolve authority or budget. Releasing leases without evidence could enable conflicts rather than recovery.
+governance,S194,GV17 GV31 GV18 GV28,conditional,Need whether content is actually required by reducers and whether the order allows a lawful retained representation. No unauthorized preservation is assumed.
+governance,S195,GV02 GV05 GV06 GV07,conditional,"Syntactic acceptance, semantic correctness and independent verification are separate. A format change alone need not produce wrong business meaning."
+governance,S196,GV10 GV11 GV01 GV24,conditional,"Cron catch-up policy is not inspected or assumed implemented. Two-agent same-chain ping-pong is a counterexample excluded by current delegation gate, not proof of bounded total task count."
+governance,S197,GV44 GV38 GV28,conditional,"Forward object version, human edit, retained compensation schema and actual executed plugin identity must all be known; design promises are not verified runtime behavior."
+governance,S198,GV26 GV27 GV43 GV38,conditional,Database transaction atomicity does not fence an independent host or participant. Need writer ownership and participant identities across cutover.
+governance,S199,GV31 GV25 GV48,conditional,Vendor insolvency alone does not make open or retained software unusable. Lost indispensable encryption key differs from merely unavailable downloads.
+governance,S200,GV31 GV06 GV05 GV02,conditional,"Feedback requires report authority to actually govern testing, as stipulated. This reviews own complete coverage is a disposition ledger, never empirical success evidence."
+observability,S201,OB02 OB01,conditional,OBT201: Monitoring independence includes power network identity and a reachable human. Disk survival is a separate assumption and no data-loss conclusion follows from power loss alone
+observability,S202,OB03 OB16 OB01,conditional,OBT202: Daemon process health is distinct from host uptime. Restart does not necessarily restart already-running external workers
+observability,S203,OB30 OB06 OB07 OB01 OB17,source-supported,OBT203: Source-supported only for an explicit restore call and its attempted versus unattempted task branches. Automatic wake and business freshness remain conditional.
+observability,S204,OB02 OB01,conditional,OBT204: Shared outlet is stipulated. An upstream observer and its communication route must not share the outage
+observability,S205,OB04 OB02 OB20,conditional,OBT205: Distinguish account access denial from physical deletion. Shared provider identity may correlate otherwise different services
+observability,S206,OB02 OB04 OB01,conditional,OBT206: Persistence depends on external regional conditions and responder availability. Permanent destruction is not stipulated
+observability,S207,OB02 OB03,conditional,OBT207: OB03 arises only if missing detector data is displayed as green. A truthful unknown display is OB02 without false health
+observability,S208,OB04 OB01,conditional,OBT208: Transport acceptance is not inbox placement or acknowledgement. No assumption that a human checks spam eventually
+observability,S209,OB05 OB01,conditional,OBT209: Need actual wall-clock monotonic restart and persisted-expiry semantics to distinguish configuration error from repeated renewal
+observability,S210,OB03 OB13,conditional,OBT210: The probe must truly bypass the blocked critical path. Alternative is a busy or slow kernel not a deadlock
+observability,S211,OB08 OB03 OB11,conditional,OBT211: Assume readable old pages and failed durable writes rather than complete device failure. Busy timeout is not an fsync deadline
+observability,S212,OB07 OB34,conditional,OBT212: Legitimate holds need not imply healthy underlying service either. A real outage can coexist with blocked work
+observability,S213,OB03 OB02,conditional,OBT213: Proxy receipt time must not be mistaken for host observation time. Freshness behavior is unspecified
+observability,S214,OB12 OB03 OB02,conditional,OBT214: Requires separate generation identity ordering and arrival time. A thousand messages are finite and not automatically a storm attractor
+observability,S215,OB19 OB03 OB01,conditional,OBT215: Identity uniqueness and source epoch semantics are unspecified. C6 confidence gate is not a monitor identity protocol
+observability,S216,OB27 OB25 OB02,conditional,OBT216: Need retention period allocation per label total memory and isolation boundaries. Agent throughput need not remain constant after pressure rises
+observability,S217,OB13 OB03 OB01,conditional,OBT217: Placement relative to durable commit matters. A post-commit timeout can leave an applied mutation despite caller error and must not imply rollback
+observability,S218,none,unresolved,OBT218: Missing competing-access timing instrumentation placement race frequency and number of trials. No convergence inferred
+observability,S219,OB09 OB01,conditional,OBT219: The 72-second branch requires serial non-overlapping work. Eight layers may be nested overlapping waits rather than additive work
+observability,S220,OB09 OB15 OB01,conditional,OBT220: Need contractual deadline origin. Forty-eight hours alone does not prove a five-second-from-creation contract existed
+observability,S221,OB07 OB01 OB09,conditional,OBT221: Need approval validity expiry business deadline and whether resources stay reserved. Deadline loss only if a finite business promise exists
+observability,S222,OB15 OB03 OB10,conditional,OBT222: Dashboard and resource retention are stipulated separately. Missing samples do not prove missing underlying records
+observability,S223,OB15,conditional,OBT223: Need generator concurrency timeout and actual production arrival process. The measurement is biased for an open-loop claim not for every closed-loop client population
+observability,S224,none,unresolved,OBT224: Missing definition of availability sampling frame independence confidence target outage duration and non-completions. A quantile and time availability are not interchangeable
+observability,S225,OB13 OB10 OB01 OB15,conditional,OBT225: Need all-of contract deadline slot retention and partial-failure semantics. One wait alone does not imply all system slots are lost
+observability,S226,OB17 OB16 OB01,conditional,OBT226: Speculative performance benefit says nothing about business idempotency. This is hypothetical only and no invoice action was executed
+observability,S227,OB15 OB17 OB01,conditional,OBT227: Need semantic role of omitted check and downstream action gate. Speed alone does not make partial output incorrect if the declared contract is partial
+observability,S228,OB10 OB01,conditional,OBT228: Probability independence stationary rate and perpetual retention are model assumptions not empirical findings. One request does not immediately fill all slots
+observability,S229,OB09 OB03 OB13,conditional,OBT229: Need scope queue topology lock residence and per-scope traffic weighting. Global mean is not evidence of each scope's tail
+observability,S230,none,unresolved,OBT230: Missing collector trigger period jitter deadline cadence sample count and causal timing. Do not infer an attractor from the word always
+observability,S231,OB28 OB16 OB17 OB01,conditional,OBT231: Need local and participant retention horizons reply correlation and whether a retry occurred. Expired local history need not imply erased external evidence
+observability,S232,OB17 OB07 OB01,conditional,OBT232: Need expiration authority scope succession recipient identity and offline queue semantics. No claim that present Factory automatically executes such buffers
+observability,S233,OB28 OB16 OB21 OB25,conditional,OBT233: Need lawful retention policy quarantine capability and content-handling path. Retaining every old mapping may violate the scenario's deletion obligation
+observability,S234,OB17 OB16 OB01,conditional,OBT234: Timing order at participant is decisive. Reversibility must be judged from operation semantics not cancellation response text
+observability,S235,OB18 OB32 OB17 OB01,conditional,OBT235: Need process-group inheritance detached grandchildren authority lifetime and actual lease-release precondition. Two days is a finite execution tail not an attractor
+observability,S236,OB35 OB01 OB17,conditional,OBT236: Need actual stdin/stdout direction queue scheduling parsing and cancel processing topology. D2 bidirectional framing does not establish this stall in code
+observability,S237,OB12 OB11 OB17,conditional,OBT237: Multiplication needs nested independent retries with no shared budget short-circuit or deduplication. OB17 only if repeated effectful acceptance escapes participant deduplication
+observability,S238,OB12 OB11 OB01,conditional,OBT238: Need retry rounds admission bounds arrival synchronization service curve and whether clients retain identical phase
+observability,S239,OB11 OB07,conditional,OBT239: Budget reset or new authorization is external forcing rather than autonomous recovery. OB07 denotes an explicit spending hold not identity failure
+observability,S240,OB12 OB26 OB11 OB01,conditional,OBT240: Need model sharing peak memory eviction policy startup deadline and restart budget. D2 restart quarantine is a promised limiting branch
+observability,S241,OB26 OB13 OB11 OB01,conditional,OBT241: Need actual dependency graph cache working set warm rate and fallback policy. Optional configuration does not prove optional critical-path behavior
+observability,S242,OB26 OB09 OB01 OB11,conditional,OBT242: Need deadline start cancellation of setup DNS cache persistence and whether connection establishment is reused
+observability,S243,OB13 OB09 OB01,conditional,OBT243: Need disk/network rate queue placement preemption and control workload. Export size does not give an exact duration without throughput
+observability,S244,OB14 OB09 OB01,conditional,OBT244: Need priority discipline service share and emergency arrival rate. Months of forcing are not an autonomous basin
+observability,S245,OB06 OB32 OB01,source-supported,OBT245: Source-supported disconnected lease retention and caller-owned termination precondition. TTL release with live writers is a counterfactual branch.
+observability,S246,OB27 OB15 OB25 OB01,conditional,OBT246: Need caller-supplied scope chain/name listing and harness handling of over-window input. Store capacity and message capacity are different limits
+observability,S247,OB27 OB25 OB35,conditional,OBT247: Need limit enforcement before allocation total decoded size incremental parsing and channel isolation. No actual oversized payload generated
+observability,S248,OB27 OB11 OB25,conditional,OBT248: Need subscriber cap per-queue bytes cursor replay policy and shared resource pool. Slow consumers alone do not establish a restart loop
+observability,S249,OB23 OB09 OB01,conditional,OBT249: Need throughput history volume snapshot availability upcaster costs and arrival rates. Event replay is not established by current row-based libraries
+observability,S250,OB23 OB01 OB08,conditional,OBT250: Need peak live-set timeline copy-on-write behavior index construction scratch and rollback requirements. Nominal final database size is insufficient
+observability,S251,OB28 OB17 OB01,conditional,OBT251: Need stable retry identity and both local and participant retention. Duplicate effect is stipulated by scenario but mechanism must identify which deduplication boundary failed
+observability,S252,OB30 OB12 OB07 OB01 OB09,conditional,OBT252: Need catch-up skip/coalesce semantics cursor arithmetic materialization bounds business validity and service rate. No live schedule touched
+observability,S253,OB12 OB11 OB01,conditional,OBT253: Need common unblock trigger admission policy provider capacity and retry phasing. One synchronized cohort is not by itself an attractor
+observability,S254,OB36 OB11 OB30 OB25,conditional,OBT254: Need branching factor permitted scope count chain inheritance total admission budget and cost-report lag. No claim of infinite recursion through the same scope under source rules
+observability,S255,OB31 OB09 OB11 OB01,conditional,OBT255: Need thermal lag cooling curve service demand admission rate and actual timeout policy. Scenario deadline elongation interpreted as elapsed work not automatic modification of contractual expiry
+observability,S256,OB16 OB06 OB01,source-supported,OBT256: Source-supported commit-before-manual-writer ambiguity. General external send and UPS acceptance timing are conditional analogies.
+observability,S257,OB02 OB03 OB01,conditional,OBT257: Need actual electrical/network dependency and load-shed priority. Monitoring importance labels do not confer independence
+observability,S258,OB35 OB11 OB01,conditional,OBT258: Need stop admission dispatch scheduling timer execution and kill mechanism outside the saturated path. No stop issued
+observability,S259,OB20 OB33 OB21,conditional,OBT259: Need locally available credentials session expiry offline authorization and operator reachability. Account recovery is external intervention
+observability,S260,OB29 OB08 OB16,source-supported,OBT260: Source-supported counterexample: direct stop/cancel commit errors precede success. A falsely acknowledging wrapper is not established.
+observability,S261,OB33 OB17 OB21 OB25,conditional,OBT261: Need credential lookup inputs capability binding and destination authorization. No secrets inspected
+observability,S262,OB33 OB17 OB21 OB25 OB07,conditional,OBT262: Need resolution time recipient version approval contents and external API identity semantics
+observability,S263,OB33 OB17 OB25,conditional,OBT263: Need importer trust boundary lookup scope and whether approvals are distinct authoritative records. No task-import implementation inspected
+observability,S264,OB25 OB33 OB21,conditional,OBT264: Need model behavior actual secret access independent approval enforcement and egress rights. Text separators are not a security sandbox
+observability,S265,OB33 OB17 OB21 OB25,conditional,OBT265: Need log provenance recovery-agent instruction boundaries and actual dispatch gate. No logs containing customer data read
+observability,S266,OB33 OB17 OB21 OB25 OB07,conditional,OBT266: Need artifact trust level reviewer capability and approval provenance. A content reference alone does not prevent instruction following
+observability,S267,OB21 OB22 OB25,conditional,OBT267: Need code execution authority data access egress and persistence. Exfiltration can be a one-shot absorbing loss without an attractor
+observability,S268,OB21 OB22 OB25 OB23,conditional,OBT268: Need artifact pinning trust-root availability content retention and whether restore executes dependencies. Age alone does not make all archives malicious
+observability,S269,OB03 OB22 OB21,conditional,OBT269: Need both updates installed update authority and observer's evidence generation powers. No deployed updater inspected
+observability,S270,OB20 OB02 OB01 OB03,conditional,OBT270: Need key epochs overlap expiry secure clock and authority for rekey. Permanent fail-closed state is a policy hold not proven attraction
+observability,S271,OB06 OB24,conditional,OBT271: Need key inventory escrow trusted hardware dependencies cipher longevity and evidence all alternatives are unavailable
+observability,S272,OB21,conditional,OBT272: Need retained adversarial copy vulnerable algorithm useful plaintext and actual decryption capability. Security horizon differs from operational restore horizon
+observability,S273,OB21 OB25,conditional,OBT273: Need UID permissions sandbox mounts process inspection and secret access. No cross-scope content read for this test
+observability,S274,none,unresolved,OBT274: Need attacker observation model victim base rate scheduling isolation repeated trials and inference accuracy beyond prior knowledge
+observability,S275,OB21 OB22 OB03 OB25,conditional,OBT275: Need actual shell account privileges reachable secrets persistence and observer compromise assumption. No shell access granted or used
+boundaries,S276,BD06,conditional,Historical disclosure is absorbing only once learned; continued service does not reverse it.
+boundaries,S277,BD06 BD02,conditional,Payload scope and recipients distinguish disclosure from a blocked or private diagnostic export.
+boundaries,S278,BD07 BD06 BD18,conditional,Separate an externally driven probing cycle from retained knowledge and a conditional attention loop.
+boundaries,S279,BD04 BD05 BD02,conditional,Consistent corruption is not automatically an attractor; only the repeated trust/reuse branch supplies feedback.
+boundaries,S280,BD04 BD10 BD02,conditional,Distinguish syntactic validity from quantity correctness and from a proven irreversible consequence.
+boundaries,S281,BD27 BD08 BD01,conditional,Conflicting authentic claims are not evidence of forgery or proof that both may continue writing.
+boundaries,S282,BD03 BD09 BD10 BD01,conditional,Source-supported local restore behavior does not cover the scenario missing suffix or business consequences.
+boundaries,S283,BD27 BD08 BD01,conditional,"Source identity comparison is only a local session check, not clone exclusion."
+boundaries,S284,BD09 BD02 BD10,conditional,Recovery success is not proof that start-time rights remain current.
+boundaries,S285,BD04 BD02 BD10,conditional,Type-valid numeric interoperability does not establish semantic compatibility.
+boundaries,S286,BD02 BD15 BD12,conditional,"Per-scope activation is an instruction/design boundary, not a demonstrated startup property."
+boundaries,S287,BD02 BD04 BD05,conditional,Version comparison and schema tests do not alone prove historical binary forward compatibility.
+boundaries,S288,BD10 BD03,conditional,Code rollback is not a world rollback; no attractor is implied by a one-time irreversible action.
+boundaries,S289,BD11 BD08 BD01,conditional,A migration transport break is not resolved by citing local SQL atomicity.
+boundaries,S290,BD12 BD02,conditional,"Circular prerequisites establish deadlock under the stated boundary, not empirical attraction."
+boundaries,S291,BD13 BD14,conditional,A social reinforcing mechanism is required beyond a missing maintainer.
+boundaries,S292,BD37 BD13 BD22,conditional,Distinguish unavailable repair path from total information loss or permanent impossibility of all future substitutes.
+boundaries,S293,BD14 BD02,conditional,"Authority opacity can be self-reinforcing, but conservative abstention is a competing basin."
+boundaries,S294,BD15 BD04 BD05 BD02,conditional,"Common library creates correlated evidence risk, not proof that replay or monitoring already shares an implemented path."
+boundaries,S295,BD15 BD37,conditional,"Dependency concentration is a startup coupling, not the same as independent provider failures."
+boundaries,S296,BD08 BD04 BD27,conditional,"A second writer is a structural entry condition, not a guarantee of sustained conflict on its own."
+boundaries,S297,BD16 BD03 BD10 BD24,conditional,Test inadequacy is explicit; production convergence remains conditional on omitted dynamics.
+boundaries,S298,BD16,conditional,Only the evidence-blind state is classified; actual production failure duration and timing remain unknown.
+boundaries,S299,BD16 BD08 BD10,conditional,Mock agreement cannot establish real authority extinction; no live provider test was performed.
+boundaries,S300,BD04 BD05 BD02,conditional,"Separate wrong presentation, wrong acted-on quantity, and a recursive false-verification loop."
+boundaries,S301,BD04 BD01 BD02,conditional,An old price is not necessarily wrong; intended effective date determines the branch.
+boundaries,S302,BD04 BD06 BD10 BD02,conditional,Internal identity integrity and real-world referent correctness are different boundaries.
+boundaries,S303,BD17 BD10,conditional,A delivered signal is not perceived information; duration depends on actual accessible alternatives.
+boundaries,S304,BD04 BD17 BD10 BD02,conditional,An incorrect human intervention is not automatically an attractor; the still-failing original is a separate state.
+boundaries,S305,BD04 BD10 BD03 BD02,conditional,"This is loss of epistemic meaning, not simply unattractive UI text."
+boundaries,S306,BD17,conditional,Observation delivery and human availability are separate; multi-day wait is not an attractor.
+boundaries,S307,BD17 BD18,conditional,The key discriminator is persistence after initial forcing is removed.
+boundaries,S308,BD19 BD18 BD01,conditional,Distinguish deliberate deferral from an attention overload loop.
+boundaries,S309,BD20 BD01 BD09 BD10,conditional,"This is an authority-semantics gap, not a signature-validation failure."
+boundaries,S310,BD21,conditional,Loss of governance access is distinct from cloud uptime or destruction of stored data.
+boundaries,S311,BD21 BD28,conditional,Concentrated authority can preserve blindness without any technical service outage.
+boundaries,S312,BD15 BD24,conditional,Externally sustained common-mode failure is separate from an optional congestion feedback loop.
+boundaries,S313,BD15 BD22,conditional,Economic concentration can be a common dependency even across different networks.
+boundaries,S314,BD01 BD22 BD32 BD23,conditional,Service discontinuity and impossibility of recovering all historical data must not be conflated.
+boundaries,S315,BD23 BD02,conditional,This is delayed economic effect evidence; no autonomous attractor follows from one late bill.
+boundaries,S316,BD24 BD01 BD10 BD23,conditional,A latency objective alone is not a feedback law; the copied-work response rule supplies the candidate loop.
+boundaries,S317,BD18 BD19,conditional,Economic inefficiency alone is not an attractor; queue behavior distinguishes the proposed branches.
+boundaries,S318,BD09 BD25 BD10,conditional,Local approval history and current permission can diverge during delayed delivery.
+boundaries,S319,none,unresolved,"Unresolved legal compatibility and authority, not a presumed technical deadlock or universal impossibility."
+boundaries,S320,BD06 BD25,conditional,"Geographic compliance, confidentiality and detectability are related but not identical properties."
+boundaries,S321,BD09 BD10 BD25,conditional,Physical safety requires evidence at the actuator; no live valve or safety test was performed.
+boundaries,S322,BD03 BD25 BD10,conditional,Separate shutdown command acknowledgment from physical cessation and irreversibility.
+boundaries,S323,none,unresolved,Unresolved normative/safety boundary; no automatic life-versus-budget policy is endorsed or modelled.
+boundaries,S324,BD03 BD24 BD10,conditional,"The current local delivery journal supports withholding attempts, not business-service reachability guarantees."
+boundaries,S325,BD27 BD09 BD10 BD02 BD01,conditional,Authenticity does not establish timeliness; harmless commutative telemetry is a counterexample to universal danger.
+boundaries,S326,BD36 BD08,conditional,Loss of observation and loss of execution must not be collapsed into one health bit.
+boundaries,S327,BD26 BD09 BD02,conditional,Clock name does not establish suspend semantics or safe year-late continuation.
+boundaries,S328,BD26 BD17,conditional,Policy-retained timing error differs from an autonomous attractor.
+boundaries,S329,BD26 BD01 BD02,conditional,Political time semantics cannot be reconstructed from an offset alone.
+boundaries,S330,BD27 BD04,conditional,Conflicting liveness requires correlation; none of the three statements alone proves task completion.
+boundaries,S331,BD04 BD05 BD02,conditional,Reviewer multiplicity does not establish source independence.
+boundaries,S332,BD27 BD03 BD01,conditional,"No log is not proof of no effect, and an attestation is not proof of correct real-world delivery."
+boundaries,S333,BD28,conditional,Measurement-boundary manipulation can stabilize apparent success while total delivered value falls.
+boundaries,S334,BD28,conditional,A semantic change to the metric can erase evidence without repairing service.
+boundaries,S335,BD04 BD28 BD02,conditional,Source stores a reported result rather than certifying its meaning; incentive dynamics remain hypothetical.
+boundaries,S336,BD29 BD18 BD17,conditional,"Energy intent, service obligations and monitoring semantics can disagree without a hardware defect."
+boundaries,S337,BD26 BD09 BD02 BD10,conditional,An environmentally beneficial scheduling objective does not settle authority or safety timing.
+boundaries,S338,none,unresolved,Unresolved value and resource dynamics; high monitor-to-service consumption alone is not a failure basin.
+boundaries,S339,BD30 BD04 BD05 BD01,conditional,Recovering bytes is different from recovering their intended meaning.
+boundaries,S340,BD02 BD31 BD04,conditional,Source runtime alias recognition is not a portable restore manifest or recovery of overwritten information.
+boundaries,S341,none,unresolved,Unresolved extreme-horizon dynamics; current format disappearance is not proof of information-theoretic impossibility.
+boundaries,S342,BD32 BD09 BD10 BD01,conditional,Local lifecycle termination is not global business-effect termination.
+boundaries,S343,BD32 BD03 BD06,conditional,Operational decommission and contractual observation horizon are separate clocks.
+boundaries,S344,none,unresolved,Unresolved privacy/authority semantics; neither an indiscriminate secret export nor automatic erasure is justified.
+boundaries,S345,BD33,conditional,"Absorbing loss and impossible endogenous recovery, explicitly not an attractor."
+boundaries,S346,BD34 BD05,conditional,Classify the epistemic limit without pretending to know a physical endpoint or a universal actual-world deception.
+boundaries,S347,none,unresolved,"Unresolved infinite-horizon specification; conditional information-limit argument, not an invented attractor."
+boundaries,S348,BD21 BD17 BD32,conditional,"Sequential loss of visibility, compute and authority compounds recovery, but does not establish loss of every copy or actor."
+boundaries,S349,BD24 BD03 BD10 BD23,conditional,Compound trajectory has two separate dimensions; one recovery does not imply the other.
+boundaries,S350,BD35 BD06 BD34,conditional,Self-confirming hostile execution is a conditional loop; actual damage cannot be measured from perfect forged internal reports.

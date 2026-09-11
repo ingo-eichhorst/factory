@@ -55,6 +55,30 @@ documented in
 with the plan for moving the seven live scopes in
 [`docs/scope-registry-migration-plan.md`](docs/scope-registry-migration-plan.md).
 
+Why the scope table is a projection of the declared configuration rather than a
+second source of truth, and why reconciliation reports a drift before it repairs
+one, are documented in
+[`docs/adr/0016-slice-3-registry-projection-and-reconcile.md`](docs/adr/0016-slice-3-registry-projection-and-reconcile.md).
+Why session state for Pi is taken from Herdr rather than Irrlicht, how a pane, a
+transcript, and a session are correlated, and which of Herdr's states may move a
+task, are documented in
+[`docs/adr/0017-slice-5-pi-adapter-observation-source.md`](docs/adr/0017-slice-5-pi-adapter-observation-source.md).
+
+When a migration runs on an installed instance, why an update always migrates
+and a downgrade never does, and why a configuration version change stays the
+human's edit, are documented in
+[`docs/adr/0018-updating-an-installed-instance.md`](docs/adr/0018-updating-an-installed-instance.md).
+Why restoring is an explicit command rather than a consequence of opening a
+file, what a recovered database may claim about processes it never observed, and
+what a backup does and does not cover, are documented in
+[`docs/adr/0019-restore-and-what-a-recovered-database-may-claim.md`](docs/adr/0019-restore-and-what-a-recovered-database-may-claim.md).
+
+What is recorded about a run so that it can be measured — the pinned tuple that
+makes two runs comparable, which metrics survive a comparison across harnesses,
+how friction is captured, and why the fixture rather than a judge produces a
+bench verdict — is documented in
+[`docs/adr/0020-run-telemetry-and-the-evaluation-bench.md`](docs/adr/0020-run-telemetry-and-the-evaluation-bench.md).
+
 The version-1 delivery plan is owned by this project in
 [`docs/implementation-backlog.md`](docs/implementation-backlog.md).
 

@@ -1,0 +1,101 @@
+stressor_id;state_ids;analysis_status;reason
+S101;GV04 GV01 GV07;conditional;"Provider independence of local records is assumed; substitute availability and compatibility are not given."
+S102;GV07 GV05 GV02;conditional;"Alias is not immutable model identity; a feedback loop requires reuse of error, not the weight change alone."
+S103;GV09 GV08 GV05 GV02;conditional;Following text is stipulated, but privileged execution, disclosure and persistence depend on actual capabilities and destinations.
+S104;GV05 GV02;conditional;"Reviewer count supplies no independence; persistent regime requires circular reuse or suppression of contradictory outcomes."
+S105;GV03 GV05 GV01;source-supported;Source supports acceptance of unverified path strings in this function, not a deployed hallucination or persistent false-belief loop.
+S106;GV04 GV13 GV10;conditional;"OS eviction behavior, memory limits and restart ordering determine duration; committed storage survival is not guaranteed by RAM pressure alone."
+S107;GV07 GV05;conditional;No per-call identity evidence is available. ADR 0020 explicitly leaves attribution across switches open.
+S108;GV12 GV21 GV04 GV01;conditional;"An ideal endless sequence is distinct from any finite observed trace; a growing useful partial result may be economically rational."
+S109;GV02 GV07 GV05 GV01;conditional;"Compiler reports bytes but sets no model-window bound; actual rejection or truncation behavior belongs to the uninspected harness."
+S110;GV06 GV02;conditional;An executable oracle removes model grading, not test leakage or a wrong oracle. Fixture-specific optimization may be harmless if the claim is fixture-specific.
+S111;GV02 GV07;source-supported;"Source-supported timing boundary only; actual queue-to-start integration and required policy revision remain unspecified."
+S112;GV03 GV01;source-supported;"Explicit source error is implemented; propagation to a deployed scheduler and recovery duration were not observed."
+S113;GV19 GV08;conditional;"Compiler includes supplied task text without a secret classifier; durable intake path and recipient authorization determine actual exposure."
+S114;GV01 GV10 GV12;source-supported;Non-traversal is source-supported. Any crawler branch is a separate explicitly hypothetical executor.
+S115;GV15 GV02 GV05 GV01;conditional;The sources may differ in jurisdiction or effective time rather than one simply being false.
+S116;GV07 GV05 GV01;conditional;Mutable address and immutable content identity are different. The scenario does not prove anyone relies on the changed page.
+S117;GV09 GV08 GV02;conditional;Native configuration semantics and harness trust settings are not inspected, so execution is a conditional branch.
+S118;GV02 GV28 GV05 GV08;conditional;"Actual shared-memory authorization is not established by scope naming; a genuine write is not necessarily disclosure unless readers differ."
+S119;GV02 GV07 GV18 GV01;conditional;"Artifact store normalization, filesystem behavior and collision policy are missing; path identity of scope directories would not settle artifact identity."
+S120;GV19 GV08 GV17;conditional;ADR 0020 forbids production full transcripts but is a design rule, not proof of redaction or safe telemetry.
+S121;GV08 GV09;conditional;"Same user is not a complete sandbox; keychain ACL, unlock status and recipient authorization still matter to the exact exposure."
+S122;GV09 GV02;conditional;"Manifest validation is promised; binding the bytes checked to bytes executed is not established in inspected source."
+S123;GV09 GV28 GV02;conditional;"Design assigns peer authentication to transport; domain validation does not independently prove which human spoke."
+S124;GV28 GV27;conditional;"Inspected schema is mutable rather than a tamper-proof event log; local connection access is not an OS isolation boundary."
+S125;none;unresolved;Existing backup code escapes SQL quotes, but it is not the unnamed new plugin parameter. No general injection outcome can be inferred.
+S126;GV28 GV02;conditional;Rendering and subsequent operator reliance, not merely storage of escapes, cause the diagnostic failure.
+S127;GV43 GV09 GV02;conditional;"Token format, epochs, clock and revocation location are unspecified; a restore-local check cannot know a missing later revocation."
+S128;GV09 GV08 GV02;conditional;"Name similarity alone is not execution; install scripts, selection and executable trust determine entry."
+S129;GV04 GV31 GV48 GV30;conditional;"Encryption is not logically permanent loss merely because no key is currently known; paying or contacting attacker is not authorized or assumed."
+S130;GV10 GV01 GV11;conditional;rule::check prevents revisiting a chain scope, not aggregate fan-out. Fixed finite scopes bound chain depth but not the number of task instances.
+S131;GV17 GV18 GV19;conditional;Append-only event history is a target design, not the inspected mutable implementation. Neither unconditional deletion nor unconditional retention is inferred as law.
+S132;GV17 GV18;conditional;Race ordering, service of the order and precise data scope decide the branch. Inspected backup library does not implement automatic retention.
+S133;GV20 GV08 GV17 GV01;conditional;"Processing location, contractual exceptions and what data was transmitted are required; all cloud use is not assumed unlawful."
+S134;GV19 GV08 GV43;conditional;"Credential validity and information sensitivity differ; rotation need not erase personal data or prevent decryption with a retained key."
+S135;GV25 GV20 GV21 GV01;conditional;"The new license is not presumed to revoke rights already granted for older releases; redistribution and dependency necessity need legal review."
+S136;GV03 GV28 GV01;conditional;Design promises authenticated actors, not proof that a shared credential maps uniquely to one physical person or proves intent.
+S137;GV32 GV17 GV08;conditional;"Legal authority, access terms, encryption and existence of independent lawful copies determine availability and exposure; no evasion is assumed."
+S138;GV19 GV17 GV08;conditional;"Need classification effective date, recipient inventory and retention purpose; current restrictions do not imply identical historic law."
+S139;GV01 GV18 GV17 GV03;conditional;Deleting a registry entry is not necessarily deleting provenance. Actual schema and retained content determine what can be answered.
+S140;GV31 GV47 GV01;conditional;SQLite integrity and snapshot existence do not demonstrate content, keys, tools, authority or external-effect reconciliation. No drill was executed in this review.
+S141;GV21 GV22 GV01;conditional;"The multiplier alone does not imply insolvency; volume, preexisting commitments and enforceable caps determine loss."
+S142;GV22 GV21;conditional;Must know contract effective time, provider-side cap and pending usage to bound actual liability.
+S143;GV10 GV23 GV01;conditional;Max sessions per agent is not a demonstrated cross-scope fairness rule. Feedback requires endogenous allocation advantage.
+S144;GV21 GV16;conditional;"Human attention and opportunity cost count as service cost; batching authority is not presumed valid for every effect."
+S145;GV01 GV10 GV24 GV11;conditional;"Baseline utilization, task service times, arrival duration and retry behavior are unspecified; tenfold does not itself prove overload."
+S146;GV21 GV22 GV13;conditional;Recorded cancellation is not forcible termination and cannot recall accepted external calls. Budget enforcement was not established in inspected code.
+S147;GV37 GV04 GV24;conditional;"Need worst-case computation, external inference latency and whether outage intervals count; local presence alone gives no hard bound."
+S148;GV24 GV21;conditional;Loss concerns the original business objective, not necessarily the truth or reusability of late output.
+S149;GV30 GV21 GV31;conditional;"Provider deletion timing, retained exports and alternative custody determine recovery diversity; no cancellation was performed."
+S150;GV22 GV07 GV06;conditional;Token counts are not universal prices and objective outcome comparison may remain valid while monetary comparison fails.
+S151;GV26 GV28 GV25 GV01;conditional;"Concrete changed behavior and test oracle are unspecified; unchanged code does not imply unchanged executable environment."
+S152;GV26 GV28;conditional;"An upcaster is necessary only when required historical payloads are incompatible; additive backward-compatible events may need none."
+S153;GV26 GV27 GV28;conditional;SQL transactions serialize bytes within one database, not incompatible semantic interpretations or effects outside it.
+S154;GV26 GV28 GV43;conditional;Forward-only migration list does not prove historical binary behavior. The old release and data shapes must be tested offline.
+S155;GV25 GV01 GV04;conditional;Download availability, installed runtime, source buildability and legal redistribution rights are separate variables.
+S156;GV02 GV08 GV19;conditional;README documents the subtree boundary but a documented command is not proof of every publisher invoking it correctly. No publication occurred here.
+S157;GV06 GV28 GV09 GV02;conditional;"The scenario stipulates a wrong oracle; no particular current missing-ID implementation is accused without inspection."
+S158;GV07 GV26 GV05 GV01;source-supported;Static README/source mismatch was observed. Operational impact and stable belief dynamics remain conditional.
+S159;GV09 GV08 GV01;conditional;This violates the design ordering but is not an observed updater implementation in the inspected libraries.
+S160;GV29 GV01;conditional;"Service count alone is not coupling or a demonstrated feedback loop; ownership and removal decisions determine persistence."
+S161;GV14 GV33 GV16 GV28;conditional;"Ability to authenticate is distinct from legal or organizational authority; succession provisions are unspecified."
+S162;GV15 GV27 GV38 GV33;conditional;"Legitimate titles do not settle quorum, delegation, timing or scope; last instruction arrival is not automatically valid precedence."
+S163;GV33 GV43 GV09 GV15;conditional;"Rights changing on paper and revocation reaching every session or restore are different events; historic authorship should not be relabeled."
+S164;GV34 GV08 GV17 GV01;conditional;Compiler concatenation establishes what it reads, not the legal transferability of those bytes. Not all company instructions are necessarily needed.
+S165;GV15 GV02 GV13 GV16;conditional;"Both authority over risk and knowledge of prior effects are necessary; either can remain absent after the other is resolved."
+S166;GV35 GV07 GV01 GV06;conditional;"Agent replacement does not necessarily break output contracts; incomparable observation fields are not zero-valued measurements."
+S167;GV16 GV06;conditional;Need actual ability to bypass and reward asymmetry. Legitimately eliminating unnecessary blocks is a competing beneficial interpretation.
+S168;GV10 GV22 GV23;conditional;"Privacy or contractual confidentiality may justify nondisclosure; neither resource use nor fair entitlement can be inferred from budget secrecy alone."
+S169;GV15 GV28 GV16 GV05;conditional;Design append-only promises and mutable local implementation differ. A correction appended with provenance is not equivalent to concealed rewriting.
+S170;GV03 GV13 GV01 GV38;conditional;"Partner absence removes one witness, not necessarily all evidence; timeouts do not establish failure."
+S171;GV10 GV04 GV01;conditional;Per-scope explicit activation bounds dependencies semantically, not aggregate resource use. Actual process footprint and sharing are missing.
+S172;GV37 GV08 GV20;conditional;Same UID is a trust-boundary warning, not proof of a particular leak. OS sandbox and key access restrictions could provide additional boundaries.
+S173;GV36 GV43 GV27 GV01;conditional;Need what work may execute offline, who controls hardware, and whether credentials or sensitive data can be inspected by that owner.
+S174;none;unresolved;Missing offline functionality, OS suspension rules, permissible remote daemon, latency and background-effect requirements.
+S175;none;unresolved;Missing partition behavior, permissible unavailability, global effect ownership, quorum placement, latency bounds and authority to fail over.
+S176;GV37 GV20 GV38;conditional;No control-loop period, plant state, safety interlock or worst-case delay is supplied. Approval before motion is not a real-time safety proof.
+S177;GV37 GV28 GV01;conditional;"Root can control local files and code under the stated model; whether an independent trust anchor exists is unspecified."
+S178;GV47 GV24 GV26;conditional;Event replay is target design. Snapshot existence alone does not show bounded validation, tail processing or content retrieval time.
+S179;GV46 GV31 GV34 GV19;conditional;"Completeness includes interpretation, scope lineage and required artifacts, not just a SQL dump; export and legal deletion are separate requests."
+S180;GV45 GV01 GV10;conditional;"A graph cycle alone is insufficient for deadlock; readiness semantics and independent bootstrap determine entry."
+S181;GV04 GV30 GV48;conditional;Need geography, media exposure, keys and replacement tool availability. Correlation weakens the inference from copy count to independence.
+S182;GV36 GV25 GV04 GV10 GV43;conditional;"Clock correctness, missed-occurrence policy and surviving legal entity are unknown; normal chronological processing need not be meaningful after decades."
+S183;GV39 GV01 GV05;conditional;"Natural-language fluency is not proof of original business meaning; missing tacit context may be unrecoverable even with intact encodings."
+S184;GV05 GV03;conditional;Universal reviewer agreement is stipulated, not universal failure of all experiments. No meta-reviewer outside the premise is invented.
+S185;none;unresolved;Missing meaning of legitimate, common object identity, effective time, jurisdiction and whether clones must converge at all.
+S186;none;unresolved;"Missing jurisdiction, precise data and proof definitions, exception rules and authoritative precedence; literal mutually exclusive obligations have no joint technical solution."
+S187;GV40 GV04 GV47 GV24;conditional;Energy availability does not specify energy quantity, startup time, durable checkpoints or useful task granularity.
+S188;GV41 GV08 GV28;conditional;"Practical breaks undermine capability claims but do not themselves prove an attacker used them; independent physical provenance may survive."
+S189;GV15 GV33 GV27 GV38;conditional;Legal succession and credential possession are separate. No arrival-order or majority rule is presumed to settle ownership.
+S190;GV42;conditional;Total loss is conditional on the stated complete information boundary, including no external reconstructive trace. This is logical loss, not an empirical attractor.
+S191;GV43 GV13 GV38;source-supported;"Source directly supports snapshot-local queued/no-attempt behavior; actual later dispatch and duplicate external effects remain conditional."
+S192;GV10 GV43 GV38 GV02;conditional;Need write-failure handling, acknowledgement semantics, current in-flight effects and whether stopping needs disk. Flood plus timing alone does not prove the revocation was lost.
+S193;GV13 GV14 GV21 GV04;conditional;Restoring runtime alone does not resolve authority or budget. Releasing leases without evidence could enable conflicts rather than recovery.
+S194;GV17 GV31 GV18 GV28;conditional;Need whether content is actually required by reducers and whether the order allows a lawful retained representation. No unauthorized preservation is assumed.
+S195;GV02 GV05 GV06 GV07;conditional;Syntactic acceptance, semantic correctness and independent verification are separate. A format change alone need not produce wrong business meaning.
+S196;GV10 GV11 GV01 GV24;conditional;Cron catch-up policy is not inspected or assumed implemented. Two-agent same-chain ping-pong is a counterexample excluded by current delegation gate, not proof of bounded total task count.
+S197;GV44 GV38 GV28;conditional;"Forward object version, human edit, retained compensation schema and actual executed plugin identity must all be known; design promises are not verified runtime behavior."
+S198;GV26 GV27 GV43 GV38;conditional;Database transaction atomicity does not fence an independent host or participant. Need writer ownership and participant identities across cutover.
+S199;GV31 GV25 GV48;conditional;Vendor insolvency alone does not make open or retained software unusable. Lost indispensable encryption key differs from merely unavailable downloads.
+S200;GV31 GV06 GV05 GV02;conditional;Feedback requires report authority to actually govern testing, as stipulated. This reviews own complete coverage is a disposition ledger, never empirical success evidence.

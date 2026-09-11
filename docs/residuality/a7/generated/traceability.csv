@@ -1,0 +1,1008 @@
+branch_id,stressor_id,residue_id,primary_module,residue_status,reason
+S001.B01,S001,OPR001,M03,bedingt,"Der vorherige Taskkern ist nach Wiederzugang nutzbar, nicht die uncommittete Berechnung. C1 stützt nur die Commit-vor-Writer-Grenze."
+S001.B02,S001,OPR002,M06,bedingt,"Operator kann Versuch und Prompt inspizieren, aber aus ihnen keinen Empfang ableiten."
+S001.B03,S001,none,none,keines,Für exakte Rekonstruktion dieser Fakten bleibt keines; Stromausfall allein hätte diesen Verlust nicht bewiesen.
+S002.B01,S002,OPR001,M03,bedingt,Berechtigter Wiederhersteller kann später den Taskbestand nutzen; aktuelle Rechenleistung bleibt weg.
+S002.B02,S002,OPR002,M06,bedingt,Der erhaltene Versuch ist Entscheidungsgrundlage und keine Erlaubnis zum doppelten Start.
+S002.B03,S002,none,none,ungeklaert,"Derzeit ist kein nutzbarer Datenzugang belegt, daher auch kein erfundener Export als Residue."
+S003.B01,S003,OPR010,M03,bedingt,Scheduler behält identifizierbare Originalaufträge trotz falscher Laufzeitschätzung.
+S003.B02,S003,OPR010,M03,teilweise,"Zugelassene Originalarbeit bleibt planbar, nicht jede eingehende Arbeit und nicht jede Frist."
+S003.B03,S003,OPR001,M03,teilweise,"Solange Store zugänglich bleibt, kann Operator Originaltaskfakten lesen; Fortschritt und Deadlinequalität sind nicht erhalten."
+S004.B01,S004,OPR001,M03,teilweise,"Taskkern belegt die Annahme, nicht Korrektheit des Ergebnisses; die betroffene Richtigkeitsgarantie fehlt."
+S004.B02,S004,OPR034,M08,bedingt,Prüfer kann konkrete falsche Eigenschaft feststellen; kein universelles Fehlerorakel behauptet.
+S005.B01,S005,none,none,ungeklaert,Für vertrauenswürdige Betreiberkontrolle ist kein nutzbares Residue belegt. Kein Backup oder Widerrufskanal wird hinzuerfunden.
+S005.B02,S005,OPR008,M09,teilweise,"Besitzer kann Exportfakten nutzen und Zugang zurückerlangen, aber erfolgte Offenlegung nicht rückgängig machen."
+S005.B02,S005,OPR033,M14,teilweise,"Besitzer kann Exportfakten nutzen und Zugang zurückerlangen, aber erfolgte Offenlegung nicht rückgängig machen."
+S005.B03,S005,none,none,keines,Für diese Information keines; fremde weiter existierende Bytes bedeuten keinen nutzbaren Zugang für den Besitzer.
+S006.B01,S006,none,none,keines,Für den exakt verlorenen Inhalt keines; andere unabhängige Unternehmensfähigkeiten werden nicht mitvernichtet behauptet.
+S006.B02,S006,OPR008,M09,bedingt,"Berechtigte Wiederhersteller besitzen genau die exportierten Informationen, nicht automatisch den späteren Nachlauf."
+S006.B03,S006,OPR003,M09,teilweise,Präfix bleibt auswertbar; sichere Neuzustellung und Kenntnis späterer Effekte bleiben offen.
+S007.B01,S007,OPR001,M03,bedingt,Operator behält vorhandene Taskfakten; abgetrennte Scope-Dateien sind nicht verfügbar.
+S007.B02,S007,OPR016,M07,bedingt,"Factory-Schreiber behält die Begrenzung seines Zielobjekts, nicht garantierte Schreibverfügbarkeit."
+S007.B03,S007,OPR001,M03,teilweise,Taskabsicht kann im unbetroffenen Kern bleiben; Vertrauen in ausgeführte Zielzuordnung fehlt.
+S008.B01,S008,OPR001,M03,bedingt,"Auftrag ist lesbar, nicht die verlorene Zustimmung und nicht bereits erteilte Wirkungserlaubnis."
+S008.B02,S008,OPR002,M06,bedingt,Operator kann alten Versuch lesen; damit sind externe Wirkungen noch nicht geklärt.
+S008.B03,S008,OPR020,M06,bedingt,"Rekonziliator hat genaue Operation zum Nachfragen, keine gesicherte Anzahl von Effekten."
+S009.B01,S009,OPR008,M09,bedingt,Berechtigter Bearbeiter kann enthaltene Fakten weiter verwenden und einen späteren Übergang planen.
+S009.B02,S009,none,none,ungeklaert,Intakte Bits allein belegen weder nutzbaren Export noch totale Zerstörung.
+S009.B03,S009,OPR001,M03,bedingt,Erhaltene Taskfakten können kontrolliert weiterverarbeitet werden.
+S010.B01,S010,OPR001,M03,bedingt,"Nach Wiederzugang sind alte Taskfakten nutzbar, während der Woche keine behauptete lokale Bedienbarkeit."
+S010.B02,S010,OPR027,M16,bedingt,Autorisierter Dispatcher behält begrenzte Originalarbeit ohne Doppelautorität des ausgeschalteten Geräts.
+S010.B02,S010,OPR010,M03,bedingt,Autorisierter Dispatcher behält begrenzte Originalarbeit ohne Doppelautorität des ausgeschalteten Geräts.
+S010.B03,S010,OPR020,M06,bedingt,Operator kann die konkrete offene Operation rekonzilieren statt pauschal nachholen.
+S011.B01,S011,OPR001,M03,bedingt,"Operator liest bestehende Tasks, während uncommitteter Versuch und neue Wirkung nicht behauptet werden."
+S011.B02,S011,OPR001,M03,bedingt,Originalauftragsdaten vermeiden Neuanlage unter neuer Identität.
+S012.B01,S012,OPR004,M01,teilweise,"Diagnostiker kann intakte Eingaben prüfen und Fehlstelle lokalisieren, keine vollständige Rekonstruktion dahinter behaupten."
+S012.B02,S012,none,none,keines,"Für verlässliche Rekonstruktion der betroffenen Tatsache bleibt keines, auch wenn andere Events lesbar sind."
+S012.B03,S012,none,none,keines,Kein Residue für genau diesen Rekonstruktionsschritt; nicht pauschal Verlust aller Tasks.
+S013.B01,S013,OPR001,M03,bedingt,Vorhandene Taskdaten bleiben über das gültige Schema zugänglich; historische C9-Aussage ist kein getesteter Powercut.
+S013.B02,S013,OPR004,M01,bedingt,"Rebuilder kann aus Originaleingaben neu ableiten, nicht aus willkürlich geflickter halber Projektion."
+S013.B03,S013,none,none,ungeklaert,Kein imaginärer Eventstore als Rettung eines nur relationalen Bestands.
+S014.B01,S014,OPR003,M09,teilweise,"Restore-Bearbeiter kann enthaltene frühere Fakten nutzen, nicht niemals-gesendet daraus folgern."
+S014.B02,S014,OPR003,M09,bedingt,Der nachgewiesen vollständige Sicherungsstand ist konkret nutzbar.
+S014.B03,S014,none,none,ungeklaert,Für zuverlässigen Restore ist kein konsistenter Präfix belegt; nicht automatisch alle Bits vernichtet.
+S015.B01,S015,OPR003,M09,teilweise,"Alte Auftragsfakten sind nutzbar, sichere Neuzustellung ist nicht nachgewiesen."
+S015.B02,S015,OPR003,M09,bedingt,Wiederhersteller kann alten Bestand prüfen ohne daraus automatisch neue externe Effekte zu erzeugen.
+S015.B02,S015,OPR027,M16,bedingt,Wiederhersteller kann alten Bestand prüfen ohne daraus automatisch neue externe Effekte zu erzeugen.
+S015.B03,S015,OPR003,M09,teilweise,"Präfix bleibt früheres Beweismaterial, garantiert aber keine Einmaligkeit oder Kenntnis des Gesamtzählers."
+S016.B01,S016,OPR001,M03,teilweise,Task-ID und Zusammenfassung können nachverfolgt werden; für exakte Artefaktbytes bleibt keines.
+S016.B02,S016,OPR005,M07,bedingt,"Ergebnisnutzer kann genau alte Bytes lesen, nicht nur einen alten Pfad anzeigen."
+S017.B01,S017,OPR007,M09,teilweise,"Verwahrer behält Sicherungsmaterial, Besitzer hat dadurch noch keine Tasklesefähigkeit."
+S017.B02,S017,OPR007,M09,bedingt,"Besitzer kann vorhandenes Material wieder nutzbar machen, nicht fehlenden Nachlauf erzeugen."
+S017.B02,S017,OPR033,M14,bedingt,"Besitzer kann vorhandenes Material wieder nutzbar machen, nicht fehlenden Nachlauf erzeugen."
+S017.B03,S017,none,none,keines,Für benötigten Klartext keines; intakter Ciphertext ist keine erhaltene Arbeitsfähigkeit.
+S018.B01,S018,OPR004,M01,teilweise,Diagnostiker kann Eingabebytes vergleichen; fehlende damalige Autorisierung lässt sich daraus nicht automatisch rekonstruieren.
+S018.B02,S018,OPR004,M01,bedingt,Historiennutzer kann damalige Zuordnung korrekt prüfen statt alte Rechte umzudeuten.
+S018.B02,S018,OPR026,M02,bedingt,Historiennutzer kann damalige Zuordnung korrekt prüfen statt alte Rechte umzudeuten.
+S018.B03,S018,none,none,keines,Für belegte damalige Autorisierung ist keine Restfähigkeit vorhanden; kein Wunschwert wird eingesetzt.
+S019.B01,S019,OPR004,M01,bedingt,Replaybearbeiter kann neuen Typ und Originaldaten an einen passenden Decoder übergeben.
+S019.B02,S019,OPR004,M01,bedingt,"Erhaltene Eingaben tragen Wiederaufbau, nicht bloß eine höhere schema_version."
+S019.B03,S019,OPR004,M01,teilweise,"Originale erlauben spätere Korrektur, aktueller Erfolgsstatus belegt keine korrekte Rekonstruktion."
+S020.B01,S020,none,none,keines,Für diese Inhalte keines; verbleibender Pfad und Retentionsregel erzeugen sie nicht.
+S020.B02,S020,OPR005,M07,bedingt,Ergebnisnutzer kann benötigte Originalbytes weiter lesen.
+S020.B03,S020,OPR001,M03,bedingt,Noch benötigte Taskfakten bleiben nützlich; keine Aussage über unnötige verlorene Bytes.
+S021.B01,S021,OPR011,M04,bedingt,Dispatcher kann erklären warum beide Uhranzeigen denselben Auftrag meinen.
+S021.B01,S021,OPR012,M04,bedingt,Dispatcher kann erklären warum beide Uhranzeigen denselben Auftrag meinen.
+S021.B02,S021,OPR011,M04,bedingt,Zwei Runs sind hier erhaltene Absicht statt Doppelschaden; spätere Geschäftswirkung braucht eigene Zustimmung.
+S021.B02,S021,OPR012,M04,bedingt,Zwei Runs sind hier erhaltene Absicht statt Doppelschaden; spätere Geschäftswirkung braucht eigene Zustimmung.
+S021.B03,S021,none,none,ungeklaert,Für nachweislich richtige Terminaufnahme ist kein bestimmter Gegenstand belegt; kein universelles einmal oder zweimal.
+S022.B01,S022,OPR011,M04,bedingt,Operator kann sehen warum kein Run existiert; kein erledigter Geschäftsauftrag wird daraus behauptet.
+S022.B01,S022,OPR012,M04,bedingt,Operator kann sehen warum kein Run existiert; kein erledigter Geschäftsauftrag wird daraus behauptet.
+S022.B02,S022,OPR011,M04,bedingt,Dispatcher kann den fehlenden zivilen Termin seinem Ersatz zuordnen ohne zweite Absicht zu erzeugen.
+S022.B02,S022,OPR012,M04,bedingt,Dispatcher kann den fehlenden zivilen Termin seinem Ersatz zuordnen ohne zweite Absicht zu erzeugen.
+S022.B03,S022,none,none,ungeklaert,Kein nachgewiesener Termin-Erhalt durch bloße Cronzeichenfolge.
+S023.B01,S023,OPR011,M04,bedingt,Scheduler behält nachvollziehbare Absicht und bereits getroffene Terminentscheidungen.
+S023.B01,S023,OPR012,M04,bedingt,Scheduler behält nachvollziehbare Absicht und bereits getroffene Terminentscheidungen.
+S023.B02,S023,OPR012,M04,teilweise,"Prüfer kennt die beabsichtigte Frist und den fehlenden Vergleichswert, nicht deren aktuellen Wahrheitswert."
+S023.B03,S023,OPR001,M03,teilweise,Unbetroffene Taskfakten können erhalten sein; korrekte zeitliche Zustimmung ist für die Wirkung nicht erhalten.
+S024.B01,S024,OPR010,M03,bedingt,Scheduler kann erhaltene Termine Originalaufträgen zuordnen und begrenzt abarbeiten.
+S024.B01,S024,OPR011,M04,bedingt,Scheduler kann erhaltene Termine Originalaufträgen zuordnen und begrenzt abarbeiten.
+S024.B02,S024,OPR010,M03,teilweise,"Bereits zugelassene Arbeit bleibt nutzbar, nicht alle Fristen oder alle abgewiesenen Eingänge."
+S024.B03,S024,OPR001,M03,teilweise,Lesbarer Taskkern bleibt nur solange Speicher und Zugriffsressourcen nicht ebenfalls erschöpfen.
+S025.B01,S025,OPR012,M04,bedingt,Dispatcher kann ursprüngliche Zeitabsicht wiedergeben und Wiederholungen zuordnen.
+S025.B01,S025,OPR011,M04,bedingt,Dispatcher kann ursprüngliche Zeitabsicht wiedergeben und Wiederholungen zuordnen.
+S025.B02,S025,OPR012,M04,bedingt,Operator kann verschobene Termine auf eine legitime Regelentscheidung zurückführen.
+S025.B02,S025,OPR011,M04,bedingt,Operator kann verschobene Termine auf eine legitime Regelentscheidung zurückführen.
+S025.B03,S025,none,none,ungeklaert,Für originalgetreue zukünftige Terminbedeutung kein belegter Prüfgegenstand.
+S026.B01,S026,OPR021,M16,bedingt,"Operator kann genau diese Abhängigkeit feststellen, nicht alle globalen Effekte total ordnen."
+S026.B02,S026,OPR021,M16,bedingt,Beide konkreten Wirkungen bleiben belegbar ohne künstliche zeitliche Gesamtreihenfolge.
+S026.B03,S026,none,none,keines,Für verlässlichen Nachweis der benötigten Reihenfolge keines; Annahmen einzelner Effekte können trotzdem wahr sein.
+S027.B01,S027,OPR022,M02,bedingt,Entscheider kann die alte begrenzte Zustimmung und neue benötigte Entscheidung prüfen.
+S027.B02,S027,OPR021,M16,bedingt,Operator kann genau akzeptierte Wirkung und damalige Zustimmung verbinden.
+S027.B02,S027,OPR022,M02,bedingt,Operator kann genau akzeptierte Wirkung und damalige Zustimmung verbinden.
+S027.B03,S027,OPR020,M06,teilweise,"Absicht und Freigabegrenze bleiben lesbar, erfüllte zeitliche Zustimmung bleibt offen."
+S027.B03,S027,OPR022,M02,teilweise,"Absicht und Freigabegrenze bleiben lesbar, erfüllte zeitliche Zustimmung bleibt offen."
+S027.B04,S027,OPR022,M02,teilweise,"Entscheider kann die ursprüngliche Zeitgrenze untersuchen, nicht verlorene Zustimmungstreue oder eine genaue Annahmezeit aus dem Reviewobjekt allein herstellen."
+S028.B01,S028,OPR034,M08,bedingt,Prüfer kann den verlangten historischen Wert nutzen statt unnötig aktuelle Preise einzusetzen.
+S028.B02,S028,OPR022,M02,bedingt,"Operator kann alten Entscheidungsgegenstand abgrenzen, nicht neuen Preis aus ihm erzeugen."
+S028.B03,S028,OPR001,M03,teilweise,"Taskdaten belegen was behauptet wurde, nicht aktuelle Preiskorrektheit."
+S029.B01,S029,OPR012,M04,bedingt,Fristprüfer kann Restdauer gemäß ursprünglichem Auftrag berechnen.
+S029.B02,S029,OPR012,M04,bedingt,Timer erhält genau vereinbarte aktive Restzeit.
+S029.B03,S029,OPR012,M04,teilweise,"Beabsichtigte Frist bleibt nutzbarer Prüfauftrag, ihr aktueller Ablauf nicht."
+S030.B01,S030,OPR011,M04,bedingt,Dispatcher kann Originalrun weiterverfolgen ohne neue Aufgabe.
+S030.B02,S030,OPR001,M03,teilweise,"Vorhandene Taskfakten bleiben nachprüfbar, einmalige Terminaufnahme ist verloren."
+S030.B03,S030,OPR020,M06,teilweise,"Erhaltene einzelne Intentjournale helfen untersuchen, garantieren aber keine fachliche Einmaligkeit."
+S031.B01,S031,OPR015,M05,bedingt,"Startentscheider besitzt Beleg der Belegung und Operator später Taskfakten, nicht aktuelle Herdr-Liveness."
+S031.B01,S031,OPR001,M03,bedingt,"Startentscheider besitzt Beleg der Belegung und Operator später Taskfakten, nicht aktuelle Herdr-Liveness."
+S031.B02,S031,OPR001,M03,teilweise,"Unbetroffener Taskkern bleibt nutzbar, exklusive Workspaceattribution nicht."
+S032.B01,S032,OPR014,M05,bedingt,Operator kann Fremdbeobachtung von alter Belegung trennen.
+S032.B01,S032,OPR015,M05,bedingt,Operator kann Fremdbeobachtung von alter Belegung trennen.
+S032.B02,S032,OPR001,M03,teilweise,"Ursprüngliche Taskfakten können bleiben, aktuelle Sessionzuordnung ist nicht verlässlich."
+S033.B01,S033,OPR014,M05,bedingt,Lifecycle-Verbraucher kann die echte Session weiter identifizieren.
+S033.B02,S033,OPR015,M05,teilweise,"Verwalteter Startentscheider kann Workspace weiterhin reserviert halten, nicht die Pane als alte Session bestätigen."
+S034.B01,S034,OPR029,M05,bedingt,Assignment-Entscheider behält richtige Belegung und Taskfakten; tatsächlicher Worker kann weiterarbeiten.
+S034.B01,S034,OPR001,M03,bedingt,Assignment-Entscheider behält richtige Belegung und Taskfakten; tatsächlicher Worker kann weiterarbeiten.
+S034.B02,S034,OPR001,M03,teilweise,"Kernfakten können richtig weiterbestehen, Beobachterentscheidung aus der Anzeige nicht."
+S035.B01,S035,OPR001,M03,bedingt,Taskabsicht und Belegung bleiben erhalten statt durch Turnsignal ersetzt.
+S035.B01,S035,OPR029,M05,bedingt,Taskabsicht und Belegung bleiben erhalten statt durch Turnsignal ersetzt.
+S035.B02,S035,OPR001,M03,teilweise,"Gespeicherte Behauptung bleibt nachvollziehbar, fachlicher Abschluss ist nicht erhalten."
+S036.B01,S036,OPR014,M05,bedingt,Operator kann Vergangenheit prüfen ohne aktuelle Liveness daraus abzuleiten.
+S036.B02,S036,none,none,ungeklaert,Für frische Sessionbeobachtung kein belegter Gegenstand. Historisches C4 allein beantwortet die End-to-end-Frage nicht.
+S036.B03,S036,OPR001,M03,teilweise,"Taskauftrag und erhaltene frühere Annahmeangaben bleiben lesbar, aktuelle Sessionattribution ist verletzt. Dies ist ein bedingter Callerfehler, kein aus C4 bewiesener Produktvorfall."
+S037.B01,S037,OPR015,M05,bedingt,Startentscheider besitzt nutzbare exklusive verwaltete Belegung trotz Aliasnamen.
+S038.B01,S038,OPR001,M03,teilweise,"Taskfakten sind noch nutzbar, Workspaceexklusivität fehlt auch wenn Pane weg ist."
+S038.B02,S038,OPR015,M05,bedingt,Startentscheider kann alte Belegung konservativ nutzen ohne Prozess-Tod zu behaupten.
+S038.B03,S038,OPR006,M07,bedingt,Prüfer kann vorhandene Arbeit verwerten statt blind neu rechnen.
+S039.B01,S039,OPR029,M05,bedingt,Task und Assignment bleiben inspizierbar; andere unabhängige Worker können getrennt arbeiten.
+S039.B01,S039,OPR001,M03,bedingt,Task und Assignment bleiben inspizierbar; andere unabhängige Worker können getrennt arbeiten.
+S039.B02,S039,OPR032,M13,bedingt,Vertreter hat einen nutzbaren Fallstand; alte Workerbelegung endet dadurch nicht automatisch.
+S040.B01,S040,OPR014,M05,bedingt,Operator erhält aktuellen korrelierten Sessionbezug statt neuer Identität durch Klassifikationsfehler.
+S040.B02,S040,OPR015,M05,bedingt,"Belegung bleibt nutzbar, behauptet aber keine aktuell sichtbare Runtime."
+S040.B03,S040,OPR001,M03,teilweise,"Unbetroffener Taskkern bleibt, exklusive Arbeitsattribution geht verloren."
+S041.B01,S041,OPR017,M05,bedingt,"Operator kann Defekt und verbrauchtes Budget diagnostizieren, nicht Pluginheilung aus Restart folgern."
+S041.B02,S041,OPR020,M06,bedingt,Rekonziliator behält genaue Operation zum späteren Abgleich ohne blinden Retry.
+S042.B01,S042,OPR018,M03,bedingt,Kernel kann weiter bedienen und Operator den Headerverstoß prüfen.
+S042.B01,S042,OPR017,M05,bedingt,Kernel kann weiter bedienen und Operator den Headerverstoß prüfen.
+S042.B02,S042,none,none,ungeklaert,Während globaler Erschöpfung ist keine unabhängige Bedienfähigkeit belegt; spätere Datenerhaltung hängt von konkret überlebendem Store ab.
+S043.B01,S043,OPR010,M03,teilweise,"Lokaler Operator kann wartende Originalaufträge inspizieren und unabhängige lokale Arbeit bedienen, nicht blockierte Operationen abschließen."
+S043.B01,S043,OPR009,M05,teilweise,"Lokaler Operator kann wartende Originalaufträge inspizieren und unabhängige lokale Arbeit bedienen, nicht blockierte Operationen abschließen."
+S043.B02,S043,OPR020,M06,bedingt,"Operation bleibt gezielt rekonzilierbar, Healthsuccess liefert keinen Ergebnisbeleg."
+S043.B03,S043,OPR001,M03,teilweise,Lesbarer Taskkern bleibt nur bei nicht erschöpftem Store; gesunde Geschäftsarbeit ist nicht behauptet.
+S044.B01,S044,OPR017,M05,bedingt,Operator behält konkreten Fehler und verbrauchte Versuche zur gezielten Änderung.
+S044.B02,S044,OPR009,M05,teilweise,Lokaler unabhängiger Bedienpfad bleibt nur wegen separater Ressourcen und Aktivierungsunabhängigkeit nutzbar.
+S045.B01,S045,OPR017,M05,bedingt,Operator kann lokal den konkreten Aktivierungsfehler und Tasks prüfen.
+S045.B01,S045,OPR009,M05,bedingt,Operator kann lokal den konkreten Aktivierungsfehler und Tasks prüfen.
+S045.B02,S045,OPR001,M03,teilweise,"Taskfakten können nach zulässigem Wiederzugang weiter nützlich sein, aktueller lokaler API-Zugang ist nicht erhalten."
+S046.B01,S046,OPR020,M06,bedingt,Rekonziliator kennt genaue Operation und unzureichenden Beleg statt erfolgreich zu halluzinieren.
+S046.B02,S046,OPR021,M16,bedingt,Operator kann konkreten Endzustand belegen ohne nochmals auszulösen.
+S046.B03,S046,OPR001,M03,teilweise,"Annahmebehauptung ist nachvollziehbar, ausgeführte Geschäftsarbeit ist gerade nicht erhalten."
+S047.B01,S047,OPR018,M03,bedingt,Andere Aktivierungen und Operator behalten konkrete Ressourcen sowie Diagnose.
+S047.B01,S047,OPR017,M05,bedingt,Andere Aktivierungen und Operator behalten konkrete Ressourcen sowie Diagnose.
+S047.B02,S047,none,none,ungeklaert,"Aktuelle lokale Bedienfähigkeit ist nicht belegt. Bereits gespeicherte Daten könnten nach Freigabe noch nutzbar sein, sind hier aber nicht zugänglich."
+S048.B01,S048,OPR019,M10,bedingt,Host kann genau die weiterhin gleichbedeutende Operation nutzen.
+S048.B02,S048,OPR019,M10,bedingt,Bearbeiter kann den konkreten Bedeutungsunterschied prüfen statt Major-Kompatibilität als Freigabe nutzen.
+S048.B03,S048,none,none,ungeklaert,Für semantisch sichere Operation ist kein nachgewiesener Vertrag vorhanden; keine beliebige Gefahr als Tatsache.
+S048.B04,S048,OPR020,M06,teilweise,"Rekonziliator kann die beabsichtigte simulierte Operation und erhaltene Versuche prüfen, nicht aus dem Majorhandshake sichere gleiche Bedeutung ableiten. Dieses Feld ist eine stipulierte Testannahme, kein behauptetes bestehendes Factoryfeld."
+S049.B01,S049,OPR020,M06,bedingt,Operator kann offene konkrete Verpflichtung sehen obwohl Plugin nicht mehr neu arbeiten darf.
+S049.B02,S049,OPR021,M16,bedingt,"Operator kann genau diesen Abschluss nachweisen, keine universelle Teilnehmerstilllegung."
+S050.B01,S050,OPR023,M06,bedingt,Bearbeiter kann den bestimmten Vorzustand und Defekt der Inverse prüfen.
+S050.B01,S050,OPR034,M08,bedingt,Bearbeiter kann den bestimmten Vorzustand und Defekt der Inverse prüfen.
+S050.B02,S050,none,none,keines,Für den zerstörten einzigartigen Inhalt keines; keine imaginäre Vorzustandskopie im Journal.
+S050.B03,S050,OPR023,M06,teilweise,"Zuständiger Bearbeiter kann Wiederherstellung beurteilen, aktueller korrekter Teilnehmerzustand ist nicht erhalten."
+S051.B01,S051,OPR020,M06,bedingt,Rekonziliator kann genaue Operation benennen und weitere Schritte begrenzen.
+S051.B02,S051,OPR021,M16,bedingt,Operator kann erfolgte Arbeit nutzen und belegen.
+S051.B03,S051,OPR020,M06,teilweise,"Erhaltene lokale Versuche helfen untersuchen, beweisen aber weder Gesamtzahl noch aktuelle Bilanz."
+S052.B01,S052,OPR009,M05,bedingt,Lokaler Operator kann vorhandene Intentdaten bearbeiten ohne sie dem falschen Ziel zu übergeben.
+S052.B01,S052,OPR020,M06,bedingt,Lokaler Operator kann vorhandene Intentdaten bearbeiten ohne sie dem falschen Ziel zu übergeben.
+S052.B02,S052,OPR020,M06,teilweise,"Unbetroffenes Intentjournal kann den beabsichtigten Zielbezug zeigen, nicht verlorene Vertraulichkeit wiederherstellen."
+S053.B01,S053,OPR009,M05,bedingt,Operator kann lokal weiter inspizieren und unabhängige Aufgaben bedienen.
+S053.B02,S053,OPR001,M03,teilweise,"Unbetroffene Taskfakten können erhalten sein, betroffene Vertraulichkeit nicht."
+S054.B01,S054,OPR018,M03,bedingt,"Die Kernreserve und der begrenzte autorisierte Subscriber-Cursor bleiben nutzbar. Der Cursor bezeichnet vorhandenen Ereignisbereich und mögliche Retentionslücke, nicht eine Runtime-Sessiongeneration."
+S054.B01,S054,OBR029,M01,bedingt,"Die Kernreserve und der begrenzte autorisierte Subscriber-Cursor bleiben nutzbar. Der Cursor bezeichnet vorhandenen Ereignisbereich und mögliche Retentionslücke, nicht eine Runtime-Sessiongeneration."
+S054.B02,S054,OBR029,M01,bedingt,"Der Subscriber liest den tatsächlich erhaltenen Ereignissuffix zu seinem autorisierten Cursor. Kanonische Eingaben erlauben die Rekonstruktion innerhalb dieses Horizonts, ohne eine Runtimeobservation zu benötigen."
+S054.B02,S054,OPR004,M01,bedingt,"Der Subscriber liest den tatsächlich erhaltenen Ereignissuffix zu seinem autorisierten Cursor. Kanonische Eingaben erlauben die Rekonstruktion innerhalb dieses Horizonts, ohne eine Runtimeobservation zu benötigen."
+S054.B03,S054,none,none,ungeklaert,Unabhängige lokale Bedienbarkeit ist ohne Schutz nicht nachgewiesen; vorhandene Datenträgerbits allein ersetzen sie nicht.
+S055.B01,S055,OPR009,M05,bedingt,Operator kann konkrete Taskabfragen und erlaubte lokale Arbeit ohne HTTP erledigen.
+S055.B02,S055,OPR001,M03,teilweise,"Lokaler Taskkern bewahrt Entscheidungsbedarf für später, kein erreichbarer Entscheidungskanal wird behauptet."
+S056.B01,S056,OPR014,M05,bedingt,Operator kann den damaligen beobachteten Stand einordnen ohne ihn als heutige Wahrheit zu nutzen.
+S056.B02,S056,OPR001,M03,teilweise,"Realer Taskkern ist weiter inspizierbar über einen gültigen Zugang, Cacheentscheidung ist unzuverlässig."
+S056.B03,S056,OPR020,M06,teilweise,"Erhaltene Intentjournale können Absichten nachzeichnen, nicht Einmaligkeit garantieren."
+S057.B01,S057,OPR021,M16,bedingt,Rekonziliator nutzt eine echte Quittung mehrfach lesend statt mehrfach auslösend.
+S057.B01,S057,OPR020,M06,bedingt,Rekonziliator nutzt eine echte Quittung mehrfach lesend statt mehrfach auslösend.
+S057.B02,S057,OPR020,M06,teilweise,"Beabsichtigte Operationen bleiben untersuchbar, der angezeigte Ausgang nicht vertrauenswürdig."
+S057.B03,S057,OPR020,M06,teilweise,"Erhaltene lokale Versuche helfen Diagnose, nicht gesicherte Wirkungseinmaligkeit."
+S058.B01,S058,OPR025,M02,bedingt,Kernel kann zulässige Aufrufe weiterhin von fremden unterscheiden.
+S058.B02,S058,none,none,keines,Für bereits verlorene Vertraulichkeit beziehungsweise Zustimmungstreue keines; übrige Systemfähigkeiten sind nicht pauschal verloren.
+S059.B01,S059,OPR001,M03,teilweise,"Lokaler Dispatcher nutzt erhaltene Aufträge, entfernter Operator hat dadurch noch keinen Livezugang."
+S059.B01,S059,OPR010,M03,teilweise,"Lokaler Dispatcher nutzt erhaltene Aufträge, entfernter Operator hat dadurch noch keinen Livezugang."
+S059.B02,S059,OPR009,M05,bedingt,Vertreter kann lokale Evidenz lesen und im Rahmen seiner Rechte entscheiden.
+S059.B02,S059,OPR032,M13,bedingt,Vertreter kann lokale Evidenz lesen und im Rahmen seiner Rechte entscheiden.
+S059.B03,S059,OPR001,M03,teilweise,"Bedarf bleibt gespeichert, rechtzeitige menschliche Eingriffsfähigkeit nicht."
+S060.B01,S060,OPR010,M03,teilweise,"Scheduler behält zugelassene Originalarbeit, nicht Fristtreue oder unbegrenzte Aufnahme."
+S060.B02,S060,OPR001,M03,teilweise,"Taskfakten bleiben bei intaktem Store untersuchbar, Teilnehmerfortschritt nicht garantiert."
+S060.B03,S060,OPR010,M03,bedingt,Scheduler kann gültige ursprüngliche Aufträge abarbeiten.
+S061.B01,S061,OPR026,M02,bedingt,Assignment-Bearbeiter kann alte und neue Bezeichnung auf dasselbe erlaubte Ziel beziehen.
+S061.B01,S061,OPR001,M03,bedingt,Assignment-Bearbeiter kann alte und neue Bezeichnung auf dasselbe erlaubte Ziel beziehen.
+S061.B02,S061,OPR026,M02,bedingt,"Operator kann erkennen welches Ziel ursprünglich gemeint war, nicht automatisch an anderen Agent liefern."
+S061.B03,S061,OPR001,M03,teilweise,"Taskabsicht bleibt nachlesbar, richtige Empfängerbindung ist nicht erhalten."
+S062.B01,S062,OPR026,M02,bedingt,Operator kann alte Identität sehen und Factory-Schreiber bleibt am erlaubten geprüften Objekt begrenzt.
+S062.B01,S062,OPR016,M07,bedingt,Operator kann alte Identität sehen und Factory-Schreiber bleibt am erlaubten geprüften Objekt begrenzt.
+S062.B02,S062,OPR001,M03,teilweise,"Alte Auftragsfakten können bleiben, Verzeichnis- und Artefaktkontinuität fehlen."
+S062.B03,S062,none,none,keines,Für exakte Originalbytes keines; neue Pfadexistenz ist keine Erhaltung.
+S063.B01,S063,OPR016,M07,bedingt,Factory-Schreiber kann Zielbegrenzung behalten; erfolgreicher fachlicher Inhalt ist damit nicht bewiesen.
+S063.B02,S063,OPR001,M03,teilweise,"Unbetroffener Taskkern kann beabsichtigtes Ziel belegen, tatsächliche Schreibgrenze wurde verletzt."
+S064.B01,S064,OPR026,M02,bedingt,Delegationsprüfer kann alte Kette und heutige Grenze getrennt nutzen.
+S064.B01,S064,OPR030,M03,bedingt,Delegationsprüfer kann alte Kette und heutige Grenze getrennt nutzen.
+S064.B02,S064,OPR004,M01,teilweise,"Replaybearbeiter kann Originaleingaben prüfen, nicht nie aufgezeichnete Rechte erfinden."
+S065.B01,S065,OPR027,M16,bedingt,Wiederhersteller liest Snapshot ohne aus kopierter queued-Historie Doppelwirkungen abzuleiten.
+S065.B01,S065,OPR003,M09,bedingt,Wiederhersteller liest Snapshot ohne aus kopierter queued-Historie Doppelwirkungen abzuleiten.
+S065.B02,S065,OPR001,M03,teilweise,"Jeweilige lokale Taskfakten sind noch lesbar, globaler Einmaligkeits- und Identitätsanspruch nicht erhalten."
+S065.B03,S065,OPR001,M03,teilweise,"Nicht betroffene Taskdaten bleiben nutzbar, exklusive Dateiänderungsattribution fehlt."
+S066.B01,S066,OPR025,M02,bedingt,Kernel kann berechtigte Agentaufträge weiter unterscheiden und fremden Aufruf abweisen.
+S066.B02,S066,none,none,keines,Für die verletzte Principalgrenze und bereits offengelegte Information keines; keine unabhängige Vertrauenswurzel wird unterstellt.
+S067.B01,S067,OPR030,M03,bedingt,Prüfer kann aus bestehender Provenienz die Wiederholung erkennen ohne bestehende Arbeit zu löschen.
+S067.B01,S067,OPR001,M03,bedingt,Prüfer kann aus bestehender Provenienz die Wiederholung erkennen ohne bestehende Arbeit zu löschen.
+S068.B01,S068,OPR010,M03,teilweise,"Scheduler behält zugelassene Aufträge, nicht pauschal Nutzen jeder semantisch gleichen Kopie."
+S068.B02,S068,OPR001,M03,teilweise,"Bei lesbarem Store bleiben ursprüngliche Taskfakten untersuchbar, produktiver Fortschritt nicht."
+S068.B03,S068,none,none,ungeklaert,Unter ungebremster Store-Erschöpfung ist keine dauerhaft nutzbare Queue garantiert; bis dahin vorhandene Records sind kein Erhaltungsbeweis.
+S069.B01,S069,OPR026,M02,bedingt,Berechtigter Bearbeiter kann alte Identität und Taskstand nutzen; Memorybytes nur wenn tatsächlich erhalten und erlaubt.
+S069.B01,S069,OPR001,M03,bedingt,Berechtigter Bearbeiter kann alte Identität und Taskstand nutzen; Memorybytes nur wenn tatsächlich erhalten und erlaubt.
+S069.B02,S069,OPR020,M06,bedingt,Zuständiger Nachfolger kann bekannte offene Operationen verfolgen; kein Schluss auf keine unbekannten späten Wirkungen.
+S069.B03,S069,none,none,keines,Keines für den gelöschten Inhalt; unerlaubte Schattenkopie wird nicht als Residue vorgeschlagen.
+S069.B04,S069,none,none,ungeklaert,Es ist kein bestimmter erlaubter Restzugriff belegt; Produktvertrag muss vor Nutzung entschieden werden.
+S070.B01,S070,OPR008,M09,bedingt,Wiederhersteller kann beide Originalinhalte aus Export lesen obwohl Zielfilesystem sie nicht gleichnamig tragen kann.
+S070.B02,S070,OPR005,M07,bedingt,"Ergebnisnutzer erhält beide Originalbytes, bequeme Pfadschreibweise kann verändert sein."
+S070.B03,S070,none,none,keines,Für die verlorene Variante keines; ein Alias ist keine zweite Originalkopie.
+S071.B01,S071,OPR028,M01,bedingt,CLI erhält ursprüngliche Task-ID und Commandausgang trotz Transportverlust.
+S071.B02,S071,OPR001,M03,teilweise,"Operator kann vorhandenen Task nach ID suchen, CLI hat nicht automatisch eine erfolgreiche idempotente Antwort."
+S071.B03,S071,OPR001,M03,teilweise,"Beide Taskfakten können untersucht werden, einmalige Aufnahme der Absicht ist verloren."
+S072.B01,S072,OPR001,M03,bedingt,Operator besitzt gültigen Cancel-Taskstand für diesen nie begonnenen Zustellpfad.
+S072.B02,S072,OPR002,M06,teilweise,"Operator kann Versuch und Cancel lesen, nicht daraus beweisen dass niemand einen Prompt erhielt."
+S072.B02,S072,OPR001,M03,teilweise,"Operator kann Versuch und Cancel lesen, nicht daraus beweisen dass niemand einen Prompt erhielt."
+S072.B03,S072,OPR021,M16,bedingt,Operator kann genau angenommene Wirkung belegen; lokale Stornierung ist kein Unsenden.
+S073.B01,S073,OPR029,M05,bedingt,Assignment-Entscheider behält eine eindeutige verwaltete Belegung.
+S074.B01,S074,OPR002,M06,bedingt,Operator kann alten Versuch und fehlende neue Erlaubnis prüfen.
+S074.B02,S074,KOR001,M06,bedingt,Der erhaltene Task und seine unverbrauchte gültige Zustellrevision erlauben die ursprüngliche begrenzte Aufnahme. Es gibt ausdrücklich noch keinen historischen Versuchsrecord und daher kein OPR002.
+S074.B02,S074,OPR001,M03,bedingt,Der erhaltene Task und seine unverbrauchte gültige Zustellrevision erlauben die ursprüngliche begrenzte Aufnahme. Es gibt ausdrücklich noch keinen historischen Versuchsrecord und daher kein OPR002.
+S074.B03,S074,OPR002,M06,bedingt,OPR002 erhält die frühere Versuchsevidenz und deren verbrauchte Erlaubnis. KOR001 bezeichnet ausschließlich den zusätzlichen gültigen Rest der neuen Revision. Keines klärt frühere Außenwirkung oder Workspacebesitz.
+S074.B03,S074,KOR001,M06,bedingt,OPR002 erhält die frühere Versuchsevidenz und deren verbrauchte Erlaubnis. KOR001 bezeichnet ausschließlich den zusätzlichen gültigen Rest der neuen Revision. Keines klärt frühere Außenwirkung oder Workspacebesitz.
+S075.B01,S075,OPR005,M07,bedingt,Ergebnisnutzer kann Original gegen spätere Datei unterscheiden.
+S075.B02,S075,OPR001,M03,teilweise,"Taskbezug bleibt nutzbar, für exaktes ursprüngliches Artefakt keines."
+S075.B03,S075,OPR001,M03,teilweise,"Taskfakten zeigen ursprüngliche Annahmebehauptung, nicht Wahrheit der später gelesenen Ausgabe."
+S076.B01,S076,OPR001,M03,bedingt,"Operator kann bisherigen Taskstand weiter benutzen, kein riesiges Resultat wurde als vollständig akzeptiert."
+S076.B02,S076,OPR018,M03,bedingt,Kernel kann weiter nützliche lokale Anfragen bearbeiten statt an Validierungsvorbereitung zu sterben.
+S076.B03,S076,OPR005,M07,bedingt,"Ergebnisnutzer hat den echten Inhalt, nicht eine abgeschnittene Zeichenfolge."
+S077.B01,S077,OPR029,M05,bedingt,Assignment-Bearbeiter behält eindeutige alte Zuständigkeit; andere freie Sessions können separat arbeiten.
+S077.B02,S077,OPR001,M03,teilweise,"Alte Taskfakten bleiben, verlässliche Zuordnung der neuen unverwalteten Arbeit fehlt."
+S078.B01,S078,OPR001,M03,bedingt,"Offener Task bleibt als Auftrag nutzbar, kein fachlicher Erfolg aus Exitcode behauptet."
+S078.B02,S078,OPR001,M03,teilweise,"Taskrow belegt Behauptung, erforderliche Arbeitsleistung ist nicht erhalten."
+S078.B03,S078,OPR034,M08,bedingt,Prüfer kann echten Erfolg trotz Stille belegen ohne Output zu erfinden.
+S079.B01,S079,OPR031,M05,bedingt,Executor kann Promptdaten mit Metazeichen als Daten übergeben statt Zusatzbefehl.
+S079.B02,S079,OPR001,M03,teilweise,"Originaltask kann Absicht belegen, Ausführungs- und Zustimmungsbindung ist verletzt."
+S080.B01,S080,OPR006,M07,bedingt,Prüfer kann vorhandene Arbeit nutzen und alten Versuch prüfen ohne blind neu zuzustellen.
+S080.B01,S080,OPR002,M06,bedingt,Prüfer kann vorhandene Arbeit nutzen und alten Versuch prüfen ohne blind neu zuzustellen.
+S080.B02,S080,OPR006,M07,bedingt,"Resultatnutzer hat nachgewiesene Arbeit und akzeptierten Taskstand, nicht bloß zufällige Datei."
+S080.B02,S080,OPR034,M08,bedingt,"Resultatnutzer hat nachgewiesene Arbeit und akzeptierten Taskstand, nicht bloß zufällige Datei."
+S080.B02,S080,OPR001,M03,bedingt,"Resultatnutzer hat nachgewiesene Arbeit und akzeptierten Taskstand, nicht bloß zufällige Datei."
+S080.B03,S080,OPR001,M03,teilweise,"Taskabsicht kann neue zulässige Arbeit begründen, exaktes altes Artefakt ist nicht erhalten."
+S081.B01,S081,OPR020,M06,bedingt,"Operator kann genaue beabsichtigte Zahlung und bisherige Versuche untersuchen, nicht ihren Effektzähler feststellen."
+S081.B02,S081,OPR021,M16,bedingt,"Operator kann diese Zahlung zuordnen und verwenden, nicht generell jeden Retry sicher machen."
+S081.B03,S081,OPR020,M06,teilweise,"Erhaltene Versuche helfen Diagnose, lokale Keys bewahren keine entfernte Einmaligkeit."
+S082.B01,S082,OPR020,M06,bedingt,"Rekonziliator kennt Nachrichtabsicht und Operation, nicht aus sich heraus verbindlichen Versandbeleg."
+S082.B02,S082,OPR021,M16,bedingt,Operator kann genau den erfolgten Versand nachweisen und weiteren identischen Versand vermeiden.
+S082.B03,S082,OPR020,M06,teilweise,"Absichten und erhaltene Versuche bleiben prüfbar, einmalige Empfängerbelastung ist verloren."
+S083.B01,S083,OPR022,M02,bedingt,Entscheider kann exakt alte und neue Rechnung unterscheiden und gezielt prüfen.
+S083.B02,S083,OPR022,M02,teilweise,"Operator kann betroffene Abweichung anhand erhaltenem A belegen, nicht verlorene Consenttreue wiederherstellen."
+S083.B03,S083,OPR021,M16,bedingt,Operator kann wirklich angenommene Rechnung B als Fakt verfolgen ohne sie als genehmigt umzudeuten.
+S084.B01,S084,OPR021,M16,bedingt,"Operator kann historischen Effekt nachweisen, nicht zurücknehmen."
+S084.B02,S084,OPR020,M06,bedingt,Operator sieht bekannte Absicht und muss den alten Ausgang weiter klären.
+S084.B03,S084,OPR023,M06,bedingt,"Bearbeiter kann sichere konkrete Korrektur beurteilen, noch kein Rollback geschehen."
+S085.B01,S085,OPR023,M06,bedingt,"Bearbeiter kann Konflikt und alte Absicht prüfen, erhält keine allgemeine Merge-Lösung."
+S085.B02,S085,none,none,keines,Für exakte neue menschliche Arbeit keines; alter Saga-Vorwert rekonstruiert sie gerade nicht.
+S085.B03,S085,OPR005,M07,teilweise,"Berechtigter Bearbeiter kann neuere Bytes lesen und Korrektur vorbereiten, nicht behaupten Teilnehmer sei schon korrekt."
+S086.B01,S086,OPR023,M06,bedingt,Bearbeiter kann konkrete fehlgeschlagene Korrektur nachvollziehen statt kompletten Rollback behaupten.
+S086.B02,S086,OPR023,M06,teilweise,"Nur solange Journal lesbar bleibt kann Operator ursprünglichen Korrekturstand nutzen, Fortschritt ist nicht erhalten."
+S086.B03,S086,none,none,ungeklaert,Dauerhafte Erreichbarkeit des Korrekturstands ist ohne Ressourcengrenze nicht nachgewiesen.
+S087.B01,S087,OPR024,M16,bedingt,Bestellentscheider kann eine Absicht über Taskgrenzen erhalten.
+S087.B02,S087,OPR024,M16,bedingt,Operator kann tatsächliche Menge gegen autorisierte Absicht prüfen.
+S087.B02,S087,OPR021,M16,bedingt,Operator kann tatsächliche Menge gegen autorisierte Absicht prüfen.
+S087.B03,S087,OPR020,M06,teilweise,"Erhaltene Intentjournale zeigen zwei Vorgänge, erklären aber ohne Fachbezug nicht von selbst Gleichheit der Absicht."
+S088.B01,S088,OPR022,M02,bedingt,Entscheider kann konkreten Preiswechsel abgrenzen und neu bewerten.
+S088.B02,S088,OPR021,M16,bedingt,Operator kann akzeptierte Terms gegen die echte Zustimmung prüfen.
+S088.B02,S088,OPR022,M02,bedingt,Operator kann akzeptierte Terms gegen die echte Zustimmung prüfen.
+S088.B03,S088,OPR020,M06,bedingt,Rekonziliator kann die alte Operation abgrenzen statt Preisrefresh als sicheren Neustart behandeln.
+S088.B04,S088,OPR022,M02,teilweise,"Abweichung von erlaubtem Preis ist untersuchbar, Zustimmungstreue nicht erhalten."
+S089.B01,S089,OPR022,M02,bedingt,Entscheider kann vorher genehmigten Inhalt abgrenzen und neue Fassung gezielt prüfen.
+S089.B02,S089,none,none,keines,Für Vertraulichkeit der bereits übermittelten Zeilen keines; kein Unsenden oder perfekte Empfängerlöschung erfunden.
+S089.B03,S089,OPR022,M02,bedingt,Operator kann zugestimmten Inhalt und tatsächlichen Versand verbinden.
+S089.B03,S089,OPR021,M16,bedingt,Operator kann zugestimmten Inhalt und tatsächlichen Versand verbinden.
+S090.B01,S090,OPR020,M06,bedingt,"Operator kann bekannte Absicht und offene Evidenzlücke untersuchen, keine Effektanzahl rekonstruieren."
+S090.B02,S090,OPR021,M16,bedingt,Operator kann diese Wirkung nachweisen ohne History-Retention oder perfekten Drittbeobachter zu erfinden.
+S090.B03,S090,none,none,keines,Für belegbar sichere konkrete Inverse keines; Intentlesen ist eine andere erhaltene Fähigkeit des ersten Zweigs.
+S091.B01,S091,OPR001,M03,teilweise,"Operator kann nach Rückkehr Auftrag und offenen Bedarf lesen, nicht verlorene Gelegenheit zurückholen."
+S091.B02,S091,OPR010,M03,bedingt,Lokaler Dispatcher nutzt erhaltene Originalaufträge ohne Abwesenheit als zusätzliche Sendefreigabe auszulegen.
+S091.B03,S091,OPR001,M03,teilweise,"Taskbezug bleibt zur ehrlichen Disposition nutzbar, rechtzeitige Entscheidung ist verloren."
+S092.B01,S092,OPR032,M13,bedingt,"Befugter Prüfer kann konkrete Dossiers und Reviewobjekte bearbeiten, nicht bloß hundert Dialoge wegklicken."
+S092.B01,S092,OPR022,M02,bedingt,"Befugter Prüfer kann konkrete Dossiers und Reviewobjekte bearbeiten, nicht bloß hundert Dialoge wegklicken."
+S092.B02,S092,OPR022,M02,teilweise,"Reviewobjekt belegt was formal vorlag, nicht dass Mensch es verstanden oder richtig entschieden hat."
+S092.B03,S092,OPR001,M03,teilweise,"Unbetroffene Taskfakten und tatsächlich gespeicherte Reviewobjekte bleiben untersuchbar, Urteilsgüte und vollständiger Vorfallbestand nicht garantiert."
+S092.B03,S092,OPR022,M02,teilweise,"Unbetroffene Taskfakten und tatsächlich gespeicherte Reviewobjekte bleiben untersuchbar, Urteilsgüte und vollständiger Vorfallbestand nicht garantiert."
+S093.B01,S093,OPR032,M13,bedingt,Vertreter kann wissen was bekannt ist und was noch zu klären bleibt ohne Originalowner zu fragen.
+S093.B01,S093,OPR020,M06,bedingt,Vertreter kann wissen was bekannt ist und was noch zu klären bleibt ohne Originalowner zu fragen.
+S093.B02,S093,OPR020,M06,teilweise,"Vertreter kann gezielt den offenen Sachverhalt abgrenzen, nicht sichere Wiederholung folgern."
+S093.B03,S093,OPR020,M06,teilweise,"Erhaltene Intentdaten erlauben Nachuntersuchung, nicht Einmaligkeit oder sachgerechte Entscheidung."
+S094.B01,S094,OPR022,M02,bedingt,Entscheider kann genau beabsichtigtes Ziel gegen echte Verbindung prüfen.
+S094.B02,S094,OPR021,M16,teilweise,"Operator kann tatsächliche Produktionsannahme belegen, menschliche Zieltreue ist verletzt."
+S094.B03,S094,OPR001,M03,teilweise,"Aufgabenfakten der tatsächlichen Instanz bleiben lesbar, Interpretation als Fixture ist ungesichert."
+S095.B01,S095,OPR003,M09,teilweise,"Bearbeiter kann den enthaltenen Stand auswerten, nicht aktuell running oder nie versucht daraus folgern."
+S095.B02,S095,OPR027,M16,bedingt,"Wiederhersteller kann Inventur durchführen, fehlenden Nachlauf aber noch nicht rekonstruieren."
+S095.B02,S095,OPR003,M09,bedingt,"Wiederhersteller kann Inventur durchführen, fehlenden Nachlauf aber noch nicht rekonstruieren."
+S095.B03,S095,OPR002,M06,bedingt,Operator kann gespeicherte Versuche und Workspacebelegung nutzen; nicht enthaltene spätere Versuche bleiben außerhalb.
+S095.B03,S095,OPR015,M05,bedingt,Operator kann gespeicherte Versuche und Workspacebelegung nutzen; nicht enthaltene spätere Versuche bleiben außerhalb.
+S096.B01,S096,OPR015,M05,bedingt,"Startentscheider behält alte Belegung als Sperrgrund, nicht Macht über menschliche Editoren."
+S096.B02,S096,OPR001,M03,teilweise,"Unbetroffener Taskkern bleibt nutzbar, exklusive Änderungsattribution fehlt."
+S096.B03,S096,OPR005,M07,bedingt,"Nachfolger kann den übergebenen Originalstand lesen, nicht beliebige spätere menschliche Edits mitumfassen."
+S097.B01,S097,OPR001,M03,teilweise,"Task-ID und Status bleiben nachlesbar, für selbständige Blockerentscheidung keines."
+S097.B02,S097,OPR032,M13,bedingt,Vertreter kann Fall bearbeiten statt nur blocked erneut zu quittieren.
+S098.B01,S098,OPR001,M03,teilweise,"Taskrecord dokumentiert Annahme, beweist weder Unbefangenheit noch sachliche Wahrheit."
+S098.B02,S098,OPR034,M08,bedingt,Prüfer kann Fehler unabhängig vom Autorinteresse feststellen; andere ungemessene Eigenschaften bleiben offen.
+S099.B01,S099,OPR015,M05,bedingt,Startentscheider kann erhaltene Belegung weiterhin zur kontrollierten Ausschließung nutzen.
+S099.B02,S099,OPR001,M03,teilweise,"Unbetroffene Taskdaten bleiben, exklusive Workspacekontrolle nicht."
+S099.B03,S099,OPR015,M05,bedingt,Aufnahmeentscheider nutzt geklärte Belegung und vorhandene Taskfakten statt Dringlichkeit als Beweis.
+S099.B03,S099,OPR001,M03,bedingt,Aufnahmeentscheider nutzt geklärte Belegung und vorhandene Taskfakten statt Dringlichkeit als Beweis.
+S100.B01,S100,none,none,ungeklaert,Für selbständigen Besitzerwiederzugang kein nutzbarer Gegenstand belegt; dauerhafte Vernichtung wird daraus noch nicht gefolgert.
+S100.B02,S100,OPR033,M14,bedingt,Besitzer kann unter genau diesem Ausfall Zugang zurückerlangen; kein geheimer Inhalt im Analysebericht nötig.
+S100.B03,S100,OPR010,M03,teilweise,"Lokaler Worker kann erhaltene Aufträge nutzen, nicht der ausgesperrte Besitzer aktuell inspizieren."
+S100.B03,S100,OPR001,M03,teilweise,"Lokaler Worker kann erhaltene Aufträge nutzen, nicht der ausgesperrte Besitzer aktuell inspizieren."
+S100.B04,S100,none,none,keines,Für die davon abhängige Besitzerwiederherstellung keines; keine imaginäre externe Kopie oder perfekte Kontorettung.
+S101.B01,S101,GVR001,M01,teilweise,Berechtigte Prüfer können gespeicherte Aufgaben und Versuche lesen; neue Inference bleibt unmöglich.
+S101.B02,S101,GVR002,M08,bedingt,Empfänger nutzt das konkret abgenommene Ergebnis; der Entwurf behauptet keine identischen Modelle.
+S102.B01,S102,GVR004,M11,teilweise,"Analyst kann bekannte Ergebnisgrößen auswerten, aber keine Gewichtsversion zuschreiben."
+S102.B02,S102,GVR001,M01,teilweise,Erhaltene Akte lässt Aussagen und Wiederverwendung untersuchen; sie liefert keine Wahrheit oder verlorene Gewichtsdaten.
+S103.B01,S103,GVR005,M06,bedingt,Prüfer behalten den Effektauftrag und können ihn ablehnen; keine privilegierte Wirkung dieser Anforderung.
+S103.B02,S103,none,none,keines,Für Nie-Offengelegtheit dieser Daten bleibt keine Restfähigkeit; andere Daten sind damit nicht automatisch verloren.
+S103.B03,S103,GVR003,M07,teilweise,"Ein zuvor gebundenes Eingabepaket erlaubt dem Prüfer Herkunftsanalyse, sofern es außerhalb der Manipulation erhalten ist; es korrigiert den Glauben nicht automatisch."
+S104.B01,S104,GVR001,M01,teilweise,"Erhaltene Bewertungen erlauben Nachprüfung des Vorgangs, nicht des behaupteten Wahrheitsgehalts."
+S104.B02,S104,GVR001,M01,teilweise,"Die unveränderte Bewertungsakte bleibt ein untersuchbarer Gegenstand; berechtigte Prüfer können den Zitatkreislauf sehen, sofern lesbar."
+S104.B03,S104,GVR006,M08,bedingt,Befund und gesperrter Auftrag bleiben für zuständige Prüfer nutzbar; kein allwissender dritter Prüfer wird vorausgesetzt.
+S104.B03,S104,GVR005,M06,bedingt,Befund und gesperrter Auftrag bleiben für zuständige Prüfer nutzbar; kein allwissender dritter Prüfer wird vorausgesetzt.
+S105.B01,S105,GVR001,M01,teilweise,Prüfer kann die falsche Ergebnisbehauptung belegen; für die behaupteten Originalbytes gibt es keine Restfähigkeit.
+S105.B02,S105,GVR002,M08,bedingt,"Empfänger nutzt identifizierte abgenommene Bytes, nicht den ungeprüften Pfad aus complete_with_result."
+S105.B02,S105,GVR037,M07,bedingt,"Empfänger nutzt identifizierte abgenommene Bytes, nicht den ungeprüften Pfad aus complete_with_result."
+S106.B01,S106,GVR001,M01,teilweise,Operator liest nach verfügbarem Speicher alte Versuche; dies belegt weder weiterlaufende Arbeit noch deren Ende.
+S106.B02,S106,GVR005,M06,bedingt,"Prüfer kann die offene Effekthülle bearbeiten; dies ist eine entworfene Vermittlungsgrenze, keine produktweite Garantie aus restore::reconcile."
+S107.B01,S107,GVR002,M08,teilweise,"Empfänger nutzt die abgenommenen Bytes; Analyst vergleicht nur belegte Größen, nicht erfundene Modellanteile."
+S107.B01,S107,GVR004,M11,teilweise,"Empfänger nutzt die abgenommenen Bytes; Analyst vergleicht nur belegte Größen, nicht erfundene Modellanteile."
+S107.B02,S107,GVR001,M01,teilweise,"Lesbare Auftragsakten zeigen den Behauptungsfluss, nicht die fehlende Modellidentität."
+S108.B01,S108,GVR028,M03,teilweise,Worker kann belegte Teilarbeit später fortsetzen oder prüfen; ein terminaler Liefergegenstand ist nicht erhalten.
+S108.B02,S108,GVR002,M08,bedingt,"Empfänger verwendet das konkret fertige Ergebnis, nicht den bloßen Zähler korrekter Zwischenschritte."
+S109.B01,S109,GVR003,M07,bedingt,Prüfer kann die betroffenen Eingaben sehen und genau diese Ausführung zurückhalten.
+S109.B01,S109,GVR005,M06,bedingt,Prüfer kann die betroffenen Eingaben sehen und genau diese Ausführung zurückhalten.
+S109.B02,S109,GVR001,M01,teilweise,"Auftragsakte bleibt lesbar; für den tatsächlichen vollständigen Verbrauch fehlt Evidenz, weshalb GVR003 nicht als erfüllt zählt."
+S110.B01,S110,GVR004,M11,teilweise,Analyst kann den gespeicherten engen Testwert lesen; Generalisierung und reale Kompetenz bleiben unbewiesen.
+S110.B02,S110,GVR031,M08,bedingt,Prüfer nutzt den explizit begrenzten Testbeleg und seine Ausschlüsse.
+S111.B01,S111,GVR003,M07,bedingt,Prüfer sieht beide belegten Revisionen und entscheidet über den erhaltenen Auftrag.
+S111.B01,S111,GVR005,M06,bedingt,Prüfer sieht beide belegten Revisionen und entscheidet über den erhaltenen Auftrag.
+S111.B02,S111,GVR001,M01,teilweise,Bekannte Taskzeiten bleiben prüfbar; alte Regelbindung kann daraus nicht erfunden werden.
+S112.B01,S112,GVR001,M01,teilweise,"Operator kann Aufgabenmetadaten und den Quellfehler untersuchen, sofern separat lesbar; fehlende Anweisung bleibt unbekannt."
+S112.B02,S112,GVR003,M07,bedingt,Berechtigter Worker kann belegte Eingaben lesen; nicht automatisch auf beliebigen alten Cache übertragbar.
+S113.B01,S113,GVR014,M15,teilweise,Datenverantwortliche können erlaubte Behandlung der konkreten Kopien bestimmen; bloße Speicherexistenz wird nicht als Leak gezählt.
+S113.B02,S113,none,none,keines,Für nie erfolgte Offenlegung dieses Inhalts bleibt nichts nutzbar; daraus folgt nicht Verlust sämtlicher Aufgaben.
+S114.B01,S114,GVR002,M08,bedingt,Empfänger nutzt das abgenommene Ergebnis; Quellen-Nichtverfolgung allein hätte keine Nützlichkeit bewiesen.
+S114.B02,S114,GVR013,M03,bedingt,Operator kann die verbleibende endliche Suchmenge prüfen und bewusst erweitern; vollständige Wissenserschließung ist nicht garantiert.
+S115.B01,S115,GVR005,M06,bedingt,Zuständige Prüfer behalten die strittige Effekthülle; sachfremde Arbeit wird dadurch nicht automatisch gestoppt.
+S115.B02,S115,GVR032,M02,bedingt,"Befugte Person kann die richtige aktuelle Regel anwenden, ohne Quellmehrheit zu simulieren."
+S116.B01,S116,GVR003,M07,bedingt,Prüfer rekonstruiert die damalige Eingabe ohne heutige Website.
+S116.B02,S116,none,none,keines,Für exakte damalige Quellbytes besteht keine Restfähigkeit unter dieser Inventargrenze; heutige Aufgaben können trotzdem funktionieren.
+S117.B01,S117,GVR005,M06,bedingt,Prüfer bearbeitet eine gehaltene Aktivierungsanforderung statt bereits ausgeführten Schadcodes.
+S117.B02,S117,GVR008,M14,teilweise,Berechtigter Besitzer verwendet isolierte Daten weiter; Aussagen und Geheimnisse im kompromittierten Bereich sind nicht geschützt.
+S118.B01,S118,GVR005,M06,bedingt,Prüfer sieht den abgewiesenen Schreibauftrag; bestehender fremder Bestand bleibt unverändert.
+S118.B02,S118,GVR003,M07,teilweise,Berechtigter Prüfer kann Aussagen mit erhaltenen Eingabepaketen vergleichen; diese heilen nicht automatisch den gefälschten Eintrag.
+S119.B01,S119,GVR037,M07,bedingt,Prüfer kann beide Bytes getrennt lesen und benennen; kein Original wird aus Displaygleichheit ersetzt.
+S119.B02,S119,none,none,keines,Für dieses Original bleibt kein Residue; das andere Artefakt und restliches System können bestehen.
+S120.B01,S120,GVR014,M15,teilweise,Verantwortliche können konkrete Kopien sperren oder rechtmäßig behandeln; die Kopie selbst ist kein Resilienzgewinn.
+S120.B02,S120,none,none,keines,Für Vertraulichkeit dieses offengelegten Inhalts bleibt keine Restfähigkeit.
+S121.B01,S121,none,none,keines,Für die nie erfolgte Offenlegung dieses Items gibt es keinen Rest. Ein Audit über Kernelaufrufe ist kein vollständiges Zugriffsprotokoll.
+S121.B02,S121,GVR008,M14,teilweise,Berechtigter Besitzer nutzt ausschließlich die tatsächlich isolierten Daten; gleicher UID allein genügt nicht.
+S122.B01,S122,GVR009,M10,bedingt,Loader kann authentisches Objekt nutzen und Prüfer den Tausch erklären; keine heutige Implementierung behauptet.
+S122.B02,S122,none,none,ungeklaert,Für saubere Ausführung fehlt ein belastbarer Restnachweis; Isolation oder externe Kopie wird nicht hinzuerfunden.
+S123.B01,S123,GVR010,M02,bedingt,Auditor prüft die echte Personen-/Effektbindung; Gate weist bloße Actorbehauptung zurück.
+S123.B01,S123,GVR005,M06,bedingt,Auditor prüft die echte Personen-/Effektbindung; Gate weist bloße Actorbehauptung zurück.
+S123.B02,S123,none,none,keines,Für den geforderten historischen Personenbeweis besteht keine Restfähigkeit aus dieser Datenlage; andere Fakten können lesbar sein.
+S124.B01,S124,GVR008,M14,teilweise,Besitzer nutzt nur unabhängig geschützte Daten; betroffene DB gilt nicht mehr als zuverlässige Autoritätsquelle.
+S124.B02,S124,GVR033,M12,teilweise,Auditor prüft den tatsächlich verwahrten Fakt trotz direktem SQLitewrite.
+S125.B01,S125,GVR008,M14,bedingt,Ein nachgewiesen nicht erreichbarer fremder Datenbereich bleibt für seinen Besitzer nutzbar; keine allgemeine Sicherheit aus einer Zeichenfolge.
+S125.B02,S125,none,none,ungeklaert,Für betroffene Integrität ist keine Restfähigkeit begründbar ohne Sink- und Dateninventar.
+S126.B01,S126,GVR007,M11,bedingt,"Operator prüft die Originalzeichen, ohne dass sie andere Zeilen ersetzen."
+S126.B02,S126,GVR007,M11,teilweise,Operator kann mit vertrauenswürdiger Ersatzansicht Rohbytes prüfen; daraus folgt keine Rücknahme eines ausgelösten Effekts.
+S127.B01,S127,GVR011,M02,bedingt,M02 nutzt den tatsächlich verfügbaren aktuellen Stand aus dem unabhängig verwalteten Register über M16. M01 liefert nur historische lokale Fakten. Der Zweig behauptet GVR011 nicht bei ausgefallener Gegenquelle; frühere Wirkungen bleiben getrennt.
+S127.B02,S127,GVR001,M01,teilweise,Prüfer liest historischen Grant mit Snapshotgrenze; daraus folgt kein heutiges Recht und kein Nachweis bereits erfolgter Ausnutzung.
+S127.B03,S127,GVR001,M01,teilweise,Historischer Bestand und konkrete gehaltene Absicht sind nutzbar. Der aktuelle Widerrufsstand GVR011 ist in diesem Zweig ausdrücklich nicht verfügbar.
+S127.B03,S127,GVR005,M06,teilweise,Historischer Bestand und konkrete gehaltene Absicht sind nutzbar. Der aktuelle Widerrufsstand GVR011 ist in diesem Zweig ausdrücklich nicht verfügbar.
+S128.B01,S128,GVR009,M10,bedingt,Loader behält den authentischen konkreten Integrationssatz als nutzbaren Gegenstand.
+S128.B02,S128,GVR008,M14,teilweise,Besitzer kann isolierten Bestand weiter nutzen; betroffene Integration und deren Ausgaben gelten nicht als sauber.
+S129.B01,S129,GVR012,M09,bedingt,Berechtigter Wiederhersteller nutzt nur den konkret unabhängig erhaltenen Satz; keine spontane externe Kopie wird angenommen.
+S129.B02,S129,none,none,keines,Für aktuelle Inhaltwiederherstellung fehlt ein nutzbarer Rest; Ciphertext und Erinnerungen schließen pauschalen Totalverlust aus.
+S130.B01,S130,GVR013,M03,bedingt,"Scheduler nutzt das endliche Arbeitsregister zur Abweisung und Abarbeitung, nicht nur den Zyklustest."
+S130.B02,S130,GVR001,M01,teilweise,Erhaltene Aufgabenlinien bleiben untersuchbar; sie begrenzen die Last nicht.
+S131.B01,S131,GVR014,M15,bedingt,Berechtigte Verantwortliche können betroffene Kopien und Handlungen bestimmen; Verzeichnis darf nicht selbst verbotene Daten retten.
+S131.B02,S131,GVR015,M07,teilweise,Auskunftsbearbeiter beantwortet nur Fragen aus erlaubten Kanten; für payloadabhängigen Beweis bleibt keines.
+S132.B01,S132,GVR014,M15,bedingt,Verantwortliche können die konkret gehaltenen Kopien nachweisen und erlaubte Einsicht organisieren.
+S132.B02,S132,none,none,keines,Für Erhaltung bzw. Wiederherstellung dieses Inhalts gibt es keinen Rest; sonstige Rechtsakten können bestehen.
+S133.B01,S133,GVR005,M06,bedingt,Verantwortliche behalten den ungesendeten konkreten Auftrag zur zulässigen Neubewertung; eigenständige lokale Auftragserfüllung wird nicht vorausgesetzt.
+S133.B02,S133,GVR014,M15,teilweise,Datenverantwortliche können konkrete Kopien/Orte und zulässige Folgeschritte untersuchen; keine Vertraulichkeitsvernichtung wird erfunden.
+S134.B01,S134,GVR014,M15,teilweise,"Verantwortliche können erlaubte Behandlung der alten Kopien planen und prüfen, ohne einen Leak zu behaupten."
+S134.B02,S134,GVR011,M02,bedingt,Gate kann neue Nutzung alter Zugangsdaten verhindern; gespeicherte private Informationen bleiben dadurch nicht gelöscht.
+S135.B01,S135,GVR016,M09,bedingt,Maintainer kann genau die erhaltene rechtmäßige Version betreiben oder bauen.
+S135.B02,S135,GVR005,M06,bedingt,"Berechtigter Entscheider hat den gehaltenen Auftrag, nicht die Fähigkeit zur unzulässigen Nutzung."
+S136.B01,S136,GVR010,M02,bedingt,Autorisierter Auditor kann die geforderte historische Zustimmung nachvollziehen.
+S136.B02,S136,none,none,keines,Für konkreten Menschenbeweis besteht aus diesem Inventar keine Restfähigkeit; die Taskhistorie ist nicht automatisch wertlos.
+S137.B01,S137,GVR014,M15,teilweise,Berechtigte Rechtsverantwortliche können erlaubte Einsicht beantragen bzw. organisieren; freie Originalnutzung ist nicht erhalten.
+S137.B02,S137,GVR012,M09,bedingt,"Berechtigter Wiederhersteller nutzt nur ausdrücklich erlaubten Satz, nicht heimlich kopiertes Original."
+S138.B01,S138,GVR014,M15,bedingt,"Verantwortliche können erlaubte aktuelle Behandlung der Feldkopien durchsetzen, ohne alte Leser pauschal zu illegalisieren."
+S138.B02,S138,none,none,ungeklaert,Für eine vollständige Offenlegungs-/Zweckbewertung ist kein Restnachweis belegt; tatsächlicher Geheimhaltungsverlust bleibt separat offen.
+S139.B01,S139,GVR015,M07,bedingt,Auskunftsbearbeiter beantwortet die konkrete Herkunftsfrage aus vorhandener Struktur.
+S139.B02,S139,none,none,keines,Für vollständige verlangte Herkunft gibt es keinen Rest; bekannte Teilbeziehungen dürfen nur als unvollständig ausgewiesen werden.
+S140.B01,S140,GVR012,M09,teilweise,Wiederhersteller kann den Satz prüfen; für garantierte Recovery liegt noch kein Testbeleg vor.
+S140.B02,S140,GVR025,M08,bedingt,"Auditor nutzt die belegte Dauer und Inhaltsabnahme, nicht bloß die Dateianzahl."
+S141.B01,S141,GVR018,M03,bedingt,Budgethalter stoppt neue Verpflichtungen und sieht alte bekannte Kosten; vergangene Aufrufe werden nicht ungeschehen.
+S141.B01,S141,GVR017,M03,bedingt,Budgethalter stoppt neue Verpflichtungen und sieht alte bekannte Kosten; vergangene Aufrufe werden nicht ungeschehen.
+S141.B02,S141,GVR002,M08,bedingt,Empfänger nutzt das Ergebnis und Budgethalter den konkreten Kostennachweis.
+S141.B02,S141,GVR017,M03,bedingt,Empfänger nutzt das Ergebnis und Budgethalter den konkreten Kostennachweis.
+S142.B01,S142,GVR017,M03,teilweise,"Budgethalter kann bekannte Nutzung und offenen Rechnungsanteil ausweisen, keine sichere Gesamtschranke."
+S142.B02,S142,GVR005,M06,teilweise,Entscheider behält offene Anfrage und bekannte Altverpflichtungen; Sperre löscht keine Schuld.
+S142.B02,S142,GVR017,M03,teilweise,Entscheider behält offene Anfrage und bekannte Altverpflichtungen; Sperre löscht keine Schuld.
+S143.B01,S143,GVR019,M03,bedingt,Kleine Scopes erhalten ihren konkreten Anteil; weder allgemeine Fristgarantie noch Gleichheit aller Ergebnisse folgt.
+S143.B02,S143,GVR004,M11,teilweise,"Erhaltene rohe Verbrauchs-/Ergebnisgrößen bleiben auswertbar, sofern unabhängig aufbewahrt; sie erzwingen keine faire Entscheidung."
+S144.B01,S144,GVR017,M03,teilweise,Verantwortliche behalten Aufwandbeleg und begründete Entscheidung für spätere Neubewertung.
+S144.B01,S144,GVR031,M08,teilweise,Verantwortliche behalten Aufwandbeleg und begründete Entscheidung für spätere Neubewertung.
+S144.B02,S144,GVR001,M01,teilweise,Unveränderte Auftragsakte kann spätere Untersuchung tragen; sie bewahrt nicht die umgangene Autorität.
+S145.B01,S145,GVR013,M03,bedingt,Scheduler behält endliche Arbeit und konkrete Anteile; abgelehnte oder verspätete Aufträge sind kein Erfolg.
+S145.B01,S145,GVR019,M03,bedingt,Scheduler behält endliche Arbeit und konkrete Anteile; abgelehnte oder verspätete Aufträge sind kein Erfolg.
+S145.B02,S145,none,none,keines,Für ursprüngliche Rechtzeitigkeit bleibt kein Rest; erhaltenes spätes Ergebnis wäre separat nach anderem Zweck abnehmbar.
+S146.B01,S146,GVR018,M03,teilweise,Budgethalter stoppt nur noch nicht eingegangene Kosten und sieht bereits bekannte Exposition.
+S146.B01,S146,GVR017,M03,teilweise,Budgethalter stoppt nur noch nicht eingegangene Kosten und sieht bereits bekannte Exposition.
+S146.B02,S146,GVR001,M01,teilweise,Operator kann Anfragen und offene Kosten benennen; keine Behauptung freier Leases oder beendeter Arbeit.
+S146.B02,S146,GVR017,M03,teilweise,Operator kann Anfragen und offene Kosten benennen; keine Behauptung freier Leases oder beendeter Arbeit.
+S147.B01,S147,GVR031,M08,teilweise,Prüfer kann bereits belegte begrenzte Funktion von unbewiesener Garantie unterscheiden; geforderte Echtzeit ist nicht erhalten.
+S147.B02,S147,none,none,keines,Für diese rechtzeitige Antwort bleibt keine Restfähigkeit; dauerhafte Datenhaltung ist eine andere Eigenschaft.
+S148.B01,S148,none,none,keines,Für ursprünglichen ökonomischen Zweck bleibt kein Rest; sinnvolle künftige Verwendung wäre ein anderer Auftrag.
+S148.B02,S148,GVR002,M08,teilweise,"Empfänger nutzt echten Folgeauftrag, ohne alten verlorenen Wert als gerettet zu zählen."
+S149.B01,S149,GVR001,M01,teilweise,Berechtigte Nutzer lesen alte Aufgaben und abgenommene Ergebnisse; zusätzliche Wiederherstellungsfähigkeit wird nicht behauptet.
+S149.B01,S149,GVR002,M08,teilweise,Berechtigte Nutzer lesen alte Aufgaben und abgenommene Ergebnisse; zusätzliche Wiederherstellungsfähigkeit wird nicht behauptet.
+S149.B02,S149,GVR012,M09,teilweise,"Wiederhersteller kann den konkret noch vorhandenen Umfang lesen, nicht den alten Diversitätsanspruch."
+S150.B01,S150,GVR017,M03,teilweise,"Analyst nutzt bekannte Sachgrößen und offenes Obligo, nicht behauptete Gewinnrangfolge."
+S150.B01,S150,GVR004,M11,teilweise,"Analyst nutzt bekannte Sachgrößen und offenes Obligo, nicht behauptete Gewinnrangfolge."
+S150.B02,S150,GVR017,M03,teilweise,Erhaltene echte Nutzungsbelege können spätere Abrechnung tragen; sie erzwingen noch keine Korrektur der Auswahl.
+S151.B01,S151,GVR020,M01,bedingt,Maintainer prüft unveränderte Daten mit passendem Leser statt sie mit falschem Binary umzudeuten.
+S151.B02,S151,GVR016,M09,bedingt,"Maintainer kann konkrete alte Verträge weiter bedienen, nicht beliebige neue Plattformen garantieren."
+S152.B01,S152,GVR020,M01,teilweise,Maintainer kann originale Bytes und bekannten Präfix lesen; vollständiger Replay ist nicht erhalten.
+S152.B02,S152,GVR020,M01,bedingt,Prüfer nutzt passenden reinen Reader für den tatsächlichen Bestand; fehlender benannter Upcaster ist hier kein Ausfall.
+S153.B01,S153,GVR020,M01,bedingt,Maintainer liest unveränderten Bestand ohne semantisch fremde Mutation.
+S153.B02,S153,GVR033,M12,teilweise,Auditor kann nur konkret unabhängig belegte frühere Fakten prüfen; gegenwärtige kohärente Reihenfolge ist nicht bewiesen.
+S154.B01,S154,GVR020,M01,bedingt,Maintainer bewahrt aktuelle Bytes statt sie durch alte Schemaannahmen zu verändern.
+S154.B02,S154,GVR011,M02,bedingt,Gate/Teilnehmer lehnen alte Grants oder bereits akzeptierte Operationen ab; DBintern verlorenes Suffix wird dadurch nicht vollständig rekonstruiert.
+S154.B02,S154,GVR021,M16,bedingt,Gate/Teilnehmer lehnen alte Grants oder bereits akzeptierte Operationen ab; DBintern verlorenes Suffix wird dadurch nicht vollständig rekonstruiert.
+S155.B01,S155,GVR016,M09,bedingt,Maintainer baut/startet die konkret erhaltene Version ohne verschwundenes Paketrepository.
+S155.B02,S155,GVR001,M01,teilweise,Operator kann vorhandene Aufgaben inspizieren; Neubau- oder Ersatzhardwarefähigkeit wird nicht hinzuerfunden.
+S156.B01,S156,GVR005,M06,bedingt,Nutzbar ist nur die erhaltene gesperrte Publikationsabsicht mit dem konkreten Prüfbedarf. Ein sauberes Projektpaket existiert in diesem Zweig noch nicht und wird nicht als Residue gezählt.
+S156.B02,S156,none,none,keines,Für Nie-Veröffentlichung/Nie-Offenlegung dieser Inhalte besteht keine Restfähigkeit; erlaubte Projektveröffentlichung bleibt ein anderer Gegenstand.
+S156.B03,S156,GVR036,M07,bedingt,"Erst hier existiert der von GVR036 bezeichnete saubere Projektobjektgraph. M07 hält die Bytes, M15 den erlaubten Umfang und M02 eine davon getrennte aktuelle Sendefreigabe."
+S157.B01,S157,GVR031,M08,teilweise,"Ein unverändertes Belegverzeichnis zeigt die enge und falsche Testannahme, sofern Originale erhalten; es stellt keine sichere Identität her."
+S157.B02,S157,GVR005,M06,bedingt,Prüfer nutzt die gehaltene Effekthülle; der fehlende Personenbeleg wird ausdrücklich nicht als erhaltenes Residue gezählt. Keine Person entsteht aus missing ID.
+S158.B01,S158,GVR020,M01,bedingt,"Maintainer prüft reale Lesefähigkeit und begrenzte Behauptungen, ohne Eventreplay aus mutable Tables zu folgern."
+S158.B01,S158,GVR031,M08,bedingt,"Maintainer prüft reale Lesefähigkeit und begrenzte Behauptungen, ohne Eventreplay aus mutable Tables zu folgern."
+S158.B02,S158,GVR031,M08,teilweise,"Unveränderte belegte Gegenbefunde bleiben prüfbar, sofern nicht mit umgeschrieben; Wirksamkeit ihrer Korrektur ist nicht garantiert."
+S159.B01,S159,GVR002,M08,teilweise,Empfänger nutzt nur das belegte richtige Ergebnis; keine Sicherheitsbescheinigung für Activation-before-check.
+S159.B02,S159,none,none,ungeklaert,Für vertrauenswürdige betroffene Ausführung ist kein Residue nachgewiesen; spätere Signaturprüfung ist keine überlebende Schutzstruktur.
+S160.B01,S160,GVR031,M08,teilweise,Erhaltene Architekturentscheidungen und Gegenbelege bleiben prüfbar; sie reduzieren Kopplung nicht von selbst.
+S160.B02,S160,GVR031,M08,bedingt,Prüfer kann alte und neue Vertragsgrenzen sowie tatsächlichen Nachweis vergleichen.
+S161.B01,S161,GVR005,M06,teilweise,Berechtigte Leser können alte Aufgaben sehen und Anforderungen aufbewahren; neue legitime Entscheidung bleibt nicht möglich.
+S161.B01,S161,GVR001,M01,teilweise,Berechtigte Leser können alte Aufgaben sehen und Anforderungen aufbewahren; neue legitime Entscheidung bleibt nicht möglich.
+S161.B02,S161,GVR032,M02,bedingt,Legitime Nachfolge entscheidet ihren übertragenen Bereich ohne Gründeridentität zu imitieren.
+S162.B01,S162,GVR005,M06,bedingt,Prüfer behalten beide Aussagen am konkreten Auftrag; kein Doppelauftrag wird als Vorrangentscheidung benutzt.
+S162.B02,S162,GVR032,M02,bedingt,Befugte Person kann neuen Beschluss persönlich belegen; Übertragung bewahrt nur den tatsächlich gültigen Bereich.
+S162.B02,S162,GVR010,M02,bedingt,Befugte Person kann neuen Beschluss persönlich belegen; Übertragung bewahrt nur den tatsächlich gültigen Bereich.
+S163.B01,S163,GVR032,M02,bedingt,"Neue Befugte entscheiden, alte persönliche Belege bleiben historisch lesbar und alte Sessions erlangen keine neuen Rechte."
+S163.B01,S163,GVR011,M02,bedingt,"Neue Befugte entscheiden, alte persönliche Belege bleiben historisch lesbar und alte Sessions erlangen keine neuen Rechte."
+S163.B01,S163,GVR010,M02,bedingt,"Neue Befugte entscheiden, alte persönliche Belege bleiben historisch lesbar und alte Sessions erlangen keine neuen Rechte."
+S163.B02,S163,GVR001,M01,teilweise,Auditor kann frühere Grants mit Standgrenze sehen; legitime heutige Autorisierung bleibt unbelegt.
+S164.B01,S164,GVR022,M07,bedingt,Nachfolger verwendet nur übertragbare Aufgabenbasis; rechtlich verbotene Kopie wird nicht zur Schutzstruktur.
+S164.B02,S164,GVR005,M06,teilweise,Prüfer behält gehaltenen Auftrag mit benannter Lücke; für die verbotene notwendige Wissensfähigkeit bleibt keines.
+S165.B01,S165,GVR005,M06,bedingt,"Prüfer bearbeitet konkreten riskanten Resume, ohne aus blockiertem Status Prozessende zu folgern."
+S165.B02,S165,GVR032,M02,teilweise,"Befugte Person und erhaltene Hülle erlauben kontrollierte Entscheidung über Unsicherheit, nicht Behauptung sicherer Wiederholung."
+S165.B02,S165,GVR005,M06,teilweise,"Befugte Person und erhaltene Hülle erlauben kontrollierte Entscheidung über Unsicherheit, nicht Behauptung sicherer Wiederholung."
+S166.B01,S166,GVR002,M08,teilweise,"Empfänger nutzt Resultate, Analyst nur ursprüngliche enge Rohwerte; keine kontinuierliche Reibungskurve erfunden."
+S166.B01,S166,GVR004,M11,teilweise,"Empfänger nutzt Resultate, Analyst nur ursprüngliche enge Rohwerte; keine kontinuierliche Reibungskurve erfunden."
+S166.B02,S166,GVR023,M08,bedingt,Analyst nutzt belegte Zuordnung ohne fehlendes Feld als null zu werten.
+S167.B01,S167,GVR001,M01,teilweise,"Unveränderte konkrete Aufgabenakten erlauben nachträgliche Untersuchung, falls erreichbar; Gateintegrität ist nicht erhalten."
+S167.B02,S167,GVR010,M02,bedingt,"Auditor nutzt Effektbelege und explizit geänderten Anspruch, statt niedrige Kennzahl als alleinigen Erfolg zu nehmen."
+S167.B02,S167,GVR031,M08,bedingt,"Auditor nutzt Effektbelege und explizit geänderten Anspruch, statt niedrige Kennzahl als alleinigen Erfolg zu nehmen."
+S168.B01,S168,GVR019,M03,bedingt,"Operator und kleine Scopes nutzen konkreten Zuteilungsvertrag, ohne privaten Budgetbetrag zu kennen."
+S168.B02,S168,GVR001,M01,teilweise,Erhaltene Akten können Streit und bekannte Last dokumentieren; faire Zuteilung ist daraus nicht automatisch rekonstruierbar.
+S169.B01,S169,GVR033,M12,bedingt,"Auditor kann Original und spätere sichtbare Korrektur vergleichen, nicht jede denkbare Aussage authentifizieren."
+S169.B02,S169,none,none,keines,Für unverfälschten betroffenen historischen Fakt bleibt ohne unabhängige Darstellung kein nutzbarer Beleg; übriger Betrieb kann laufen.
+S170.B01,S170,GVR001,M01,teilweise,Prüfer sieht offenen Versuch und kann neue Wirkung zurückhalten; kein Beweis gescheiterten ersten Effekts.
+S170.B01,S170,GVR005,M06,teilweise,Prüfer sieht offenen Versuch und kann neue Wirkung zurückhalten; kein Beweis gescheiterten ersten Effekts.
+S170.B02,S170,GVR021,M16,teilweise,"Reconciler nutzt den erhaltenen Receipt, nicht eine erfundene künftig erreichbare Partnerantwort; laufendes Fencing ist damit nicht garantiert."
+S171.B01,S171,GVR019,M03,bedingt,Operator behält lokalen Inspektionspfad und zugelassene Scopes ihren Anteil.
+S171.B01,S171,GVR027,M05,bedingt,Operator behält lokalen Inspektionspfad und zugelassene Scopes ihren Anteil.
+S171.B02,S171,GVR001,M01,teilweise,Operator kann nach verfügbarem Leser bestehende Aufgaben untersuchen; keine verfügbare Daemonausführung während Verdrängung behauptet.
+S172.B01,S172,GVR008,M14,bedingt,Jeweiliger berechtigter Kunde nutzt eigenen Bestand ohne Zugriff des anderen; Scope-Namen allein erfüllen Voraussetzung nicht.
+S172.B02,S172,none,none,ungeklaert,Für zugesagte gegenseitige Geheimhaltung ist kein Residue belegt; Offenlegung darf daraus dennoch nicht behauptet werden.
+S173.B01,S173,GVR024,M07,bedingt,Berechtigter Worker nutzt gespeicherte Entwürfe und Basisversionen; keine Zusage heutiger externer Gültigkeit.
+S173.B02,S173,GVR011,M02,bedingt,"Reconciler kann alte Grants/Operationsidentitäten prüfen und Doppelwirkung verweigern, sofern Teilnehmer dies vertraglich unterstützt."
+S173.B02,S173,GVR021,M16,bedingt,"Reconciler kann alte Grants/Operationsidentitäten prüfen und Doppelwirkung verweigern, sofern Teilnehmer dies vertraglich unterstützt."
+S174.B01,S174,GVR001,M01,teilweise,Berechtigter Client kann beim Wiederverbinden den haltbaren bekannten Bestand lesen; autonome Offlineantwort ist nicht erhalten.
+S174.B02,S174,GVR024,M07,bedingt,Worker/Benutzer kann gespeicherte Teilaufgabe wiederaufnehmen ohne dauernden Daemon.
+S174.B02,S174,GVR028,M03,bedingt,Worker/Benutzer kann gespeicherte Teilaufgabe wiederaufnehmen ohne dauernden Daemon.
+S174.B03,S174,none,none,keines,Für genau diese autonome Fristwirkung besteht kein nutzbarer Ausführungsträger. Andere Smartphonefunktionen bleiben möglich.
+S175.B01,S175,GVR021,M16,bedingt,Reconciler und Teilnehmer bewahren begrenzte Effektordnung; gleichzeitige volle Verfügbarkeit wird ausdrücklich aufgegeben.
+S175.B01,S175,GVR038,M16,bedingt,Reconciler und Teilnehmer bewahren begrenzte Effektordnung; gleichzeitige volle Verfügbarkeit wird ausdrücklich aufgegeben.
+S175.B02,S175,GVR001,M01,teilweise,Prüfer kann nur tatsächlich erhaltene lokale Absichten als historischen Arbeitsstand vergleichen; gemeinsame Reihenfolge und ein akzeptiertes Outcome sind nicht bewiesen.
+S175.B03,S175,none,none,ungeklaert,Für behauptetes garantiertes active-active gibt es ohne Vertrag keinen Restnachweis; keine automatische Architekturwahl wird erfunden.
+S176.B01,S176,GVR035,M16,bedingt,Anlagenverantwortlicher nutzt den nachgewiesenen lokalen Regel-/Sperrpfad; kein Beleg heutiger Factory-Echtzeitfähigkeit.
+S176.B02,S176,none,none,keines,Für Ungeschehenmachen dieser Eigenschaft bleibt nichts; das bedeutet weder automatisch Schaden noch Verlust aller Anlagenfähigkeit.
+S177.B01,S177,GVR033,M12,teilweise,Autorisierter Auditor prüft den konkret erhaltenen Fakt und erkannte Abweichung.
+S177.B02,S177,none,none,keines,Für verlangten Rootfestigkeitsbeweis dieser Historie besteht kein Residue; lesbare Bytes können trotzdem weiter nützlich sein.
+S178.B01,S178,GVR020,M01,teilweise,Maintainer rekonstruiert Inhalt und Auditor sieht ehrlichen Laufzeitbeleg; RTO-Fähigkeit ist nicht erhalten.
+S178.B01,S178,GVR025,M08,teilweise,Maintainer rekonstruiert Inhalt und Auditor sieht ehrlichen Laufzeitbeleg; RTO-Fähigkeit ist nicht erhalten.
+S178.B02,S178,GVR020,M01,bedingt,"Wiederhersteller nutzt belegten Interpretationspfad und Auditor die zeitbegrenzte Evidenz, keine bloße Snapshotbehauptung."
+S178.B02,S178,GVR025,M08,bedingt,"Wiederhersteller nutzt belegten Interpretationspfad und Auditor die zeitbegrenzte Evidenz, keine bloße Snapshotbehauptung."
+S179.B01,S179,GVR026,M09,bedingt,Empfänger nutzt tatsächlich enthaltene Bytes/Bedeutung nach lokalem Stop; keine universelle Stilllegung externer Welt behauptet.
+S179.B02,S179,GVR021,M16,teilweise,Berechtigter Abwickler kann konkrete Operation außerhalb Factory prüfen; Empfängerexport kann gleichzeitig nutzbar sein.
+S179.B03,S179,none,none,keines,Für vereinbarte vollständige selbständige Nutzung bleibt keine Restfähigkeit aus diesem Export; lesbare Teilmetadaten sind nicht Vollübergabe.
+S180.B01,S180,GVR027,M05,bedingt,"Operator liest die konkreten Kanten und kann separat begründete Reparatur planen, ohne Plugins bereits starten zu müssen."
+S180.B02,S180,GVR027,M05,bedingt,Operator nutzt Startbeschreibung zur Prüfung der wirklich optionalen Grenze; erfolgreiche Facharbeit ist damit noch nicht belegt.
+S181.B01,S181,GVR012,M09,teilweise,"Wiederhersteller nutzt nur tatsächlich überlebenden vollständigen Satz, keine implizit perfekte zusätzliche Region."
+S181.B02,S181,none,none,keines,Für derzeitige Inhaltsrecovery besteht kein nutzbarer Rest; mehrere Regionen bedeuten nicht S190.
+S182.B01,S182,GVR001,M01,teilweise,Prüfer liest historischen Plan und offene Absichten; gegenwärtige Ausführung und Bedeutung sind nicht automatisch verfügbar.
+S182.B01,S182,GVR005,M06,teilweise,Prüfer liest historischen Plan und offene Absichten; gegenwärtige Ausführung und Bedeutung sind nicht automatisch verfügbar.
+S182.B02,S182,GVR013,M03,bedingt,Befugter Operator kann endliche alte Arbeitsmenge verwerfen oder neu definieren.
+S182.B02,S182,GVR032,M02,bedingt,Befugter Operator kann endliche alte Arbeitsmenge verwerfen oder neu definieren.
+S183.B01,S183,GVR029,M07,bedingt,"Berechtigte spätere Leser nutzen den konkreten Bedeutungsschlüssel, keinen erfundenen alten Experten."
+S183.B02,S183,GVR001,M01,teilweise,Archivleser kann Text und mechanische Metadaten prüfen; für exakte verlorene Bedeutung bleibt keines innerhalb dieser Inventargrenze.
+S184.B01,S184,GVR001,M01,teilweise,Erhaltene Aussagen bleiben als Aussagen prüfbar; gerechtfertigte Korrektur folgt daraus nicht.
+S184.B02,S184,GVR006,M08,bedingt,"Prüfer nutzen genau diesen belastbaren Gegenbefund; Existenz und Anerkennung sind Bedingungen, nicht aus der Karte garantiert."
+S184.B03,S184,none,none,keines,Für begründete Korrektur der konkreten Behauptung besteht unter dieser Informationsgrenze kein Residue; andere Aufgaben können lösbar bleiben.
+S185.B01,S185,GVR032,M02,bedingt,Berechtigte Prüfer nutzen gültige Zuständigkeitsordnung und getrennte Basisstände; beide Historien dürfen unterschiedlich bleiben.
+S185.B01,S185,GVR001,M01,bedingt,Berechtigte Prüfer nutzen gültige Zuständigkeitsordnung und getrennte Basisstände; beide Historien dürfen unterschiedlich bleiben.
+S185.B02,S185,GVR005,M06,bedingt,Prüfer behalten beide Ansprüche am konkreten gehaltenen Effekt; keine willkürliche Last-write-wins-Rechtsprechung.
+S185.B03,S185,none,none,ungeklaert,"Für globale eindeutige Weltentscheidung ist kein Restnachweis begründbar, bis der fehlende Vertrag benannt wird."
+S186.B01,S186,none,none,keines,"Für gleichzeitige Erfüllung beider wörtlichen Pflichten besteht keine Restfähigkeit. Das bestimmt nicht, welche Pflicht rechtlich vorgeht."
+S186.B02,S186,GVR014,M15,bedingt,Auskunftsverantwortliche nutzen nur tatsächlich erlaubte ausreichende Beweisstruktur; Ewigkeit aller Inhalte wird nicht versprochen.
+S186.B02,S186,GVR015,M07,bedingt,Auskunftsverantwortliche nutzen nur tatsächlich erlaubte ausreichende Beweisstruktur; Ewigkeit aller Inhalte wird nicht versprochen.
+S186.B03,S186,none,none,ungeklaert,Für zugesagte Rechtskonformität ist kein Residue bestimmbar; Factory muss Anforderungskonflikt offen halten statt Recht zu erfinden.
+S187.B01,S187,GVR028,M03,bedingt,Worker nutzt erhaltenen Checkpoint zur nächsten Teilaufgabe; Fristen innerhalb stromloser Zeit werden nicht gerettet.
+S187.B02,S187,GVR001,M01,teilweise,"Falls enge Inspektion tatsächlich ins Fenster passt, bleiben bekannte Akten lesbar; für den geforderten laufenden Arbeitsfortschritt bleibt keines."
+S188.B01,S188,GVR033,M12,teilweise,"Berechtigter Auditor nutzt den tatsächlich unabhängigen Verwahrbeleg, nicht pauschal jede alte Signatur."
+S188.B02,S188,none,none,keines,Für frühere kryptographisch garantierte Authentizität bleibt kein Rest; tatsächliche Fälschung oder Offenlegung ist damit noch nicht bewiesen.
+S188.B03,S188,none,none,keines,Für Nie-Offenlegung des gelesenen Inhalts besteht keine Restfähigkeit; neue sichere Kommunikation wäre ein neuer Vertrag.
+S189.B01,S189,GVR005,M06,bedingt,Prüfer bewahrt strittigen Auftrag ohne unberechtigte Parteinahme; andere eindeutige Bereiche bleiben getrennt.
+S189.B02,S189,GVR032,M02,bedingt,"Neue Befugte nutzen tatsächlich zugeordnete Rechte, alte globale Grants werden abgewiesen."
+S189.B02,S189,GVR011,M02,bedingt,"Neue Befugte nutzen tatsächlich zugeordnete Rechte, alte globale Grants werden abgewiesen."
+S190.B01,S190,none,none,keines,Für systemspezifische Information und nachweisbare Kontinuität bleibt keinerlei Residue; unabhängige fremde Technik wäre nicht dieses System.
+S191.B01,S191,GVR011,M02,bedingt,"Reconciler verweigert widerrufenen Grant und Teilnehmer erkennt schon angenommene Operation, jeweils unter eigenem Vertrag."
+S191.B01,S191,GVR021,M16,bedingt,"Reconciler verweigert widerrufenen Grant und Teilnehmer erkennt schon angenommene Operation, jeweils unter eigenem Vertrag."
+S191.B02,S191,GVR001,M01,teilweise,Prüfer liest konkreten alten Versuch und gehaltene Hülle; kein produktweiter Todesbeweis aus diesem Helper.
+S191.B02,S191,GVR005,M06,teilweise,Prüfer liest konkreten alten Versuch und gehaltene Hülle; kein produktweiter Todesbeweis aus diesem Helper.
+S191.B03,S191,none,none,keines,Für nie doppelt erfolgte Wirkung bleibt kein Residue; Verlust jedes Geschäftswerts oder Schadenshöhe wird nicht automatisch behauptet.
+S192.B01,S192,GVR034,M06,bedingt,Operator kann neue Annahmen verhindern und wahrheitsgemäß fehlende Persistenz sehen.
+S192.B02,S192,none,none,ungeklaert,"Für wirksamen dauerhaften Widerruf ist kein Residue belegt, solange Commit-/Zulassungstrace fehlt."
+S192.B03,S192,none,none,keines,Für Verhindern dieser bereits erfolgten Wirkung bleibt nichts; Dringlichkeit des Widerrufs belegt nicht rückwirkend Unrecht oder Totalschaden.
+S193.B01,S193,GVR001,M01,teilweise,"Berechtigte passive Leser behalten Akte und gehaltene Effekte, sofern eigener Leserzugang existiert; ohne solchen Leser ist selbst dieser Rest nicht nutzbar."
+S193.B01,S193,GVR005,M06,teilweise,"Berechtigte passive Leser behalten Akte und gehaltene Effekte, sofern eigener Leserzugang existiert; ohne solchen Leser ist selbst dieser Rest nicht nutzbar."
+S193.B02,S193,GVR032,M02,teilweise,Nachfolger kann bekanntes Obligo prüfen und konkrete Mitigation/Beendigung entscheiden; automatische Wiederaufnahme ist nicht erhalten.
+S193.B02,S193,GVR017,M03,teilweise,Nachfolger kann bekanntes Obligo prüfen und konkrete Mitigation/Beendigung entscheiden; automatische Wiederaufnahme ist nicht erhalten.
+S193.B02,S193,GVR005,M06,teilweise,Nachfolger kann bekanntes Obligo prüfen und konkrete Mitigation/Beendigung entscheiden; automatische Wiederaufnahme ist nicht erhalten.
+S194.B01,S194,GVR014,M15,bedingt,Zuständige Verantwortliche sehen betroffene einzige Kopie und können erlaubte Handlung entscheiden; Erlaubnis zum Behalten wird nicht erfunden.
+S194.B02,S194,none,none,keines,Für diesen contentabhängigen Replay gibt es keinen Rest; vollständiges Manifest ist kein Recoverysatz.
+S194.B03,S194,GVR015,M07,teilweise,Prüfer nutzt nur erlaubte Kanten mit kompatiblem reinem Reader; GVR020 gilt hier ausdrücklich nur für diesen Metadatenbestand.
+S194.B03,S194,GVR020,M01,teilweise,Prüfer nutzt nur erlaubte Kanten mit kompatiblem reinem Reader; GVR020 gilt hier ausdrücklich nur für diesen Metadatenbestand.
+S195.B01,S195,GVR037,M07,bedingt,Prüfer kann echte neue Ausgabe lesen und Wirkung zurückhalten; Parsererfolg wäre noch keine Bedeutungsabnahme.
+S195.B01,S195,GVR005,M06,bedingt,Prüfer kann echte neue Ausgabe lesen und Wirkung zurückhalten; Parsererfolg wäre noch keine Bedeutungsabnahme.
+S195.B02,S195,GVR037,M07,teilweise,"Erhaltene Originalbytes und enge Rohwerte ermöglichen spätere Analyse, liefern aber keine fachliche Wahrheit oder unabhängige Modellidentität."
+S195.B02,S195,GVR004,M11,teilweise,"Erhaltene Originalbytes und enge Rohwerte ermöglichen spätere Analyse, liefern aber keine fachliche Wahrheit oder unabhängige Modellidentität."
+S195.B03,S195,GVR006,M08,bedingt,Prüfer nutzt konkreten Gegenbefund und Effekthülle; universell korrekter Test wird nicht angenommen.
+S195.B03,S195,GVR005,M06,bedingt,Prüfer nutzt konkreten Gegenbefund und Effekthülle; universell korrekter Test wird nicht angenommen.
+S196.B01,S196,GVR013,M03,bedingt,Operator priorisiert/streicht benannte überholte Arbeit aus endlichem Register; Rechtzeitigkeit alter Aufträge ist nicht gerettet.
+S196.B02,S196,GVR001,M01,teilweise,Erhaltene Abstammungs-/Auftragsdaten bleiben untersuchbar; endliche Tiefe begrenzt hier nicht Instanzzahl.
+S197.B01,S197,GVR030,M06,bedingt,Operator nutzt konkreten Kompensationsauftrag zur Prüfung und erhält aktuelle menschliche Änderungen unverändert.
+S197.B01,S197,GVR009,M10,bedingt,Operator nutzt konkreten Kompensationsauftrag zur Prüfung und erhält aktuelle menschliche Änderungen unverändert.
+S197.B02,S197,none,none,keines,Für Erhalt der überschriebenen einzigartigen Änderung besteht kein Residue; finanzielle oder fachliche Teilmitigation kann anderen Wert retten.
+S198.B01,S198,GVR021,M16,bedingt,Reconciler prüft getrennte historische Bytes mit passenden Lesern; Teilnehmer bewahrt begrenzte Effektordnung unabhängig davon.
+S198.B01,S198,GVR038,M16,bedingt,Reconciler prüft getrennte historische Bytes mit passenden Lesern; Teilnehmer bewahrt begrenzte Effektordnung unabhängig davon.
+S198.B01,S198,GVR020,M01,bedingt,Reconciler prüft getrennte historische Bytes mit passenden Lesern; Teilnehmer bewahrt begrenzte Effektordnung unabhängig davon.
+S198.B02,S198,GVR001,M01,teilweise,"Prüfer liest beide klar als Teilhistorien, nicht als eine automatisch gültige Gesamtgeschichte."
+S198.B03,S198,none,none,keines,Für At-most-once dieses bereits ausgeführten Effekts bleibt kein Rest; Umfang irreversiblen Schadens ist separat zu bestimmen.
+S199.B01,S199,GVR016,M09,teilweise,"Maintainer kann Toolchain betreiben; für tatsächliche Payloadrecovery bleibt aktuell keines, auch bei korrektem Backupmanifest."
+S199.B02,S199,GVR012,M09,bedingt,Berechtigter Wiederhersteller nutzt allein den nachgewiesen vollständigen unabhängigen Satz.
+S199.B03,S199,none,none,keines,Für jetzige Wiederherstellung fehlt Restfähigkeit; nicht als vollständiges S190-Verschwinden umetikettieren.
+S200.B01,S200,GVR031,M08,teilweise,"Falls ursprüngliche begrenzte Belege und fehlende Versuche lesbar bleiben, können unabhängige Prüfer Behauptung angreifen; Liste führt keinen Test aus."
+S200.B02,S200,GVR031,M08,bedingt,Prüfer hält unbelegte Freigabe zurück und kann Prüfauftrag präzise stellen; reale Resilienz bleibt unbewiesen.
+S201.B01,S201,OBR001,M01,teilweise,"Nach Rückkehr kann der Operator den erhaltenen Bestand lesen, aktuell kann der ausgeschaltete Mac nichts melden"
+S201.B02,S201,OBR002,M12,bedingt,"Unabhängiger Leser kann fehlende Lebenszeichen erkennen, damit ist weder Mensch informiert noch Host wieder verfügbar"
+S202.B01,S202,OBR001,M01,teilweise,"Operator kann frühere Aufträge lesen, daraus folgt kein aktueller Daemonfortschritt"
+S202.B02,S202,OBR005,M11,bedingt,"Probe belegt neuen lokalen Pfad, Journal erlaubt alten Versuch zurückzuhalten ohne Teilnehmerende zu erfinden"
+S202.B02,S202,OBR017,M06,bedingt,"Probe belegt neuen lokalen Pfad, Journal erlaubt alten Versuch zurückzuhalten ohne Teilnehmerende zu erfinden"
+S203.B01,S203,OBR007,M02,bedingt,"Operator kann alte Absicht und bekannte Versuche prüfen, kein automatischer Versand aus bloßer Queue-Dauerhaftigkeit"
+S203.B01,S203,OBR017,M06,bedingt,"Operator kann alte Absicht und bekannte Versuche prüfen, kein automatischer Versand aus bloßer Queue-Dauerhaftigkeit"
+S203.B02,S203,OBR017,M06,teilweise,"Journal hilft noch bei Abgleich und Folgenbearbeitung, ursprüngliche Gültigkeit der angenommenen Aktion ist verloren"
+S204.B01,S204,OBR001,M01,teilweise,"Erhaltener bestätigter Bestand ist später lesbar, die zwei Geräte können währenddessen keinen Ausfall feststellen"
+S204.B02,S204,OBR002,M12,bedingt,"Operator kann genau den gemeinsamen Ausfall erkennen, nicht den Erfolg aller offenen Tasks"
+S205.B01,S205,none,none,ungeklaert,"Für Alarmempfang und Backupabruf ist keine nutzbare Struktur belegt, physische Existenz der Bytes allein hilft dem ausgesperrten Operator nicht"
+S205.B02,S205,OBR002,M12,bedingt,"Operator kann definierte Notbefehle und unabhängige Evidenz nutzen, damit sind die gesperrten Backups nicht wieder lesbar"
+S205.B02,S205,OBR034,M02,bedingt,"Operator kann definierte Notbefehle und unabhängige Evidenz nutzen, damit sind die gesperrten Backups nicht wieder lesbar"
+S206.B01,S206,OBR001,M01,teilweise,"Lokale Daten können später gelesen werden, aktuell bleibt menschliche Reaktionsfähigkeit ohne nachgewiesenen Ersatz unzugänglich"
+S206.B02,S206,OBR002,M12,bedingt,"Vertretung kann genau diesen Ausfall kennen und quittieren, keine Wiederherstellung der Region oder aller Tasks"
+S206.B02,S206,OBR003,M13,bedingt,"Vertretung kann genau diesen Ausfall kennen und quittieren, keine Wiederherstellung der Region oder aller Tasks"
+S207.B01,S207,none,none,keines,"Für aktuelle Remote-Gesundheitsfeststellung ist nichts nutzbar, Host- und Datenerhaltung sind davon getrennt"
+S207.B02,S207,OBR002,M12,bedingt,"Leser kann fehlende Monitorfrische sehen, Factoryzustand bleibt ohne eigene Probe unbekannt"
+S207.B02,S207,OBR004,M12,bedingt,"Leser kann fehlende Monitorfrische sehen, Factoryzustand bleibt ohne eigene Probe unbekannt"
+S208.B01,S208,none,none,keines,"Für nachgewiesene menschliche Kenntnis existiert keine Restfähigkeit, Providerannahme ist nur Transportinformation"
+S208.B02,S208,OBR003,M13,bedingt,"Operator und Eskalationslogik können genau eine Empfangsstufe zuverlässig lesen, Spam-Mail muss dafür nicht ankommen"
+S209.B01,S209,OBR001,M01,teilweise,"Operator kann historischen Bestand prüfen, Alarmberechtigung ist nicht erhalten"
+S209.B02,S209,OBR006,M13,bedingt,"Alarmprüfer kann ursprüngliche Ausnahme begrenzen, weder Zustellung noch offene Vorfallsmenge ist damit gesichert"
+S210.B01,S210,OBR001,M01,teilweise,"Lesbarer alter Bestand bleibt Diagnoseeingang, keine neue Kernelarbeit oder gültige Gesamthealth"
+S210.B02,S210,OBR005,M11,bedingt,"Operator kann Fehlpfad trotz freiem Health-Thread erkennen, Ursache und alle Geschäftsfunktionen sind nicht bewiesen"
+S211.B01,S211,OBR001,M01,teilweise,"Operator kann bestätigte Vergangenheit lesen, neue Mutationen und ehrliche Schreibbestätigung sind nicht verfügbar"
+S211.B02,S211,OBR005,M11,bedingt,"Operator sieht Unterschied zwischen lesbarem Bestand und fehlendem Writefortschritt, kein allumfassendes Grün"
+S211.B02,S211,OBR001,M01,bedingt,"Operator sieht Unterschied zwischen lesbarem Bestand und fehlendem Writefortschritt, kein allumfassendes Grün"
+S212.B01,S212,OBR007,M02,bedingt,"Erhaltene Absichten und getrennte offene Vorfälle bleiben prüfbar, blockierte Tasks beweisen nicht Kernelgesundheit"
+S212.B01,S212,OBR008,M13,bedingt,"Erhaltene Absichten und getrennte offene Vorfälle bleiben prüfbar, blockierte Tasks beweisen nicht Kernelgesundheit"
+S212.B02,S212,OBR007,M02,teilweise,"Absichten und fehlende Erlaubnis bleiben operativ prüfbar, menschliche Reaktion auf echte Vorfälle ist nicht erhalten"
+S212.B03,S212,OBR001,M01,teilweise,"Operator kann konkrete Blocker und echte offene Vorfälle prüfen, externe Voraussetzung oder menschliche Freigabe wird dadurch weder erzeugt noch gleichgesetzt"
+S212.B03,S212,OBR008,M13,teilweise,"Operator kann konkrete Blocker und echte offene Vorfälle prüfen, externe Voraussetzung oder menschliche Freigabe wird dadurch weder erzeugt noch gleichgesetzt"
+S213.B01,S213,none,none,keines,"Für aktuelle Hostgesundheit liefert das Cachepaket keine nutzbare Struktur, alte Bytes beweisen nur Vergangenheit"
+S213.B02,S213,OBR004,M12,bedingt,Monitor kann aktuelle Gesundheitsbehauptung verweigern und genau die Frischelücke zeigen
+S214.B01,S214,none,none,ungeklaert,"Ohne Quellalter und Servicebudget ist unklar ob echte Lebenszeichen rechtzeitig auswertbar sind, endliche Anzahl ist kein Frischebeleg"
+S214.B02,S214,OBR004,M12,bedingt,"Monitor kann echte von alten Belegen unterscheiden und begrenzte Verarbeitung bewahren, verworfene Pakete bleiben verloren"
+S214.B02,S214,OBR016,M03,bedingt,"Monitor kann echte von alten Belegen unterscheiden und begrenzte Verarbeitung bewahren, verworfene Pakete bleiben verloren"
+S215.B01,S215,none,none,keines,"Für Gesundheitszuordnung zum Original ist kein unterscheidender Gegenstand vorhanden, Signatur derselben Identität löst nichts"
+S215.B02,S215,OBR004,M12,bedingt,Monitor kann beide Quellen getrennt nutzen statt Klongesundheit auf Original zu übertragen
+S216.B01,S216,OBR001,M01,teilweise,"Nach Entlastung bleibt lesbarer historischer Bestand nutzbar, weder laufender Monitor noch Kernlatenz sind geschützt"
+S216.B02,S216,OBR009,M11,bedingt,"Operator kann begrenzte Metriken weiter lesen und weiß um ausgelassene Reihen, keine Rekonstruktion sämtlicher Token"
+S217.B01,S217,OBR001,M01,teilweise,"Storeleser kann bestätigte Mutation prüfen obwohl Caller keine Antwort hat, kein automatisches Wiederholen aus Exportfehler"
+S217.B02,S217,OBR001,M01,teilweise,"Nur vor dem Versuch bestätigter Bestand bleibt lesbar, neue Wirkung darf nicht behauptet werden"
+S217.B03,S217,OBR010,M11,bedingt,"Kernel kann Antworten bestätigen und Diagnose verbleibende Spans nutzen, Vollständigkeit der Traces ist verloren"
+S218.B01,S218,OBR011,M08,bedingt,"Analyst kann kausale Timingalternative anhand Vergleichsdossier prüfen, Produktionsfehlerfreiheit ist nicht erhalten"
+S218.B02,S218,none,none,ungeklaert,Ohne Expositions- und Reihenfolgenachweis ist keine belastbare Race-Diagnose als Restfähigkeit belegt
+S219.B01,S219,OBR012,M04,teilweise,"Operator kann Fristverletzung und Phasen bestimmen, späteres Ergebnis heilt Timeliness nicht"
+S219.B02,S219,OBR012,M04,bedingt,"Dispatcher kann verbleibende Zeit nutzen ohne neue Neunsekundenfrist je Hop, Abbruchfreigabe fremder Ressourcen bleibt gesondert"
+S220.B01,S220,OBR012,M04,teilweise,"Operator kann Queueverlust ausweisen und Dispatcher veraltete Aufnahme ablehnen, Erfolg in fünf Sekunden ist keine Gesamterfüllung"
+S220.B02,S220,OBR012,M04,bedingt,Auftraggeber kann den engeren Erfolg und offenen Gesamtnenner lesen ohne Queuezeit zu unterschlagen
+S220.B02,S220,OBR013,M11,bedingt,Auftraggeber kann den engeren Erfolg und offenen Gesamtnenner lesen ohne Queuezeit zu unterschlagen
+S221.B01,S221,OBR007,M02,bedingt,"Operator kann Absicht weiterhin prüfen ohne frühere Zustimmung zu erfinden, Leasefreigabe folgt daraus nicht"
+S221.B02,S221,OBR007,M02,bedingt,"Operator erhält einen wahren Ablaufbefund statt automatischer jahrzehntealter Ausführung, kein erfolgreicher Geschäftsabschluss"
+S221.B02,S221,OBR012,M04,bedingt,"Operator erhält einen wahren Ablaufbefund statt automatischer jahrzehntealter Ausführung, kein erfolgreicher Geschäftsabschluss"
+S222.B01,S222,OBR001,M01,teilweise,"Operator kann mit anderem Bestandslesepfad offene Tasks finden, angezeigte schnelle Statistik erklärt deren Zustand nicht"
+S222.B02,S222,OBR013,M11,bedingt,"Dashboardnutzer kann hängenden Rest wahrnehmen statt nur Überlebende zu sehen, Durchführung bleibt blockiert"
+S223.B01,S223,none,none,ungeklaert,"Vorhandene schnelle Abschlüsse belegen keine Bedienbarkeit unter nicht angebotener Last, fehlend sind echte Ankunftsannahme und Nichtantwortnenner"
+S223.B02,S223,OBR013,M11,bedingt,"Analyst kann diesen Clientprozess und dessen offene Wartezeit auswerten, keine offene Last oder allgemeine Stabilität ableiten"
+S223.B02,S223,OBR014,M08,bedingt,"Analyst kann diesen Clientprozess und dessen offene Wartezeit auswerten, keine offene Last oder allgemeine Stabilität ableiten"
+S224.B01,S224,OBR014,M08,teilweise,"Analyst kann tatsächliche Stichprobe und Unsicherheit nutzen, p99.999 oder Zeitverfügbarkeit sind dadurch nicht gesichert"
+S224.B02,S224,none,none,ungeklaert,"Für eine konkrete langfristige Verfügbarkeitszusage ist keine tragfähige Reststruktur benannt, Datenverlust des übrigen Systems wird nicht behauptet"
+S225.B01,S225,OBR015,M08,teilweise,"Operator kann vorhandene Befunde prüfen, fachliche Vollständigkeit und Freigabe sind nicht erhalten"
+S225.B02,S225,OBR015,M08,bedingt,"Teildiagnose und nicht vom wartenden Parent belegte Restkapazität bleiben nutzbar, kein erfundener zehntausendster Befund"
+S225.B02,S225,OBR016,M03,bedingt,"Teildiagnose und nicht vom wartenden Parent belegte Restkapazität bleiben nutzbar, kein erfundener zehntausendster Befund"
+S226.B01,S226,OBR017,M06,teilweise,"Operator kann erhaltene Versuche zur Folgenbearbeitung nutzen, ursprüngliche Nichtduplikation ist verloren"
+S226.B02,S226,OBR018,M16,bedingt,"Recovery kann einen Ausgang zuordnen und Teilnehmer doppelte Annahme abweisen, Transportlast ist dadurch nicht reduziert"
+S227.B01,S227,OBR015,M08,teilweise,"Operator kann 999 Resultate prüfen, Aggregator darf damit weder volle Prüfung noch zulässige Aktion behaupten"
+S227.B02,S227,OBR015,M08,teilweise,"Erhaltenes Soll-/Istmanifest erlaubt Fehlerursache zu prüfen, Freigabekorrektheit der vergangenen Aktion ist verloren"
+S227.B03,S227,OBR015,M08,bedingt,Auftraggeber kann qualifiziertes Ergebnis samt Nenner nutzen ohne fehlenden Befund zu erfinden
+S228.B01,S228,OBR001,M01,teilweise,"Operator kann erhaltene Aufträge inspizieren, verfügbare Slots und Zeit bis Erschöpfung sind nicht aus Häufigkeit allein gesichert"
+S228.B02,S228,OBR016,M03,bedingt,"Scheduler kann tatsächlich freie reservierte Kapazität nutzen, Timeout allein beendet Hänger oder deren Writes nicht"
+S229.B01,S229,OBR012,M04,teilweise,"Andere isolierte Scopes können arbeiten und Operator sieht betroffenen Nenner, verlorene Scopefristen bleiben verloren"
+S229.B01,S229,OBR013,M11,teilweise,"Andere isolierte Scopes können arbeiten und Operator sieht betroffenen Nenner, verlorene Scopefristen bleiben verloren"
+S229.B01,S229,OBR016,M03,teilweise,"Andere isolierte Scopes können arbeiten und Operator sieht betroffenen Nenner, verlorene Scopefristen bleiben verloren"
+S229.B02,S229,OBR001,M01,teilweise,"Reads und aufgenommene offene Arbeit bleiben inspizierbar, keine garantierte Schreibrestkapazität"
+S229.B02,S229,OBR013,M11,teilweise,"Reads und aufgenommene offene Arbeit bleiben inspizierbar, keine garantierte Schreibrestkapazität"
+S230.B01,S230,OBR011,M08,bedingt,"Analyst kann Kollision und unveränderten Termin anhand Timingdossier prüfen, vergangene Frist ist nicht gerettet"
+S230.B01,S230,OBR012,M04,bedingt,"Analyst kann Kollision und unveränderten Termin anhand Timingdossier prüfen, vergangene Frist ist nicht gerettet"
+S230.B02,S230,none,none,ungeklaert,Für konkrete kausale Timingdiagnose ist kein ausreichend spezifiziertes Dossier belegt
+S231.B01,S231,none,none,keines,"Zuordnung dieses 90 Tage verspäteten Ergebnisses ist verloren, kein Verlust des restlichen Stores oder automatische Zweitwirkung behauptet"
+S231.B02,S231,OBR018,M16,bedingt,"Recovery kann diesen Ausgang und eventuelle Retries derselben Identität unterscheiden, keine externe Kopie ohne Voraussetzung ergänzt"
+S231.B03,S231,none,none,ungeklaert,"Kein nutzbarer Korrelationsgegenstand ist aktuell belegt, aus fehlender lokaler Historie darf weder Totalverlust noch zweite Annahme folgen"
+S232.B01,S232,OBR017,M06,teilweise,"Recovery kann dokumentierten Versuch zur Folgenklärung nutzen, Gültigkeit dieser angenommenen Aktion ist nicht erhalten"
+S232.B02,S232,OBR007,M02,bedingt,"Operator kann Absicht prüfen und Gate falsche neue Identität ablehnen, bereits autonom beim Teilnehmer laufender Puffer wäre außerhalb Grenze"
+S232.B02,S232,OBR035,M02,bedingt,"Operator kann Absicht prüfen und Gate falsche neue Identität ablehnen, bereits autonom beim Teilnehmer laufender Puffer wäre außerhalb Grenze"
+S233.B01,S233,none,none,keines,"Fähigkeit zur Zuordnung ist verloren, sensible Bytes selbst sind kein nutzbares Zustellrecht und keine imaginäre Quarantäne wird angenommen"
+S233.B02,S233,OBR042,M15,bedingt,"Kleine zulässige Protokollverarbeitung und klare Ablehnung bleiben nutzbar, weder Inhalt noch Identitätszuordnung werden als erhalten ausgegeben"
+S233.B03,S233,none,none,keines,"Für Geheimhaltung dieser gelesenen Payload bleibt kein Residue, andere nicht offengelegte Daten sind nicht automatisch verloren"
+S234.B01,S234,OBR018,M16,teilweise,"Operator kann echte Annahmereihenfolge und Folgen klären, Nichtausführung ist für diese Aktion verloren"
+S234.B02,S234,OBR017,M06,teilweise,"Recovery kann Wiederholung zurückhalten und Unsicherheit zeigen, lokale Anfrage beweist externe Annahme oder Nichtannahme nicht"
+S234.B03,S234,OBR018,M16,bedingt,"Operator kann echte Abbruchwirkung von bloßer Kanalannahme unterscheiden, dieser Zweig gilt nicht bei vorgegebener umgekehrter Mikrosekundenordnung"
+S235.B01,S235,OBR021,M05,teilweise,"Scheduler kann besetzte Ressource vor Wiedervergabe halten, das stoppt den Enkel selbst nicht und bestätigt kein Taskergebnis"
+S235.B02,S235,OBR001,M01,teilweise,"Früher bestätigte Daten bleiben Inspektionsgrundlage soweit intakt, Single-Writer-Eigenschaft ist nicht erhalten"
+S235.B03,S235,OBR020,M05,bedingt,"Neuer Besitzer kann frei von alter Schreibautorität arbeiten, Parent-PID oder verstrichene Zeit allein genügen nicht"
+S236.B01,S236,OBR017,M06,teilweise,"Recovery kann bekannte Versuche und unbestätigten Cancelstatus lesen, zeitgerechter Abbruch ist nicht erhalten"
+S236.B02,S236,OBR019,M05,bedingt,"Operator kann Anfrage wirksam weiterleiten und neue Aufnahme sperren ohne stdout abzuwarten, bereits angenommene Aktion bleibt irreversibel"
+S237.B01,S237,OBR017,M06,teilweise,"Operator kann logische Wirkung als ungewiss halten, viele Transportversuche beweisen weder mehrere Annahmen noch vorhandene Dienstkapazität"
+S237.B02,S237,OBR017,M06,teilweise,"Lokale Wirkungsungewissheit bleibt noch inspizierbar, rechtzeitiger Durchsatz und externe Nichtduplikation sind nicht bewiesen"
+S237.B03,S237,OBR022,M03,bedingt,"Dispatcher kann erlaubte Restversuche nutzen und Gesamtlast begrenzen, dieses Budget verhindert allein keine zwei externen Annahmen"
+S238.B01,S238,OBR016,M03,bedingt,"Zugelassene Arbeit kann reservierte Kapazität nutzen und Restversuche bleiben zählbar, nicht alle Millionen Anfragen müssen erfolgreich werden"
+S238.B01,S238,OBR022,M03,bedingt,"Zugelassene Arbeit kann reservierte Kapazität nutzen und Restversuche bleiben zählbar, nicht alle Millionen Anfragen müssen erfolgreich werden"
+S238.B02,S238,OBR001,M01,teilweise,"Operator kann erhaltene Absichten inspizieren, zeitgerechte Bedienung oder Budgeterhalt sind nicht gesichert"
+S239.B01,S239,none,none,keines,"Für den bereits verbrauchten Restbetrag ist keine Spendefähigkeit erhalten, gratis Fehler würden diesen Mechanismus nicht tragen"
+S239.B02,S239,OBR023,M03,bedingt,"Dispatcher kann noch reservierte zulässige Versuche planen und weitere Ausgabe verweigern, vorhandene Quote allein garantiert keinen Providererfolg"
+S240.B01,S240,OBR024,M03,bedingt,Operator kann schrittweise nutzbare warme Agenten erhalten statt Gleichzeitigkeit zu versprechen
+S240.B02,S240,OBR001,M01,teilweise,"Bestätigte Aufträge bleiben später lesbar, benutzbare warme Kapazität ist nicht gesichert"
+S241.B01,S241,OBR001,M01,teilweise,"Operator kann Absicht und Bestand weiter prüfen, fachlich richtiges Ergebnis ohne notwendige Suchinformation ist nicht erhalten"
+S241.B02,S241,OBR025,M08,bedingt,"Auftraggeber kann wirklich nutzbares eingeschränktes Resultat erhalten, keine vollständige Suchqualität behaupten"
+S242.B01,S242,OBR012,M04,teilweise,"Operator kann Setupverlust messen und spätere Restbudgets korrekt beginnen, OBR012 behauptet selbst keine bestehende Connectionpool-Fähigkeit"
+S242.B02,S242,OBR012,M04,teilweise,"Frist- und Bestandsdiagnose bleiben möglich, erfolgreiche Anwendungsleistung ist nicht erhalten"
+S242.B02,S242,OBR001,M01,teilweise,"Frist- und Bestandsdiagnose bleiben möglich, erfolgreiche Anwendungsleistung ist nicht erhalten"
+S243.B01,S243,OBR001,M01,teilweise,"Operator kann erhaltenen Bestand und verlorene Zeitverträge später prüfen, aktuelle Kontrollbedienung nicht garantiert"
+S243.B01,S243,OBR012,M04,teilweise,"Operator kann erhaltenen Bestand und verlorene Zeitverträge später prüfen, aktuelle Kontrollbedienung nicht garantiert"
+S243.B02,S243,OBR026,M03,bedingt,"Operator kann begrenzte Kontrollen nutzen ohne ganzen Export abzuwarten, beliebige kurze Fristen folgen nicht allein aus positivem Anteil"
+S243.B02,S243,OBR019,M05,bedingt,"Operator kann begrenzte Kontrollen nutzen ohne ganzen Export abzuwarten, beliebige kurze Fristen folgen nicht allein aus positivem Anteil"
+S244.B01,S244,OBR001,M01,teilweise,"Operator kann Normalbestand und verpasste Fristen prüfen, rechtzeitige normale Ausführung ist nicht erhalten"
+S244.B01,S244,OBR012,M04,teilweise,"Operator kann Normalbestand und verpasste Fristen prüfen, rechtzeitige normale Ausführung ist nicht erhalten"
+S244.B02,S244,OBR026,M03,bedingt,"Normale Auftraggeber können begrenzten Service nutzen, alle Notfälle sofort und alle normalen Deadlines zugleich sind nicht versprochen"
+S245.B01,S245,OBR021,M05,bedingt,"Scheduler kann genau den Workspace gegen zweite Zuteilung halten und Operator Belegbedarf lesen, Taskfreigabe und remote Ausgang bleiben separat"
+S245.B02,S245,OBR001,M01,teilweise,"Früher bestätigter Bestand bleibt soweit intakt prüfbar, Exklusivität ist verloren, kein empirischer Vorfall aus Helpercode abgeleitet"
+S245.B03,S245,OBR020,M05,bedingt,"Neuer Besitzer kann Exklusivität nutzen statt Zeitablauf als Todesbeweis, Remoteaktionsstatus wird nicht mit freigegeben"
+S246.B01,S246,OBR001,M01,teilweise,"Operator kann intakten gespeicherten Bestand lesen, das Modell besitzt keine vollständige Namenkenntnis"
+S246.B02,S246,OBR027,M02,bedingt,"Agent kann benötigten Namen aus großem Bestand finden ohne Gesamtmenge im Kontext, bei Vollmengenpflicht kein Ersatz"
+S247.B01,S247,OBR001,M01,teilweise,"Alter bestätigter Bestand bleibt nach Entlastung lesbar, Riesenresultat und Controlservice sind nicht geschützt"
+S247.B02,S247,OBR028,M05,bedingt,"Empfänger und Operator können kleine Antworten und Kontrollen nutzen, die 100-GB-Nutzlast selbst wird ausdrücklich nicht als erhalten gezählt"
+S247.B02,S247,OBR019,M05,bedingt,"Empfänger und Operator können kleine Antworten und Kontrollen nutzen, die 100-GB-Nutzlast selbst wird ausdrücklich nicht als erhalten gezählt"
+S248.B01,S248,OBR001,M01,teilweise,"Bestandslesbarkeit kann nach Entlastung fortbestehen, laufende Benachrichtigungsabdeckung ist nicht erhalten"
+S248.B02,S248,OBR029,M01,bedingt,"Zugelassener Subscriber kann noch vorhandenen Suffix lesen, abgelaufene Benachrichtigungen sind nicht rekonstruiert"
+S249.B01,S249,OBR001,M01,teilweise,"Recovery kann erhaltene Geschichte für spätere Wiederherstellung nutzen, keine rechtzeitige Verfügbarkeit und kein nachgewiesenes heutiges Eventreplay"
+S249.B02,S249,OBR030,M01,bedingt,"Recovery kann verifizierten Einstieg nutzen statt Jahrzehnte erneut abspielen, fehlender Checkpoint darf nicht nachträglich angenommen werden"
+S249.B03,S249,OBR001,M01,teilweise,"Erhaltene Geschichte bleibt wiederaufbaubar bei endlichem Eingang, aktuelle Catch-up-Fähigkeit ist nicht erhalten"
+S250.B01,S250,OBR001,M01,teilweise,"Operator kann letzte verifizierte Quelle lesen, aktueller Restorefortschritt ist nicht möglich"
+S250.B02,S250,OBR031,M09,bedingt,"Operator kann Wiederherstellung mit vorhandenem Platz fortsetzen ohne imaginären Zusatzspeicher, Endgröße allein wäre kein Nachweis"
+S250.B03,S250,none,none,keines,"Für Wiederherstellung dieses verlorenen Standes bleibt keine Struktur, neue Backups oder perfekte Reparaturquelle dürfen nicht erfunden werden"
+S251.B01,S251,none,none,keines,"Für ursprüngliche Einmalwirkung bleibt kein Residue, spätere Kompensation könnte nur Folgen mindern und ist nicht vorausgesetzt"
+S251.B02,S251,OBR018,M16,bedingt,"Teilnehmer kann genau die doppelte Annahme verhindern und Recovery Ausgang zuordnen, lokales tombstonefreies System ist nicht allgemein sicher"
+S252.B01,S252,OBR001,M01,teilweise,"Operator kann erhaltene Vorkommen prüfen und ungültige Aktionen halten, keine schnelle Kapazität oder Milliarde Erfolge erhalten"
+S252.B01,S252,OBR007,M02,teilweise,"Operator kann erhaltene Vorkommen prüfen und ungültige Aktionen halten, keine schnelle Kapazität oder Milliarde Erfolge erhalten"
+S252.B01,S252,OBR012,M04,teilweise,"Operator kann erhaltene Vorkommen prüfen und ungültige Aktionen halten, keine schnelle Kapazität oder Milliarde Erfolge erhalten"
+S252.B02,S252,OBR032,M04,bedingt,"Scheduler kann Nachholstand und berechtigten kleinen Rest nutzen, übersprungene Vorkommen sind ausdrücklich nicht ausgeführte Erfolge"
+S252.B02,S252,OBR007,M02,bedingt,"Scheduler kann Nachholstand und berechtigten kleinen Rest nutzen, übersprungene Vorkommen sind ausdrücklich nicht ausgeführte Erfolge"
+S253.B01,S253,OBR016,M03,bedingt,"Scheduler kann begrenzt erlaubte Arbeit bedienen und Restversuche zählen, gleichzeitige sofortige Erfüllung aller Scopes nicht zugesagt"
+S253.B01,S253,OBR022,M03,bedingt,"Scheduler kann begrenzt erlaubte Arbeit bedienen und Restversuche zählen, gleichzeitige sofortige Erfüllung aller Scopes nicht zugesagt"
+S253.B02,S253,OBR001,M01,teilweise,"Operator kann verbliebene Absichten prüfen, Durchsatz und Providerbudget sind nicht gesichert"
+S254.B01,S254,OBR001,M01,teilweise,"Operator kann aufgenommenen Bestand prüfen, ursprüngliche Kosten- und Zeitgrenze kann längst verfehlt sein"
+S254.B02,S254,none,none,ungeklaert,"Ohne begrenzte durable Aufnahme ist weder vollständige Lineage noch nutzbare Restkapazität belegt, keine stabile Attraktorkonvergenz aus Wachstum behauptet"
+S254.B03,S254,OBR033,M03,bedingt,"Dispatcher kann Restkontingent und Lineage nutzen bevor Rechnung kommt, verborgene externe Kosten bleiben außerhalb nachgewiesenem Modell"
+S255.B01,S255,OBR012,M04,teilweise,"Operator kann ursprüngliche Zeitverträge und gemessene Verfehlung weiter lesen, volle Warmkapazität ist nicht erhalten"
+S255.B02,S255,OBR016,M03,bedingt,"Zugelassene Klassen behalten begrenzten Service auch unter Drossel, frühere höhere Frist-/Mengenzusage gilt nicht automatisch"
+S255.B02,S255,OBR026,M03,bedingt,"Zugelassene Klassen behalten begrenzten Service auch unter Drossel, frühere höhere Frist-/Mengenzusage gilt nicht automatisch"
+S255.B03,S255,OBR001,M01,teilweise,"Bestands- und Zeitdiagnose bleiben möglich, weder Deadlineerhalt noch selbstständige Abkühlung sind gesichert"
+S255.B03,S255,OBR012,M04,teilweise,"Bestands- und Zeitdiagnose bleiben möglich, weder Deadlineerhalt noch selbstständige Abkühlung sind gesichert"
+S256.B01,S256,OBR017,M06,teilweise,"Recovery kann belegten Versuch zurückhalten und lesen, weder Mailzustellung noch No-send sind dadurch erhalten"
+S256.B02,S256,OBR018,M16,bedingt,"Operator kann Annahme oder belegte endgültige Nichtannahme unterscheiden, bloß momentanes not-found bei weiterlaufendem Sender reicht nicht"
+S257.B01,S257,OBR001,M01,teilweise,"Lokaler Operator kann bestätigten Bestand nutzen und Arbeit kann laufen, daraus folgt kein frischer Remotezustand oder Menschenempfang"
+S257.B02,S257,OBR002,M12,bedingt,"Externer Leser kann definierte Erreichbarkeit beobachten, Produktionsausführung und Empfang werden separat ausgewiesen"
+S258.B01,S258,OBR017,M06,teilweise,"Operator kann frühere Versuche später abgleichen, aktuelle Notsteuerbarkeit ist nicht erhalten"
+S258.B02,S258,OBR019,M05,bedingt,"Operator kann Belastungsnachschub stoppen und Abbruch anstoßen, abgeschlossener irreversibler Effekt wird nicht zurückgenommen"
+S259.B01,S259,none,none,keines,"Für aktuelle autorisierte Notbedienung ist kein nutzbarer Zugang vorhanden, Daten können dennoch intakt sein"
+S259.B02,S259,OBR034,M02,bedingt,"Operator kann autorisierte Notaktionen ausführen, keine anonyme Rettung und keine vollständige externe Accountwiederherstellung"
+S260.B01,S260,OBR001,M01,teilweise,"Operator kann alten Stand lesen und fehlgeschlagene Mutation erkennen, kein dauerhafter Stop ist erhalten"
+S260.B02,S260,OBR001,M01,teilweise,"Nur frühere dauerhafte Daten sind prüfbar, versprochene persistente Stopgarantie ist verloren beziehungsweise nicht hergestellt"
+S260.B03,S260,OBR019,M05,bedingt,"Operator kann gegenwärtigen Nachschub stoppen obwohl Persistenz fehlt, Antwort muss ausdrücklich nicht-dauerhaft bleiben"
+S261.B01,S261,OBR017,M06,teilweise,"Operator kann belegte Versuche für Abgleich nutzen, korrekte Scopeautorität dieser Aktion ist nicht erhalten"
+S261.B02,S261,OBR036,M14,bedingt,"Secret-Gate kann passende A-Capability weiter bedienen ohne B-Zugang zu geben, Pipeauth allein wäre kein Nachweis"
+S262.B01,S262,OBR017,M06,teilweise,"Operator kann Versuch und bekannte Zielbelege prüfen, ursprüngliche Empfängertreue ist verloren"
+S262.B02,S262,OBR035,M02,bedingt,Operator kann ursprüngliche Absicht und Freigabe nutzen ohne still auf neuen Empfänger zu senden
+S262.B02,S262,OBR007,M02,bedingt,Operator kann ursprüngliche Absicht und Freigabe nutzen ohne still auf neuen Empfänger zu senden
+S263.B01,S263,OBR017,M06,teilweise,"Operator kann erhaltenen Versuch prüfen, Herkunft einer Task-ID beweist keine lokale Berechtigung"
+S263.B02,S263,OBR035,M02,bedingt,Dispatcher kann echte Freigabeevidenz nutzen und importierte Identität als bloße Referenz lesen
+S264.B01,S264,none,none,keines,"Für Vertraulichkeit der hochgeladenen Fakten bleibt keine Struktur, bloßer Text ohne erfolgreichen Zugriff wäre noch kein Verlust"
+S264.B02,S264,OBR035,M02,bedingt,"Dispatcher kann wahre Freigaben weiter nutzen, Text wird als Daten gelesen ohne behauptete Systemregel zu übernehmen"
+S264.B03,S264,OBR039,M14,bedingt,"Berechtigte Prozesse können nicht offengelegte Daten weiter nutzen, Modellgehorsam ist keine vorausgesetzte Schutzstruktur"
+S265.B01,S265,none,none,keines,"Für korrekte Autorisierung dieser angenommenen Aktion bleibt kein Residue, manipuliertes Log ist gerade keine unabhängige Beweisquelle"
+S265.B02,S265,OBR035,M02,bedingt,"Recovery kann autoritative Freigabeevidenz weiter verwenden trotz falscher Diagnosetexte, Logwahrheit ist nicht gerettet"
+S266.B01,S266,none,none,keines,"Für ursprüngliche Aktionsbegrenzung dieser angenommenen Aktion bleibt nichts, erhaltenes Artefakt allein ist keine vertrauenswürdige Freigabe"
+S266.B02,S266,OBR035,M02,bedingt,"Operator kann verlangte neue Absicht prüfen ohne sie aus Artefaktbytes zu autorisieren, bloße Formatgrenze wäre unzureichend"
+S266.B02,S266,OBR007,M02,bedingt,"Operator kann verlangte neue Absicht prüfen ohne sie aus Artefaktbytes zu autorisieren, bloße Formatgrenze wäre unzureichend"
+S267.B01,S267,none,none,keines,"Für Geheimhaltung tatsächlich exfiltrierter Daten bleibt keine Restfähigkeit, Einmalverlust ist kein Attraktor"
+S267.B02,S267,none,none,keines,"Für unabhängig glaubwürdige In-Domain-Recoveryentscheidung ist kein überlebender Gegenstand benannt, nicht automatisch jeder Datenbyte zerstört"
+S267.B03,S267,OBR039,M14,bedingt,"Berechtigte Prozesse können geschützten nicht offengelegten Bereich weiter nutzen, Signatur allein leistet das nicht"
+S268.B01,S268,none,none,keines,"Geheimhaltung dieser gelesenen Daten ist verloren, eine alte unverfügbare Kopie wird nicht als Rettung erfunden"
+S268.B02,S268,OBR037,M09,bedingt,"Recovery kann konkret vorhandene Abhängigkeit wieder benutzen, Inhaltsgleichheit allein beweist keine Benignität"
+S268.B03,S268,none,none,keines,"Für Ausführung der benötigten alten Abhängigkeit fehlt der nutzbare Gegenstand, bloßer Hash ist kein ausführbares Residue"
+S269.B01,S269,none,none,keines,"Für unabhängige Gesundheitsbeurteilung durch genau diesen Monitor bleibt keine glaubwürdige Struktur, Ausführung und totale Datenzerstörung folgen daraus nicht"
+S269.B02,S269,none,none,keines,"Für unabhängige Vertrauensentscheidung aus dieser geschlossenen Domäne ist nichts belegt, keine automatische globale Informationsvernichtung"
+S269.B03,S269,OBR038,M12,bedingt,"Berechtigter Operator kann beschränkten Gegenbefund nutzen trotz in-domain Grün, keine Erkennung beliebig unsichtbarer Exfiltration"
+S270.B01,S270,none,none,keines,"Für gegenseitig authentisierte aktuelle Heartbeats besteht kein nutzbarer Zugang, Hostausführung kann trotzdem laufen"
+S270.B02,S270,OBR040,M12,bedingt,Monitor kann begrenzt authentisierte frische Belege nutzen ohne alte Replays als Leben zu lesen
+S270.B02,S270,OBR004,M12,bedingt,Monitor kann begrenzt authentisierte frische Belege nutzen ohne alte Replays als Leben zu lesen
+S271.B01,S271,none,none,ungeklaert,"Autorisierter Klartextzugriff ist derzeit nicht als nutzbare Struktur belegt, externe Schlüsselkopie wird nicht erfunden"
+S271.B02,S271,none,none,keines,"Für autorisierte Wiederherstellung des geschützten Inhalts bleibt nichts, lesbare Ciphertextbytes sind nicht dieser Inhalt und restliches System ist nicht automatisch verloren"
+S272.B01,S272,none,none,keines,"Geheimhaltung dieser alten Fakten ist verloren, künftige Daten oder heutige Betriebsfähigkeit sind nicht dadurch vollständig verloren"
+S272.B02,S272,none,none,ungeklaert,"Für belastbare langfristige Vertraulichkeitsgarantie ist kein konkreter überlebender Schutz belegt, aber bloßes Wort Durchbruch beweist auch keine tatsächliche Kenntnis"
+S273.B01,S273,none,none,keines,"Vertraulichkeit der tatsächlich gelesenen fremden Daten ist verloren, APIdenial oder Workspacelease ist keine Reststruktur dafür"
+S273.B02,S273,OBR039,M14,bedingt,Berechtigte Nutzer können noch nicht offengelegten Datenbereich weiter verwenden während Angreifer ausgeschlossen bleibt
+S274.B01,S274,none,none,keines,"Für Geheimhaltung tatsächlich erschlossener Aktivitätsfakten bleibt keine Restfähigkeit, kein automatischer Beweis gelesener Nutzinhalte"
+S274.B02,S274,none,none,ungeklaert,"Konkrete Timing-Vertraulichkeit ist nicht belegt, keine perfekte Abschirmung oder bereits erfolgte Offenlegung wird ergänzt"
+S274.B03,S274,OBR041,M14,bedingt,"Berechtigte Nutzer behalten Arbeit ohne das geprüfte Aktivitätssignal an diesen Beobachter preiszugeben, kein universeller Noninterferenz- oder empirischer Nachweis behauptet"
+S275.B01,S275,none,none,ungeklaert,"Unabhängige Beobachterrolle ist nicht als durchgesetzte Vertragsgrenze belegt, dennoch ist keine konkrete Datenoffenlegung behauptet"
+S275.B02,S275,none,none,keines,"Vertraulichkeit der so gelesenen Daten ist verloren, Diagnose durch denselben kompromittierten Monitor ist keine unabhängige Rettung"
+S275.B03,S275,none,none,keines,"Für unabhängig glaubwürdige Entscheidung innerhalb dieser kontrollierten Domäne ist kein Residue belegt, nicht jeder sonstige Byte ist verloren"
+S275.B04,S275,OBR038,M12,bedingt,"Operator kann begrenzte unabhängige Prüfevidenz und berechtigte Prozesse nicht offengelegte Daten nutzen, das ist andere Autorität als freie Shell"
+S275.B04,S275,OBR039,M14,bedingt,"Operator kann begrenzte unabhängige Prüfevidenz und berechtigte Prozesse nicht offengelegte Daten nutzen, das ist andere Autorität als freie Shell"
+S276.B01,S276,BDR003,M08,teilweise,Prüfer können Umfang der belegten Offenlegung untersuchen. Exklusivität des bereits Gelernten bleibt verloren.
+S276.B02,S276,BDR001,M12,bedingt,Berechtigter Beobachter erhält groben technischen Zustand ohne die behaupteten Kundeninformationen. Dies ist ein alternativer Entwurf nicht Rücknahme eines Lecks.
+S277.B01,S277,BDR003,M08,teilweise,Der Vorfallsprüfer kann den dokumentierten Transfer abgrenzen. Der Beleg ist keine Rückgewinnung der Geheimhaltung und enthält keine zusätzliche Gesprächskopie.
+S277.B02,S277,BDR002,M11,bedingt,Support kann erlaubte Fehlerparameter nutzen ohne die ganze AGENTS-Konversation. Die Sperre betrifft nur diesen Export.
+S278.B01,S278,BDR003,M08,teilweise,Die Untersuchung kann beobachtete Probeantworten vergleichen. Sie verhindert weder weitere Inferenz noch macht sie gelerntes Wissen geheim.
+S278.B02,S278,BDR001,M12,bedingt,Der legitime Beobachter kann grobe Health weiter lesen während der externe Probeeffekt begrenzt ist. Andere Timingkanäle sind nicht mitbewiesen.
+S278.B03,S278,BDR019,M13,teilweise,Einsatzplanung kann einzelne offene Vorfälle weiterfinden. Das Register verspricht weder rechtzeitige Reparatur noch unendliche Speicherung.
+S279.B01,S279,BDR004,M08,teilweise,Fachprüfer können betroffene Mengen gegen den nicht vom Exporter erzeugten Ursprung prüfen. Signaturen der Kopien leisten das nicht.
+S279.B02,S279,none,none,keines,Für Wiedergewinnung der ursprünglichen Fachwahrheit gibt es in diesem geschlossenen Bestand keine nutzbare Struktur. Internes Rechnen bleibt möglich aber ist kein Wahrheitsresidue.
+S279.B03,S279,BDR004,M08,bedingt,Der Ursprungsbetrag bleibt zur Ablehnung des konsistent falschen Imports nutzbar. Andere nicht unabhängig belegte Felder bleiben ungesichert.
+S280.B01,S280,BDR004,M08,bedingt,Autorisierter Bearbeiter kann ursprüngliche Menge vergleichen und diesen neuen Fehler zurückhalten.
+S280.B02,S280,BDR004,M08,teilweise,Prüfer kann den falschen Betrag quantifizieren und Ausgleich begründen. Bereits versandte Information oder andere irreversible Folge bleibt ggf. verloren.
+S280.B03,S280,none,none,keines,Für die genaue ursprüngliche Menge fehlt jeder tragfähige Vergleich. Schema und Prüfsumme liefern die verlorene Fachinformation nicht.
+S281.B01,S281,BDR003,M08,bedingt,Legitimer Prüfer kann beide Geschichten samt Lücken lesen ohne einen Sieger zu erfinden.
+S281.B02,S281,BDR003,M08,teilweise,Prüfer können Konfliktverlauf rekonstruieren soweit ihre Kopien reichen. Belege selbst stellen keine Exklusivität her.
+S281.B03,S281,BDR008,M16,bedingt,Neuer Berechtigter kann exklusiv schreiben und Prüfer den begrenzten Abgleich nachvollziehen. Frühere reale Doppelwirkung wird nicht ungeschehen.
+S281.B03,S281,BDR003,M08,bedingt,Neuer Berechtigter kann exklusiv schreiben und Prüfer den begrenzten Abgleich nachvollziehen. Frühere reale Doppelwirkung wird nicht ungeschehen.
+S282.B01,S282,BDR009,M06,bedingt,Operator kann nur die erhaltenen Versuche untersuchen ohne automatische Wiederholung. Gestern fehlende Rechnungen sind ausdrücklich nicht mit erfasst.
+S282.B02,S282,BDR010,M16,bedingt,Der Teilnehmer kann heutige Widerrufe trotz altem lokalen Stand anwenden. Dies beantwortet nicht ob gestern schon Rechnungen versandt wurden.
+S282.B03,S282,none,none,keines,Für den tatsächlichen gestrigen Versand fehlt ein nutzbarer Nachweis. Unbetroffene lokale Daten können weiterhin bestehen.
+S283.B01,S283,BDR003,M08,bedingt,Prüfer können zwei Identitätsbehauptungen nebeneinander halten. Health liefert keinen exklusiven Writerbeweis.
+S283.B02,S283,BDR003,M08,teilweise,Unabhängiger Prüfer behält die dokumentierte Konfliktspur aber keine Exklusivität und keine Garantie vollständiger Wirkungsgeschichte.
+S283.B03,S283,BDR008,M16,bedingt,Neuer Writer kann begrenzt exklusiv fortfahren. Diese Fähigkeit ist nicht gleich Abschluss aller vorigen Aktionen.
+S284.B01,S284,BDR010,M16,bedingt,Teilnehmer kann historische Rechte als nicht mehr ausreichend erkennen obwohl Recovery lokal erfolgreich ist.
+S284.B02,S284,BDR009,M06,teilweise,Operator kann den bekannten Versuch ohne blindes Retry untersuchen. Die Sperre verhindert seine alte Außenannahme nicht.
+S285.B01,S285,BDR005,M10,bedingt,Beide Seiten können die jeweils gemeinte Menge feststellen und diese inkompatible Verwendung verweigern.
+S285.B02,S285,BDR004,M08,teilweise,Fachprüfer kann Abweichung quantifizieren. Die erhaltene Menge korrigiert den vergangenen Effekt nicht automatisch.
+S286.B01,S286,BDR012,M10,bedingt,Nicht aktivierende Scopenutzer behalten ihren lokalen Start und Datenzugriff. Kein Beweis gegen gemeinsame Hostausfälle.
+S286.B02,S286,BDR011,M05,teilweise,Lokaler Betreiber kann vorhandenen Bestand und Konfiguration untersuchen ohne betroffenen Pluginstart. Produktbetrieb ist nicht erhalten.
+S286.B02,S286,BDR022,M09,teilweise,Lokaler Betreiber kann vorhandenen Bestand und Konfiguration untersuchen ohne betroffenen Pluginstart. Produktbetrieb ist nicht erhalten.
+S286.B03,S286,none,none,keines,Für in-band Reparatur fehlt ein nutzbarer Pfad. Rohe Bytes oder unbetroffene Funktionen begründen keinen lesbaren Notstart.
+S287.B01,S287,BDR013,M01,bedingt,Späterer kompatibler Leser erhält originale unbekannte Felder. Das ist Byteerhalt nicht garantierte fachliche Richtigkeit.
+S287.B02,S287,none,none,keines,Für die überschriebenen Werte gibt es kein Residue. Schemavalidität enthält die entfernte Information nicht.
+S287.B03,S287,none,none,keines,Für den ursprünglichen unbekannten Feldinhalt fehlt im geschlossenen Bestand jede belastbare Rekonstruktionsfähigkeit. Wiederholbare falsche Berechnung bleibt keine Wahrheit.
+S288.B01,S288,BDR003,M08,teilweise,Prüfer kann belegten Vorgang nachvollziehen. Fähigkeit ihn ungeschehen zu machen besteht nicht.
+S288.B02,S288,BDR009,M06,bedingt,Berechtigter Operator behält bekannte Operationsidentität und unterlässt blindes erneutes Senden. Weltrollback wird nicht versprochen.
+S289.B01,S289,BDR003,M08,bedingt,Zuständiger Prüfer kann Fragmente vergleichen ohne Eigentümer zu raten. Lokale Transaktionsatomizität ersetzt diesen Beleg nicht.
+S289.B02,S289,BDR008,M16,bedingt,Legitimer Nachfolger kann exklusiv schreiben. Andere Businessoutcomes brauchen weiterhin eigene Belege.
+S289.B03,S289,BDR003,M08,teilweise,Prüfer kann Konfliktbeginn und erhaltene Wiederholungen sehen. Belegaufbewahrung stoppt keinen der Writer.
+S290.B01,S290,none,none,keines,In-band Konfigurationsreparatur hat keine nutzbare Struktur. Rohdatei ist ohne nötige Semantik und Schlüssel keine Reparaturfähigkeit.
+S290.B02,S290,BDR011,M05,bedingt,Lokaler Betreiber kann Fehlerkonfiguration prüfen ohne den defekten Teil aufzurufen. Reader erteilt keine Wirkungsvollmacht.
+S291.B01,S291,BDR003,M08,teilweise,Nachfolger kann dokumentierte Aussagen und Wissenslücken prüfen. Das Belegpaket enthält keine vollständige Bauumgebung und beweist keine kompetente Reparatur.
+S291.B02,S291,BDR003,M08,teilweise,Nachfolger kann dokumentierte Behauptungen und Lücken prüfen aber daraus folgt keine reproduzierbare Wartung. Verstärkung ist eine soziale Hypothese.
+S291.B03,S291,BDR014,M09,bedingt,Nachfolger kann diese Reparatur ohne verschwundenen Maintainer erklären bauen und prüfen.
+S292.B01,S292,BDR022,M09,teilweise,Berechtigter Betreiber kann erhaltene Geschäftsdaten prüfen. Weder vorhandene Quellen noch Daten ersetzen Konto und Compiler.
+S292.B02,S292,BDR014,M09,bedingt,Nachfolger kann den kleinen Fix reproduzieren und prüfen. Eine versteckte Cloudbauabhängigkeit würde diesen Kandidaten aufheben.
+S292.B03,S292,BDR022,M09,teilweise,Erhaltene lesbare lokale Akten dienen noch der Abwicklung. Die entfallene Außenfunktion ist nicht erhalten.
+S293.B01,S293,BDR003,M08,teilweise,Berechtigter Prüfer kann dokumentierte Entscheidungsfragmente untersuchen aber keine einheitliche Legitimität daraus erfinden.
+S293.B02,S293,BDR015,M02,bedingt,Entscheider behält Konflikt und Begründungsbedarf als nutzbaren Gegenstand statt neuer stiller Ausnahme.
+S294.B01,S294,BDR022,M09,teilweise,Offlinebetreiber kann den erhaltenen älteren Bestand lesen sofern sein Reader nicht die neue Bibliothek braucht.
+S294.B02,S294,BDR004,M08,teilweise,Fachprüfer kann die falsche Menge gegen den separaten Ursprung erkennen. Mehr gleiche JSON-Prüfer helfen nicht.
+S294.B03,S294,BDR004,M08,teilweise,Unabhängiger Fachprüfer könnte mit dem noch erhaltenen Ursprung widersprechen. Erst wirksamer Eingriff bricht Vertrauen und wird nicht vorausgesetzt.
+S295.B01,S295,BDR011,M05,teilweise,Berechtigter lokaler Betreiber kann Konfiguration und erhaltenen Bestand lesen. Regulärer Kindbetrieb ist nicht erhalten.
+S295.B01,S295,BDR022,M09,teilweise,Berechtigter lokaler Betreiber kann Konfiguration und erhaltenen Bestand lesen. Regulärer Kindbetrieb ist nicht erhalten.
+S295.B02,S295,BDR012,M10,bedingt,Kindscopenutzer behalten lokale Abfragen und Start ohne das zusätzliche Konto. Das ist ein alternativer begrenzter Entwurf.
+S296.B01,S296,BDR008,M16,bedingt,Der berechtigte Kernel behält exklusive Mutation an den erfassten Teilnehmern. Andere Schreibwege müssen ausdrücklich ausgeschlossen sein.
+S296.B02,S296,BDR003,M08,teilweise,Berechtigter Prüfer behält erhaltene Konfliktspur und kann die doppelte Autorität untersuchen. Kein eigener Schreibstopp folgt aus dem Beleg.
+S296.B03,S296,BDR003,M08,teilweise,Prüfer kann den belegten Eingriff abgrenzen. Die Spur belegt nicht automatisch alle externen Folgen.
+S297.B01,S297,none,none,ungeklaert,Für reale Sicherheit bei verspäteter Annahme fehlt erforderliche Evidenz. Soforttests bleiben nur für ihre tatsächlich abgebildeten Abläufe nutzbar.
+S297.B02,S297,BDR009,M06,bedingt,Operator kann die bekannte Operation wiederfinden ohne Antwortverlust als Ablehnung umzudeuten. Es ist keine Provider-Deduplikation.
+S297.B03,S297,BDR016,M08,bedingt,Testprüfer kann die ausgelassene Interleavingklasse beurteilen und Mockgrenzen sehen. Kein empirischer Providerbeweis wird behauptet.
+S298.B01,S298,none,none,ungeklaert,Für Erkennung einer Produktionszeitstörung fehlt unterscheidende Evidenz. Es wird weder reale Blindheit noch realer Notalarm behauptet.
+S298.B02,S298,BDR016,M08,bedingt,Testverantwortlicher kann das gemeinsame Einfrieren widerlegen statt es mit einem zweiten gleich getakteten Mock zu bestätigen.
+S299.B01,S299,BDR016,M08,teilweise,Testprüfer kann den begrenzten Fixturevertrag inspizieren und seine Widerlegung dokumentieren. Eine reale Sperrfähigkeit bleibt nicht erhalten.
+S299.B02,S299,BDR003,M08,teilweise,Prüfer kann dokumentierte Doppelautorität nachweisen. Das lokale Erfolgssignal ist gerade kein Ausschlussresidue.
+S299.B03,S299,BDR008,M16,bedingt,Neuer legitimer Writer behält exklusive Annahmefähigkeit. Das setzt einen gegenüber dem Szenario geänderten Vertrag voraus und ist kein heutiger Befund.
+S300.B01,S300,BDR004,M08,teilweise,Fachprüfer kann den Darstellungsfehler gegen Originalmenge erkennen ohne daraus eine falsche Außenwirkung zu erfinden.
+S300.B02,S300,BDR005,M10,bedingt,Abnehmer kann die beabsichtigte Menge verständlich lesen oder diese Darstellung ablehnen. Gemeinsame falsche Sollquelle bleibt Grenze.
+S300.B03,S300,BDR004,M08,teilweise,Ein befugter unabhängiger Abnehmer könnte mit dem erhaltenen Ursprung widersprechen. Sein Eingriff ist nicht automatisch gegeben.
+S301.B01,S301,BDR006,M16,bedingt,Berechtigter Abnehmer kann die gültige Preisbindung prüfen und verwenden. Es folgt keine Zusage für andere heutige Bestellungen.
+S301.B02,S301,BDR006,M16,bedingt,Der Preisvertragsprüfer kann den erhaltenen Beleg zur Feststellung der abgelaufenen Bindung nutzen und betroffene Annahme verweigern. Ohne jeden echten Preisbeleg wäre nur der Cachewert kein solcher Gegenstand.
+S301.B03,S301,BDR003,M08,teilweise,Fachprüfer kann die belegte Regelabweichung untersuchen. Historische Preisbelege ersetzen keine neue gültige Bestellung.
+S302.B01,S302,BDR007,M08,bedingt,Bearbeiter kann den richtigen Menschen vom gleichnamigen anderen unterscheiden. Ein falsch formulierter Originalauftrag bleibt ungesichert.
+S302.B02,S302,BDR007,M08,teilweise,Berechtigter Prüfer kann die Fehlzuordnung feststellen. Vergangene Zustellung wird dadurch nicht aufgehoben.
+S302.B03,S302,BDR003,M08,teilweise,Prüfer kann den belegten Offenlegungsumfang untersuchen ohne eine zusätzliche geheime Vollkopie zu benötigen. Vergessen ist nicht nachweisbar.
+S303.B01,S303,BDR003,M08,teilweise,Späterer Prüfer kann die vorhandene Warnung nachvollziehen. Rechtzeitiges Verstehen dieses Operators ist nicht erhalten.
+S303.B02,S303,BDR017,M13,bedingt,Erreichter berechtigter Operator kann Alarm und erlaubten nächsten Schritt korrekt unterscheiden. Kein Notfallstopp wird damit bewiesen.
+S304.B01,S304,BDR003,M08,teilweise,Prüfer kann belegte Zielverwechslung untersuchen. Weder richtige Instanzreparatur noch Unschädlichkeit des Stopps folgt daraus.
+S304.B02,S304,BDR017,M13,bedingt,Operator kann Ziel und konkrete Aktion auf kleinem Gerät prüfen. Die bestätigte Ansicht muss an denselben angenommenen Zielbezug gebunden sein.
+S305.B01,S305,BDR003,M08,teilweise,Berechtigter Prüfer kann die verfälschte Deutung gegen originale Aussage prüfen. Der falsche UI-Glaube beweist keine erfolgte Doppelzahlung.
+S305.B02,S305,BDR017,M13,bedingt,Operator kann Ungewissheit verstehen und bekannten Versuch ohne blindes Retry abgleichen. Empfang und Autorität sind separate Voraussetzungen.
+S305.B02,S305,BDR009,M06,bedingt,Operator kann Ungewissheit verstehen und bekannten Versuch ohne blindes Retry abgleichen. Empfang und Autorität sind separate Voraussetzungen.
+S306.B01,S306,BDR003,M08,teilweise,Späterer Prüfer kann den Sendeversuch nachvollziehen. Für rechtzeitige menschliche Reaktion gibt es in diesem Zweig keine Restfähigkeit.
+S306.B02,S306,BDR018,M13,bedingt,Disponent kann fehlenden menschlichen Empfang erkennen und eine begrenzte Nachricht rechtzeitig weiterreichen. Kein unbegrenzter Bereitschaftsdienst folgt.
+S307.B01,S307,BDR019,M13,bedingt,Einsatzplanung kann den gesonderten echten Ausfall weiterfinden. Das beweist noch keine Behebung oder rechtzeitige menschliche Aufmerksamkeit.
+S307.B02,S307,BDR019,M13,teilweise,Berechtigte Einsatzplanung behält registrierte offene Vorfälle sichtbar. Erhaltene Liste ersetzt keine freie Bearbeitungskapazität.
+S308.B01,S308,BDR019,M13,bedingt,Berechtigte Planung kann Fristverletzung und offenen Reparaturbedarf sehen obwohl Pagerpflicht beendet ist.
+S308.B02,S308,BDR019,M13,teilweise,Planer kann noch gespeicherte offene Vorfälle priorisieren. Bestehende Kapazitätskrise wird nicht vom Register gelöst.
+S308.B03,S308,BDR019,M13,bedingt,Planer und Abnehmer können echte Behebung vom alten Ack unterscheiden und den begrenzten Abschluss nachvollziehen.
+S308.B03,S308,BDR032,M08,bedingt,Planer und Abnehmer können echte Behebung vom alten Ack unterscheiden und den begrenzten Abschluss nachvollziehen.
+S309.B01,S309,BDR015,M02,bedingt,Entscheider kann beide Weisungen mit Geltung prüfen ohne sie durch last-write-wins zu verfälschen. Alte Puffer bleiben separat zu prüfen.
+S309.B02,S309,BDR015,M02,bedingt,Zuständiger Teilnehmer kann die für diese Operation geltende Weisung anwenden. Der Vertrag entscheidet keine unbekannte Rechtsfrage von selbst.
+S309.B02,S309,BDR010,M16,bedingt,Zuständiger Teilnehmer kann die für diese Operation geltende Weisung anwenden. Der Vertrag entscheidet keine unbekannte Rechtsfrage von selbst.
+S310.B01,S310,BDR022,M09,teilweise,Berechtigter lokaler Betreiber kann erhaltene Geschäftsdaten lesen. Unabhängiger Monitoringzugang ist in diesem Zweig nicht erhalten.
+S310.B02,S310,BDR020,M14,bedingt,Nachfolger kann bestimmte Aufsichtsrechte wieder nutzen ohne Geheimnisse des Vorgängers zu übernehmen. Kontozugang allein repariert keine Incidents.
+S311.B01,S311,BDR021,M12,teilweise,Unabhängiger Prüfer kann erkennen wann und durch wen Beobachtung unterdrückt wurde. Nicht erzeugte Detailalarme bleiben unbekannt.
+S311.B02,S311,BDR021,M12,teilweise,Berechtigter unabhängiger Prüfer behält Gegenbeleg zur Unterdrückung. Seine politische Durchsetzung wird nicht erfunden.
+S312.B01,S312,BDR022,M09,teilweise,Lokaler berechtigter Betreiber kann erhaltenen Geschäftsstand prüfen. Externe Modelle und erreichbarer Pager sind nicht erhalten.
+S312.B02,S312,BDR022,M09,teilweise,Offlineprüfer kann erhaltenen Zustand sehen aber daraus folgt weder Drainage noch externer Alarmweg.
+S312.B03,S312,BDR025,M03,bedingt,Disponent kann begrenzte eigene Arbeit priorisieren und Kopienobergrenze erhalten. Fremde Cloudlast bleibt außerhalb.
+S313.B01,S313,BDR022,M09,teilweise,Berechtigter Offlinebetreiber kann den gespeicherten Stand prüfen. Neue Backups Alarme und Modelle sind nicht dadurch verfügbar.
+S313.B02,S313,BDR022,M09,teilweise,Lokale Unterlagen dienen noch der begrenzten Abwicklung. Provider-only Daten und spätere Kosten brauchen gesonderte Evidenz.
+S314.B01,S314,BDR023,M16,bedingt,Berechtigter Betreiber kann genau die geprüfte Operation fortsetzen. Gleiche API-Namen oder künftige Hoffnung genügen nicht.
+S314.B02,S314,BDR022,M09,teilweise,Abwickler kann erhaltene lokale Geschäftsfakten lesen. Provider-only fehlende Daten werden nicht erfunden.
+S314.B03,S314,BDR009,M06,teilweise,Berechtigte Abwicklung kann bekannte Operations- und Kostenlücken getrennt führen. Register garantieren keinen endgültigen Schlussbetrag.
+S314.B03,S314,BDR024,M03,teilweise,Berechtigte Abwicklung kann bekannte Operations- und Kostenlücken getrennt führen. Register garantieren keinen endgültigen Schlussbetrag.
+S315.B01,S315,BDR024,M03,bedingt,Finanzplanung kann bekannte Haftung und unbekannte Restbelastung getrennt anzeigen statt falschen freien Budgetraum. Harte Obergrenze bleibt unbewiesen.
+S315.B02,S315,BDR024,M03,bedingt,Finanzplaner kann mit Zusagebilanz und begrenzter Annahme künftige eigene Haftung begrenzen. Ohne gebundenen Preis ist derselbe Zähler unzureichend.
+S315.B02,S315,BDR025,M03,bedingt,Finanzplaner kann mit Zusagebilanz und begrenzter Annahme künftige eigene Haftung begrenzen. Ohne gebundenen Preis ist derselbe Zähler unzureichend.
+S316.B01,S316,BDR024,M03,teilweise,Finanzprüfer kann bekannte Kopienkosten und unbekannte Resthaftung sehen. Register dämpft die Schleife nicht selbst.
+S316.B02,S316,BDR025,M03,bedingt,Disponent kann endliche Kopienmenge priorisieren und eigene Überlast begrenzen. Kein globales p99.999-Versprechen folgt.
+S317.B01,S317,BDR019,M13,bedingt,Legitimierte Planung kann offene Vorfälle und echte Behebung verfolgen. Überlegene Wirtschaftlichkeit wird nicht behauptet.
+S317.B02,S317,BDR019,M13,teilweise,Planer kann registrierte Vorfälle noch unterscheiden. Das bewahrt weder freie Aufmerksamkeit noch ökonomische Tragbarkeit.
+S318.B01,S318,BDR010,M16,bedingt,Zuständiger Teilnehmer kann trotz alter Freigabe diese Annahme verhindern. Andere bereits eingetretene Wirkungen bleiben getrennt.
+S318.B02,S318,BDR003,M08,teilweise,Berechtigter Prüfer kann belegte Zeiten und Wirkung untersuchen. Er kann weder Rechtsrang erfinden noch Vergangenheit rückgängig machen.
+S319.B01,S319,none,none,ungeklaert,Für rechtmäßige Gesamtverfügung lässt sich kein nutzbarer Kandidat behaupten solange nicht feststeht wer was aufbewahren darf. Unbekannte Rechtmäßigkeit ist kein Totalverlust.
+S319.B02,S319,BDR036,M15,bedingt,Datenschutzverantwortlicher kann zulässigen Umfang und Nachweis nutzen ohne pauschal beide Gesetze technisch zu erfüllen. Keine konkrete Rechtslösung wird hier behauptet.
+S319.B03,S319,none,none,keines,Für gleichzeitige vollständige Erfüllung gibt es keine Restfähigkeit. Andere Daten oder Dienste sind dadurch nicht automatisch verloren.
+S320.B01,S320,BDR003,M08,teilweise,Zuständiger Prüfer kann den begrenzten Residencyverstoß belegen. Vertraulichkeitsverlust oder wirksame Transfersperre werden nicht erfunden.
+S320.B02,S320,BDR003,M08,teilweise,Prüfer kann belegten Transfer und Lesergrenze untersuchen. Geheimhaltung der bereits gelernten Daten ist nicht erhalten.
+S320.B03,S320,BDR010,M16,bedingt,Zuständiger Exportteilnehmer kann neue kontrollierte Übertragung verweigern. Kein Anspruch dass derselbe Mechanismus interne Providerumzüge stoppt.
+S320.B04,S320,BDR003,M08,bedingt,Berechtigter Prüfer kann die begrenzte erlaubte Standortänderung nachvollziehen. Eine allgemeine künftige Standortgarantie folgt nicht.
+S321.B01,S321,BDR026,M16,bedingt,Zuständiger Sicherheitsbetrieb kann den verspäteten Auftrag am Aktuator fernhalten obwohl Factory ihn früher freigab. Dies setzt externe lokale Schutztechnik voraus.
+S321.B02,S321,BDR003,M08,teilweise,Qualifizierter Prüfer kann den belegten Vorgang untersuchen. Unversehrtheit der bereits betroffenen Eigenschaft ist nicht erhalten.
+S321.B03,S321,none,none,ungeklaert,Für nachgewiesene physische Sicherheit gibt es keine belegbare Restfähigkeit. Es wird weder unsichtbarer Interlock noch automatisch sicherer Stopp erfunden.
+S322.B01,S322,BDR009,M06,teilweise,Operator kann bekannten Stopversuch abgleichen ohne unklare Annahme als Ende auszugeben. Register erhält keine physische Stoppleistung.
+S322.B02,S322,BDR027,M16,bedingt,Zuständiger Operator behält eine konkrete cloudunabhängige Stoppleistung. Nicht jede Anlage ist durch Abschalten sicher.
+S322.B03,S322,none,none,keines,Für garantierten sicheren Zustand vor heutiger Gefahrfrist fehlt eine nutzbare Struktur. Außerhalb dieser Fähigkeit können Aufzeichnungen überleben.
+S323.B01,S323,none,none,ungeklaert,Für eine legitime Entscheidung über Menschenleben ist keine Restfähigkeit ableitbar. Kein Modellpreis begründet Sicherheitsautorität.
+S323.B02,S323,BDR026,M16,bedingt,Zuständiger Sicherheitsbetrieb behält die qualifizierte Freigabegrenze ohne dem Modell die Lebensbewertung zu übertragen. Keine konkrete medizinische oder physische Regel wird erfunden.
+S323.B03,S323,BDR003,M08,teilweise,Kompetenter Prüfer kann den belegten Vorgang untersuchen. Dokumentation legitimiert weder ursprüngliche Entscheidung noch behauptet sie Wiederherstellung des Lebens.
+S324.B01,S324,BDR009,M06,bedingt,Operator kann bekannte Operation abgleichen ohne sie wegen stummem Rückweg als nie angenommen auszugeben.
+S324.B02,S324,BDR024,M03,teilweise,Berechtigte Finanzplanung behält bekannte Verpflichtungen sichtbar. Sie kann weder fehlenden Wirkungsausgang noch spontane Drainage garantieren.
+S325.B01,S325,BDR003,M08,bedingt,Prüfer kann mehrere Aussagen mit Herkunft und Zeit getrennt halten. Er gewinnt daraus keine aktuelle Autorität.
+S325.B02,S325,BDR010,M16,bedingt,Zuständiger Teilnehmer kann nicht mehr gültige Aktion verweigern. Andere Teilnehmer ohne diesen Vertrag bleiben offen.
+S325.B03,S325,BDR003,M08,bedingt,Prüfer kann den endlichen unabhängig abgeglichenen Ergebnissatz nachvollziehen. Signatur alleine hätte das nicht geleistet.
+S326.B01,S326,BDR022,M09,teilweise,Lokaler berechtigter Betreiber kann erhaltenen Stand prüfen und Original kann weiterhin handeln. Beobachterwissen und menschlicher Empfang sind nicht erhalten.
+S326.B02,S326,BDR003,M08,teilweise,Berechtigter Prüfer behält begrenzte Konfliktspur. Sichtbarer gesunder Klon beweist keine exklusive Aktivität.
+S326.B03,S326,BDR008,M16,bedingt,Neuer berechtigter Writer kann exklusiv arbeiten innerhalb erfasster Teilnehmer. Dies verändert gerade die Prämisse unbegrenzter Originalautorität.
+S327.B01,S327,BDR029,M04,bedingt,Lokaler Planer kann falsche Fristbasis verwerfen statt eine Uhrannahme als erneuerte Autorität zu verwenden.
+S327.B02,S327,BDR028,M04,teilweise,Berechtigter Planer kann gespeicherte Absicht und Ablauf später untersuchen. Der Terminbeleg selbst liefert keine korrekte verstrichene Zeit und keine sichere Annahme.
+S328.B01,S328,BDR021,M12,teilweise,Unabhängiger Prüfer kann die andauernde Beobachtungslücke erkennen. Er erhält dadurch weder unterdrückte Details noch rechtzeitige Reparatur.
+S328.B02,S328,BDR029,M04,bedingt,Zuständiger Planer kann einen unbeabsichtigt jahrelangen Mute verhindern ohne Wallclock als Realzeit zu vertrauen.
+S329.B01,S329,BDR028,M04,bedingt,Planer kann für benannte Termine passende Bedeutungsänderung prüfen statt alle blind auf alte Offsets zu fixieren.
+S329.B02,S329,none,none,keines,Für genau den ursprünglichen zivilen oder festen Terminbezug fehlt die erforderliche Information. Andere gut spezifizierte Termine sind nicht betroffen.
+S330.B01,S330,BDR003,M08,bedingt,Prüfer kann Herkunft und Wissenslücke sehen ohne abgeschlossenes Werk oder toten Writer zu erfinden.
+S330.B02,S330,BDR003,M08,teilweise,Berechtigter Prüfer kann Deutung von originaler Evidenz unterscheiden. Dieser Zweig bedeutet ausdrücklich kein nachgewiesen falsches Arbeitsergebnis.
+S330.B03,S330,BDR003,M08,bedingt,Prüfer kann die Erklärung aus erhaltenen korrelierten Aussagen nachvollziehen. Keine allgemeine Lebens- oder Vollendungszusage folgt.
+S331.B01,S331,BDR004,M08,teilweise,Unabhängiger Fachprüfer kann den betroffenen Mengenfehler gegen anderen Ursprung erkennen. Drei Ableitungen derselben Tabelle sind keine weiteren Quellen.
+S331.B02,S331,none,none,keines,Für Wahrheit des betroffenen Faktums fehlt unter ausschließlich gemeinsam falschen verbleibenden Quellen ein belastbarer Gegenstand. Rechnen auf Tabellen bleibt möglich aber ist keine unabhängige Prüfung.
+S332.B01,S332,BDR003,M08,bedingt,Berechtigter Prüfer kann Aussagen und offenen Versuch nachvollziehen ohne eine Seite unbegründet zur Wahrheit zu erklären. Keine vollständigen Logs werden erfunden.
+S332.B01,S332,BDR009,M06,bedingt,Berechtigter Prüfer kann Aussagen und offenen Versuch nachvollziehen ohne eine Seite unbegründet zur Wahrheit zu erklären. Keine vollständigen Logs werden erfunden.
+S332.B02,S332,BDR003,M08,bedingt,Prüfer kann richtigen Empfänger und nachgewiesene Wirkung getrennt begründen. Eine bloße erneute Providerattestation genügt nicht.
+S332.B02,S332,BDR007,M08,bedingt,Prüfer kann richtigen Empfänger und nachgewiesene Wirkung getrennt begründen. Eine bloße erneute Providerattestation genügt nicht.
+S333.B01,S333,BDR030,M11,teilweise,Berechtigter Bewertender kann angebotene und abgewiesene Arbeit im erhaltenen Gesamtfenster sehen. Er muss diese Evidenz tatsächlich in Bewertung einbringen um Schleife zu brechen.
+S333.B02,S333,BDR030,M11,bedingt,Bewertender kann ehrliche Teilmengenleistung und unerledigte Nachfrage unterscheiden. Nutzen oder Fairness für abgelehnte Arbeit ist nicht erhalten.
+S334.B01,S334,BDR031,M08,teilweise,Legitimierter Auftraggeber kann reale Unterbrechung und Ausschlüsse im benannten Umfang prüfen. Fortbestehende Machtänderung wird nicht von Belegen allein gestoppt.
+S334.B02,S334,BDR031,M08,bedingt,Auftraggeber kann genau die vereinbarte Metrik verwenden und ihre Ausschlüsse sehen. Hundert Prozent gilt nicht automatisch für Nutzerwirkung.
+S335.B01,S335,BDR003,M08,teilweise,Berechtigter Prüfer kann behaupteten Abschluss und verfügbare Artefaktbezüge untersuchen. Das Belegpaket selbst zertifiziert keinen Nutzen.
+S335.B02,S335,BDR003,M08,teilweise,Prüfer kann dokumentierte Behauptungen gegen nachträgliche Stichproben halten sofern Originale zugänglich sind. Belegaufbewahrung garantiert kein Bestehen der Fachprüfung.
+S335.B03,S335,BDR032,M08,bedingt,Berechtigter Abnehmer kann richtigen Inhalt von plausiblem Pfad oder Selbstbericht unterscheiden. Ein geteilter falscher Prüfer bleibt gemeinsame Grenze.
+S336.B01,S336,BDR031,M08,teilweise,Auftraggeber kann geplante Abwesenheit gegen wirkliche Dienstpflicht prüfen. Historische Nachtwirkung und unerledigte Aufgaben bleiben getrennt.
+S336.B02,S336,BDR031,M08,bedingt,Auftraggeber kann engen Dienstumfang prüfen und Disponent einen echten Ausnahmealarm weiterleiten. Keine Nachtvollverfügbarkeit wird behauptet.
+S336.B02,S336,BDR018,M13,bedingt,Auftraggeber kann engen Dienstumfang prüfen und Disponent einen echten Ausnahmealarm weiterleiten. Keine Nachtvollverfügbarkeit wird behauptet.
+S336.B03,S336,BDR019,M13,teilweise,Einsatzplanung kann erhaltene offene Vorfälle erkennen statt jede Nachtmeldung als neuen erledigten Incident zu behandeln.
+S337.B01,S337,BDR010,M16,bedingt,Teilnehmer kann ungültig gewordene Arbeit aus umgeplanter Queue ablehnen. Frühere lokale Planung ist keine Autorität.
+S337.B02,S337,BDR028,M04,teilweise,Berechtigter Planer kann den Konflikt zwischen Verschiebung und Ablauf erkennen. Gespeicherte Zeiten sperren den Teilnehmer nicht selbst.
+S338.B01,S338,none,none,ungeklaert,Für begründete Wahl der tragbaren Beobachtungsarchitektur fehlt nötige Information. Teurer bedeutet nicht wirkungslos oder unzulässig.
+S338.B02,S338,BDR039,M13,bedingt,Entscheider kann konkrete Last gegen konkret belegte Beobachtungsleistung prüfen. Messung erzeugt keine moralische Erlaubnis aus sich selbst.
+S338.B03,S338,BDR039,M13,bedingt,Entscheider behält Bilanz und Disponent kontrolliert begrenzte neue eigene Ressourcenlast. Das ist keine Garantie über fremde Energie oder notwendige Mindestaufsicht.
+S338.B03,S338,BDR025,M03,bedingt,Entscheider behält Bilanz und Disponent kontrolliert begrenzte neue eigene Ressourcenlast. Das ist keine Garantie über fremde Energie oder notwendige Mindestaufsicht.
+S339.B01,S339,none,none,keines,Für gegenwärtig verlässliche Interpretation dieses Artefakts fehlt nutzbare Struktur. Byteexistenz allein ist keine erhaltene Fachbedeutung und kein Totalverlustbeweis.
+S339.B02,S339,BDR033,M09,bedingt,Berechtigter Archivar kann die benannten Inhalte trotz CPUwechsel interpretieren. Native Ausführbarkeit wird nicht mit zugesagt.
+S339.B03,S339,none,none,keines,Für unabhängige ursprüngliche Bedeutung gibt es unter diesen gemeinsamen Quellen keinen nutzbaren Bezug. Wiederholbare Ausgabe genügt nicht.
+S340.B01,S340,BDR034,M09,bedingt,Berechtigter Restaurator kann beide Inhalte getrennt lesen und Identitäten zuordnen ohne eine durch Pfadalias zu verlieren.
+S340.B02,S340,none,none,keines,Für die verlorenen Bytes und ihre ursprüngliche Eigentümerzuordnung fehlt Residue. Eine übriggebliebene gleichnamige Datei enthält sie nicht.
+S340.B03,S340,BDR003,M08,teilweise,Prüfer kann dokumentierte Fehlzuordnung nachvollziehen. Existierende Datei ist kein Nachweis richtigen fachlichen Einsatzes.
+S341.B01,S341,none,none,ungeklaert,Für künftige Interpretation oder legitimen Betrieb lässt sich keine erhaltene Struktur behaupten. Gegenwärtige Exportpläne sind keine überlebenden Zukunftstatsachen.
+S341.B02,S341,BDR033,M09,bedingt,Archivar kann genau die dokumentierten Inhalte lesen. Ehemaliger Modellbetrieb und Außenprotokolle sind damit nicht wiederhergestellt.
+S341.B03,S341,none,none,keines,Für die ausdrücklich inventarisierte verlorene Bedeutung gibt es keinen nutzbaren Gegenstand. Neue plausible Deutung ist kein Wiedergewinn.
+S342.B01,S342,BDR009,M06,teilweise,Abwickler kann bekannte Altversuche prüfen und Wiederholung vermeiden. Unbekannter Nachlauf und tatsächliche spätere Annahme bleiben offen.
+S342.B02,S342,BDR035,M06,bedingt,Stilllegungsverantwortlicher kann den begrenzten Außenabschluss nachweisen. Gesamte Fernlöschung und letzte Rechnung folgen nicht automatisch.
+S343.B01,S343,BDR009,M06,teilweise,Abwickler kann bekannten offenen Export führen ohne ihn blind zu wiederholen. Menschliche Beobachtung und legitimer Empfänger sind nicht aus dem Register ableitbar.
+S343.B02,S343,BDR036,M15,bedingt,Abwickler kann erlaubten Datenumfang und vollständig benannten Teilnehmerabschluss nachweisen. Das setzt echten Ersatzbeobachter voraus nicht nur längere Taskfrist.
+S343.B02,S343,BDR035,M06,bedingt,Abwickler kann erlaubten Datenumfang und vollständig benannten Teilnehmerabschluss nachweisen. Das setzt echten Ersatzbeobachter voraus nicht nur längere Taskfrist.
+S343.B03,S343,BDR003,M08,teilweise,Prüfer kann belegte Offenlegung untersuchen. Kein Exportrecht aus alter Taskfreigabe oder Monitoringdauer wird erfunden.
+S344.B01,S344,none,none,ungeklaert,Für rechtmäßigen Export mit vollständiger Löschung fehlt geklärter Daten- und Empfängerumfang. Keine ideale Beweisquelle oder pauschale Exportberechtigung wird vorausgesetzt.
+S344.B02,S344,BDR036,M15,bedingt,Datenschutzverantwortlicher kann diese begrenzte Verfügung nachvollziehen ohne geheime Vollinhalte im Beleg zu behalten. Kein Empfängervergessen oder universelle Fernlöschung folgt.
+S344.B03,S344,none,none,keines,Für gleichzeitige Erfüllung existiert keine Restfähigkeit. Beweissicherer lesbarer Geheimexport ist selbst die verbotene verbleibende Information.
+S344.B04,S344,none,none,keines,Für vollständigen Export genau dieser verlorenen Geheimnisse gibt es kein Residue. Plausible Neuerzeugung wäre keine beweissichere historische Kopie.
+S345.B01,S345,none,none,keines,Für Wiederherstellung des verlorenen Zustands und legitime Fortsetzung bleibt nichts nutzbar. Eine später neu errichtete Factory wäre nicht Wiedergewinnung dieser Fakten.
+S346.B01,S346,none,none,keines,Für gerechtfertigte Entscheidung welche Realwelt vorliegt gibt es keinen nutzbaren Gegenstand. Interne Berechnung und Konsistenz können weiter bestehen aber begründen keine Wahrheit.
+S346.B02,S346,none,none,keines,Für unabhängige Wahrheitsbestimmung bleibt auch in diesem zusätzlichen Vertrauenskreis kein Residue. Die Schleife betrifft Vertrauen nicht bewiesene Anziehung der physischen Welt.
+S347.B01,S347,none,none,ungeklaert,Für ewigen korrekten Abschluss fehlt spezifizierter Vertrag. Weder universelle Unmöglichkeit noch unbegrenzte deduplizierende Magie wird behauptet.
+S347.B02,S347,BDR038,M16,bedingt,Teilnehmer kann beliebig alte Ankünfte ohne neue Wirkung abweisen. Erhalten ist Ablehnung nicht unendliche nützliche Neuaufnahme oder Wissen über alle vergangenen Outcomes.
+S347.B03,S347,none,none,keines,Für exakte ewige Unterscheidung unter dieser Kombination existiert kein tragfähiger begrenzter Erinnerungsgegenstand. Dies betrifft nicht Designs mit Zulassungsstopp oder wirksamem Ablauf.
+S348.B01,S348,none,none,ungeklaert,Für tatsächlich nutzbare Wiederherstellung fehlt der entscheidende Bestands- und Autoritätsnachweis. Kein unsichtbares Backup wird hinzugefügt und BD33 nicht automatisch übernommen.
+S348.B02,S348,BDR020,M14,bedingt,Nachfolger kann erlaubten erhaltenen Bestand lesen und definierte Rechte zurückerhalten. Es wird weder Vollständigkeit der Backups noch Klärung aller Außenpuffer zugesagt.
+S348.B02,S348,BDR022,M09,bedingt,Nachfolger kann erlaubten erhaltenen Bestand lesen und definierte Rechte zurückerhalten. Es wird weder Vollständigkeit der Backups noch Klärung aller Außenpuffer zugesagt.
+S348.B03,S348,BDR009,M06,teilweise,Abwickler kann bekannte offene Operationen ohne blindes Wiederholen prüfen. Nicht überlebende Versuchsnachläufe bleiben unbekannt.
+S349.B01,S349,BDR009,M06,teilweise,Berechtigter Abwickler kann bekannten Zahlungsversuch gesperrt offenhalten trotz Lastkrise. Outcomeprüfung ist keine Dämpfung des Cachekreises.
+S349.B02,S349,BDR025,M03,bedingt,Disponent behält begrenzte eigene Arbeit und Abwickler den offenen bekannten Zahlungsversuch. Fehlender Nachlauf bleibt nicht erfasst.
+S349.B02,S349,BDR009,M06,bedingt,Disponent behält begrenzte eigene Arbeit und Abwickler den offenen bekannten Zahlungsversuch. Fehlender Nachlauf bleibt nicht erfasst.
+S349.B03,S349,BDR003,M08,bedingt,Abwickler kann begrenzten richtigen Zahlungsabschluss nachvollziehen. Es ist weder globale Betriebsheilung noch endgültige Kostenabrechnung.
+S349.B03,S349,BDR004,M08,bedingt,Abwickler kann begrenzten richtigen Zahlungsabschluss nachvollziehen. Es ist weder globale Betriebsheilung noch endgültige Kostenabrechnung.
+S349.B04,S349,none,none,keines,Für den alten tatsächlichen Zahlungsausgang fehlt eine nutzbare Rekonstruktionsstruktur. Das sagt nichts über Überleben anderer Daten oder Lastkontrolle.
+S350.B01,S350,BDR037,M13,teilweise,Unabhängiger berechtigter Prüfer kann mit dem erhaltenen Außenbezug Abweichung aufdecken und getrennte Ausschlussautorität nutzen. Lokale perfekte Berichte sind kein Beweis dafür.
+S350.B02,S350,none,none,keines,Für vertrauenswürdige Bestimmung von Integrität gibt es unter dieser geschlossenen Prämisse keinen nutzbaren Gegenstand. Signatur beweist nur Herkunft nicht Gutartigkeit.
+S350.B03,S350,none,none,keines,Für Rekonstruktion der ausdrücklich verlorenen Historie bleibt kein Residue. Ein nachträglich perfekter Bericht enthält keine vertrauenswürdige Originalevidenz.
+S350.B04,S350,BDR037,M13,bedingt,Berechtigter Prüfer behält eine konkrete externe Vergleichs- und Eingriffsmöglichkeit. Herkunftssignatur allein hätte diese Fähigkeit nicht geliefert.
+S350.B05,S350,OBR038,M12,teilweise,Es bleibt nur die begrenzte unabhängige Beobachtungsfähigkeit. Der zusammengesetzte Vergleichs- und Entzugsvertrag BDR037 ist mangels Akteur oder wirksamem Entzug gerade nicht erfüllt.

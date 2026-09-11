@@ -1,0 +1,1125 @@
+{
+  "boundary": "Toy probes, not Factory observations",
+  "source_sha256": {
+    "dynamics.py": "a3b2f752e4e3058b0a35cd0a5dfdf751fd783a6e44241e8a1950464cddc88035",
+    "cases.json": "5195b06c75c492fd31d79b68209c67b31899c649f5ebb7229834b6caf4989c78",
+    "derive.py": "42e884eda3b2f235ab27a93a46721bd16f4c62fef19fb4f2bfd53768c1716b3d",
+    "regimes.csv": "fb0d3b29be419fbdd1f2716feed00172bc0c3444a775b5a29ad7d0cb11f12661",
+    "candidates.csv": "287361b8fb528b52b36cc96f52c509f54f9f8ddb7457e4d25bf8002b936f2ecb"
+  },
+  "P01_queue": {
+    "D01_seed_endpoints": {
+      "3": [
+        [
+          0
+        ]
+      ],
+      "4": [
+        [
+          4
+        ]
+      ],
+      "5": [
+        [
+          5
+        ]
+      ],
+      "6": [
+        [
+          "outside-observation-window"
+        ]
+      ]
+    },
+    "D04_seed_endpoints": {
+      "5": [
+        [
+          0
+        ]
+      ],
+      "6": [
+        [
+          6
+        ]
+      ],
+      "7": [
+        [
+          7
+        ]
+      ],
+      "8": [
+        [
+          8
+        ]
+      ],
+      "9": [
+        [
+          9
+        ]
+      ]
+    },
+    "D04_q8_service_sweep": {
+      "0": [
+        [
+          "outside-observation-window"
+        ]
+      ],
+      "1": [
+        [
+          8
+        ]
+      ],
+      "2": [
+        [
+          0
+        ]
+      ]
+    }
+  },
+  "P02_restart": {
+    "D06_original_hot": [
+      [
+        4,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        6,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        6,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        6,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        6,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        6,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        6,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        6,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        6,
+        0,
+        0,
+        "boot"
+      ]
+    ],
+    "D06_uncapped_hot": [
+      [
+        4,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        6,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        8,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        10,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        12,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        14,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        16,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        18,
+        0,
+        0,
+        "boot"
+      ],
+      [
+        20,
+        0,
+        0,
+        "boot"
+      ]
+    ],
+    "D08_cooldown_sweep": {
+      "0": [
+        {
+          "cycle": [
+            [
+              6,
+              0,
+              0,
+              "boot"
+            ]
+          ],
+          "kind": "model-attractor",
+          "seed_count": 7,
+          "returned": 1,
+          "tested": 1
+        }
+      ],
+      "1": [
+        {
+          "cycle": [
+            [
+              5,
+              0,
+              0,
+              "boot"
+            ],
+            [
+              6,
+              1,
+              0,
+              "boot"
+            ]
+          ],
+          "kind": "model-attractor",
+          "seed_count": 7,
+          "returned": 3,
+          "tested": 3
+        }
+      ],
+      "2": [
+        {
+          "cycle": [
+            [
+              0,
+              0,
+              0,
+              "boot"
+            ],
+            [
+              2,
+              2,
+              0,
+              "boot"
+            ],
+            [
+              1,
+              1,
+              0,
+              "boot"
+            ]
+          ],
+          "kind": "model-recurrent-set",
+          "seed_count": 1,
+          "returned": 2,
+          "tested": 5
+        },
+        {
+          "cycle": [
+            [
+              1,
+              0,
+              0,
+              "boot"
+            ],
+            [
+              3,
+              2,
+              0,
+              "boot"
+            ],
+            [
+              2,
+              1,
+              0,
+              "boot"
+            ]
+          ],
+          "kind": "model-recurrent-set",
+          "seed_count": 1,
+          "returned": 0,
+          "tested": 6
+        },
+        {
+          "cycle": [
+            [
+              2,
+              0,
+              0,
+              "boot"
+            ],
+            [
+              4,
+              2,
+              0,
+              "boot"
+            ],
+            [
+              3,
+              1,
+              0,
+              "boot"
+            ]
+          ],
+          "kind": "model-recurrent-set",
+          "seed_count": 1,
+          "returned": 0,
+          "tested": 6
+        },
+        {
+          "cycle": [
+            [
+              3,
+              0,
+              0,
+              "boot"
+            ],
+            [
+              5,
+              2,
+              0,
+              "boot"
+            ],
+            [
+              4,
+              1,
+              0,
+              "boot"
+            ]
+          ],
+          "kind": "model-recurrent-set",
+          "seed_count": 1,
+          "returned": 0,
+          "tested": 6
+        },
+        {
+          "cycle": [
+            [
+              4,
+              0,
+              0,
+              "boot"
+            ],
+            [
+              6,
+              2,
+              0,
+              "boot"
+            ],
+            [
+              5,
+              1,
+              0,
+              "boot"
+            ]
+          ],
+          "kind": "model-recurrent-set",
+          "seed_count": 3,
+          "returned": 2,
+          "tested": 5
+        }
+      ],
+      "3": [
+        {
+          "cycle": [
+            [
+              0,
+              0,
+              0,
+              "boot"
+            ],
+            [
+              2,
+              3,
+              0,
+              "boot"
+            ],
+            [
+              1,
+              2,
+              0,
+              "boot"
+            ],
+            [
+              0,
+              1,
+              0,
+              "boot"
+            ]
+          ],
+          "kind": "model-attractor",
+          "seed_count": 7,
+          "returned": 6,
+          "tested": 6
+        }
+      ],
+      "4": [
+        {
+          "cycle": [
+            [
+              0,
+              0,
+              0,
+              "boot"
+            ],
+            [
+              2,
+              4,
+              0,
+              "boot"
+            ],
+            [
+              1,
+              3,
+              0,
+              "boot"
+            ],
+            [
+              0,
+              2,
+              0,
+              "boot"
+            ],
+            [
+              0,
+              1,
+              0,
+              "boot"
+            ]
+          ],
+          "kind": "model-attractor",
+          "seed_count": 7,
+          "returned": 7,
+          "tested": 7
+        }
+      ]
+    }
+  },
+  "P03_alarm_loss": {
+    "D11_original": [
+      [
+        0,
+        0
+      ],
+      [
+        3,
+        0
+      ],
+      [
+        6,
+        0
+      ],
+      [
+        0,
+        3
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        3,
+        0
+      ],
+      [
+        6,
+        0
+      ],
+      [
+        0,
+        3
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        3,
+        0
+      ],
+      [
+        6,
+        0
+      ],
+      [
+        0,
+        3
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        3,
+        0
+      ],
+      [
+        6,
+        0
+      ],
+      [
+        0,
+        3
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "D11_preserve_unserved_during_mute": [
+      [
+        0,
+        0
+      ],
+      [
+        3,
+        0
+      ],
+      [
+        6,
+        0
+      ],
+      [
+        9,
+        3
+      ],
+      [
+        9,
+        2
+      ],
+      [
+        9,
+        1
+      ],
+      [
+        9,
+        0
+      ],
+      [
+        12,
+        3
+      ],
+      [
+        12,
+        2
+      ],
+      [
+        12,
+        1
+      ],
+      [
+        12,
+        0
+      ],
+      [
+        15,
+        3
+      ],
+      [
+        15,
+        2
+      ],
+      [
+        15,
+        1
+      ],
+      [
+        15,
+        0
+      ],
+      [
+        18,
+        3
+      ],
+      [
+        18,
+        2
+      ],
+      [
+        18,
+        1
+      ],
+      [
+        18,
+        0
+      ],
+      [
+        21,
+        3
+      ],
+      [
+        21,
+        2
+      ],
+      [
+        21,
+        1
+      ],
+      [
+        21,
+        0
+      ],
+      [
+        24,
+        3
+      ],
+      [
+        24,
+        2
+      ]
+    ],
+    "D13_group_six_unserved_plus_four_new": [
+      1,
+      0
+    ],
+    "D10_mute_deletes_pending": [
+      0,
+      -1
+    ]
+  },
+  "P04_alarm_input_withdrawal": {
+    "D11_no_more_arrivals": [
+      [
+        6,
+        0
+      ],
+      [
+        5,
+        0
+      ],
+      [
+        4,
+        0
+      ],
+      [
+        3,
+        0
+      ],
+      [
+        2,
+        0
+      ],
+      [
+        1,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "D10_no_more_arrivals_while_muted": [
+      [
+        0,
+        -1
+      ],
+      [
+        0,
+        -1
+      ],
+      [
+        0,
+        -1
+      ],
+      [
+        0,
+        -1
+      ],
+      [
+        0,
+        -1
+      ]
+    ],
+    "D13_no_more_arrivals_existing_incident": [
+      [
+        1,
+        0
+      ],
+      [
+        1,
+        0
+      ],
+      [
+        1,
+        0
+      ],
+      [
+        1,
+        0
+      ],
+      [
+        1,
+        0
+      ]
+    ]
+  },
+  "P05_verification_projection": {
+    "D14_truth_flip": [
+      [
+        4,
+        false,
+        "accepted"
+      ]
+    ],
+    "D14_original_confidence_perturbation": [
+      [
+        4,
+        true,
+        "accepted"
+      ]
+    ],
+    "D14_stop_on_accept_confidence_perturbation": [
+      [
+        3,
+        true,
+        "accepted"
+      ],
+      [
+        3,
+        true,
+        "accepted"
+      ],
+      [
+        3,
+        true,
+        "accepted"
+      ],
+      [
+        3,
+        true,
+        "accepted"
+      ]
+    ],
+    "D16_stop_on_accept": [
+      [
+        0,
+        true,
+        "review"
+      ],
+      [
+        0,
+        false,
+        "review"
+      ],
+      [
+        1,
+        false,
+        "review"
+      ],
+      [
+        2,
+        false,
+        "review"
+      ],
+      [
+        3,
+        false,
+        "accepted"
+      ],
+      [
+        3,
+        false,
+        "accepted"
+      ],
+      [
+        3,
+        false,
+        "accepted"
+      ],
+      [
+        3,
+        false,
+        "accepted"
+      ],
+      [
+        3,
+        false,
+        "accepted"
+      ]
+    ]
+  },
+  "P06_basin_test_limits": {
+    "D14_original_seeds": [
+      {
+        "cycle": [
+          [
+            4,
+            true,
+            "accepted"
+          ]
+        ],
+        "kind": "model-attractor",
+        "seed_count": 5,
+        "returned": 1,
+        "tested": 1
+      }
+    ],
+    "D14_endpoint_only_seeds": [
+      {
+        "cycle": [
+          [
+            4,
+            true,
+            "accepted"
+          ]
+        ],
+        "kind": "model-fixed-point",
+        "seed_count": 1,
+        "returned": 1,
+        "tested": 1
+      }
+    ],
+    "local_return_with_far_excursion": [
+      {
+        "cycle": [
+          [
+            0
+          ]
+        ],
+        "kind": "model-attractor",
+        "seed_count": 1,
+        "returned": 1,
+        "tested": 1
+      }
+    ],
+    "excursion_path": [
+      [
+        1
+      ],
+      [
+        100
+      ],
+      [
+        0
+      ]
+    ],
+    "cycle_neighbors_already_in_cycle": {
+      "D08": 0,
+      "D11": 0
+    }
+  },
+  "P07_uninterpreted_sets": [
+    {
+      "set_id": "D01.3",
+      "cycle": [
+        [
+          4
+        ]
+      ],
+      "kind": "fixed-without-local-attraction"
+    },
+    {
+      "set_id": "D01.4",
+      "cycle": [
+        [
+          5
+        ]
+      ],
+      "kind": "fixed-without-local-attraction"
+    }
+  ],
+  "P08_queue_identity": [
+    {
+      "q_next_both": 2,
+      "FIFO_served": [
+        "old-A",
+        "old-B",
+        "new-0-0"
+      ],
+      "LIFO_served": [
+        "new-0-0",
+        "new-0-1",
+        "new-0-2"
+      ],
+      "LIFO_remaining": [
+        "old-A",
+        "old-B"
+      ]
+    },
+    {
+      "q_next_both": 2,
+      "FIFO_served": [
+        "new-0-1",
+        "new-0-2",
+        "new-1-0"
+      ],
+      "LIFO_served": [
+        "new-1-0",
+        "new-1-1",
+        "new-1-2"
+      ],
+      "LIFO_remaining": [
+        "old-A",
+        "old-B"
+      ]
+    },
+    {
+      "q_next_both": 2,
+      "FIFO_served": [
+        "new-1-1",
+        "new-1-2",
+        "new-2-0"
+      ],
+      "LIFO_served": [
+        "new-2-0",
+        "new-2-1",
+        "new-2-2"
+      ],
+      "LIFO_remaining": [
+        "old-A",
+        "old-B"
+      ]
+    },
+    {
+      "q_next_both": 2,
+      "FIFO_served": [
+        "new-2-1",
+        "new-2-2",
+        "new-3-0"
+      ],
+      "LIFO_served": [
+        "new-3-0",
+        "new-3-1",
+        "new-3-2"
+      ],
+      "LIFO_remaining": [
+        "old-A",
+        "old-B"
+      ]
+    }
+  ],
+  "P09_information": {
+    "accepted_ground_truth": [
+      [
+        "intent",
+        0,
+        0
+      ],
+      [
+        "unknown",
+        1,
+        0
+      ],
+      [
+        "unknown",
+        1,
+        1
+      ],
+      [
+        "unknown",
+        1,
+        2
+      ],
+      [
+        "unknown",
+        1,
+        3
+      ],
+      [
+        "unknown",
+        1,
+        3
+      ],
+      [
+        "unknown",
+        1,
+        3
+      ],
+      [
+        "unknown",
+        1,
+        3
+      ],
+      [
+        "unknown",
+        1,
+        3
+      ]
+    ],
+    "unaccepted_ground_truth": [
+      [
+        "intent",
+        0,
+        0
+      ],
+      [
+        "unknown",
+        0,
+        0
+      ],
+      [
+        "unknown",
+        0,
+        1
+      ],
+      [
+        "unknown",
+        0,
+        2
+      ],
+      [
+        "unknown",
+        0,
+        3
+      ],
+      [
+        "unknown",
+        0,
+        3
+      ],
+      [
+        "unknown",
+        0,
+        3
+      ],
+      [
+        "unknown",
+        0,
+        3
+      ],
+      [
+        "unknown",
+        0,
+        3
+      ]
+    ],
+    "identical_sender_observations": [
+      [
+        "intent",
+        0
+      ],
+      [
+        "unknown",
+        0
+      ],
+      [
+        "unknown",
+        1
+      ],
+      [
+        "unknown",
+        2
+      ],
+      [
+        "unknown",
+        3
+      ],
+      [
+        "unknown",
+        3
+      ],
+      [
+        "unknown",
+        3
+      ],
+      [
+        "unknown",
+        3
+      ],
+      [
+        "unknown",
+        3
+      ]
+    ],
+    "D19_and_D22_same_endpoint": true,
+    "dedup_retention_counterfactuals": {
+      "D22": [
+        [
+          "unknown",
+          1,
+          3
+        ]
+      ],
+      "D23": [
+        [
+          "damage",
+          2,
+          0
+        ]
+      ]
+    }
+  },
+  "P10_join_not_semantic_validation": {
+    "accepted_counterfeit_G01": "Every accepted task has completed with independent correctness proof"
+  }
+}

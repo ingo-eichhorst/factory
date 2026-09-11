@@ -1,0 +1,1 @@
+Source revision changed: crates/factory-adapter/src/claude.rs; review before rerunning this pinned probe

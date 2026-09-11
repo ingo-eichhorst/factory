@@ -65,31 +65,6 @@ p{margin:0}
 .wire .k{color:var(--faint)}
 .wire .dot{width:6px;height:6px;border-radius:50%;background:var(--run);display:inline-block;margin-right:5px}
 
-/* ---------- level column ---------- */
-.lvtitle{font:600 10px var(--mono);letter-spacing:.12em;text-transform:uppercase;
-  color:var(--faint);padding:6px 14px 8px}
-.lv{display:grid;grid-template-columns:3px 24px minmax(0,1fr) auto;align-items:center;gap:9px;
-  width:100%;padding:0 12px 0 0;border:0;background:none;text-align:left;cursor:pointer;
-  height:46px;border-bottom:1px solid var(--line-soft)}
-.lv:first-of-type{border-top:1px solid var(--line-soft)}
-.lv .rail{height:100%;background:var(--c)}
-.lv .n{font:600 11px var(--mono);color:var(--c);padding-left:3px}
-.lv .t{font:600 13px/1.2 var(--cond);letter-spacing:.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.lv .t small{display:block;font:400 10.5px var(--sans);color:var(--muted);letter-spacing:0}
-.lv .c{font:500 11px var(--mono);color:var(--ink-2)}
-.lv:hover{background:var(--panel)}
-.lv[aria-current="true"]{background:var(--panel);box-shadow:inset -2px 0 0 var(--c)}
-.lv.off .t{color:var(--faint)} .lv.off .rail{opacity:.35} .lv.off .n{opacity:.6}
-.lv.off .c{color:var(--faint)}
-.lv:focus-visible{outline:2px solid var(--signal);outline-offset:-2px}
-
-/* ---------- view head ---------- */
-.vhead{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:0 0 16px}
-.vhead h2{font-size:19px;font-weight:700;letter-spacing:.01em}
-.vhead .lvtag{font:600 10.5px var(--mono);color:var(--c);border:1px solid var(--c);
-  border-radius:2px;padding:1px 5px;align-self:center}
-.vhead .lede{flex:1 1 340px;min-width:0;font-size:12.5px;color:var(--muted);max-width:66ch}
-
 /* ---------- panels ---------- */
 .card{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:13px 15px}
 .card > h3{font:700 12.5px var(--cond);letter-spacing:.04em;text-transform:uppercase;
@@ -224,16 +199,7 @@ textarea.fi{font:400 12.5px/1.55 var(--sans);resize:vertical}
 .sess .sid{font:600 12px var(--mono)}
 .sess .ws{font:400 11px var(--mono);color:var(--muted);margin-top:4px;word-break:break-all}
 
-/* ---------- board ---------- */
-.board{display:grid;grid-template-columns:repeat(6,minmax(178px,1fr));gap:11px;
-  overflow-x:auto;padding-bottom:4px;align-items:start}
-.col{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:9px;min-width:0}
-.col > h4{margin:0 0 8px;font:700 10.5px var(--mono);letter-spacing:.09em;text-transform:uppercase;
-  display:flex;justify-content:space-between;align-items:center;gap:6px}
-.col.c-queued > h4{color:var(--muted)} .col.c-running > h4{color:var(--run)}
-.col.c-blocked > h4{color:var(--wait)} .col.c-done > h4{color:var(--ink-2)}
-.col.c-failed > h4{color:var(--fault)} .col.c-cancelled > h4{color:var(--faint)}
-.col > h4 span{font-weight:500;color:var(--faint)}
+/* ---------- task cards ---------- */
 .tk{display:block;width:100%;text-align:left;border:1px solid var(--line-soft);background:var(--panel-2);
   border-radius:3px;padding:8px 9px;cursor:pointer;margin-bottom:7px}
 .tk:last-child{margin-bottom:0}
@@ -245,8 +211,6 @@ textarea.fi{font:400 12.5px/1.55 var(--sans);resize:vertical}
   display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .tk .tm{display:flex;gap:8px;flex-wrap:wrap;font:400 10.5px var(--mono);color:var(--faint)}
 .tk .tm b{font-weight:500;color:var(--muted)}
-.col.empty-hint{opacity:.75}
-.col .none{font:400 11px var(--sans);color:var(--faint);padding:3px 1px}
 .tk:focus-visible{outline:2px solid var(--signal);outline-offset:1px}
 
 /* ---------- task detail ---------- */
@@ -274,13 +238,219 @@ textarea.fi{font:400 12.5px/1.55 var(--sans);resize:vertical}
 .stack{display:flex;flex-direction:column;gap:13px}
 @media (max-width:860px){
   .body{grid-template-columns:minmax(0,1fr)}
-  .levels{border-right:0;border-bottom:1px solid var(--line);display:flex;overflow-x:auto;padding:0}
-  .lv{height:auto;padding:8px 12px 8px 0;border-bottom:0;border-right:1px solid var(--line-soft);
-     grid-template-columns:3px 22px auto;flex:0 0 auto}
-  .lv .c{display:none} .lv .t small{display:none}
+  .levels{border-right:0;border-bottom:1px solid var(--line)}
   .main{padding:14px}
+  .two{grid-template-columns:minmax(0,1fr)}
+  .colm.inst{border-left:0;border-top:1px solid var(--line-soft)}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<style>
+/* ---------- the scope column ---------- */
+.levels{padding:8px 10px 14px}
+.srow{display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;border:0;background:none;
+  padding:6px 8px;border-radius:3px;cursor:pointer}
+.srow.all{border:1px dashed var(--line);margin-bottom:10px}
+.srow .ag{margin-left:auto}
+.tfoot{margin-top:14px;padding:0 8px;font:400 11px/1.55 var(--sans);color:var(--faint)}
+.tfoot code{font:500 10.5px var(--mono);color:var(--muted)}
+
+/* ---------- scope head ---------- */
+.shead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin:0 0 16px;
+  padding-bottom:11px;border-bottom:1px solid var(--line)}
+.shead h2{font:700 20px var(--cond);letter-spacing:.01em}
+.shead .spath{font:400 11.5px var(--mono);color:var(--muted)}
+.shead .scount{margin-left:auto;font:500 11px var(--mono);color:var(--faint)}
+
+/* ---------- one decision level ---------- */
+.layer{border:1px solid var(--line);border-left:2px solid var(--c);border-radius:3px;
+  background:var(--panel);margin-bottom:13px}
+.layer > header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
+  padding:9px 14px;border-bottom:1px solid var(--line-soft)}
+.layer > header .lx{font:600 10.5px var(--mono);color:var(--c);border:1px solid var(--c);
+  border-radius:2px;padding:1px 5px}
+.layer > header h3{font:700 14px var(--cond);letter-spacing:.02em}
+.layer > header .lsub{font:400 11.5px var(--sans);color:var(--muted)}
+.layer.off{opacity:.72;background:transparent}
+.layer.off > header h3{color:var(--faint)}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.colm{padding:12px 14px;min-width:0}
+.colm.inst{border-left:1px solid var(--line-soft);background:var(--panel-2)}
+.colm > h4{margin:0 0 9px;font:600 10px var(--mono);letter-spacing:.12em;text-transform:uppercase;
+  color:var(--faint)}
+.foot{margin:0;padding:10px 14px;border-top:1px solid var(--line-soft);background:var(--sunk);
+  font:400 11.5px/1.6 var(--sans);color:var(--muted);border-radius:0 0 3px 3px}
+.foot b{color:var(--ink-2);font-weight:600}
+.foot code{font:500 11px var(--mono);color:var(--signal)}
+.none{margin:0;font:400 12px var(--sans);color:var(--faint);padding:2px 0}
+.later{padding:34px 17px 38px;font:400 13px var(--sans);color:var(--faint)}
+
+/* ---------- one configured value, and where it came from ---------- */
+.cell{display:grid;grid-template-columns:minmax(92px,auto) minmax(0,1fr) auto;gap:4px 10px;
+  align-items:baseline;padding:5px 0;border-bottom:1px solid var(--line-soft)}
+.cell:last-child{border-bottom:0}
+.cell .cl{font:500 10.5px var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:.05em}
+.cell .cv{font:400 12px var(--mono);color:var(--ink);word-break:break-all}
+.cell .ck{font:500 9.5px var(--mono);letter-spacing:.04em;border-radius:2px;padding:1px 5px;
+  white-space:nowrap;border:1px solid currentColor}
+.cell .ch{grid-column:1/-1;font:400 11px/1.5 var(--sans);color:var(--faint)}
+.k-own .ck{color:var(--signal)} .k-own .cv{font-weight:600}
+.k-inherit .ck{color:var(--muted)} .k-inherit .cv{color:var(--ink-2)}
+.k-instance .ck{color:var(--ly1)} .k-instance .cv{color:var(--ink-2)}
+.k-derived .ck{color:var(--muted);border-style:dashed}
+.k-none .ck{color:var(--faint);border-style:dashed} .k-none .cv{color:var(--faint)}
+.ch{font:400 11px/1.55 var(--sans);color:var(--faint);margin:7px 0 0}
+.ch code{font:500 10.5px var(--mono);color:var(--muted)}
+
+/* ---------- the inherited context chain ---------- */
+.chain{padding:8px 0 2px;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.chain .cl{font:500 10.5px var(--mono);color:var(--faint);text-transform:uppercase;
+  letter-spacing:.05em;width:100%}
+.chain .lnk{font:400 11.5px var(--mono);color:var(--muted);border:1px solid var(--line);
+  border-radius:2px;padding:2px 6px;background:var(--panel-2)}
+.chain .lnk.own{color:var(--ink);border-color:var(--signal);font-weight:600}
+.chain .lnk i{font-style:normal;color:var(--faint);margin-left:5px;font-size:10px}
+.chain .arr{color:var(--faint)}
+.chain .ch{width:100%;margin:2px 0 0}
+
+/* ---------- an agent as declared ---------- */
+.adef{border:1px solid var(--line-soft);border-radius:3px;padding:8px 10px;background:var(--panel-2)}
+.adef + .adef{margin-top:8px}
+.adef .ah{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.adef .ah b{font:600 13px var(--sans)}
+dl.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 12px;margin:0;font-size:12px}
+dl.kv dt{font:500 10.5px var(--mono);color:var(--faint)}
+dl.kv dd{margin:0;font:400 11.5px var(--mono);color:var(--ink-2);word-break:break-all}
+
+/* ---------- plain facts ---------- */
+.facts{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:9px}
+.fct{font:400 11.5px var(--sans);color:var(--muted)}
+.fct b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.fct.m{font:400 11.5px var(--mono);color:var(--ink-2);word-break:break-all}
+
+/* ---------- tasks by status ---------- */
+.tgrp + .tgrp{margin-top:11px}
+.tgrp h5{margin:0 0 6px;display:flex;align-items:center;gap:7px;font:inherit}
+.tdet{margin-top:11px;border-top:1px solid var(--line);padding-top:11px}
+
+/* ---------- the comparison ---------- */
+table.t.mx td{font-size:11.5px;vertical-align:top}
+table.t.mx td.k-own{color:var(--ink)}
+table.t.mx td.k-instance{color:var(--ly1);font:500 11px var(--mono)}
+table.t.mx td.k-none{color:var(--faint)}
+.lnkb{border:0;background:none;padding:0;cursor:pointer;font:600 12.5px var(--sans);color:var(--signal)}
+.lnkb:hover{text-decoration:underline}
+
+/* ---------- the level tabs ---------- */
+.tabs{display:flex;gap:0;overflow-x:auto;background:var(--panel-2);
+  border-bottom:1px solid var(--line)}
+.tab{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto auto;
+  gap:0 8px;align-items:baseline;flex:1 1 0;min-width:132px;
+  border:0;border-right:1px solid var(--line-soft);border-top:2px solid transparent;
+  background:none;text-align:left;cursor:pointer;padding:8px 14px 9px}
+.tab .n{grid-row:1/3;align-self:center;font:600 12px var(--mono);color:var(--c)}
+.tab .t{font:600 13px/1.2 var(--cond);letter-spacing:.01em;white-space:nowrap}
+.tab .s{font:400 10.5px var(--sans);color:var(--muted);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.tab:hover{background:var(--panel)}
+.tab[aria-current="true"]{background:var(--panel);border-top-color:var(--c)}
+.tab[aria-current="true"] .t{color:var(--ink)}
+.tab.off .t{color:var(--faint)} .tab.off .n{opacity:.55} .tab.off .s{color:var(--faint)}
+.tab:focus-visible{outline:2px solid var(--signal);outline-offset:-2px}
+
+/* One level fills the page, so the card no longer needs to stack. */
+.layer{margin-bottom:0}
+.layer > header{padding:11px 16px}
+.colm{padding:15px 17px}
+
+/* The tab also names a column of the comparison. */
+table.t.mx th.on{color:var(--signal)}
+table.t.mx.c1 td:nth-child(2),table.t.mx.c2 td:nth-child(3){background:var(--signal-wash)}
+@media (max-width:860px){
+  .tab{flex:0 0 auto;min-width:0;padding:7px 11px}
+  .tab .s{display:none}
+}
+
+/* ---------- L4: the board ---------- */
+.layer.wide > header{align-items:center}
+.hacts{margin-left:auto;display:flex;gap:7px}
+.lane + .lane{border-top:1px solid var(--line-soft)}
+.lanehead{display:flex;align-items:center;gap:10px;padding:9px 16px 0}
+.lanehead .lnkb{font:700 13px var(--cond);letter-spacing:.02em;color:var(--ink)}
+.lanehead .lnkb:hover{color:var(--signal)}
+.lanehead .act{margin-left:auto;padding:3px 8px;font-size:11.5px}
+.lanehead .act code{display:none}
+.board{display:grid;grid-template-columns:repeat(6,minmax(172px,1fr));gap:10px;
+  padding:11px 16px 14px;overflow-x:auto;align-items:start}
+.col{background:var(--panel-2);border:1px solid var(--line-soft);border-radius:3px;
+  padding:8px;min-width:0}
+.col > h4{margin:0 0 7px;display:flex;justify-content:space-between;align-items:baseline;gap:6px;
+  font:700 10px var(--mono);letter-spacing:.09em;text-transform:uppercase}
+.col > h4 span{font-weight:500;color:var(--faint);font-variant-numeric:tabular-nums}
+.col.c-queued > h4{color:var(--signal)} .col.c-running > h4{color:var(--run)}
+.col.c-blocked > h4{color:var(--wait)} .col.c-done > h4{color:var(--ink-2)}
+.col.c-failed > h4{color:var(--fault)} .col.c-cancelled > h4{color:var(--faint)}
+.col .none{padding:1px;color:var(--line)}
+/* A column past five cards keeps the page one screen tall. */
+.col.dense .tk{padding:5px 7px;margin-bottom:4px}
+.col.dense .tk .tp{-webkit-line-clamp:1;font-size:11.5px;margin:2px 0 0}
+.col.dense .tk .tm{display:none}
+@media (max-width:1180px){.board{grid-template-columns:repeat(6,minmax(148px,1fr))}}
+
+
+/* ---------- L4, second view: occupancy ---------- */
+.seg{display:flex;border:1px solid var(--line);border-radius:3px;overflow:hidden}
+.seg button{padding:4px 11px;font:500 11.5px var(--sans);color:var(--muted);
+  background:var(--panel);border:0;cursor:pointer}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.on{background:var(--signal);color:#fff}
+.seg button:focus-visible{outline:2px solid var(--signal);outline-offset:-2px}
+.tl{padding:13px 16px 16px}
+.tl-axis{display:flex;height:17px;margin:2px 78px 0 210px;border-bottom:1px solid var(--line)}
+.tl-axis span{flex:1;font:400 9.5px var(--mono);color:var(--faint);position:relative}
+.tl-axis span::before{content:"";position:absolute;left:0;bottom:-1px;width:1px;height:5px;
+  background:var(--line)}
+.tl-grp{font:600 9px var(--cond);letter-spacing:.14em;text-transform:uppercase;color:var(--faint);
+  margin:13px 0 5px;padding-top:9px;border-top:1px solid var(--line-soft)}
+.tl-grp:first-of-type{margin-top:9px;padding-top:0;border-top:0}
+.tl-row{display:flex;align-items:center;height:26px}
+.tl-lab{flex:0 0 210px;padding-right:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font:400 11px var(--sans);color:var(--ink-2)}
+.tl-lab b{font:600 12px var(--sans);color:var(--ink)}
+.tl-lab b.q{color:var(--signal)}
+.tl-lab .sid{font:500 10.5px var(--mono);color:var(--muted)}
+.tl-lab .cont{color:var(--faint)}
+.tl-lab .s{font:400 10px var(--mono);color:var(--faint);margin-left:6px}
+.tl-lab.free{color:var(--faint)}
+.tl-track{flex:1;position:relative;height:19px;min-width:0;border-radius:2px;background:var(--sunk);
+  background-image:repeating-linear-gradient(90deg,transparent 0 calc(16.666% - 1px),
+    var(--line-soft) calc(16.666% - 1px),var(--line-soft) 16.666%)}
+.tl-util{flex:0 0 78px;padding-left:11px;text-align:right;font:500 10px var(--mono);
+  color:var(--muted);font-variant-numeric:tabular-nums}
+.blk{position:absolute;top:0;bottom:0;border-radius:2px;overflow:hidden;padding:0 5px;
+  font:500 9.5px/19px var(--mono);color:#fff;white-space:nowrap;text-overflow:ellipsis}
+.blk.run{background:var(--idle)}
+.blk.live{background:var(--run)}
+.blk.wait{background:var(--wait);
+  background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.22) 0 4px,transparent 4px 8px)}
+.blk.scrap{background:var(--fault);
+  background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.26) 0 4px,transparent 4px 8px)}
+.blk.plan{background:transparent;border:1px dashed var(--signal);color:var(--signal);line-height:17px}
+.blk.tiny{padding:0 2px;font-size:0}
+.tl-legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:15px;padding-top:10px;
+  border-top:1px solid var(--line);font:400 10.5px var(--mono);color:var(--muted)}
+.tl-legend i.blk{position:static;display:inline-block;width:16px;height:9px;margin-right:6px;
+  vertical-align:-1px;padding:0}
+.why{margin:13px 0 0;padding:10px 12px;border-left:2px solid var(--signal);background:var(--signal-wash);
+  font:400 11.5px/1.6 var(--sans);color:var(--ink-2);border-radius:0 3px 3px 0}
+.why b{color:var(--ink);font-weight:600}
+.why code{font:500 11px var(--mono);color:var(--signal)}
+@media (max-width:860px){
+  .tl-axis{margin-left:120px;margin-right:54px}
+  .tl-lab{flex-basis:120px} .tl-util{flex-basis:54px}
+}
+
 </style>
 
 </head>
@@ -288,14 +458,15 @@ textarea.fi{font:400 12.5px/1.55 var(--sans);resize:vertical}
 <div id="shell">
   <div class="mast">
     <span class="nm">Factory Leitstand</span>
-    <span class="sub">Was die Fabrik heute beantworten kann — und was noch nicht.</span>
+    <span class="sub">Scope links, Ebenen untereinander — je Ebene links die Konfiguration, rechts die Instanz.</span>
     <span class="wire-counts">
       <span><b>13</b> Queries</span><span><b>20</b> Kommandos</span><span><b>0</b> Abos</span>
     </span>
   </div>
   <div id="alarm" hidden></div>
+  <nav class="tabs" id="tabs" aria-label="Entscheidungsebenen"></nav>
   <div class="body">
-    <nav class="levels" id="levels" aria-label="Entscheidungsebenen"></nav>
+    <nav class="levels" id="tree" aria-label="Scopes"></nav>
     <main class="main" id="main"></main>
   </div>
   <div class="wire">
@@ -322,9 +493,9 @@ textarea.fi{font:400 12.5px/1.55 var(--sans);resize:vertical}
 var ZERO='00000000-0000-0000-0000-000000000000';
 var POLL_MS=5000;
 
-var S={scopes:[],agents:{},targetable:{},refusal:{},sessions:[],leases:[],tasks:[],
+var S={scopes:[],agents:{},targetable:{},refusal:{},sessions:[],tasks:[],
        schedules:[],daemon:null,root:ZERO,calls:0,loaded:false};
-var cur='harn', selScope=null, selTask=null, timer=null, inflight=false;
+var cur='harn', selScope=null, selTask=null, timer=null, inflight=false, booted=false;
 
 function $(s){return document.querySelector(s)}
 function uuid(){
@@ -358,7 +529,7 @@ function send(kind,name,payload,scopeId){
 function q(name,payload,scopeId){return send('q',name,payload,scopeId)}
 
 function load(){
-  var calls0=S.calls, agents={}, targ={}, refus={}, sessions=[], leases=[];
+  var calls0=S.calls, agents={}, targ={}, refus={}, sessions=[];
   return q('daemon.status').then(function(d){
     S.daemon=d;
     return q('scope.list');
@@ -389,18 +560,6 @@ function load(){
     },Promise.resolve());
   }).then(function(){
     S.sessions=sessions;
-    // And one more per session: leases come back only when a single
-    // `session_id` is named, and the row itself does not carry it — the
-    // pairing below is the page's, not the store's.
-    return sessions.reduce(function(chain,se){
-      return chain.then(function(){
-        return q('agent.status',{session_id:se.id},se.scope_id).then(function(r3){
-          (r3.leases||[]).forEach(function(l){l.session=se.id; leases.push(l)});
-        });
-      });
-    },Promise.resolve());
-  }).then(function(){
-    S.leases=leases;
     return q('task.list');
   }).then(function(r){
     S.tasks=r.tasks||[];
@@ -410,7 +569,7 @@ function load(){
     S.loaded=true;
     // Keep the selection only while it still exists: a task can finish and a
     // scope can be removed between two polls.
-    if(!S.scopes.some(function(x){return x.id===selScope}))
+    if(selScope!=='*'&&!S.scopes.some(function(x){return x.id===selScope}))
       selScope=S.scopes.length?S.root:null;
     if(!S.tasks.some(function(t){return t.id===selTask}))
       selTask=S.tasks.length?S.tasks[0].id:null;
@@ -431,8 +590,7 @@ function wire(nCalls,ok){
 }
 
 /* ------------------------------------------------------------------ *
- * Rendering. Six destinations, one per decision level; two of them are
- * grey because no query can fill them, and they say so.
+ * Helpers shared by every view.
  * ------------------------------------------------------------------ */
 
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
@@ -476,46 +634,20 @@ var STATUSES=[
  {k:'queued',t:'queued'},{k:'running',t:'running'},{k:'blocked',t:'blocked'},
  {k:'done',t:'done'},{k:'failed',t:'failed'},{k:'cancelled',t:'cancelled'}
 ];
-/* task_events.event_type — the thirteen strings the CHECK allows. */
-var EVENT_TYPES=['created','assigned','delivered','refused','running','progress','blocked',
- 'done','failed','cancelled','resumed','verification','rework'];
 
-function heldLeases(){return S.leases.filter(function(l){return !l.released_at})}
-function liveSessions(){return S.sessions.filter(function(s){
+function live(list){return list.filter(function(s){
   return s.state!=='stopped'&&s.state!=='failed'})}
-function openTasks(){return S.tasks.filter(function(t){
-  return t.status==='queued'||t.status==='running'||t.status==='blocked'})}
 
 var LEVELS=[
- {k:'dir',  n:'L6',t:'Richtung',     s:'Ziele, Budget, Stückkosten',c:'--ly6',off:true,
-  badge:function(){return '—'}},
- {k:'imp',  n:'L5',t:'Verbesserung', s:'Verlauf und Entscheidungen',c:'--ly5',off:true,
-  badge:function(){return '—'}},
- {k:'proc', n:'L4',t:'Prozess',      s:'Aufträge',            c:'--ly4',
-  badge:function(){return S.loaded?openTasks().length+' offen':'…'}},
- {k:'harn', n:'L3',t:'Harness',      s:'Scopes und Agenten',  c:'--ly3',
-  badge:function(){return S.loaded?liveSessions().length+' Sitz.':'…'}},
- {k:'env',  n:'L2',t:'Umgebung',     s:'Workspaces und Leases',c:'--ly2',
-  badge:function(){return S.loaded?heldLeases().length+' Lease':'…'}},
- {k:'infra',n:'L1',t:'Infrastruktur',s:'Daemon und Store',    c:'--ly1',
-  badge:function(){return S.loaded?'läuft':'…'}}
+ {k:'dir',  n:'L6',t:'Richtung',     s:'Ziele, Budget, Stückkosten',c:'--ly6',off:true},
+ {k:'imp',  n:'L5',t:'Verbesserung', s:'Verlauf und Entscheidungen',c:'--ly5',off:true},
+ {k:'proc', n:'L4',t:'Prozess',      s:'Regeln und Läufe',     c:'--ly4'},
+ {k:'harn', n:'L3',t:'Agent',        s:'Wer arbeiten darf',    c:'--ly3'},
+ {k:'env',  n:'L2',t:'Umgebung',     s:'Verzeichnis und Lease',c:'--ly2',off:true},
+ {k:'infra',n:'L1',t:'Infrastruktur',s:'Daemon und Store',     c:'--ly1',off:true}
 ];
 function lv(kk){for(var i=0;i<LEVELS.length;i++)if(LEVELS[i].k===kk)return LEVELS[i]}
 
-function renderLevels(){
-  $('#levels').innerHTML='<div class="lvtitle">Entscheidungsebenen</div>'+LEVELS.map(function(l){
-    return '<button class="lv'+(l.off?' off':'')+'" data-go="'+l.k+'" style="--c:var('+l.c+')"'+
-      (l.k===cur?' aria-current="true"':'')+'>'+
-      '<span class="rail"></span><span class="n">'+l.n+'</span>'+
-      '<span class="t">'+esc(l.t)+'<small>'+esc(l.s)+'</small></span>'+
-      '<span class="c">'+esc(l.badge())+'</span></button>';
-  }).join('');
-}
-function vhead(kk,lede){
-  var l=lv(kk);
-  return '<div class="vhead" style="--c:var('+l.c+')"><span class="lvtag">'+l.n+'</span>'+
-    '<h2>'+esc(l.t)+' — '+esc(l.s)+'</h2><p class="lede">'+lede+'</p></div>';
-}
 function empty(title,body){
   return '<div class="empty"><b>'+esc(title)+'</b>'+body+'</div>';
 }
@@ -524,403 +656,380 @@ function sessById(id){for(var i=0;i<S.sessions.length;i++)if(S.sessions[i].id===
 function taskById(id){for(var i=0;i<S.tasks.length;i++)if(S.tasks[i].id===id)return S.tasks[i]}
 function kids(pid){return S.scopes.filter(function(s){return (s.parent_id||null)===pid})}
 
-/* ---------- L3: scopes and agents ---------- */
+/* ------------------------------------------------------------------ *
+ * Rendering. The scope tree is the navigation; the decision levels are
+ * the rows. Every row splits the same way: what is *declared* on the
+ * left, what *exists* on the right. Configuration can be inherited;
+ * an instance never is — it runs or it does not.
+ * ------------------------------------------------------------------ */
+
+function layer(kk,cfg,inst,foot){
+  var l=lv(kk);
+  return '<section class="layer'+(l.off?' off':'')+'" style="--c:var('+l.c+')">'+
+    '<header><span class="lx">'+l.n+'</span><h3>'+esc(l.t)+'</h3>'+
+    '<span class="lsub">'+esc(l.s)+'</span></header>'+
+    '<div class="two"><div class="colm"><h4>Konfiguration</h4>'+cfg+'</div>'+
+    '<div class="colm inst"><h4>Instanz</h4>'+inst+'</div></div>'+
+    (foot?'<p class="foot">'+foot+'</p>':'')+'</section>';
+}
+function nothing(t){return '<p class="none">'+esc(t)+'</p>'}
+
+function rootScope(){return scopeById(S.root)}
+function sessionsOf(id){return S.sessions.filter(function(s){return s.scope_id===id})}
+function tasksOf(id){return S.tasks.filter(function(t){return t.target_scope_id===id})}
+/* ---------- the tree, which is the filesystem ---------- */
+/* `parent_id` is not declared anywhere: `factory-registry` derives it by
+   finding the deepest registered path that contains this one. The tree on
+   the left is therefore the directory nesting, not a second hierarchy
+   somebody has to keep in step with it. */
 function treeHtml(pid){
   var ks=kids(pid); if(!ks.length)return '';
   return '<ul class="tree">'+ks.map(function(s){
-    var ag=S.agents[s.id]||[];
-    return '<li><button class="srow'+(ag.length?'':' drift')+'" data-scope="'+esc(s.id)+'"'+
+    var ag=(S.agents[s.id]||[]).length, running=live(sessionsOf(s.id)).length;
+    return '<li><button class="srow" data-scope="'+esc(s.id)+'"'+
       (s.id===selScope?' aria-current="true"':'')+'>'+
       '<span class="nm">'+esc(s.name)+'</span>'+
       '<span class="pth">'+esc(s.declared_path)+'</span>'+
-      '<span class="ag">'+(ag.length?ag.length+(ag.length===1?' Agent':' Agenten'):'keine Agenten')+
-      '</span></button>'+treeHtml(s.id)+'</li>';
+      '<span class="ag">'+(running?'<b>'+running+'</b> läuft':(ag?ag+' Ag.':'—'))+'</span>'+
+      '</button>'+treeHtml(s.id)+'</li>';
   }).join('')+'</ul>';
 }
-
-function viewHarn(){
-  var lede='Ein Klick auf die Ebene zeigt zuerst die Übersicht: welche Scopes es gibt, welche Agenten dort '+
-   'deklariert sind und welche Sitzungen gerade laufen. Das ist die Ebene mit der besten Datenlage — vier der '+
-   'dreizehn Queries bedienen sie.';
-
-  if(!S.scopes.length)return vhead('harn',lede)+empty('Keine Scopes registriert',
-    '<p>Eine frische Instanz kennt noch keinen Scope. Trag ihn in <code class="i">.factory/config.yaml</code> ein und '+
-    'projiziere ihn mit <code class="i">factory scope reconcile --apply</code>. Der Daemon schreibt selbst kein YAML — '+
-    'siehe den Knopf links, der genau deshalb aus ist.</p>');
-
-  var s=scopeById(selScope)||S.scopes[0];
-  var ag=S.agents[s.id]||[];
-  var ss=S.sessions.filter(function(x){return x.scope_id===s.id});
-
-  var agentsHtml=ag.length?ag.map(function(a){
-    // No model named is not a blank: it means the harness's own default, and
-    // saying so is the difference between "unset" and "we do not know".
-    var model=a.model?esc(a.model):'<span class="faint">Harness-Vorgabe</span>';
-    return '<div class="arow"><span class="an">'+esc(a.name)+'<small>'+esc(a.lifetime)+'</small></span>'+
-      '<span class="hx">'+esc(a.harness)+'<small class="mdl">'+model+'</small></span>'+
-      '<span class="hx">max '+esc(a.max_sessions)+'</span>'+
-      '<span class="pill '+(AVAIL_CLS[a.availability]||'ghost')+'">'+esc(a.availability)+'</span></div>';
-  }).join(''):
-    '<div class="blank"><div class="bt">Keine Agenten</div><p class="note">Der Scope steht in der Registry, aber '+
-    '<code>config.yaml</code> führt keinen Agenten für ihn. <b>agent.list liest die Konfiguration, nicht die '+
-    'Scope-Tabelle</b> — eine leere Agentenliste unter einem registrierten Scope ist deshalb ein echter '+
-    'Betriebszustand, keine Fehlanzeige der Oberfläche. Das ist der Fall, für den <code>scope.reconcile</code> '+
-    'da ist.</p></div>';
-
-  var sessHtml=ss.length?ss.map(function(x){
-    var lease=S.leases.filter(function(l){return l.session===x.id&&!l.released_at})[0];
-    return '<div class="sess"><div class="sh"><span class="sid">'+esc(shortId(x.id))+'</span>'+
-      '<span class="pill '+(STATE_CLS[x.state]||'idle')+'">'+esc(x.state)+'</span>'+
-      '<span class="muted" style="font-size:11.5px">'+esc(x.agent_name)+'</span>'+
-      '<span class="faint" style="margin-left:auto;font:400 11px var(--mono)">seit '+ago(x.created_at)+'</span>'+
-      '</div><div class="ws">'+esc(tilde(x.workspace_path))+
-      (lease?'':' <span class="faint">· kein Lease</span>')+'</div>'+
-      '<div class="acts">'+act('Beenden','agent.stop',false,null,{scope_id:x.scope_id,payload:{session_id:x.id}})+act('Anhängen','agent.attach_command',false,null,{scope_id:x.scope_id,payload:{session_id:x.id}})+
-      '</div></div>';
-  }).join(''):'<p class="note faint">Keine Sitzung in diesem Scope.</p>';
-
-  var tgt=S.targetable[s.id], ref=S.refusal[s.id];
-  var rootName=(scopeById(S.root)||{}).name||'—';
-
-  return vhead('harn',lede)+
-  '<div class="grid" style="grid-template-columns:minmax(240px,310px) minmax(0,1fr);gap:13px">'+
-    '<div class="card"><h3>Scopes '+qc('scope.list')+'</h3>'+
-      '<ul class="tree" style="margin:0;padding:0;list-style:none">'+
-      kids(null).map(function(r){
-        var ag2=S.agents[r.id]||[];
-        return '<li><button class="srow'+(ag2.length?'':' drift')+'" data-scope="'+esc(r.id)+'"'+
-          (r.id===selScope?' aria-current="true"':'')+'>'+
-          '<span class="nm">'+esc(r.name)+'</span><span class="pth">'+esc(r.declared_path)+'</span>'+
-          '<span class="ag">'+(ag2.length?ag2.length+' Agent':'keine Agenten')+'</span></button>'+
-          treeHtml(r.id)+'</li>';
-      }).join('')+'</ul>'+
-      '<div class="sep"></div>'+
-      '<p class="note">Die Verschachtelung kommt aus <code>parent_id</code>, nicht aus dem Pfad.</p>'+
-      '<div class="acts">'+
-        act('Scope registrieren','scope.add',true,
-          'internal.scope_add_unsupported — der Daemon hat keinen YAML-Schreiber für .factory/config.yaml, und '+
-          'ADR 0009 verlangt, dass unbekannte Schlüssel erhalten bleiben. Scope direkt eintragen, dann '+
-          'scope.reconcile mit apply:true.')+
-        act('Abgleichen','scope.reconcile',false,null,{})+'</div>'+
-      '<p class="note faint" style="margin-top:7px">Registrieren ist ein Zweischritt: <code>config.yaml</code> '+
-      'von Hand, dann <code>scope.reconcile --apply</code>.</p>'+
-    '</div>'+
-    '<div class="stack">'+
-      '<div class="card"><h3>'+esc(s.name)+' '+qc('agent.list')+'</h3>'+
-        '<dl class="dl">'+
-          '<dt>id</dt><dd>'+esc(s.id)+'</dd>'+
-          '<dt>declared</dt><dd>'+esc(s.declared_path)+'</dd>'+
-          '<dt>canonical</dt><dd>'+(s.canonical_path?esc(tilde(s.canonical_path)):
-            '<span class="pill fault">nicht aufgelöst</span>')+'</dd>'+
-          '<dt>git</dt><dd>'+(s.git?esc(s.git):'<span class="faint">—</span>')+'</dd>'+
-          '<dt>adressierbar</dt><dd>'+(tgt?'<span class="pill run">ja</span>':
-            '<span class="pill fault">nein</span>')+
-            (ref?'<div class="faint" style="margin-top:3px;font-size:11px">'+esc(ref)+'</div>':'')+
-            '<div class="faint" style="margin-top:3px;font-size:11px">aus Sicht von <b>'+esc(rootName)+
-            '</b> — dieses Feld hängt am Aufrufer</div></dd>'+
-        '</dl><div class="sep"></div>'+agentsHtml+
-        '<div class="acts">'+act('Agent starten','agent.start',false,null,{scope_id:s.id})+act('Auftrag senden','task.send',false,null,{scope_id:s.id})+'</div>'+
-      '</div>'+
-      '<div class="card"><h3>Sitzungen '+qc('agent.status')+'</h3>'+sessHtml+'</div>'+
-    '</div>'+
-  '</div>'+
-  '<div class="card" style="margin-top:13px"><h3>Was dieser Baum kostet</h3>'+
-    '<p class="note"><b>Er verschmilzt zwei Quellen.</b> Die Scopes kommen aus der Registry-Tabelle, die Agenten '+
-    'aus <code>config.yaml</code>. Beide können auseinanderlaufen, und genau dann ist die Agentenliste leer.</p>'+
-    '<p class="note" style="margin-top:7px"><b>Und er kostet einen Aufruf je Scope.</b> <code>agent.status</code> '+
-    'filtert auf den Scope des Aufrufers; eine fabrikweite Sitzungsliste gibt es auf dem Draht nicht. Die Zahl '+
-    'unten in der Leiste ist deshalb kein Schätzwert, sondern gezählt.</p>'+
-  '</div>';
+/* L6 on the left, L1 on the right: read downward through the levels and you
+   are reading from what the factory is for toward what it runs on. Only the
+   selected one is on the page — a level is a place you go, not a row you
+   scroll past. */
+function renderTabs(){
+  $('#tabs').innerHTML=LEVELS.map(function(l){
+    return '<button class="tab'+(l.off?' off':'')+'" data-go="'+l.k+'" style="--c:var('+l.c+')"'+
+      (l.k===cur?' aria-current="true"':'')+'>'+
+      '<span class="n">'+l.n+'</span><span class="t">'+esc(l.t)+'</span>'+
+      '<span class="s">'+esc(l.s)+'</span></button>';
+  }).join('');
+}
+function renderTree(){
+  var r=rootScope();
+  $('#tree').innerHTML='<div class="lvtitle">Scopes</div>'+
+    '<button class="srow all" data-scope="*"'+(selScope==='*'?' aria-current="true"':'')+'>'+
+      '<span class="nm">Alle Scopes</span><span class="ag">Vergleich</span></button>'+
+    (r?'<ul class="tree"><li><button class="srow" data-scope="'+esc(r.id)+'"'+
+      (r.id===selScope?' aria-current="true"':'')+'>'+
+      '<span class="nm">'+esc(r.name)+'</span><span class="pth">'+esc(r.declared_path)+'</span>'+
+      '<span class="ag">Wurzel</span></button>'+treeHtml(r.id)+'</li></ul>':'')+
+    '<p class="tfoot">Der Baum kommt aus <code>parent_id</code>, und das wird nicht '+
+    'deklariert, sondern aus der Pfadverschachtelung abgeleitet.</p>';
 }
 
-/* ---------- L4: tasks ---------- */
-function viewProc(){
-  var lede='Die Liste kommt in einem Aufruf und trägt alles, was eine Karte braucht — Status, Auslöser, Vorlage, '+
-   'Sitzung, Zeiten und sogar die Token. Die sechs Spalten sind nicht gewählt, sondern die sechs Werte, die '+
-   '<code>tasks.status</code> per CHECK zulässt.';
+/* A level that is not built yet says so, and says nothing else. An empty
+   level dressed up with an account of what it would hold reads like a
+   feature; one plain line reads like a plan. */
+function soon(kk){
+  var l=lv(kk);
+  return '<section class="layer off" style="--c:var('+l.c+')">'+
+    '<header><span class="lx">'+l.n+'</span><h3>'+esc(l.t)+'</h3>'+
+    '<span class="lsub">'+esc(l.s)+'</span></header>'+
+    '<div class="later">Kommt später.</div></section>';
+}
 
-  var board=STATUSES.map(function(st){
-    var list=S.tasks.filter(function(t){return t.status===st.k});
-    return '<div class="col c-'+st.k+'"><h4>'+esc(st.t)+' <span>'+list.length+'</span></h4>'+
-      (list.length?list.map(function(t){
-        var sc=scopeById(t.target_scope_id);
-        return '<button class="tk" data-task="'+esc(t.id)+'"'+(t.id===selTask?' aria-current="true"':'')+'>'+
-          '<span class="ti">'+esc(shortId(t.id))+'<span class="src">'+
-          esc(t.triggered_by==='cron'?'cron':'manuell')+'</span></span>'+
-          '<span class="tp">'+esc(t.prompt)+'</span>'+
-          '<span class="tm"><b>'+esc(sc?sc.name:shortId(t.target_scope_id))+'</b>'+
-          (t.template_id?'<span>'+esc(t.template_id)+(t.template_version!=null?'@v'+esc(t.template_version):'')+
-            '</span>':'')+
-          '<span>'+ago(t.updated_at)+'</span></span></button>';
-      }).join(''):'<p class="none">—</p>')+'</div>';
+/* ---------- L3 ---------- */
+function secAgent(sc){
+  var ags=S.agents[sc.id]||[], sess=sessionsOf(sc.id);
+  var cfg=ags.length?ags.map(function(a){
+    return '<div class="adef"><div class="ah"><b>'+esc(a.name)+'</b>'+
+      '<span class="pill '+(AVAIL_CLS[a.availability]||'ghost')+'">'+esc(a.availability)+'</span></div>'+
+      '<dl class="kv">'+
+      '<dt>harness</dt><dd>'+esc(a.harness)+'</dd>'+
+      '<dt>model</dt><dd>'+(a.model?esc(a.model):
+        '<span class="faint">keine Angabe — der Harness entscheidet</span>')+'</dd>'+
+      '<dt>max_sessions</dt><dd>'+esc(a.max_sessions)+'</dd>'+
+      '<dt>lifetime</dt><dd>'+esc(a.lifetime)+'</dd>'+
+      '</dl></div>';
+  }).join(''):nothing('Kein Agent deklariert. Der Scope ist registriert, aber niemand kann hier arbeiten.');
+  var inst=sess.length?sess.map(function(s){
+    return '<div class="sess"><div class="sh">'+
+      '<span class="pill '+(STATE_CLS[s.state]||'ghost')+'">'+esc(s.state)+'</span>'+
+      '<span class="sid">'+esc(shortId(s.id))+'</span>'+
+      '<span class="muted">'+esc(s.agent_name)+'</span>'+
+      '<span class="faint">'+esc(ago(s.updated_at))+'</span></div>'+
+      '<div class="ws">'+esc(tilde(s.workspace_path))+'</div>'+
+      (s.state==='running'||s.state==='disconnected'?
+        '<div class="acts">'+act('Beenden','agent.stop',false,'',
+          {scope_id:sc.id,session_id:s.id})+'</div>':'')+
+      '</div>';
+  }).join(''):nothing('Keine Sitzung — weder laufend noch beendet.');
+  if(ags.length)inst+='<div class="acts">'+act('Agent starten','agent.start',false,'',{scope_id:sc.id})+'</div>';
+  return layer('harn',cfg,inst,
+    'Die Ebene heißt Agent, nicht Harness: <code>harness</code> ist ein Feld des Agenten, nicht '+
+    'umgekehrt. <b>Was hier steht, ist der aufgelöste Wert.</b> <code>agent.list</code> liefert '+
+    '<code>max_sessions</code> und <code>lifetime</code> immer gefüllt — ob jemand sie geschrieben '+
+    'hat oder ob die Vorgabe greift, steht nicht auf dem Draht. Nur <code>model</code> hat einen '+
+    'sichtbar leeren Zustand. Ein <code>defaults:</code>-Block auf Instanzebene existiert nicht: '+
+    '<code>RawInstance</code> kennt genau <code>id</code> und <code>name</code>.');
+}
+
+/* ---------- L4: the board ---------- */
+/* A scope's work is not only its own: a parent's board shows every task that
+   targets anything inside it, one swimlane per scope, because that is the
+   question a parent scope is actually asking. The lane is the task's
+   `target_scope_id` — the scope the run was sent *to*, not the one it came
+   from. */
+function subtreeOf(id){
+  var out=[id];
+  (function walk(pid){kids(pid).forEach(function(k){out.push(k.id); walk(k.id)})})(id);
+  return out;
+}
+function agentOfTask(t){
+  var se=t.assigned_session_id?sessById(t.assigned_session_id):null;
+  return se?se.agent_name:null;
+}
+function card(t,dense){
+  var who=agentOfTask(t);
+  var from=(t.sender_scope_id&&t.sender_scope_id!==t.target_scope_id)?scopeById(t.sender_scope_id):null;
+  return '<button class="tk'+(dense?' dense':'')+'" data-task="'+esc(t.id)+'"'+
+    (t.id===selTask?' aria-current="true"':'')+'>'+
+    '<div class="ti">'+esc(shortId(t.id))+
+      (from?'<span class="src">← '+esc(from.name)+'</span>':
+        (t.template_id?'<span class="src">cron</span>':''))+'</div>'+
+    '<div class="tp">'+esc(t.prompt)+'</div>'+
+    '<div class="tm">'+(who?'<b>'+esc(who)+'</b>':'<span class="faint">ohne Agent</span>')+
+      '<span>'+esc(ago(t.created_at))+'</span>'+
+      (t.blocked_reason?'<b>'+esc(t.blocked_reason)+'</b>':'')+'</div></button>';
+}
+/* More than five cards in one column and the column decides the page height.
+   Past that the cards drop to a single line — the same information, ranked by
+   what you scan a full column for: which task, and whose. */
+function boardFor(scopeId){
+  var ts=tasksOf(scopeId);
+  return '<div class="board">'+STATUSES.map(function(st){
+    var rows=ts.filter(function(t){return t.status===st.k});
+    var dense=rows.length>5;
+    return '<div class="col c-'+st.k+(dense?' dense':'')+'">'+
+      '<h4>'+esc(st.t)+'<span>'+(rows.length||'')+'</span></h4>'+
+      (rows.length?rows.map(function(t){return card(t,dense)}).join('')
+                  :'<p class="none">—</p>')+'</div>';
+  }).join('')+'</div>';
+}
+
+/* ---------- L4, second view: who is occupied ---------- */
+/* The board asks "what state is the work in". This asks the other question:
+   "who is carrying it". Rows are agents and their sessions, so an idle bay is
+   as visible as a busy one — a queue next to empty rows is the whole point.
+
+   A block is a task's *lifetime*, from `created_at` to `updated_at` (or now,
+   while it runs). It is deliberately not called execution time: the store
+   knows exactly when a task was delivered and when it started running, in
+   `task_events` — and no query returns that. When `task.events` lands, these
+   blocks get their real edges. Until then only a task that carries an
+   `assigned_session_id` is drawn at all, because that is the only tie between
+   a run and a bay the wire will hand over. */
+var procView='board';
+
+function tsOf(iso){
+  if(!iso)return NaN;
+  var s=String(iso);
+  return Date.parse(s.length<=19&&s.indexOf('Z')<0?s.replace(' ','T')+'Z':s);
+}
+function hhmm(ms){
+  var d=new Date(ms);
+  return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);
+}
+var BLK={done:'run',running:'live',blocked:'wait',failed:'scrap',cancelled:'scrap',queued:'plan'};
+
+function occRow(label,sub,tasks,win,extra){
+  var t0=win[0], span=win[1]-win[0];
+  var busy=0;
+  var blocks=tasks.map(function(t){
+    var a=Math.max(tsOf(t.created_at),t0), b=Math.min(tsOf(t.updated_at)||win[1],win[1]);
+    if(t.status==='running')b=win[1];
+    if(!(b>a))return '';
+    busy+=b-a;
+    var left=(a-t0)/span*100, w=(b-a)/span*100;
+    return '<span class="blk '+(BLK[t.status]||'run')+(w<3?' tiny':'')+'" '+
+      'style="left:'+left.toFixed(2)+'%;width:'+Math.max(w,0.6).toFixed(2)+'%" '+
+      'title="'+esc(shortId(t.id)+' · '+t.status+' · '+t.prompt.slice(0,70))+'">'+
+      esc(shortId(t.id))+'</span>';
+  }).join('');
+  var util=span?Math.min(100,Math.round(busy/span*100)):0;
+  return '<div class="tl-row"><div class="tl-lab'+(tasks.length?'':' free')+'">'+label+
+    (sub?'<span class="s">'+sub+'</span>':'')+'</div>'+
+    '<div class="tl-track">'+blocks+'</div>'+
+    '<div class="tl-util">'+(extra!=null?extra:(tasks.length?util+' %':'frei'))+'</div></div>';
+}
+
+function occFor(sc){
+  var lanes=subtreeOf(sc.id), all=[];
+  lanes.forEach(function(id){tasksOf(id).forEach(function(t){all.push(t)})});
+  var assigned=all.filter(function(t){return t.assigned_session_id});
+  var now=Date.now(), HOUR=3600000;
+  var earliest=assigned.reduce(function(m,t){
+    var v=tsOf(t.created_at); return isNaN(v)?m:Math.min(m,v)}, now);
+  var span=Math.max(2*HOUR,Math.min(24*HOUR,(now-earliest)*1.15));
+  var win=[now-span,now];
+  var ticks='';
+  for(var i=0;i<6;i++)ticks+='<span>'+hhmm(win[0]+span*i/6)+'</span>';
+
+  var body=lanes.map(function(id){
+    var s2=scopeById(id); if(!s2)return '';
+    var ags=S.agents[id]||[], sess=sessionsOf(id);
+    var loose=tasksOf(id).filter(function(t){return !t.assigned_session_id});
+    var rows=ags.map(function(a){
+      /* A bay is worth a row while it is alive, or while it still carries a
+         block inside the window. A stopped session with nothing in it is not
+         occupancy, it is history. */
+      var mine=sess.filter(function(x){
+        return x.agent_name===a.name&&(x.state!=='stopped'&&x.state!=='failed'||
+          assigned.some(function(t){return t.assigned_session_id===x.id}));
+      });
+      mine.sort(function(x,y){return (tsOf(y.updated_at)||0)-(tsOf(x.updated_at)||0)});
+      if(!mine.length)return occRow('<b>'+esc(a.name)+'</b>','keine Sitzung',[],win,'—');
+      return mine.map(function(x,n){
+        var ts=assigned.filter(function(t){return t.assigned_session_id===x.id});
+        return occRow((n===0?'<b>'+esc(a.name)+'</b>':'<span class="cont">↳</span>')+
+          ' <span class="sid">'+esc(shortId(x.id))+'</span>',
+          esc(x.state),ts,win);
+      }).join('');
+    }).join('');
+    if(loose.length)rows+=occRow('<b class="q">nicht zugeteilt</b>','wartet auf einen Agenten',
+      [],win,loose.length+(loose.length===1?' Task':' Tasks'));
+    return '<div class="tl-grp">'+esc(s2.name)+'</div>'+
+      (rows||occRow('<b class="faint">kein Agent</b>','',[],win,'—'));
   }).join('');
 
-  var detail;
-  var t=selTask?taskById(selTask):null;
-  if(!t){
-    detail=empty(S.tasks.length?'Keine Task ausgewählt':'Noch kein Auftrag',
-      S.tasks.length?'<p>Wähle oben eine Karte.</p>':
-      '<p>Diese Instanz hat noch nichts zu tun bekommen. <code class="i">task.send</code> ist das Kommando, '+
-      'das den ersten Auftrag anlegt.</p>');
-  }else{
-    var sc=scopeById(t.target_scope_id), se=t.assigned_session_id?sessById(t.assigned_session_id):null;
-    var rows='';
-    function row(l,v){rows+='<dt>'+esc(l)+'</dt><dd>'+v+'</dd>'}
-    row('id',esc(t.id));
-    row('status','<span class="pill '+(TASK_CLS[t.status]||'idle')+'">'+esc(t.status)+'</span>');
-    row('scope',esc(sc?sc.name:'—')+' <span class="faint">'+esc(shortId(t.target_scope_id))+'</span>');
-    row('session',t.assigned_session_id?
-      esc(shortId(t.assigned_session_id))+(se?' <span class="faint">'+esc(se.agent_name)+' · '+
-      esc(se.state)+'</span>':''):'<span class="faint">nicht zugeteilt</span>');
-    row('triggered_by',esc(t.triggered_by||'—')+(t.schedule_id?' <span class="faint">'+
-      esc(shortId(t.schedule_id))+(t.fired_for_minute?' · '+esc(t.fired_for_minute):'')+'</span>':''));
-    row('template',t.template_id?esc(t.template_id)+(t.template_version!=null?'@v'+esc(t.template_version):''):
-      '<span class="faint">—</span>');
-    row('created',stamp(t.created_at)+' <span class="faint">vor '+ago(t.created_at)+'</span>');
-    row('updated',stamp(t.updated_at)+' <span class="faint">vor '+ago(t.updated_at)+'</span>');
-    if(t.cost_model||t.cost_input_tokens!=null)
-      row('kosten',kn(t.cost_input_tokens)+' in / '+kn(t.cost_output_tokens)+' out'+
-        (t.cost_model?' · '+esc(t.cost_model):'')+' · '+dur(t.cost_duration_ms)+
-        (t.context_utilization_percent!=null?' · Kontext '+esc(t.context_utilization_percent)+' %':''));
-    if(t.reworks_task_id)row('nacharbeit an',esc(shortId(t.reworks_task_id))+
-      (t.rework_finding?'<div class="s" style="margin-top:3px">'+esc(t.rework_finding)+'</div>':''));
-    if(t.blocked_reason)row('blocked_reason','<span class="s">'+esc(t.blocked_reason)+'</span>');
-    if(t.result_summary)row('result','<span class="s">'+esc(t.result_summary)+'</span>');
-    if(t.result_artifact_paths&&t.result_artifact_paths.length)
-      row('artefakte',t.result_artifact_paths.map(function(p){return esc(tilde(p))}).join('<br>'));
-
-    // Every action carries the run it acts on. `rework` is the exception:
-    // its `task_id` is the *new* run's, minted in the dialog, and the old
-    // one travels as `reworks_task_id`.
-    var on={scope_id:t.target_scope_id,payload:{task_id:t.id}};
-    var rw={scope_id:t.target_scope_id,payload:{reworks_task_id:t.id}};
-    var A=function(label,cmd,ctx){return act(label,cmd,false,null,ctx)};
-    var actions=[];
-    if(t.status==='queued')actions.push(A('Zuteilen','task.assign',on),A('Abbrechen','task.cancel',on));
-    if(t.status==='running')actions.push(A('Abbrechen','task.cancel',on),
-      A('Blockieren','task.block',on),A('Notiz anhängen','task.progress',on));
-    if(t.status==='blocked')actions.push(A('Fortsetzen','task.resume',on),
-      A('Abbrechen','task.cancel',on));
-    if(t.status==='done')actions.push(A('Abnehmen','task.verify',on),A('Nacharbeit','task.rework',rw));
-    if(t.status==='failed')actions.push(A('Abnehmen','task.verify',on),
-      A('Nacharbeit','task.rework',rw));
-    if(t.status==='cancelled')actions.push(act('Nacharbeit','task.rework',true,
-      'Eine zurückgezogene Task ist terminal; rework legt eine neue an, aber hier ist nichts nachzuarbeiten.'));
-
-    detail='<div class="card"><h3>'+esc(shortId(t.id))+' '+qc('task.show')+'</h3>'+
-      '<p class="prompt">'+esc(t.prompt)+'</p><dl class="dl">'+rows+'</dl>'+
-      (actions.length?'<div class="acts">'+actions.join('')+'</div>':'')+'</div>';
-  }
-
-  return vhead('proc',lede)+
-  '<div class="acts" style="margin:0 0 12px">'+act('Auftrag senden','task.send',false,null,{scope_id:selScope||S.root})+'</div>'+
-  '<div class="board">'+board+'</div>'+
-  '<div class="grid g2" style="margin-top:14px">'+detail+
-    '<div class="stack">'+
-      '<div class="blank"><div class="bt">Verlauf nicht abrufbar</div>'+
-      '<p class="note">Der Store ist ereignisbasiert: jede Zustandsänderung, jede Fortschrittsnotiz und jedes '+
-      'Abnahmeurteil steht als Zeile in <code>task_events</code>. <b>Keine Query gibt sie heraus.</b> '+
-      '<code>task.show</code> liefert die Task-Zeile plus Delegationskette — mehr nicht. Deshalb hat diese Karte '+
-      'keine Zeitachse.</p>'+
-      '<div class="evts">'+EVENT_TYPES.map(function(e){return '<i class="na">'+esc(e)+'</i>'}).join('')+'</div>'+
-      '<p class="note faint" style="margin-top:7px">Dreizehn Typen, per CHECK festgelegt. Geschrieben werden '+
-      'alle, gelesen keiner.</p></div>'+
-      '<div class="card"><h3>Was die Karte trägt '+qc('task.list')+'</h3>'+
-        '<p class="note">Alle Felder oben stammen aus einem einzigen <code>task.list</code>. Damit sind zwei Dinge '+
-        'reine Klientenrechnung: <b>eine Schätzung</b> (p50 je <code>template_id</code>+<code>template_version</code> '+
-        'über <code>cost_duration_ms</code> der abgeschlossenen Läufe) und <b>ein Tagesraster</b> (Zählung über '+
-        '<code>created_at</code>). Beides ist nicht blockiert — es braucht nur erst eine Historie.</p>'+
-        '<p class="note" style="margin-top:7px">Was nicht geht: <b>Geld.</b> Es gibt '+
-        '<code>cost_input_tokens</code>, <code>cost_output_tokens</code> und <code>cost_model</code>, aber keine '+
-        'Preistabelle. Also Token, kein Euro.</p></div>'+
+  return '<div class="tl"><div class="tl-axis">'+ticks+'</div>'+body+
+    '<div class="tl-legend">'+
+      '<span><i class="blk live"></i>läuft</span>'+
+      '<span><i class="blk run"></i>fertig</span>'+
+      '<span><i class="blk wait"></i>blockiert</span>'+
+      '<span><i class="blk scrap"></i>gescheitert oder abgebrochen</span>'+
+      '<span class="faint">Fenster: '+Math.round(span/HOUR*10)/10+' h bis jetzt</span>'+
     '</div>'+
-  '</div>';
+    '<p class="why"><b>Ein Balken ist die Lebensdauer einer Task</b>, von <code>created_at</code> bis '+
+    '<code>updated_at</code> — nicht ihre Laufzeit. Wann eine Task zugestellt wurde und wann sie '+
+    'wirklich zu laufen begann, steht in <code>task_events</code>, und dafür gibt es keine Query. '+
+    'Gezeichnet wird nur, was eine <code>assigned_session_id</code> trägt: die einzige Verbindung '+
+    'zwischen einem Lauf und einer Sitzung, die der Draht hergibt. Alles andere steht in der Zeile '+
+    '„nicht zugeteilt".</p></div>';
 }
 
-/* ---------- L2: workspaces and leases ---------- */
-function viewEnv(){
-  var lede='Die Umgebung ist heute genau eine Frage: <b>wer hält welches Arbeitsverzeichnis.</b> Ein Lease '+
-   'verhindert, dass zwei Sitzungen dasselbe Verzeichnis bearbeiten — das ist die einzige Isolation, die '+
-   'Version 1 zusagt.';
-
-  if(!S.leases.length)return vhead('env',lede)+empty('Kein Lease vergeben',
-    '<p>Ein Lease entsteht, wenn eine Sitzung startet, und wird in <code class="i">starting</code>, '+
-    '<code class="i">running</code> und <code class="i">disconnected</code> gehalten. Solange keine Sitzung läuft, '+
-    'ist diese Tabelle korrekt leer.</p>');
-
-  var held=S.leases.filter(function(l){return !l.released_at});
-  var paths={}; S.leases.forEach(function(l){paths[l.canonical_workspace_path]=1});
-
-  var rows=S.leases.slice().sort(function(a,b){
-    return (a.released_at?1:0)-(b.released_at?1:0)||String(a.acquired_at).localeCompare(b.acquired_at);
-  }).map(function(l){
-    var se=sessById(l.session), sc=se?scopeById(se.scope_id):null;
-    return '<tr><td class="m">'+esc(tilde(l.canonical_workspace_path))+'</td>'+
-      '<td class="m">'+esc(shortId(l.session))+'<br><span class="faint">'+
-      esc(sc&&se?sc.name+' / '+se.agent_name:'—')+'</span></td>'+
-      '<td><span class="pill '+(se?(STATE_CLS[se.state]||'idle'):'ghost')+'">'+
-      esc(se?se.state:'—')+'</span></td>'+
-      '<td class="m">'+stamp(l.acquired_at)+'</td>'+
-      '<td class="m">'+(l.released_at?stamp(l.released_at)+'<br><span class="faint">'+
-      esc(l.release_reason||'')+'</span>':'<span class="pill run">gehalten</span>')+'</td></tr>';
+function secProc(sc){
+  var lanes=subtreeOf(sc.id), many=lanes.length>1;
+  var total=lanes.reduce(function(n,id){return n+tasksOf(id).length},0);
+  var body=procView==='occ'?'':lanes.map(function(id){
+    var s2=scopeById(id); if(!s2)return '';
+    var n=tasksOf(id).length;
+    return '<div class="lane">'+(many?'<div class="lanehead">'+
+      '<button class="lnkb" data-scope="'+esc(id)+'">'+esc(s2.name)+'</button>'+
+      '<span class="faint">'+n+(n===1?' Task':' Tasks')+'</span>'+
+      act('+ Task','task.send',false,'',{scope_id:id})+'</div>':'')+
+      boardFor(id)+'</div>';
   }).join('');
-
-  /* The case this page exists for: a lease still held by a session that is no
-     longer attached. Named only when it is actually true right now. */
-  var stuck=held.filter(function(l){
-    var se=sessById(l.session); return se&&se.state==='disconnected';
-  });
-  var stuckNote=stuck.length?
-    '<p class="note" style="margin-top:7px"><b>Gerade blockiert ohne zu arbeiten:</b> '+
-    stuck.map(function(l){
-      return '<code>'+esc(shortId(l.session))+'</code> hält '+esc(tilde(l.canonical_workspace_path))+
-        ' seit '+ago(l.acquired_at)+', ist aber abgehängt.';
-    }).join(' ')+'</p>':'';
-
-  return vhead('env',lede)+
-  '<div class="grid g3" style="margin-bottom:13px">'+
-    '<div class="card"><div class="big">'+held.length+'</div><div class="bl">Leases gehalten</div></div>'+
-    '<div class="card"><div class="big">'+(S.leases.length-held.length)+
-      '</div><div class="bl">freigegeben</div></div>'+
-    '<div class="card"><div class="big">'+Object.keys(paths).length+
-      '</div><div class="bl">Verzeichnisse insgesamt</div></div>'+
-  '</div>'+
-  '<div class="card"><h3>Workspace-Leases '+qc('agent.status')+'</h3>'+
-    '<div class="tw"><table class="t"><thead><tr>'+
-    '<th>kanonischer Pfad</th><th>Sitzung</th><th>Zustand</th><th>erworben</th><th>freigegeben</th>'+
-    '</tr></thead><tbody>'+rows+'</tbody></table></div>'+
-    '<div class="sep"></div>'+
-    '<p class="note">Gehalten wird ein Lease in genau drei Sitzungszuständen: <code>starting</code>, '+
-    '<code>running</code>, <code>disconnected</code>. Eine abgestürzte Sitzung gibt frei, eine abgehängte '+
-    'nicht.</p>'+stuckNote+
-  '</div>'+
-  '<div class="card" style="margin-top:13px"><h3>Was hier fehlt</h3>'+
-    '<p class="note">Diese Tabelle gibt es auf dem Draht nicht als Tabelle. <code>agent.status</code> liefert '+
-    'Leases nur, wenn man ihm <b>eine</b> <code>session_id</code> nennt, und die Lease-Zeile trägt diese Sitzung '+
-    'selbst nicht — die Spalte „Sitzung" oben ist die Zuordnung <b>dieser Seite</b>, nicht die des Stores.</p>'+
-    '<p class="note" style="margin-top:7px">Und sie sagt nichts über die andere Hälfte einer Umgebung: '+
-    '<b>Netz, Zugangsdaten, Reichweite.</b> Solange nichts davon auf dem Draht steht, kann keine Oberfläche '+
-    'ehrlich behaupten, wie riskant ein Lauf ist.</p>'+
-  '</div>';
+  var sel=taskById(selTask);
+  var l=lv('proc');
+  return '<section class="layer wide" style="--c:var('+l.c+')">'+
+    '<header><span class="lx">'+l.n+'</span><h3>'+esc(l.t)+'</h3>'+
+    '<span class="lsub">'+total+(total===1?' Task':' Tasks')+
+      (many?' in '+lanes.length+' Scopes':'')+'</span>'+
+    '<div class="hacts"><div class="seg">'+
+      '<button data-pview="board"'+(procView==='board'?' class="on"':'')+'>Board</button>'+
+      '<button data-pview="occ"'+(procView==='occ'?' class="on"':'')+'>Belegung</button></div>'+
+      act('Task anlegen','task.send',false,'',{scope_id:sc.id})+'</div>'+
+    '</header>'+
+    (total?(procView==='occ'?occFor(sc):body)
+          :'<div class="later">Noch keine Task in diesem Scope. '+
+      '<button class="lnkb" data-cmd="task.send" data-ctx="'+
+      esc(JSON.stringify({scope_id:sc.id}))+'">Die erste anlegen.</button></div>')+
+    (sel&&lanes.indexOf(sel.target_scope_id)>=0?taskDetail(sel):'')+
+    '</section>';
 }
 
-/* ---------- L1: daemon and store ---------- */
-function viewInfra(){
-  var d=S.daemon||{};
-  var scheds=S.schedules.length?S.schedules.map(function(s){
-    return '<tr><td class="m">'+esc(shortId(s.id))+'</td>'+
-      '<td class="m">'+esc(s.template_name||s.template_id||'—')+'</td>'+
-      '<td class="m">'+esc(s.cron||'—')+'<br><span class="faint">'+esc(s.timezone||'')+'</span></td>'+
-      '<td><span class="pill '+(s.enabled?'run':'idle')+'">'+(s.enabled?'aktiv':'aus')+'</span>'+
-      (s.next_run?'<br><span class="faint" style="font:400 10.5px var(--mono)">nächster '+
-        esc(s.next_run)+'</span>':'')+
-      (s.template_error?'<br><span class="faint" style="color:var(--fault)">'+esc(s.template_error)+
-        '</span>':'')+'</td>'+
-      '<td>'+act(s.enabled?'Aus':'Ein',s.enabled?'schedule.disable':'schedule.enable',
-        false,null,{payload:{schedule_id:s.id}})+'</td></tr>';
-  }).join(''):'<tr><td colspan="5" class="faint">Kein Zeitplan angelegt.</td></tr>';
-
-  return vhead('infra',
-    'Die unterste Ebene beantwortet eine Frage — <b>läuft sie</b> — und zwar mit genau vier Werten. Was '+
-    '<code>daemon.status</code> zurückgibt, steht unten vollständig; alles andere hier ist ein lokaler Befehl.')+
-  '<div class="grid g2">'+
-    '<div class="card"><h3>Daemon '+qc('daemon.status')+'</h3>'+
-      '<dl class="dl">'+
-        '<dt>schema_version</dt><dd>'+esc(d.schema_version!=null?d.schema_version:'—')+'</dd>'+
-        '<dt>database_path</dt><dd>'+esc(tilde(d.database_path))+'</dd>'+
-        '<dt>socket_path</dt><dd>'+esc(tilde(d.socket_path))+'</dd>'+
-        '<dt>lock_path</dt><dd>'+esc(tilde(d.lock_path))+'</dd>'+
-      '</dl><div class="sep"></div>'+
-      '<p class="note"><b>Das ist die ganze Antwort.</b> Keine Laufzeit, kein Gesundheitswert, keine '+
-      'Warteschlangentiefe, keine Speicherzahl. Dass die Antwort überhaupt kommt, ist die Statusmeldung — '+
-      'deshalb steht der Punkt unten in der Leiste und nicht in einer Kachel.</p>'+
-      '<div class="acts">'+
-        act('Prüfen','doctor',true,
-          'factory doctor läuft lokal gegen den Instanzpfad, nicht über den Socket — es gibt keine doctor-Query.')+
-        act('Stoppen','daemon.stop',true,
-          'start und stop laufen über den Prozess, nicht über den Socket.')+'</div>'+
-    '</div>'+
-    '<div class="stack">'+
-      '<div class="card"><h3>Zeitplan '+qc('schedule.list')+'</h3>'+
-        '<div class="tw"><table class="t" style="min-width:0"><thead><tr>'+
-        '<th>Plan</th><th>Vorlage</th><th>cron</th><th>Zustand</th><th></th>'+
-        '</tr></thead><tbody>'+scheds+'</tbody></table></div>'+
-        '<div class="acts">'+act('Anlegen','schedule.create',false,null,{scope_id:S.root})+'</div>'+
-      '</div>'+
-      '<div class="blank"><div class="bt">Zustellung nicht einsehbar</div>'+
-      '<p class="note">Jeder Zustellversuch wird <b>vor</b> dem Schreiben in <code>delivery_attempts</code> '+
-      'journalisiert — genau deshalb kann ein Absturz keine stille Doppelzustellung erzeugen, und genau deshalb '+
-      'kann ein Versuch als <i>unbekannt</i> enden. <b>Keine Query liest diese Tabelle.</b> Was die Fabrik über '+
-      'ihre eigenen Zustellungen weiß, weiß heute niemand sonst.</p></div>'+
-    '</div>'+
-  '</div>';
+/* ---------- one scope, one level ---------- */
+var SECTION={harn:secAgent,proc:secProc};
+function viewScope(){
+  var sc=scopeById(selScope);
+  if(!sc)return empty('Kein Scope gewählt','<p>Links einen auswählen.</p>');
+  var ags=(S.agents[sc.id]||[]).length;
+  return '<div class="shead"><h2>'+esc(sc.name)+'</h2>'+
+    '<span class="spath">'+esc(tilde(sc.canonical_path))+'</span>'+
+    (S.refusal[sc.id]?'<span class="pill ghost" title="'+esc(S.refusal[sc.id])+'">nicht adressierbar</span>':'')+
+    '<span class="scount">'+ags+' Agenten · '+sessionsOf(sc.id).length+' Sitzungen · '+
+    tasksOf(sc.id).length+' Tasks</span></div>'+
+    (SECTION[cur]?SECTION[cur](sc):soon(cur));
 }
 
-/* ---------- L5: improvement (grey) ---------- */
-function viewImp(){
-  var miss=[
-   ['task.events','Der Ereignisverlauf einer Task. <b>Schaltet diese ganze Ebene frei</b> — plus die Zeitachse '+
-     'auf L4 und die Fortschrittsnotizen. Die Leseseite gibt es schon: <code>events::for_task()</code>, mit '+
-     'ausschließlich Test-Aufrufern.'],
-   ['task.decisions','Die Begründungen. <code>task.decision</code> schreibt in <code>task_decisions</code>, '+
-     '<code>decisions::for_task()</code> liest sie zurück — und hat ebenfalls keinen Aufrufer außerhalb '+
-     'der Tests.'],
-   ['session.list','Eine fabrikweite Sitzungsliste. Heute filtert <code>agent.status</code> auf den Scope des '+
-     'Aufrufers, also kostet jede Übersicht einen Aufruf je Scope.'],
-   ['delivery.attempts','Das Zustelljournal. Ohne diese Query bleibt ein unklarer Zustellversuch unsichtbar, und '+
-     'die Regel „ein Mensch autorisiert genau einen Resend" hat keine Oberfläche.']
-  ];
-  return vhead('imp',
-    'Diese Ebene ist ausgegraut, und das ist keine Designentscheidung: <b>es gibt keine Query, die sie füllen '+
-    'könnte.</b> Die Daten werden geschrieben, vollständig und geordnet — sie kommen nur nicht zurück heraus.')+
-  '<div class="grid g2">'+
-    '<div class="card"><h3>Was geschrieben wird</h3>'+
-      '<p class="note"><code>task_events</code>, per CHECK auf dreizehn Typen festgelegt, unveränderlich und in '+
-      'Anfügereihenfolge. Korrigiert wird durch ein neues Ereignis, nie durch Ändern.</p>'+
-      '<div class="evts">'+EVENT_TYPES.map(function(e){return '<i class="na">'+esc(e)+'</i>'}).join('')+'</div>'+
-      '<div class="sep"></div>'+
-      '<p class="note">Dazu <code>task_decisions</code> mit Begründung, verworfenen Alternativen und akzeptierter '+
-      'Folge — geschrieben von <code>task.decision</code>, jedes Mal, wenn ein Lauf eine Frage entscheiden '+
-      'musste.</p>'+
-    '</div>'+
-    '<div class="card"><h3>Was fehlt — vier Queries</h3>'+
-      '<div class="miss">'+miss.map(function(m){
-        return '<span class="qn">'+esc(m[0])+'</span><span class="qd">'+m[1]+'</span>';
-      }).join('')+'</div><div class="sep"></div>'+
-      '<p class="note">Alle vier sind Leseoperationen auf Tabellen, die es gibt, und für zwei davon existiert die '+
-      'Funktion bereits. Das ist kein Ausbau, das ist eine Durchreiche — und die kürzeste Strecke von diesem '+
-      'Leitstand zu einer Oberfläche, die die Fabrik auch verbessern und nicht nur bedienen kann.</p>'+
-    '</div>'+
-  '</div>';
+/* ---------- all scopes: where they differ ---------- */
+function viewMatrix(){
+  var rows=[], depth={};
+  (function walk(pid,d){
+    kids(pid).forEach(function(s){depth[s.id]=d; rows.push(s); walk(s.id,d+1)});
+  })(null,0);
+  var body=rows.map(function(s){
+    var ags=S.agents[s.id]||[];
+    var models={}; ags.forEach(function(a){models[a.model||'(keins)']=1});
+    var mk=Object.keys(models);
+    return '<tr><th scope="row"><button class="lnkb" data-scope="'+esc(s.id)+'">'+
+      '<span style="padding-left:'+(depth[s.id]*13)+'px">'+esc(s.name)+'</span></button></th>'+
+      '<td class="'+(ags.length?'k-own':'k-none')+'">'+
+        (ags.length?esc(ags.length+(ags.length===1?' Agent':' Agenten'))+
+          '<br><span class="faint">'+esc(mk.join(', '))+'</span>':'keiner')+'</td>'+
+      '<td class="'+(tasksOf(s.id).length?'k-own':'k-none')+'">'+
+        (tasksOf(s.id).length||'—')+'</td></tr>';
+  }).join('');
+  var allModels={}, allHarness={};
+  S.scopes.forEach(function(s){(S.agents[s.id]||[]).forEach(function(a){
+    allModels[a.model||'(keins)']=(allModels[a.model||'(keins)']||0)+1;
+    allHarness[a.harness]=(allHarness[a.harness]||0)+1; })});
+  var mKeys=Object.keys(allModels), hKeys=Object.keys(allHarness);
+  var col={harn:1,proc:2}[cur]||0;
+  function th(i,label){return '<th'+(i===col?' class="on"':'')+'>'+esc(label)+'</th>'}
+  return '<div class="shead"><h2>Alle Scopes</h2><span class="spath">Wo sie sich unterscheiden — '+
+    'und wo sie nur denselben Wert tragen</span>'+
+    (col?'<span class="scount">'+esc(lv(cur).n+' '+lv(cur).t)+' hervorgehoben</span>':'')+'</div>'+
+    '<div class="card"><div class="tw"><table class="t mx c'+col+'"><thead><tr><th>Scope</th>'+
+    th(1,'L3 Agent')+th(2,'L4 Prozess')+'</tr></thead>'+
+    '<tbody>'+body+'</tbody></table></div>'+
+    '<div class="sep"></div><p class="note"><b>Geteiltes Objekt ist nicht dasselbe wie gleicher '+
+    'Wert.</b> Alle Agenten hier tragen '+esc(hKeys.join(' / '))+' und '+esc(mKeys.join(' / '))+
+    ' — das sind unabhängige Zeichenketten in je eigenen Zeilen, und es gibt keinen Mechanismus, '+
+    'der sie aneinander bindet.</p>'+
+    '<p class="note faint">L1 und L2 kommen später in den Vergleich.</p></div>'+
+    '<div class="card"><h3>Instanzweit, für jeden Scope gleich '+qc('schedule.list')+'</h3>'+
+    (S.schedules.length?'<div class="tw"><table class="t"><thead><tr><th>Template</th><th>Cron</th>'+
+      '<th>Zuletzt</th><th></th></tr></thead><tbody>'+S.schedules.map(function(s){
+      return '<tr><td>'+esc(s.template_name||shortId(s.template_id))+'</td>'+
+        '<td class="m">'+esc(s.cron)+' <span class="faint">'+esc(s.timezone)+'</span></td>'+
+        '<td class="m">'+(s.last_fired_at?esc(ago(s.last_fired_at)):'<span class="faint">nie</span>')+'</td>'+
+        '<td><span class="pill '+(s.enabled?'run':'ghost')+'">'+(s.enabled?'aktiv':'aus')+'</span></td></tr>';
+      }).join('')+'</tbody></table></div>':nothing('Kein Schedule angelegt.'))+
+    '<div class="acts">'+act('Schedule anlegen','schedule.create',false,'',{scope_id:S.root})+'</div></div>';
 }
 
-/* ---------- L6: direction (grey) ---------- */
-function viewDir(){
-  return vhead('dir',
-    'Ausgegraut, und hier ist der Grund härter als eine Ebene tiefer: <b>es gibt nichts zu lesen, weil es nichts '+
-    'gibt.</b>')+
-  '<div class="grid g2">'+
-    '<div class="card"><h3>Was hier stehen würde</h3>'+
-      '<div class="miss">'+
-        '<span class="qn">Ziel</span><span class="qd">Wofür die Fabrik überhaupt läuft — als Satz, an dem ein '+
-        'Auftrag scheitern kann.</span>'+
-        '<span class="qn">Budget</span><span class="qd">Eine Obergrenze, die der Dispatcher <b>vor</b> dem Start '+
-        'liest, nicht eine Zahl, die man hinterher bedauert.</span>'+
-        '<span class="qn">Stückkosten</span><span class="qd">Was ein abgeschlossener Auftrag gekostet hat, in '+
-        'Geld — nicht in Token.</span>'+
-      '</div>'+
+/* The one detail panel that survived the rebuild: a task card opens what the
+   store knows about that run, and the operations it still allows. */
+function taskDetail(t){
+  var rows=[['Status',t.status],['Ziel-Session',t.assigned_session_id?shortId(t.assigned_session_id):'—'],
+    ['Angelegt',stamp(t.created_at)],['Zuletzt',stamp(t.updated_at)]];
+  if(t.blocked_reason)rows.push(['Blockiert',t.blocked_reason]);
+  if(t.result_summary)rows.push(['Ergebnis',t.result_summary]);
+  if(t.cost_model)rows.push(['Modell (gemessen)',t.cost_model]);
+  if(t.cost_input_tokens!=null)rows.push(['Tokens',kn(t.cost_input_tokens)+' ein / '+kn(t.cost_output_tokens)+' aus']);
+  if(t.cost_duration_ms!=null)rows.push(['Dauer',dur(t.cost_duration_ms)]);
+  var open=(t.status==='queued'||t.status==='running'||t.status==='blocked');
+  var ctx={scope_id:t.target_scope_id,task_id:t.id};
+  return '<div class="tdet"><div class="prompt">'+esc(t.prompt)+'</div>'+
+    '<dl class="dl">'+rows.map(function(r){
+      return '<dt>'+esc(r[0])+'</dt><dd class="s">'+esc(r[1])+'</dd>'}).join('')+'</dl>'+
+    '<div class="acts">'+
+      act('Agent zuteilen','task.assign',t.status!=='queued',
+          'nur solange der Lauf queued ist',ctx)+
+      act('Fortschritt','task.progress',!open,'nur bei offener Task',ctx)+
+      act('Entscheidung','task.decision',false,'',ctx)+
+      act('Fertig','task.done',!open,'nur bei offener Task',ctx)+
+      act('Blockiert','task.block',!open,'nur bei offener Task',ctx)+
+      act('Abbrechen','task.cancel',!open,'nur bei offener Task',ctx)+
+      act('Prüfen','task.verify',open,'erst wenn der Lauf terminal ist',ctx)+
     '</div>'+
-    '<div class="card"><h3>Warum es leer ist</h3>'+
-      '<p class="note">Weder die Entwurfsgrundlage noch der Code kennen ein Ziel, ein Budget oder eine '+
-      'Stückkostenrechnung. Was im Code „budget" heißt, sind Wiederholungs- und Sitzungskontingente — Schutz '+
-      'gegen Durchdrehen, keine Richtungsentscheidung.</p>'+
-      '<p class="note" style="margin-top:7px"><b>Die Ebene steht trotzdem im Menü.</b> Eine Fabrik ohne '+
-      'Richtungsebene ist eine Fabrik, die sehr effizient irgendwohin läuft; dass das Feld leer ist, gehört auf '+
-      'den Leitstand und nicht in eine Fußnote.</p>'+
-    '</div>'+
-  '</div>';
+    '<p class="ch">Der Verlauf dieser Task steht vollständig in <code>task_events</code> — '+
+    'es gibt nur keine Query, die ihn zurückgibt. Siehe L5.</p></div>';
 }
-
 /* ------------------------------------------------------------------ *
  * The acting half.
  *
@@ -992,7 +1101,8 @@ var CMD={
   ]}},
 
  'task.assign':{k:'c',title:'Auftrag zuteilen',
-  lede:'Sucht eine Sitzung des genannten Agenten, oder startet eine, und stellt zu.',
+  lede:'Hält fest, welcher Agent den Lauf bekommt. <b>Stellt nicht zu</b> — das tut nur '+
+       '<code>task.send</code>, und der Cron-Dispatcher für seine eigenen Läufe.',
   fields:function(ctx){return [
     {k:'agent_name',t:'select',label:'Agent',options:agentOptions(ctx.scope_id)}
   ]}},
@@ -1004,7 +1114,12 @@ var CMD={
  'task.block':{k:'c',title:'Auftrag blockieren',
   lede:'Hält den Lauf an, bis ein Mensch ihn fortsetzt. Der Grund steht im Ereignisprotokoll.',
   fields:function(){return [
-    {k:'reason',t:'area',rows:3,label:'Grund',req:true}
+    /* A closed vocabulary, not free text: the daemon refuses anything else. */
+    {k:'reason',t:'select',label:'Grund',req:true,options:[
+      {v:'clarification',l:'clarification — es fehlt eine Antwort'},
+      {v:'permission',l:'permission — es fehlt eine Freigabe'},
+      {v:'interrupted',l:'interrupted — der Lauf wurde unterbrochen'},
+      {v:'external',l:'external — es hängt an etwas außerhalb'}]}
   ]}},
 
  'task.resume':{k:'c',title:'Auftrag fortsetzen',
@@ -1287,14 +1402,14 @@ document.addEventListener('click',function(e){
 });
 
 /* ---------- router ---------- */
-var VIEWS={harn:viewHarn,proc:viewProc,env:viewEnv,infra:viewInfra,imp:viewImp,dir:viewDir};
-var CALL={harn:'scope.list + agent.list + agent.status',proc:'task.list',env:'agent.status',
-  infra:'daemon.status + schedule.list',imp:'—',dir:'—'};
-
+/* The address bar carries the scope, not the level: every level is on the
+   page at once, so there is nothing else to route. */
 function render(){
-  renderLevels();
-  $('#main').innerHTML=VIEWS[cur]();
-  $('#lastcall').textContent=CALL[cur];
+  renderTabs();
+  renderTree();
+  $('#main').innerHTML=(selScope==='*')?viewMatrix():viewScope();
+  $('#lastcall').textContent='daemon.status + scope.list + agent.list + agent.status + '+
+    'task.list + schedule.list';
 }
 
 function poll(){
@@ -1302,6 +1417,7 @@ function poll(){
   inflight=true;
   load().then(function(n){
     inflight=false;
+    if(!booted){booted=true; fromHash()}
     alarm(null);
     wire(n,true);
     render();
@@ -1316,7 +1432,7 @@ function poll(){
 }
 
 document.addEventListener('click',function(e){
-  var b=e.target.closest('[data-go],[data-scope],[data-task],[data-cmd]');
+  var b=e.target.closest('[data-go],[data-scope],[data-task],[data-cmd],[data-pview]');
   if(!b)return;
   if(b.hasAttribute('data-cmd')){
     if(b.disabled)return;
@@ -1326,25 +1442,32 @@ document.addEventListener('click',function(e){
     openCmd(b.getAttribute('data-cmd'),ctx);
     return;
   }
-  if(b.hasAttribute('data-go')){
-    cur=b.getAttribute('data-go');
-    // The level is in the address bar, so a view can be bookmarked and a
-    // reload comes back where it was.
-    if(window.location.hash!=='#'+cur)window.location.hash=cur;
-    render(); window.scrollTo(0,0); return;
+  if(b.hasAttribute('data-pview')){procView=b.getAttribute('data-pview'); render(); return}
+  if(b.hasAttribute('data-go')){cur=b.getAttribute('data-go'); writeHash(); render(); window.scrollTo(0,0); return}
+  if(b.hasAttribute('data-scope')){
+    selScope=b.getAttribute('data-scope');
+    writeHash(); render(); window.scrollTo(0,0); return;
   }
-  if(b.hasAttribute('data-scope')){selScope=b.getAttribute('data-scope'); render(); return}
   if(b.hasAttribute('data-task')){selTask=b.getAttribute('data-task'); render(); return}
 });
 
+/* `#<scope>/<level>` — both halves, so a bookmark comes back to the same
+   page and not merely to the same scope. */
+function writeHash(){
+  var sc=scopeById(selScope);
+  var h=((selScope==='*')?'alle':(sc?sc.name:''))+'/'+cur;
+  if(h.charAt(0)!=='/'&&window.location.hash!=='#'+h)window.location.hash=h;
+}
 function fromHash(){
-  var h=String(window.location.hash||'').replace(/^#/,'');
-  if(VIEWS[h])cur=h;
+  var raw=decodeURIComponent(String(window.location.hash||'').replace(/^#/,''));
+  if(!raw)return;
+  var parts=raw.split('/'), name=parts[0], level=parts[1];
+  if(level&&lv(level))cur=level;
+  if(name==='alle'){selScope='*'; return}
+  for(var i=0;i<S.scopes.length;i++)if(S.scopes[i].name===name){selScope=S.scopes[i].id; return}
 }
 window.addEventListener('hashchange',function(){fromHash(); render(); });
 
-fromHash();
-renderLevels();
 $('#main').innerHTML='<div class="empty"><b>Verbinde mit dem Daemon …</b></div>';
 poll();
 timer=window.setInterval(poll,POLL_MS);

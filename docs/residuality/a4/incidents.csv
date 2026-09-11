@@ -1,0 +1,9 @@
+id;sequence;interaction;architectural_response;remaining_limit
+I13;S209 S201 S306;Unendliches Mute verdeckt Hostausfall und der einzige Empfänger ist unerreichbar;C38 C46 C37;Ohne unabhängigen erreichbaren Empfänger gibt es keine garantierte Reaktion
+I14;S210 S213 S202;Ein freier Healththread und alte Pulse verdecken den beendeten Kernel;C39 C37;Authentifizierte Frische beweist nicht die Wahrheit eines kompromittierten Senders
+I15;S219 S234 S231;Lokale Timeoutkette endet vor Annahme und Antwort kommt erst nach Teilnehmerretention;C40 C03 C34;Unbekannter Ausgang kann dauerhaft bleiben
+I16;S240 S237 S260;Kaltstart löst Retrylawine aus und ein nicht persistierter Stop wird scheinbar bestätigt;C43 C41 C14 C39;Physisch erschöpfte Persistenz kann keinen dauerhaften Stop zusagen
+I17;S267 S269 S350;Signiertes Update kompromittiert Factory und den vermeintlich unabhängigen Beobachter;C48 C33 C38;Gleichzeitig verlorene Vertrauensanker erlauben keinen Wahrheitsschutz
+I18;S282 S283 S284;Restore erzeugt einen zweiten grün meldenden Klon und Freigaben verfallen während Rekonziliation;C02 C06 C37 C18 C40;Monitoring ist kein Fencing und keine Dispatchfreigabe
+I19;S251 S233 S319;Retention entfernt Operationsevidenz vor einer späten sensiblen Antwort und Rechtskonflikt;C24 C34 C36 C40;Endliche Erinnerung sichere Wiederholung und vollständige Löschung sind nicht stets vereinbar
+I20;S223 S333 S224;Geschlossene Last und ausgeblendete Ablehnungen erzeugen einen scheinbar perfekten extremen Latenzwert;C42 C47;Eine überprüfte Messmethode macht einen synthetischen Workload nicht repräsentativ

@@ -1,0 +1,7 @@
+residue;requires;condition;failure_consequence;safe_response
+R17;R10;Für legitimierte Alarmempfänger und Eskalation;Ein erzeugter Alarm erreicht niemanden der handeln darf;Unerreichbarkeit und Ende der Reaktionszusage offenlegen
+R17;R12;Für externe Betriebsmetadaten;Monitoring erzeugt einen neuen Geheimnis- oder Datenschutzabfluss;Nur genehmigte minimale sichere Felder senden
+R17;R16;Für unabhängige Anbieter Accounts und Aktualisierung;Beobachter teilt verdeckt den Ausfall des beobachteten Systems;Gemeinsame Abhängigkeit dokumentieren statt Unabhängigkeit behaupten
+R17;R08;Nur für die Aussage der Kernel reagiere aktuell;Ein Hostsignal wird fälschlich als fachliche Gesundheit verstanden;Nur die tatsächlich beobachtete Ebene bestätigen
+R13;R02;Bei Antwort nach Frist oder Cancel;Alte Wirkung wird als neuer Auftrag oder sicher fehlgeschlagen gedeutet;Antwort historisch binden oder kontrolliert als unzuordenbar behandeln
+R07;R14;Bei Optimierung auf schnelle oder billige Erledigung;Unvollständige falsche Arbeit zählt als erfolgreicher Durchsatz;Nutzbare Qualität getrennt von Laufzeit und Abschluss prüfen

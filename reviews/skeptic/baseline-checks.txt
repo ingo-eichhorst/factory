@@ -1,0 +1,7 @@
+......................
+----------------------------------------------------------------------
+Ran 22 tests in 0.048s
+
+OK
+6 A5 model files checked
+3 downstream candidate files checked

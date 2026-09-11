@@ -1,0 +1,8 @@
+stressor_id;branch_id;kind;residue_ids;document_anchor;review_status
+S351;S351.B01;extern-erzwungen;GVR016;S351-weiteres-betriebssystem.md#s351-b01;coordinator-proposal-not-independently-reviewed
+S351;S351.B02;halt;GVR020;S351-weiteres-betriebssystem.md#s351-b02;coordinator-proposal-not-independently-reviewed
+S351;S351.B03;abschluss;GVR016;S351-weiteres-betriebssystem.md#s351-b03;coordinator-proposal-not-independently-reviewed
+S351;S351.B04;konflikt;OPR003;S351-weiteres-betriebssystem.md#s351-b04;coordinator-proposal-not-independently-reviewed
+S351;S351.B05;attraktorhypothese;GVR020;S351-weiteres-betriebssystem.md#s351-b05;coordinator-proposal-not-independently-reviewed
+S351;S351.B06;verlust;keines;S351-weiteres-betriebssystem.md#s351-b06;coordinator-proposal-not-independently-reviewed
+S351;S351.B07;halt;OPR001;S351-weiteres-betriebssystem.md#s351-b07;coordinator-proposal-not-independently-reviewed

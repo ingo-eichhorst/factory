@@ -1,0 +1,76 @@
+stressor_id;scenario
+S276;Heartbeat-Labels verraten Kundennamen und vertrauliche Geschäftszeiten
+S277;Ein Debugexport für Monitoring enthält die vollständige AGENTS-Konversation
+S278;Ein Angreifer löst gezielt Fehlalarme aus um Alarmempfänger und Bereitschaftsmuster zu lernen
+S279;Ein fehlerhafter Exporter erzeugt identisch falsche Daten und passende Prüfsummen in allen Backups
+S280;Ein einzelner Bitfehler verwandelt einen Betrag in eine andere noch gültige Zahl
+S281;Zwei signierte Journale widersprechen sich nach einer Split-Brain-Phase
+S282;Ein altes Backup kennt weder gestern versandte Rechnungen noch heutige Widerrufe
+S283;Original und restaurierter Klon senden gleichzeitig plausible Lebenszeichen
+S284;Der Recoverylauf dauert so lange dass seine zu Beginn geprüften Rechte schon wieder verfallen
+S285;Neuer Client und altes Plugin interpretieren dieselbe gültige Zahl mit verschiedener Einheit
+S286;Ein optionales Plugin verlangt plötzlich eine globale Kernmigration für alle Scopes
+S287;Altes Binary öffnet einen neuen Store und ersetzt unverstandene Felder durch Defaults
+S288;Rollback startet den alten Code nachdem der neue schon eine irreversible Außenaktion ausgelöst hat
+S289;Eine Migration verliert die Verbindung genau zwischen Übergabe und Start des neuen Writers
+S290;Eine Notfallkorrektur benötigt gerade das kaputte Plugin um dessen Konfiguration zu lesen
+S291;Der einzige Maintainer verschwindet und ein Nachfolger kennt die verdeckten Betriebsannahmen nicht
+S292;Eine winzige Reparatur braucht eine nicht mehr erhältliche Toolchain und einen gelöschten Cloudaccount
+S293;Nach tausend Sonderfällen versteht niemand mehr welche Ausnahme Außenwirkung erlaubt
+S294;Ein Update der gemeinsamen JSON-Bibliothek verändert gleichzeitig Plugins Replay und Monitoring
+S295;Ein Monitoringfeature macht einen Cloudaccount zur Startvoraussetzung aller Kindscopes
+S296;Eine hilfreiche automatische Reparatur wächst zum zweiten schreibenden Kernel
+S297;Alle Tests verwenden sofortige Antworten und verpassen jede verspätete Annahme
+S298;Die virtuelle Testuhr friert Timeout und externen Monitor gemeinsam ein
+S299;Ein Mock bestätigt Fencing obwohl der reale Provider alte Generationen akzeptiert
+S300;Ein erfolgreicher Bericht vertauscht Euro Cent und Dezimalkomma
+S301;Ein schneller Cache liefert eine alte aber plausibel richtige Preisliste für heutige Bestellung
+S302;Ein Auftrag wird vollständig für die falsche reale Person mit gleichem Namen erledigt
+S303;Im Incident ist die rote Warnung für einen farbfehlsichtigen Operator nicht erkennbar
+S304;Ein langer Scopepfad wird im Mobilalarm gekürzt und der Operator stoppt die falsche Instanz
+S305;Eine übersetzte Schaltfläche macht aus unklar scheinbar sicher fehlgeschlagen
+S306;Der Alarm erreicht nachts ein ausgeschaltetes Telefon und niemand bemerkt ihn für Tage
+S307;Ein Flapping-Link erzeugt zehntausend Meldungen und verdeckt den späteren echten Totalausfall
+S308;Der Operator bestätigt einen Alarm sofort aber die Reparatur liegt drei Monate in seiner Queue
+S309;Zwei rechtmäßige Vertreter erteilen gleichzeitig gegensätzliche Freigaben
+S310;Der ausgeschiedene Betreiber kontrolliert noch den einzigen Monitoringaccount
+S311;Ein befangenes Team schaltet Alarme stumm um eigene Fehlaktionen unsichtbar zu machen
+S312;Zwei Modellanbieter Monitor und Pager nutzen denselben gestörten Cloudunterbau
+S313;Eine Zahlungssperre stoppt Modelle Backups und Alarme am selben Tag
+S314;Der einzige Provider stellt den Dienst mit 24 Stunden Frist endgültig ein
+S315;Ein Provider meldet Tokenkosten erst eine Woche nach Überschreitung des Monatsbudgets
+S316;Ein p99.999-Latenzziel führt zu hundert spekulativen Kopien pro Auftrag
+S317;Aufmerksamkeit für Fehlalarme kostet mehr als sämtliche Modellaufrufe
+S318;Eine behördliche Untersagung trifft zwischen Freigabe und später Teilnehmerannahme ein
+S319;Zwei Rechtsräume verlangen gleichzeitig Löschung und unveränderte Beweisaufbewahrung
+S320;Ein Monitoringprovider verlagert sensible Betriebsmetadaten unangekündigt in einen anderen Rechtsraum
+S321;Ein alter Auftrag öffnet nach Tagen ein physisches Ventil in einer inzwischen anderen Situation
+S322;Eine Notfallabschaltung hängt von einer Cloudantwort ab die erst morgen kommt
+S323;Ein Menschenleben wird gegen monatliches Rechenbudget automatisch abgewogen
+S324;Factory erreicht den Dienst aber keine Antwort erreicht Factory zurück
+S325;Eine Satellitenverbindung liefert signierte Pakete nach 30 Tagen stark umgeordnet
+S326;Monitoring sieht Factory nicht aber Factory erreicht weiterhin alle Businessdienste
+S327;Ein Laptop schläft ein Jahr und seine lokale monotone Uhr behandelt Suspend anders als erwartet
+S328;Die Wallclock springt rückwärts und verlängert eine Wartungsstummschaltung scheinbar um Jahre
+S329;Eine globale Zeitzonenreform ändert die Bedeutung bereits geplanter lokaler Termine
+S330;Runtime sagt beendet Dateibeobachtung zeigt neue Writes und der Agent behauptet bereit
+S331;Drei unabhängige Prüfer verwenden dieselbe fehlerhafte externe Grundtabelle
+S332;Der Provider attestiert Erfolg aber der Empfänger bestreitet jede Wirkung und Logs fehlen
+S333;Ein Agent verbessert seine Durchlaufzeit indem er schwierige Tasks vor Messbeginn ablehnt
+S334;Ein Team benennt Fehler als Wartung um die Verfügbarkeit auf hundert Prozent zu heben
+S335;Ein Modell schreibt fertige Artefakte ohne Prüfung um das Erfolgsziel zu erfüllen
+S336;Energiesparmodus schaltet nachts den Rechner ab und erzeugt täglich einen Totalausfallalarm
+S337;CO2-optimiertes Verschieben lässt eine genehmigte Aktion erst nach ihrem Verfallsdatum starten
+S338;Drei zusätzliche Monitoringcluster verbrauchen mehr als das kleine überwachte System
+S339;Restore auf anderer CPU interpretiert ein natives Binärartefakt anders
+S340;Ein Dateisystem mit anderer Großschreibung vereinigt zwei vormals verschiedene Workspacepfade
+S341;Im Jahr 2080 existieren weder heutige Modellformate noch Netzwerkprotokolle
+S342;Factory wird abgeschaltet während ein Dienst noch alte Aktionen gepuffert hat
+S343;Der Monitoringvertrag endet vor dem letzten genehmigten Exportlauf
+S344;Der Nutzer verlangt vollständige Löschung und zugleich beweissicheren Export aller früheren Geheimnisse
+S345;Rechner Monitor Mobilfunk alle Backups und alle legitimierten Empfänger verschwinden gleichzeitig
+S346;Alle vertrauenswürdigen Quellen liefern gemeinsam eine perfekt konsistente falsche Welt
+S347;Eine Außenaktion kann jederzeit in unendlicher Zukunft ankommen während Speicherung endlich bleiben muss
+S348;Monitor wird stummgeschaltet dann Mac zerstört dann der einzige Vertreterkonto gesperrt
+S349;Nach Restore erzeugt kalter Cache Retrylawine und eine späte alte Zahlung trifft ein
+S350;Ein signiertes Update fälscht Health löscht Historie und liefert perfekte Prüfberichte

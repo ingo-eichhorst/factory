@@ -1,0 +1,37 @@
+id;residue;introduced;obligation;test
+C01;R01;A1;Identität plus lebendige autoritative frische Beobachtung vor Promotion und positive Endevidenz vor Lease-Freigabe;T01
+C02;R01;A2;Restore-Epoche invalidiert Live-Annahmen und sperrt Dispatch bis Rekonziliation;T02
+C03;R02;A0;Dauerhafte Operation und Zustellabsicht vor Effekt sowie unbekannter Outcome ohne blinden Retry;T03
+C04;R02;A1;Resume autorisiert einen konkreten Versuch und keine neue Geschäftsaktion mit atomarer Audit-Evidenz;T03
+C05;R03;A0;Ein Daemon besitzt den exklusiven Instanz-Lock und alle Core-Mutationen;T04
+C06;R03;A2;Instanzinkarnation und externe Fencing-Preconditions oder manueller Ausschluss paralleler Klone;T04
+C07;R04;A0;Kanonische Events mit versioniertem purem Replay ohne Plugins oder Wallclock;T05
+C08;R04;A2;Referenzintegrität und vollständiges Recovery-Manifest mit expliziter Import-/Historiengrenze;T05
+C09;R05;A1;Unveränderliche sichere Arbeitsbeschreibung mit Zielagent und Input-/Kontextrevision;T06
+C10;R05;A2;Revalidierung aktueller Berechtigung und Inputgültigkeit vor Dispatch trotz gepinnter Historie;T06
+C11;R06;A0;Explizite Scope-Aktivierung und versionierter überwachter Plugin-Prozess;T07
+C12;R06;A1;End-to-End-Deadlines und Byte-/Queue-Grenzen samt Quarantäne auch für Unterprozesse;T07
+C13;R07;A1;Globale Aufnahme-/Kostenbudgets und Scope-Fairness zusätzlich zu max_sessions;T08
+C14;R07;A2;Geschützte Kontrollkapazität und abgestufter Speicher-/Lastnotbetrieb vor Erschöpfung;T08
+C15;R08;A0;Bundled lokaler Safe-Mode und ausdrücklich read-only Offline-Diagnose ohne zweiten Writer;T09
+C16;R08;A2;Minimaler Bootstrap ignoriert defekte optionale Konfiguration und zeigt Evidenzlücken ohne Reparaturzwang;T09
+C17;R09;A0;Authentifizierter Actor mit Scope-Capabilities und explizite menschliche Freigabe externer Effekte;T10
+C18;R09;A2;Freigabe an Payload Empfänger Version und Gültigkeit binden und Widerrufsgrenze protokollieren;T10
+C19;R10;A2;Lesbare begrenzte menschliche Entscheidungsqueue und explizit benannte Vertretungsautorität;T11
+C20;R10;A3;Überlastungs-/Befangenheits- und Nachfolgeverfahren ohne automatische Zustimmung oder heimliche Kompetenzübertragung;T11
+C21;R11;A2;Genehmigtes unabhängiges Recovery-Set mit RPO/RTO und Wiederaufbau ohne Originalgerät;T12
+C22;R11;A3;Separater Schlüssel-Recovery und Langzeit-Lese-/Stilllegungsplan mit Verantwortlichem;T12
+C23;R12;A0;Minimale sichere Event-Payloads keine Secrets und kontrollierte Inhaltsreferenzen;T13
+C24;R12;A3;Klassifizierte Retention mit Incident-/Lösch-/Legal-Hold-Konfliktverfahren und ehrlicher Replay-Grenze;T13
+C25;R13;A1;Stabile Schedule-Occurrence und spezifizierte DST-/Catch-up-/Uhrsprung-Semantik;T14
+C26;R13;A2;Monotone lokale Fristen getrennt von Geschäftszeit und explizite Verfalls-/Offline-Gültigkeit;T14
+C27;R14;A1;Worker-Abschluss getrennt von unabhängiger Verifikation und externem Dispatch;T15
+C28;R14;A3;Verifikationsinstrumente auf Korrelation Blindstellen und portable Übergabe prüfen;T15
+C29;R15;A0;Vertrauenswürdiger Single-User-Einsatz explizit und keine Sandbox-Garantie behaupten;T16
+C30;R15;A3;Feindliche Workloads ablehnen bis eigenständige OS-/VM-/Credential-Isolation ratifiziert ist;T16
+C31;R16;A1;Ein versionierter Vertrags-/Lieferstatus mit Cutover ohne semantisches Dual-Write;T17
+C32;R16;A3;Release-Herkunft Kompatibilitätsfixtures und geplanter Systemausstieg statt unbegrenzt wachsendem Kern;T17
+C33;R15;offen;Harte Isolation feindlicher Workloads über OS-/VM-/Credential-Grenzen tatsächlich nachweisen falls Einsatzgrenze erweitert wird;T16
+C34;R02;offen;Unabhängige Teilnehmer-Evidenz nach dessen Historienverlust verfügbar machen falls automatisch fortgesetzt werden soll;T03
+C35;R14;offen;Domänenspezifisch tragfähige unabhängige Qualitätskriterien ratifizieren wo heutige Gates keine belastbare Wahrheit liefern;T15
+C36;R12;offen;Konkreten rechtlichen Aufbewahrungs-/Löschkonflikt durch zuständige menschliche Autorität entscheiden;T13

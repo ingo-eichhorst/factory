@@ -1,0 +1,17 @@
+{
+  "phase": "four-completed-derivations-before-skeptic",
+  "sha256": {
+    "reviews/boundaries/a7/cases.json": "e42c15d54b974cd3e17960a513b36d985f060806eb4240a99602c232dae1fc33",
+    "reviews/boundaries/a7/report.md": "c1d6b6f82c0937ea08e3277cfc4b1b602efee98a4bb1de2b1b39621c1816df82",
+    "reviews/boundaries/a7/residues.csv": "192262f720afb59b9ff73cf7617bbc0bc652b9778384ccd8c97050b0d218ed24",
+    "reviews/governance/a7/cases.json": "15db00c5dd39c7532a1a3efeca660d1568efeb73e15700da965719760fd4eff6",
+    "reviews/governance/a7/report.md": "da57fccc3b52eb269336589cab54769857ea6012798990efca19499759620e6c",
+    "reviews/governance/a7/residues.csv": "5f6768d2cedd585ad0ca7aef22cc32e7ae0d74a4cb4f5f2648d209789f7935d1",
+    "reviews/observability/a7/cases.json": "3e0b1b1431509ea875a207de00649813daa080a664e0c4b31b55fd83a0637f00",
+    "reviews/observability/a7/report.md": "0e9be99d203588527f7b392fbe844654919e556479283334dd42287a02b34c53",
+    "reviews/observability/a7/residues.csv": "4bf28c13e311a844240e3d454fd7554dd664fe8fc8965af5c30d702c09cc24cc",
+    "reviews/operations/a7/cases.json": "9decd6ae38247b627b90a5743c3efb9c685d66f7b4c75ce03aadd0650ec4e045",
+    "reviews/operations/a7/report.md": "c3c16fe0805ef1adfa3f432ee1501466ea7bb65698ce3fbc5e2e07daa15235b7",
+    "reviews/operations/a7/residues.csv": "a38a1dbf9fa602ac2a0e26db1add2fb4789437fa2439d861c7115661d58aad37"
+  }
+}

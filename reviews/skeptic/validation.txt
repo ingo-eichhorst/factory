@@ -1,0 +1,10 @@
+PASS: findings.csv UTF-8 semicolon schema, 9 unique complete findings, matching report sections
+PASS: all 10 assertion-backed probes rerun with byte-identical results
+PASS: audited A5 input hashes unchanged
+PASS: no bytecode directory created in audit workspace
+AGENTS.md: 663 bytes
+baseline-checks.txt: 183 bytes
+findings.csv: 11039 bytes
+method-audit.md: 21149 bytes
+probe-results.json: 15620 bytes
+sensitivity_probes.py: 9012 bytes

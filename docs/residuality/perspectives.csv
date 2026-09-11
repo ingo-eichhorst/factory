@@ -1,0 +1,21 @@
+id;perspective;question;stressor_range;source_basis
+P01;Physik Gerät Energie Umwelt;Was bleibt ohne ursprüngliches Gerät und konstante Ressourcen;S001-S010;Company-Design Plattform und ADR 0019
+P02;Storage Datenhistorie Integrität;Welche Bedeutung ist ohne heutige Projektionen rekonstruierbar;S011-S020;ADR 0003 0012 0018 0019 und Store-Schema
+P03;Zeit und Gültigkeit;Welche Zeit meint ein Termin eine Frist oder eine Erlaubnis;S021-S030;Backlog Slice 11 und ADR 0003
+P04;Runtime Prozesse Workspace;Wann darf aus Beobachtung Identität oder Ende folgen;S031-S040;ADR 0017 und Recovery-Arbeitsstand
+P05;Plugin-Protokoll und Supervision;Wie lokal bleibt ein Ausfall der Integrationsgrenze;S041-S050;ADR 0007 und factory-adapter
+P06;Netzwerk und entfernte Beobachter;Welche Fakten überleben verlorene oder veraltete Antworten;S051-S060;ADR 0002 0003 0007
+P07;Identität Topologie Berechtigung;Welche Identität bleibt unter Umzug Klonen und Delegation erhalten;S061-S070;ADR 0015 0016 und Delegationsbibliothek
+P08;Task-Lifecycle und Executor;Welche Übergänge sind atomar und welche nur Absichten;S071-S080;factory-task und Backlog Slices 6-9
+P09;Externe Geschäftswirkung;Was ist unwiederholbar und was nicht kompensierbar;S081-S090;ADR 0003 Sagas und Freigaben
+P10;Operator Aufmerksamkeit und Irrtum;Was funktioniert ohne allwissenden jederzeit verfügbaren Menschen;S091-S100;ADR 0019 und manuelle Operator-Guides
+P11;Modelle Erkenntnis und Qualitätsmessung;Was überlebt Modellwechsel oder gemeinsames Falschliegen;S101-S110;ADR 0020 und Context-/Adapter-Verträge
+P12;Kontext Wissen und Provenienz;Welche Inputs und Instruktionen gelten für welchen Lauf;S111-S120;ADR 0013 0020 und Backlog Slice 12
+P13;Angreifer und Supply-Chain-Missbrauch;Wo endet kooperative Policy und beginnt notwendige Isolation;S121-S130;Company-Design §6 und ADR 0007
+P14;Datenschutz Recht Beweispflichten;Welche widersprüchlichen Pflichten kann Architektur nicht selbst entscheiden;S131-S140;ADR 0003 sensitive references und ADR 0019
+P15;Ökonomie Kapazität und SLA;Welche Automation ist unter realen Budgets noch tragfähig;S141-S150;max_sessions Backlog und ADR 0020
+P16;Entwicklung Release und Wartbarkeit;Welche Verträge überleben Versions- und Maintainerwechsel;S151-S160;Task-Migrationsplan und ADR 0018
+P17;Organisation Verantwortung und Macht;Was geschieht wenn nicht Hardware sondern Zuständigkeit wechselt;S161-S170;Explorative zweite Runde ohne behauptete konkrete Vorfälle
+P18;Wachstum Plattformwechsel und neue Nutzung;Welche zukünftige Anforderung sprengt die heutige Einsatzgrenze;S171-S180;Explorative zweite Runde mit v1-Abgrenzung
+P19;Abwegige Extrem- und Langzeitbedingungen;Welche verborgenen Selbstverständlichkeiten sind keine Naturgesetze;S181-S190;Bewusste Gegenproben keine Prognosen
+P20;Kaskaden und widersprüchliche Signale;Welche Reihenfolge mehrerer Stressoren besiegt die Einzelmaßnahmen;S191-S200;Zusammengesetzte Gegenproben aus vorherigen Karten

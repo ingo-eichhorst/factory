@@ -1,0 +1,2825 @@
+[
+  {
+    "stressor_id": "S201",
+    "source_states": [
+      "OB02",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Mac aus, bestätigte Daten warten",
+        "kind": "extern-erzwungen",
+        "conditions": "Strom fehlt, zuvor bestätigte Daten und Decoder bleiben auf intaktem Medium, kein unabhängiger Beobachter verfügbar",
+        "persistence": "Ausführung und Selbstalarm ruhen bis Energie zurückkehrt, keine Eigenrückkopplung",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Nach Rückkehr kann der Operator den erhaltenen Bestand lesen, aktuell kann der ausgeschaltete Mac nichts melden",
+        "validation": "Nach Stromrückkehr sind bestätigte Daten nicht lesbar oder vor Rückkehr lief doch ein unabhängiger Alarmweg"
+      },
+      {
+        "state": "Ausfall außerhalb des Macs erkennbar",
+        "kind": "extern-erzwungen",
+        "conditions": "Ein zuvor eingerichteter Beobachter mit eigener Energie und erreichbarem Lesepfad überlebt genau diesen Stromverlust",
+        "persistence": "Frische läuft ab und Detektor hält Ausfallevidenz solange Mac stumm bleibt",
+        "residue_ids": [
+          "OBR002"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Unabhängiger Leser kann fehlende Lebenszeichen erkennen, damit ist weder Mensch informiert noch Host wieder verfügbar",
+        "validation": "Ausfall der Macversorgung legt auch den behaupteten Detektor oder seinen Evidenzzugang still"
+      }
+    ],
+    "architectural_consequence": "Lokalen Bestand, laufende Ausführung und externe Ausfallfeststellung separat ausweisen. Ein unabhängiger Detektor ersetzt weder Strom noch erreichbaren Menschen."
+  },
+  {
+    "stressor_id": "S202",
+    "source_states": [
+      "OB03",
+      "OB16",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Host grün, Daemon ohne Dienst",
+        "kind": "halt",
+        "conditions": "Daemon beendet, Hostprobe läuft weiter und bestätigter Store bleibt lesbar",
+        "persistence": "Ohne Neustarter oder Operator bleibt Dienst beendet, Hostgrün liefert keinen Wiederanlauf",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann frühere Aufträge lesen, daraus folgt kein aktueller Daemonfortschritt",
+        "validation": "Neue Daemonmutation ist während behaupteter Abwesenheit nachweislich bestätigt"
+      },
+      {
+        "state": "Neustart mit unbekannten alten Wirkungen",
+        "kind": "ungewissheit",
+        "conditions": "Daemonpfad-Probe erkennt Fehlen und Neustart gelingt, alte Teilnehmer können weiterlaufen, Versuchsjournal erhalten",
+        "persistence": "Ungewissheit endet nur mit korrelierter Annahmeevidenz, nicht mit neuer PID",
+        "residue_ids": [
+          "OBR005",
+          "OBR017"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Probe belegt neuen lokalen Pfad, Journal erlaubt alten Versuch zurückzuhalten ohne Teilnehmerende zu erfinden",
+        "validation": "Neustart markiert unbekannte alte Versuche ohne Teilnehmerbeleg als nie ausgeführt"
+      }
+    ],
+    "architectural_consequence": "Hostuptime nicht als Daemondienst führen. Neustart nur mit getrenntem Abgleich fortlaufender Teilnehmer und erhaltenem Versuchsstand."
+  },
+  {
+    "stressor_id": "S203",
+    "source_states": [
+      "OB30",
+      "OB06",
+      "OB07",
+      "OB01",
+      "OB17"
+    ],
+    "branches": [
+      {
+        "state": "Alter Bestand vor neuer Freigabe gehalten",
+        "kind": "halt",
+        "conditions": "Alte Absichten sind lesbar und vorgeschlagenes Frischegate greift vor Dispatch, explizites Restore behandelt versuchte Tasks gesondert",
+        "persistence": "Halt endet durch gültige erneute Entscheidung oder dokumentiertes Verwerfen, nicht durch Aufwachen",
+        "residue_ids": [
+          "OBR007",
+          "OBR017"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann alte Absicht und bekannte Versuche prüfen, kein automatischer Versand aus bloßer Queue-Dauerhaftigkeit",
+        "validation": "Nie versuchter aber abgelaufener Auftrag erreicht Teilnehmer ohne neue Freigabe"
+      },
+      {
+        "state": "Alter Auftrag hat falsche Wirkung erzeugt",
+        "kind": "verlust",
+        "conditions": "Ohne Frischegate wird inzwischen ungültiger Auftrag extern irreversibel akzeptiert, lokales Journal blieb intakt",
+        "persistence": "Vergangene Fehlwirkung bleibt auch nach späterem Stop historisch wahr",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Journal hilft noch bei Abgleich und Folgenbearbeitung, ursprüngliche Gültigkeit der angenommenen Aktion ist verloren",
+        "validation": "Teilnehmer weist nach dass der alte Auftrag vor Annahme abgelehnt wurde"
+      }
+    ],
+    "architectural_consequence": "Wake-up braucht Gültigkeitsentscheidung getrennt von explizitem restore::reconcile. Nie versucht heißt nicht noch erlaubt, Taskfreigabe und Lease bleiben eigene Prädikate."
+  },
+  {
+    "stressor_id": "S204",
+    "source_states": [
+      "OB02",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Beide Geräte stromlos",
+        "kind": "extern-erzwungen",
+        "conditions": "Gemeinsame Steckdose fällt aus, Medien bleiben intakt, kein dritter Beobachter",
+        "persistence": "Ausführung und lokale Beobachtung kehren erst mit Versorgung zurück",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltener bestätigter Bestand ist später lesbar, die zwei Geräte können währenddessen keinen Ausfall feststellen",
+        "validation": "Mini-PC sendet unter derselben stromlosen Versorgung nachweislich aktuelle Befunde"
+      },
+      {
+        "state": "Vorgelagerter Zeuge bleibt verfügbar",
+        "kind": "extern-erzwungen",
+        "conditions": "Bereits vorhandener externer Zeuge samt Netz Identität und Lesezugang hängt nicht an dieser Steckdose",
+        "persistence": "Ausfallevidenz bleibt bis neue frische Beobachtung eintrifft",
+        "residue_ids": [
+          "OBR002"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann genau den gemeinsamen Ausfall erkennen, nicht den Erfolg aller offenen Tasks",
+        "validation": "Entzug der Steckdose entfernt auch den letzten Belegzugang des Zeugen"
+      }
+    ],
+    "architectural_consequence": "Fehlerdomäne Steckdose dokumentieren. Separate Box ist kein unabhängiger Zeuge und eine weitere Kopie wird nicht vorausgesetzt."
+  },
+  {
+    "stressor_id": "S205",
+    "source_states": [
+      "OB04",
+      "OB02",
+      "OB20"
+    ],
+    "branches": [
+      {
+        "state": "Gemeinsamer Account sperrt alle Zugänge",
+        "kind": "halt",
+        "conditions": "Monitor Mail und einzige Backupzugänge sind gesperrt, kein anderer erlaubter Zugang ist bekannt",
+        "persistence": "Warten auf Accountrecovery oder Nachweis eines tatsächlich vorhandenen anderen Zugangs",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für Alarmempfang und Backupabruf ist keine nutzbare Struktur belegt, physische Existenz der Bytes allein hilft dem ausgesperrten Operator nicht",
+        "validation": "Ein berechtigter Operator ruft während der Sperre verifizierte Daten oder frische Alarme ohne den Account ab"
+      },
+      {
+        "state": "Vorab unabhängiger Notzugang und Zeuge",
+        "kind": "halt",
+        "conditions": "Separater lokal autorisierter Notzugang und accountunabhängiger Zeuge wurden vorher eingerichtet, Operator und Host erreichbar",
+        "persistence": "Account bleibt gesperrt, begrenzte lokale Bedienung und fremde Ausfallevidenz bleiben bis eigener Ablauf nutzbar",
+        "residue_ids": [
+          "OBR002",
+          "OBR034"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann definierte Notbefehle und unabhängige Evidenz nutzen, damit sind die gesperrten Backups nicht wieder lesbar",
+        "validation": "Notzugang benötigt doch denselben Login oder Zeuge verliert gleichzeitig seine Identität"
+      }
+    ],
+    "architectural_consequence": "Accountabhängigkeiten für Beobachtung Empfang und Backupzugang separat prüfen. Gesperrte Daten nicht als gelöscht oder als bereits verfügbare Kopie behandeln."
+  },
+  {
+    "stressor_id": "S206",
+    "source_states": [
+      "OB02",
+      "OB04",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Regionale Trennung ohne erreichbaren Operator",
+        "kind": "extern-erzwungen",
+        "conditions": "Region kappt Rechnerzugang Mobilfunk und einzigen Operator, lokaler bestätigter Bestand überlebt",
+        "persistence": "Äußere Trennung hält an bis regionale Wege wiederkehren, keine Schleife erforderlich",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Lokale Daten können später gelesen werden, aktuell bleibt menschliche Reaktionsfähigkeit ohne nachgewiesenen Ersatz unzugänglich",
+        "validation": "Eine autorisierte erreichbare Person empfängt außerhalb der Region aktuelle Evidenz"
+      },
+      {
+        "state": "Außerregionaler Empfang nur mit echter Vertretung",
+        "kind": "extern-erzwungen",
+        "conditions": "Entwurfsalternative richtet vorab Zeugen und zusätzlich berechtigte erreichbare Vertretung außerhalb der Region ein",
+        "persistence": "Unabhängiger Vorfall kann quittiert werden während regionale Ausführung weiter unerreichbar ist",
+        "residue_ids": [
+          "OBR002",
+          "OBR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Vertretung kann genau diesen Ausfall kennen und quittieren, keine Wiederherstellung der Region oder aller Tasks",
+        "validation": "Alle Quittungen stammen nur vom unerreichbaren einzigen ursprünglichen Operator oder teilen die ausgefallenen Wege"
+      }
+    ],
+    "architectural_consequence": "Region, Leser und Menschen als verschiedene Abhängigkeiten modellieren. Lokale autonome Erholung nicht als Alarmempfang darstellen."
+  },
+  {
+    "stressor_id": "S207",
+    "source_states": [
+      "OB02",
+      "OB03"
+    ],
+    "branches": [
+      {
+        "state": "Einziger Monitor tot, Gesundheitswissen fehlt",
+        "kind": "ungewissheit",
+        "conditions": "Monitor fällt vor Factory aus, kein frischer anderer Beleg und keine externe Ersatzstruktur vorhanden",
+        "persistence": "Bis neue Beobachtung bleibt Zustand unbekannt, angezeigtes altes Grün wäre nur falsche Behauptung",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für aktuelle Remote-Gesundheitsfeststellung ist nichts nutzbar, Host- und Datenerhaltung sind davon getrennt",
+        "validation": "Ein anderer authentischer frischer Befund existiert während dieser Lücke"
+      },
+      {
+        "state": "Beobachterstille wird unabhängig erkannt",
+        "kind": "halt",
+        "conditions": "Vorhandener zweiter unabhängiger Zeuge prüft Monitorfrische statt dessen letztes Grün zu übernehmen",
+        "persistence": "Monitorablauf erzeugt begrenzte Ausfallevidenz bevor Factory selbst ausfällt",
+        "residue_ids": [
+          "OBR002",
+          "OBR004"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Leser kann fehlende Monitorfrische sehen, Factoryzustand bleibt ohne eigene Probe unbekannt",
+        "validation": "Monitorstille verlängert das letzte Grün oder zweiter Zeuge fällt im selben Fehler weg"
+      }
+    ],
+    "architectural_consequence": "Auch Frische des Beobachters befristen. Ein zweiter Zeuge belegt Beobachterausfall, nicht automatisch Ursache oder Gesundheit Factorys."
+  },
+  {
+    "stressor_id": "S208",
+    "source_states": [
+      "OB04",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Annahme bestätigt, Mensch nicht erreicht",
+        "kind": "halt",
+        "conditions": "Mail landet im Spam, einziger erwarteter Mensch liest sie nicht, kein Quittungsweg vorhanden",
+        "persistence": "Warten endet nur mit tatsächlichem Empfang oder anderem Kontakt, Resend allein beweist nichts",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für nachgewiesene menschliche Kenntnis existiert keine Restfähigkeit, Providerannahme ist nur Transportinformation",
+        "validation": "Authentische vorfallsgebundene Menschenquittung liegt im behaupteten stillen Zeitraum vor"
+      },
+      {
+        "state": "Unabhängig quittierter Einzelvorfall",
+        "kind": "abschluss",
+        "conditions": "Vorab eingerichteter unabhängiger Kontakt erreicht berechtigten Menschen und dessen echte Quittung wird erhalten",
+        "persistence": "Empfang dieses Vorfalls ist abgeschlossen, Bearbeitung kann weiterhin offen sein",
+        "residue_ids": [
+          "OBR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator und Eskalationslogik können genau eine Empfangsstufe zuverlässig lesen, Spam-Mail muss dafür nicht ankommen",
+        "validation": "Quittung stammt nur vom Mailprovider oder schließt ohne Menschenaktion weitere Vorfälle"
+      }
+    ],
+    "architectural_consequence": "Versandannahme und menschlichen Empfang getrennt korrelieren, endliche Vorfallsquittung nicht zur Reparatur oder zur Erhaltung aller Vorfälle aufwerten."
+  },
+  {
+    "stressor_id": "S209",
+    "source_states": [
+      "OB05",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Fehlerhafte Zehnjahresunterdrückung",
+        "kind": "halt",
+        "conditions": "Tatsächlich gespeicherte Mute-Policy hat keinen wirksamen Ablauf, darunterliegende bestätigte Daten sind lesbar",
+        "persistence": "Gespeicherte Policy unterdrückt weiter bis explizite Änderung, keine Attraktion aus bloßer Dauer",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann historischen Bestand prüfen, Alarmberechtigung ist nicht erhalten",
+        "validation": "Ursprüngliche Ein-Stunden-Grenze beendet Mute ohne manuelle Änderung"
+      },
+      {
+        "state": "Befristete Ausnahme endet unabhängig",
+        "kind": "abschluss",
+        "conditions": "Entwurfs-Ablaufprüfung läuft unabhängig vom Wartungsfehler und erhält ursprüngliches Ende über Neustarts",
+        "persistence": "Nach Ablauf werden neue Alarme wieder zulässig, Wartungszustand bleibt separat offen",
+        "residue_ids": [
+          "OBR006"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Alarmprüfer kann ursprüngliche Ausnahme begrenzen, weder Zustellung noch offene Vorfallsmenge ist damit gesichert",
+        "validation": "Neustart oder Uhrsprung verlängert den Mute ohne neue autorisierte Entscheidung"
+      }
+    ],
+    "architectural_consequence": "Mute braucht ursprünglichen dauerhaften Ablauf und sichere Behandlung unklarer Zeit. Ablauf macht Alarme berechtigt, nicht Wartung erfolgreich."
+  },
+  {
+    "stressor_id": "S210",
+    "source_states": [
+      "OB03",
+      "OB13"
+    ],
+    "branches": [
+      {
+        "state": "Grüner Thread neben festem Deadlock",
+        "kind": "halt",
+        "conditions": "Lockgraph hält Kernel dauerhaft, Health-Thread umgeht ihn und bestätigter Store ist außerhalb lesbar",
+        "persistence": "Ohne Eingriff löst der feste Lockgraph sich nicht, grüner Thread erzeugt keinen Reparaturmechanismus",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Lesbarer alter Bestand bleibt Diagnoseeingang, keine neue Kernelarbeit oder gültige Gesamthealth",
+        "validation": "Unter unverändertem behauptetem Deadlock bestätigt der Kernel neue Mutationen"
+      },
+      {
+        "state": "Blockierter Pfad sichtbar, Ursache noch offen",
+        "kind": "ungewissheit",
+        "conditions": "Probe durch Kernelpfad bleibt aus und unabhängiger Auswerter läuft, Lockbeweis fehlt",
+        "persistence": "Befund bleibt Pfadstillstand bis Fortschritt oder Lockdiagnose, er darf nicht zum sicheren Deadlock erklärt werden",
+        "residue_ids": [
+          "OBR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann Fehlpfad trotz freiem Health-Thread erkennen, Ursache und alle Geschäftsfunktionen sind nicht bewiesen",
+        "validation": "Auswerter zeigt gesamtes System grün solange der Kernelpfad keinen frischen Commit belegt"
+      }
+    ],
+    "architectural_consequence": "Kernelpfad und freien Health-Thread getrennt prüfen, Auswerter darf nicht am untersuchten Lock hängen. Ausbleibende Probe allein unterscheidet Deadlock nicht von extremer Langsamkeit."
+  },
+  {
+    "stressor_id": "S211",
+    "source_states": [
+      "OB08",
+      "OB03",
+      "OB11"
+    ],
+    "branches": [
+      {
+        "state": "Alter Bestand lesbar, Writes verweigert",
+        "kind": "extern-erzwungen",
+        "conditions": "Alte Pages und Decoder intakt, alle neuen Commits scheitern, Retrylast ist begrenzt",
+        "persistence": "Schreibstillstand dauert mit Medienfehler, Reads können unabhängig weitergehen",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann bestätigte Vergangenheit lesen, neue Mutationen und ehrliche Schreibbestätigung sind nicht verfügbar",
+        "validation": "Eine neu bestätigte Mutation überlebt Wiederöffnen unter denselben Fehlerbedingungen"
+      },
+      {
+        "state": "Write-Ausfall korrekt sichtbar",
+        "kind": "halt",
+        "conditions": "Pfadprobe und Fehlerauswertung sind unabhängig von blockiertem Writepfad, keine Erfolgsmeldung vor Commit",
+        "persistence": "Befund bleibt fehlerhaft oder unbekannt bis belegter neuer Commit, Probe repariert keine SSD",
+        "residue_ids": [
+          "OBR005",
+          "OBR001"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator sieht Unterschied zwischen lesbarem Bestand und fehlendem Writefortschritt, kein allumfassendes Grün",
+        "validation": "Nur erfolgreicher Read lässt Writebefund trotz fehlender Commits gesund werden"
+      }
+    ],
+    "architectural_consequence": "Lesbarkeit und neue Dauerhaftigkeit getrennt bestätigen, Fehler vor Erfolg ausgeben. fsync-Frist nicht aus SQLite-busy-timeout ableiten."
+  },
+  {
+    "stressor_id": "S212",
+    "source_states": [
+      "OB07",
+      "OB34"
+    ],
+    "branches": [
+      {
+        "state": "Legitimes Warten ohne Aufmerksamkeitsschleife",
+        "kind": "halt",
+        "conditions": "Alle hier betrachteten Tasks warten berechtigt auf fehlende Freigaben und Dispatch ist wirksam gehalten, Operator kann Noise noch unterscheiden, Vorfallsbestand ist innerhalb seiner Grenze",
+        "persistence": "Taskwartezeit endet durch jeweilige Voraussetzung, bezahlbarer Alarmaufwand allein erzeugt keine Schleife",
+        "residue_ids": [
+          "OBR007",
+          "OBR008"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Erhaltene Absichten und getrennte offene Vorfälle bleiben prüfbar, blockierte Tasks beweisen nicht Kernelgesundheit",
+        "validation": "Ein echter unabhängiger Fehler verschwindet allein weil alle Tasks als legitim blockiert markiert sind"
+      },
+      {
+        "state": "Verwerfung bewahrt falsches Alarmkriterium",
+        "kind": "attraktorhypothese",
+        "conditions": "Wiederholte falsche Fortschrittsalarme überlasten Menschen, sie ignorieren sie und korrigieren deshalb das Kriterium nicht, Taskintent und fehlende Freigaben bleiben lesbar und ihr Dispatchgate wirksam",
+        "persistence": "Falsches Kriterium erzeugt Lärm, Lärm führt zu Verwerfung, Verwerfung verhindert Korrektur und erhält neues Rauschen",
+        "residue_ids": [
+          "OBR007"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Absichten und fehlende Erlaubnis bleiben operativ prüfbar, menschliche Reaktion auf echte Vorfälle ist nicht erhalten",
+        "validation": "Menschen reagieren bei unverändertem Rauschen zuverlässig auf echte Fehler oder korrigieren das Kriterium ohne Schleifenbruch"
+      },
+      {
+        "state": "Andere legitime Voraussetzungen fehlen ohne Freigabemangel",
+        "kind": "halt",
+        "conditions": "Tasks warten auf tatsächliche externe Voraussetzungen statt auf Zustimmung, bestätigter Bestand und begrenzter getrennter Vorfallsbestand sind lesbar, Operator kann echte Fehler weiter unterscheiden",
+        "persistence": "Jeder Task wartet bis seine Voraussetzung eintritt oder er explizit disponiert wird, erwarteter Stillstand erzeugt selbst keine autonome Schleife",
+        "residue_ids": [
+          "OBR001",
+          "OBR008"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann konkrete Blocker und echte offene Vorfälle prüfen, externe Voraussetzung oder menschliche Freigabe wird dadurch weder erzeugt noch gleichgesetzt",
+        "validation": "Ein echter Vorfall verschwindet allein wegen erwarteter Taskwartezeit oder die angeblich externe Voraussetzung ist tatsächlich bereits erfüllt"
+      }
+    ],
+    "architectural_consequence": "Taskblocker und Vorfälle separat führen, Rohmeldungsreset darf keinen Vorfallsabschluss fingieren. Unendliche neue Vorfälle übersteigen jeden endlichen Bestand."
+  },
+  {
+    "stressor_id": "S213",
+    "source_states": [
+      "OB03",
+      "OB02"
+    ],
+    "branches": [
+      {
+        "state": "Cachegrün ohne aktuelle Quelle",
+        "kind": "ungewissheit",
+        "conditions": "Host aus und Proxy erneuert nur Empfangszeit alter Antwort, kein anderer aktueller Beleg",
+        "persistence": "Falsches Grün dauert höchstens Cachehorizont falls nicht erneut künstlich verlängert",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für aktuelle Hostgesundheit liefert das Cachepaket keine nutzbare Struktur, alte Bytes beweisen nur Vergangenheit",
+        "validation": "Ein authentischer vom noch lebenden Host neu erzeugter Befund trägt das aktuelle Grün"
+      },
+      {
+        "state": "Alte Antwort belegt nur abgelaufene Inkarnation",
+        "kind": "halt",
+        "conditions": "Signierte Quellinkarnation und belastbares Alter werden auch hinter Proxy geprüft",
+        "persistence": "Ursprünglicher Ablauf wird durch neue Ankunft nicht verschoben, Zustand bleibt ohne neue Quelle unbekannt",
+        "residue_ids": [
+          "OBR004"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Monitor kann aktuelle Gesundheitsbehauptung verweigern und genau die Frischelücke zeigen",
+        "validation": "Wiederholte Proxyantwort verlängert Quellfrische ohne neue Quellgeneration"
+      }
+    ],
+    "architectural_consequence": "Quellalter statt Proxyempfang als Frische benutzen. Eine Woche Cache ist endliche Täuschung, nicht selbsttragende Erneuerung."
+  },
+  {
+    "stressor_id": "S214",
+    "source_states": [
+      "OB12",
+      "OB03",
+      "OB02"
+    ],
+    "branches": [
+      {
+        "state": "Endlicher alter Schwall verdrängt echte Evidenz",
+        "kind": "transient",
+        "conditions": "Tausend alte Nachrichten teilen FIFO-Auswertung mit echten, keine weitere Paketproduktion aus dem Fehler",
+        "persistence": "Rückstau kann nach endlich vielen Paketen drainieren, bis dahin keine sichere aktuelle Aussage",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Ohne Quellalter und Servicebudget ist unklar ob echte Lebenszeichen rechtzeitig auswertbar sind, endliche Anzahl ist kein Frischebeleg",
+        "validation": "Quellbelege bleiben unter genau diesem Rückstau nachweislich frisch und zeitnah auswertbar"
+      },
+      {
+        "state": "Rückstau ohne Frischeverlängerung",
+        "kind": "transient",
+        "conditions": "Quellinkarnation Sequenz Alter werden geprüft und Aufnahme ist vor teurer Verarbeitung begrenzt",
+        "persistence": "Alte Pakete laufen endlich aus ohne Gesundheit zu erneuern, reservierte Aufnahme lässt echte Evidenz passieren",
+        "residue_ids": [
+          "OBR004",
+          "OBR016"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Monitor kann echte von alten Belegen unterscheiden und begrenzte Verarbeitung bewahren, verworfene Pakete bleiben verloren",
+        "validation": "Alter Schwall setzt letzten Frischezeitpunkt vor oder verbraucht die gesamte zugesagte Restkapazität"
+      }
+    ],
+    "architectural_consequence": "Frischeprüfung und begrenzte Verarbeitung des Rückstaus separat bauen. Ablehnen alter Pakete ohne Kapazitätsgrenze garantiert keine schnelle echte Probe."
+  },
+  {
+    "stressor_id": "S215",
+    "source_states": [
+      "OB19",
+      "OB03",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Zwei Sender nicht unterscheidbar",
+        "kind": "ungewissheit",
+        "conditions": "Original und Klon besitzen dieselbe vollständige beobachtbare Identität ohne unabhängigen Inkarnationsbeleg",
+        "persistence": "Interleavte Pakete bleiben mehrdeutig solange beide oder ihre alten Daten ankommen",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Gesundheitszuordnung zum Original ist kein unterscheidender Gegenstand vorhanden, Signatur derselben Identität löst nichts",
+        "validation": "Unabhängig geprüfte Inkarnationen ordnen jedes Paket eindeutig zu"
+      },
+      {
+        "state": "Getrennte nicht kopierte Inkarnationen",
+        "kind": "halt",
+        "conditions": "Entwurf registriert beide Starts unter unabhängiger Inkarnationsautorität und erhält Frische getrennt",
+        "persistence": "Klon bleibt separat gesund während Originalablauf sichtbar bleibt, bei Autoritätskollision wieder unbekannt",
+        "residue_ids": [
+          "OBR004"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Monitor kann beide Quellen getrennt nutzen statt Klongesundheit auf Original zu übertragen",
+        "validation": "Klon mit kopiertem Namen erneuert den Gesundheitsbeleg des gestoppten Originals"
+      }
+    ],
+    "architectural_consequence": "Kloninkarnation unabhängig von kopiertem logischem Namen vergeben. Bei vollständig kopierter Autorität ehrliche Mehrdeutigkeit statt erfundener Unterscheidung."
+  },
+  {
+    "stressor_id": "S216",
+    "source_states": [
+      "OB27",
+      "OB25",
+      "OB02"
+    ],
+    "branches": [
+      {
+        "state": "Monitor erschöpft gemeinsame Ressourcen",
+        "kind": "extern-erzwungen",
+        "conditions": "Neue Tokenlabels bleiben gespeichert und teilen unbeschränkten Speicher mit Kern, bestätigte Diskdaten bleiben intakt",
+        "persistence": "Weiterer Tokeninput hält Wachstum bis Erschöpfung, ohne Input oder Freigabe kein selbsttragender Beweis",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Nach Entlastung bleibt lesbarer historischer Bestand nutzbar, weder laufender Monitor noch Kernlatenz sind geschützt",
+        "validation": "Unter fortgesetzten neuen Labels bleiben tatsächlich Gesamtbytes begrenzt und Kernelressourcen frei"
+      },
+      {
+        "state": "Begrenzte Reihen mit sichtbarer Lücke",
+        "kind": "halt",
+        "conditions": "Serienbudget greift vor Allokation und Monitoringressourcen sind insgesamt vom Kern begrenzt",
+        "persistence": "Neue Labels werden verworfen, vorhandene Reihen und Verlustzähler bleiben innerhalb Budget lesbar",
+        "residue_ids": [
+          "OBR009"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann begrenzte Metriken weiter lesen und weiß um ausgelassene Reihen, keine Rekonstruktion sämtlicher Token",
+        "validation": "Unbekannte Labelwerte erhöhen Speicher trotz ausgeschöpftem Budget oder Verwerfung bleibt unsichtbar"
+      }
+    ],
+    "architectural_consequence": "Labelanzahl vor Allokation und aggregierten Monitoringbedarf begrenzen. Eigener Prozess ohne Ressourcenisolation schützt den Kernel nicht."
+  },
+  {
+    "stressor_id": "S217",
+    "source_states": [
+      "OB13",
+      "OB03",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Collector blockiert nach bereits erfolgtem Commit",
+        "kind": "halt",
+        "conditions": "Export liegt nach durablem Commit und vor Antwort, Collector hängt ohne wirksame Frist, alter und neuer bestätigter Bestand lesbar",
+        "persistence": "Caller wartet bis Export freikommt, Timeout würde bereits angewandte Mutation nicht zurückrollen",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Storeleser kann bestätigte Mutation prüfen obwohl Caller keine Antwort hat, kein automatisches Wiederholen aus Exportfehler",
+        "validation": "Mutation ist nachweislich vor Exportwartebeginn noch nicht committed, dann gilt stattdessen Vor-Commit-Wartezweig"
+      },
+      {
+        "state": "Collector blockiert vor Commit",
+        "kind": "halt",
+        "conditions": "Synchroner Export ist tatsächlich Voraussetzung vor Commit und nie kehrt zurück, frühere Daten intakt",
+        "persistence": "Keine neue Mutation bis Warteende oder explizitem Abbruch, keine Attraktion nötig",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Nur vor dem Versuch bestätigter Bestand bleibt lesbar, neue Wirkung darf nicht behauptet werden",
+        "validation": "Neuer Commit ist vor Freigabe dieses vorgeschalteten Exporters dauerhaft vorhanden"
+      },
+      {
+        "state": "Asynchroner endlicher Tracerest",
+        "kind": "transient",
+        "conditions": "Vorgeschlagener Exportpuffer ist unabhängig vom Commitabschluss und hat Gesamtlimit",
+        "persistence": "Collectorstörung verwirft bei vollem Puffer Spans statt weitere Commits zu blockieren, Export kann später Rest drainieren",
+        "residue_ids": [
+          "OBR010"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Kernel kann Antworten bestätigen und Diagnose verbleibende Spans nutzen, Vollständigkeit der Traces ist verloren",
+        "validation": "Collectorstillstand blockiert Commitantwort oder Speicher steigt unbegrenzt"
+      }
+    ],
+    "architectural_consequence": "Traceexport aus Commitbestätigung entfernen, Position des Exportfehlers vor oder nach Commit ausdrücklich festhalten."
+  },
+  {
+    "stressor_id": "S218",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Debug ändert kritische Zugriffsreihenfolge",
+        "kind": "transient",
+        "conditions": "Unabhängige oder gering eingreifende Messung belegt bei gleicher Exposition eine andere konkurrierende Reihenfolge durch Debuglatenz",
+        "persistence": "Rennen fehlt nur unter veränderter Ordnung, nach Abschalten kann es zurückkehren, keine Attraktion belegt",
+        "residue_ids": [
+          "OBR011"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Analyst kann kausale Timingalternative anhand Vergleichsdossier prüfen, Produktionsfehlerfreiheit ist nicht erhalten",
+        "validation": "Gleiche Reihenfolge und Exposition ergeben mit und ohne Debug dieselbe Fehlerhäufigkeit"
+      },
+      {
+        "state": "Weniger Chancen statt entferntem Rennen",
+        "kind": "ungewissheit",
+        "conditions": "Debug halbiert etwa Durchsatz, Versuchsanzahl und seltene Racewahrscheinlichkeit sind unbekannt",
+        "persistence": "Beobachtete Nullfehler entscheiden nicht zwischen Samplemangel und kausaler Beseitigung",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Ohne Expositions- und Reihenfolgenachweis ist keine belastbare Race-Diagnose als Restfähigkeit belegt",
+        "validation": "Ein kontrollierter Vergleich bei gleicher Exposition trennt Häufigkeit und Reihenfolgeeffekt"
+      }
+    ],
+    "architectural_consequence": "Instrumentierungsmodus Exposition und alternative Ordnungsbelege erhalten. Debug-Erfolg ist keine Reparaturgarantie; ursprüngliche Einordnung bleibt ohne historische IDs."
+  },
+  {
+    "stressor_id": "S219",
+    "source_states": [
+      "OB09",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Serielle lokale Erfolge verpassen Gesamtfrist",
+        "kind": "verlust",
+        "conditions": "Alle acht Schritte brauchen nacheinander neun Sekunden, Vertrag endet zehn Sekunden nach Beginn, Zeitdaten bleiben erhalten",
+        "persistence": "72 Sekunden kritischer Pfad machen vergangene Zehnsekundenfrist unwiederbringlich, keine Schleife",
+        "residue_ids": [
+          "OBR012"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann Fristverletzung und Phasen bestimmen, späteres Ergebnis heilt Timeliness nicht",
+        "validation": "Ablaufbelege zeigen überlappende statt serielle neunsekündige Abschnitte"
+      },
+      {
+        "state": "Gemeinsames Budget beendet oder erlaubt begrenzt",
+        "kind": "abschluss",
+        "conditions": "Propagierte Frist wird vor jedem weiteren Dispatch geprüft, oder acht überlappende Schritte samt Overhead liegen innerhalb zehn Sekunden",
+        "persistence": "Fristablauf endet in wahrer Ablehnung, nur rechtzeitiger fachlicher Erfolg ist Erfüllung",
+        "residue_ids": [
+          "OBR012"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Dispatcher kann verbleibende Zeit nutzen ohne neue Neunsekundenfrist je Hop, Abbruchfreigabe fremder Ressourcen bleibt gesondert",
+        "validation": "Später Hop erhält ein erneuertes Budget oder ein abgelaufener Abbruch wird als Geschäftserfolg gemeldet"
+      }
+    ],
+    "architectural_consequence": "Eine Gesamtfrist mit deklariertem Ursprung über Hops tragen, reale kritische Pfade statt Layerzahl addieren. Ablaufverweigerung ist kein nützliches Geschäftsergebnis."
+  },
+  {
+    "stressor_id": "S220",
+    "source_states": [
+      "OB09",
+      "OB15",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Geschäftsfrist beim Dispatch schon verloren",
+        "kind": "verlust",
+        "conditions": "Ende-zu-Ende-Vertrag beginnt bei Erstellung und ist kürzer als 48 Stunden, Ursprungs- und Queuezeit bleiben lesbar",
+        "persistence": "Vergangene Frist ist irreversibel, fünf Sekunden Dienst ändern den Ursprung nicht",
+        "residue_ids": [
+          "OBR012"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann Queueverlust ausweisen und Dispatcher veraltete Aufnahme ablehnen, Erfolg in fünf Sekunden ist keine Gesamterfüllung",
+        "validation": "Ursprünglicher gültiger Vertrag erlaubt die 48 Stunden ausdrücklich"
+      },
+      {
+        "state": "Ehrliche enge Dienstzeit ohne Gesamtzusage",
+        "kind": "abschluss",
+        "conditions": "Tatsächlicher Vertrag beginnt erst bei Dispatch, Task ist noch gültig und Dienst endet innerhalb fünf Sekunden, Queuezeit separat erhalten",
+        "persistence": "Dieser Dienstvertrag ist erfüllt, Gesamtalter bleibt 48 Stunden plus Dienst und beweist keine kurze Kundenerfahrung",
+        "residue_ids": [
+          "OBR012",
+          "OBR013"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Auftraggeber kann den engeren Erfolg und offenen Gesamtnenner lesen ohne Queuezeit zu unterschlagen",
+        "validation": "Dashboard oder Vertrag nennt die fünf Sekunden Ende-zu-Ende oder löscht den Aufnahmeeintrag"
+      }
+    ],
+    "architectural_consequence": "Queuezeit nicht mit frischem Servicetimer überschreiben. Vertragsursprung explizit, Service-SLO darf als enger Claim bestehen bleiben."
+  },
+  {
+    "stressor_id": "S221",
+    "source_states": [
+      "OB07",
+      "OB01",
+      "OB09"
+    ],
+    "branches": [
+      {
+        "state": "Zwölfjähriger berechtigter Freigabehalt",
+        "kind": "halt",
+        "conditions": "Freigabe fehlt und Vertrag hat keine automatische Taskbeendigung, erhaltene Absicht passiert durchgesetztes Dispatchgate",
+        "persistence": "Nur neue gültige Entscheidung oder spätere Disposition beendet Halt, 200 ms CPU ändern nichts",
+        "residue_ids": [
+          "OBR007"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann Absicht weiterhin prüfen ohne frühere Zustimmung zu erfinden, Leasefreigabe folgt daraus nicht",
+        "validation": "Task wird ohne passende Freigabe ausgeführt oder tatsächliche Ablaufregel hat ihn längst beendet"
+      },
+      {
+        "state": "Abgelaufene Gelegenheit wahrheitsgemäß beendet",
+        "kind": "abschluss",
+        "conditions": "Expliziter Geschäftstermin beziehungsweise Freigabeablauf existiert und vorgeschlagenes Gate disponiert ihn als abgelaufen",
+        "persistence": "Taskdisposition endet, vergangener Termin bleibt verloren, externe Teilnehmer dürfen nicht schon akzeptiert haben",
+        "residue_ids": [
+          "OBR007",
+          "OBR012"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator erhält einen wahren Ablaufbefund statt automatischer jahrzehntealter Ausführung, kein erfolgreicher Geschäftsabschluss",
+        "validation": "Ablaufstatus erlaubt später Dispatch ohne neue Entscheidung oder behauptet erfolgreiche ursprüngliche Leistung"
+      }
+    ],
+    "architectural_consequence": "Freigabealter und Ressourcenbelegung von Rechenzeit trennen. Keine beliebige Frist unterstellen, Erlaubnisablauf und Geschäftstermin getrennt modellieren."
+  },
+  {
+    "stressor_id": "S222",
+    "source_states": [
+      "OB15",
+      "OB03",
+      "OB10"
+    ],
+    "branches": [
+      {
+        "state": "Offene Arbeit aus Anzeige ausgeschlossen",
+        "kind": "ungewissheit",
+        "conditions": "Dashboard zeigt nur Abschlüsse, darunterliegende offene Taskdatensätze sind noch lesbar",
+        "persistence": "Selektionsfehler bleibt solange Filter unverändert, fehlende Anzeige beweist noch keine komplette Sloterschöpfung",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann mit anderem Bestandslesepfad offene Tasks finden, angezeigte schnelle Statistik erklärt deren Zustand nicht",
+        "validation": "Auch zugrundeliegende offene Einträge sind gelöscht oder Dashboardnenner enthält sie bereits"
+      },
+      {
+        "state": "Offene Alter bleiben im Nenner",
+        "kind": "halt",
+        "conditions": "Aufnahmejournal und alle Status werden in vorgeschlagener Messung abgeglichen, Hänger selbst besteht fort",
+        "persistence": "Messung zeigt wachsende zensierte Alter bis Hänger endet oder explizit disponiert wird",
+        "residue_ids": [
+          "OBR013"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Dashboardnutzer kann hängenden Rest wahrnehmen statt nur Überlebende zu sehen, Durchführung bleibt blockiert",
+        "validation": "Ein nie abgeschlossener aufgenommener Task verschwindet aus Nenner und Altersanzeige"
+      }
+    ],
+    "architectural_consequence": "Aufnahmen und offene Alter neben abgeschlossenen Latenzen führen. Bessere Anzeige reclaimt keinen Slot und alle Status in task::list sind keine Dashboardgarantie."
+  },
+  {
+    "stressor_id": "S223",
+    "source_states": [
+      "OB15"
+    ],
+    "branches": [
+      {
+        "state": "Geschlossener Generator verschweigt offene Nachfrage",
+        "kind": "ungewissheit",
+        "conditions": "Ein Client wartet unbegrenzt und sendet nichts nach, Behauptung betrifft dagegen fortgesetzte offene Produktionsankünfte",
+        "persistence": "Testangebot fällt mit Antworten aus, über reale offene Last ergibt sich kein dynamischer Endzustand",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Vorhandene schnelle Abschlüsse belegen keine Bedienbarkeit unter nicht angebotener Last, fehlend sind echte Ankunftsannahme und Nichtantwortnenner",
+        "validation": "Unabhängige Aufnahmedaten zeigen dass deklarierte offene Ankunftsrate trotz Hänger weiter angeboten wurde"
+      },
+      {
+        "state": "Messbarer enger Closed-loop-Vertrag",
+        "kind": "halt",
+        "conditions": "Reale Population hat genau den dokumentierten geschlossenen Ankunftsprozess, Aufnahmen inklusive wartender Requests bleiben erhalten",
+        "persistence": "Hängende Clients hören real auf zu senden, enge Lastbeschreibung bleibt wahr ohne Gesundheitsgarantie",
+        "residue_ids": [
+          "OBR013",
+          "OBR014"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Analyst kann diesen Clientprozess und dessen offene Wartezeit auswerten, keine offene Last oder allgemeine Stabilität ableiten",
+        "validation": "Testbericht überträgt eingeschränkte Population auf unabhängige fortlaufende Produktionsankünfte"
+      }
+    ],
+    "architectural_consequence": "Angebotene Aufnahmen Antworten und Nichtantworten getrennt messen. Closed-loop ist für passende reale Clientpopulation legitim, nicht universeller Lastbeweis."
+  },
+  {
+    "stressor_id": "S224",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Erhaltene Samples erlauben nur enge Aussage",
+        "kind": "ungewissheit",
+        "conditions": "1000 erhaltene schnelle fehlerfreie Samples haben benannte Auswahl, für Binomialgrenze zusätzlich unabhängige stationäre Bernoulliversuche",
+        "persistence": "Sampleinformation bleibt begrenzt, bei 95 Prozent liegt obere Fehlerwahrscheinlichkeit etwa 0,002991 und nicht 0,00001",
+        "residue_ids": [
+          "OBR014"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Analyst kann tatsächliche Stichprobe und Unsicherheit nutzen, p99.999 oder Zeitverfügbarkeit sind dadurch nicht gesichert",
+        "validation": "Ein belastbarer struktureller Beweis oder repräsentative zusätzliche Daten tragen exakt den behaupteten Nenner und Konfidenz"
+      },
+      {
+        "state": "Produktionsverfügbarkeit bleibt unbestimmt",
+        "kind": "offen",
+        "conditions": "Verfügbarkeitseinheit Ausfälle Nichtabschlüsse Auswahl und künftige Last sind unbekannt",
+        "persistence": "Ohne diese Annahmen entscheiden tausend schnelle Samples weder über seltene Hänger noch über Betriebsregime",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für eine konkrete langfristige Verfügbarkeitszusage ist keine tragfähige Reststruktur benannt, Datenverlust des übrigen Systems wird nicht behauptet",
+        "validation": "Vorab definierter Nenner samt offener Zeiten und ausreichender Evidenz entscheidet den konkreten Claim"
+      }
+    ],
+    "architectural_consequence": "Messgröße Population Stationarität und Konfidenz festhalten. Statistische Kritik ergänzt den offenen Zustand, erfindet keine operative Konvergenz."
+  },
+  {
+    "stressor_id": "S225",
+    "source_states": [
+      "OB13",
+      "OB10",
+      "OB01",
+      "OB15"
+    ],
+    "branches": [
+      {
+        "state": "All-of-Halt mit nutzbaren Teilbefunden",
+        "kind": "halt",
+        "conditions": "Ein Pflichtprüfer antwortet nie, andere 9999 zugeordnete Resultate und Sollmanifest sind erhalten",
+        "persistence": "Barrier wartet bis Pflichtbeleg oder zulässige explizite Fehlerdisposition, allein ein Parent erschöpft nicht alle Slots",
+        "residue_ids": [
+          "OBR015"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann vorhandene Befunde prüfen, fachliche Vollständigkeit und Freigabe sind nicht erhalten",
+        "validation": "Vermisster Prüfer ist nach ursprünglichem Vertrag optional oder Teilresultat wird trotzdem als vollständig freigegeben"
+      },
+      {
+        "state": "Begrenzter Parent endet unvollständig",
+        "kind": "abschluss",
+        "conditions": "Vertrag erlaubt explizites unvollständiges Ende und tatsächliche Poolaufnahme bleibt begrenzt, fremde Childwirkungen werden separat reconciliert",
+        "persistence": "Parent gibt seinen nachgewiesenen Slot frei, fehlendes Prüfergebnis bleibt fehlend",
+        "residue_ids": [
+          "OBR015",
+          "OBR016"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Teildiagnose und nicht vom wartenden Parent belegte Restkapazität bleiben nutzbar, kein erfundener zehntausendster Befund",
+        "validation": "Parent behält nach terminaler Disposition seinen Slot oder fehlendes Ergebnis erscheint als erfolgreich geprüft"
+      }
+    ],
+    "architectural_consequence": "Sollmenge und fehlende Prüfer explizit halten. Zeitlich begrenzte Ablehnung oder Teildiagnose dürfen nicht unbemerkt All-of-Semantik ersetzen."
+  },
+  {
+    "stressor_id": "S226",
+    "source_states": [
+      "OB17",
+      "OB16",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Zwei spekulative Rechnungswirkungen angenommen",
+        "kind": "verlust",
+        "conditions": "Hedges nutzen unterschiedliche Identitäten oder Teilnehmer dedupliziert nicht, beide werden irreversibel akzeptiert, lokales Journal erhalten",
+        "persistence": "Historische Duplikation bleibt, spätere finanzielle Korrektur kann Schaden mindern aber Annahmen nicht ungeschehen machen",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann erhaltene Versuche zur Folgenbearbeitung nutzen, ursprüngliche Nichtduplikation ist verloren",
+        "validation": "Teilnehmerbuch zeigt nur eine Annahme der Geschäftsoperation trotz zweier Aufrufe"
+      },
+      {
+        "state": "Zwei Aufrufe, eine gebundene Annahme",
+        "kind": "abschluss",
+        "conditions": "Beide erlaubten Hedges tragen dieselbe stabile Geschäftsidentität und Teilnehmer dedupliziert atomar über ganzen Horizont",
+        "persistence": "Eine fachliche Annahme bleibt terminal, erneute Transportaufrufe liefern nur Status derselben Identität",
+        "residue_ids": [
+          "OBR018"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Recovery kann einen Ausgang zuordnen und Teilnehmer doppelte Annahme abweisen, Transportlast ist dadurch nicht reduziert",
+        "validation": "Zwei Aufrufe derselben Identität erzeugen zwei Annahmen oder Teilnehmer vergisst Identität bevor Nachzügler enden"
+      }
+    ],
+    "architectural_consequence": "Effektvolle Hedges nur mit bewiesenem Teilnehmervertrag und gültiger Aktionsfreigabe betrachten. Lokales Versuchsjournal ersetzt keine atomare Annahmededuplication."
+  },
+  {
+    "stressor_id": "S227",
+    "source_states": [
+      "OB15",
+      "OB17",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "999 Befunde, Pflichtvollständigkeit verloren",
+        "kind": "ungewissheit",
+        "conditions": "Tausend Prüfer sind erforderlich, einer fehlt und vorhandene 999 Resultate sowie Sollmenge sind erhalten",
+        "persistence": "Lücke bleibt bis echter fehlender Befund oder ehrliche unvollständige Disposition, schneller Report schließt sie nicht",
+        "residue_ids": [
+          "OBR015"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann 999 Resultate prüfen, Aggregator darf damit weder volle Prüfung noch zulässige Aktion behaupten",
+        "validation": "Ursprünglicher Vertrag verlangt tatsächlich nur 999 und fehlender Prüfer hat kein Vetorecht"
+      },
+      {
+        "state": "Fehlendes Veto führt zu angenommener Fehlaktion",
+        "kind": "verlust",
+        "conditions": "Tausendster Pflichtprüfer hätte vetoisiert, fälschlich vollständiger Report öffnet Dispatch und irreversible Fehlaktion wird angenommen",
+        "persistence": "Historische falsche Annahme bleibt auch wenn Prüfung später vervollständigt wird",
+        "residue_ids": [
+          "OBR015"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltenes Soll-/Istmanifest erlaubt Fehlerursache zu prüfen, Freigabekorrektheit der vergangenen Aktion ist verloren",
+        "validation": "Kein nachfolgender Effekt wurde angenommen oder fehlender Pflichtbefund hätte Aktion nicht verhindert"
+      },
+      {
+        "state": "Ehrlicher ursprünglicher Schwellvertrag erfüllt",
+        "kind": "abschluss",
+        "conditions": "Vor Beginn erlaubter Vertrag verlangt genau erreichten Schwellwert, fehlende Identität wird offengelegt und hat kein Pflichtveto",
+        "persistence": "Erfüllung gilt nur für diesen engeren Vertrag, keine nachträgliche Umschreibung der All-of-Zusage",
+        "residue_ids": [
+          "OBR015"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Auftraggeber kann qualifiziertes Ergebnis samt Nenner nutzen ohne fehlenden Befund zu erfinden",
+        "validation": "Schwelle wird erst nach Ausbleiben geändert oder Verbraucher sieht eine Tausend-von-Tausend-Behauptung"
+      }
+    ],
+    "architectural_consequence": "Pflichtmenge vor Beginn binden. Schwellenergebnis ist nur bei ursprünglichem Schwellvertrag vollständig, ein fehlendes Veto bleibt echte Lücke."
+  },
+  {
+    "stressor_id": "S228",
+    "source_states": [
+      "OB10",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Immer mehr Slots dauerhaft belegt",
+        "kind": "extern-erzwungen",
+        "conditions": "Endlicher Pool, fortgesetzte Ankünfte mit positiver Hangwahrscheinlichkeit und keine Freigabe, bestätigte Taskdaten bleiben lesbar",
+        "persistence": "Jeder Hang hält einen weiteren Slot, bei Ende neuer Ankünfte stoppt Wachstum aber belegte Slots bleiben",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann erhaltene Aufträge inspizieren, verfügbare Slots und Zeit bis Erschöpfung sind nicht aus Häufigkeit allein gesichert",
+        "validation": "Alle Hänger geben Slots innerhalb einer belegten endlichen Grenze frei"
+      },
+      {
+        "state": "Nicht vom Hang belegbarer Pool bleibt nutzbar",
+        "kind": "halt",
+        "conditions": "Gesamtaufnahme je Pool ist begrenzt und reale getrennte Kapazität schützt andere zugelassene Arbeit, Hänger behalten ihre belegten Slots",
+        "persistence": "Störpool kann voll bleiben, isolierter Rest dient weiter solange dessen eigener Bedarf passt",
+        "residue_ids": [
+          "OBR016"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Scheduler kann tatsächlich freie reservierte Kapazität nutzen, Timeout allein beendet Hänger oder deren Writes nicht",
+        "validation": "Ein Hangpool sättigt den gemeinsamen Lock und verhindert auch Arbeit der angeblich isolierten Klasse"
+      }
+    ],
+    "architectural_consequence": "Slotresidenz und belegte Isolation messen, nicht aus seltenem Prozentwert eine Lebensdauer ableiten. Reclamation erfordert echte Beendigung oder Fence."
+  },
+  {
+    "stressor_id": "S229",
+    "source_states": [
+      "OB09",
+      "OB03",
+      "OB13"
+    ],
+    "branches": [
+      {
+        "state": "Ein Scope verpasst Fristen, Rest hat Service",
+        "kind": "extern-erzwungen",
+        "conditions": "Fsync-Pausen betreffen wirklich nur isolierte Scopekapazität, ursprüngliche Frist kürzer, Zeit- und Aufnahmebelege erhalten",
+        "persistence": "Wiederkehrende scopebezogene Pausen erhalten Latenzproblem, globales Mittel glättet es ohne Ursache zu ändern",
+        "residue_ids": [
+          "OBR012",
+          "OBR013",
+          "OBR016"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Andere isolierte Scopes können arbeiten und Operator sieht betroffenen Nenner, verlorene Scopefristen bleiben verloren",
+        "validation": "Ein globaler Writerlock überträgt denselben Stillstand auf alle behauptet isolierten Scopes"
+      },
+      {
+        "state": "Globaler Writer zieht andere Scopes mit",
+        "kind": "halt",
+        "conditions": "Fsync hält tatsächlich gemeinsamen nicht präemptierbaren Writer, alter Store lesbar",
+        "persistence": "Andere Writes warten bis fsync endet, Serviceanteil auf höherer Queueebene schafft keinen I/O-Fortschritt",
+        "residue_ids": [
+          "OBR001",
+          "OBR013"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Reads und aufgenommene offene Arbeit bleiben inspizierbar, keine garantierte Schreibrestkapazität",
+        "validation": "Neue Writes anderer Scopes committen während derselbe globale Lock unverändert gehalten wird"
+      }
+    ],
+    "architectural_consequence": "Scopebezogene Aufnahme- und Commitzeiten mit tatsächlicher I/O-Topologie verbinden. Faire Queues können einen ununterbrechbaren globalen fsync nicht isolieren."
+  },
+  {
+    "stressor_id": "S230",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Periodische Allokation bindet Pause an Geschäftstermin",
+        "kind": "extern-erzwungen",
+        "conditions": "Gering eingreifende Messung zeigt periodische Allokationsschwelle und gleichbleibende Deadlinephase, nicht echten unabhängigen Zufall",
+        "persistence": "Wiederkehrende Last triggert Sammlung, feste Phase legt Pause immer auf Termin, Verschieben der Phase kann Kollision beenden",
+        "residue_ids": [
+          "OBR011",
+          "OBR012"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Analyst kann Kollision und unveränderten Termin anhand Timingdossier prüfen, vergangene Frist ist nicht gerettet",
+        "validation": "Phase verschieben bei unveränderter Allokation ändert Kollisionen nicht oder Trigger ist tatsächlich unabhängig"
+      },
+      {
+        "state": "Zufall oder selektive Erinnerung bleibt offen",
+        "kind": "offen",
+        "conditions": "Triggerverteilung Stichprobengröße und Auswahl der berichteten Deadlines fehlen",
+        "persistence": "Behauptetes immer trennt Zufall Alias und Beobachterselektion nicht, kein eindeutiges Regime",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für konkrete kausale Timingdiagnose ist kein ausreichend spezifiziertes Dossier belegt",
+        "validation": "Vorregistrierte lange Exposition samt Zufallsbaseline weist stabilen Phaseneffekt nach"
+      }
+    ],
+    "architectural_consequence": "Collectortrigger Deadlinephase Jitter Exposition und Auswahlmodus gemeinsam erfassen. Wiederholtes Zusammentreffen allein ist keine Lock-in-Dynamik."
+  },
+  {
+    "stressor_id": "S231",
+    "source_states": [
+      "OB28",
+      "OB16",
+      "OB17",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Letzte notwendige Zuordnung erloschen",
+        "kind": "verlust",
+        "conditions": "Lokale Historie gelöscht und Inventar schließt alle rechtmäßig zugänglichen Teilnehmerzuordnungen und Kopien im benötigten Horizont aus",
+        "persistence": "Für dieses alte Ergebnis bleibt Klassifikation unreproduzierbar, neue Annahmeevidenz würde Inventarprämisse widerlegen",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Zuordnung dieses 90 Tage verspäteten Ergebnisses ist verloren, kein Verlust des restlichen Stores oder automatische Zweitwirkung behauptet",
+        "validation": "Eine rechtmäßig erhaltene stabile Teilnehmeridentität ordnet Antwort eindeutig zu"
+      },
+      {
+        "state": "Teilnehmer kennt Identität noch",
+        "kind": "abschluss",
+        "conditions": "Lokale Historie abgelaufen, aber derselbe Teilnehmer führt tatsächlich noch autorisiert abfragbares Annahmebuch über den ganzen Horizont",
+        "persistence": "Passende Abfrage beendet genau die Ausgangsungewissheit, lokale Löschung wird nicht als nie versucht gelesen",
+        "residue_ids": [
+          "OBR018"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Recovery kann diesen Ausgang und eventuelle Retries derselben Identität unterscheiden, keine externe Kopie ohne Voraussetzung ergänzt",
+        "validation": "Teilnehmer kann wegen eigener Retention oder neuer Retryidentität den Zusammenhang nicht eindeutig liefern"
+      },
+      {
+        "state": "Nur lokale Sicht fehlt, globale Lage unbekannt",
+        "kind": "ungewissheit",
+        "conditions": "Lokale Historie weg, Inventar externer Retention und eventueller bereits erfolgter Retries ist unbekannt",
+        "persistence": "Bis Inventar oder rechtmäßige Evidenz vorliegt bleiben Ausgang und Duplikatzahl offen",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Kein nutzbarer Korrelationsgegenstand ist aktuell belegt, aus fehlender lokaler Historie darf weder Totalverlust noch zweite Annahme folgen",
+        "validation": "Autorisierte Abfrage zeigt entweder stabile Zuordnung oder ein geschlossenes Inventar belegt endgültigen Verlust"
+      }
+    ],
+    "architectural_consequence": "Lokale und externe Retention samt spätester Antwort gemeinsam festlegen. Späte Antwort allein dupliziert nichts; ohne lawful Korrelation keine rekonstruierte Gewissheit."
+  },
+  {
+    "stressor_id": "S232",
+    "source_states": [
+      "OB17",
+      "OB07",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "2046 angenommene veraltete Aktion",
+        "kind": "verlust",
+        "conditions": "Empfänger oder Firma hat sich geändert und Teilnehmer akzeptiert alte nicht mehr gültige Absicht, Versuchsjournal erhalten",
+        "persistence": "Vergangene ungewollte Wirkung bleibt nach Stop wahr, statischer alter Empfänger allein beweist alte Erlaubnis nicht",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Recovery kann dokumentierten Versuch zur Folgenklärung nutzen, Gültigkeit dieser angenommenen Aktion ist nicht erhalten",
+        "validation": "Teilnehmer lehnt vor Annahme ab oder es liegt eine tatsächlich passende aktuelle Erlaubnis vor"
+      },
+      {
+        "state": "Alter Puffer bleibt prüfbarer Halt",
+        "kind": "halt",
+        "conditions": "Gültigkeitsgate kontrolliert letzten Dispatch und verlangt neue passende Autorität sowie gebundene Empfängeridentität bei relevanter Änderung",
+        "persistence": "Alte Bytes bleiben Absicht bis berechtigte neue Entscheidung oder expliziter Ablauf",
+        "residue_ids": [
+          "OBR007",
+          "OBR035"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann Absicht prüfen und Gate falsche neue Identität ablehnen, bereits autonom beim Teilnehmer laufender Puffer wäre außerhalb Grenze",
+        "validation": "Alter Offlineeintrag wird trotz geänderter gebundener Identität ohne neue Freigabe angenommen"
+      }
+    ],
+    "architectural_consequence": "Offlinepuffer darf nicht neue Gegenwartserlaubnis aus alten Bytes ableiten. Empfängerbindung und Unternehmensnachfolge getrennt vom Erstellungsdatum prüfen."
+  },
+  {
+    "stressor_id": "S233",
+    "source_states": [
+      "OB28",
+      "OB16",
+      "OB21",
+      "OB25"
+    ],
+    "branches": [
+      {
+        "state": "Korrelation nach endgültiger Löschung verloren",
+        "kind": "verlust",
+        "conditions": "Erforderliche Zuordnung wurde rechtmäßig überall im zulässigen Inventar gelöscht, keine erlaubte Rekonstruktion vorhanden",
+        "persistence": "Für dieses Ergebnis bleibt richtige Zuordnung unmöglich, Datenschutzgewinn der Löschung bleibt davon getrennt",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Fähigkeit zur Zuordnung ist verloren, sensible Bytes selbst sind kein nutzbares Zustellrecht und keine imaginäre Quarantäne wird angenommen",
+        "validation": "Eine rechtmäßig zugängliche unabhängige Zuordnung löst den Rückläufer ohne verbotene Wiederherstellung auf"
+      },
+      {
+        "state": "Unzugeordneten Inhalt vor Weitergabe verworfen",
+        "kind": "abschluss",
+        "conditions": "Entwurfsgrenze erlaubt und erzwingt frühe begrenzte Ablehnung ohne sensible Logs oder Speicherung, Zuordnung bleibt gelöscht",
+        "persistence": "Dieser Rückläufer endet ohne Routing, spätere Rückläufer benötigen dieselbe eigenständige Prüfung",
+        "residue_ids": [
+          "OBR042"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Kleine zulässige Protokollverarbeitung und klare Ablehnung bleiben nutzbar, weder Inhalt noch Identitätszuordnung werden als erhalten ausgegeben",
+        "validation": "Ablehnung puffert unbegrenzt oder schreibt sensible Payload dennoch in Log beziehungsweise fremden Scope"
+      },
+      {
+        "state": "Geratene Zuordnung legt Daten offen",
+        "kind": "verlust",
+        "conditions": "Handler routet oder loggt Rückläufer zu unberechtigtem Leser und dieser erhält Klartext",
+        "persistence": "Offengelegte Fakten lassen sich nicht zurückholen, Stop verhindert höchstens weitere Offenlegung",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Geheimhaltung dieser gelesenen Payload bleibt kein Residue, andere nicht offengelegte Daten sind nicht automatisch verloren",
+        "validation": "Kein unberechtigter Leser erhält tatsächlich Inhalte oder der Handler verwirft vor Offenlegung"
+      }
+    ],
+    "architectural_consequence": "Nach legaler Löschung keine Zuordnung heimlich retten. Unassoziierte sensible Rückläufer müssen vor Log Routing und dauerhafter Aufnahme mit expliziter Rechtsgrenze behandelt werden."
+  },
+  {
+    "stressor_id": "S234",
+    "source_states": [
+      "OB17",
+      "OB16",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Cancel nach tatsächlicher Annahme",
+        "kind": "verlust",
+        "conditions": "Teilnehmer akzeptiert irreversible Aktion eine Mikrosekunde vorher und führt autorisiert lesbares Annahmebuch",
+        "persistence": "Vergangene Aktion kann nicht ungeschehen werden, spätere Cancelwirkung beendet nur weitere Arbeit",
+        "residue_ids": [
+          "OBR018"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann echte Annahmereihenfolge und Folgen klären, Nichtausführung ist für diese Aktion verloren",
+        "validation": "Teilnehmerledger belegt Cancel-Fence vor tatsächlichem irreversiblen Annahmepunkt"
+      },
+      {
+        "state": "Lokaler Cancel ohne bekannte externe Ordnung",
+        "kind": "ungewissheit",
+        "conditions": "Nur lokale Cancelanfrage und Versuchsjournal sind erhalten, externe Antwort oder Reihenfolgenachweis fehlt",
+        "persistence": "Warten endet erst durch passende Teilnehmerbelege, Timeout ist weder Erfolg noch Rollback",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Recovery kann Wiederholung zurückhalten und Unsicherheit zeigen, lokale Anfrage beweist externe Annahme oder Nichtannahme nicht",
+        "validation": "Passende autoritative externe Reihenfolge liegt bereits vor und löst den konkreten Ausgang auf"
+      },
+      {
+        "state": "Cancel gewinnt am Wirkungspunkt als Gegenbedingung",
+        "kind": "abschluss",
+        "conditions": "Anderer Timingzweig: Teilnehmer wendet kontrolliertes Cancel-Fence vor Annahme an und belegt keine frühere Annahme",
+        "persistence": "Für genau diese Operation endet weitere Annahmefähigkeit, vergangene andere Aktionen bleiben getrennt",
+        "residue_ids": [
+          "OBR018"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann echte Abbruchwirkung von bloßer Kanalannahme unterscheiden, dieser Zweig gilt nicht bei vorgegebener umgekehrter Mikrosekundenordnung",
+        "validation": "Spätere Nachricht derselben Operation wird trotz bestätigtem vorgelagertem Cancel-Fence noch angenommen"
+      }
+    ],
+    "architectural_consequence": "Cancel-Anfrage Cancelannahme und externe irreversible Annahme getrennt belegen. Mikrosekundenordnung am Teilnehmer zählt, lokaler Timestamp ist kein Fence."
+  },
+  {
+    "stressor_id": "S235",
+    "source_states": [
+      "OB18",
+      "OB32",
+      "OB17",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Enkel schreibt nach Parenttod weiter",
+        "kind": "transient",
+        "conditions": "Enkel lebt mit eigener Schreibautorität zwei Tage weiter, Lease bleibt im betrachteten Pfad gehalten",
+        "persistence": "Endliche Enkelarbeit braucht keine Rückkopplung, Ende erst mit tatsächlichem Exit oder wirksamem Autoritätsentzug",
+        "residue_ids": [
+          "OBR021"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Scheduler kann besetzte Ressource vor Wiedervergabe halten, das stoppt den Enkel selbst nicht und bestätigt kein Taskergebnis",
+        "validation": "Lease wird trotz behaupteter Haltegrenze wiedervergeben oder Enkel konnte seit Parentende überhaupt nicht schreiben"
+      },
+      {
+        "state": "Wiedervergabe erzeugt zwei Writer",
+        "kind": "eskalation",
+        "conditions": "TTL oder presumed-gone-Entscheidung führt tatsächlich zu Ersatzstart während Enkel weiterhin schreiben darf, Originaljournal lesbar",
+        "persistence": "Zwei Writer können bis Entzug oder Ende kollidieren, bloßer Ersatzdatensatz ohne Start reicht nicht",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Früher bestätigte Daten bleiben Inspektionsgrundlage soweit intakt, Single-Writer-Eigenschaft ist nicht erhalten",
+        "validation": "Kein Ersatzprozess startet oder alter Enkel verliert vor Start nachweislich Schreibrechte"
+      },
+      {
+        "state": "Alle Nachkommen wirksam eingefasst",
+        "kind": "abschluss",
+        "conditions": "Vollständige Autoritätsinventur und Fence am tatsächlichen Zugriffspunkt entziehen auch abgetrenntem Enkel Rechte vor Wiedervergabe",
+        "persistence": "Alte Prozesse können weiter existieren aber keine neuen autorisierten Writes ausführen, vergangene Writes bleiben abzugleichen",
+        "residue_ids": [
+          "OBR020"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Neuer Besitzer kann frei von alter Schreibautorität arbeiten, Parent-PID oder verstrichene Zeit allein genügen nicht",
+        "validation": "Abgetrennter Enkel schreibt nach bestätigter Fencegrenze weiterhin über eigene Credentials oder OS-Bypass"
+      }
+    ],
+    "architectural_consequence": "Parentende nicht als gesamte Autoritätsbeendigung führen. Leasewiedervergabe nur bei geprüftem Eigentums- und Fencevertrag, vergangene Enkelwrites separat abgleichen."
+  },
+  {
+    "stressor_id": "S236",
+    "source_states": [
+      "OB35",
+      "OB01",
+      "OB17"
+    ],
+    "branches": [
+      {
+        "state": "Cancel wartet hinter endlichem stdout",
+        "kind": "halt",
+        "conditions": "Gemeinsamer Leser oder Scheduler verarbeitet Gigabytes vor Cancel, noch keine unabhängige Controlkapazität, Versuchsjournal bleibt lesbar",
+        "persistence": "Bei endlicher Ausgabe kann Kanal später drainieren, bis dahin kann Teilnehmer weiterarbeiten oder irreversibel annehmen",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Recovery kann bekannte Versuche und unbestätigten Cancelstatus lesen, zeitgerechter Abbruch ist nicht erhalten",
+        "validation": "Cancel wird bei unverändert gesättigtem gemeinsamem Pfad innerhalb zugesagter Grenze tatsächlich verarbeitet"
+      },
+      {
+        "state": "Control trotz Datenrückstau bedienbar",
+        "kind": "halt",
+        "conditions": "Vorgeschlagene Controlaufnahme Timer und Supervisor haben eigene begrenzte Verarbeitung, vor Wirkungsannahme ist Stop noch möglich",
+        "persistence": "Cancel kann unabhängig fortschreiten, tatsächliches Ende braucht eigene Bestätigung am Wirkungspunkt",
+        "residue_ids": [
+          "OBR019"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann Anfrage wirksam weiterleiten und neue Aufnahme sperren ohne stdout abzuwarten, bereits angenommene Aktion bleibt irreversibel",
+        "validation": "Datenflut verbraucht den angeblich reservierten Eventloopturn oder Controlannahme wird ohne Wirkung als fertig ausgegeben"
+      }
+    ],
+    "architectural_consequence": "Control braucht reservierte Verarbeitung durch alle geteilten Leser und Scheduler, nicht nur zwei Pipe-Richtungen. Annahmefrist ersetzt keine externe Wirkungsfrist."
+  },
+  {
+    "stressor_id": "S237",
+    "source_states": [
+      "OB12",
+      "OB11",
+      "OB17"
+    ],
+    "branches": [
+      {
+        "state": "Endlicher multiplizierter Retrybaum",
+        "kind": "transient",
+        "conditions": "Vier Schichten wiederholen unabhängig aber endlich, keine frischen Wurzeln, Journal der logischen Aktion bleibt erhalten",
+        "persistence": "Endlicher Versuchsvorrat kann nach Fehlerende drainieren, Multiplikation allein ist kein Attraktor",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann logische Wirkung als ungewiss halten, viele Transportversuche beweisen weder mehrere Annahmen noch vorhandene Dienstkapazität",
+        "validation": "Nach vollständigem Verbrauch entstehen ohne deklarierte neue Autorität weitere Versuche"
+      },
+      {
+        "state": "Wiederholungen erhalten Überlast nach Fehlerende",
+        "kind": "attraktorhypothese",
+        "conditions": "Deklarierter positiver Grundbedarf liegt unter gesunder Kapazität, Timeoutfolgen erneuern Retryarbeit über endliche Teilbudgets hinaus, Rückstau senkt Erfolgsrate und Journal bleibt lesbar",
+        "persistence": "Lange Queue erzeugt Timeouts, diese neue Versuche, diese längere Queue und weniger nützlichen Dienst auch nach ursprünglichem Fehlerende",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Lokale Wirkungsungewissheit bleibt noch inspizierbar, rechtzeitiger Durchsatz und externe Nichtduplikation sind nicht bewiesen",
+        "validation": "Nach Fehlerende bei gleichem Grundbedarf gleicher Policy und variiertem Rückstau drainiert jede behauptete Überlastlage, Null-Neuzugänge separat prüfen"
+      },
+      {
+        "state": "Ende-zu-Ende-Budget bleibt zählbar",
+        "kind": "halt",
+        "conditions": "Alle Retryschichten konsumieren dieselbe stabile Operationsidentität und begrenzte Gesamtzulassung, verdeckte SDK-Versuche ausgeschlossen",
+        "persistence": "Budgetende hält weitere Versuche bis neue explizite Erlaubnis, keine heimliche Erneuerung durch Layerwechsel",
+        "residue_ids": [
+          "OBR022"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Dispatcher kann erlaubte Restversuche nutzen und Gesamtlast begrenzen, dieses Budget verhindert allein keine zwei externen Annahmen",
+        "validation": "Leafzahl überschreitet gemeinsame Grenze obwohl keine neue Erlaubnis erteilt wurde"
+      }
+    ],
+    "architectural_consequence": "Gemeinsames endliches Versuchsbudget von Teilnehmerdedup trennen. Vier Gesamtversuche je Schicht ergeben höchstens 256 Blätter, vier Wiederholungen fünf Versuche und höchstens 625."
+  },
+  {
+    "stressor_id": "S238",
+    "source_states": [
+      "OB12",
+      "OB11",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Einmaliger synchroner Millionenstoß",
+        "kind": "transient",
+        "conditions": "Endliche Clientmenge wiederholt genau eine begrenzte Runde, reale Restkapazität und Gesamtaufnahme sind begrenzt",
+        "persistence": "Nach Ablehnung oder Bearbeitung endet Kohorte, neue Peaks brauchen zusätzliche Retryregel",
+        "residue_ids": [
+          "OBR016",
+          "OBR022"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zugelassene Arbeit kann reservierte Kapazität nutzen und Restversuche bleiben zählbar, nicht alle Millionen Anfragen müssen erfolgreich werden",
+        "validation": "Ohne neue Autorität entstehen nach Abschluss der Kohorte weitere synchrone Wellen"
+      },
+      {
+        "state": "Gleiche Timer koppeln neue Überlastwellen",
+        "kind": "attraktorhypothese",
+        "conditions": "Timeouts erzeugen erneut synchronisierte Versuche und deklarierter Grundbedarf allein wäre tragbar, dauerhafte Absichten bleiben lesbar",
+        "persistence": "Welle überfüllt Dienst, Fehler setzen gleiche Timer, nächste Welle erhält Fehler auch bei repariertem Provider",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann erhaltene Absichten inspizieren, zeitgerechte Bedienung oder Budgeterhalt sind nicht gesichert",
+        "validation": "Nach Fehlerende bei festem Grundbedarf und gleicher Policy erzeugt variierter Rückstau keine erneuten Peaks, danach separat Neuzugänge stoppen"
+      }
+    ],
+    "architectural_consequence": "Admission und Retrybudget vor Jitter priorisieren. Timerstreuung verteilt Last, schafft aber keine Kapazität oder zulässige unbegrenzte Retryautorität."
+  },
+  {
+    "stressor_id": "S239",
+    "source_states": [
+      "OB11",
+      "OB07"
+    ],
+    "branches": [
+      {
+        "state": "Retries fressen endlichen Restbetrag",
+        "kind": "eskalation",
+        "conditions": "Auch Quotenfehler kosten knappe Mittel, Plugin reagiert mit mehr Calls und kein vorab wirksames Ausgabenlimit",
+        "persistence": "Quotenfehler erhöhen Retryrate, Calls verbrauchen Rest und erzeugen mehr Fehler, ohne Budgetreset endet Wachstum spätestens bei harter Sperre",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für den bereits verbrauchten Restbetrag ist keine Spendefähigkeit erhalten, gratis Fehler würden diesen Mechanismus nicht tragen",
+        "validation": "Fehlgeschlagene Calls sind kostenlos oder hartes Gate stoppt vor zusätzlicher Belastung"
+      },
+      {
+        "state": "Reservierter Rest bleibt gebundene Erlaubnis",
+        "kind": "halt",
+        "conditions": "Alle kostenpflichtigen Versuche verbrauchen vorher bekanntes reserviertes Budget, Quotenfehler öffnen keine neuen Mittel",
+        "persistence": "Gate hält nach Budgetende bis neue berechtigte Ausgabenentscheidung, Providerreset ist externer Anlass",
+        "residue_ids": [
+          "OBR023"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Dispatcher kann noch reservierte zulässige Versuche planen und weitere Ausgabe verweigern, vorhandene Quote allein garantiert keinen Providererfolg",
+        "validation": "Nachbelastung oder verborgene SDK-Calls überschreiten reservierten Betrag ohne neue Freigabe"
+      }
+    ],
+    "architectural_consequence": "Quotenantwort und tatsächlich belastbare Kosten unterscheiden. Hart erschöpftes Budget ist Halt, nicht unbegrenzt weiterlaufender Überlastattraktor."
+  },
+  {
+    "stressor_id": "S240",
+    "source_states": [
+      "OB12",
+      "OB26",
+      "OB11",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Begrenzte kalte Kohorte wird warm",
+        "kind": "transient",
+        "conditions": "Modelle werden über durchgesetzte Ladeplätze gestartet und Gesamtspitzenbedarf passt, erfolgreiche Warmzustände werden nicht sofort verdrängt",
+        "persistence": "Jedes Modell lädt endlich einmal, Startstoß endet ohne neue Ladeschleife",
+        "residue_ids": [
+          "OBR024"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann schrittweise nutzbare warme Agenten erhalten statt Gleichzeitigkeit zu versprechen",
+        "validation": "Erfolgreiches Laden wird vor Nutzung verdrängt oder tatsächliche Spitzenbelegung überschreitet physische Grenze"
+      },
+      {
+        "state": "Eviction und Neustart reproduzieren Ladelast",
+        "kind": "attraktorhypothese",
+        "conditions": "Lastspitze erzeugt Speicherdruck, Loader sterben oder Modelle werden vor Nutzung evicted, Neustartbudget erneuert sich, Intent auf Disk erhalten",
+        "persistence": "Erneutes Laden beansprucht Speicher, Druck zerstört Warmfortschritt, fehlende Readiness löst nächste Ladung aus",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Bestätigte Aufträge bleiben später lesbar, benutzbare warme Kapazität ist nicht gesichert",
+        "validation": "Bei Fehlerende und festem Start-/Grundbedarf stabilisiert jeder getestete Rückstau ohne erneute Loader, Null-Neustarts wäre gesonderter Policywechsel"
+      }
+    ],
+    "architectural_consequence": "Kaltstart-Spitzenbedarf und Ladezulassung getrennt vom Warmdurchsatz behandeln. Endliche Kohorte oder harter Startfehler sind keine wiedererzeugte Überlast."
+  },
+  {
+    "stressor_id": "S241",
+    "source_states": [
+      "OB26",
+      "OB13",
+      "OB11",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Leerer Cache macht Suche zum echten Pflicht-Halt",
+        "kind": "halt",
+        "conditions": "Kern wartet synchron auf benötigte Suche, kalt benötigter Dienst liefert nicht rechtzeitig, Intent und bestätigte Daten bleiben lesbar",
+        "persistence": "Warten endet erst bei erfolgreichem Warming oder expliziter Fehlerdisposition, Cacheverlust allein ist keine Schleife",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann Absicht und Bestand weiter prüfen, fachlich richtiges Ergebnis ohne notwendige Suchinformation ist nicht erhalten",
+        "validation": "Kern liefert bei dauerhaft fehlender Suche nach ursprünglichem Vertrag akzeptables Ergebnis"
+      },
+      {
+        "state": "Erlaubtes Grundresultat ohne Anreicherung",
+        "kind": "abschluss",
+        "conditions": "Ursprünglicher Vertrag erlaubt ausdrücklich Suchauslassung und Kern benutzt separaten begrenzten Pfad",
+        "persistence": "Kern endet mit markierter fehlender Anreicherung auch solange Suche kalt oder ausgefallen bleibt",
+        "residue_ids": [
+          "OBR025"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Auftraggeber kann wirklich nutzbares eingeschränktes Resultat erhalten, keine vollständige Suchqualität behaupten",
+        "validation": "Ausgelassene Suche enthält zwingende Autorisierung oder Fakten ohne die Grundresultat unzulässig ist"
+      }
+    ],
+    "architectural_consequence": "Optionalität fachlich und im tatsächlichen kritischen Pfad nachweisen. Keine richtige Grundantwort ohne Suche erfinden wenn Suche Pflichtinformation liefert."
+  },
+  {
+    "stressor_id": "S242",
+    "source_states": [
+      "OB26",
+      "OB09",
+      "OB01",
+      "OB11"
+    ],
+    "branches": [
+      {
+        "state": "Erstaufruffrist verbraucht, späterer Warmweg möglich",
+        "kind": "verlust",
+        "conditions": "Kalter Aufbau verbraucht reale Endfrist, erfolgreich etablierte Verbindung darf danach für künftige gültige Aufträge bleiben, Timingbelege erhalten",
+        "persistence": "Erster Termin ist verloren, erhaltene Verbindung kann spätere Kaltkosten mindern aber keine vergangene Zusage heilen",
+        "residue_ids": [
+          "OBR012"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann Setupverlust messen und spätere Restbudgets korrekt beginnen, OBR012 behauptet selbst keine bestehende Connectionpool-Fähigkeit",
+        "validation": "Kaltes Ende-zu-Ende-Ergebnis lag bereits innerhalb ursprünglicher Frist oder Trace schließt DNS/TLS aus"
+      },
+      {
+        "state": "Timeout vernichtet jeden Warmfortschritt",
+        "kind": "attraktorhypothese",
+        "conditions": "Jeder Timeout bricht Setup ab, erneuerte Versuche starten kalt und konkurrierende Setups verlängern Aufbau weiter, Zeitbelege und Intent bleiben erhalten",
+        "persistence": "Abbruch erzeugt neuen Kaltversuch, Parallelversuche verringern Aufbaukapazität, erneute Timeouts verhindern Warmzustand",
+        "residue_ids": [
+          "OBR012",
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Frist- und Bestandsdiagnose bleiben möglich, erfolgreiche Anwendungsleistung ist nicht erhalten",
+        "validation": "Bei festem Grundbedarf und gleicher Retrypolicy nach Fehlerende bleibt Warmfortschritt erhalten und Rückstau drainiert statt Setup neu zu erzeugen"
+      }
+    ],
+    "architectural_consequence": "DNS TLS und Queue unter denselben ursprünglichen Zeitvertrag nehmen. Erwärmung und fachliche Ausführung nicht durch blindes Budgeterneuern verwechseln."
+  },
+  {
+    "stressor_id": "S243",
+    "source_states": [
+      "OB13",
+      "OB09",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Endlicher Export blockiert gemeinsame Schlange",
+        "kind": "transient",
+        "conditions": "8 TB stehen nicht präemptierbar vor Kontrollen, positiver Durchsatz und keine weiteren Bulkankünfte, Bestand und ursprüngliche Kontrollzeitverträge sind lesbar",
+        "persistence": "Nach endlichem Export kann Schlange drainieren, Kontrollfristen können vorher historisch verloren sein",
+        "residue_ids": [
+          "OBR001",
+          "OBR012"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann erhaltenen Bestand und verlorene Zeitverträge später prüfen, aktuelle Kontrollbedienung nicht garantiert",
+        "validation": "Kontrollen werden während desselben nicht präemptierten Exports innerhalb zugesagter Frist verarbeitet"
+      },
+      {
+        "state": "Reservierter Anteil bedient kleine Kontrollen",
+        "kind": "halt",
+        "conditions": "Engpass erlaubt tatsächliche Unterbrechung oder getrennte Bedienung und garantierter Anteil deckt deklarierte Kontrolllast",
+        "persistence": "Export kann fortlaufen während Kontrollqueue positiven Dienst erhält, unteilbarer globaler I/O-Stall würde Grenze brechen",
+        "residue_ids": [
+          "OBR026",
+          "OBR019"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann begrenzte Kontrollen nutzen ohne ganzen Export abzuwarten, beliebige kurze Fristen folgen nicht allein aus positivem Anteil",
+        "validation": "Kleine Stopanfrage bleibt bei vollem Export trotz zugesagter reservierter Kapazität unbedient"
+      }
+    ],
+    "architectural_consequence": "Bulktransfer von kleinen Kontrollen über den realen Engpass trennen. Streaming ohne Unterbrechbarkeit garantiert keine Bedienung."
+  },
+  {
+    "stressor_id": "S244",
+    "source_states": [
+      "OB14",
+      "OB09",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Dauernde Notfälle lassen Normales warten",
+        "kind": "extern-erzwungen",
+        "conditions": "Strikter Vorrang und fortgesetzte Notfalllast verbrauchen ganze Kapazität, normale Absichten und ursprüngliche Zeitverträge bleiben lesbar",
+        "persistence": "Solange Notfälle ankommen bleibt normales Warten, nach deren Ende kann endlicher Rest drainieren",
+        "residue_ids": [
+          "OBR001",
+          "OBR012"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann Normalbestand und verpasste Fristen prüfen, rechtzeitige normale Ausführung ist nicht erhalten",
+        "validation": "Normale Tasks erhalten bei dauerhaft voller Notfallqueue nachweislich positiven Service"
+      },
+      {
+        "state": "Normale Arbeit behält zugesagten Anteil",
+        "kind": "halt",
+        "conditions": "Vorgeschlagener Scheduler erzwingt echten Mindestanteil über teilbare Engpässe, normale eigene Last passt",
+        "persistence": "Notfallqueue kann voll bleiben ohne normalen Durchsatz auf null zu drücken",
+        "residue_ids": [
+          "OBR026"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Normale Auftraggeber können begrenzten Service nutzen, alle Notfälle sofort und alle normalen Deadlines zugleich sind nicht versprochen",
+        "validation": "Gemeinsamer nicht präemptierbarer Engpass nimmt trotz Quote jeden normalen Service weg"
+      }
+    ],
+    "architectural_consequence": "Notfallvorrang als explizite begrenzte Ressourcenzusage behandeln. Politisch gewollte Dauerpriorität ist äußere Last, kein selbsttragender Attraktor."
+  },
+  {
+    "stressor_id": "S245",
+    "source_states": [
+      "OB06",
+      "OB32",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Disconnected-Lease hält konkrete Reservierung",
+        "kind": "halt",
+        "conditions": "Restore- beziehungsweise disconnected-Pfad hält Lease und alle hier beteiligten Wiedervergabepfade respektieren ihn, Besitzerstatus unbekannt",
+        "persistence": "Fehlende Liveness hält diese Reservierung bis korrelierter Ownerbeleg oder nachgewiesener Autoritätsentzug",
+        "residue_ids": [
+          "OBR021"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Scheduler kann genau den Workspace gegen zweite Zuteilung halten und Operator Belegbedarf lesen, Taskfreigabe und remote Ausgang bleiben separat",
+        "validation": "Ein anderer beteiligter Pfad vergibt diese Ressource auf bloße vermutete Abwesenheit neu"
+      },
+      {
+        "state": "TTL oder presumed-gone mit tatsächlichem Ersatzstart",
+        "kind": "eskalation",
+        "conditions": "Unbelegte Abwesenheit wird als Freigabe benutzt, Ersatz startet wirklich und alter Besitzer kann noch schreiben, frühere Daten lesbar",
+        "persistence": "Überlappende Schreibautorität dauert bis Ende oder Fence, TTL selbst beendet sie nicht",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Früher bestätigter Bestand bleibt soweit intakt prüfbar, Exklusivität ist verloren, kein empirischer Vorfall aus Helpercode abgeleitet",
+        "validation": "Alte Autorität war vor Ersatzstart wirksam entzogen oder nur Ersatzdatensatz ohne Start existiert"
+      },
+      {
+        "state": "Belegte alte Autorität beendet",
+        "kind": "abschluss",
+        "conditions": "Tatsächlicher Ressourcenfence schließt alle alten Writes aus oder vollständig bestätigte Unbenutzbarkeit liegt vor, erst dann Leasefreigabe",
+        "persistence": "Ehemaliger Besitzer kann neue Annahmen nicht mehr beeinflussen, alte Effekte bleiben separat zu klären",
+        "residue_ids": [
+          "OBR020"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Neuer Besitzer kann Exklusivität nutzen statt Zeitablauf als Todesbeweis, Remoteaktionsstatus wird nicht mit freigegeben",
+        "validation": "Alter Worker schreibt nach Fence oder stop-Voraussetzung wurde lediglich aus verstrichener Zeit angenommen"
+      }
+    ],
+    "architectural_consequence": "restore::reconcile und reconnect_after_herdr_or_machine_restart unterschiedlich ausweisen. Presumed-gone-Replacement ist weder positiver Todesbeweis noch schon gestarteter zweiter Writer."
+  },
+  {
+    "stressor_id": "S246",
+    "source_states": [
+      "OB27",
+      "OB15",
+      "OB25",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Volltextauswahl passt nicht in Modellfenster",
+        "kind": "halt",
+        "conditions": "Caller expandiert zehn Millionen Namen und Consumer schneidet oder verweigert, Registry selbst bleibt lesbar",
+        "persistence": "Nachrichtenfehler dauert mit übergroßer Auswahl, Registrykapazität heilt Kontextlimit nicht",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann intakten gespeicherten Bestand lesen, das Modell besitzt keine vollständige Namenkenntnis",
+        "validation": "Tatsächlich kompilierte Nachricht enthält gar nicht die Registryexpansion und passt vollständig"
+      },
+      {
+        "state": "Gezielter Registryzugriff bleibt klein",
+        "kind": "abschluss",
+        "conditions": "Entwurf bietet stabile IDs und begrenzte paginierte Abfrage, Aufgabe braucht nicht alle Namen gleichzeitig im Modell",
+        "persistence": "Ein konkreter Nachschlagevorgang endet begrenzt, weitere Seiten sind neue lesbare Anfragen",
+        "residue_ids": [
+          "OBR027"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Agent kann benötigten Namen aus großem Bestand finden ohne Gesamtmenge im Kontext, bei Vollmengenpflicht kein Ersatz",
+        "validation": "Gesuchter existierender Name ist durch versteckte Abschneidung nicht mehr abrufbar oder Nachricht wächst linear mit Gesamtregister"
+      }
+    ],
+    "architectural_consequence": "Registryabfrage und Kontexttext getrennte Verträge. Historischer compile-Pfad erhält explizite Quellen, eine automatische Vollregistrysendung ist dort nicht belegt."
+  },
+  {
+    "stressor_id": "S247",
+    "source_states": [
+      "OB27",
+      "OB25",
+      "OB35"
+    ],
+    "branches": [
+      {
+        "state": "Gültiges Riesen-JSON erschöpft Parser",
+        "kind": "halt",
+        "conditions": "Parser allokiert 100 GB vor Grenze, geteilter Speicher reicht nicht und letzte bestätigte Diskdaten bleiben intakt",
+        "persistence": "Verarbeitung stoppt bis Ressourcen frei oder Input verworfen, gültige Syntax liefert keinen Kapazitätsvertrag",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Alter bestätigter Bestand bleibt nach Entlastung lesbar, Riesenresultat und Controlservice sind nicht geschützt",
+        "validation": "Peakallokation bleibt vor Bodyannahme belegbar klein und Parser lehnt früh ab"
+      },
+      {
+        "state": "Kleines Protokoll bleibt bedienbar, Body abgelehnt",
+        "kind": "abschluss",
+        "conditions": "Grenze greift vor Body- und Dekodierallokation, Gesamtpuffer sowie Controlpfad sind getrennt begrenzt",
+        "persistence": "Riesenresultat endet als Ablehnung, neue kleine zulässige Frames können unabhängig passieren",
+        "residue_ids": [
+          "OBR028",
+          "OBR019"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Empfänger und Operator können kleine Antworten und Kontrollen nutzen, die 100-GB-Nutzlast selbst wird ausdrücklich nicht als erhalten gezählt",
+        "validation": "Parser oder referenzierter Blobabruf allokiert Bodygröße oder Riesenframe blockiert weiterhin Stop"
+      }
+    ],
+    "architectural_consequence": "Framegrenze vor Allokation und dekodierte Gesamtgröße prüfen. Inhaltsverweis ist keine automatische Erhaltung oder sichere unbegrenzte Downloadberechtigung."
+  },
+  {
+    "stressor_id": "S248",
+    "source_states": [
+      "OB27",
+      "OB11",
+      "OB25"
+    ],
+    "branches": [
+      {
+        "state": "Viele einzeln kleine Queues erschöpfen Gesamtpool",
+        "kind": "extern-erzwungen",
+        "conditions": "100000 langsame Leser halten eigene Queues, Summenspeicher unbeschränkt und bestätigter Store bleibt intakt",
+        "persistence": "Langsame laufende Nachfrage hält Belegung, Reconnectschleife wäre zusätzliche Annahme",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Bestandslesbarkeit kann nach Entlastung fortbestehen, laufende Benachrichtigungsabdeckung ist nicht erhalten",
+        "validation": "Gesamte Subscriberbytes bleiben bei steigender Leserzahl tatsächlich begrenzt"
+      },
+      {
+        "state": "Begrenztes Fenster statt verlustfreier Einzelqueues",
+        "kind": "halt",
+        "conditions": "Gemeinsames Ereignisfenster und Leseraufnahme haben globale Limits, Cursor ist bekannt und Lückenregel erlaubt Resync",
+        "persistence": "Langsame Leser werden abgewiesen oder sehen explizite Lücke statt unendlicher Akkumulation",
+        "residue_ids": [
+          "OBR029"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zugelassener Subscriber kann noch vorhandenen Suffix lesen, abgelaufene Benachrichtigungen sind nicht rekonstruiert",
+        "validation": "Cursor vor Fensteranfang erhält stillschweigend lückenlosen Erfolgsstatus oder Gesamtmemory wächst mit unbegrenzt neuen Lesern"
+      }
+    ],
+    "architectural_consequence": "Gesamtzahl Leser Gesamtbytes und Retentionsfenster zusammen begrenzen. Per-Queue-Cap allein ist kein globales Limit, alte Cursor brauchen ehrliche Lücke."
+  },
+  {
+    "stressor_id": "S249",
+    "source_states": [
+      "OB23",
+      "OB09",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Korrektes Vollreplay endet nach verlorenem RTO",
+        "kind": "verlust",
+        "conditions": "Intakte lesbare kanonische Historie ist fest, Replay braucht drei Wochen ohne neue Events, Ziel war eine Stunde",
+        "persistence": "Vergangenes RTO bleibt verfehlt auch wenn endliches korrektes Replay später fertig wird",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Recovery kann erhaltene Geschichte für spätere Wiederherstellung nutzen, keine rechtzeitige Verfügbarkeit und kein nachgewiesenes heutiges Eventreplay",
+        "validation": "Vollständige Bereitschaft aus genau diesem Eingang ist einschließlich Prüfungen schon innerhalb einer Stunde erreicht"
+      },
+      {
+        "state": "Vorhandener geprüfter Checkpoint verkürzt Rest",
+        "kind": "abschluss",
+        "conditions": "Vorab existierender kompatibler Checkpoint plus vollständiger Suffix passen und gemessenes Replay inklusive Validierung bleibt unter RTO",
+        "persistence": "Endlicher Suffix wird ohne Pluginaufrufe angewandt, Bereitschaft erst nach bestandener Gleichwertigkeitsprüfung",
+        "residue_ids": [
+          "OBR030"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Recovery kann verifizierten Einstieg nutzen statt Jahrzehnte erneut abspielen, fehlender Checkpoint darf nicht nachträglich angenommen werden",
+        "validation": "Checkpoint plus Suffix weicht vom Vollreplay ab oder Prüfung und Restreplay überschreiten eine Stunde"
+      },
+      {
+        "state": "Beweglicher Replayrand holt nicht auf",
+        "kind": "extern-erzwungen",
+        "conditions": "Neue Events kommen dauerhaft schneller als Restreplay verarbeitet, Historie bleibt lesbar",
+        "persistence": "Äußere Produktionsrate vergrößert Abstand, Ende der Neuzugänge ist eigene geänderte Bedingung",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene Geschichte bleibt wiederaufbaubar bei endlichem Eingang, aktuelle Catch-up-Fähigkeit ist nicht erhalten",
+        "validation": "Bei gleichen Raten sinkt nachgewiesener Abstand dauerhaft auf null"
+      }
+    ],
+    "architectural_consequence": "RTO separat von Replaykorrektheit und Datenerhaltung nachweisen. Checkpoint nur mit erhaltenem Suffix Decoder und gemessener Bereitschaft als Entwurf akzeptieren."
+  },
+  {
+    "stressor_id": "S250",
+    "source_states": [
+      "OB23",
+      "OB01",
+      "OB08"
+    ],
+    "branches": [
+      {
+        "state": "Keine sichere gleichzeitige Kopienbelegung möglich",
+        "kind": "halt",
+        "conditions": "Verwendeter Restore braucht mehr physisch gleichzeitigen Platz als vorhanden, einzige geprüfte Eingabe wird nicht gelöscht",
+        "persistence": "Halt dauert bis Kapazität oder tatsächlich sicherer anderer Stufenplan verfügbar ist",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann letzte verifizierte Quelle lesen, aktueller Restorefortschritt ist nicht möglich",
+        "validation": "Gemessener aktueller Algorithmus passt inklusive Scratch Index und Rollback ohne Quelle zu gefährden"
+      },
+      {
+        "state": "Geprüfte Stufenfolge passt tatsächlich",
+        "kind": "abschluss",
+        "conditions": "Expliziter Plan vermeidet unzulässige Überlappung, jede Ersatzstufe wird vor Löschen ihrer Vorgängerquelle geprüft und Peak passt",
+        "persistence": "Endliche Schritte erreichen Restore mit belegten Wiederanlaufpunkten, Zwischenfehler behalten mindestens eine gültige Quelle",
+        "residue_ids": [
+          "OBR031"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann Wiederherstellung mit vorhandenem Platz fortsetzen ohne imaginären Zusatzspeicher, Endgröße allein wäre kein Nachweis",
+        "validation": "Abbruch an einer Stufe lässt keine gültige Quelle oder tatsächliche COW-/Scratchbelegung übersteigt Kapazität"
+      },
+      {
+        "state": "Letzte Quelle für Platz gelöscht und Ersatz unbrauchbar",
+        "kind": "verlust",
+        "conditions": "Unsicherer Plan löscht letzte gültige Datenquelle bevor brauchbarer Ersatz existiert, keine weitere lesbare Kopie im Inventar",
+        "persistence": "Benötigter Datenstand ist unter diesem geschlossenen Inventar nicht rekonstruierbar",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Wiederherstellung dieses verlorenen Standes bleibt keine Struktur, neue Backups oder perfekte Reparaturquelle dürfen nicht erfunden werden",
+        "validation": "Eine tatsächlich vorhandene rechtmäßig lesbare geprüfte Quelle liefert den verlorenen Stand"
+      }
+    ],
+    "architectural_consequence": "Peak-Live-Set mit Rollback und letzter guter Quelle planen. Kein Platzgewinn durch Löschen der einzigen verifizierten Eingabe als sichere Recovery verkaufen."
+  },
+  {
+    "stressor_id": "S251",
+    "source_states": [
+      "OB28",
+      "OB17",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Tombstones weg und Retry doppelt angenommen",
+        "kind": "verlust",
+        "conditions": "Lokale Tombstones sind letzte lokale Zuordnung, Teilnehmer dedupliziert nicht mehr oder Retry benutzt neue Identität, zweite irreversible Wirkung tatsächlich angenommen",
+        "persistence": "Historische Nichtduplikation ist verloren, ein späterer Tombstone kann vergangene Annahme nicht löschen",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für ursprüngliche Einmalwirkung bleibt kein Residue, spätere Kompensation könnte nur Folgen mindern und ist nicht vorausgesetzt",
+        "validation": "Teilnehmerannahmebuch belegt dass kein zweiter Effekt akzeptiert wurde"
+      },
+      {
+        "state": "Lokaler Verlust, Teilnehmer hält alte Identität",
+        "kind": "abschluss",
+        "conditions": "Gegenbedingung zur vorgegebenen Duplikation: Teilnehmer hält gleiche stabile Retryidentität noch atomar und autorisiert abfragbar trotz lokaler Löschung",
+        "persistence": "Retry liefert alte Annahme statt neuer Wirkung bis Ende dieses Retentionshorizonts",
+        "residue_ids": [
+          "OBR018"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Teilnehmer kann genau die doppelte Annahme verhindern und Recovery Ausgang zuordnen, lokales tombstonefreies System ist nicht allgemein sicher",
+        "validation": "Retryidentität ändert sich oder Teilnehmer hat den Eintrag vor Nachzügler bereits gelöscht"
+      }
+    ],
+    "architectural_consequence": "Tombstonebedarf nach spätestem möglichen Retry statt nach geringem Bytevolumen bestimmen. Teilnehmerhorizont getrennt belegen, kein Wiederherstellen gelöschter Zuordnung behaupten."
+  },
+  {
+    "stressor_id": "S252",
+    "source_states": [
+      "OB30",
+      "OB12",
+      "OB07",
+      "OB01",
+      "OB09"
+    ],
+    "branches": [
+      {
+        "state": "Endlicher zwingend einzeln abzuarbeitender Altbestand",
+        "kind": "transient",
+        "conditions": "Vertrag verlangt alle Milliarde Vorkommen einzeln, deren Absichten und Ursprungsfristen sind erhalten, tatsächliches Freigabegate hält abgelaufene Effektaufträge, Bearbeitungsrate freigegebener Arbeit positiv und kein unendlicher neuer Nachholhorizont",
+        "persistence": "Endlicher Rückstau kann langsam drainieren, historische Fristen sind dennoch verloren und Freigaben können Halt erfordern",
+        "residue_ids": [
+          "OBR001",
+          "OBR007",
+          "OBR012"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann erhaltene Vorkommen prüfen und ungültige Aktionen halten, keine schnelle Kapazität oder Milliarde Erfolge erhalten",
+        "validation": "Tatsächlicher Vertrag erlaubt übersprungene Intervalle oder Materialisierung erzeugt nach festem Ende ohne neue Quelle unbegrenzt weiter"
+      },
+      {
+        "state": "Erlaubtes Intervall disponiert, nur kleiner Rest aufgenommen",
+        "kind": "abschluss",
+        "conditions": "Ursprünglicher legitimer Vertrag erlaubt Skip oder Coalesce, kompakter Cursor und Dispositionsbeleg erhalten Intervall eindeutig, frische Erlaubnis vor Effekten",
+        "persistence": "Altes Intervall endet als deklarierte Disposition und nächste begrenzte Materialisierung beginnt ohne Doppelzählung",
+        "residue_ids": [
+          "OBR032",
+          "OBR007"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Scheduler kann Nachholstand und berechtigten kleinen Rest nutzen, übersprungene Vorkommen sind ausdrücklich nicht ausgeführte Erfolge",
+        "validation": "Neustart materialisiert dasselbe disponierte Intervall erneut oder Skip wird trotz Pflicht-Einzelausführung als vollständig ausgeführt gemeldet"
+      }
+    ],
+    "architectural_consequence": "Vergangenes Scheduleintervall von einer Milliarde ausführbaren Runs trennen. Skip/Coalesce braucht legitimen Vertrag und erteilt keine neue externe Freigabe."
+  },
+  {
+    "stressor_id": "S253",
+    "source_states": [
+      "OB12",
+      "OB11",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Endliche Entblockungskohorte drainiert",
+        "kind": "transient",
+        "conditions": "Provider tatsächlich repariert, freigegebene Kohorte endlich und gemeinsame Aufnahme-/Versuchsbudgets erzwingen tragbare Last",
+        "persistence": "Zugelassene Aufträge enden oder werden wahr abgewiesen, ohne neue Retries verschwindet ursprünglicher Stoß",
+        "residue_ids": [
+          "OBR016",
+          "OBR022"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Scheduler kann begrenzt erlaubte Arbeit bedienen und Restversuche zählen, gleichzeitige sofortige Erfüllung aller Scopes nicht zugesagt",
+        "validation": "Nach vollständig disponierter Kohorte entstehen ohne neue Erlaubnis weitere Versuche"
+      },
+      {
+        "state": "Gemeinsame Fehlerwellen erzeugen nächste Entblockung",
+        "kind": "attraktorhypothese",
+        "conditions": "Deklarierter Grundbedarf wäre tragbar, synchrones Dispatch überschreitet Providerkapazität und Fehler setzen neue gemeinsame Retryepochen, Intent lesbar",
+        "persistence": "Stoß löst Quotenfehler aus, diese erneute gemeinsame Warte-/Freigabezeit, deren Stoß erhält Fehler nach ursprünglicher Reparatur",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann verbliebene Absichten prüfen, Durchsatz und Providerbudget sind nicht gesichert",
+        "validation": "Bei behobenem Initialfehler gleicher Grundlast und Policy drainiert jeder getestete Rückstau ohne erneute Fehlerwelle, Null-Ankünfte separat variieren"
+      }
+    ],
+    "architectural_consequence": "Provider-Rückkehr ist gemeinsamer Aufnahmeimpuls, keine neue Kapazität. Scopeberechtigung liefert keine Ressourcenisolation und Fehlerende muss bei gleichem Grundbedarf geprüft werden."
+  },
+  {
+    "stressor_id": "S254",
+    "source_states": [
+      "OB36",
+      "OB11",
+      "OB30",
+      "OB25"
+    ],
+    "branches": [
+      {
+        "state": "Großer aber endlicher legaler Baum",
+        "kind": "transient",
+        "conditions": "Endliche Scopezahl mit unverändert vererbter Nichtwiederholungskette, großer Verzweigungsfaktor und keine neuen Wurzeln, aufgenommene Absichten lesbar",
+        "persistence": "Jede Ebene hat weniger erlaubte Scopes, endliche Tiefe endet trotz Millionen Kindern, danach bleibt endlicher Rückstau",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann aufgenommenen Bestand prüfen, ursprüngliche Kosten- und Zeitgrenze kann längst verfehlt sein",
+        "validation": "Kinder dürfen dieselbe Scopekette zurücksetzen oder neue Wurzeln erzeugen, dann gilt Endlichkeitsannahme nicht"
+      },
+      {
+        "state": "Neue Wurzeln reproduzieren Wachstum",
+        "kind": "eskalation",
+        "conditions": "Kinder dürfen frische Wurzeln mit erneutem Kontingent erzeugen, mittlere neue Aufnahme über eins und kein Gesamtlimit",
+        "persistence": "Arbeit erzeugt neue erlaubte Wurzeln, diese mehr Kinder und Wurzeln, Wachstum bis realer Ressourcen- oder Autoritätsgrenze",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Ohne begrenzte durable Aufnahme ist weder vollständige Lineage noch nutzbare Restkapazität belegt, keine stabile Attraktorkonvergenz aus Wachstum behauptet",
+        "validation": "Jede neue Wurzel konsumiert dasselbe endliche autorisierte Gesamtkontingent oder effektive Reproduktion fällt unter eins"
+      },
+      {
+        "state": "Begrenzter aufgenommener Baum bleibt prüfbar",
+        "kind": "halt",
+        "conditions": "Jedes Kind erbt Wurzel und durchgesetztes Gesamt-Nachkommen-/Kostenbudget, frische Wurzeln brauchen eigene begrenzte Erlaubnis",
+        "persistence": "Budgetende stoppt weitere Aufnahme, bereits zugelassene Kinder bleiben endlicher zu disponierender Bestand",
+        "residue_ids": [
+          "OBR033"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Dispatcher kann Restkontingent und Lineage nutzen bevor Rechnung kommt, verborgene externe Kosten bleiben außerhalb nachgewiesenem Modell",
+        "validation": "Breite Delegation oder erlaubter Frischwurzelpfad vervielfacht Budget ohne neue Gesamtfreigabe"
+      }
+    ],
+    "architectural_consequence": "Vererbte Scopekette begrenzt Tiefe aber nicht Breite. Gesamtkontingent an Wurzel binden und frische Wurzeln nur unter separat begrenzter Autorität zulassen."
+  },
+  {
+    "stressor_id": "S255",
+    "source_states": [
+      "OB31",
+      "OB09",
+      "OB11",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Äußere Dauerlast hält niedrige Taktrate",
+        "kind": "extern-erzwungen",
+        "conditions": "Last heizt CPU auf Zehntelrate, Kühlung erreicht nur dieses Gleichgewicht oder Zyklus, Zeitbelege erhalten",
+        "persistence": "Last erzeugt Wärme, Drossel senkt Leistung und Kühlung kann gegenwirken, fortgesetzte Last hält Regime ohne nötige Retryschleife",
+        "residue_ids": [
+          "OBR012"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann ursprüngliche Zeitverträge und gemessene Verfehlung weiter lesen, volle Warmkapazität ist nicht erhalten",
+        "validation": "Bei festem Bedarf korrelieren Temperatur Takt und Durchsatz nicht mit behaupteter Drosselwirkung"
+      },
+      {
+        "state": "Zulassung passt zu gemessener gedrosselter Kapazität",
+        "kind": "halt",
+        "conditions": "Physisches Aufnahmebudget wurde auf nachhaltige Zehntelkapazität ausgelegt, Mindestservice teilbarer Klassen ist wirklich erzwingbar",
+        "persistence": "Weniger zugelassene Last kann stabil bedient werden, abgewiesene Nachfrage ist nicht erfüllt",
+        "residue_ids": [
+          "OBR016",
+          "OBR026"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zugelassene Klassen behalten begrenzten Service auch unter Drossel, frühere höhere Frist-/Mengenzusage gilt nicht automatisch",
+        "validation": "Gedrosselte CPU oder geteilter unteilbarer Engpass entzieht auch zugesagtem Rest jeden Service"
+      },
+      {
+        "state": "Retries koppeln Hitze und lange Queues",
+        "kind": "attraktorhypothese",
+        "conditions": "Deklarierter Grundbedarf wäre bei abgekühltem System tragbar, Timeouts erneuern zusätzliche Arbeit und verhindern Abkühlung, Intent lesbar",
+        "persistence": "Hitze senkt Rate, Queue erzeugt Timeouts, Retryarbeit erhält Auslastung und Hitze und damit neue Timeouts",
+        "residue_ids": [
+          "OBR001",
+          "OBR012"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Bestands- und Zeitdiagnose bleiben möglich, weder Deadlineerhalt noch selbstständige Abkühlung sind gesichert",
+        "validation": "Nach Initialstörung bei gleicher Grundlast und Policy kühlt jeder getestete Rückstau ab und drainiert, Null-Neuzugänge erst separat prüfen"
+      }
+    ],
+    "architectural_consequence": "Thermisch nachhaltige Rate statt kurzer Warmbenchmark als Zulassungsbasis messen. CPU-Drossel ändert reale Dauer, nicht automatisch Vertragsablauf."
+  },
+  {
+    "stressor_id": "S256",
+    "source_states": [
+      "OB16",
+      "OB06",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Dauerhafter Versuch, Versandpunkt unbekannt",
+        "kind": "ungewissheit",
+        "conditions": "USV reicht für lokales Intentcommit, Recovery kann nicht unterscheiden ob Writer gar nicht aufgerufen oder externe Annahmeantwort verloren ging",
+        "persistence": "Unbekannter Ausgang hält automatische Wiederholung bis korrelierte neue Evidenz, Stromrückkehr allein beendet Wissenlücke nicht",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Recovery kann belegten Versuch zurückhalten und lesen, weder Mailzustellung noch No-send sind dadurch erhalten",
+        "validation": "Erhaltener unabhängiger Beleg bestimmt eindeutig ob Annahmepunkt erreicht wurde"
+      },
+      {
+        "state": "Teilnehmerbeleg entscheidet tatsächlichen Ausgang",
+        "kind": "abschluss",
+        "conditions": "Teilnehmer führt für dieselbe Identität erhaltenes autorisiert abfragbares Annahmebuch und definitive Nichtannahme braucht geschlossene weitere Annahmemöglichkeit",
+        "persistence": "Passende Evidenz beendet genau Ausgangsfrage, zulässige erneute Aktion braucht gegebenenfalls neue Freigabe",
+        "residue_ids": [
+          "OBR018"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann Annahme oder belegte endgültige Nichtannahme unterscheiden, bloß momentanes not-found bei weiterlaufendem Sender reicht nicht",
+        "validation": "Not-found wird als No-send ausgegeben obwohl alter Teilnehmer später noch annehmen darf"
+      }
+    ],
+    "architectural_consequence": "Commit-vor-Writer-Lücke funktionsgebunden halten: historische deliver-Quelle nutzt manuelle Übergabe, keinen bewiesenen Versand. UPS kann weder Fernannahme noch deren Nichtvorkommen aus lokalem Intent beweisen."
+  },
+  {
+    "stressor_id": "S257",
+    "source_states": [
+      "OB02",
+      "OB03",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Router aus, Geschäft läuft ohne Außenblick",
+        "kind": "extern-erzwungen",
+        "conditions": "Nur Monitoringrouter wird abgeworfen, Geschäftsweg und bestätigter Bestand bleiben nutzbar, kein anderer Beobachtungspfad",
+        "persistence": "Beobachtungsblindheit bleibt mit Abwurf, Geschäftsfortschritt kann unabhängig weitergehen",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Lokaler Operator kann bestätigten Bestand nutzen und Arbeit kann laufen, daraus folgt kein frischer Remotezustand oder Menschenempfang",
+        "validation": "Abwurf stoppt tatsächlich auch Geschäftsweg oder frischer unabhängiger Außenbefund bleibt vorhanden"
+      },
+      {
+        "state": "Anderer konkreter Beobachtungspfad überlebt Abwurf",
+        "kind": "extern-erzwungen",
+        "conditions": "Vorab vorhandener Zeuge samt eigener Verbindung Energie Identität und Lesezugang hängt nicht am abgeworfenen Router",
+        "persistence": "Zeuge erhält begrenzte frische Befunde oder Ausfallevidenz auch bei anhaltendem Abwurf",
+        "residue_ids": [
+          "OBR002"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Externer Leser kann definierte Erreichbarkeit beobachten, Produktionsausführung und Empfang werden separat ausgewiesen",
+        "validation": "Alternativer Pfad routet doch durch abgeschaltetes Gerät oder teilt dessen Versorgung"
+      }
+    ],
+    "architectural_consequence": "Lastabwurf muss Monitoringenergie/-netz als Abhängigkeit explizit machen. OB02 wird nur auf Beobachtung bezogen, Ausführung kann vollständig weiterlaufen."
+  },
+  {
+    "stressor_id": "S258",
+    "source_states": [
+      "OB35",
+      "OB11",
+      "OB01"
+    ],
+    "branches": [
+      {
+        "state": "Stop hinter dauernd belegten Aufrufen",
+        "kind": "halt",
+        "conditions": "Stop teilt voll belegten Pool, Calls hängen oder werden durch dauernden Input ersetzt, Journal bereits bestätigter Versuche lesbar",
+        "persistence": "Ohne freien Service wartet Stop, endliche Calltimeouts könnten transient freigeben, erneute Retrylast wäre zusätzliche Schleife",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann frühere Versuche später abgleichen, aktuelle Notsteuerbarkeit ist nicht erhalten",
+        "validation": "Stop wird unter derselben unveränderten Poolbelegung innerhalb seiner zugesagten Frist tatsächlich bedient"
+      },
+      {
+        "state": "Reservierte Kontrolle sperrt neue Aufnahme",
+        "kind": "halt",
+        "conditions": "Controlpfad Timer und Supervisor sind unabhängig bedienbar, Dispatchsperre greift bevor weitere Calls zugelassen werden",
+        "persistence": "Neue Calls bleiben gehalten während bestehende getrennt beendet oder reconciliert werden, Stopstatus bleibt bis Wirkung unvollständig",
+        "residue_ids": [
+          "OBR019"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann Belastungsnachschub stoppen und Abbruch anstoßen, abgeschlossener irreversibler Effekt wird nicht zurückgenommen",
+        "validation": "Gesättigter Pluginloop verhindert Timerlauf oder Stopannahme wird ohne Fence und Commit als vollständig ausgegeben"
+      }
+    ],
+    "architectural_consequence": "Stopaufnahme und Timer aus gesättigten Pluginpools heraus bedienbar machen, danach tatsächliche Autoritätswirkung und dauerhafte Bestätigung getrennt prüfen."
+  },
+  {
+    "stressor_id": "S259",
+    "source_states": [
+      "OB20",
+      "OB33",
+      "OB21"
+    ],
+    "branches": [
+      {
+        "state": "Einziger Identitätsweg gesperrt",
+        "kind": "halt",
+        "conditions": "IdP blockiert und kein gültiger vorheriger lokaler Login oder Offlinecredential vorhanden",
+        "persistence": "Zugriff bleibt fail-closed bis berechtigte Wiederherstellung des Identitätswegs, keine autonome Schleife",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für aktuelle autorisierte Notbedienung ist kein nutzbarer Zugang vorhanden, Daten können dennoch intakt sein",
+        "validation": "Vorhandener gültiger lokaler Notnachweis erlaubt definierte Befehle ohne IdP"
+      },
+      {
+        "state": "Vorab gebundene Offline-Notbefehle möglich",
+        "kind": "halt",
+        "conditions": "Erreichbarer Operator besitzt bereits gültiges enges Offlinecredential und lokaler Prüfpfad arbeitet ohne gesperrten Provider",
+        "persistence": "Definierte Recoverykontrollen bleiben bis Ablauf oder Widerrufsgrenze nutzbar, übriger IdP-Zugang bleibt gesperrt",
+        "residue_ids": [
+          "OBR034"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann autorisierte Notaktionen ausführen, keine anonyme Rettung und keine vollständige externe Accountwiederherstellung",
+        "validation": "Offlinepfad verlangt doch IdP oder ein unberechtigter Principal kann dieselben Befehle ausführen"
+      }
+    ],
+    "architectural_consequence": "Lokales IPC-Safe-mode ist kein Autorisierungsbypass. Offline-Notautorität muss vorher eng bereitstehen, sonst ehrlicher Halt statt offener Shell."
+  },
+  {
+    "stressor_id": "S260",
+    "source_states": [
+      "OB29",
+      "OB08",
+      "OB16"
+    ],
+    "branches": [
+      {
+        "state": "Commitfehler wird ehrlich zurückgegeben",
+        "kind": "halt",
+        "conditions": "SSD voll, direkte historische stop/cancel-Transaktion scheitert und Caller propagiert Fehler, alter Bestand lesbar",
+        "persistence": "Keine neue dauerhafte Stopzusage bis Speicher wieder schreibt, physischer Prozesszustand ist separate Frage",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann alten Stand lesen und fehlgeschlagene Mutation erkennen, kein dauerhafter Stop ist erhalten",
+        "validation": "Gesamter Clientpfad gibt trotz fehlgeschlagenem Commit erfolgreiche dauerhafte Stopbestätigung aus"
+      },
+      {
+        "state": "Wrapper behauptet gespeicherten Stop ohne Commit",
+        "kind": "ungewissheit",
+        "conditions": "Hypothetischer Wrapper bestätigt zu früh, SSD nimmt Stop nicht an, Prozess könnte tatsächlich gestoppt sein oder weiterlaufen",
+        "persistence": "Nach Restart kann alter gewünschter Zustand wieder wirksam werden, falsche Quittung entscheidet reale Wirkung nicht",
+        "residue_ids": [
+          "OBR001"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Nur frühere dauerhafte Daten sind prüfbar, versprochene persistente Stopgarantie ist verloren beziehungsweise nicht hergestellt",
+        "validation": "Erfolgsantwort hängt belegbar am erfolgreichen Stopcommit oder unabhängige dauerhaft gespeicherte Stopautorität existiert"
+      },
+      {
+        "state": "Volatile Notkontrolle wirkt ohne Dauerhaftigkeitsbehauptung",
+        "kind": "halt",
+        "conditions": "Separater Supervisor kann laufenden Host kontrollieren und Dispatch vorübergehend sperren, aber SSD bleibt voll und Neustartschutz ist nicht gespeichert",
+        "persistence": "Physische Sperre hält nur solange diese Autorität lebt, Wiederanlauf muss erneut geprüft werden",
+        "residue_ids": [
+          "OBR019"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann gegenwärtigen Nachschub stoppen obwohl Persistenz fehlt, Antwort muss ausdrücklich nicht-dauerhaft bleiben",
+        "validation": "Neustart wird ohne neue Prüfung als weiterhin dauerhaft gestoppt bestätigt oder Control teilt den blockierten Schreibpfad"
+      }
+    ],
+    "architectural_consequence": "Dauerhaften gewünschten Stop von physischem Prozessende und Antwortstufe trennen. Historische stop/cancel-Library propagiert Commitfehler; lügender Wrapper ist nur Gegenbedingung."
+  },
+  {
+    "stressor_id": "S261",
+    "source_states": [
+      "OB33",
+      "OB17",
+      "OB21",
+      "OB25"
+    ],
+    "branches": [
+      {
+        "state": "Fremdes Credential hat fremde Aktion ermöglicht",
+        "kind": "verlust",
+        "conditions": "Plugin A erhält oder nutzt B-Credential, externe unberechtigte Aktion wird akzeptiert und unabhängiges lokales Versuchsjournal bleibt intakt",
+        "persistence": "Vergangene falsche Autorisierung bleibt auch nach Credentialwiderruf, Offenlegung braucht zusätzlich tatsächlichen Klartextleser",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann belegte Versuche für Abgleich nutzen, korrekte Scopeautorität dieser Aktion ist nicht erhalten",
+        "validation": "Teilnehmer lehnt B-Nutzung vor Annahme ab oder Aktion war gesondert korrekt für B autorisiert"
+      },
+      {
+        "state": "Credential-Gate bewahrt erlaubte A-Nutzung",
+        "kind": "abschluss",
+        "conditions": "Trusted Aktivierung bindet A Scope Zweck und Ziel, Anfrage auf B wird vor Release oder Nutzung abgewiesen, kein OS-Vaultbypass",
+        "persistence": "Falsche Anfrage endet, weiterhin erlaubte A-Nutzung kann separat passieren",
+        "residue_ids": [
+          "OBR036"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Secret-Gate kann passende A-Capability weiter bedienen ohne B-Zugang zu geben, Pipeauth allein wäre kein Nachweis",
+        "validation": "Authentischer A-Prozess liest B-Secret direkt oder wählt B erfolgreich über freies Requestfeld"
+      }
+    ],
+    "architectural_consequence": "Authentisierte Pipe an konkrete Secret-Capability von Scope und Zweck binden, nicht Pluginbehauptung. Falsche Nutzung und tatsächliche Offenlegung getrennte Wirkungen."
+  },
+  {
+    "stressor_id": "S262",
+    "source_states": [
+      "OB33",
+      "OB17",
+      "OB21",
+      "OB25",
+      "OB07"
+    ],
+    "branches": [
+      {
+        "state": "Umgebogener Name erreicht falschen Empfänger",
+        "kind": "verlust",
+        "conditions": "Dispatch löst nur veränderbaren Anzeigenamen neu auf, andere reale Identität nimmt irreversible Aktion an, Versuchsjournal erhalten",
+        "persistence": "Vergangene falsche Empfängerwirkung bleibt, geheimhaltungsbezogener Zusatzverlust nur bei tatsächlicher sensibler Offenlegung",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann Versuch und bekannte Zielbelege prüfen, ursprüngliche Empfängertreue ist verloren",
+        "validation": "Tatsächlicher Teilnehmer bindet trotz Namensänderung unverändert den genehmigten Empfänger"
+      },
+      {
+        "state": "Gebundene Zielidentität verhindert Umlenkung",
+        "kind": "halt",
+        "conditions": "Approval umfasst echte unveränderliche Zielidentität Version und Aktion, Gate prüft letzten kontrollierten Dispatch und Teilnehmer respektiert Identität",
+        "persistence": "Abweichung hält Aktion bis passende neue Freigabe, kosmetischer Name kann getrennt wechseln",
+        "residue_ids": [
+          "OBR035",
+          "OBR007"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann ursprüngliche Absicht und Freigabe nutzen ohne still auf neuen Empfänger zu senden",
+        "validation": "Teilnehmer löst gebundene ID hinter dem Gate in andere Person auf oder Namewechsel ändert Ziel ohne neue Freigabe"
+      }
+    ],
+    "architectural_consequence": "Menschlichen Namen vor Freigabe an unveränderliche tatsächliche Zielidentität binden und am Dispatch prüfen. Erneute Freigabe bei semantischer Änderung statt Namegleichheit."
+  },
+  {
+    "stressor_id": "S263",
+    "source_states": [
+      "OB33",
+      "OB17",
+      "OB25"
+    ],
+    "branches": [
+      {
+        "state": "Fremde ID wird fälschlich Autorität",
+        "kind": "verlust",
+        "conditions": "Importer setzt bekannte fremde ID ein, Gate behandelt ID als Zustimmung und irreversible unberechtigte Aktion wird angenommen, unabhängiges Journal erhalten",
+        "persistence": "Historische falsche Freigabe bleibt, UUID-Eindeutigkeit würde sie nicht legitimieren",
+        "residue_ids": [
+          "OBR017"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann erhaltenen Versuch prüfen, Herkunft einer Task-ID beweist keine lokale Berechtigung",
+        "validation": "Separates autoritatives Approval deckt genau den tatsächlichen Principal Scope und die Aktion"
+      },
+      {
+        "state": "ID bleibt Datenreferenz ohne Approvalwirkung",
+        "kind": "abschluss",
+        "conditions": "Import bleibt untrusted und nur separate authentisierte passende Approvalquelle kann Dispatch erlauben",
+        "persistence": "Falscher Autoritätsversuch endet als Ablehnung, andere korrekt gebundene Arbeit darf weiterlaufen",
+        "residue_ids": [
+          "OBR035"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Dispatcher kann echte Freigabeevidenz nutzen und importierte Identität als bloße Referenz lesen",
+        "validation": "Fremde syntaktisch gültige Task-ID ersetzt die unabhängige Approvalprüfung erfolgreich"
+      }
+    ],
+    "architectural_consequence": "Importierte Task-ID nie selbst als Freigabeevidenz akzeptieren. Approvalprovenienz Principal Scope und unveränderliche Aktion am Dispatch überprüfen."
+  },
+  {
+    "stressor_id": "S264",
+    "source_states": [
+      "OB25",
+      "OB33",
+      "OB21"
+    ],
+    "branches": [
+      {
+        "state": "Instruktionsübernahme führt zu Secret-Offenlegung",
+        "kind": "verlust",
+        "conditions": "Agent erhebt Dokument zur Systemautorität und besitzt tatsächlichen Secretlese- plus Uploadzugriff, unberechtigter Empfänger erhält Klartext",
+        "persistence": "Bereits gelesene Secrets sind nicht zurückholbar, Rotation schützt höchstens künftige Nutzung",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Vertraulichkeit der hochgeladenen Fakten bleibt keine Struktur, bloßer Text ohne erfolgreichen Zugriff wäre noch kein Verlust",
+        "validation": "Secret-Gate oder Egress stoppt vor Übertragung und kein unberechtigter Leser erhält Klartext"
+      },
+      {
+        "state": "Inhalt bleibt ohne Handlungsautorität",
+        "kind": "abschluss",
+        "conditions": "Unabhängiges Approvalgate kontrolliert jede entsprechende externe Aktion, Dokument kann diese Quelle nicht ändern",
+        "persistence": "Geforderter Upload scheitert ohne passende echte Freigabe, legitime unabhängig gebundene Aktionen bleiben möglich",
+        "residue_ids": [
+          "OBR035"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Dispatcher kann wahre Freigaben weiter nutzen, Text wird als Daten gelesen ohne behauptete Systemregel zu übernehmen",
+        "validation": "Dokumentwortlaut allein erzeugt gültige Uploadfreigabe oder Agent benutzt ungeprüften externen Nebenkanal"
+      },
+      {
+        "state": "Daten bleiben außerhalb erreichbarer Rechte",
+        "kind": "halt",
+        "conditions": "OS- und Egress-Kompartiment enthält geschützte Secrets außerhalb Agentenzugriff, selbst bei instruktionswilligem Modell",
+        "persistence": "Versuch bleibt ohne tatsächlichen Lese-/Übertragungsweg blockiert solange diese Grenze gilt",
+        "residue_ids": [
+          "OBR039"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigte Prozesse können nicht offengelegte Daten weiter nutzen, Modellgehorsam ist keine vorausgesetzte Schutzstruktur",
+        "validation": "Agent liest Secrets über gemeinsame UID Prozessinspektion oder zulässigen Nebenkanal und kann sie abführen"
+      }
+    ],
+    "architectural_consequence": "Dokumenttext darf keine Capability oder Approvalquelle sein. Promptformatierung nicht als Secret- oder Egressgrenze behandeln."
+  },
+  {
+    "stressor_id": "S265",
+    "source_states": [
+      "OB33",
+      "OB17",
+      "OB21",
+      "OB25"
+    ],
+    "branches": [
+      {
+        "state": "Gefälschte Bestätigung ermöglicht Fehlaktion",
+        "kind": "verlust",
+        "conditions": "Recovery-Agent glaubt Logtext und besitzt effektiven Dispatchzugang, unberechtigte irreversible Aktion wird angenommen",
+        "persistence": "Vergangene Fehlaktion bleibt, plausible Logform beweist nie den behaupteten Operator",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für korrekte Autorisierung dieser angenommenen Aktion bleibt kein Residue, manipuliertes Log ist gerade keine unabhängige Beweisquelle",
+        "validation": "Dispatch verlangt und erhält eine echte separat verifizierte passende Zustimmung oder verweigert vor Annahme"
+      },
+      {
+        "state": "Gefälschtes Log bleibt nicht autorisierende Diagnose",
+        "kind": "abschluss",
+        "conditions": "Approvalbuch und Prüfgate liegen außerhalb veränderbarer Logtexte, Principal Scope Aktion und Gültigkeit werden unabhängig geprüft",
+        "persistence": "Log kann Diagnose verwirren aber keine neue Erlaubnis erzeugen, zulässige Recoveryentscheidung braucht echte Quelle",
+        "residue_ids": [
+          "OBR035"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Recovery kann autoritative Freigabeevidenz weiter verwenden trotz falscher Diagnosetexte, Logwahrheit ist nicht gerettet",
+        "validation": "Passend formatierte Logzeile erfüllt ohne echte Operatorhandlung die Approvalabfrage"
+      }
+    ],
+    "architectural_consequence": "Logs sind Diagnose, keine Operatorstimmen. Wiederanlauffreigaben müssen aus separater authentisierter Quelle stammen und genau die neue Aktion binden."
+  },
+  {
+    "stressor_id": "S266",
+    "source_states": [
+      "OB33",
+      "OB17",
+      "OB21",
+      "OB25",
+      "OB07"
+    ],
+    "branches": [
+      {
+        "state": "Prüfanweisung wird unerlaubte neue Aktion",
+        "kind": "verlust",
+        "conditions": "Prüfer folgt Artefaktinstruction über externes Tool ohne passendes Approval und irreversible Aktion wird angenommen",
+        "persistence": "Neue historische Aktion bleibt trotz späterer Ablehnung des Artefakts, Completionprüfung hatte sie nicht autorisiert",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für ursprüngliche Aktionsbegrenzung dieser angenommenen Aktion bleibt nichts, erhaltenes Artefakt allein ist keine vertrauenswürdige Freigabe",
+        "validation": "Tool-Gate verhindert Annahme oder eine unabhängige bereits gültige Zustimmung deckt genau diese Aktion"
+      },
+      {
+        "state": "Neue Aktion als nicht freigegebene Absicht gehalten",
+        "kind": "halt",
+        "conditions": "Prüfer oder erzwungenes Gate behandelt Artefaktinhalt als untrusted Daten, neue Aktion braucht unabhängige gebundene Freigabe",
+        "persistence": "Prüfung kann getrennt fortgehen, zusätzliche Aktion bleibt bis echter Entscheidung gehalten oder wird verworfen",
+        "residue_ids": [
+          "OBR035",
+          "OBR007"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann verlangte neue Absicht prüfen ohne sie aus Artefaktbytes zu autorisieren, bloße Formatgrenze wäre unzureichend",
+        "validation": "Artefaktinhalt kann ohne neue echte Zustimmung externe Wirkung auslösen"
+      }
+    ],
+    "architectural_consequence": "Artefaktprüfung und neue externe Aktion trennen. Hash oder gültiger Inhaltsverweis bindet Bytes, nicht Erlaubnis zu darin geforderten Tools."
+  },
+  {
+    "stressor_id": "S267",
+    "source_states": [
+      "OB21",
+      "OB22",
+      "OB25"
+    ],
+    "branches": [
+      {
+        "state": "Signierter Einmalpayload legt Klartext offen",
+        "kind": "verlust",
+        "conditions": "Gültig signierter Code hat Daten- und Egresszugriff und Empfänger erhält geschützte Daten, keine Persistenzschleife belegt",
+        "persistence": "Offenlegung ist historisch irreversibel auch wenn Payload danach endet",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Geheimhaltung tatsächlich exfiltrierter Daten bleibt keine Restfähigkeit, Einmalverlust ist kein Attraktor",
+        "validation": "Kein unberechtigter Empfänger erhält verwertbaren Klartext"
+      },
+      {
+        "state": "Update und Recoveryevidenz reproduzieren Kompromiss",
+        "kind": "attraktorhypothese",
+        "conditions": "Angreifer kontrolliert wiederkehrenden Update-/Persistenzpfad und für Recoveryentscheidungen verwendete In-Domain-Evidenz, keine unabhängige nutzbare Prüfbasis vorhanden",
+        "persistence": "Kompromittierter Updater installiert schädlichen Code, falsche Evidenz legitimiert Recovery, diese lädt denselben Kompromiss erneut",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für unabhängig glaubwürdige In-Domain-Recoveryentscheidung ist kein überlebender Gegenstand benannt, nicht automatisch jeder Datenbyte zerstört",
+        "validation": "Sauberer Neustart bleibt trotz fortbestehend behaupteter Reinstallationsautorität sauber oder Recovery benutzt wirksame unabhängige Evidenz"
+      },
+      {
+        "state": "Signierter Code erreicht geschützten Bereich nicht",
+        "kind": "abschluss",
+        "conditions": "Gegenbedingung zum tatsächlichen Exfiltrationserfolg: durchgesetzte OS-/Egressgrenze sperrt geschützte Daten und fremde Ausgänge, gültige eigene Funktion bleibt möglich",
+        "persistence": "Unerlaubter Zugriff scheitert vor Offenlegung solange Isolation außerhalb Pluginmacht liegt",
+        "residue_ids": [
+          "OBR039"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigte Prozesse können geschützten nicht offengelegten Bereich weiter nutzen, Signatur allein leistet das nicht",
+        "validation": "Signed Payload umgeht Grenze über gleiche UID privilegierte Rechte oder erlaubten Klartextkanal"
+      }
+    ],
+    "architectural_consequence": "Signatur prüft Herkunft, nicht Verhalten. Schon offengelegte Daten nicht als durch nachträgliche Isolation erhalten verkaufen, Wiederinfektion braucht konkrete reproduzierende Rechte."
+  },
+  {
+    "stressor_id": "S268",
+    "source_states": [
+      "OB21",
+      "OB22",
+      "OB25",
+      "OB23"
+    ],
+    "branches": [
+      {
+        "state": "Übernommener Paketname startet fremden Code",
+        "kind": "verlust",
+        "conditions": "Restore vertraut nur wiederverwendetem Namen beziehungsweise aktueller Signatur, neuer Code liest und exfiltriert tatsächlich Daten",
+        "persistence": "Historische Offenlegung bleibt, Namensübernahme allein ohne Ausführung und Zugriff wäre nur Exposition",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Geheimhaltung dieser gelesenen Daten ist verloren, eine alte unverfügbare Kopie wird nicht als Rettung erfunden",
+        "validation": "Restore lehnt fremde Bytes vor Ausführung ab oder Code erhält keinen geschützten Klartext"
+      },
+      {
+        "state": "Erhaltene Inhaltsbytes lassen kontrollierten Restore zu",
+        "kind": "abschluss",
+        "conditions": "Verifizierbare alte ausführbare Bytes Prüfanker und kompatible Runtime wurden vorab unabhängig erhalten, bekannte Bytes sind für diesen Zweck vertrauenswürdig geprüft",
+        "persistence": "Restore benutzt festen Inhalt statt neu besetztem Namen, Abschluss gilt nur bei bestandener Laufzeitprüfung",
+        "residue_ids": [
+          "OBR037"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Recovery kann konkret vorhandene Abhängigkeit wieder benutzen, Inhaltsgleichheit allein beweist keine Benignität",
+        "validation": "Digest stimmt nicht Laufzeit fehlt oder ursprünglicher Inhalt war selbst bösartig"
+      },
+      {
+        "state": "Prüfanker erhalten, benötigte alte Bytes fehlen",
+        "kind": "halt",
+        "conditions": "Nur vertrauenswürdiger Digest ist erhalten, keine bekannte zugängliche Kopie ausführbarer alter Bytes, neuer Name liefert andere Bytes",
+        "persistence": "Korrekte Ablehnung hält Restore bis tatsächliche passende Bytes gefunden werden, Gegenwartsmangel beweist noch kein ewiges Allweltverschwinden",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Ausführung der benötigten alten Abhängigkeit fehlt der nutzbare Gegenstand, bloßer Hash ist kein ausführbares Residue",
+        "validation": "Eine tatsächlich vorhandene verifizierbare und kompatibel ausführbare Kopie wird gefunden"
+      }
+    ],
+    "architectural_consequence": "Archivierte Inhalte Prüfanker und ausführungstaugliche Laufzeit getrennt sichern. Digestablehnung kann korrekt sein während vollständiger Restore mangels Bytes unmöglich bleibt."
+  },
+  {
+    "stressor_id": "S269",
+    "source_states": [
+      "OB03",
+      "OB22",
+      "OB21"
+    ],
+    "branches": [
+      {
+        "state": "Gemeinsames Update korrumpiert beide Befunde",
+        "kind": "ungewissheit",
+        "conditions": "Schädlicher Updater hat Factory und Monitor erreicht, Monitor kann falsches Grün erzeugen, weitere Reinstallation nicht belegt",
+        "persistence": "Aktuelles In-Domain-Grün ist unzuverlässig bis andere glaubwürdige Evidenz oder saubere Basis entsteht, Einmalinstallation ist noch keine Schleife",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für unabhängige Gesundheitsbeurteilung durch genau diesen Monitor bleibt keine glaubwürdige Struktur, Ausführung und totale Datenzerstörung folgen daraus nicht",
+        "validation": "Monitoradministration war tatsächlich außerhalb kompromittierter Updaterrechte und kann relevante Abweichung unabhängig belegen"
+      },
+      {
+        "state": "Reinstallation bestätigt sich selbst",
+        "kind": "attraktorhypothese",
+        "conditions": "Updater behält Persistenzrechte über beide Systeme und Operator-Recoveryentscheidungen verlassen sich wiederholt auf deren manipulierte Befunde",
+        "persistence": "Schädliches Update erzeugt falsches Gesundsignal, dieses erlaubt in derselben Domäne Recovery, Update installiert erneut schädlichen Stand",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für unabhängige Vertrauensentscheidung aus dieser geschlossenen Domäne ist nichts belegt, keine automatische globale Informationsvernichtung",
+        "validation": "Bei fortbestehender behaupteter Macht bleibt unabhängig geprüfter Neustart sauber oder falsches Grün beeinflusst keine Recoveryentscheidung"
+      },
+      {
+        "state": "Zusätzlicher anders verwalteter Zeuge erkennt definierte Abweichung",
+        "kind": "halt",
+        "conditions": "Vorab vorhandene Prüfbasis samt Administration liegt außerhalb gemeinsamen Updaters und konkrete schädliche Änderung ist durch ihre Beobachtungen unterscheidbar",
+        "persistence": "Zeuge bleibt glaubwürdig solange Angreifer weder Basis noch dessen Evidenzpfad ändern kann, Reparatur ist separater Schritt",
+        "residue_ids": [
+          "OBR038"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Operator kann beschränkten Gegenbefund nutzen trotz in-domain Grün, keine Erkennung beliebig unsichtbarer Exfiltration",
+        "validation": "Angreifer kontrolliert doch Zeugenupdate oder saubere und schädliche Ausführung liefern identische erlaubte Beobachtungen"
+      }
+    ],
+    "architectural_consequence": "Monitoring braucht getrennte administrative Vertrauensdomäne, nicht nur Strom/Netz. Unabhängige Evidenz muss eine konkrete Abweichung unterscheiden können, kein perfektes Orakel annehmen."
+  },
+  {
+    "stressor_id": "S270",
+    "source_states": [
+      "OB20",
+      "OB02",
+      "OB01",
+      "OB03"
+    ],
+    "branches": [
+      {
+        "state": "Partition geheilt, Schlüsselzustände bleiben unvereinbar",
+        "kind": "halt",
+        "conditions": "Beide Seiten akzeptieren ausschließlich ihren unterschiedlichen Key und keine gültige Überlappung oder separate Rekeyautorität ist vorhanden",
+        "persistence": "Netzrückkehr ändert akzeptierte Keys nicht, fail-closed hält bis echte autorisierte Synchronisierung",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für gegenseitig authentisierte aktuelle Heartbeats besteht kein nutzbarer Zugang, Hostausführung kann trotzdem laufen",
+        "validation": "Unveränderte akzeptierte Keymengen validieren nach Netzrückkehr legitime neue Heartbeats"
+      },
+      {
+        "state": "Vorab gültige Überlappung trägt kurze Partition",
+        "kind": "transient",
+        "conditions": "Beide Seiten besitzen vorab autorisierte überlappende Epochen, Partition endet innerhalb sicheren Zeitfensters und Frischeprüfung bleibt wirksam",
+        "persistence": "Legitime neue Heartbeats werden bis Abschlussrotation akzeptiert, nach Ablauf ohne Sync wieder Halt",
+        "residue_ids": [
+          "OBR040",
+          "OBR004"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Monitor kann begrenzt authentisierte frische Belege nutzen ohne alte Replays als Leben zu lesen",
+        "validation": "Partition über Fensterende wird trotzdem still mit altem Key akzeptiert oder frische legitime Pakete scheitern schon innerhalb gültiger Überlappung"
+      }
+    ],
+    "architectural_consequence": "Rotation als expliziten bestätigten Epochzustand mit befristeter Überlappung und Frische führen. Authfehler bedeutet unbekannt, nie grün oder unbegrenzte Altkeyannahme."
+  },
+  {
+    "stressor_id": "S271",
+    "source_states": [
+      "OB06",
+      "OB24"
+    ],
+    "branches": [
+      {
+        "state": "Entschlüsselungsweg heute unbekannt",
+        "kind": "ungewissheit",
+        "conditions": "Ciphertext lesbar, aber Inventar möglicher Schlüssel Escrows Hardware und Decoder ist nicht geschlossen",
+        "persistence": "Suche nach tatsächlich vorhandenem erlaubtem Weg kann Wait beenden, weder Fund noch endgültiges Fehlen ist vorausgesetzt",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Autorisierter Klartextzugriff ist derzeit nicht als nutzbare Struktur belegt, externe Schlüsselkopie wird nicht erfunden",
+        "validation": "Ein dokumentierter rechtmäßig erreichbarer Weg entschlüsselt einen repräsentativen Eintrag"
+      },
+      {
+        "state": "Alle benötigten Entschlüsselungswege im Horizont verloren",
+        "kind": "verlust",
+        "conditions": "Inventar schließt alle rechtmäßig verfügbaren Schlüssel Decoder Hardware- und Rekonstruktionswege für benötigten Zeitraum aus, kein technisch machbarer alternativer Angriff im Horizont",
+        "persistence": "Ohne benötigte Information kein Klartextwiederaufbau, späterer kryptografischer Durchbruch würde die Zeitprämisse ändern",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für autorisierte Wiederherstellung des geschützten Inhalts bleibt nichts, lesbare Ciphertextbytes sind nicht dieser Inhalt und restliches System ist nicht automatisch verloren",
+        "validation": "Vorhandener erlaubter Schlüssel oder machbare Rekonstruktion entschlüsselt trotz geschlossen behauptetem Inventar"
+      }
+    ],
+    "architectural_consequence": "Key Decoder Hardware und rechtmäßig zugängliche Rekonstruktionswege samt Zeithorizont inventarisieren. Lesbarer Vault allein ist keine Klartextfähigkeit und heutige Unkenntnis kein permanenter Totalverlust."
+  },
+  {
+    "stressor_id": "S272",
+    "source_states": [
+      "OB21"
+    ],
+    "branches": [
+      {
+        "state": "Angreifer entschlüsselt alte Kopie",
+        "kind": "verlust",
+        "conditions": "Angreifer besitzt alte sensible Exporte, Durchbruch trifft deren tatsächliche Konstruktion und verwertbarer Klartext wird gelesen",
+        "persistence": "Bereits offenbarte Fakten bleiben bekannt auch wenn heutige Keys und lokale Exporte gelöscht werden",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Geheimhaltung dieser alten Fakten ist verloren, künftige Daten oder heutige Betriebsfähigkeit sind nicht dadurch vollständig verloren",
+        "validation": "Angreifer hatte keine Kopie oder tatsächliche Konstruktion ist unter genau dem Durchbruch weiterhin nicht entschlüsselbar"
+      },
+      {
+        "state": "Durchbruch reicht für konkrete Kopie nicht nachweislich aus",
+        "kind": "offen",
+        "conditions": "Gegenbedingung: tatsächlicher Exportbesitz verwundbare Konstruktion oder nötiges unabhängiges Schlüsselmaterial ist nicht bekannt",
+        "persistence": "Ohne Bestands- und Angriffsmodell bleibt Offenlegung offen, kein wohltätiger zusätzlicher Schlüssel wird als gegeben eingeführt",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für belastbare langfristige Vertraulichkeitsgarantie ist kein konkreter überlebender Schutz belegt, aber bloßes Wort Durchbruch beweist auch keine tatsächliche Kenntnis",
+        "validation": "Konkrete gehaltene Kopie liefert unter benannten Fähigkeiten verifizierbaren Klartext oder nachweislich unbetroffene Konstruktion wird belegt"
+      }
+    ],
+    "architectural_consequence": "Vertraulichkeitshorizont externer Kopien getrennt vom operativen Restorehorizont festlegen. Gegenwärtige Rotation oder lokale Löschung schützt bereits kopiertes verwundbares Material nicht rückwirkend."
+  },
+  {
+    "stressor_id": "S273",
+    "source_states": [
+      "OB21",
+      "OB25"
+    ],
+    "branches": [
+      {
+        "state": "Direkter OS-Lesezugriff legt fremde Daten offen",
+        "kind": "verlust",
+        "conditions": "Feindlicher Agent besitzt OS-Rechte auf geschützte fremde Scopes und liest tatsächlich Klartext unter Umgehung der API",
+        "persistence": "Gelesene Fakten sind historisch offen, spätere API-Sperre nimmt Wissen nicht zurück",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Vertraulichkeit der tatsächlich gelesenen fremden Daten ist verloren, APIdenial oder Workspacelease ist keine Reststruktur dafür",
+        "validation": "OS verhindert alle entsprechenden Datei- und Prozesslesezugriffe bevor Inhalt bekannt wird"
+      },
+      {
+        "state": "Effektive getrennte Principals verweigern Zugriff",
+        "kind": "abschluss",
+        "conditions": "Vorgeschlagene OS-Isolation sperrt direkte Dateien Prozessinspektion Mounts und entsprechende Ausgänge, berechtigte eigene Arbeit bleibt bedienbar",
+        "persistence": "Unerlaubter direkter Zugriff endet vor Offenlegung, andere Kanäle insbesondere Timing sind gesondert zu prüfen",
+        "residue_ids": [
+          "OBR039"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigte Nutzer können noch nicht offengelegten Datenbereich weiter verwenden während Angreifer ausgeschlossen bleibt",
+        "validation": "Geteilte UID offene Mounts oder Prozessrechte erlauben denselben Inhalt außerhalb Factory-API"
+      }
+    ],
+    "architectural_consequence": "Logische Scopeautorisierung von OS-Datei Prozess- und Mountrechten trennen. Historische Subprozesse unter gleichem User sind ausdrücklich kein vollständiger Sandboxnachweis."
+  },
+  {
+    "stressor_id": "S274",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Aktivität aus Timing wirklich über Priorwissen erkannt",
+        "kind": "verlust",
+        "conditions": "Angreifer beobachtet benannte CPU-/Queuezeiten, kontrollierte Auswertung erkennt sensible Opferaktivität über vorab deklarierte Priorbaseline bei akzeptierter Fehlerrate",
+        "persistence": "Gelernte vergangene Aktivität bleibt bekannt, fortlaufend gemeinsame Ressourcen können künftige Beobachtung ermöglichen ohne eigenen Attraktor",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Geheimhaltung tatsächlich erschlossener Aktivitätsfakten bleibt keine Restfähigkeit, kein automatischer Beweis gelesener Nutzinhalte",
+        "validation": "Blindes synthetisches Testset zeigt keine belastbare Verbesserung gegenüber Priorbaseline oder unerlaubte Zusatzsensoren erklären Treffer"
+      },
+      {
+        "state": "Beobachtungsmodell und Signal noch unbekannt",
+        "kind": "offen",
+        "conditions": "Sichtbare Timer Angreiferkontrolle Opfergrundrate und tolerierte Fehler fehlen, gemeinsame Ressourcen allein sind gegeben",
+        "persistence": "Weder nützliche Inferenz noch deren Unmöglichkeit folgt ohne messbare Hypothesen",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Konkrete Timing-Vertraulichkeit ist nicht belegt, keine perfekte Abschirmung oder bereits erfolgte Offenlegung wird ergänzt",
+        "validation": "Vorregistriertes Angreifermodell und versteckte synthetische Aktivitätsfolge liefern unterscheidendes Ergebnis"
+      },
+      {
+        "state": "Abfluss am definierten Timingkanal unterbunden",
+        "kind": "halt",
+        "conditions": "Entwurfsalternative trennt Ressourcenzeiten oder paddet Antworten für genau deklarierte Sensoren, Kostenbudget passt und wirksame Abschirmung dieses Signals wird bedingt vorausgesetzt, der unterscheidende Nachweis steht aus",
+        "persistence": "Autorisierte Arbeit kann weiterlaufen während dieses Aktivitätssignal unter definierter Unterscheidungsschwelle bleibt, neue Sensoren brechen Grenze",
+        "residue_ids": [
+          "OBR041"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigte Nutzer behalten Arbeit ohne das geprüfte Aktivitätssignal an diesen Beobachter preiszugeben, kein universeller Noninterferenz- oder empirischer Nachweis behauptet",
+        "validation": "Angreifer erreicht im blinden Test unter denselben erlaubten Sensoren bessere als zugesagte Unterscheidbarkeit"
+      }
+    ],
+    "architectural_consequence": "Timing als eigenen Beobachtungskanal mit Angreiferrechten Baseline und Fehlerkosten modellieren. OS-Leseverbot nicht als Nichtinterferenzbeweis wiederverwenden."
+  },
+  {
+    "stressor_id": "S275",
+    "source_states": [
+      "OB21",
+      "OB22",
+      "OB03",
+      "OB25"
+    ],
+    "branches": [
+      {
+        "state": "Shellrecht vorhanden, Missbrauch nicht belegt",
+        "kind": "offen",
+        "conditions": "Monitor erhielt Shellrecht, ist aber nicht nachweislich kompromittiert und Umfang der Rechte ungeprüft",
+        "persistence": "Erweiterte Exposition besteht solange Rechte gelten, ohne Angreifer und Wirkung keine eindeutige Kompromissdynamik",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Unabhängige Beobachterrolle ist nicht als durchgesetzte Vertragsgrenze belegt, dennoch ist keine konkrete Datenoffenlegung behauptet",
+        "validation": "Inspektion belegt entweder missbrauchten wirksamen Zugriff oder tatsächlich eng begrenzte unveränderbare Nur-Lese-Autorität"
+      },
+      {
+        "state": "Kompromittierte Shell legt Daten offen",
+        "kind": "verlust",
+        "conditions": "Monitor oder Shellcredential kompromittiert, Shell kann geschützte Daten lesen und Angreifer erhält sie",
+        "persistence": "Vergangene Offenlegung bleibt trotz spätem Widerruf, weitere Persistenz braucht zusätzliche Rechte",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Vertraulichkeit der so gelesenen Daten ist verloren, Diagnose durch denselben kompromittierten Monitor ist keine unabhängige Rettung",
+        "validation": "Tatsächliche Shellrechte verhindern geschützte Reads und kein unberechtigter Leser erhält Inhalt"
+      },
+      {
+        "state": "Shell installiert erneut sich selbst bestätigenden Kompromiss",
+        "kind": "attraktorhypothese",
+        "conditions": "Shell kann Factorypersistenz und vom Operator genutzte Monitorbelege ändern, wiederkehrende Recovery folgt diesen falschen Belegen",
+        "persistence": "Shell richtet Persistenz ein, manipulierte Befunde erklären Zustand gesund, gleichartige Recovery aktiviert erneut die Persistenz",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für unabhängig glaubwürdige Entscheidung innerhalb dieser kontrollierten Domäne ist kein Residue belegt, nicht jeder sonstige Byte ist verloren",
+        "validation": "Saubere unabhängige Recovery bleibt trotz behaupteter Rechte sauber oder manipulierte Befunde sind entscheidungsunwirksam"
+      },
+      {
+        "state": "Zeugencredential bleibt technisch ohne Shellwirkung",
+        "kind": "abschluss",
+        "conditions": "Gegenentwurf ersetzt freie Shell durch vorab begrenzte Nur-Lese-Prüfung außerhalb gemeinsamer Administration, geschützte OS-Daten bleiben unerreichbar",
+        "persistence": "Kompromittierter Zeugenaufruf kann definierte Beobachtung anfragen aber nicht Factory mutieren oder Secrets lesen",
+        "residue_ids": [
+          "OBR038",
+          "OBR039"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann begrenzte unabhängige Prüfevidenz und berechtigte Prozesse nicht offengelegte Daten nutzen, das ist andere Autorität als freie Shell",
+        "validation": "Zeugencredential kann doch Befehle injizieren Updater ändern oder geschützte Dateien beziehungsweise Prozesse lesen"
+      }
+    ],
+    "architectural_consequence": "Monitorcredential nicht still zum Aktuator machen. Nur-Lese-Zeuge Datenkompartiment und tatsächliche Shellmacht getrennt prüfen, bloße Rechtevergabe ist noch kein Vorfall."
+  }
+]

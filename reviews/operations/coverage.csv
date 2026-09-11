@@ -1,0 +1,101 @@
+stressor_id;state_ids;analysis_status;reason
+S001;OP002 OP001 OP014 OP006;conditional;Cut position separates no write from possibly delivered work and hardware loss.
+S002;OP002 OP014 OP001 OP006;conditional;Forced shutdown need not destroy readable disk or independent copies.
+S003;OP001 OP003 OP004;conditional;Reduced service and retry amplification require different load conditions.
+S004;OP005 OP026 OP001;conditional;Silent wrong bytes persist only if semantic validation accepts them.
+S005;OP002 OP007 OP001 OP006;conditional;Owner outage and exposed authority are separate consequences of theft.
+S006;OP006 OP002 OP011 OP001;conditional;Absorbing loss requires verifying the all-copies inventory.
+S007;OP008 OP026 OP025 OP001;conditional;Disconnect timing separates failed validation from later identity substitution.
+S008;OP002 OP017 OP014 OP022 OP028;conditional;Approval persistence and external acceptance have separate restart cut points.
+S009;OP002 OP001;conditional;Runtime portability and data readability are independent missing prerequisites.
+S010;OP002 OP033 OP001 OP003 OP022;conditional;Shared power/network failure preserves only independently available paths.
+S011;OP008 OP001;conditional;Failed prerequisite commit prevents this delivery writer from being called.
+S012;OP009 OP005 OP006;conditional;Detected replay failure differs from valid-looking undetected corruption.
+S013;OP001 OP009;conditional;Halfway execution of transactional statements is not half-committed schema.
+S014;OP011 OP009 OP001;conditional;Omitted WAL can mean missing tail inconsistent copy or harmless checkpointed data.
+S015;OP011 OP023 OP001 OP028 OP014;conditional;Restore cannot infer later attempts that were never in its snapshot.
+S016;OP012 OP001 OP006;conditional;A stored path can survive while exact artifact content is gone.
+S017;OP013 OP001 OP006;conditional;Lost known key differs from proven absence of every recovery key.
+S018;OP010 OP001 OP009;conditional;Present registry affects replay only if reducer output actually depends on it.
+S019;OP009 OP001 OP005;conditional;Relational schema migration does not establish new event-payload decoding.
+S020;OP012 OP006 OP001;conditional;Retention loss is irreversible only for needed unique content.
+S021;none;unresolved;Missing DST-fold occurrence identity and durable trigger-key policy.
+S022;none;unresolved;Missing nonexistent-local-time policy and intended misfire behavior.
+S023;none;unresolved;Missing wall/monotonic clock mapping and backward-step handling.
+S024;OP001 OP003 OP004;conditional;A finite wake backlog drains unless arrivals or endogenous generation sustain it.
+S025;none;unresolved;Missing timezone-rule pinning and already-materialized occurrence policy.
+S026;none;unresolved;Missing remote causal evidence and business relevance of timestamp order.
+S027;OP017 OP027 OP028 OP022;conditional;Approval expiry must be compared with acceptance not merely plugin readiness.
+S028;OP005 OP027 OP017 OP001;conditional;Expired price can be invalid current work or valid intended historical data.
+S029;none;unresolved;Missing concrete monotonic primitive suspend accounting and restart semantics.
+S030;OP026 OP001 OP023 OP003;conditional;Restart trigger repetition is harmless only with retained occurrence identity.
+S031;OP015 OP001 OP016;conditional;Observer outage leaves possible continuing file work and workspace uncertainty.
+S032;OP015 OP025 OP016;conditional;Known UUID mismatch is rejected but missing identity takes another branch.
+S033;OP025 OP001 OP015;conditional;Filename parsing failure removes a discriminating identity comparison.
+S034;OP001 OP015 OP024;conditional;Adapter suppresses hook-absent task signals but caller/UI behavior may differ.
+S035;OP001 OP005;conditional;Intermediate done does not complete a task through the inspected adapter.
+S036;none;unresolved;Missing observation generation/order and caller binding beyond UUID comparison.
+S037;OP026 OP001;source-supported;One-store stable-FileId reservations serialize and reject the second alias.
+S038;OP016 OP001 OP034;conditional;Parent exit is not proof surviving descendants lack write capability.
+S039;OP017 OP031 OP026 OP001;conditional;Blocked nonterminal assignment still occupies a temporary worker.
+S040;OP001 OP016 OP015;conditional;Common presumed-gone recovery can recreate records without proving old writer death.
+S041;OP018 OP022;conditional;Designed framing failure and in-flight effect uncertainty are independent.
+S042;OP018 OP021 OP008 OP002;conditional;Frame containment depends on checking declared size before allocation.
+S043;OP020 OP022 OP004 OP021;conditional;Health success need not imply useful business-operation progress.
+S044;OP019 OP018;conditional;Finite restart budget bounds cycle unless policy resets the budget.
+S045;OP018 OP026 OP021 OP002;conditional;Optional manifest isolation and safe-mode parse ordering remain design assumptions.
+S046;OP005 OP022 OP001 OP028;conditional;Participant durability cannot be created by persisting its premature success claim.
+S047;OP018 OP021 OP008 OP002;conditional;Subprocess isolation does not by itself prove per-process resource limits.
+S048;none;unresolved;Missing changed field semantics schema compatibility and affected invariant.
+S049;OP028 OP022 OP001;conditional;Disabling new dispatch does not undo already accepted in-flight work.
+S050;OP030 OP006 OP026 OP017;conditional;Lossy inverse contradicts declared reversibility rather than proving rollback.
+S051;OP022 OP028 OP001 OP023;conditional;Accepted effect and lost response create knowledge uncertainty not known failure.
+S052;OP020 OP021 OP007 OP027;conditional;Wrong DNS is not impersonation when peer authentication rejects it.
+S053;OP020 OP021 OP007 OP001;conditional;Expired certificate blocks strict clients but unsafe bypass is a different branch.
+S054;OP021 OP024 OP003 OP008 OP001;conditional;Slow-client containment requires bounded buffers across the entire delivery path.
+S055;OP021 OP001 OP031;conditional;Given intact local operation HTTP-only failure is a partial-service case.
+S056;OP024 OP001 OP017 OP034 OP023;conditional;Cached running is an observer claim not a task's actual persistent state.
+S057;OP026 OP001 OP024 OP025 OP023;conditional;Duplicate/reordered responses cause duplicate effects only with extra bad handling.
+S058;OP001 OP007 OP027;conditional;Public reachability alone does not prove unauthorized capability or disclosure.
+S059;OP033 OP001 OP031;conditional;Independent local work may continue while every remote control path is gone.
+S060;OP020 OP003 OP001 OP004;conditional;Continued rate limiting is external forcing unless retries worsen the condition.
+S061;OP001 OP026 OP031 OP025;conditional;Queued scope identity and later agent-name selection are distinct bindings.
+S062;OP025 OP026 OP015 OP012;conditional;Same path after deletion is not proof of the original directory object.
+S063;OP025 OP027 OP026 OP001;conditional;Canonical validation alone does not establish descriptor-bound later writes.
+S064;OP026 OP031 OP010 OP025;conditional;Historical authorization and future current-policy authorization must be separated.
+S065;OP023 OP025 OP016 OP001;conditional;One-database lease exclusivity does not fence two independent clones.
+S066;OP026 OP007 OP025;conditional;An existing session UUID is not evidence of authenticated ownership.
+S067;OP026 OP001;source-supported;Preserved chain membership is refused before a new delegated task is written.
+S068;OP004 OP023 OP026 OP001;conditional;Fresh-task reproduction is outside simple retained-chain loop rejection.
+S069;none;unresolved;Missing retirement task disposition tombstone memory retention and access semantics.
+S070;OP026 OP012 OP025 OP001;conditional;Only actual colliding case-sensitive names enter the lossy-restore basin.
+S071;OP026 OP023 OP001;conditional;Current helper duplicate-ID rejection differs from promised idempotent API response.
+S072;OP035 OP024 OP028 OP026;conditional;Queued cancel can commit between delivery intent and unguarded writer invocation.
+S073;OP026 OP001;source-supported;Transactional idle check includes already assigned queued or blocked tasks.
+S074;OP014 OP026 OP001;source-supported;Consumed delivery attempts remain counted after an unauthorized requeue.
+S075;OP012 OP005 OP001;conditional;Mutable result path does not retain immutable original bytes.
+S076;OP026 OP001 OP034;source-supported;Oversized completion is refused before mutation but ingress allocation is separate.
+S077;OP026 OP017 OP001 OP016;conditional;Normal assignment rejects occupied permanent session while manual bypass differs.
+S078;OP026 OP005 OP001;conditional;Zero exit and nonempty summary do not demonstrate task-specific output validity.
+S079;OP001 OP026 OP027 OP016;conditional;Metacharacters require shell interpretation to change executable meaning.
+S080;OP034 OP014 OP001 OP012 OP006;conditional;Durable orphan artifact and durable accepted completion are separate boundaries.
+S081;OP022 OP028 OP001 OP023;conditional;Preserved local key cannot force participant payment deduplication.
+S082;OP028 OP022 OP023;conditional;Actual irreversible send can coexist with locally unknown acceptance.
+S083;OP017 OP026 OP027 OP028;conditional;Approval for A cannot establish consent for changed B without content binding.
+S084;OP028 OP022 OP029;conditional;Post-acceptance revocation is not retroactive cancellation of an irreversible fact.
+S085;OP029 OP030 OP006 OP001;conditional;Stale inverse can destroy intervening human work without external preconditions.
+S086;OP029 OP004;conditional;Compensation failure is a disposition wait unless retry feedback is additionally shown.
+S087;OP023 OP026 OP001;conditional;Per-task idempotency does not identify one business intention across two tasks.
+S088;OP001 OP027 OP023 OP017 OP022;conditional;Retry repricing must satisfy the actual authorized terms and old acceptance state.
+S089;OP017 OP027 OP028 OP001;conditional;Refreshed confidential rows need current content and recipient authorization.
+S090;OP022 OP029 OP023 OP001 OP028;conditional;Expired operation history makes not-found ambiguous rather than never-accepted proof.
+S091;OP031 OP017 OP001 OP003 OP005;conditional;Operator absence blocks human-dependent work not every authorized operation.
+S092;OP027 OP005 OP032 OP003 OP001;conditional;Approval-degradation trap requires errors to generate further approval load.
+S093;OP031 OP022 OP023 OP027 OP001;conditional;A substitute needs usable operation evidence not merely account authority.
+S094;OP026 OP027 OP028 OP024;conditional;Correct authentication to wrong instance can still violate human intended target.
+S095;OP024 OP011 OP014 OP015;conditional;Manual snapshot open leaves stale rows and reconcile cannot fill omitted tail.
+S096;OP015 OP016 OP001;conditional;Pane closure does not account for later human writers or all descendants.
+S097;OP031 OP001;conditional;Durable opaque blocker text need not be usable by an authorized substitute.
+S098;OP005 OP026 OP001;conditional;Self-review bias is conditional and not evidence of an autonomous error loop.
+S099;OP026 OP015 OP016 OP001;conditional;Urgency does not discharge old lease or surviving-writer uncertainty.
+S100;OP013 OP031 OP001 OP006;conditional;Recovery instructions behind lost access form a dependency not a recovery path.

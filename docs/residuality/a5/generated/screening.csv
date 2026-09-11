@@ -1,0 +1,351 @@
+stressor,scenario,toy_cases,evidence
+S001,Netzstrom fällt während Commit und Prompt-Übergabe aus,D19,toy-mechanism-linked
+S002,Akku bläht sich auf und Gerät muss sofort außer Betrieb,,text-screened-only
+S003,Thermal Throttling macht alle Deadline-Schätzungen falsch,D06 D07,toy-mechanism-linked
+S004,RAM-Fehler korrumpiert ein Ergebnis ohne Prozesscrash,,text-screened-only
+S005,Einbruch entwendet den entsperrten einzigen Mac,,text-screened-only
+S006,Brand vernichtet Gerät und daneben gelagerte Backupplatte,,text-screened-only
+S007,Externe SSD trennt sich bei Scope-Kanonisierung,,text-screened-only
+S008,macOS startet mitten in einer Freigabe ungefragt neu,,text-screened-only
+S009,Hardware ersetzt Apple Silicon durch inkompatible Plattform,,text-screened-only
+S010,Wohnort verliert eine Woche Strom und Internet,,text-screened-only
+S011,SSD ist vor dem Intent-Commit voll,,text-screened-only
+S012,Bitrot beschädigt einen alten kanonischen Event,,text-screened-only
+S013,Projektionsmigration endet nach halber Tabellenänderung,,text-screened-only
+S014,WAL-Datei wird beim Dateikopieren vergessen,,text-screened-only
+S015,Restore stellt eine Woche alte Tasks ohne spätere Versuche her,D24 D25,toy-mechanism-linked
+S016,Referenziertes Artefakt wurde manuell gelöscht,,text-screened-only
+S017,Backup-Key ist verloren obwohl alle Backups intakt sind,,text-screened-only
+S018,Reduktor liest heutige Registry beim historischen Replay,,text-screened-only
+S019,Schema enthält neueren Payload-Typ als installiertes Binary,,text-screened-only
+S020,Backup-Retention löscht die einzige Kopie benötigter Inhalte,,text-screened-only
+S021,Sommerzeit wiederholt dieselbe lokale Cron-Minute,,text-screened-only
+S022,Sommerzeit überspringt geplanten Zeitpunkt,,text-screened-only
+S023,NTP setzt Uhr zwölf Stunden zurück,,text-screened-only
+S024,Laptop erwacht nach sechs Wochen mit tausenden fälligen Runs,,text-screened-only
+S025,Zeitzonenregeln ändern sich nach Schedule-Erstellung,,text-screened-only
+S026,Zwei Teilnehmer bestätigen Wirkungen mit widersprüchlichen Uhrzeiten,,text-screened-only
+S027,Freigabe läuft während langem Plugin-Start ab,,text-screened-only
+S028,Ein Task verarbeitet einen inzwischen abgelaufenen Preis,,text-screened-only
+S029,Maschine geht während monotonic-basierter Frist in Sleep,,text-screened-only
+S030,Cron-Plugin feuert denselben Trigger nach jedem Neustart erneut,,text-screened-only
+S031,Herdr ist unerreichbar während der Harness weiter Dateien schreibt,,text-screened-only
+S032,Pane-ID wird nach Neustart einer anderen Session gegeben,,text-screened-only
+S033,Transcript-Dateiname verliert die erwartete UUID,,text-screened-only
+S034,Hook fehlt aber Screen-Parser meldet idle,,text-screened-only
+S035,Harness meldet done nach einem Zwischenturn,,text-screened-only
+S036,Alte autoritative Beobachtung trifft nach neuer Session ein,,text-screened-only
+S037,Zwei Case-Varianten desselben Workspace werden parallel reserviert,,text-screened-only
+S038,Ein untergeordneter Prozess überlebt den gestoppten Harness,,text-screened-only
+S039,Temporärer Worker wartet tagelang auf Permission,,text-screened-only
+S040,Herdr-Restart wird fälschlich als kompletter Maschinenneustart klassifiziert,,text-screened-only
+S041,Plugin schreibt Debugtext auf stdout zwischen Protokollframes,,text-screened-only
+S042,Plugin meldet einen Frame von mehreren Terabytes an,,text-screened-only
+S043,Plugin beantwortet Healthchecks aber blockiert jede Geschäftsoperation,,text-screened-only
+S044,Plugin crasht sofort nach jedem automatischen Restart,D06 D07 D08 D09,toy-mechanism-linked
+S045,Optionales Pluginmanifest ist syntaktisch kaputt,,text-screened-only
+S046,Plugin liefert Erfolg vor dauerhaftem Commit beim Teilnehmer,,text-screened-only
+S047,Plugin-Unterprozess verbraucht alle File Descriptors,,text-screened-only
+S048,Kompatibles Major-Protokoll ändert die Bedeutung eines optionalen Felds,,text-screened-only
+S049,Ein Scope deaktiviert Plugin während dessen Effekt in flight ist,,text-screened-only
+S050,Plugin behauptet reversibel aber inverse Operation verliert Daten,,text-screened-only
+S051,Netz partitioniert nach externer Annahme vor Response,D19 D20 D21 D22,toy-mechanism-linked
+S052,Provider DNS zeigt auf falschen Endpunkt,,text-screened-only
+S053,TLS-Zertifikat läuft ab während langer Offlinephase,,text-screened-only
+S054,WebSocket-Client liest nie seine Events,,text-screened-only
+S055,HTTP-Transport fällt aus während lokaler Betrieb intakt ist,,text-screened-only
+S056,Remote-Client zeigt tagelang gecachten Status running,,text-screened-only
+S057,Netzwerk-Antworten kommen doppelt und vertauscht,,text-screened-only
+S058,Ein nicht-lokaler Listener wird versehentlich öffentlich gebunden,,text-screened-only
+S059,Tailscale und SSH fallen gemeinsam aus während Operator fern ist,,text-screened-only
+S060,Teilnehmer drosselt alle Anfragen über Tage mit Rate Limit,D01 D03 D04 D26,toy-mechanism-linked
+S061,Registry benennt Zielagent um nachdem Task queued wurde,,text-screened-only
+S062,Scope-Verzeichnis wird gelöscht und am selben Pfad ersetzt,,text-screened-only
+S063,Symlink ändert Ziel zwischen Validierung und Dateischreibzugriff,,text-screened-only
+S064,Parent-Scope verschiebt sich und ändert Delegationsrechte,,text-screened-only
+S065,Zwei Klone derselben Installation starten auf getrennten Macs,D17 D18,toy-mechanism-linked
+S066,Client zeigt legitime Session-ID eines anderen Agents vor,,text-screened-only
+S067,Task delegiert A nach B nach C nach A,,text-screened-only
+S068,Agent erzeugt statt Weiterdelegation immer neue identische Tasks,,text-screened-only
+S069,Scope wird stillgelegt während alte Tasks und Memory existieren,,text-screened-only
+S070,Case-sensitive Export wird auf case-insensitive Dateisystem restauriert,,text-screened-only
+S071,CLI wiederholt create nach verlorener Antwort,,text-screened-only
+S072,Cancel trifft nach Zustellcommit aber vor Writer-Aufruf ein,,text-screened-only
+S073,Zwei Assignments sehen denselben idle Worker,,text-screened-only
+S074,Blocked Task wird requeued ohne neue Zustellautorisierung,,text-screened-only
+S075,Worker liefert Artefaktpfad der auf später überschreibbare Datei zeigt,,text-screened-only
+S076,Taskergebnis enthält mehrere Gigabytes Text,,text-screened-only
+S077,Permanent Agent bearbeitet neue Aufgabe während alte auf Permission wartet,,text-screened-only
+S078,Process-Executor Exitcode null obwohl Output leer ist,,text-screened-only
+S079,Taskprompts enthalten Shell-Metazeichen für Process-Executor,,text-screened-only
+S080,Worker stirbt nach fertigem Artefakt vor Result-Commit,,text-screened-only
+S081,Zahlungsprovider ignoriert Idempotency-Key,D20 D22,toy-mechanism-linked
+S082,Email wurde gesendet aber Versandplugin crasht,D19 D20,toy-mechanism-linked
+S083,Mensch genehmigt Rechnung A während Payload auf Rechnung B wechselt,,text-screened-only
+S084,Freigabe wird nach Annahme beim Teilnehmer widerrufen,,text-screened-only
+S085,Saga kompensiert Änderung die inzwischen ein Mensch weiterbearbeitet hat,,text-screened-only
+S086,Kompensation schlägt wiederholt fehl,,text-screened-only
+S087,Zwei verschiedene Tasks bestellen fachlich dasselbe Produkt,,text-screened-only
+S088,Provider berechnet beim Retry einen neuen Preis,,text-screened-only
+S089,Geplanter Reportversand enthält nach Refresh neue vertrauliche Zeilen,,text-screened-only
+S090,Teilnehmer löscht Operationhistorie bevor Factory rekonziliert,D22 D23,toy-mechanism-linked
+S091,Einziger Operator ist drei Tage offline,D13,toy-mechanism-linked
+S092,Operator bestätigt hundert Dialoge im Alarmsturm reflexhaft,D10 D12,toy-mechanism-linked
+S093,Vertreter übernimmt ohne Wissen über laufende Außenwirkungen,,text-screened-only
+S094,Operator verwechselt Produktions- und Fixture-Instanz,,text-screened-only
+S095,Operator kopiert Backup per Hand statt Restore-Prozess,D24 D25,toy-mechanism-linked
+S096,Mensch beendet pane manuell und schreibt später im selben Workspace,,text-screened-only
+S097,Nur zuständiger Owner versteht eine Blockerbeschreibung,,text-screened-only
+S098,Operator ist bei Abnahme seines eigenen fehlerhaften Ergebnisses befangen,,text-screened-only
+S099,Mensch fordert Sofortstart trotz unklarer alter Lease,,text-screened-only
+S100,Operator verliert alle Zugänge und Recoveryanweisungen liegen nur auf dem Gerät,,text-screened-only
+S101,Modellanbieter schließt über Nacht,,text-screened-only
+S102,Modellalias wird still auf andere Gewichte umgestellt,,text-screened-only
+S103,Modell folgt Prompt Injection in einer Quellseite,,text-screened-only
+S104,Zwei Prüfer nutzen denselben Modellfehler und bestätigen falsches Ergebnis,D14 D15 D16,toy-mechanism-linked
+S105,Modell halluziniert nicht existierende Ergebnisdateien,,text-screened-only
+S106,Lokales Modell belegt gesamten RAM und verdrängt Daemon,,text-screened-only
+S107,Modell wechselt mitten im Run ohne Telemetriehinweis,,text-screened-only
+S108,Modell produziert unendlich viele korrekte Zwischenschritte,,text-screened-only
+S109,Kontextfenster schrumpft nach Harnessupgrade,,text-screened-only
+S110,Benchmarkfixture wird vom Modell erkannt und speziell ausgetrickst,,text-screened-only
+S111,Root-AGENTS wird zwischen Queueing und Start geändert,,text-screened-only
+S112,Ein AGENTS-Quellfile ist plötzlich unlesbar,,text-screened-only
+S113,Human schreibt Geheimnis in Taskprompt,,text-screened-only
+S114,Knowledge-Link führt zyklisch durch tausende Notizen,,text-screened-only
+S115,Zwei Quellen widersprechen sich über aktuelle Freigaberegel,,text-screened-only
+S116,Quellwebsite ändert Inhalt ohne URLänderung,,text-screened-only
+S117,Repo enthält bösartige native Harnesskonfiguration,,text-screened-only
+S118,Agent schreibt Shared Memory im Namen fremden Scopes,,text-screened-only
+S119,Artefaktnamen unterscheiden sich nur durch Unicode-Normalisierung,,text-screened-only
+S120,Context wird zum Debuggen vollständig in Telemetrie kopiert,,text-screened-only
+S121,Plugin läuft als gleicher User und liest Keychain außerhalb Kernel,,text-screened-only
+S122,Angreifer ersetzt Pluginbinary nach Manifestprüfung,,text-screened-only
+S123,Transportplugin behauptet falschen authentifizierten Actor,,text-screened-only
+S124,Agent schreibt absichtlich direkt in SQLite,,text-screened-only
+S125,SQL-/Pfadinjection steckt in neuem Pluginparameter,,text-screened-only
+S126,Log enthält Terminalescapes die Diagnoseanzeige fälschen,,text-screened-only
+S127,Altes gestohlenes Capability-Token wird nach Restore erneut gültig,,text-screened-only
+S128,Bekannte Integration wird per Dependency-Typosquatting ersetzt,,text-screened-only
+S129,Ransomware verschlüsselt DB Backups und Knowledge gleichzeitig,,text-screened-only
+S130,Task erzeugt riesige gültige Delegationsketten ohne Zyklus,,text-screened-only
+S131,Betroffene Person verlangt Löschung aus append-only History,,text-screened-only
+S132,Gericht verlangt Legal Hold während Retention löschbereit ist,,text-screened-only
+S133,Kunde verlangt Datenresidenz die aktueller Modellprovider nicht erfüllt,,text-screened-only
+S134,Backup enthält Geheimnisse die im Original schon rotiert wurden,,text-screened-only
+S135,Lizenz einer notwendigen Library wird für neue Releases unbrauchbar,,text-screened-only
+S136,Audit muss beweisen welcher Mensch konkret freigegeben hat,,text-screened-only
+S137,Behörde beschlagnahmt Originalgerät und fordert Einsicht,,text-screened-only
+S138,Ein ursprünglich harmloses Feld wird später als sensibel eingestuft,,text-screened-only
+S139,Auskunftsanfrage verlangt Provenienz über gelöschte Scopes hinweg,,text-screened-only
+S140,Versicherer verlangt beweisbare Recovery statt vorhandener Backups,,text-screened-only
+S141,Tokenpreise steigen über Nacht um Faktor hundert,,text-screened-only
+S142,Provider ersetzt Prepaid durch unbekannte nachträgliche Abrechnung,,text-screened-only
+S143,Ein großer Scope monopolisiert alle Slots mit legalen Tasks,D05,toy-mechanism-linked
+S144,Jeder kleine Task kostet mehr menschliche Freigabe als er spart,,text-screened-only
+S145,Nachfrage verzehnfacht sich ohne weitere Workspaces,,text-screened-only
+S146,Budget wird während langer Agentarbeit auf null gesetzt,,text-screened-only
+S147,Geschäftskunde verlangt garantierte Echtzeitantwort bei lokalem Single-Host,,text-screened-only
+S148,Ein Fachauftrag ist nach Queuewartezeit wirtschaftlich wertlos,,text-screened-only
+S149,Unternehmen kann keinen externen Backupdienst mehr bezahlen,,text-screened-only
+S150,Unbekannte Providerrechnung macht Metrikvergleich irreführend,,text-screened-only
+S151,Rust-Update ändert Plattformverhalten trotz unverändertem Code,D08 D09,toy-mechanism-linked
+S152,Release enthält neue Eventversion aber keinen alten Upcaster,,text-screened-only
+S153,Python-Prototyp und Rust mutieren denselben Tabellennamen mit anderem Schema,D17,toy-mechanism-linked
+S154,Rollback des Binaries trifft auf bereits migriertes Schema,,text-screened-only
+S155,Ein Versionspaket ist nach Maintainerwechsel nicht mehr herunterladbar,,text-screened-only
+S156,Veröffentlichung exportiert versehentlich Company-root statt Projekt,,text-screened-only
+S157,Tests bestätigen absichtlich unsicheren Missing-ID-Fallback,,text-screened-only
+S158,README und ADR widersprechen dem aktuellen Library-Schema,,text-screened-only
+S159,Automatischer Updater aktiviert Plugin vor Manifestverifikation,,text-screened-only
+S160,Jedes Architekturproblem wird durch weiteren Kerndienst beantwortet,,text-screened-only
+S161,Firmengründer fällt dauerhaft aus und niemand besitzt Freigabeautorität,D13,toy-mechanism-linked
+S162,Zwei Geschäftsführer geben widersprüchliche Anweisungen zum selben Effekt,,text-screened-only
+S163,Unternehmen wird verkauft und bisherige Mitarbeiter verlieren Zugriffsrechte,,text-screened-only
+S164,Projekt wird ausgegliedert und darf Company-Kontext nicht mitnehmen,,text-screened-only
+S165,Sicherheitsverantwortlicher und Produktowner streiten über riskanten Resume,,text-screened-only
+S166,Dienstleister ersetzt komplette Agentflotte mit anderen Instrumenten,,text-screened-only
+S167,Teams optimieren auf möglichst wenige blocked Runs und umgehen Freigaben,,text-screened-only
+S168,Scope-Besitzer verweigert Budgetauskunft obwohl gemeinsame Maschine überlastet ist,,text-screened-only
+S169,Organisation verlangt nachträgliches Umschreiben eines unbequemen Auditfakts,,text-screened-only
+S170,Ein Partner stellt Betrieb ein und niemand kann seine alten Operationen bestätigen,,text-screened-only
+S171,Tausend neue Scopes erzeugen je einen Pluginprozess,,text-screened-only
+S172,Zwei Kunden fordern gegenseitige Geheimhaltung auf derselben User-ID,,text-screened-only
+S173,Remote-Worker laufen über Tage offline auf fremder Hardware,,text-screened-only
+S174,Produkt muss auf Smartphone ohne Daemon-Dauerbetrieb laufen,,text-screened-only
+S175,Firma verlangt Active-active mit automatischem Failover zwischen Städten,,text-screened-only
+S176,Robotikplugin steuert irreversible Bewegung mit Millisekundenfrist,,text-screened-only
+S177,Regulierter Betrieb verlangt manipulationssichere Beweise gegen Root-Admin,,text-screened-only
+S178,Ereignisbestand wächst auf Jahrzehnte und Replay dauert länger als RTO,,text-screened-only
+S179,Kunde fordert vollständigen Export und Abschaltung aller Factorydienste,,text-screened-only
+S180,Pluginlandschaft entwickelt wechselseitige Abhängigkeiten mit Startzyklus,,text-screened-only
+S181,Extremer Sonnensturm zerstört Elektronik in mehreren Backupregionen,,text-screened-only
+S182,Mac erwacht im Jahr 2046 und alle Termine Zertifikate und Anbieter sind historisch,,text-screened-only
+S183,Nach zwanzig Jahren versteht niemand mehr Sprache und Geschäftskürzel der Taskprompts,,text-screened-only
+S184,Alle verfügbaren Modelle und menschlichen Prüfer teilen denselben überzeugenden Irrtum,D14 D15,toy-mechanism-linked
+S185,Zwei technisch identische Instanzklone erhalten widersprüchliche legitime Weltzustände,D17 D18,toy-mechanism-linked
+S186,Neue Rechtslage verlangt sofortige Löschung aller Geschäftsdaten und zugleich ewige Beweisbarkeit,,text-screened-only
+S187,Energie steht künftig nur fünf Minuten pro Monat zur Verfügung,,text-screened-only
+S188,Alle genutzten Kryptoprimitiven gelten plötzlich als praktisch gebrochen,,text-screened-only
+S189,Firma spaltet sich rechtlich in zwei Nachfolger die beide alle Freigaberechte beanspruchen,,text-screened-only
+S190,Alle Geräte Backups Schlüssel und Erinnerungen an das System verschwinden,,text-screened-only
+S191,Alter Restore trifft auf widerrufene Freigabe und inzwischen ausgeführte queued-Aktion,D24 D25,toy-mechanism-linked
+S192,Pluginflood füllt SSD genau als dringender Widerruf eingeht,,text-screened-only
+S193,Herdrausfall hält Leases und einziger Operator stirbt während Rechenbudget ausläuft,,text-screened-only
+S194,Restoremanifest ist vollständig aber einzige Contentkopie unterliegt gerichtlich angeordneter Löschung,,text-screened-only
+S195,Providerwechsel verändert Outputformat und derselbe Modelltyp verifiziert seinen Fehler,,text-screened-only
+S196,Zwei Scopeagenten vervielfachen Tasks während Cron eine monatelange Nachholwelle erzeugt,D01 D02,toy-mechanism-linked
+S197,Compensation läuft gegen vom Menschen veränderte Daten während ihr Plugin geupdatet wird,,text-screened-only
+S198,Migrationscutover wird unterbrochen und Backupklon startet parallel den Legacydispatcher,D17 D18,toy-mechanism-linked
+S199,Geräteverlust trifft auf verlorenen Backup-Key und insolventen Softwarelieferanten,,text-screened-only
+S200,Incidentbericht behauptet volle Resilienz weil alle Matrixfelder markiert sind und stoppt reale Tests,D14,toy-mechanism-linked
+S201,Der ganze Mac verliert Strom und kann keinen Ausfallalarm mehr senden,,text-screened-only
+S202,Der Rechner läuft aber der Factory-Daemon ist seit Stunden beendet,,text-screened-only
+S203,Der Rechner wacht nach drei Monaten mit alten wartenden Aufträgen auf,,text-screened-only
+S204,Factory und Monitoring-Mini-PC hängen an derselben ausgefallenen Steckdose,,text-screened-only
+S205,Monitor Alarmemail und Backups werden durch dieselbe Accountsperre unzugänglich,,text-screened-only
+S206,Ein regionales Ereignis trennt Rechner Mobilfunk und den einzigen Operator,D13,toy-mechanism-linked
+S207,Der Monitor fällt eine Stunde vor Factory aus und bleibt stumm,,text-screened-only
+S208,Der Alarmdienst bestätigt Versand aber die Nachricht landet im Spam,,text-screened-only
+S209,Ein Wartungsfenster von einer Stunde bleibt nach einem Fehler zehn Jahre stumm,D10 D11,toy-mechanism-linked
+S210,Ein freier Health-Thread meldet grün während der Kernel im Deadlock steckt,,text-screened-only
+S211,Reads funktionieren aber die SSD nimmt seit gestern keinen Commit mehr an,,text-screened-only
+S212,Alle Tasks sind legitim blockiert und ein Fortschrittsalarm erzeugt dauernd Lärm,,text-screened-only
+S213,Ein Proxy liefert nach dem Rechnerausfall noch eine Woche gecachte Lebenszeichen,,text-screened-only
+S214,Nach Netzrückkehr treffen tausend alte Heartbeats schneller als echte ein,,text-screened-only
+S215,Ein restaurierter Klon sendet dieselbe alte Monitoridentität wie das Original,,text-screened-only
+S216,Ein Agent erzeugt pro Token ein neues Metriklabel bis das Monitoring abstürzt,,text-screened-only
+S217,Ein Tracingexport wartet bei jedem Commit auf einen ausgefallenen Cloudcollector,,text-screened-only
+S218,Ein Debugmodus verdoppelt die Latenz und beseitigt zugleich das untersuchte Rennen,,text-screened-only
+S219,Acht Schichten brauchen jeweils neun Sekunden bei einer Gesamtfrist von zehn,,text-screened-only
+S220,Ein Auftrag wartet 48 Stunden in der Queue und bekommt danach eine frische Fünfsekundenfrist,,text-screened-only
+S221,Ein 200-Millisekunden-Task wartet zwölf Jahre auf menschliche Freigabe,,text-screened-only
+S222,Das Dashboard zeigt nur abgeschlossene Tasks und verschweigt den seit Wochen hängenden Rest,,text-screened-only
+S223,Der Lasttest sendet erst nach jeder Antwort und erzeugt während des Hängers keine neue Last,,text-screened-only
+S224,Aus tausend schnellen Samples wird ein p99.999-Verfügbarkeitsversprechen abgeleitet,,text-screened-only
+S225,Ein Task wartet auf alle zehntausend Pluginantworten und eine kommt nie,,text-screened-only
+S226,Ein Optimierer verdoppelt langsame Rechnungsaktionen spekulativ um das Tail zu verkürzen,D20,toy-mechanism-linked
+S227,Ein Aggregator erklärt 999 von 1000 Prüfergebnissen für vollständig um schnell zu antworten,D15 D16,toy-mechanism-linked
+S228,Eine von hunderttausend Anfragen hängt unbegrenzt und belegt über Jahre alle Slots,D01,toy-mechanism-linked
+S229,Nur ein bestimmter Scope erlebt minutenlange fsync-Pausen während globale Mittelwerte grün sind,,text-screened-only
+S230,Eine zufällige Speicherbereinigung trifft immer dieselbe Geschäftsdeadline,,text-screened-only
+S231,Die Antwort auf einen Versand kommt 90 Tage nach Ablauf der Idempotenzhistorie,D21 D22 D23,toy-mechanism-linked
+S232,Ein offline gepufferter Auftrag wird 2046 ausgeführt nachdem Empfänger und Firma gewechselt haben,,text-screened-only
+S233,Ein Ergebnis trifft nach legaler Löschung seiner Zuordnung ein und enthält sensible Daten,,text-screened-only
+S234,Cancel erreicht den Teilnehmer eine Mikrosekunde nach irreversibler Annahme,D19 D21,toy-mechanism-linked
+S235,Der Parent stirbt nach Timeout aber ein Enkelprozess schreibt zwei Tage weiter,,text-screened-only
+S236,Ein Cancel steckt hinter Gigabytes stdout im selben Kanal fest,,text-screened-only
+S237,CLI Kernel Plugin und SDK wiederholen jeweils viermal denselben Fehler,D01 D02 D03 D04 D26,toy-mechanism-linked
+S238,Eine Million Clients versuchen nach identischer Pause exakt gleichzeitig erneut,,text-screened-only
+S239,Nach Quotenfehler retryt ein Plugin aggressiver und verbraucht das letzte Budget,,text-screened-only
+S240,Nach Stromrückkehr laden alle Agenten gleichzeitig ihre riesigen Modelle,D06 D07,toy-mechanism-linked
+S241,Ein leerer Cache macht eine bisher optionale Suche zum Kapazitätsengpass,,text-screened-only
+S242,Kalte DNS- und TLS-Aufbauten verbrauchen die gesamte Erstaufruffrist,,text-screened-only
+S243,Ein 8-Terabyte-Export steht vor allen kleinen Kontrollabfragen,,text-screened-only
+S244,Ständig eintreffende Notfalltasks verdrängen normale Aufgaben über Monate,D05,toy-mechanism-linked
+S245,Unklare Agenten halten alle Workspace-Reservierungen und der Operator fordert TTL-Freigabe,D02,toy-mechanism-linked
+S246,Zehn Millionen registrierte Namen passen in den Store aber nicht in jede Kontextnachricht,,text-screened-only
+S247,Ein einziges Ergebnis enthält hundert Gigabytes in einem gültigen JSON-Feld,,text-screened-only
+S248,Hunderttausend langsame Subscriber halten je eine eigene Queue offen,,text-screened-only
+S249,Zwanzig Jahre Ereignisse brauchen drei Wochen Replay bei vereinbartem RTO von einer Stunde,,text-screened-only
+S250,Der Restore passt nur wenn Original Export temporäre Kopie und Index nie gleichzeitig existieren,,text-screened-only
+S251,Um Platz zu sparen werden nur Operationstombstones gelöscht und der nächste Retry dupliziert Wirkung,D23,toy-mechanism-linked
+S252,Nach zehn Jahren Pause sind eine Milliarde Schedule-Occurrences nachzuholen,,text-screened-only
+S253,Eine Providerstörung endet und alle blockierten Scopes starten im selben Millisekundenfenster,D03 D04 D26,toy-mechanism-linked
+S254,Ein viraler Auftrag erzeugt rekursiv Millionen Kinder bevor die Rechnung sichtbar wird,D05,toy-mechanism-linked
+S255,Dauerlast drosselt die CPU auf ein Zehntel und verlängert alle Fristen gleichzeitig,D06 D07,toy-mechanism-linked
+S256,Die USV reicht für den Commit aber nicht für den nachfolgenden externen Versand,,text-screened-only
+S257,Lastabwurf schaltet zuerst den als unwichtig eingestuften Monitoringrouter ab,,text-screened-only
+S258,Stop wartet hinter sämtlichen überlasteten Pluginaufrufen,,text-screened-only
+S259,Der Notfallzugang verlangt einen Login beim gerade gesperrten einzigen Identitätsanbieter,,text-screened-only
+S260,Die SSD ist voll und Factory bestätigt einen Stopp den es nicht speichern konnte,,text-screened-only
+S261,Ein korrekt authentifizierter Pluginaufruf verwendet das Credential eines anderen Scopes,,text-screened-only
+S262,Ein menschenlesbarer Empfängername wird kurz vor Dispatch auf eine andere Identität umgebogen,,text-screened-only
+S263,Eine importierte Task-ID wird als Beleg einer fremden Freigabe akzeptiert,,text-screened-only
+S264,Ein Dokument behauptet Systemregel zu sein und verlangt den Upload aller Secrets,,text-screened-only
+S265,Ein Fehlerlog enthält gefälschte Bestätigungen die ein Recovery-Agent für Operatorfreigaben hält,,text-screened-only
+S266,Ein Ergebnisartefakt schmuggelt eine neue externe Aktion in seine Prüfanweisung,,text-screened-only
+S267,Ein gültig signiertes Pluginupdate exfiltriert Daten,,text-screened-only
+S268,Ein zurückgezogenes Paket wird zwanzig Jahre später für Restore aus einem übernommenen Namen geladen,,text-screened-only
+S269,Das unabhängige Monitoring erhält denselben kompromittierten Auto-Updater wie Factory,,text-screened-only
+S270,Heartbeat-Schlüsselrotation und Netzpartition überlappen sodass beide Seiten den jeweils anderen Key ablehnen,,text-screened-only
+S271,Ein zwanzig Jahre alter Vault ist lesbar aber niemand besitzt den Entschlüsselungsweg,,text-screened-only
+S272,Ein späterer kryptografischer Durchbruch macht alte sensible Exporte lesbar,,text-screened-only
+S273,Ein feindlicher Agent liest andere Scopes direkt über das Betriebssystem,,text-screened-only
+S274,Ein Mitnutzer rekonstruiert fremde Aktivität aus geteilten CPU- und Queuezeiten,,text-screened-only
+S275,Der externe Monitor erhält aus Bequemlichkeit Shellzugriff auf Factory,,text-screened-only
+S276,Heartbeat-Labels verraten Kundennamen und vertrauliche Geschäftszeiten,,text-screened-only
+S277,Ein Debugexport für Monitoring enthält die vollständige AGENTS-Konversation,,text-screened-only
+S278,Ein Angreifer löst gezielt Fehlalarme aus um Alarmempfänger und Bereitschaftsmuster zu lernen,,text-screened-only
+S279,Ein fehlerhafter Exporter erzeugt identisch falsche Daten und passende Prüfsummen in allen Backups,,text-screened-only
+S280,Ein einzelner Bitfehler verwandelt einen Betrag in eine andere noch gültige Zahl,,text-screened-only
+S281,Zwei signierte Journale widersprechen sich nach einer Split-Brain-Phase,D17 D18,toy-mechanism-linked
+S282,Ein altes Backup kennt weder gestern versandte Rechnungen noch heutige Widerrufe,D24 D25,toy-mechanism-linked
+S283,Original und restaurierter Klon senden gleichzeitig plausible Lebenszeichen,D17 D18,toy-mechanism-linked
+S284,Der Recoverylauf dauert so lange dass seine zu Beginn geprüften Rechte schon wieder verfallen,,text-screened-only
+S285,Neuer Client und altes Plugin interpretieren dieselbe gültige Zahl mit verschiedener Einheit,,text-screened-only
+S286,Ein optionales Plugin verlangt plötzlich eine globale Kernmigration für alle Scopes,,text-screened-only
+S287,Altes Binary öffnet einen neuen Store und ersetzt unverstandene Felder durch Defaults,,text-screened-only
+S288,Rollback startet den alten Code nachdem der neue schon eine irreversible Außenaktion ausgelöst hat,,text-screened-only
+S289,Eine Migration verliert die Verbindung genau zwischen Übergabe und Start des neuen Writers,,text-screened-only
+S290,Eine Notfallkorrektur benötigt gerade das kaputte Plugin um dessen Konfiguration zu lesen,,text-screened-only
+S291,Der einzige Maintainer verschwindet und ein Nachfolger kennt die verdeckten Betriebsannahmen nicht,,text-screened-only
+S292,Eine winzige Reparatur braucht eine nicht mehr erhältliche Toolchain und einen gelöschten Cloudaccount,,text-screened-only
+S293,Nach tausend Sonderfällen versteht niemand mehr welche Ausnahme Außenwirkung erlaubt,,text-screened-only
+S294,Ein Update der gemeinsamen JSON-Bibliothek verändert gleichzeitig Plugins Replay und Monitoring,D08 D09,toy-mechanism-linked
+S295,Ein Monitoringfeature macht einen Cloudaccount zur Startvoraussetzung aller Kindscopes,,text-screened-only
+S296,Eine hilfreiche automatische Reparatur wächst zum zweiten schreibenden Kernel,,text-screened-only
+S297,Alle Tests verwenden sofortige Antworten und verpassen jede verspätete Annahme,,text-screened-only
+S298,Die virtuelle Testuhr friert Timeout und externen Monitor gemeinsam ein,,text-screened-only
+S299,Ein Mock bestätigt Fencing obwohl der reale Provider alte Generationen akzeptiert,D18,toy-mechanism-linked
+S300,Ein erfolgreicher Bericht vertauscht Euro Cent und Dezimalkomma,D15 D16,toy-mechanism-linked
+S301,Ein schneller Cache liefert eine alte aber plausibel richtige Preisliste für heutige Bestellung,,text-screened-only
+S302,Ein Auftrag wird vollständig für die falsche reale Person mit gleichem Namen erledigt,,text-screened-only
+S303,Im Incident ist die rote Warnung für einen farbfehlsichtigen Operator nicht erkennbar,,text-screened-only
+S304,Ein langer Scopepfad wird im Mobilalarm gekürzt und der Operator stoppt die falsche Instanz,,text-screened-only
+S305,Eine übersetzte Schaltfläche macht aus unklar scheinbar sicher fehlgeschlagen,,text-screened-only
+S306,Der Alarm erreicht nachts ein ausgeschaltetes Telefon und niemand bemerkt ihn für Tage,D13,toy-mechanism-linked
+S307,Ein Flapping-Link erzeugt zehntausend Meldungen und verdeckt den späteren echten Totalausfall,D10 D11 D12,toy-mechanism-linked
+S308,Der Operator bestätigt einen Alarm sofort aber die Reparatur liegt drei Monate in seiner Queue,,text-screened-only
+S309,Zwei rechtmäßige Vertreter erteilen gleichzeitig gegensätzliche Freigaben,,text-screened-only
+S310,Der ausgeschiedene Betreiber kontrolliert noch den einzigen Monitoringaccount,,text-screened-only
+S311,Ein befangenes Team schaltet Alarme stumm um eigene Fehlaktionen unsichtbar zu machen,,text-screened-only
+S312,Zwei Modellanbieter Monitor und Pager nutzen denselben gestörten Cloudunterbau,,text-screened-only
+S313,Eine Zahlungssperre stoppt Modelle Backups und Alarme am selben Tag,,text-screened-only
+S314,Der einzige Provider stellt den Dienst mit 24 Stunden Frist endgültig ein,,text-screened-only
+S315,Ein Provider meldet Tokenkosten erst eine Woche nach Überschreitung des Monatsbudgets,,text-screened-only
+S316,Ein p99.999-Latenzziel führt zu hundert spekulativen Kopien pro Auftrag,,text-screened-only
+S317,Aufmerksamkeit für Fehlalarme kostet mehr als sämtliche Modellaufrufe,D10 D11 D12,toy-mechanism-linked
+S318,Eine behördliche Untersagung trifft zwischen Freigabe und später Teilnehmerannahme ein,,text-screened-only
+S319,Zwei Rechtsräume verlangen gleichzeitig Löschung und unveränderte Beweisaufbewahrung,,text-screened-only
+S320,Ein Monitoringprovider verlagert sensible Betriebsmetadaten unangekündigt in einen anderen Rechtsraum,,text-screened-only
+S321,Ein alter Auftrag öffnet nach Tagen ein physisches Ventil in einer inzwischen anderen Situation,,text-screened-only
+S322,Eine Notfallabschaltung hängt von einer Cloudantwort ab die erst morgen kommt,,text-screened-only
+S323,Ein Menschenleben wird gegen monatliches Rechenbudget automatisch abgewogen,,text-screened-only
+S324,Factory erreicht den Dienst aber keine Antwort erreicht Factory zurück,D19 D20,toy-mechanism-linked
+S325,Eine Satellitenverbindung liefert signierte Pakete nach 30 Tagen stark umgeordnet,D21,toy-mechanism-linked
+S326,Monitoring sieht Factory nicht aber Factory erreicht weiterhin alle Businessdienste,,text-screened-only
+S327,Ein Laptop schläft ein Jahr und seine lokale monotone Uhr behandelt Suspend anders als erwartet,,text-screened-only
+S328,Die Wallclock springt rückwärts und verlängert eine Wartungsstummschaltung scheinbar um Jahre,,text-screened-only
+S329,Eine globale Zeitzonenreform ändert die Bedeutung bereits geplanter lokaler Termine,,text-screened-only
+S330,Runtime sagt beendet Dateibeobachtung zeigt neue Writes und der Agent behauptet bereit,,text-screened-only
+S331,Drei unabhängige Prüfer verwenden dieselbe fehlerhafte externe Grundtabelle,D14 D15,toy-mechanism-linked
+S332,Der Provider attestiert Erfolg aber der Empfänger bestreitet jede Wirkung und Logs fehlen,,text-screened-only
+S333,Ein Agent verbessert seine Durchlaufzeit indem er schwierige Tasks vor Messbeginn ablehnt,,text-screened-only
+S334,Ein Team benennt Fehler als Wartung um die Verfügbarkeit auf hundert Prozent zu heben,,text-screened-only
+S335,Ein Modell schreibt fertige Artefakte ohne Prüfung um das Erfolgsziel zu erfüllen,D14,toy-mechanism-linked
+S336,Energiesparmodus schaltet nachts den Rechner ab und erzeugt täglich einen Totalausfallalarm,,text-screened-only
+S337,CO2-optimiertes Verschieben lässt eine genehmigte Aktion erst nach ihrem Verfallsdatum starten,,text-screened-only
+S338,Drei zusätzliche Monitoringcluster verbrauchen mehr als das kleine überwachte System,,text-screened-only
+S339,Restore auf anderer CPU interpretiert ein natives Binärartefakt anders,,text-screened-only
+S340,Ein Dateisystem mit anderer Großschreibung vereinigt zwei vormals verschiedene Workspacepfade,,text-screened-only
+S341,Im Jahr 2080 existieren weder heutige Modellformate noch Netzwerkprotokolle,,text-screened-only
+S342,Factory wird abgeschaltet während ein Dienst noch alte Aktionen gepuffert hat,,text-screened-only
+S343,Der Monitoringvertrag endet vor dem letzten genehmigten Exportlauf,,text-screened-only
+S344,Der Nutzer verlangt vollständige Löschung und zugleich beweissicheren Export aller früheren Geheimnisse,,text-screened-only
+S345,Rechner Monitor Mobilfunk alle Backups und alle legitimierten Empfänger verschwinden gleichzeitig,,text-screened-only
+S346,Alle vertrauenswürdigen Quellen liefern gemeinsam eine perfekt konsistente falsche Welt,D14,toy-mechanism-linked
+S347,Eine Außenaktion kann jederzeit in unendlicher Zukunft ankommen während Speicherung endlich bleiben muss,D23,toy-mechanism-linked
+S348,Monitor wird stummgeschaltet dann Mac zerstört dann der einzige Vertreterkonto gesperrt,,text-screened-only
+S349,Nach Restore erzeugt kalter Cache Retrylawine und eine späte alte Zahlung trifft ein,D24 D25,toy-mechanism-linked
+S350,Ein signiertes Update fälscht Health löscht Historie und liefert perfekte Prüfberichte,,text-screened-only

@@ -1,0 +1,13 @@
+id;residue;introduced;obligation;test
+C37;R17;A4;Unabhängiger Beobachter bewertet ausbleibende frische authentifizierte instanzgebundene Lebenszeichen mit eigener Uhr ohne Factory für den Alarm zu brauchen;T18
+C38;R17;A4;Gesamte Alarmkette bis zum genehmigten Empfänger testen und Monitoringausfall endliche Wartungssperren sowie Wiederkehr getrennt erkennen;T19
+C39;R08;A4;Host-Erreichbarkeit Kernelreaktion Persistenzbefund Arbeitsfortschritt und Beobachtungsalter getrennt darstellen statt pauschalem healthy;T20
+C40;R13;A4;Gesamtfrist einschließlich Queue und Restbudget durch den Aufrufbaum führen sowie verspätete Antworten nur der ursprünglichen Operation zuordnen;T21
+C41;R07;A4;Globale Retry- und Fan-out-Budgets mit Jitter und expliziter Fairness ohne spekulative Verdoppelung externer Effekte;T22
+C42;R07;A4;Angebotene wartende abgebrochene abgelehnte und abgeschlossene Arbeit samt Zeitverteilung und zensierten Fällen begrenzt messen;T23
+C43;R16;A4;Versionskombinationen Kaltstart Datenvolumen und Vorwärtswirkung in Kompatibilitäts- und Migrationsgegenproben nachweisen;T24
+C44;R09;A4;Aufgelöste Zielidentität und Scope vor Nutzung privilegierter Credentials erneut prüfen und untrusted Daten niemals als Actorfreigabe behandeln;T25
+C45;R12;A4;Monitoring und Export nutzen minimale erlaubte Felder begrenzte Kardinalität sichere Secretreferenzen und explizite Retention statt Rohkontext;T26
+C46;R10;A4;Alarmzuständigkeit Vertretung barrierearm lesbare Handlung und endliche Stummschaltung vor unbeaufsichtigtem Betrieb vereinbaren und üben;T27
+C47;R14;A4;Akzeptanz umfasst Semantik Einheiten Teilvollständigkeit Aktualität und Wirkungsrisiko statt nur Prozessabschluss und technische Schnelligkeit;T28
+C48;R16;A4;Kritische Abhängigkeits- und Ausfalldomänen samt Änderungsradius dokumentieren und Erweiterungen ohne unbemerkte neue Kernpflicht ermöglichen;T29

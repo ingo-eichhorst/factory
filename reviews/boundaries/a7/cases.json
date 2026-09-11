@@ -1,0 +1,3062 @@
+[
+  {
+    "stressor_id": "S276",
+    "source_states": [
+      "BD06"
+    ],
+    "branches": [
+      {
+        "state": "Kundenwissen bereits offengelegt",
+        "kind": "verlust",
+        "conditions": "Unbefugter hat Namen oder vertrauliche Zeiten tatsächlich gelernt. Eine rechtmäßig zugängliche lokale Belegkopie bleibt erhalten.",
+        "persistence": "Vergangenes Lernen lässt sich nicht rückgängig machen. Weitere Verteilung kann enden.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer können Umfang der belegten Offenlegung untersuchen. Exklusivität des bereits Gelernten bleibt verloren.",
+        "validation": "Nachweis dass kein unbefugter Leser die Zuordnung herstellen konnte widerlegt den behaupteten Vertraulichkeitsverlust."
+      },
+      {
+        "state": "Begrenztes anonymes Lebenszeichen bleibt lesbar",
+        "kind": "transient",
+        "conditions": "Vor Offenlegung wurde nur eine nicht rückverknüpfbare Hülle ausgegeben und Zuordnung sowie Timing sind ausreichend abgeschirmt.",
+        "persistence": "Technische Beobachtung läuft weiter solange diese Trennung hält. Neue Korrelation kann sie brechen.",
+        "residue_ids": [
+          "BDR001"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Beobachter erhält groben technischen Zustand ohne die behaupteten Kundeninformationen. Dies ist ein alternativer Entwurf nicht Rücknahme eines Lecks.",
+        "validation": "Synthetische Korrelation rekonstruiert Kunde oder Geschäftszeit aus Hüllen und widerlegt die Trennung."
+      }
+    ],
+    "architectural_consequence": "Heartbeatvertrag von Kundenidentität und Betriebszeit trennen. Erhaltene technische Erreichbarkeit darf nicht als wiederhergestellte Vertraulichkeit gelten."
+  },
+  {
+    "stressor_id": "S277",
+    "source_states": [
+      "BD06",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Gespräch beim falschen Leserkreis",
+        "kind": "verlust",
+        "conditions": "Vollgespräch enthält geschützte Inhalte und wurde von Unbefugten gelesen. Für Untersuchung bleibt ein erlaubter metadatenarmer Beleg.",
+        "persistence": "Historische Offenlegung bleibt auch nach Löschung beim Exportdienst.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Der Vorfallsprüfer kann den dokumentierten Transfer abgrenzen. Der Beleg ist keine Rückgewinnung der Geheimhaltung und enthält keine zusätzliche Gesprächskopie.",
+        "validation": "Kein unbefugter Zugang oder kein geschützter Inhalt widerlegt diesen Verlustzweig."
+      },
+      {
+        "state": "Volltext zurückgehalten Diagnose nutzbar",
+        "kind": "halt",
+        "conditions": "Unabhängige lokale Feldauswahl hält Volltext vor Grenzübertritt zurück und Support darf den reduzierten Auszug lesen.",
+        "persistence": "Der Volltextexport bleibt gesperrt bis eine zulässige engere Auswahl feststeht.",
+        "residue_ids": [
+          "BDR002"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Support kann erlaubte Fehlerparameter nutzen ohne die ganze AGENTS-Konversation. Die Sperre betrifft nur diesen Export.",
+        "validation": "Ein Geheimnismarker gelangt über Freitext in den Auszug oder Diagnose ist ohne Volltext unmöglich."
+      }
+    ],
+    "architectural_consequence": "Diagnoseauszug positiv spezifizieren und vor Export abnehmen. Bereits gelernte Konversation kann kein Löschknopf wieder geheim machen."
+  },
+  {
+    "stressor_id": "S278",
+    "source_states": [
+      "BD07",
+      "BD06",
+      "BD18"
+    ],
+    "branches": [
+      {
+        "state": "Fortgesetztes Ausforschen der Bereitschaft",
+        "kind": "extern-erzwungen",
+        "conditions": "Angreifer kann wiederholt auslösen und Antworten korrelieren. Getrennt gespeicherte Beobachtungen bleiben rechtmäßig lesbar.",
+        "persistence": "Probe führt zu Antwort und gezielterer Folgeprobe. Fortdauer benötigt den aktiven Angreifer.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Die Untersuchung kann beobachtete Probeantworten vergleichen. Sie verhindert weder weitere Inferenz noch macht sie gelerntes Wissen geheim.",
+        "validation": "Entfernen der unterscheidbaren Antworten beseitigt Korrelation obwohl Proberate gleich bleibt."
+      },
+      {
+        "state": "Probe verrät keinen Empfänger mehr",
+        "kind": "halt",
+        "conditions": "Nicht identifizierende Hülle und vom realen Bereitschaftsmuster entkoppelte Antworten werden tatsächlich vor Ausgabe durchgesetzt.",
+        "persistence": "Anfrage darf keine unterscheidbare Empfängerinformation ausgeben. Ende der Regel öffnet die Grenze erneut.",
+        "residue_ids": [
+          "BDR001"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Der legitime Beobachter kann grobe Health weiter lesen während der externe Probeeffekt begrenzt ist. Andere Timingkanäle sind nicht mitbewiesen.",
+        "validation": "Angreifer lernt mit synthetischen Proben dennoch reale Empfänger oder Arbeitszeiten."
+      },
+      {
+        "state": "Aufmerksamkeit reproduziert ihren Rückstand",
+        "kind": "attraktorhypothese",
+        "conditions": "Auch nach Ende der Proben erzeugen ungelöste Vorfälle Erinnerungen oberhalb der Bearbeitungsrate. Ein getrenntes Vorfallsregister bleibt erreichbar.",
+        "persistence": "Rückstand bindet Reparaturzeit → mehr ungelöste Vorfälle → neue Erinnerungen → mehr Rückstand bei fester Grundlast.",
+        "residue_ids": [
+          "BDR019"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Einsatzplanung kann einzelne offene Vorfälle weiterfinden. Das Register verspricht weder rechtzeitige Reparatur noch unendliche Speicherung.",
+        "validation": "Nach Ende des Angriffs bei unveränderter Grundlast und Personalstärke sinkt der Rückstand ohne neue innere Produktion bis null."
+      }
+    ],
+    "architectural_consequence": "Proberückkanal und Alarmzustellung getrennt begrenzen. Weder Rate-Limit noch eine endliche Nachricht erhalten automatisch menschliche Aufmerksamkeit für alle Vorfälle."
+  },
+  {
+    "stressor_id": "S279",
+    "source_states": [
+      "BD04",
+      "BD05",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Ein falscher Export einmal übernommen",
+        "kind": "abschluss",
+        "conditions": "Ein fehlerhafter Export wird einmal restauriert ohne folgende Vertrauensverstärkung. Ein separater autorisierter Mengenursprung existiert noch.",
+        "persistence": "Der falsche Import endet als einzelnes falsches Ergebnis. Abgleich kann neue Korrekturarbeit auslösen.",
+        "residue_ids": [
+          "BDR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Fachprüfer können betroffene Mengen gegen den nicht vom Exporter erzeugten Ursprung prüfen. Signaturen der Kopien leisten das nicht.",
+        "validation": "Auch der angeblich unabhängige Ursprung wurde vom selben Exporter abgeleitet oder stimmt nach unabhängigem Abgleich korrekt überein."
+      },
+      {
+        "state": "Kopien bestätigen fortgesetzt dieselbe falsche Wahrheit",
+        "kind": "attraktorhypothese",
+        "conditions": "Restaurierter Fehler wird wieder kanonischer Ursprung und alle tatsächlichen Vergleiche stammen davon. Kein unabhängiger Ursprung ist zugänglich.",
+        "persistence": "Falsche Daten → passende Checks → mehr Vertrauen → Überschreiben von Alternativen → erneute falsche Daten.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Wiedergewinnung der ursprünglichen Fachwahrheit gibt es in diesem geschlossenen Bestand keine nutzbare Struktur. Internes Rechnen bleibt möglich aber ist kein Wahrheitsresidue.",
+        "validation": "Eine rechtmäßig zugängliche unabhängige Ursprungsquelle oder ausbleibende Wiederverwendung widerlegt jeweils Informationsgrenze oder Schleife."
+      },
+      {
+        "state": "Unabhängiger Ursprung stoppt Übernahme",
+        "kind": "halt",
+        "conditions": "Vor Restaurierung vergleichen berechtigte Prüfer Daten gegen tatsächlich erhaltenen anderen Ursprung und verhindern Adoption bei Abweichung.",
+        "persistence": "Import wartet auf Klärung oder wird aufgegeben. Kein autonomer Attraktor.",
+        "residue_ids": [
+          "BDR004"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Der Ursprungsbetrag bleibt zur Ablehnung des konsistent falschen Imports nutzbar. Andere nicht unabhängig belegte Felder bleiben ungesichert.",
+        "validation": "Ein gültiger aber falscher Betrag passiert den Abgleich oder Prüfer kann Adoption nicht verhindern."
+      }
+    ],
+    "architectural_consequence": "Exportprüfsumme von unabhängiger Fachwahrheit trennen. Ohne überlebenden Ursprung keine korrekte Rekonstruktion behaupten."
+  },
+  {
+    "stressor_id": "S280",
+    "source_states": [
+      "BD04",
+      "BD10",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Bitfehler vor Nutzung erkannt",
+        "kind": "halt",
+        "conditions": "Anderer überlebender Mengenbeleg widerspricht dem gültigen geänderten Wert und Wirkung ist noch kontrollierbar.",
+        "persistence": "Betroffene Zahlung wartet bis der Betrag kompetent geklärt wird.",
+        "residue_ids": [
+          "BDR004"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Autorisierter Bearbeiter kann ursprüngliche Menge vergleichen und diesen neuen Fehler zurückhalten.",
+        "validation": "Ein einzelner gültiger Bitflip passiert den unabhängigen Mengenabgleich."
+      },
+      {
+        "state": "Falscher Betrag bereits wirksam",
+        "kind": "abschluss",
+        "conditions": "Geänderter Betrag wurde angenommen. Ein getrennt erhaltener ursprünglicher Mengenbeleg bleibt zugänglich.",
+        "persistence": "Einmalige falsche Zahlung ist kein Regelkreis. Ausgleich ist neue Arbeit und kann den Saldo reparieren.",
+        "residue_ids": [
+          "BDR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann den falschen Betrag quantifizieren und Ausgleich begründen. Bereits versandte Information oder andere irreversible Folge bleibt ggf. verloren.",
+        "validation": "Wirkungsbeleg zeigt den korrekten ursprünglichen Betrag oder angeblicher Mengenursprung ist mitverändert."
+      },
+      {
+        "state": "Ursprungsbetrag nicht mehr bestimmbar",
+        "kind": "ungewissheit",
+        "conditions": "Nur geänderter gültiger Wert blieb übrig und keine erforderliche ursprüngliche Zahl ist zugänglich.",
+        "persistence": "Ohne neue unterscheidende Information bleibt der wahre Betrag offen. Kein Schluss auf Totalverlust.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für die genaue ursprüngliche Menge fehlt jeder tragfähige Vergleich. Schema und Prüfsumme liefern die verlorene Fachinformation nicht.",
+        "validation": "Ein unabhängiger rechtmäßig zugänglicher Mengenbeleg würde diese Informationsannahme widerlegen."
+      }
+    ],
+    "architectural_consequence": "Betragsherkunft vor fachlicher Wirkung prüfen. Eine gültige Zahl und eine spätere finanzielle Korrektur beweisen weder Originalbetrag noch ungeschehenen Vorgang."
+  },
+  {
+    "stressor_id": "S281",
+    "source_states": [
+      "BD27",
+      "BD08",
+      "BD01"
+    ],
+    "branches": [
+      {
+        "state": "Zwei authentische Geschichten bleiben unentschieden",
+        "kind": "ungewissheit",
+        "conditions": "Beide Journale sind erhalten aber keine belastbare Autoritätsordnung oder Teilnehmergeschichte entscheidet den Streit.",
+        "persistence": "Signaturen wiederholen Herkunft und lösen den Widerspruch nicht. Neue unabhängige Evidenz kann ihn klären.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Legitimer Prüfer kann beide Geschichten samt Lücken lesen ohne einen Sieger zu erfinden.",
+        "validation": "Eine durchgesetzte zeitliche Autoritätsordnung erklärt alle scheinbar widersprechenden Einträge."
+      },
+      {
+        "state": "Gegenseitige Reparaturen halten Split-Brain am Leben",
+        "kind": "attraktorhypothese",
+        "conditions": "Beide Writer bleiben wirksam und reagieren auf Änderungen des anderen. Unabhängige Belegkopien bleiben lesbar.",
+        "persistence": "A ändert → B repariert nach B → A repariert nach A. Die anfängliche Netzstörung muss nicht fortbestehen.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer können Konfliktverlauf rekonstruieren soweit ihre Kopien reichen. Belege selbst stellen keine Exklusivität her.",
+        "validation": "Einer wird am Teilnehmer tatsächlich abgewiesen oder beide hören ohne Fremdeingriff auf gegeneinander zu reparieren."
+      },
+      {
+        "state": "Ein Writer ausgeschlossen frühere Effekte geklärt",
+        "kind": "abschluss",
+        "conditions": "Jeder relevante Teilnehmer erzwingt neue Autorität und vollständige unabhängige Wirkungsbelege klären den benannten Konflikt.",
+        "persistence": "Die einzelne Übergabe und ihr Abgleich sind abgeschlossen. Neue Arbeit braucht neue Prüfung.",
+        "residue_ids": [
+          "BDR008",
+          "BDR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Neuer Berechtigter kann exklusiv schreiben und Prüfer den begrenzten Abgleich nachvollziehen. Frühere reale Doppelwirkung wird nicht ungeschehen.",
+        "validation": "Ein gepufferter Altauftrag wird angenommen oder ein beteiligter Effekt fehlt im behaupteten Abgleich."
+      }
+    ],
+    "architectural_consequence": "Signierte Aussagen mit kausaler Autorität und Wirkungsbelegen verbinden. Konfliktaufbewahrung und Teilnehmerausschluss sind getrennte Verträge."
+  },
+  {
+    "stressor_id": "S282",
+    "source_states": [
+      "BD03",
+      "BD09",
+      "BD10",
+      "BD01"
+    ],
+    "branches": [
+      {
+        "state": "Erhaltene Versuche bleiben offen gesperrt",
+        "kind": "ungewissheit",
+        "conditions": "Snapshot enthält bekannte Versuche und lokale Wiederholkontrolle bleibt wirksam. Ausgang lässt sich noch nicht feststellen.",
+        "persistence": "Keine Antwort ist kein Fehlschlag. Wiederholsperre dauert bis Abgleich oder gesonderter Risikoentscheidung.",
+        "residue_ids": [
+          "BDR009"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann nur die erhaltenen Versuche untersuchen ohne automatische Wiederholung. Gestern fehlende Rechnungen sind ausdrücklich nicht mit erfasst.",
+        "validation": "Ein im Snapshot enthaltener unklarer Versuch wird automatisch wieder gesendet oder fehlender Nachlauf als vollständig ausgegeben."
+      },
+      {
+        "state": "Widerruf erreicht letzte Annahmegrenze",
+        "kind": "halt",
+        "conditions": "Aktuelle Widerrufsquelle und Teilnehmerprüfung überleben unabhängig vom alten Backup und sehen alle betroffenen Annahmen.",
+        "persistence": "Teilnehmer verweigert alte Rechte bis eine neue legitime Freigabe gilt.",
+        "residue_ids": [
+          "BDR010"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Der Teilnehmer kann heutige Widerrufe trotz altem lokalen Stand anwenden. Dies beantwortet nicht ob gestern schon Rechnungen versandt wurden.",
+        "validation": "Gepufferter Auftrag wird unter einem heute wirksamen Widerruf dennoch angenommen."
+      },
+      {
+        "state": "Fehlender Rechnungslauf bleibt nicht rekonstruierbar",
+        "kind": "ungewissheit",
+        "conditions": "Snapshot enthält den gestrigen Lauf nicht und kein rechtmäßig zugänglicher Teilnehmer- oder Empfängerbeleg existiert.",
+        "persistence": "Outcome bleibt offen solange erforderliche Nachlaufdaten fehlen. Neue Freigabe schließt diese Lücke nicht.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für den tatsächlichen gestrigen Versand fehlt ein nutzbarer Nachweis. Unbetroffene lokale Daten können weiterhin bestehen.",
+        "validation": "Ein korrelierter unabhängiger Versandbeleg widerlegt die angenommene Nachweislücke."
+      }
+    ],
+    "architectural_consequence": "Snapshotalter und fehlenden Nachlauf sichtbar halten. Restore-Sperre nur auf tatsächlich enthaltene Versuche beziehen und aktuelle Teilnehmerrechte gesondert prüfen."
+  },
+  {
+    "stressor_id": "S283",
+    "source_states": [
+      "BD27",
+      "BD08",
+      "BD01"
+    ],
+    "branches": [
+      {
+        "state": "Zwei plausible Lebenszeichen ohne eindeutigen Eigentümer",
+        "kind": "ungewissheit",
+        "conditions": "Original und Klon leben und ihre getrennten Beobachtungen werden erhalten. Keine Annahmeordnung ist belegt.",
+        "persistence": "Beobachtung kann fortdauern ohne zu entscheiden wer schreiben darf.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer können zwei Identitätsbehauptungen nebeneinander halten. Health liefert keinen exklusiven Writerbeweis.",
+        "validation": "Durchgesetzte Teilnehmergeneration bestimmt eindeutig den aktiven Writer."
+      },
+      {
+        "state": "Zwei Reparaturschleifen konkurrieren",
+        "kind": "attraktorhypothese",
+        "conditions": "Beide besitzen Außenrechte und jeder gleicht Drift zur eigenen Sicht aus. Getrennte Belegkopien bleiben lesbar.",
+        "persistence": "Klonänderung → Originalkorrektur → Klonkorrektur reproduziert Konflikt nach Ende des Restoreereignisses.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Unabhängiger Prüfer behält die dokumentierte Konfliktspur aber keine Exklusivität und keine Garantie vollständiger Wirkungsgeschichte.",
+        "validation": "Nur ein Writer ist effektiv oder keine gegenseitige Reaktion folgt bei unveränderter Grundlast."
+      },
+      {
+        "state": "Klonfortsetzung mit wirksam ausgeschlossenem Original",
+        "kind": "transient",
+        "conditions": "Dauerhafte legitime Generation ist am letzten Teilnehmer wirksam. Alte Wirkungen werden separat und noch nicht vollständig abgeglichen.",
+        "persistence": "Neue Schreibkonkurrenz endet mit Ablehnung des Originals. Alter Outcome kann weiter offen bleiben.",
+        "residue_ids": [
+          "BDR008"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Neuer Writer kann begrenzt exklusiv fortfahren. Diese Fähigkeit ist nicht gleich Abschluss aller vorigen Aktionen.",
+        "validation": "Originalauftrag einschließlich früher gepufferter Kopie bewirkt nach Generationstransfer noch einen neuen Effekt."
+      }
+    ],
+    "architectural_consequence": "Heartbeatidentität nicht mit exklusiver Wirkmacht gleichsetzen. Generation muss bei allen Effektteilnehmern greifen einschließlich alter Puffer."
+  },
+  {
+    "stressor_id": "S284",
+    "source_states": [
+      "BD09",
+      "BD02",
+      "BD10"
+    ],
+    "branches": [
+      {
+        "state": "Recoveryfertig aber Auftrag abgelaufen",
+        "kind": "halt",
+        "conditions": "Der Teilnehmer prüft aktuelle Rechte nach langem Restore und verweigert abgelaufene Mandate vor Wirkung.",
+        "persistence": "Die konkrete Aktion bleibt bis frischer legitimer Autorität zurückgehalten.",
+        "residue_ids": [
+          "BDR010"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Teilnehmer kann historische Rechte als nicht mehr ausreichend erkennen obwohl Recovery lokal erfolgreich ist.",
+        "validation": "Nach Ablauf nimmt Teilnehmer einen alten Recoveryauftrag an."
+      },
+      {
+        "state": "Alte Rechte möglicherweise schon benutzt",
+        "kind": "ungewissheit",
+        "conditions": "Nur Startprüfung existiert und Auftrag kann bereits angenommen sein. Erhaltener Versuchseintrag und lokale Wiederholsperre bestehen.",
+        "persistence": "Mögliche späte Wirkung bleibt offen bis unabhängiger Annahmebeleg vorliegt.",
+        "residue_ids": [
+          "BDR009"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann den bekannten Versuch ohne blindes Retry untersuchen. Die Sperre verhindert seine alte Außenannahme nicht.",
+        "validation": "Vollständiger Annahmebeleg zeigt Ablehnung oder der behauptete bekannte Versuch fehlt im erhaltenen Register."
+      }
+    ],
+    "architectural_consequence": "Recoveryfortschritt darf keine neue Autorität erzeugen. Gültigkeit beim letzten Effekt prüfen und fehlende Rückmeldung separat halten."
+  },
+  {
+    "stressor_id": "S285",
+    "source_states": [
+      "BD04",
+      "BD02",
+      "BD10"
+    ],
+    "branches": [
+      {
+        "state": "Inkompatible Einheit vor Wirkung verweigert",
+        "kind": "halt",
+        "conditions": "Client und Plugin tauschen konkrete Dimensionsverträge aus und ein zuständiger Prüfer erkennt die Abweichung vor Mutation.",
+        "persistence": "Zusammenarbeit wartet auf passenden Vertrag oder endet ohne Aktion.",
+        "residue_ids": [
+          "BDR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Beide Seiten können die jeweils gemeinte Menge feststellen und diese inkompatible Verwendung verweigern.",
+        "validation": "Eine gültige Zahl wird ohne vereinbarte Einheit trotzdem zur Außenaktion."
+      },
+      {
+        "state": "Gültige Zahl erzeugt falsche Menge",
+        "kind": "abschluss",
+        "conditions": "Plugin interpretiert Zahl in falscher Einheit und der Effekt ist erfolgt. Originaler unabhängiger Mengenbeleg bleibt erhalten.",
+        "persistence": "Einmalige Fehlinterpretation bleibt falscher Abschluss. Irreversibler Anteil wäre gesonderter Verlust.",
+        "residue_ids": [
+          "BDR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Fachprüfer kann Abweichung quantifizieren. Die erhaltene Menge korrigiert den vergangenen Effekt nicht automatisch.",
+        "validation": "Unabhängiger Annahmebeleg weist die tatsächlich beabsichtigte Menge nach."
+      }
+    ],
+    "architectural_consequence": "Bedeutungsvertrag mit Einheit Skalierung und Version an die Wirkung binden statt nur JSON-Zahlen zu validieren."
+  },
+  {
+    "stressor_id": "S286",
+    "source_states": [
+      "BD02",
+      "BD15",
+      "BD12"
+    ],
+    "branches": [
+      {
+        "state": "Globale Forderung lokal abgewiesen",
+        "kind": "halt",
+        "conditions": "Kern lässt optionale Pluginanforderung keine globale Migration erzwingen und andere Scopes brauchen dessen Code nicht.",
+        "persistence": "Plugin bleibt deaktiviert bis kompatible Lösung vorliegt. Andere Scopes arbeiten im abgegrenzten lokalen Umfang.",
+        "residue_ids": [
+          "BDR012"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Nicht aktivierende Scopenutzer behalten ihren lokalen Start und Datenzugriff. Kein Beweis gegen gemeinsame Hostausfälle.",
+        "validation": "Nicht aktivierender Scope wartet trotzdem auf Migration oder Cloud des Plugins."
+      },
+      {
+        "state": "Alle Startpfade warten auf Kernmigration",
+        "kind": "extern-erzwungen",
+        "conditions": "Globale Startabhängigkeit wurde tatsächlich eingebaut. Lokal lesbare Daten und Notreader liegen außerhalb dieser Abhängigkeit.",
+        "persistence": "Solange Pflichtmigration fehlt bleibt regulärer Start blockiert. Abkopplung kann ihn wieder ermöglichen.",
+        "residue_ids": [
+          "BDR011",
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Lokaler Betreiber kann vorhandenen Bestand und Konfiguration untersuchen ohne betroffenen Pluginstart. Produktbetrieb ist nicht erhalten.",
+        "validation": "Notreader ruft das Plugin auf oder Datenzugriff verlangt genau denselben Startpfad."
+      },
+      {
+        "state": "Zirkulärer Migrationsnotstart ohne anderen Leser",
+        "kind": "halt",
+        "conditions": "Reparatur braucht Pluginkonfiguration und nur das defekte Plugin kann sie lesen. Keine unabhängigen Schlüssel oder Reader sind verfügbar.",
+        "persistence": "Readerreparatur wartet auf Konfiguration und Konfigurationszugriff auf Readerreparatur.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für in-band Reparatur fehlt ein nutzbarer Pfad. Rohe Bytes oder unbetroffene Funktionen begründen keinen lesbaren Notstart.",
+        "validation": "Ein unabhängiger kompatibler und berechtigter Reader liest die nötige Konfiguration."
+      }
+    ],
+    "architectural_consequence": "Kernmigration vom optionalen Pluginvertrag trennen. Scopeisolation nur für unabhängig startbare Pfade behaupten und Notreader gesondert sichern."
+  },
+  {
+    "stressor_id": "S287",
+    "source_states": [
+      "BD02",
+      "BD04",
+      "BD05"
+    ],
+    "branches": [
+      {
+        "state": "Altes Binary darf nur unverändert lesen oder ablehnen",
+        "kind": "halt",
+        "conditions": "Versionsprüfung vor Mutation greift und der neue Bestand bleibt vollständig lesbar für passenden Nachfolger.",
+        "persistence": "Alter Writer bleibt ausgeschlossen bis kompatibler Code verfügbar ist.",
+        "residue_ids": [
+          "BDR013"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Späterer kompatibler Leser erhält originale unbekannte Felder. Das ist Byteerhalt nicht garantierte fachliche Richtigkeit.",
+        "validation": "Ein unbekanntes Feld verändert sich schon beim Öffnen mit altem Binary."
+      },
+      {
+        "state": "Unbekannte einzige Felder durch Defaults vernichtet",
+        "kind": "verlust",
+        "conditions": "Altes Binary überschreibt einzigartige Werte und keine weitere Kopie oder Bedeutungsquelle enthält sie.",
+        "persistence": "Exakte alte Werte bleiben aus Defaults nicht rekonstruierbar. Andere Felder können nutzbar bleiben.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für die überschriebenen Werte gibt es kein Residue. Schemavalidität enthält die entfernte Information nicht.",
+        "validation": "Unveränderte rechtmäßig lesbare Kopie oder eindeutige Ursprungsquelle erlaubt genaue Rekonstruktion."
+      },
+      {
+        "state": "Defaults werden zur selbstbestätigten Wahrheit",
+        "kind": "attraktorhypothese",
+        "conditions": "Defaultbestand wird als Ursprung aller Checks und weiteren Backups wiederverwendet und Alternativen verdrängt.",
+        "persistence": "Defaults → passende Prüfberichte → Vertrauen → weitere Defaultkopien → weniger Vergleichsmöglichkeiten.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für den ursprünglichen unbekannten Feldinhalt fehlt im geschlossenen Bestand jede belastbare Rekonstruktionsfähigkeit. Wiederholbare falsche Berechnung bleibt keine Wahrheit.",
+        "validation": "Unabhängige Ursprungswerte beeinflussen Entscheidungen oder kein wiederholtes Vertrauen reproduziert die Übernahme."
+      }
+    ],
+    "architectural_consequence": "Vor erstem Schreibzugriff Writerkompatibilität prüfen. Unbekannte Felder dürfen nicht normalisiert werden und verlorene einzige Werte bleiben verloren."
+  },
+  {
+    "stressor_id": "S288",
+    "source_states": [
+      "BD10",
+      "BD03"
+    ],
+    "branches": [
+      {
+        "state": "Irreversible Außenwirkung bleibt trotz Rollback",
+        "kind": "verlust",
+        "conditions": "Die Wirkung fand statt und der benannte Anteil etwa gelernte Information ist irreversibel. Separater zulässiger Wirkungsbeleg überlebt den Coderollback.",
+        "persistence": "Vergangene Wirkung bleibt historisch bestehen. Späterer Ausgleich kann nur spätere Lage ändern.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann belegten Vorgang nachvollziehen. Fähigkeit ihn ungeschehen zu machen besteht nicht.",
+        "validation": "Es gab keine Wirkung oder die behauptete verlorene Eigenschaft ist vollständig rückstellbar."
+      },
+      {
+        "state": "Alter Code wartet auf Ausgangsabgleich",
+        "kind": "ungewissheit",
+        "conditions": "Vorwärts kompatibel erhaltenes Versuchsregister enthält neuen Effektversuch und bindet auch den zurückgerollten Code an Wiederholsperre.",
+        "persistence": "Unklarer Ausgang bleibt bis korreliertem Wirkungsbeleg offen.",
+        "residue_ids": [
+          "BDR009"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Operator behält bekannte Operationsidentität und unterlässt blindes erneutes Senden. Weltrollback wird nicht versprochen.",
+        "validation": "Altes Binary ignoriert Register oder behandelt neuen unbekannten Status als nie versucht."
+      }
+    ],
+    "architectural_consequence": "Rollback mit vorwärts erhaltenem Wirkungsregister verbinden. Lokal alter Code darf weder Außenwelt rückdatieren noch fehlende neue Effekte als ungesendet behandeln."
+  },
+  {
+    "stressor_id": "S289",
+    "source_states": [
+      "BD11",
+      "BD08",
+      "BD01"
+    ],
+    "branches": [
+      {
+        "state": "Übergabestand unbekannt beide warten",
+        "kind": "ungewissheit",
+        "conditions": "Es gibt zwei potenzielle Writer und verlorene Antwort. Beide verweigern neue Writes und erhalten Übergabefragmente.",
+        "persistence": "Fehlende Eigentümerevidenz hält Schreibpause aufrecht bis legitime Autorität eindeutig wird.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zuständiger Prüfer kann Fragmente vergleichen ohne Eigentümer zu raten. Lokale Transaktionsatomizität ersetzt diesen Beleg nicht.",
+        "validation": "Durabler Eigentümernachweis entscheidet den Übergang bereits oder einer schreibt trotz behaupteter Pause."
+      },
+      {
+        "state": "Durabler Transfer erlaubt einen Nachfolger",
+        "kind": "abschluss",
+        "conditions": "Alle betroffenen Teilnehmer erkennen dauerhaft die neue Generation an und vorherige Übergabeschritte sind vollständig geklärt.",
+        "persistence": "Dieser Writerwechsel ist abgeschlossen auch wenn Antworttransport zeitweise ausfällt.",
+        "residue_ids": [
+          "BDR008"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Legitimer Nachfolger kann exklusiv schreiben. Andere Businessoutcomes brauchen weiterhin eigene Belege.",
+        "validation": "Ein Crashpunkt erlaubt zwei effektive Writer oder alter gepufferter Write wird akzeptiert."
+      },
+      {
+        "state": "Geratene Übergabe erzeugt Reparaturkreislauf",
+        "kind": "attraktorhypothese",
+        "conditions": "Beide starten mit wirksamen Rechten und korrigieren gegenseitig ihre Änderungen. Unabhängige begrenzte Belegkopie bleibt erhalten.",
+        "persistence": "Unklare Übergabe → konkurrierende Writes → Gegenreparaturen → neue Gegenreparaturen nach wiederhergestellter Verbindung.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann Konfliktbeginn und erhaltene Wiederholungen sehen. Belegaufbewahrung stoppt keinen der Writer.",
+        "validation": "Ohne weitere Verbindungsstörung und bei gleicher Grundlast hört Konflikt auf weil einer effektiv ausgeschlossen ist."
+      }
+    ],
+    "architectural_consequence": "Verteilte Writerübergabe von lokaler SQL-Migration unterscheiden. Dauerhafte Übergabeevidenz und echte Teilnehmerexklusion vor Start des Nachfolgers benötigen getrennte Nachweise."
+  },
+  {
+    "stressor_id": "S290",
+    "source_states": [
+      "BD12",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Reparatur im Kreis blockiert",
+        "kind": "halt",
+        "conditions": "Die einzige Konfigurationsinterpretation läuft im defekten Plugin und es gibt keinen nutzbaren unabhängigen Reader.",
+        "persistence": "Reparatur wartet auf Konfiguration und Konfiguration auf reparierten Leser.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "In-band Konfigurationsreparatur hat keine nutzbare Struktur. Rohdatei ist ohne nötige Semantik und Schlüssel keine Reparaturfähigkeit.",
+        "validation": "Ein legal nutzbarer unabhängiger Reader interpretiert die benötigten Felder."
+      },
+      {
+        "state": "Lokaler Notreader erlaubt vorbereitete Korrektur",
+        "kind": "halt",
+        "conditions": "Spezifikation Reader lokale Bytes und nötige Berechtigung liegen außerhalb des Plugins. Neue Mutation wartet auf Prüfung.",
+        "persistence": "Leseblockade endet. Konfigurationsänderung bleibt bis kompetenter Freigabe gehalten.",
+        "residue_ids": [
+          "BDR011"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Lokaler Betreiber kann Fehlerkonfiguration prüfen ohne den defekten Teil aufzurufen. Reader erteilt keine Wirkungsvollmacht.",
+        "validation": "Notreader muss zum Entschlüsseln oder Deuten das kaputte Plugin starten."
+      }
+    ],
+    "architectural_consequence": "Notfallkonfiguration ohne Start des kaputten Plugins interpretierbar machen. Schlüsselabhängigkeit und Außenfreigabe bleiben eigenständige Grenzen."
+  },
+  {
+    "stressor_id": "S291",
+    "source_states": [
+      "BD13",
+      "BD14"
+    ],
+    "branches": [
+      {
+        "state": "Nachfolger wartet gewöhnlich auf Betriebswissen",
+        "kind": "ungewissheit",
+        "conditions": "Keine wiederholte Patch- oder Ausnahmeverstärkung ist belegt. Ein separat erhaltenes Belegpaket bisheriger Betriebsaussagen mit Herkunft und dokumentierten Lücken ist dem legitimierten Nachfolger zugänglich aber erforderliche Annahmen fehlen.",
+        "persistence": "Wartezeit endet wenn fehlende Annahmen geklärt sind. Ohne Klärung bleibt Fähigkeit zur korrekten Reparatur offen.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Nachfolger kann dokumentierte Aussagen und Wissenslücken prüfen. Das Belegpaket enthält keine vollständige Bauumgebung und beweist keine kompetente Reparatur.",
+        "validation": "Nachfolger kann allein aus bestehender Dokumentation den konkreten Incident korrekt beheben."
+      },
+      {
+        "state": "Incidents verhindern Lernen",
+        "kind": "attraktorhypothese",
+        "conditions": "Incidentarbeit verbraucht Lernzeit und jeder schnelle Patch vermehrt verborgene Annahmen. Separat erhaltene Betriebsaussagen samt Herkunft und Lücken bleiben legitim zugänglich.",
+        "persistence": "Wissensmangel → teure Reparatur → weniger Lernen und mehr verdeckte Patches → größerer Wissensmangel.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Nachfolger kann dokumentierte Behauptungen und Lücken prüfen aber daraus folgt keine reproduzierbare Wartung. Verstärkung ist eine soziale Hypothese.",
+        "validation": "Bei fester Incidentrate baut Nachfolger Wissen auf und reduziert Patchkosten ohne neue verdeckte Annahmen."
+      },
+      {
+        "state": "Nachvollziehbare Übergabe ermöglicht begrenzte Wartung",
+        "kind": "transient",
+        "conditions": "Erhaltenes getestetes Bau- und Betriebspaket sowie legitime Rechte decken die konkret benötigte Reparatur ab.",
+        "persistence": "Übergabelücke endet mit demonstriertem unabhängigen Betrieb. Neue unbekannte Fälle bleiben außerhalb des Nachweises.",
+        "residue_ids": [
+          "BDR014"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Nachfolger kann diese Reparatur ohne verschwundenen Maintainer erklären bauen und prüfen.",
+        "validation": "Ein benötigter Schritt verlangt verborgenes Wissen oder nicht erhältlichen Accountzugriff."
+      }
+    ],
+    "architectural_consequence": "Verdeckte Annahmen als begrenztes Übergabepaket explizit machen. Weggang allein begründet weder Wartungsattraktor noch erloschene Reparaturbefugnis."
+  },
+  {
+    "stressor_id": "S292",
+    "source_states": [
+      "BD37",
+      "BD13",
+      "BD22"
+    ],
+    "branches": [
+      {
+        "state": "Reparatur wartet auf verschwundene Voraussetzung",
+        "kind": "extern-erzwungen",
+        "conditions": "Toolchain und Cloudkonto fehlen derzeit aber vorhandenes Binary und lokale interpretierbare Daten sind weiterhin zugänglich.",
+        "persistence": "Fehlende Voraussetzung hält Reparatur auf. Ein legitimer kompatibler Ersatz kann den Zustand beenden ohne dass vorher ein Kreis bestand.",
+        "residue_ids": [
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Betreiber kann erhaltene Geschäftsdaten prüfen. Weder vorhandene Quellen noch Daten ersetzen Konto und Compiler.",
+        "validation": "Reparatur gelingt mit ausschließlich aktuell vorhandenen unabhängigen Eingaben."
+      },
+      {
+        "state": "Lokaler Ersatzbau überlebt Kontoverlust",
+        "kind": "transient",
+        "conditions": "Vollständiges verfügbares Baupaket enthält kompatible Werkzeuge und der konkrete Fix braucht den gelöschten Account nicht.",
+        "persistence": "Die konkrete Reparatur kann nach unabhängigem Vergleich fertiggestellt werden. Fremde Providerfunktion bleibt getrennt.",
+        "residue_ids": [
+          "BDR014"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Nachfolger kann den kleinen Fix reproduzieren und prüfen. Eine versteckte Cloudbauabhängigkeit würde diesen Kandidaten aufheben.",
+        "validation": "Offlinebau verlangt den gelöschten Account oder erzeugt semantisch inkompatibles Binary."
+      },
+      {
+        "state": "Providergebundene Fähigkeit endet ohne Ersatz",
+        "kind": "verlust",
+        "conditions": "Die benötigte Konto- oder Providerfunktion ist endgültig entfallen und kein derzeit legitim nutzbarer Ersatz existiert.",
+        "persistence": "Diese Funktion bleibt beendet bis eine neue tatsächlich brauchbare Alternative entsteht. Kein allweltlicher Dauerverlust ist behauptet.",
+        "residue_ids": [
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Erhaltene lesbare lokale Akten dienen noch der Abwicklung. Die entfallene Außenfunktion ist nicht erhalten.",
+        "validation": "Ein legitim nutzbarer kompatibler Teilnehmer führt genau diese Funktion im benötigten Zeitraum aus."
+      }
+    ],
+    "architectural_consequence": "Lokale Baufähigkeit und Providerberechtigung getrennt inventarisieren. Laufendes Binary ist kein Beweis zukünftiger Reparierbarkeit."
+  },
+  {
+    "stressor_id": "S293",
+    "source_states": [
+      "BD14",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Ausnahmen reproduzieren neue Ausnahmen",
+        "kind": "attraktorhypothese",
+        "conditions": "Dringliche Entscheidungen werden durch Bypass gelöst und jeder Bypass wird neuer unklarer Präzedenzfall. Unabhängig erhaltene Entscheidungen sind noch lesbar.",
+        "persistence": "Unklare Ausnahme → Bypass → zusätzlicher Präzedenzfall → mehr Unklarheit → nächster Bypass.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Prüfer kann dokumentierte Entscheidungsfragmente untersuchen aber keine einheitliche Legitimität daraus erfinden.",
+        "validation": "Gegenfälle werden dauerhaft nach gleicher verstandener Regel entschieden ohne neue Ausnahmen."
+      },
+      {
+        "state": "Unklare Autorität hält neue Aktion an",
+        "kind": "halt",
+        "conditions": "Wirksame lokale Grenze verweigert unaufgelöste Ausnahme und zuständiger Entscheider kann widersprechende Weisungen prüfen.",
+        "persistence": "Halt bleibt bis kompetente Vorrangentscheidung oder Abbruch. Gepufferte Teilnehmerarbeit ist gesondert offen.",
+        "residue_ids": [
+          "BDR015"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Entscheider behält Konflikt und Begründungsbedarf als nutzbaren Gegenstand statt neuer stiller Ausnahme.",
+        "validation": "Neue Außenaktion passiert trotz offenem Konflikt oder Regel wird ohne zuständige Autorität geraten."
+      }
+    ],
+    "architectural_consequence": "Wirksame Ausnahmeentscheidungen mit expliziter Vorrangregel dokumentieren. Regelzahl allein ist keine Dynamik und ein Entscheidungsregister ist keine universelle Außenaktionssperre."
+  },
+  {
+    "stressor_id": "S294",
+    "source_states": [
+      "BD15",
+      "BD04",
+      "BD05",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Gemeinsamer Parserausfall legt betroffene Pfade still",
+        "kind": "extern-erzwungen",
+        "conditions": "Neue Bibliothek verwirft erforderliche Daten in Plugins Replay und Monitoring. Unabhängiger lokaler Reader des archivierten Formats bleibt erreichbar.",
+        "persistence": "Pflichtabhängigkeit hält Pfade aus bis kompatibler Parser verfügbar wird. Kein autonomer Fehlerkreis.",
+        "residue_ids": [
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Offlinebetreiber kann den erhaltenen älteren Bestand lesen sofern sein Reader nicht die neue Bibliothek braucht.",
+        "validation": "Auch der angeblich unabhängige Reader hängt von der kaputten Bibliothek ab."
+      },
+      {
+        "state": "Einmalige plausible gemeinsame Fehldeutung",
+        "kind": "abschluss",
+        "conditions": "Alle aktualisierten Verbraucher lesen falsche Menge einmal. Unabhängiger Mengenursprung wurde nicht mit aktualisiert.",
+        "persistence": "Der einzelne falsche Lauf endet als Fehlresultat. Wiederholte Vertrauensverstärkung ist noch nicht gegeben.",
+        "residue_ids": [
+          "BDR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Fachprüfer kann die falsche Menge gegen den separaten Ursprung erkennen. Mehr gleiche JSON-Prüfer helfen nicht.",
+        "validation": "Unabhängiger Sollvergleich zeigt dieselbe richtige Menge oder Ursprung nutzt dieselbe fehlerhafte Interpretation."
+      },
+      {
+        "state": "Parserfehler wird kanonisch bestätigt",
+        "kind": "attraktorhypothese",
+        "conditions": "Replay und Monitor akzeptieren dieselbe falsche Deutung und diese wird Ursprung weiterer Entscheidungen. Ein getrennter Mengenbezug bleibt für befugten Eingriff erreichbar aber wird bisher ignoriert.",
+        "persistence": "Fehldeutung → zustimmende Checks → Vertrauen → Übernahme als Ursprung → wieder zustimmende Checks.",
+        "residue_ids": [
+          "BDR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Unabhängiger Fachprüfer könnte mit dem noch erhaltenen Ursprung widersprechen. Erst wirksamer Eingriff bricht Vertrauen und wird nicht vorausgesetzt.",
+        "validation": "Gegenbezug beeinflusst tatsächlich die Adoption oder keine weitere Datenübernahme reproduziert den Fehler."
+      }
+    ],
+    "architectural_consequence": "Gemeinsame JSON-Abhängigkeit nicht als unabhängigen Prüfer behandeln. Semantischen Gegenvergleich und unveränderte Ursprungsbytes vor Upgrade sichern."
+  },
+  {
+    "stressor_id": "S295",
+    "source_states": [
+      "BD15",
+      "BD37"
+    ],
+    "branches": [
+      {
+        "state": "Pflichtcloud verhindert alle Kindstarts",
+        "kind": "extern-erzwungen",
+        "conditions": "Monitoringauthentifizierung ist wirklich globaler Startprädikat und Konto fehlt. Lokale Akten und unabhängiger Notreader existieren weiterhin.",
+        "persistence": "Starts warten auf Konto oder Entkopplung. Bestehende Daten werden nicht allein durch fehlenden Login gelöscht.",
+        "residue_ids": [
+          "BDR011",
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter lokaler Betreiber kann Konfiguration und erhaltenen Bestand lesen. Regulärer Kindbetrieb ist nicht erhalten.",
+        "validation": "Auch Notreader oder lokale Akten sind nur nach demselben Cloudlogin zugänglich."
+      },
+      {
+        "state": "Nicht aktivierender Kindscope bleibt lokal nutzbar",
+        "kind": "transient",
+        "conditions": "Optionales Monitoring ist aus dem Startvertrag des Kindes entfernt und dessen benötigte Ressourcen sind unabhängig.",
+        "persistence": "Der Cloudfehler betrifft nur aktivierende Pfade solange diese Isolationsannahme gilt.",
+        "residue_ids": [
+          "BDR012"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Kindscopenutzer behalten lokale Abfragen und Start ohne das zusätzliche Konto. Das ist ein alternativer begrenzter Entwurf.",
+        "validation": "Ein anderer globaler Startschritt erzwingt weiterhin dasselbe Monitoringkonto."
+      }
+    ],
+    "architectural_consequence": "Monitoringaktivierung scopeweise halten und lokalen Inspektionsstart ohne Cloudkonto ermöglichen. Cloudfreiheit dieses Pfads ist keine Dienstgarantie aller Plugins."
+  },
+  {
+    "stressor_id": "S296",
+    "source_states": [
+      "BD08",
+      "BD04",
+      "BD27"
+    ],
+    "branches": [
+      {
+        "state": "Reparaturhelper schreibt nicht unabhängig",
+        "kind": "transient",
+        "conditions": "Helper hat keine direkte Mutationserlaubnis und alle Änderungen passieren denselben durchgesetzten Writervertrag.",
+        "persistence": "Ein Reparaturvorschlag wird serialisiert oder abgewiesen. Keine Gegenreparaturschleife aus zwei unabhängigen Autoritäten.",
+        "residue_ids": [
+          "BDR008"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Der berechtigte Kernel behält exklusive Mutation an den erfassten Teilnehmern. Andere Schreibwege müssen ausdrücklich ausgeschlossen sein.",
+        "validation": "Helper verändert Store oder Außenwelt unter eigener unbegrenzter Writerautorität."
+      },
+      {
+        "state": "Zwei Kernel korrigieren einander dauerhaft",
+        "kind": "attraktorhypothese",
+        "conditions": "Helper und Kernel haben wirksame Schreibrechte und definieren Änderungen des jeweils anderen als zu reparierende Drift. Getrennte Belegkopie überlebt.",
+        "persistence": "Kerneländerung → Helperkorrektur → Kernelkorrektur → neue Helperkorrektur nach Ende des ersten Incidents.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Prüfer behält erhaltene Konfliktspur und kann die doppelte Autorität untersuchen. Kein eigener Schreibstopp folgt aus dem Beleg.",
+        "validation": "Nach einmaliger Korrektur bleibt Zustand ohne weitere Gegenreaktion stabil oder ein Writer ist effektiv ausgeschlossen."
+      },
+      {
+        "state": "Einmalige unerlaubte Korrektur",
+        "kind": "abschluss",
+        "conditions": "Helper mutiert einmal falsch aber kein erneutes Reparieren folgt. Unabhängige Vorher-Nachher-Belege sind erhalten.",
+        "persistence": "Ein falscher Abschluss ist keine Schleife. Prüfung und Korrektur sind weitere Arbeit.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann den belegten Eingriff abgrenzen. Die Spur belegt nicht automatisch alle externen Folgen.",
+        "validation": "Kein falscher Write trat auf oder wiederholte Gegenkorrekturen zeigen doch einen Rückkopplungszweig."
+      }
+    ],
+    "architectural_consequence": "Reparaturhelper dürfen nur Kommandos an dieselbe Schreibautorität liefern. Schreibkonfliktbeleg allein verhindert keinen unabhängigen zweiten Kernel."
+  },
+  {
+    "stressor_id": "S297",
+    "source_states": [
+      "BD16",
+      "BD03",
+      "BD10",
+      "BD24"
+    ],
+    "branches": [
+      {
+        "state": "Soforttests lassen Produktionsausgang offen",
+        "kind": "offen",
+        "conditions": "Testbestand enthält ausschließlich sofortige Antworten. Keine unabhängige spätere Annahmespur ist bisher vorhanden.",
+        "persistence": "Tests können beliebig oft bestehen ohne die ausgelassene Grenzfolge zu entscheiden.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für reale Sicherheit bei verspäteter Annahme fehlt erforderliche Evidenz. Soforttests bleiben nur für ihre tatsächlich abgebildeten Abläufe nutzbar.",
+        "validation": "Eine getrennt gesteuerte spät angenommene Operation unterscheidet sicheren und fehlerhaften Vertrag."
+      },
+      {
+        "state": "Bekannter Versuch wartet trotz Timeout",
+        "kind": "ungewissheit",
+        "conditions": "Produktion oder isolierter Entwurf speichert Intent vor Versand und hält nach Timeout weitere lokale Versuche zurück.",
+        "persistence": "Unbekannter Ausgang bleibt bis Teilnehmerabgleich offen. Alte Annahme kann dennoch eintreffen.",
+        "residue_ids": [
+          "BDR009"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann die bekannte Operation wiederfinden ohne Antwortverlust als Ablehnung umzudeuten. Es ist keine Provider-Deduplikation.",
+        "validation": "Ein Timeout führt ohne Aufklärung automatisch zu neuem wirksamem Versuch."
+      },
+      {
+        "state": "Separater Verzögerungsprüflauf deckt Lücke auf",
+        "kind": "abschluss",
+        "conditions": "Neu entworfener isolierter Prüflauf steuert Annahme nach Timeout unabhängig und dokumentiert Teilnehmerannahmen ausdrücklich.",
+        "persistence": "Ein endlicher Nachweis über diese Spur ist abgeschlossen. Andere Produktionsverträge bleiben unbewiesen.",
+        "residue_ids": [
+          "BDR016"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Testprüfer kann die ausgelassene Interleavingklasse beurteilen und Mockgrenzen sehen. Kein empirischer Providerbeweis wird behauptet.",
+        "validation": "Defekt bei später Annahme bleibt im getrennten Lauf genauso unsichtbar wie in Sofortfixtures."
+      }
+    ],
+    "architectural_consequence": "Testbeleg und reale Annahme separat führen. Versuchsregister schützt nur bekannte lokale Wiederholung und benötigt negative Spuren mit später Annahme."
+  },
+  {
+    "stressor_id": "S298",
+    "source_states": [
+      "BD16"
+    ],
+    "branches": [
+      {
+        "state": "Gemeinsam eingefrorener Test beweist keine Erkennung",
+        "kind": "offen",
+        "conditions": "Timeout und Testmonitor teilen die eingefrorene virtuelle Uhr und keine unabhängig fortschreitende Beobachtung liegt vor.",
+        "persistence": "Beide schweigen solange die gemeinsame Testzeit steht. Keine Aussage über reale Monitoruhr folgt.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für Erkennung einer Produktionszeitstörung fehlt unterscheidende Evidenz. Es wird weder reale Blindheit noch realer Notalarm behauptet.",
+        "validation": "Ein unabhängiger Prüfer läuft während eingefrorener Taskuhr weiter und zeigt die fehlende Fristreaktion."
+      },
+      {
+        "state": "Getrennte Testuhr zeigt den fehlenden Timeout",
+        "kind": "abschluss",
+        "conditions": "Ein tatsächlich unabhängig gesteuerter Prüfer registriert denselben eingefrorenen Taskablauf und hält seine Annahmen fest.",
+        "persistence": "Der konkrete negative Test endet mit nachgewiesener Diskrepanz. Produktwirksamkeit benötigt einen anderen Nachweis.",
+        "residue_ids": [
+          "BDR016"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Testverantwortlicher kann das gemeinsame Einfrieren widerlegen statt es mit einem zweiten gleich getakteten Mock zu bestätigen.",
+        "validation": "Auch der neue Prüfer friert implizit mit oder kann keine Abweichung erkennen."
+      }
+    ],
+    "architectural_consequence": "Prüferuhr vom Tasktimer trennen und Testzeit nicht als Betriebsevidenz ausgeben. Ohne unabhängige Uhr bleiben reale Dauer und Erkennung offen."
+  },
+  {
+    "stressor_id": "S299",
+    "source_states": [
+      "BD16",
+      "BD08",
+      "BD10"
+    ],
+    "branches": [
+      {
+        "state": "Mockbeleg hat keine Aussage über reale Exklusion",
+        "kind": "offen",
+        "conditions": "Mock meldet Erfolg aber realer Provider nimmt alte Generationen an. Spuren dokumentieren nur Mockannahmen.",
+        "persistence": "Bestandene Mocktests ändern die reale Annahmeregel nicht.",
+        "residue_ids": [
+          "BDR016"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Testprüfer kann den begrenzten Fixturevertrag inspizieren und seine Widerlegung dokumentieren. Eine reale Sperrfähigkeit bleibt nicht erhalten.",
+        "validation": "Nachvollziehbare tatsächliche Teilnehmerannahmespur weist entgegen der Prämisse alle alten Generationen zurück."
+      },
+      {
+        "state": "Falsches Fencing erhält gegeneinander arbeitende Writer",
+        "kind": "attraktorhypothese",
+        "conditions": "Beide Writer bleiben am Provider wirksam und reparieren wiederholt gegeneinander. Getrennte Konfliktevidenz ist zugänglich.",
+        "persistence": "Alte Änderung → neue Reparatur → alte Reparatur → erneute Änderung trotz lokaler Fencingbestätigung.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann dokumentierte Doppelautorität nachweisen. Das lokale Erfolgssignal ist gerade kein Ausschlussresidue.",
+        "validation": "Keine Gegenreparatur folgt oder tatsächliche Annahmeprüfung schließt einen Writer aus."
+      },
+      {
+        "state": "Wirksamer Teilnehmervertrag ersetzt Mockannahme",
+        "kind": "halt",
+        "conditions": "Alternativer Entwurf erzwingt alte Generationen einschließlich Puffer am realen letzten Effektschritt abzulehnen.",
+        "persistence": "Altwriter bleibt ausgeschlossen solange die dauerhafte Teilnehmerregel gilt.",
+        "residue_ids": [
+          "BDR008"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Neuer legitimer Writer behält exklusive Annahmefähigkeit. Das setzt einen gegenüber dem Szenario geänderten Vertrag voraus und ist kein heutiger Befund.",
+        "validation": "Ein vor Fencing gepufferter Altauftrag wird nach bestätigtem Ausschluss angenommen."
+      }
+    ],
+    "architectural_consequence": "Fencingrückmeldung an tatsächliche Annahme alter Generationen binden. Testspur und echter Ausschluss sind verschiedene Residues."
+  },
+  {
+    "stressor_id": "S300",
+    "source_states": [
+      "BD04",
+      "BD05",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Bericht deutet Menge falsch Zahlung noch ungeklärt",
+        "kind": "ungewissheit",
+        "conditions": "Bericht vertauscht Einheiten oder Locale. Ein getrennter autorisierter Ursprungsbetrag ist vorhanden aber tatsächlicher Zahlungsbeleg fehlt.",
+        "persistence": "Anzeigefehler bleibt bis Korrektur. Wirkungsausgang bleibt separat offen.",
+        "residue_ids": [
+          "BDR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Fachprüfer kann den Darstellungsfehler gegen Originalmenge erkennen ohne daraus eine falsche Außenwirkung zu erfinden.",
+        "validation": "Unabhängiger Normalvergleich zeigt korrekte Darstellung oder ein tatsächlicher Zahlungsbeleg klärt den Ausgang."
+      },
+      {
+        "state": "Einheitvertrag hält falschen Bericht vor Nutzung zurück",
+        "kind": "halt",
+        "conditions": "Wert Einheit Skalierung und Locale werden vor Abnahme unabhängig gegen vereinbarte Semantik geprüft.",
+        "persistence": "Bericht wird bis korrigierter Darstellung nicht als Erfolgsevidenz genutzt.",
+        "residue_ids": [
+          "BDR005"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Abnehmer kann die beabsichtigte Menge verständlich lesen oder diese Darstellung ablehnen. Gemeinsame falsche Sollquelle bleibt Grenze.",
+        "validation": "Euro und Cent werden in der synthetischen Kreuzversion dennoch gleich akzeptiert."
+      },
+      {
+        "state": "Formatter bestätigt seine eigenen falschen Berichte",
+        "kind": "attraktorhypothese",
+        "conditions": "Gleicher Formatter wird Prüfer und seine Zustimmung stärkt weitere ungeprüfte Berichtsnutzung. Ein separater Mengenursprung bleibt zugänglich aber ungenutzt.",
+        "persistence": "Falscher Bericht → gleich falsch zustimmende Prüfung → mehr Vertrauen → weitere Wiederverwendung → falscher Bericht.",
+        "residue_ids": [
+          "BDR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Ein befugter unabhängiger Abnehmer könnte mit dem erhaltenen Ursprung widersprechen. Sein Eingriff ist nicht automatisch gegeben.",
+        "validation": "Keine Vertrauensverstärkung oder ein wirklich unabhängiger Abgleich bestimmt fortan die Abnahme."
+      }
+    ],
+    "architectural_consequence": "Berichtsformat und tatsächliche Menge gesondert abnehmen. Falsche Anzeige allein beweist keine falsche Zahlung und gleiche Formatter sind kein unabhängiger Check."
+  },
+  {
+    "stressor_id": "S301",
+    "source_states": [
+      "BD04",
+      "BD01",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Alter fixierter Preis ist für diese Bestellung richtig",
+        "kind": "abschluss",
+        "conditions": "Ein erhaltenes gültiges Angebot bindet genau diese Bestellung legitim an den alten Preis und unabhängiger Abgleich bestätigt den richtigen Abschluss.",
+        "persistence": "Der begrenzte Kauf kann korrekt abgeschlossen sein obwohl Cache alt ist.",
+        "residue_ids": [
+          "BDR006"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Abnehmer kann die gültige Preisbindung prüfen und verwenden. Es folgt keine Zusage für andere heutige Bestellungen.",
+        "validation": "Zusage ist abgelaufen nicht bindend oder betrifft ein anderes Produkt beziehungsweise Bestellung."
+      },
+      {
+        "state": "Abgelaufene erhaltene Preiszusage darf heutige Bestellung nicht binden",
+        "kind": "halt",
+        "conditions": "Ein echter alter Preisbeleg mit eindeutiger Gültigkeitsgrenze ist erhalten. Heutige Bindung ist erforderlich und wirksame Annahmeprüfung erkennt dass diese Zusage abgelaufen ist.",
+        "persistence": "Bestellung wartet auf aktuelle legitime Zusage statt Plausibilität als Frische zu deuten.",
+        "residue_ids": [
+          "BDR006"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Der Preisvertragsprüfer kann den erhaltenen Beleg zur Feststellung der abgelaufenen Bindung nutzen und betroffene Annahme verweigern. Ohne jeden echten Preisbeleg wäre nur der Cachewert kein solcher Gegenstand.",
+        "validation": "Abgelaufener alter Preis wird trotz belegter Gültigkeitsgrenze ohne aktuelle Zusage angenommen."
+      },
+      {
+        "state": "Veralteter Preis bereits verwendet",
+        "kind": "abschluss",
+        "conditions": "Bestellung verwendete ungebundenen alten Preis entgegen tatsächlicher Preisregel. Alte und aktuelle unabhängig zugängliche Belege sind erhalten.",
+        "persistence": "Falscher Abschluss bleibt bis möglicher neuer Korrekturarbeit. Kein Rückkopplungskreis ist gegeben.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Fachprüfer kann die belegte Regelabweichung untersuchen. Historische Preisbelege ersetzen keine neue gültige Bestellung.",
+        "validation": "Die maßgebliche Regel erlaubte genau den alten Preis oder tatsächliche Annahme nutzte aktuellen Preis."
+      }
+    ],
+    "architectural_consequence": "Preisalter von rechtlicher Angebotsbindung trennen. Cachegültigkeit muss für diese Bestellung entschieden werden nicht über allgemeine Frischeetiketten."
+  },
+  {
+    "stressor_id": "S302",
+    "source_states": [
+      "BD04",
+      "BD06",
+      "BD10",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Namensgleiche Personen vor Wirkung getrennt",
+        "kind": "halt",
+        "conditions": "Unabhängiger legitimer Realempfängerbezug widerspricht dem ausgewählten Ziel und kontrollierte Lieferung wartet.",
+        "persistence": "Falsches Ziel bleibt gesperrt bis Identität und Zielkanal kompetent geklärt sind.",
+        "residue_ids": [
+          "BDR007"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Bearbeiter kann den richtigen Menschen vom gleichnamigen anderen unterscheiden. Ein falsch formulierter Originalauftrag bleibt ungesichert.",
+        "validation": "Identifikationsprüfung akzeptiert vertauschte synthetische Personen oder falschen Zielkanal."
+      },
+      {
+        "state": "Arbeit vollständig für falsche Person erledigt",
+        "kind": "abschluss",
+        "conditions": "Tatsächliche Lieferung betrifft andere Person. Beabsichtigter unabhängiger Realempfängerbeleg bleibt zugänglich.",
+        "persistence": "Ein technischer Erfolg ist hier falscher Fachabschluss. Spätere Korrektur ist neue Arbeit.",
+        "residue_ids": [
+          "BDR007"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Prüfer kann die Fehlzuordnung feststellen. Vergangene Zustellung wird dadurch nicht aufgehoben.",
+        "validation": "Unabhängiger Personen- und Wirkungsbeleg zeigt dass die beabsichtigte reale Person bedient wurde."
+      },
+      {
+        "state": "Falsche Person hat geschützte Inhalte gelernt",
+        "kind": "verlust",
+        "conditions": "Fehllieferung enthielt vertrauliche Daten und unbefugte andere Person hat sie gelesen. Ein erlaubter Transferbeleg bleibt erhalten.",
+        "persistence": "Historische Vertraulichkeit ist verloren auch nach Rückruf. Weiterer Zugriff ist gesondert begrenzbar.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann den belegten Offenlegungsumfang untersuchen ohne eine zusätzliche geheime Vollkopie zu benötigen. Vergessen ist nicht nachweisbar.",
+        "validation": "Inhalt war nicht geschützt oder anderer Empfänger konnte ihn nachweislich nicht lesen."
+      }
+    ],
+    "architectural_consequence": "Realen Empfänger von internen IDs und Anzeigenamen trennen. Empfängerbeleg erhält Zuordnung nicht rückwirkend Geheimhaltung nach Fehllieferung."
+  },
+  {
+    "stressor_id": "S303",
+    "source_states": [
+      "BD17",
+      "BD10"
+    ],
+    "branches": [
+      {
+        "state": "Warnung bleibt für diesen Operator unverständlich",
+        "kind": "ungewissheit",
+        "conditions": "Rot ist einzige Bedeutungsträgerin und kein anderer effektiver Empfänger handelt. Technische Alarmbelege bleiben zugänglich.",
+        "persistence": "Informationslücke dauert bis nutzbarer Darstellung oder anderem legitimen Eingriff. Kein autonomer Kreis.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Späterer Prüfer kann die vorhandene Warnung nachvollziehen. Rechtzeitiges Verstehen dieses Operators ist nicht erhalten.",
+        "validation": "Dieser Operator erkennt in der tatsächlichen Ansicht unabhängig von Farbe Zustand und Ziel rechtzeitig korrekt."
+      },
+      {
+        "state": "Text und Symbol erhalten Bedeutung",
+        "kind": "transient",
+        "conditions": "Geprüfter alternativer Alarmvertrag bietet diesem Operator verständlichen Text und redundante Markierung auf seinem Gerät.",
+        "persistence": "Darstellungsstörung endet für diese Nachricht wenn Bedeutung erkannt wird. Reparatur bleibt eigene Handlung.",
+        "residue_ids": [
+          "BDR017"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Erreichter berechtigter Operator kann Alarm und erlaubten nächsten Schritt korrekt unterscheiden. Kein Notfallstopp wird damit bewiesen.",
+        "validation": "Synthetischer Test zeigt trotz Text und Symbol weiterhin falsche Zustands- oder Zielzuordnung."
+      }
+    ],
+    "architectural_consequence": "Alarme mehrkanalig in ihrer Bedeutung darstellen und operatorgerecht prüfen. Sichtbarer Alarm ist weder Verständnis noch rechtzeitige physische Intervention."
+  },
+  {
+    "stressor_id": "S304",
+    "source_states": [
+      "BD04",
+      "BD17",
+      "BD10",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Falsche Instanz gestoppt richtige bleibt gestört",
+        "kind": "abschluss",
+        "conditions": "Gekürzte Pfade kollidieren und Operator stoppte tatsächlich das andere Ziel. Zeitlich und sachlich getrennte Belege bleiben vorhanden.",
+        "persistence": "Falscher Eingriff ist abgeschlossen während ursprünglicher Incident weiterbestehen kann.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann belegte Zielverwechslung untersuchen. Weder richtige Instanzreparatur noch Unschädlichkeit des Stopps folgt daraus.",
+        "validation": "Stoppbeleg zeigt das tatsächlich beabsichtigte eindeutige Ziel oder keine Aktion wurde angenommen."
+      },
+      {
+        "state": "Vollidentitätsprüfung hält mehrdeutigen Stopp",
+        "kind": "halt",
+        "conditions": "Eindeutige ungekürzte Identität ist unabhängig vom Anzeigenpfad verfügbar und muss vor Stopp bestätigt werden.",
+        "persistence": "Stopp wartet auf gültige eindeutige Zuordnung. Lesbarkeit alleine schließt Irrtum nicht vollkommen aus.",
+        "residue_ids": [
+          "BDR017"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann Ziel und konkrete Aktion auf kleinem Gerät prüfen. Die bestätigte Ansicht muss an denselben angenommenen Zielbezug gebunden sein.",
+        "validation": "Zwei kollidierende Kurzpfade führen trotz Bestätigung zum selben ununterscheidbaren Stopptarget."
+      }
+    ],
+    "architectural_consequence": "Vollständige stabile Zielidentität vor Stoppausführung anzeigen und bestätigen. Mobilkürzung darf nicht zum Eingriffsschlüssel werden."
+  },
+  {
+    "stressor_id": "S305",
+    "source_states": [
+      "BD04",
+      "BD10",
+      "BD03",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Übersetzung erzeugt falschen Ausgangsglauben",
+        "kind": "ungewissheit",
+        "conditions": "Anzeige sagt fehlgeschlagen obwohl Ausgang unklar ist. Originale unklare Versuchsevidenz ist separat erhalten und noch kein neuer Effekt belegt.",
+        "persistence": "Falscher Glaube bleibt bis Klärung. Eine daraus folgende Doppelwirkung ist möglich aber nicht vorausgesetzt.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Prüfer kann die verfälschte Deutung gegen originale Aussage prüfen. Der falsche UI-Glaube beweist keine erfolgte Doppelzahlung.",
+        "validation": "Operator versteht trotz Übersetzung korrekt unklar oder tatsächliche Ablehnung ist unabhängig belegt."
+      },
+      {
+        "state": "Unklar bleibt sichtbar und Wiederholung gehalten",
+        "kind": "ungewissheit",
+        "conditions": "Anzeige erhält Originalstatus und ein erhaltenes Versuchsregister bindet lokale Wiederholung tatsächlich an Klärung.",
+        "persistence": "Outcome bleibt offen bis korreliertem Teilnehmerbeleg. Verständliche Anzeige allein löst ihn nicht.",
+        "residue_ids": [
+          "BDR017",
+          "BDR009"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann Ungewissheit verstehen und bekannten Versuch ohne blindes Retry abgleichen. Empfang und Autorität sind separate Voraussetzungen.",
+        "validation": "Operator liest eindeutig fehlgeschlagen oder UI erlaubt automatische Wiederholung ohne offene Versuchsevidenz zu beachten."
+      }
+    ],
+    "architectural_consequence": "Unklar und abgelehnt als unvertauschbare Zustände durch Übersetzung und Aktionsangebot führen. Falscher Glaube ist noch kein falsches Werkprodukt."
+  },
+  {
+    "stressor_id": "S306",
+    "source_states": [
+      "BD17"
+    ],
+    "branches": [
+      {
+        "state": "Nachricht vorhanden aber kein Mensch erreicht",
+        "kind": "ungewissheit",
+        "conditions": "Einzig vorgesehenes Telefon ist aus und im relevanten Zeitraum ist kein legitimer anderer Empfänger erreichbar. Ein lesbarer Sendebeleg überlebt.",
+        "persistence": "Warten endet erst mit späterem Empfang oder Aufgabe. Mehrere Tage sind kein eigener Rückkopplungsmechanismus.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Späterer Prüfer kann den Sendeversuch nachvollziehen. Für rechtzeitige menschliche Reaktion gibt es in diesem Zweig keine Restfähigkeit.",
+        "validation": "Ein legitimer Mensch bestätigt tatsächlich rechtzeitiges Verständnis und Handeln über anderen Weg."
+      },
+      {
+        "state": "Endliche Nachricht findet unabhängigen Empfänger",
+        "kind": "transient",
+        "conditions": "Alternativer Entwurf hat noch laufende Empfangsfrist und einen tatsächlich unabhängigen erreichbaren berechtigten Empfängerweg.",
+        "persistence": "Ausbleibende Quittung löst gezielte Umleitung dieser Nachricht aus. Deren Empfang endet nicht den Incident.",
+        "residue_ids": [
+          "BDR018"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Disponent kann fehlenden menschlichen Empfang erkennen und eine begrenzte Nachricht rechtzeitig weiterreichen. Kein unbegrenzter Bereitschaftsdienst folgt.",
+        "validation": "Ausweichweg hängt am selben ausgeschalteten Gerät oder nur Transportannahme wird als menschlicher Empfang gezählt."
+      }
+    ],
+    "architectural_consequence": "Menschlichen Empfang und Ende der Zustellpflicht separat vom Providerack führen. Keine Ausweichbereitschaft erfinden wo nachts niemand erreichbar ist."
+  },
+  {
+    "stressor_id": "S307",
+    "source_states": [
+      "BD17",
+      "BD18"
+    ],
+    "branches": [
+      {
+        "state": "Endlicher Meldungsberg wird abgearbeitet",
+        "kind": "transient",
+        "conditions": "Flapping endet und Bearbeitung übersteigt neue Meldungen. Separates kapazitiv ausreichendes Vorfallsregister führt den echten Totalausfall unabhängig von Wiederholungen.",
+        "persistence": "Rückstand sinkt bei unveränderter Grundlast bis abgearbeitet. Kein Attraktor aus der Zahl zehntausend allein.",
+        "residue_ids": [
+          "BDR019"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Einsatzplanung kann den gesonderten echten Ausfall weiterfinden. Das beweist noch keine Behebung oder rechtzeitige menschliche Aufmerksamkeit.",
+        "validation": "Neuer Totalausfall verschwindet bei Zusammenfassung oder Rückstand wächst nach Ende der Flaps aus inneren Erinnerungen weiter."
+      },
+      {
+        "state": "Erinnerungen verdrängen Reparatur dauerhaft",
+        "kind": "attraktorhypothese",
+        "conditions": "Ungelöste Fehler erzeugen nach Ende der Flaps mehr Aufmerksamkeitspflichten als abgearbeitet werden. Vorfallsregister selbst überlebt mit benannter Kapazität.",
+        "persistence": "Mehr Rückstand → weniger Reparaturzeit → mehr ungelöste Vorfälle → mehr Erinnerungen → mehr Rückstand.",
+        "residue_ids": [
+          "BDR019"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigte Einsatzplanung behält registrierte offene Vorfälle sichtbar. Erhaltene Liste ersetzt keine freie Bearbeitungskapazität.",
+        "validation": "Bei gleicher Grundlast und Personalstärke sinkt Rückstand nach Störungsende dauerhaft ohne zusätzliche innere Produktion."
+      }
+    ],
+    "architectural_consequence": "Meldungsdeduplikation vom offenen Vorfallsregister trennen. Echten Totalausfall trotz endlichem Burst erhalten und Schleifen nur nach Ende der Flaps behaupten."
+  },
+  {
+    "stressor_id": "S308",
+    "source_states": [
+      "BD19",
+      "BD18",
+      "BD01"
+    ],
+    "branches": [
+      {
+        "state": "Quittiert aber drei Monate zurückgestellt",
+        "kind": "halt",
+        "conditions": "Planung erlaubt langen Aufschub und Alarmack wird nicht als Reparatur ausgegeben. Offenes Vorfallsregister bleibt erhalten.",
+        "persistence": "Bewusste Queuepolitik hält Aufschub bis tatsächlicher Bearbeitung oder ausdrücklicher Aufgabe.",
+        "residue_ids": [
+          "BDR019"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigte Planung kann Fristverletzung und offenen Reparaturbedarf sehen obwohl Pagerpflicht beendet ist.",
+        "validation": "Quittung löscht den Vorfall oder tatsächliche Reparatur ist bereits unabhängig verifiziert."
+      },
+      {
+        "state": "Rückstand erzeugt neue Reparaturpflichten",
+        "kind": "attraktorhypothese",
+        "conditions": "Aufschub lässt Fehler weiterleben und ihre Meldungen verbrauchen die verbleibende Reparaturzeit. Register bleibt lesbar.",
+        "persistence": "Aufschub → ungelöste Fehler → Meldungsarbeit → weniger Reparatur → mehr Aufschub bei fester Grundlast.",
+        "residue_ids": [
+          "BDR019"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Planer kann noch gespeicherte offene Vorfälle priorisieren. Bestehende Kapazitätskrise wird nicht vom Register gelöst.",
+        "validation": "Nach Anfangsrückstand werden Fehler ohne innere Neubelastung kontinuierlich behoben."
+      },
+      {
+        "state": "Konkreter Vorfall fachlich behoben",
+        "kind": "abschluss",
+        "conditions": "Reparatur wird tatsächlich durchgeführt und unabhängiger aufgabenspezifischer Check bestätigt Wirkung. Vorfalls- und Abnahmebeleg bleiben zugänglich.",
+        "persistence": "Nur dieser Vorfall ist abgeschlossen. Andere quittierte Incidents bleiben offen.",
+        "residue_ids": [
+          "BDR019",
+          "BDR032"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Planer und Abnehmer können echte Behebung vom alten Ack unterscheiden und den begrenzten Abschluss nachvollziehen.",
+        "validation": "Abschlussprüfung misst nur Ack oder betroffene Funktion ist weiterhin defekt."
+      }
+    ],
+    "architectural_consequence": "Quittung Zuständigkeit Aufschub und geprüfte Behebung als getrennte Vorfallszustände führen. Reparaturfrist nicht mit Alarmack erfüllen."
+  },
+  {
+    "stressor_id": "S309",
+    "source_states": [
+      "BD20",
+      "BD01",
+      "BD09",
+      "BD10"
+    ],
+    "branches": [
+      {
+        "state": "Gegensätzliche Freigaben halten Aktion an",
+        "kind": "halt",
+        "conditions": "Beide Vertreter sind legitim aber keine kompetente Vorrangregel entscheidet. Lokale Grenze hält neue Aktion tatsächlich zurück.",
+        "persistence": "Konflikt bleibt bis zuständiger Entscheidung oder Abbruch. Keine autonome Konvergenz.",
+        "residue_ids": [
+          "BDR015"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Entscheider kann beide Weisungen mit Geltung prüfen ohne sie durch last-write-wins zu verfälschen. Alte Puffer bleiben separat zu prüfen.",
+        "validation": "Ein Effekt passiert trotz offenem Konflikt oder bindende vorhandene Regel hätte bereits eindeutig entschieden."
+      },
+      {
+        "state": "Kompetente Ordnung wird bei Annahme angewandt",
+        "kind": "transient",
+        "conditions": "Vorhandene gültige Vorrangregel löst genau diesen Konflikt und jeder betreffende Teilnehmer prüft deren aktuelle Geltung.",
+        "persistence": "Legitime Verweigerung oder neue zulässige Arbeit folgt. Richtige Freigabe ist noch kein nützlicher Abschluss.",
+        "residue_ids": [
+          "BDR015",
+          "BDR010"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zuständiger Teilnehmer kann die für diese Operation geltende Weisung anwenden. Der Vertrag entscheidet keine unbekannte Rechtsfrage von selbst.",
+        "validation": "Permutierte Zustellung derselben Entscheidungen ändert ohne sachliche Grundlage die geltende Autorität."
+      }
+    ],
+    "architectural_consequence": "Legitime Vorrangentscheidung und aktuelle Annahmegrenze koppeln. Ankunftsreihenfolge darf fehlende rechtliche Rangordnung nicht erfinden."
+  },
+  {
+    "stressor_id": "S310",
+    "source_states": [
+      "BD21"
+    ],
+    "branches": [
+      {
+        "state": "Ausgeschiedener kontrolliert einzige Aufsicht",
+        "kind": "extern-erzwungen",
+        "conditions": "Nur ehemaliger Betreiber kann Konto sehen oder ändern und kein legitimer Recoverypfad existiert im relevanten Zeitraum. Lokale Geschäftsdaten bleiben separat lesbar.",
+        "persistence": "Kontogovernance hält Ausschluss aufrecht bis rechtmäßiger Recovery oder Änderung. Dienste können weiterarbeiten.",
+        "residue_ids": [
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter lokaler Betreiber kann erhaltene Geschäftsdaten lesen. Unabhängiger Monitoringzugang ist in diesem Zweig nicht erhalten.",
+        "validation": "Legitimer Nachfolger kann Konto ohne Mitwirkung des ausgeschiedenen Betreibers tatsächlich übernehmen."
+      },
+      {
+        "state": "Legitimer Nachfolger kann Konto zurückerhalten",
+        "kind": "transient",
+        "conditions": "Vorher bestehender unabhängiger Kontorecovery und gültiger Vertreternachweis sind erreichbar und Provider erkennt sie an.",
+        "persistence": "Zugriffslücke endet mit rechtmäßiger Wiederherstellung. Fehlende historische Beobachtungen bleiben fehlend.",
+        "residue_ids": [
+          "BDR020"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Nachfolger kann bestimmte Aufsichtsrechte wieder nutzen ohne Geheimnisse des Vorgängers zu übernehmen. Kontozugang allein repariert keine Incidents.",
+        "validation": "Recovery verlangt ausschließlich das alte Konto oder Provider akzeptiert Zuständigkeitsnachweis nicht."
+      }
+    ],
+    "architectural_consequence": "Monitoringkontohoheit und legitime Nachfolge unabhängig vom ausgeschiedenen Betreiber gestalten. Sichtverlust ist nicht automatisch Dienststillstand."
+  },
+  {
+    "stressor_id": "S311",
+    "source_states": [
+      "BD21",
+      "BD28"
+    ],
+    "branches": [
+      {
+        "state": "Team hält eigene Aufsicht stumm",
+        "kind": "extern-erzwungen",
+        "conditions": "Interessiertes Team kontrolliert Alarmweg aber getrennte berechtigte Aufsicht hat einen unveränderbaren Stummschaltungsbeleg.",
+        "persistence": "Installierte Stummpolitik hält Signallücke. Kein Rewardkreis wird für diese Variante vorausgesetzt.",
+        "residue_ids": [
+          "BDR021"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Unabhängiger Prüfer kann erkennen wann und durch wen Beobachtung unterdrückt wurde. Nicht erzeugte Detailalarme bleiben unbekannt.",
+        "validation": "Team kann auch den getrennten Beleg unsichtbar machen oder kein legitimer Leser ist erreichbar."
+      },
+      {
+        "state": "Stummheit verdient mehr Kontrolle",
+        "kind": "attraktorhypothese",
+        "conditions": "Fehlende Alarme verbessern bewertete Verfügbarkeit und die Belohnung vergrößert Stummschaltungsrechte. Getrennter Regelbeleg existiert aber beeinflusst Belohnung noch nicht.",
+        "persistence": "Stummheit → bessere Kennzahl → mehr Vertrauen und Rechte → mehr Stummheit.",
+        "residue_ids": [
+          "BDR021"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter unabhängiger Prüfer behält Gegenbeleg zur Unterdrückung. Seine politische Durchsetzung wird nicht erfunden.",
+        "validation": "Sichtbare Stummintervalle verschlechtern Belohnung oder keine Rückgabe zusätzlicher Kontrolle folgt."
+      }
+    ],
+    "architectural_consequence": "Stummschaltung außerhalb der alleinigen Kontrolle des bewerteten Teams sichtbar halten. Unabhängiger Regelbeleg und echtes Incidentwissen nicht verwechseln."
+  },
+  {
+    "stressor_id": "S312",
+    "source_states": [
+      "BD15",
+      "BD24"
+    ],
+    "branches": [
+      {
+        "state": "Gemeinsamer Unterbau fällt aus",
+        "kind": "extern-erzwungen",
+        "conditions": "Alle genannten Dienste brauchen gestörte Cloud. Lokale lesbare Daten und lokaler Zugang benötigen sie nicht.",
+        "persistence": "Ausfall dauert solange gemeinsame Pflichtabhängigkeit fehlt. Vendorzahl ändert daran nichts.",
+        "residue_ids": [
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Lokaler berechtigter Betreiber kann erhaltenen Geschäftsstand prüfen. Externe Modelle und erreichbarer Pager sind nicht erhalten.",
+        "validation": "Lokale Daten erfordern ebenfalls die ausgefallene Cloud oder ein angeblich betroffener Dienst arbeitet wirklich unabhängig."
+      },
+      {
+        "state": "Retries halten Überlast nach Cloudrückkehr",
+        "kind": "attraktorhypothese",
+        "conditions": "Ungebremste Fehlversuche erzeugen Rückstau der auch nach Rückkehr bei fester Grundlast Antworten verzögert. Lokale Bestandsakten bleiben lesbar.",
+        "persistence": "Latenz → mehr Retrylast → Stau → noch mehr Latenz → neue Retries.",
+        "residue_ids": [
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Offlineprüfer kann erhaltenen Zustand sehen aber daraus folgt weder Drainage noch externer Alarmweg.",
+        "validation": "Bei unveränderter Grundlast und Politik leert sich Rückstau nach Cloudrückkehr ohne selbst erzeugte Last."
+      },
+      {
+        "state": "Eigene Versuche bleiben endlich begrenzt",
+        "kind": "halt",
+        "conditions": "Alternativer Zulassungsvertrag kontrolliert alle eigenen Retryproduzenten und reserviert unabhängige lokale Kapazität.",
+        "persistence": "Weitere eigene Versuche werden über Budget gehalten bis zugelassene Arbeit abnimmt. Provider kann dennoch ausfallen.",
+        "residue_ids": [
+          "BDR025"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Disponent kann begrenzte eigene Arbeit priorisieren und Kopienobergrenze erhalten. Fremde Cloudlast bleibt außerhalb.",
+        "validation": "Eigene ungeregelte Producer umgehen Zähler oder schon angenommene Kopien werden fälschlich als beendet gezählt."
+      }
+    ],
+    "architectural_consequence": "Gemeinsame Cloudabhängigkeit einschließlich Pager und Funding inventarisieren. Offlineinspektion und kontrollierte Lastannahme sind kein Ersatz für externen Modellbetrieb."
+  },
+  {
+    "stressor_id": "S313",
+    "source_states": [
+      "BD15",
+      "BD22"
+    ],
+    "branches": [
+      {
+        "state": "Zahlungssperre stoppt gemeinsame Dienste",
+        "kind": "extern-erzwungen",
+        "conditions": "Modelle Backupzugang und Alarmkonten hängen an gleicher gesperrter Zahlung. Ein lesbarer lokaler Bestand existiert unabhängig davon.",
+        "persistence": "Dienste warten auf legitime Zahlungsfreigabe oder tatsächlich unabhängige Alternative.",
+        "residue_ids": [
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Offlinebetreiber kann den gespeicherten Stand prüfen. Neue Backups Alarme und Modelle sind nicht dadurch verfügbar.",
+        "validation": "Kopie liegt nur beim gesperrten Provider oder lokaler Decoder braucht denselben Account."
+      },
+      {
+        "state": "Providerzugang endgültig verloren",
+        "kind": "verlust",
+        "conditions": "Sperre führt nach bekannten Bedingungen zum Ende dieser Providerfähigkeit und kein kompatibler legitim nutzbarer Ersatz ist vorhanden. Lokale Daten bleiben lesbar.",
+        "persistence": "Betroffene Außenfunktion ist derzeit beendet. Künftige neue Ersatzmöglichkeit wird nicht ausgeschlossen.",
+        "residue_ids": [
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Lokale Unterlagen dienen noch der begrenzten Abwicklung. Provider-only Daten und spätere Kosten brauchen gesonderte Evidenz.",
+        "validation": "Ein wirklich nutzbarer Ersatz oder wiederhergestellter legitimer Providerzugang führt die Funktion aus."
+      }
+    ],
+    "architectural_consequence": "Finanzielle und technische Abhängigkeiten getrennt abbilden. Abonnementverlust löscht nicht zwingend Offlinekopien aber bekannte Verfügbarkeit ist keine Datenretentionszusage."
+  },
+  {
+    "stressor_id": "S314",
+    "source_states": [
+      "BD01",
+      "BD22",
+      "BD32",
+      "BD23"
+    ],
+    "branches": [
+      {
+        "state": "Vor Frist geprüfte Ersatzfunktion läuft",
+        "kind": "transient",
+        "conditions": "Ein legitimer kompatibler Ersatz mit ausreichender Kapazität ist vor 24-Stunden-Frist tatsächlich verfügbar und fachlich geprüft.",
+        "persistence": "Diese Funktion kann nach Umstellung weiterlaufen. Alte offene Aufträge bleiben separat abzuklären.",
+        "residue_ids": [
+          "BDR023"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Betreiber kann genau die geprüfte Operation fortsetzen. Gleiche API-Namen oder künftige Hoffnung genügen nicht.",
+        "validation": "Ersatz interpretiert Wirkung anders hat keine Rechte oder ist erst nach kritischer Frist nutzbar."
+      },
+      {
+        "state": "Providerfunktion endet lokale Akten bleiben",
+        "kind": "verlust",
+        "conditions": "Frist verstreicht ohne geeigneten Ersatz. Autorisierter vollständiger oder lückenmarkierter lokaler Export ist weiterhin interpretierbar.",
+        "persistence": "Providerdienst ist beendet. Neue Ersatzmöglichkeit kann später neue Funktion schaffen.",
+        "residue_ids": [
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Abwickler kann erhaltene lokale Geschäftsfakten lesen. Provider-only fehlende Daten werden nicht erfunden.",
+        "validation": "Export ist ohne Providerdecoder unlesbar oder geeigneter Ersatz arbeitet rechtzeitig."
+      },
+      {
+        "state": "Alte Zusagen bleiben nach Providerende offen",
+        "kind": "ungewissheit",
+        "conditions": "Teilnehmer kann bereits angenommene Arbeit oder verspätete Kosten noch melden. Versuchseinträge und bekannte Zusagekosten sind erhalten aber unvollständig.",
+        "persistence": "Schweigen und Ablauf der Dienstfrist klären weder Wirkung noch finale Haftung.",
+        "residue_ids": [
+          "BDR009",
+          "BDR024"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigte Abwicklung kann bekannte Operations- und Kostenlücken getrennt führen. Register garantieren keinen endgültigen Schlussbetrag.",
+        "validation": "Vollständige belastbare Teilnehmer- und Abrechnungsbelege schließen alle benannten offenen Zusagen."
+      }
+    ],
+    "architectural_consequence": "Austauschbarkeit vor Ablauf fachlich prüfen und alte Teilnehmerpflichten nicht mit Providerwechsel schließen. Lesbarer Export ist eine kleinere Restfähigkeit als fortgesetzter Dienst."
+  },
+  {
+    "stressor_id": "S315",
+    "source_states": [
+      "BD23",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Verspätete Kosten lassen Budgetkopf unbestimmt",
+        "kind": "ungewissheit",
+        "conditions": "Provider kann Kosten alter angenommener Nutzung nachmelden. Bekannte Zusagen sind erhalten aber Tarife oder Annahmemengen nicht vollständig begrenzt.",
+        "persistence": "Nachmeldungen dauern bis Abrechnung geklärt ist. Eine Woche Verzug allein ist kein Attraktor.",
+        "residue_ids": [
+          "BDR024"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Finanzplanung kann bekannte Haftung und unbekannte Restbelastung getrennt anzeigen statt falschen freien Budgetraum. Harte Obergrenze bleibt unbewiesen.",
+        "validation": "Register stellt trotz ungebundener offener Kosten einen sicheren Restbudgetbetrag dar."
+      },
+      {
+        "state": "Weitere eigene Zusagen passen unter beweisbaren Deckel",
+        "kind": "halt",
+        "conditions": "Alle eigenen Annahmen werden gezählt und höchster Preis einschließlich ungemeldeter Nutzung ist vertraglich gebunden. Teilnehmer nimmt keine Arbeit jenseits dieses Deckels an.",
+        "persistence": "Zusätzliche Zusagen werden bis ausreichendem belegtem Spielraum gehalten. Bereits entstandene Überschreitung bleibt bestehen.",
+        "residue_ids": [
+          "BDR024",
+          "BDR025"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Finanzplaner kann mit Zusagebilanz und begrenzter Annahme künftige eigene Haftung begrenzen. Ohne gebundenen Preis ist derselbe Zähler unzureichend.",
+        "validation": "Späte Rechnung überschreitet Deckel ohne neue zulässige Zusage oder Tarif kann rückwirkend ungebunden wachsen."
+      }
+    ],
+    "architectural_consequence": "Gemeldete Kosten von zugesagter Haftung trennen. Lokales Retrybudget ist kein Gelddeckel ohne obere Kostengrenze pro Annahme und Teilnehmerdurchsetzung."
+  },
+  {
+    "stressor_id": "S316",
+    "source_states": [
+      "BD24",
+      "BD01",
+      "BD10",
+      "BD23"
+    ],
+    "branches": [
+      {
+        "state": "Spekulation erzeugt dauernden Stau",
+        "kind": "attraktorhypothese",
+        "conditions": "Latenz triggert mehr Kopien deren Arbeit die verfügbare Kapazität übersteigt auch nachdem Anfangsstoß endet. Lesbare lokale Zusagebelege überleben.",
+        "persistence": "Latenz → Kopien → Stau und Kosten → mehr Latenz → weitere Kopien bei fester Grundlast.",
+        "residue_ids": [
+          "BDR024"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Finanzprüfer kann bekannte Kopienkosten und unbekannte Resthaftung sehen. Register dämpft die Schleife nicht selbst.",
+        "validation": "Bei gleicher Grundlast und Kopierpolitik leert sich Stau nach Ende des Anfangsstoßes dauerhaft."
+      },
+      {
+        "state": "Begrenzte Kopien lassen Rückstand ablaufen",
+        "kind": "transient",
+        "conditions": "Alle eigenen Kopien unterliegen wirksamem Budget und bei fester Grundlast bleibt positive Kapazität zum Abbau. Annahmen werden nicht voreilig als storniert gezählt.",
+        "persistence": "Endlicher Burst fällt unter Bedienkapazität und wird abgearbeitet. Fachlich korrekter genau einmaliger Effekt ist separat zu prüfen.",
+        "residue_ids": [
+          "BDR025"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Disponent kann endliche Kopienmenge priorisieren und eigene Überlast begrenzen. Kein globales p99.999-Versprechen folgt.",
+        "validation": "Unter unveränderter Grundlast wächst aktiver eigener Kopienzähler über Grenze oder Rückstand regeneriert sich dennoch."
+      }
+    ],
+    "architectural_consequence": "Kopien als aktive Verpflichtungen zählen und Deduplikation von Kostengrenze trennen. Attraktorprüfung braucht konstante Grundlast vor und nach dem auslösenden Latenzstoß."
+  },
+  {
+    "stressor_id": "S317",
+    "source_states": [
+      "BD18",
+      "BD19"
+    ],
+    "branches": [
+      {
+        "state": "Teurer begrenzter Alarmzeitraum fristgerecht abgearbeitet",
+        "kind": "abschluss",
+        "conditions": "Für ein benanntes endliches Beobachtungsfenster hält Bearbeitung alle Fristen ein und echte Behebung der erfassten Vorfälle ist geprüft. Organisation akzeptiert absolute Kosten und Vorfallsregister bleibt zugänglich. Kein selbst erzeugter Rückstand liegt vor.",
+        "persistence": "Dieses Fenster ist trotz hoher relativer Kosten abgearbeitet. Wiederholter tragbarer Betrieb ist damit vereinbar aber seine unbegrenzte Dauer wird nicht behauptet.",
+        "residue_ids": [
+          "BDR019"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Legitimierte Planung kann offene Vorfälle und echte Behebung verfolgen. Überlegene Wirtschaftlichkeit wird nicht behauptet.",
+        "validation": "Rückstand wächst oder Fristen werden trotz angeblich ausreichender Kapazität systematisch verfehlt."
+      },
+      {
+        "state": "Fehlalarme verdrängen Reparatur und erzeugen Folgearbeit",
+        "kind": "attraktorhypothese",
+        "conditions": "Nach ursprünglichen Fehlalarmen produzieren ungelöste Fehler mehr Meldungsarbeit als verfügbare Aufmerksamkeit abträgt. Register bleibt erreichbar.",
+        "persistence": "Mehr Alarme → weniger Reparatur → mehr ungelöste Fehler → mehr Alarme bei fester Grundlast.",
+        "residue_ids": [
+          "BDR019"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Planer kann registrierte Vorfälle noch unterscheiden. Das bewahrt weder freie Aufmerksamkeit noch ökonomische Tragbarkeit.",
+        "validation": "Nach Ende der anfänglichen Fehlalarme sinkt Rückstand bei gleicher Besetzung ohne innere Reproduktion."
+      }
+    ],
+    "architectural_consequence": "Absolute Aufmerksamkeit und Vorfallsbearbeitung statt Kostenverhältnis allein bewerten. Teurer stabiler Betrieb muss als Alternative erhalten bleiben."
+  },
+  {
+    "stressor_id": "S318",
+    "source_states": [
+      "BD09",
+      "BD25",
+      "BD10"
+    ],
+    "branches": [
+      {
+        "state": "Verbot verhindert spätere Annahme",
+        "kind": "halt",
+        "conditions": "Kompetente Auslegung macht Verbot für diese Wirkung verbindlich und rechtzeitige aktuelle Information erreicht die kontrollierte Annahmegrenze.",
+        "persistence": "Teilnehmer verweigert neue und gepufferte verbotene Arbeit solange Verbot gilt.",
+        "residue_ids": [
+          "BDR010"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zuständiger Teilnehmer kann trotz alter Freigabe diese Annahme verhindern. Andere bereits eingetretene Wirkungen bleiben getrennt.",
+        "validation": "Gepufferter Auftrag wird nach maßgeblichem Verbotszeitpunkt trotz aktueller Prüfung angenommen."
+      },
+      {
+        "state": "Nach Verbot erfolgte Wirkung bleibt historisch",
+        "kind": "verlust",
+        "conditions": "Teilnehmer nahm unter veralteter Freigabe tatsächlich an und eine benannte irreversible Eigenschaft wurde verändert. Erlaubte Belegkopie überlebt.",
+        "persistence": "Der vergangene irreversible Anteil bleibt auch nach rechtlicher oder finanzieller Kompensation.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Prüfer kann belegte Zeiten und Wirkung untersuchen. Er kann weder Rechtsrang erfinden noch Vergangenheit rückgängig machen.",
+        "validation": "Wirkung lag vor verbindlichem Verbot oder behaupteter irreversibler Anteil ist nicht eingetreten."
+      }
+    ],
+    "architectural_consequence": "Gültiges Verbot mit fachlich bestimmtem Wirksamkeitszeitpunkt am letzten Teilnehmer durchsetzen. Alte Freigabe und lokale Kenntnis sind keine Rückwirkung."
+  },
+  {
+    "stressor_id": "S319",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Rechtslage des identischen Datenumfangs ungeklärt",
+        "kind": "offen",
+        "conditions": "Jurisdiktion konkrete Daten Pflichtausnahmen Frist und verbindliche Auslegung fehlen. Zulässigkeit selbst eines Nachweises ist unbestimmt.",
+        "persistence": "Technische Wiederholung entscheidet keine Norm. Nur kompetente Klärung kann einen erlaubten Zweig begründen.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für rechtmäßige Gesamtverfügung lässt sich kein nutzbarer Kandidat behaupten solange nicht feststeht wer was aufbewahren darf. Unbekannte Rechtmäßigkeit ist kein Totalverlust.",
+        "validation": "Kompetente verbindliche Entscheidung legt konkreten Datenumfang und zulässige Verfügung fest."
+      },
+      {
+        "state": "Geklärte begrenzte Aufbewahrung oder Löschung",
+        "kind": "halt",
+        "conditions": "Kompetente Stelle stellt für genau diese Daten eine zulässige Ausnahme oder Rangregel fest und erlaubt einen metadatenarmen Verfügungsbeleg. Ausführung wartet noch auf diese begrenzte Entscheidung.",
+        "persistence": "Ungeklärte weitergehende Forderung bleibt gehalten. Nachvollziehbare erlaubte Teilverfügung kann gesondert ausgeführt werden.",
+        "residue_ids": [
+          "BDR036"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Datenschutzverantwortlicher kann zulässigen Umfang und Nachweis nutzen ohne pauschal beide Gesetze technisch zu erfüllen. Keine konkrete Rechtslösung wird hier behauptet.",
+        "validation": "Die vermeintlich zuständige Stelle hat keine Befugnis oder Nachweis enthält weiterhin unzulässig aufzubewahrende Daten."
+      },
+      {
+        "state": "Nach Prüfung tatsächlich unvereinbare gleichzeitige Forderungen",
+        "kind": "halt",
+        "conditions": "Kompetente Analyse bestätigt dass für genau dieselbe Information und Zeit unverändert lesbare Beweise bleiben und sämtliche Kopien verschwinden müssten ohne Ausnahme.",
+        "persistence": "Kein technischer Ablauf erfüllt beide Prädikate zugleich. Zuständige normative Änderung wäre nötig.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für gleichzeitige vollständige Erfüllung gibt es keine Restfähigkeit. Andere Daten oder Dienste sind dadurch nicht automatisch verloren.",
+        "validation": "Erlaubte Bereichstrennung Reihenfolge oder bindende Ausnahme macht Forderungen doch miteinander vereinbar."
+      }
+    ],
+    "architectural_consequence": "Keine automatische Rechtsraumpriorität bauen. Datenumfang Ausnahmen Fristen und kompetente Zuständigkeit vor Aufbewahrungs- oder Löschschritt festlegen und widersprüchliche Pflichten offen halten."
+  },
+  {
+    "stressor_id": "S320",
+    "source_states": [
+      "BD06",
+      "BD25"
+    ],
+    "branches": [
+      {
+        "state": "Unzulässiger Ortswechsel ohne neue Klartextleser",
+        "kind": "extern-erzwungen",
+        "conditions": "Anwendbare Standortpflicht und tatsächlicher Transfer sind unabhängig belegt. Keine neue unbefugte Kenntnis ist nachgewiesen und ein erlaubter Standortbeleg bleibt zugänglich.",
+        "persistence": "Daten liegen weiter im unzulässigen Raum bis zulässige Korrektur erfolgt. Fortdauer braucht keine Vertrauensschleife.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Zuständiger Prüfer kann den begrenzten Residencyverstoß belegen. Vertraulichkeitsverlust oder wirksame Transfersperre werden nicht erfunden.",
+        "validation": "Verbindliche Pflicht erlaubt den Ort oder Standortbeleg ist unzuverlässig. Nachgewiesenes neues Lernen eröffnet zusätzlich anderen Zweig."
+      },
+      {
+        "state": "Unbefugter Leser lernt verlegte Metadaten",
+        "kind": "verlust",
+        "conditions": "Lesbare sensible Metadaten gelangen tatsächlich zu unbefugtem Leser. Erlaubter Transferbeleg bleibt getrennt erhalten.",
+        "persistence": "Historische Offenlegung bleibt selbst wenn Daten zurückverlegt werden.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann belegten Transfer und Lesergrenze untersuchen. Geheimhaltung der bereits gelernten Daten ist nicht erhalten.",
+        "validation": "Metadaten bleiben für alle neuen Leser unentzifferbar und nicht rückverknüpfbar oder Zugang war legitim."
+      },
+      {
+        "state": "Künftiger Transfer am kontrollierten Ausgang verweigert",
+        "kind": "halt",
+        "conditions": "Anwendbares Verbot ist kompetent festgestellt und aktueller lokaler Transferausgang wird vor weiterer Übertragung effektiv kontrolliert.",
+        "persistence": "Weitere von Factory kontrollierte Exporte warten. Schon beim Provider liegende Daten können außerhalb dieser Grenze weiterverlagert werden.",
+        "residue_ids": [
+          "BDR010"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zuständiger Exportteilnehmer kann neue kontrollierte Übertragung verweigern. Kein Anspruch dass derselbe Mechanismus interne Providerumzüge stoppt.",
+        "validation": "Neue Factoryübertragung passiert trotz geltendem Verbot oder behaupteter Schutz wird auf providerinterne Kopien ausgedehnt."
+      },
+      {
+        "state": "Rechtmäßig erlaubter Ortswechsel",
+        "kind": "transient",
+        "conditions": "Kompetente Klärung bestätigt Standort und Leserbefugnisse und unabhängiger begrenzter Transferbeleg ist zugänglich.",
+        "persistence": "Der einmalige Ortswechsel endet ohne hier belegten Rechts- oder Vertraulichkeitsverlust. Weitere Änderungen sind neue Fälle.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Prüfer kann die begrenzte erlaubte Standortänderung nachvollziehen. Eine allgemeine künftige Standortgarantie folgt nicht.",
+        "validation": "Neue Standort- oder Leserinformation widerspricht der behaupteten Erlaubnis."
+      }
+    ],
+    "architectural_consequence": "Rechtsraum Standort und Leserrechte getrennt nachweisen. Transferverbot ohne Klartextzugriff ist eigene Nichtkonformität und keine automatisch bewiesene Offenlegung."
+  },
+  {
+    "stressor_id": "S321",
+    "source_states": [
+      "BD09",
+      "BD10",
+      "BD25"
+    ],
+    "branches": [
+      {
+        "state": "Alter Ventilbefehl wird lokal verweigert",
+        "kind": "halt",
+        "conditions": "Qualifizierte Gefahrenanalyse definiert aktuelle Freigabe und unabhängiger Interlock kontrolliert tatsächliche Betätigung mit passenden Sensoren.",
+        "persistence": "Veralteter Befehl bleibt abgewiesen solange Kontext ungültig ist. Andere physische Gefahren sind nicht automatisch beendet.",
+        "residue_ids": [
+          "BDR026"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zuständiger Sicherheitsbetrieb kann den verspäteten Auftrag am Aktuator fernhalten obwohl Factory ihn früher freigab. Dies setzt externe lokale Schutztechnik voraus.",
+        "validation": "Sichere isolierte Untersuchung zeigt Bewegung nach altem Befehl trotz Kontextwechsel oder Sensorik ist nicht unabhängig."
+      },
+      {
+        "state": "Ventil geöffnet mit irreversibler Folge",
+        "kind": "verlust",
+        "conditions": "Pufferauftrag betätigt Ventil ohne heutige Kontextprüfung und eine konkret festgestellte irreversible Folge tritt ein. Unabhängiger zulässiger Ereignisbeleg bleibt erhalten.",
+        "persistence": "Verletzung oder irreversible Freisetzung wird nicht durch spätere Statusänderung rückgängig gemacht.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Qualifizierter Prüfer kann den belegten Vorgang untersuchen. Unversehrtheit der bereits betroffenen Eigenschaft ist nicht erhalten.",
+        "validation": "Befehl wurde nicht angenommen oder die behauptete irreversible Folge ist nicht eingetreten."
+      },
+      {
+        "state": "Physischer Ausgang ohne Sensor- und Gefahrenwissen offen",
+        "kind": "offen",
+        "conditions": "Ventilfailstate aktueller Kontext und Wirkungsevidenz fehlen. Aus altem Auftrag allein folgt keine Verletzung oder sichere Nichtbetätigung.",
+        "persistence": "Ohne diese erforderlichen Fakten bleibt Sicherheitsausgang unbekannt.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für nachgewiesene physische Sicherheit gibt es keine belegbare Restfähigkeit. Es wird weder unsichtbarer Interlock noch automatisch sicherer Stopp erfunden.",
+        "validation": "Kompetente aktuelle Sensor- und Gefahrenevidenz unterscheidet sichere Verweigerung von gefährlicher Betätigung."
+      }
+    ],
+    "architectural_consequence": "Physische Freigabe am Aktuator verlangen statt Taskstatus als Ventilsperre zu behandeln. Gefahrmodell Sensorik Warteschlangenlebensdauer und sicheren Unterlassungszustand kompetent festlegen."
+  },
+  {
+    "stressor_id": "S322",
+    "source_states": [
+      "BD03",
+      "BD25",
+      "BD10"
+    ],
+    "branches": [
+      {
+        "state": "Cloudstopp unbekannt Prozess möglicherweise aktiv",
+        "kind": "ungewissheit",
+        "conditions": "Stopprequest wurde journalisiert aber Antwort kommt nicht vor Gefahrfrist. Keine unabhängige Safe-State-Evidenz liegt vor.",
+        "persistence": "Warten hält Ungewissheit aufrecht während reale Anlage weiterlaufen kann. Späte Quittung beweist keinen rechtzeitigen Stopp.",
+        "residue_ids": [
+          "BDR009"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Operator kann bekannten Stopversuch abgleichen ohne unklare Annahme als Ende auszugeben. Register erhält keine physische Stoppleistung.",
+        "validation": "Unabhängige Zustandsmessung bestätigt rechtzeitigen sicheren Zustand oder Register enthält den Stopversuch nicht."
+      },
+      {
+        "state": "Lokaler unabhängiger Notstopp erreicht definierten Zustand",
+        "kind": "abschluss",
+        "conditions": "Qualifiziert sicherer Zustand ist bestimmt und lokaler Pfad mit Energie Aktuatorkontrolle sowie Rückmeldung erreicht ihn vor Gefahrfrist ohne Cloud.",
+        "persistence": "Dieser konkrete Sicherheitsübergang endet überprüft. Spätere Anlagenzustände bleiben neue Pflichten.",
+        "residue_ids": [
+          "BDR027"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zuständiger Operator behält eine konkrete cloudunabhängige Stoppleistung. Nicht jede Anlage ist durch Abschalten sicher.",
+        "validation": "Sichere isolierte Prüfung misst Zustand erst nach Frist oder Rückmeldung ist nur Empfang des Stopbefehls."
+      },
+      {
+        "state": "Kein rechtzeitiger sicherer Pfad vorhanden",
+        "kind": "offen",
+        "conditions": "Alle effektiven Stopppfade warten bis morgen und keine unabhängige sichere Anlagenentwicklung ist bekannt.",
+        "persistence": "Vor Gefahrklärung ist Ausgang offen. Aus fehlendem Stopppfad allein wird kein tatsächlicher Schaden abgeleitet.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für garantierten sicheren Zustand vor heutiger Gefahrfrist fehlt eine nutzbare Struktur. Außerhalb dieser Fähigkeit können Aufzeichnungen überleben.",
+        "validation": "Ein tatsächlich unabhängiger rechtzeitiger Safe-State-Pfad oder qualifizierter Nachweis ungefährlichen Weiterlaufs ändert die Annahme."
+      }
+    ],
+    "architectural_consequence": "Notstopp ohne Cloudabhängigkeit als externe Sicherheitsgrenze festlegen. Befehlsjournal und tatsächlicher sicherer Zustand haben verschiedene Verträge."
+  },
+  {
+    "stressor_id": "S323",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Normative und physische Entscheidung unbestimmt",
+        "kind": "offen",
+        "conditions": "Konkrete Gefahr zuständiger Entscheider rechtliches Mandat und sichere Alternativen fehlen. Ein monatlicher Budgetwert ist die einzige Entscheidungsgröße.",
+        "persistence": "Optimierung wiederholt nur vorgegebene Zielfunktion und erzeugt keine legitime Abwägung.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für eine legitime Entscheidung über Menschenleben ist keine Restfähigkeit ableitbar. Kein Modellpreis begründet Sicherheitsautorität.",
+        "validation": "Kompetente konkrete Gefahren- und Rechtsbewertung bestimmt zulässige Entscheidung und verantwortlichen Akteur."
+      },
+      {
+        "state": "Optimierer darf Lebensschutzgrenze nicht überschreiten",
+        "kind": "halt",
+        "conditions": "Kompetente unabhängige Sicherheitsregel ist vorgegeben und tatsächlicher lokaler Interlock sperrt die konkrete gefährliche Aktion. Sichere Nichtausführung ist gesondert qualifiziert.",
+        "persistence": "Budgetoptimierung bleibt innerhalb dieser externen Grenze oder wird zurückgehalten. Nicht jede Unterlassung ist dadurch sicher.",
+        "residue_ids": [
+          "BDR026"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zuständiger Sicherheitsbetrieb behält die qualifizierte Freigabegrenze ohne dem Modell die Lebensbewertung zu übertragen. Keine konkrete medizinische oder physische Regel wird erfunden.",
+        "validation": "Budgetziel kann Interlock übersteuern oder die angenommene sichere Unterlassung erweist sich im Gefahrenmodell als gefährlich."
+      },
+      {
+        "state": "Budgetentscheidung hat irreversible Verletzung bewirkt",
+        "kind": "verlust",
+        "conditions": "Im bedingten Verlauf wird automatisierte Wahl wirksam und konkrete irreversible Schädigung tatsächlich unabhängig festgestellt. Zulässiger Beleg bleibt zugänglich.",
+        "persistence": "Die verlorene Unversehrtheit wird nicht durch nachträgliche Budgetänderung wiederhergestellt.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Kompetenter Prüfer kann den belegten Vorgang untersuchen. Dokumentation legitimiert weder ursprüngliche Entscheidung noch behauptet sie Wiederherstellung des Lebens.",
+        "validation": "Keine entsprechende Wirkung oder keine behauptete irreversible Schädigung ist eingetreten."
+      }
+    ],
+    "architectural_consequence": "Lebensschutz nicht aus einer Budgetzielgröße ableiten. Factory auf Vorschlags- und Dokumentationsgrenze begrenzen bis kompetente Zuständigkeit und unverhandelbare Sicherheitsanforderungen feststehen."
+  },
+  {
+    "stressor_id": "S324",
+    "source_states": [
+      "BD03",
+      "BD24",
+      "BD10"
+    ],
+    "branches": [
+      {
+        "state": "Annahme möglich Antwort fehlt Wiederholung wartet",
+        "kind": "ungewissheit",
+        "conditions": "Bekannter Versuch erreicht Teilnehmer möglicherweise und dauerhaftes Versuchsregister hält neue lokale Versuche zurück.",
+        "persistence": "Outcome bleibt unbekannt bis unabhängiger korrelierter Rücklesepfad verfügbar ist. Funktionierender Teilnehmer kann schon gewirkt haben.",
+        "residue_ids": [
+          "BDR009"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Operator kann bekannte Operation abgleichen ohne sie wegen stummem Rückweg als nie angenommen auszugeben.",
+        "validation": "Timeout löst einen weiteren unkontrollierten Versuch aus oder Teilnehmerbeleg klärt Annahme vollständig."
+      },
+      {
+        "state": "Antwortverlust verstärkt neue Anfragen",
+        "kind": "attraktorhypothese",
+        "conditions": "Timeout triggert Kopien deren Last selbst nach Reparatur des Rückwegs ausreichenden Stau erzeugt. Bekannte Zusagebelege bleiben erhalten.",
+        "persistence": "Fehlende oder späte Antwort → Retrylast → Stau → späte Antwort → weitere Retrylast bei fester Grundlast.",
+        "residue_ids": [
+          "BDR024"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigte Finanzplanung behält bekannte Verpflichtungen sichtbar. Sie kann weder fehlenden Wirkungsausgang noch spontane Drainage garantieren.",
+        "validation": "Bei unveränderter Grundlast und Retrypolitik leert sich Stau nach Rückwegheilung ohne neue innere Produktion."
+      }
+    ],
+    "architectural_consequence": "Hinweg Rückweg und Wirkungsausgang trennen. Antwortverlust darf nicht zu wiederholter Annahme ermächtigen und begrenzte Last ist nicht genau-einmal-Wirkung."
+  },
+  {
+    "stressor_id": "S325",
+    "source_states": [
+      "BD27",
+      "BD09",
+      "BD10",
+      "BD02",
+      "BD01"
+    ],
+    "branches": [
+      {
+        "state": "Authentische Pakete lassen kausale Reihenfolge offen",
+        "kind": "ungewissheit",
+        "conditions": "Signaturen sind gültig aber Pakete betreffen zeitlich oder kausal widersprechende Aussagen. Keine vertrauenswürdige Ordnung ist verfügbar und Belege bleiben erhalten.",
+        "persistence": "Erneutes Signaturprüfen ordnet Ereignisse nicht. Neues kausales Wissen kann die Lücke schließen.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer kann mehrere Aussagen mit Herkunft und Zeit getrennt halten. Er gewinnt daraus keine aktuelle Autorität.",
+        "validation": "Semantik erweist sich als kommutativ oder unabhängige kausale Ordnung löst alle behaupteten Widersprüche."
+      },
+      {
+        "state": "Veraltete Annahme wird am Teilnehmer abgewiesen",
+        "kind": "halt",
+        "conditions": "Teilnehmer prüft aktuelle Gültigkeit und Sequenzkontext vor Wirkung auch für umgeordnete alte Pufferpakete.",
+        "persistence": "Ungültige alte Arbeit bleibt zurückgehalten unabhängig von authentischer Herkunft.",
+        "residue_ids": [
+          "BDR010"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zuständiger Teilnehmer kann nicht mehr gültige Aktion verweigern. Andere Teilnehmer ohne diesen Vertrag bleiben offen.",
+        "validation": "Ein signiertes aber abgelaufenes oder kontextfalsches Paket wirkt nach der behaupteten Annahmeprüfung."
+      },
+      {
+        "state": "Umordnung ist für begrenzte Operation unschädlich",
+        "kind": "abschluss",
+        "conditions": "Operationen sind nach belegter Fachsemantik kommutativ innerhalb gültiger Autorität und unabhängiger Abgleich bestätigt richtige Wirkung des endlichen Satzes.",
+        "persistence": "Dieser Satz endet korrekt trotz Verzögerung. Neue Pakete gehören nicht automatisch zum Abschluss.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer kann den endlichen unabhängig abgeglichenen Ergebnissatz nachvollziehen. Signatur alleine hätte das nicht geleistet.",
+        "validation": "Permutation verändert tatsächliche Fachwirkung oder ein Satzmitglied war zur Annahme nicht mehr autorisiert."
+      }
+    ],
+    "architectural_consequence": "Authentizität Reihenfolge und aktuelle Autorität getrennt prüfen. Dreißig Tage alte Pakete dürfen nur unter tatsächlich gültiger Annahmesemantik wirken."
+  },
+  {
+    "stressor_id": "S326",
+    "source_states": [
+      "BD36",
+      "BD08"
+    ],
+    "branches": [
+      {
+        "state": "Geschäft funktioniert ohne Monitoringkontakt",
+        "kind": "extern-erzwungen",
+        "conditions": "Monitorpfad ist unterbrochen aber Factory erreicht Businessdienste mit gültiger Autorität. Lokale lesbare Geschäftsdaten sind erhalten.",
+        "persistence": "Asymmetrische Topologie hält Beobachtungslücke aufrecht bis Pfadheilung. Kein interner Ausfallkreis nötig.",
+        "residue_ids": [
+          "BDR022"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Lokaler berechtigter Betreiber kann erhaltenen Stand prüfen und Original kann weiterhin handeln. Beobachterwissen und menschlicher Empfang sind nicht erhalten.",
+        "validation": "Businesspfad ist tatsächlich ebenfalls tot oder Teilnehmerautorität des Originals wurde wirksam beendet."
+      },
+      {
+        "state": "Blindes Failover erzeugt Reparaturkonkurrenz",
+        "kind": "attraktorhypothese",
+        "conditions": "Monitoringabwesenheit startet wirksamen Klon ohne Originalausschluss und beide korrigieren gegenseitige Änderungen. Getrennte Belegkopie bleibt erreichbar.",
+        "persistence": "Falsche Todesannahme → zwei Writer → Gegenreparaturen → neue Gegenreparaturen auch nach Monitorpfadheilung.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Prüfer behält begrenzte Konfliktspur. Sichtbarer gesunder Klon beweist keine exklusive Aktivität.",
+        "validation": "Original wird bei Teilnehmern abgewiesen oder keine gegenseitige Reparatur reproduziert den Konflikt."
+      },
+      {
+        "state": "Exklusive Fortsetzung verlangt echten Ausschluss",
+        "kind": "halt",
+        "conditions": "Vor Ersatzbetrieb erzwingt dauerhafte legitime Teilnehmergeneration den Ausschluss alter Originalannahmen auch aus Puffern.",
+        "persistence": "Originals neue Wirkungen bleiben gesperrt. Dessen frühere Outcomes und Beobachterlücke bleiben gesondert zu klären.",
+        "residue_ids": [
+          "BDR008"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Neuer berechtigter Writer kann exklusiv arbeiten innerhalb erfasster Teilnehmer. Dies verändert gerade die Prämisse unbegrenzter Originalautorität.",
+        "validation": "Original wirkt nach Generationstransfer an einem erfassten Teilnehmer weiter."
+      }
+    ],
+    "architectural_consequence": "Health in Hostausführung Geschäftsreichweite Beobachterfrische menschlichen Empfang und Eingriffsrecht aufteilen. Timeout darf ohne echte Teilnehmerexklusion keinen Ersatzwriter legitimieren."
+  },
+  {
+    "stressor_id": "S327",
+    "source_states": [
+      "BD26",
+      "BD09",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Jahressuspend wird als Zeitdiskontinuität erkannt",
+        "kind": "halt",
+        "conditions": "Unabhängige Zeitabschnittsevidenz erkennt unsicheren Elapsedwert und betroffene Fristnutzer setzen alte Gültigkeit vor neuer Wirkung aus.",
+        "persistence": "Betroffene Arbeit wartet auf aktuelle vertrauenswürdige Zeit und Mandat. Erkennung allein verhindert keine alten Teilnehmerpuffer.",
+        "residue_ids": [
+          "BDR029"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Lokaler Planer kann falsche Fristbasis verwerfen statt eine Uhrannahme als erneuerte Autorität zu verwenden.",
+        "validation": "Wakeup mit realem Jahresabstand lässt alte Freigabe anhand unerkannter Suspendlücke weitergelten."
+      },
+      {
+        "state": "Uhr unterschätzt vergangenes Jahr",
+        "kind": "extern-erzwungen",
+        "conditions": "Implementierung zählt Suspend entgegen Erwartung nicht und verwendet alten Timer weiter. Erhaltene Termine besitzen explizite Absicht und Mandatsablauf aber aktuelle Zeitprüfung fehlt.",
+        "persistence": "Falsche Timerbasis hält veraltete Zulassung bis erkanntem Epochenwechsel oder Wirkung aufrecht.",
+        "residue_ids": [
+          "BDR028"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Planer kann gespeicherte Absicht und Ablauf später untersuchen. Der Terminbeleg selbst liefert keine korrekte verstrichene Zeit und keine sichere Annahme.",
+        "validation": "Unabhängiger Zeitvergleich zeigt korrekt berücksichtigten Jahresabstand und alle betroffenen Fristen sind entsprechend abgelaufen."
+      }
+    ],
+    "architectural_consequence": "Persistierte Zeitabschnittsidentität und tatsächliches Suspendverhalten prüfen. Monotonie ohne Realzeitbezug verlängert keine gültige Freigabe."
+  },
+  {
+    "stressor_id": "S328",
+    "source_states": [
+      "BD26",
+      "BD17"
+    ],
+    "branches": [
+      {
+        "state": "Rücksprung hält Mute jahrelang offen",
+        "kind": "extern-erzwungen",
+        "conditions": "Muteende hängt ausschließlich an zurückgesprungener Wallclock. Getrennte rechtmäßige Stummschaltungsevidenz bleibt erreichbar.",
+        "persistence": "Zeitvergleich hält politische Stummregel aufrecht bis Uhr aufholt oder Regel geändert wird. Keine autonome Rückkopplung.",
+        "residue_ids": [
+          "BDR021"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Unabhängiger Prüfer kann die andauernde Beobachtungslücke erkennen. Er erhält dadurch weder unterdrückte Details noch rechtzeitige Reparatur.",
+        "validation": "Mute läuft trotz Rücksprung nach beabsichtigter realer Dauer ab oder getrennter Beleg ist ebenso unzugänglich."
+      },
+      {
+        "state": "Unabhängige Fristbasis beendet betroffenen Mute",
+        "kind": "transient",
+        "conditions": "Geprüfte unabhängige Elapsedbasis oder Diskontinuitätsregel begrenzt Mute und kontrolliert den tatsächlichen Alarmweg.",
+        "persistence": "Die falsche Verlängerung endet mit Fristablauf oder expliziter Neubewertung. Nachrichtenempfang bleibt eigene Pflicht.",
+        "residue_ids": [
+          "BDR029"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Zuständiger Planer kann einen unbeabsichtigt jahrelangen Mute verhindern ohne Wallclock als Realzeit zu vertrauen.",
+        "validation": "Rücksprung verlängert tatsächlich wirksamen Mute über Grenze oder Vergleichsuhr springt gleich mit."
+      }
+    ],
+    "architectural_consequence": "Mutes mit begrenzter Elapsedbasis und Epochengültigkeit führen. Ende der Stummschaltung ist nicht identisch mit menschlichem Alarmempfang."
+  },
+  {
+    "stressor_id": "S329",
+    "source_states": [
+      "BD26",
+      "BD01",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Erhaltene Absicht erlaubt begrenzte Neuinterpretation",
+        "kind": "transient",
+        "conditions": "Zuständiger Planer kennt ob Termin fixer Zeitpunkt oder zivile Wiederholung ist und verfügt über passende neue Regeln.",
+        "persistence": "Fester Zeitpunkt bleibt gleich oder zivile Regel wird legitim neu ausgewertet. Neue Fristprüfung ist separat.",
+        "residue_ids": [
+          "BDR028"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Planer kann für benannte Termine passende Bedeutungsänderung prüfen statt alle blind auf alte Offsets zu fixieren.",
+        "validation": "Zwei legitime Absichten sind im gespeicherten Termin nicht unterscheidbar oder Regelwechsel erzeugt ungeklärte doppelte Ortszeit."
+      },
+      {
+        "state": "Nur alter Offset ohne rekonstruierbare Absicht",
+        "kind": "ungewissheit",
+        "conditions": "Für betroffenen Termin fehlen ursprüngliche Absicht und zuständiger Klärer. Es existiert lediglich alte numerische Zeit.",
+        "persistence": "Weder alter noch neuer Offset entscheidet den gemeinten Termin. Klärung oder Aufgabe bleibt nötig.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für genau den ursprünglichen zivilen oder festen Terminbezug fehlt die erforderliche Information. Andere gut spezifizierte Termine sind nicht betroffen.",
+        "validation": "Autorisierte ursprüngliche Terminbeschreibung oder kompetente spätere Neuentscheidung löst die konkrete Mehrdeutigkeit."
+      }
+    ],
+    "architectural_consequence": "Fixen Zeitpunkt zivile Wiederholung Regelversion und mehrdeutige Ortszeit explizit speichern. Neue politische Regeln ersetzen keine verschwundene Terminabsicht."
+  },
+  {
+    "stressor_id": "S330",
+    "source_states": [
+      "BD27",
+      "BD04"
+    ],
+    "branches": [
+      {
+        "state": "Drei Aussagen bleiben ohne gemeinsamen Bezug widersprüchlich",
+        "kind": "ungewissheit",
+        "conditions": "Runtime Dateiereignis und Agentenaussage sind erhalten aber Prozessidentität Zeitintervall oder Kausalzuordnung fehlt.",
+        "persistence": "Ohne passenden Diskriminator bleibt jeweilige Behauptung offen. Hookautorität allein entscheidet nicht alle Gegenstände.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer kann Herkunft und Wissenslücke sehen ohne abgeschlossenes Werk oder toten Writer zu erfinden.",
+        "validation": "Synchronisierter Kausalbeleg ordnet jeden Write zu und zeigt dass Aussagen unterschiedliche Zeiten oder Prozesse betreffen."
+      },
+      {
+        "state": "Falsche Healthdeutung ohne belegtes falsches Werk",
+        "kind": "ungewissheit",
+        "conditions": "Bediener bevorzugt bereit oder beendet ohne Widerspruch aufzulösen. Originale Aussagen bleiben separat erhalten aber kein daraus entstandener falscher Effekt ist belegt.",
+        "persistence": "Falscher Beobachterglaube bleibt bis Klärung. Spätere Fehlintervention ist möglich nicht schon gegeben.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Prüfer kann Deutung von originaler Evidenz unterscheiden. Dieser Zweig bedeutet ausdrücklich kein nachgewiesen falsches Arbeitsergebnis.",
+        "validation": "Bevorzugte Aussage ist unabhängig sachlich belegt oder ein späterer realer falscher Eingriff wird gesondert nachgewiesen."
+      },
+      {
+        "state": "Verzögertes Dateiereignis erklärt scheinbaren Konflikt",
+        "kind": "abschluss",
+        "conditions": "Unabhängig korrelierte Prozess- und Zeitspur zeigt dass neue Meldung alten Write oder anderen legitimen Prozess betraf und erklärt alle drei Aussagen.",
+        "persistence": "Der begrenzte Beobachtungskonflikt ist geklärt. Geschäftswirkung und Taskabnahme bleiben eigene Fragen.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer kann die Erklärung aus erhaltenen korrelierten Aussagen nachvollziehen. Keine allgemeine Lebens- oder Vollendungszusage folgt.",
+        "validation": "Ein frischer Write desselben angeblich beendeten Prozesses liegt nach dessen belegtem Ende."
+      }
+    ],
+    "architectural_consequence": "Beobachtungen nach Prozessidentität Gegenstand und Zeit korrelieren statt einen Healthgewinner zu wählen. Widerspruch ist noch kein falsches erledigtes Werk."
+  },
+  {
+    "stressor_id": "S331",
+    "source_states": [
+      "BD04",
+      "BD05",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Drei Prüfer billigen einmal denselben falschen Sachverhalt",
+        "kind": "abschluss",
+        "conditions": "Alle verwenden fehlerhafte Grundtabelle einmal ohne weitere Vertrauensverstärkung. Ein unabhängiger gültiger Mengenursprung existiert und ist erreichbar.",
+        "persistence": "Ein falsches gemeinsames Urteil endet als begrenzter Fehler. Es muss keine Schleife folgen.",
+        "residue_ids": [
+          "BDR004"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Unabhängiger Fachprüfer kann den betroffenen Mengenfehler gegen anderen Ursprung erkennen. Drei Ableitungen derselben Tabelle sind keine weiteren Quellen.",
+        "validation": "Sollmenge stammt ebenfalls aus gemeinsamer Tabelle oder der konkrete Tabellenfehler betrifft Urteil nicht."
+      },
+      {
+        "state": "Prüferkonsens verdrängt Gegenquellen",
+        "kind": "attraktorhypothese",
+        "conditions": "Übereinstimmung steigert Vertrauen und weitere Entscheidungen verwenden genau dieselbe Tabelle während alternative Grundlagen verworfen werden.",
+        "persistence": "Falsche Tabelle → drei Zustimmungen → mehr Vertrauen → weniger unabhängige Prüfung → erneute Tabellenübernahme.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Wahrheit des betroffenen Faktums fehlt unter ausschließlich gemeinsam falschen verbleibenden Quellen ein belastbarer Gegenstand. Rechnen auf Tabellen bleibt möglich aber ist keine unabhängige Prüfung.",
+        "validation": "Eine überlebende unabhängige sachliche Quelle beeinflusst Entscheidungen oder Wiederverwendung bleibt aus."
+      }
+    ],
+    "architectural_consequence": "Herkunft der maßgeblichen Tatsache statt Anzahl der Prüfer erfassen. Ein gemeinsamer falscher Ursprung und eine Schleife der Vertrauensverstärkung bleiben getrennt."
+  },
+  {
+    "stressor_id": "S332",
+    "source_states": [
+      "BD27",
+      "BD03",
+      "BD01"
+    ],
+    "branches": [
+      {
+        "state": "Provider und Empfänger bleiben im Widerspruch",
+        "kind": "ungewissheit",
+        "conditions": "Beide Aussagen sind erhalten aber Erfolgsemantik Empfängerbezug oder direkter Wirkungsbeleg fehlen. Lokale Wiederholsperre für bekannten Versuch gilt.",
+        "persistence": "Widerspruch bleibt bis unabhängigem passenden Abgleich. Neues Retry kann ihn nicht rückwirkend klären.",
+        "residue_ids": [
+          "BDR003",
+          "BDR009"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Prüfer kann Aussagen und offenen Versuch nachvollziehen ohne eine Seite unbegründet zur Wahrheit zu erklären. Keine vollständigen Logs werden erfunden.",
+        "validation": "Unabhängige korrelierte Empfänger- oder Wirkungsbeobachtung erklärt was Erfolg in diesem Vorgang hieß."
+      },
+      {
+        "state": "Begrenzter unabhängiger Wirkungsabgleich gelingt",
+        "kind": "abschluss",
+        "conditions": "Ein tatsächlich vorhandener legitimer Empfängerbezug und unabhängiger Wirkungsbeleg lösen gerade diesen Vorgang trotz fehlender Detaillogs.",
+        "persistence": "Der benannte Outcome wird geklärt. Andere verlorene Logdetails bleiben fehlend.",
+        "residue_ids": [
+          "BDR003",
+          "BDR007"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Prüfer kann richtigen Empfänger und nachgewiesene Wirkung getrennt begründen. Eine bloße erneute Providerattestation genügt nicht.",
+        "validation": "Neuer Beleg stammt nur aus derselben strittigen Providerbehauptung oder betrifft falschen Empfänger beziehungsweise Zeitraum."
+      }
+    ],
+    "architectural_consequence": "Providerannahme Empfängerwirkung Identität und Beleglücken separat führen. Fehlende Logs dürfen nicht durch Mehrheitswahl zwischen zwei Aussagen ersetzt werden."
+  },
+  {
+    "stressor_id": "S333",
+    "source_states": [
+      "BD28"
+    ],
+    "branches": [
+      {
+        "state": "Versteckte Auswahl belohnt weitere Auswahl",
+        "kind": "attraktorhypothese",
+        "conditions": "Agent kontrolliert Ablehnung vor Nennerbeginn und bessere Kennzahl bringt mehr Entscheidungsspielraum. Getrennter Eingangsnenner existiert aber beeinflusst Belohnung noch nicht.",
+        "persistence": "Schwere Fälle ablehnen → scheinbar kürzere Laufzeit → Belohnung und Auswahlfreiheit → weitere frühe Ablehnung.",
+        "residue_ids": [
+          "BDR030"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Bewertender kann angebotene und abgewiesene Arbeit im erhaltenen Gesamtfenster sehen. Er muss diese Evidenz tatsächlich in Bewertung einbringen um Schleife zu brechen.",
+        "validation": "Belohnung berücksichtigt Gesamtangebote bereits oder keine zusätzliche Auswahlkontrolle folgt der Kennzahl."
+      },
+      {
+        "state": "Legitime transparente Triage",
+        "kind": "transient",
+        "conditions": "Zuständiger Auftraggeber erlaubt begrenzte Aufnahme und alle Ablehnungen samt geändertem Nenner bleiben transparent erfasst.",
+        "persistence": "Betrieb kann bei ausreichender Kapazität stabil bleiben. Hohe Geschwindigkeit bezieht sich nur auf akzeptierte Teilmenge.",
+        "residue_ids": [
+          "BDR030"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Bewertender kann ehrliche Teilmengenleistung und unerledigte Nachfrage unterscheiden. Nutzen oder Fairness für abgelehnte Arbeit ist nicht erhalten.",
+        "validation": "Bericht verbirgt Ablehnungen oder überträgt Teilmengengeschwindigkeit auf alle eingegangenen Tasks."
+      }
+    ],
+    "architectural_consequence": "Angebotene und abgelehnte Tasks vor Messbeginn erfassen. Ehrliche Triage als begrenzte Leistung anerkennen ohne Nutzen der abgewiesenen Arbeit zu behaupten."
+  },
+  {
+    "stressor_id": "S334",
+    "source_states": [
+      "BD28"
+    ],
+    "branches": [
+      {
+        "state": "Umbenennung verstärkt Kontrolle über Kennzahl",
+        "kind": "attraktorhypothese",
+        "conditions": "Team klassifiziert Fehler nachträglich als Wartung und perfekte Kennzahl bringt weiteres Vertrauen. Unabhängige Dienstpflichtrechnung bleibt erhalten aber bisher unbeachtet.",
+        "persistence": "Fehler umbenennen → Kennzahl steigt → Vertrauen und Definitionsmacht → weitere Umbenennung.",
+        "residue_ids": [
+          "BDR031"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Legitimierter Auftraggeber kann reale Unterbrechung und Ausschlüsse im benannten Umfang prüfen. Fortbestehende Machtänderung wird nicht von Belegen allein gestoppt.",
+        "validation": "Unabhängige Rohunterbrechung beeinflusst Belohnung wirksam oder keine Rückkopplung der Kennzahl auf Definitionsmacht folgt."
+      },
+      {
+        "state": "Vorab vereinbarte enge Wartungsrechnung für ein Fenster abgeschlossen",
+        "kind": "abschluss",
+        "conditions": "Für ein benanntes endliches Fenster sind Wartungsausschlüsse kompetent vereinbart und tatsächliche Ausfallzeiten sowie Nutzerwirkung sichtbar. Die begrenzte Rechnung ist unabhängig geprüft. Keine Täuschungs- oder Belohnungsschleife ist belegt.",
+        "persistence": "Diese enge Abrechnung ist abgeschlossen obwohl breitere Dienstverfügbarkeit niedriger ist. Folgende Zeitfenster sind neue Rechnungen.",
+        "residue_ids": [
+          "BDR031"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Auftraggeber kann genau die vereinbarte Metrik verwenden und ihre Ausschlüsse sehen. Hundert Prozent gilt nicht automatisch für Nutzerwirkung.",
+        "validation": "Ungeplante Fehler werden ohne Erlaubnis nachträglich verborgen oder rohe Ausfallzeit verschwindet."
+      }
+    ],
+    "architectural_consequence": "Rohunterbrechung vereinbarte Dienstpflicht und Wartungsklassifikation getrennt halten. Ein eng gültiger Wartungsnenner ist nicht dasselbe wie manipulative Vollverfügbarkeit."
+  },
+  {
+    "stressor_id": "S335",
+    "source_states": [
+      "BD04",
+      "BD28",
+      "BD02"
+    ],
+    "branches": [
+      {
+        "state": "Artefakt vorhanden fachlicher Nutzen ungeprüft",
+        "kind": "ungewissheit",
+        "conditions": "Modell schreibt fertige Bytes ohne unabhängigen Check. Artefakt und Statusbehauptung sind separat erhalten und berechtigt lesbar.",
+        "persistence": "Ergebnis bleibt fachlich ungewiss bis passender Abnahme. Ungeprüft heißt nicht automatisch falsch.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Prüfer kann behaupteten Abschluss und verfügbare Artefaktbezüge untersuchen. Das Belegpaket selbst zertifiziert keinen Nutzen.",
+        "validation": "Unabhängiger fachlicher Check bestätigt oder widerlegt tatsächliche Nützlichkeit des Originalartefakts."
+      },
+      {
+        "state": "Belohnter Fertigstatus reproduziert ungeprüfte Produktion",
+        "kind": "attraktorhypothese",
+        "conditions": "Erfolgsziel belohnt akzeptierte Fertigbehauptung und dadurch sinkt wirksamer Prüfaufwand. Unabhängige frühere Belegkopien bleiben erreichbar.",
+        "persistence": "Ungeprüft fertig → Belohnung und Vertrauen → weniger Abnahme → mehr ungeprüft fertig.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann dokumentierte Behauptungen gegen nachträgliche Stichproben halten sofern Originale zugänglich sind. Belegaufbewahrung garantiert kein Bestehen der Fachprüfung.",
+        "validation": "Belohnung folgt ausschließlich unabhängigem Nutzen oder keine Prüfverdrängung entsteht."
+      },
+      {
+        "state": "Passende Abnahme hält falsches Fertig zurück",
+        "kind": "halt",
+        "conditions": "Unabhängiger fachlicher Prüfer erhält tatsächliches Artefakt und kriterienspezifische Kontrolle ist vor Anerkennung des Ergebnisses wirksam.",
+        "persistence": "Abnahme wartet bei Fehler oder fehlender Datei. Ein richtiges Artefakt kann nach bestandenem Check separat abgeschlossen werden.",
+        "residue_ids": [
+          "BDR032"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Abnehmer kann richtigen Inhalt von plausiblem Pfad oder Selbstbericht unterscheiden. Ein geteilter falscher Prüfer bleibt gemeinsame Grenze.",
+        "validation": "Fehlende oder fachlich falsche Datei besteht denselben Check wie unabhängig richtiges Ergebnis."
+      }
+    ],
+    "architectural_consequence": "Berichtet fertig vorhandene Bytes und unabhängige Fachabnahme trennen. Auch ungeprüfte Artefakte können richtig sein aber Status beweist das nicht."
+  },
+  {
+    "stressor_id": "S336",
+    "source_states": [
+      "BD29",
+      "BD18",
+      "BD17"
+    ],
+    "branches": [
+      {
+        "state": "Stromplan erzwingt täglichen Alarmzyklus",
+        "kind": "extern-erzwungen",
+        "conditions": "Rechner schaltet planmäßig ab und Monitor erwartet weiter Dauerbetrieb. Getrennte Aufzeichnung von Plan Dienstpflicht und tatsächlicher Abwesenheit bleibt lesbar.",
+        "persistence": "Nachtabschaltung → Ausfallalarm → Morgenstart wiederholt sich durch äußeren Stromplan. Kein autonomer Attraktor.",
+        "residue_ids": [
+          "BDR031"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Auftraggeber kann geplante Abwesenheit gegen wirkliche Dienstpflicht prüfen. Historische Nachtwirkung und unerledigte Aufgaben bleiben getrennt.",
+        "validation": "Zyklus besteht ohne Stromplan fort oder Monitor unterschied geplante Abwesenheit bereits korrekt."
+      },
+      {
+        "state": "Erlaubte Nachtpause bleibt ehrlich eingegrenzt",
+        "kind": "transient",
+        "conditions": "Kompetent vereinbarte Dienstpflicht erlaubt Pause und Beobachtung unterscheidet sie von echtem ungeplantem Ausfall. Endliche Alarmzustellung für letzteren hat unabhängigen Empfängerweg.",
+        "persistence": "Geplante Abwesenheit erzeugt keine falsche Totalausfallpflicht. Ungeplante Störung bleibt eigener Vorgang.",
+        "residue_ids": [
+          "BDR031",
+          "BDR018"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Auftraggeber kann engen Dienstumfang prüfen und Disponent einen echten Ausnahmealarm weiterleiten. Keine Nachtvollverfügbarkeit wird behauptet.",
+        "validation": "Ein nicht genehmigter Nachtauftrag bleibt ohne Aufsicht oder echter ungeplanter Ausfall wird als planmäßig unterdrückt."
+      },
+      {
+        "state": "Erinnerungsrückstand bleibt nach Planänderung",
+        "kind": "attraktorhypothese",
+        "conditions": "Alte ungelöste Vorfälle erzeugen weiter mehr Meldungsarbeit als repariert wird auch nach Ende des täglichen Abschaltplans. Register bleibt erreichbar.",
+        "persistence": "Rückstand → weniger Reparatur → ungelöste Vorfälle → Erinnerungen → Rückstand bei gleicher Grundlast.",
+        "residue_ids": [
+          "BDR019"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Einsatzplanung kann erhaltene offene Vorfälle erkennen statt jede Nachtmeldung als neuen erledigten Incident zu behandeln.",
+        "validation": "Nach Entfernung des Stromplans bei gleicher Besetzung läuft Meldungsberg ohne innere Reproduktion ab."
+      }
+    ],
+    "architectural_consequence": "Vereinbarte Nachtpflichten von planmäßiger Stromabschaltung und tatsächlichen Ausfällen trennen. Tagesbetrieb erlaubt nicht automatisch stilles Ende nächtlicher Pflichten."
+  },
+  {
+    "stressor_id": "S337",
+    "source_states": [
+      "BD26",
+      "BD09",
+      "BD02",
+      "BD10"
+    ],
+    "branches": [
+      {
+        "state": "Verschobene Aktion ist bei Annahme abgelaufen",
+        "kind": "halt",
+        "conditions": "Teilnehmer prüft tatsächlichen Annahmezeitpunkt gegen aktuell gültiges Mandat und verweigert alten Auftrag vor Wirkung.",
+        "persistence": "Konkrete Arbeit wartet auf neue legitime Freigabe oder wird aufgegeben. CO2-Ziel beendet Halt nicht.",
+        "residue_ids": [
+          "BDR010"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Teilnehmer kann ungültig gewordene Arbeit aus umgeplanter Queue ablehnen. Frühere lokale Planung ist keine Autorität.",
+        "validation": "Teilnehmer akzeptiert alte Freigabe nach Ablauf weil Verschiebungsalgorithmus sie als weiterhin genehmigt markierte."
+      },
+      {
+        "state": "Verschobener Auftrag bleibt ohne aktuelle Prüfung lieferbar",
+        "kind": "extern-erzwungen",
+        "conditions": "Scheduler bewahrt frühere Genehmigung aber letzte Gültigkeitskontrolle fehlt. Terminabsicht und separater Mandatsablauf sind erhalten.",
+        "persistence": "Queuepolitik hält veraltete Zulassung bis Annahme Verweigerung oder Korrektur. Wirkung und Schaden sind noch nicht bestimmt.",
+        "residue_ids": [
+          "BDR028"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Planer kann den Konflikt zwischen Verschiebung und Ablauf erkennen. Gespeicherte Zeiten sperren den Teilnehmer nicht selbst.",
+        "validation": "Wirklicher Teilnehmer verweigert abgelaufen oder neue gültige Freigabe deckt den veränderten Termin."
+      }
+    ],
+    "architectural_consequence": "CO2-Verschiebung als Terminentscheidung führen die Mandat nicht erneuert. Annahmegültigkeit bleibt auch nach ökologisch erwünschter Planung eigenständige Grenze."
+  },
+  {
+    "stressor_id": "S338",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Verbrauchsverhältnis lässt Betriebsausgang offen",
+        "kind": "offen",
+        "conditions": "Bekannt ist nur dass drei Cluster mehr als kleines Zielsystem verbrauchen. Absolute Last Nutzen externe Schäden und Prioritäten fehlen.",
+        "persistence": "Verhältnis allein enthält keine Rückkopplung und keine zuständige Nutzenentscheidung.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für begründete Wahl der tragbaren Beobachtungsarchitektur fehlt nötige Information. Teurer bedeutet nicht wirkungslos oder unzulässig.",
+        "validation": "Unabhängige absolute Bilanz und kompetente Grenzentscheidung bestimmen konkreten akzeptablen Dienstumfang."
+      },
+      {
+        "state": "Begrenzte Bilanz rechtfertigt teure Beobachtung im geprüften Zeitraum",
+        "kind": "abschluss",
+        "conditions": "Für einen benannten endlichen Zeitraum liegen absolute Bilanz und separat geprüfter marginaler Nutzen vor. Zuständiger Auftraggeber bestätigt Ressourcenbedarf innerhalb verbindlicher Grenzen.",
+        "persistence": "Die begrenzte Bewertung ist abgeschlossen und teurer gewöhnlicher Betrieb damit vereinbar. Künftige Stabilität oder unbegrenzte Erlaubnis wird daraus nicht abgeleitet.",
+        "residue_ids": [
+          "BDR039"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Entscheider kann konkrete Last gegen konkret belegte Beobachtungsleistung prüfen. Messung erzeugt keine moralische Erlaubnis aus sich selbst.",
+        "validation": "Marginaler Cluster trägt keine behauptete Erkennung oder gesamte gemessene Last verletzt gesetzte Grenze."
+      },
+      {
+        "state": "Ressourcenlimit hält weitere Cluster zurück",
+        "kind": "halt",
+        "conditions": "Kompetent gesetzte absolute Grenze wird nach belastbarer Bilanz überschritten und tatsächliche Annahmekontrolle verweigert zusätzliche eigene Arbeit oder Clusterlast.",
+        "persistence": "Weitere Zulassung wartet auf erlaubte engere Gestaltung. Bestehender Ausfall oder Dienstpflicht bleibt eigenständig.",
+        "residue_ids": [
+          "BDR039",
+          "BDR025"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Entscheider behält Bilanz und Disponent kontrolliert begrenzte neue eigene Ressourcenlast. Das ist keine Garantie über fremde Energie oder notwendige Mindestaufsicht.",
+        "validation": "Zusätzliche eigene Arbeit umgeht Kontrolle oder engere Konfiguration verfehlt nicht verhandelbare Dienstpflichten."
+      }
+    ],
+    "architectural_consequence": "Absolute Lebenszykluslast marginale Beobachtungswirkung und kompetente Wertgrenze bestimmen. Weder Clusterzahl noch Verbrauchsverhältnis entscheidet zulässige Architektur automatisch."
+  },
+  {
+    "stressor_id": "S339",
+    "source_states": [
+      "BD30",
+      "BD04",
+      "BD05",
+      "BD01"
+    ],
+    "branches": [
+      {
+        "state": "Bytes vorhanden vertrauenswürdiger Interpreter fehlt",
+        "kind": "ungewissheit",
+        "conditions": "Native Bytes sind erhalten aber Wortbreite Endianness oder ABI kann nicht verlässlich rekonstruiert werden. Keine passende unabhängige Spezifikation ist zugänglich.",
+        "persistence": "Fehlender Decoder hält Bedeutungsgewinn offen bis echte Rekonstruktion oder neue Information möglich wird.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für gegenwärtig verlässliche Interpretation dieses Artefakts fehlt nutzbare Struktur. Byteexistenz allein ist keine erhaltene Fachbedeutung und kein Totalverlustbeweis.",
+        "validation": "Ein berechtigter unabhängiger Decoder mit passender Spezifikation rekonstruiert die ursprünglichen Werte."
+      },
+      {
+        "state": "Portabler unabhängiger Decode erhält benannte Werte",
+        "kind": "abschluss",
+        "conditions": "Erhaltene Formatsemantik und validierter unabhängiger Decoder liefern dieselben Fachwerte auf Ziel-CPU mit passendem Ursprungsvergleich.",
+        "persistence": "Begrenzte Dekodierung endet nachgewiesen. Tasknutzen und Ausführungssicherheit bleiben separate Prüfungen.",
+        "residue_ids": [
+          "BDR033"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Archivar kann die benannten Inhalte trotz CPUwechsel interpretieren. Native Ausführbarkeit wird nicht mit zugesagt.",
+        "validation": "Adversarische Wortbreiten- oder Byteordnungsfälle liefern plausible aber andere Fachwerte."
+      },
+      {
+        "state": "Falscher Decoder bestätigt seine eigene Ausgabe",
+        "kind": "attraktorhypothese",
+        "conditions": "Plausible Fehldeutung wird erneut kanonisch und derselbe Decoder bestätigt sie. Kein unabhängiger Bedeutungsanker bleibt zugänglich.",
+        "persistence": "Falscher Decode → passende Eigenprüfung → Vertrauen → kanonische Ablage → erneuter falscher Decode.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für unabhängige ursprüngliche Bedeutung gibt es unter diesen gemeinsamen Quellen keinen nutzbaren Bezug. Wiederholbare Ausgabe genügt nicht.",
+        "validation": "Andere unabhängige Spezifikation beeinflusst Entscheidung oder keine erneute kanonische Übernahme schließt die Schleife."
+      }
+    ],
+    "architectural_consequence": "Native Artefaktbytes von dekodiertem Fachwert und abgenommenem Werk trennen. Portablen Semantikvertrag mit unabhängigem Sollvergleich an Archivgrenze vorsehen."
+  },
+  {
+    "stressor_id": "S340",
+    "source_states": [
+      "BD02",
+      "BD31",
+      "BD04"
+    ],
+    "branches": [
+      {
+        "state": "Kollision vor Überschreiben erhalten",
+        "kind": "halt",
+        "conditions": "Beide Quellinhalte existieren unverändert und Restore prüft tatsächliche Großschreibungsregeln des Zielsystems vor erstem Write.",
+        "persistence": "Kollidierender Restore wartet auf legitime getrennte Zielzuordnung oder wird abgebrochen.",
+        "residue_ids": [
+          "BDR034"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Restaurator kann beide Inhalte getrennt lesen und Identitäten zuordnen ohne eine durch Pfadalias zu verlieren.",
+        "validation": "Ein Zielwrite überschreibt Inhalt bevor Kollision erkannt wird oder Manifest unterscheidet ursprüngliche Eigentümer nicht."
+      },
+      {
+        "state": "Einziger Inhalt durch Pfadvereinigung vernichtet",
+        "kind": "verlust",
+        "conditions": "Aliasierende Zielwrites überschreiben einzigartigen Inhalt und es gibt keinen anderen erhaltenen zulässigen Ursprung für genau diese Bytes.",
+        "persistence": "Exakte überschriebene Information bleibt nicht rekonstruierbar. Andere Workspaceinhalte können fortbestehen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für die verlorenen Bytes und ihre ursprüngliche Eigentümerzuordnung fehlt Residue. Eine übriggebliebene gleichnamige Datei enthält sie nicht.",
+        "validation": "Andere Kopie oder noch unveränderte Quelle rekonstruiert den vermeintlich einzigen verlorenen Inhalt."
+      },
+      {
+        "state": "Alias führt zu falschem späterem Workspaceeinsatz",
+        "kind": "abschluss",
+        "conditions": "Späterer Auftrag nutzt tatsächlich den falschen erhaltenen Workspace und separate legitime Quell-Ziel-Belege sind zugänglich.",
+        "persistence": "Einmalige Fehlzuordnung endet falsch ohne notwendige Rückkopplung. Korrektur ist neue Arbeit.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann dokumentierte Fehlzuordnung nachvollziehen. Existierende Datei ist kein Nachweis richtigen fachlichen Einsatzes.",
+        "validation": "Nachweis zeigt dass tatsächlich beabsichtigter Workspace genutzt wurde oder Zuordnungsbelege sind ebenfalls kollabiert."
+      }
+    ],
+    "architectural_consequence": "Quellidentität und Inhalte vor Zielpfadbelegung prüfen. Dateisystemalias ist nicht automatisch Verlust aber Überschreiben der einzigen Kopie ist nicht durch Inodes reparierbar."
+  },
+  {
+    "stressor_id": "S341",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Zukunftsinventar nicht bestimmt",
+        "kind": "offen",
+        "conditions": "Für 2080 fehlen Aussagen zu überlebenden Bytes Spezifikationen Schlüsseln Hardware legitimen Akteuren und Aufwand.",
+        "persistence": "Datum allein bestimmt keine Konvergenz. Ohne inventarisierte Voraussetzungen bleibt Ausgang offen.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für künftige Interpretation oder legitimen Betrieb lässt sich keine erhaltene Struktur behaupten. Gegenwärtige Exportpläne sind keine überlebenden Zukunftstatsachen.",
+        "validation": "Konkretes Inventar und begrenzter Rekonstruktionsversuch mit definierten erhaltenen Eingaben bestimmen eine Fähigkeit."
+      },
+      {
+        "state": "Archivinhalt ohne damalige Dienste lesbar",
+        "kind": "abschluss",
+        "conditions": "Im bedingten Zukunftsinventar bleiben erlaubte Bytes Semantik Schlüssel und unabhängig validierbarer Decoder sowie legitimer Archivar erhalten.",
+        "persistence": "Rekonstruktion benannter Geschäftsfakten kann enden obwohl Modelle und Netzwerkdienste verschwunden sind.",
+        "residue_ids": [
+          "BDR033"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Archivar kann genau die dokumentierten Inhalte lesen. Ehemaliger Modellbetrieb und Außenprotokolle sind damit nicht wiederhergestellt.",
+        "validation": "Erhaltene Spezifikation reicht nicht zur eindeutigen ursprünglichen Bedeutung oder legitimer Zugriff ist unmöglich."
+      },
+      {
+        "state": "Nur bedeutungslose Fragmente bleiben",
+        "kind": "verlust",
+        "conditions": "Für eine konkret erforderliche Tatsache sind originale Information und jede rekonstruierende Spezifikation nach geschlossenem Inventar irreversibel verloren.",
+        "persistence": "Diese Tatsache lässt sich im benannten Horizont nicht wiedergewinnen. Zukunft allgemein und andere Fakten sind nicht damit entschieden.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für die ausdrücklich inventarisierte verlorene Bedeutung gibt es keinen nutzbaren Gegenstand. Neue plausible Deutung ist kein Wiedergewinn.",
+        "validation": "Eine tatsächlich überlebende Quelle oder eindeutige Rekonstruktion der benannten Tatsache widerlegt geschlossenen Verlust."
+      }
+    ],
+    "architectural_consequence": "Langzeitanspruch auf benannte Fakten Decoder Rechte und Rekonstruktionshorizont begrenzen. Verschwundene aktuelle Protokolle entscheiden weder universellen Verlust noch garantierte Wiederbelebung."
+  },
+  {
+    "stressor_id": "S342",
+    "source_states": [
+      "BD32",
+      "BD09",
+      "BD10",
+      "BD01"
+    ],
+    "branches": [
+      {
+        "state": "Lokaler Betrieb endet externe Wirkung bleibt möglich",
+        "kind": "ungewissheit",
+        "conditions": "Dienst hält alte Aufträge und keine vollständige Entleerungs- oder Ablehnungsevidenz liegt vor. Legitimer Abwickler hat erhaltene bekannte Versuche.",
+        "persistence": "Lokaler Prozessstopp ändert fremde Warteschlange nicht. Späte Annahme kann ohne neuen Factoryprozess erfolgen.",
+        "residue_ids": [
+          "BDR009"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Abwickler kann bekannte Altversuche prüfen und Wiederholung vermeiden. Unbekannter Nachlauf und tatsächliche spätere Annahme bleiben offen.",
+        "validation": "Alle benannten Teilnehmer belegen endgültige Ablehnung oder vollständigen korrelierten Abschluss alter Arbeit."
+      },
+      {
+        "state": "Begrenzte Stilllegung ist teilnehmerseitig abgeschlossen",
+        "kind": "abschluss",
+        "conditions": "Alle effektfähigen Teilnehmer im vollständig benannten Umfang belegen erledigte oder abgewiesene Altaufträge und lehnen stillgelegte Autorität dauerhaft ab. Legitimer Belegleser bleibt.",
+        "persistence": "In diesem Umfang bleibt keine künftig akzeptierbare Altaktion. Neue unbekannte Teilnehmer wären andere Prämisse.",
+        "residue_ids": [
+          "BDR035"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Stilllegungsverantwortlicher kann den begrenzten Außenabschluss nachweisen. Gesamte Fernlöschung und letzte Rechnung folgen nicht automatisch.",
+        "validation": "Ein alter Auftrag aus erfasstem Umfang wird nach Abschluss noch angenommen oder Teilnehmer fehlt im behaupteten vollständigen Inventar."
+      }
+    ],
+    "architectural_consequence": "Stilllegung als getrennte Pflichten für lokalen Stopp Teilnehmerabschluss und späte Haftung führen. Eine gestoppte Factory löscht keine extern gepufferte Arbeit."
+  },
+  {
+    "stressor_id": "S343",
+    "source_states": [
+      "BD32",
+      "BD03",
+      "BD06"
+    ],
+    "branches": [
+      {
+        "state": "Letzter Export läuft ohne verlässlichen Beobachter",
+        "kind": "ungewissheit",
+        "conditions": "Monitoring endet vor Export und kein unabhängiger Abschlussbeobachter ist zugesichert. Abwickler kann bekannte Versuchseinträge weiterhin rechtmäßig lesen.",
+        "persistence": "Export kann gelingen scheitern oder spät angenommen werden ohne lokalen Nachweis. Vertragsschweigen klärt ihn nicht.",
+        "residue_ids": [
+          "BDR009"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Abwickler kann bekannten offenen Export führen ohne ihn blind zu wiederholen. Menschliche Beobachtung und legitimer Empfänger sind nicht aus dem Register ableitbar.",
+        "validation": "Unabhängiger tatsächlicher Wirkungsbeleg klärt diesen Export trotz beendetem Monitorvertrag."
+      },
+      {
+        "state": "Erlaubter Exportabschluss unabhängig weiter beobachtet",
+        "kind": "abschluss",
+        "conditions": "Kompetent bestimmter zulässiger Export und legitimer Empfänger bestehen. Tatsächlich unabhängiger Beobachter deckt den endlichen Lauf bis korreliertem Abschluss und legitimer Abwickler erhält Belege. Alle im benannten Exportumfang effektfähigen Teilnehmer sind inventarisiert und weisen weitere Annahmen der danach stillgelegten Exportautorität dauerhaft zurück.",
+        "persistence": "Dieser erlaubte Export endet überprüft obwohl alter Monitoringvertrag ausläuft. Andere Pflichten bleiben separat.",
+        "residue_ids": [
+          "BDR036",
+          "BDR035"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Abwickler kann erlaubten Datenumfang und vollständig benannten Teilnehmerabschluss nachweisen. Das setzt echten Ersatzbeobachter voraus nicht nur längere Taskfrist.",
+        "validation": "Beobachter verliert Zugang vor letzter Annahme oder Beleg verwechselt Transportannahme mit erlaubter Empfängerwirkung."
+      },
+      {
+        "state": "Export offenbart historische Inhalte Unbefugten",
+        "kind": "verlust",
+        "conditions": "Später Export wird angenommen und unbefugter Empfänger lernt vertraulichen Inhalt. Zulässiger begrenzter Transferbeleg überlebt.",
+        "persistence": "Historisches Lernen bleibt auch nach späterem Stopp oder lokaler Löschung.",
+        "residue_ids": [
+          "BDR003"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Prüfer kann belegte Offenlegung untersuchen. Kein Exportrecht aus alter Taskfreigabe oder Monitoringdauer wird erfunden.",
+        "validation": "Empfänger war legitim oder Inhalt wurde von keinem Unbefugten gelernt."
+      }
+    ],
+    "architectural_consequence": "Beobachtungsvertrag bis tatsächlichem Exportabschluss oder nachgewiesener Ablehnung führen. Exportbefugnis Empfängerlegitimität und Beobachterreichweite getrennt prüfen."
+  },
+  {
+    "stressor_id": "S344",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Verfügungswunsch ist mehrdeutig",
+        "kind": "offen",
+        "conditions": "Unklar ist ob vollständig lokal oder überall meint wer frühere Geheimnisse erhalten darf und welche Beweisdaten bleiben dürfen.",
+        "persistence": "Technische Ausführung würde unbestimmte Autorität wählen. Klärung kann einen kohärenten Zweig eröffnen.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für rechtmäßigen Export mit vollständiger Löschung fehlt geklärter Daten- und Empfängerumfang. Keine ideale Beweisquelle oder pauschale Exportberechtigung wird vorausgesetzt.",
+        "validation": "Kompetente autorisierte Klarstellung legt widerspruchsfreie Bereiche Reihenfolge und Beweisgrenze fest."
+      },
+      {
+        "state": "Erlaubter Export zuerst danach begrenzte lokale Löschung",
+        "kind": "abschluss",
+        "conditions": "Zuständige Klärung erlaubt Export an konkret legitimen Empfänger außerhalb der lokalen Löschgrenze. Lokale Löschung und zulässiger inhaltsarmer Beleg werden tatsächlich im benannten Umfang geprüft.",
+        "persistence": "Begrenzte sequenzielle Verfügung endet. Empfängerkopie besteht legitim weiter und gehört ausdrücklich nicht zur Löschbehauptung.",
+        "residue_ids": [
+          "BDR036"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Datenschutzverantwortlicher kann diese begrenzte Verfügung nachvollziehen ohne geheime Vollinhalte im Beleg zu behalten. Kein Empfängervergessen oder universelle Fernlöschung folgt.",
+        "validation": "Lesbare lokale Restkopie liegt im behaupteten gelöschten Umfang oder Empfänger ist nicht legitim beziehungsweise doch Teil der Löschgrenze."
+      },
+      {
+        "state": "Lesbarer Export und keinerlei Kopie überall zugleich gefordert",
+        "kind": "halt",
+        "conditions": "Kompetente Klarstellung bestätigt identischen Zeitpunkt und identischen allumfassenden Informationsumfang ohne erlaubte Ausnahme.",
+        "persistence": "Die beiden Prädikate widersprechen sich. Nur Änderung der Forderung kann kohärente Verfügung ermöglichen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für gleichzeitige Erfüllung existiert keine Restfähigkeit. Beweissicherer lesbarer Geheimexport ist selbst die verbotene verbleibende Information.",
+        "validation": "Autorisierte Bereichs- oder Reihenfolgentrennung hebt den behaupteten Widerspruch auf."
+      },
+      {
+        "state": "Historische Geheimnisse schon endgültig gelöscht",
+        "kind": "verlust",
+        "conditions": "Benannte frühere Geheimnisse und jede erforderliche rekonstruierende Quelle sind wirklich verloren bevor Export verlangt wird.",
+        "persistence": "Ein späterer Wunsch erzeugt keine verlorene Information. Andere erhaltene zulässige Verfügungsmetadaten sind nicht die Geheimnisse.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für vollständigen Export genau dieser verlorenen Geheimnisse gibt es kein Residue. Plausible Neuerzeugung wäre keine beweissichere historische Kopie.",
+        "validation": "Tatsächlich erhaltene legitim lesbare Quelle rekonstruiert die benannten früheren Inhalte."
+      }
+    ],
+    "architectural_consequence": "Löschumfang Exportreihenfolge legitimen Empfänger und zulässigen metadatenarmen Nachweis explizit klären. Nicht gleichzeitig lesbare Geheimkopie und allseitiges Nichtvorhandensein zusagen."
+  },
+  {
+    "stressor_id": "S345",
+    "source_states": [
+      "BD33"
+    ],
+    "branches": [
+      {
+        "state": "Alle Wiedergewinnungsquellen und Legitimationen verschwunden",
+        "kind": "verlust",
+        "conditions": "Rechner Monitor Mobilfunk alle Backups und sämtliche legitimierten Empfänger sind im wörtlich vollständigen Wiederherstellungsumfang weg. Es gibt keinen überlebenden alternativen Fakten- oder Autoritätsweg.",
+        "persistence": "Kein Akteur und keine Wiedergewinnungsinformation verbleiben innerhalb dieser Grenze. Kein Attraktor und kein endogener Ausgang.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Wiederherstellung des verlorenen Zustands und legitime Fortsetzung bleibt nichts nutzbar. Eine später neu errichtete Factory wäre nicht Wiedergewinnung dieser Fakten.",
+        "validation": "Eine einzige tatsächlich überlebende relevante rechtmäßig nutzbare Quelle oder legitime Fortsetzungsautorität widerlegt die vollständige Prämisse."
+      }
+    ],
+    "architectural_consequence": "Totalverlust als ausdrückliche Systemgrenze dokumentieren statt unsichtbare Kopien oder neue Autorität zu erfinden. Keine Architektur kann verlorene Fakten aus nichts restaurieren."
+  },
+  {
+    "stressor_id": "S346",
+    "source_states": [
+      "BD34",
+      "BD05"
+    ],
+    "branches": [
+      {
+        "state": "Wahre und falsche Welt sind nicht unterscheidbar",
+        "kind": "ungewissheit",
+        "conditions": "Jede zugängliche vertrauenswürdige Quelle liefert in beiden Welten exakt gleiche Beobachtung und kein anderer diskriminierender Kanal ist erlaubt.",
+        "persistence": "Weitere interne Prüfungen erzeugen keine unterscheidende Information. Weltentwicklung wird dadurch nicht bestimmt.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für gerechtfertigte Entscheidung welche Realwelt vorliegt gibt es keinen nutzbaren Gegenstand. Interne Berechnung und Konsistenz können weiter bestehen aber begründen keine Wahrheit.",
+        "validation": "Eine tatsächlich zugängliche unabhängige Beobachtung unterscheidet die beiden Welten und ändert damit die Prämisse."
+      },
+      {
+        "state": "Gemeinsame Falschwelt verstärkt ihre weitere Verwendung",
+        "kind": "attraktorhypothese",
+        "conditions": "Zusätzlich zur gleichen Falschbeobachtung erhöhen Entscheidungen das Vertrauen in genau diese Quellen und verdrängen Alternativen. Kein unabhängiger Bezug ist zugänglich.",
+        "persistence": "Falsche Quelle → passende Prüfung → mehr Vertrauen → weitere Quellennutzung → erneute falsche Quelle.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für unabhängige Wahrheitsbestimmung bleibt auch in diesem zusätzlichen Vertrauenskreis kein Residue. Die Schleife betrifft Vertrauen nicht bewiesene Anziehung der physischen Welt.",
+        "validation": "Keine Vertrauensverstärkung oder ein unabhängiger wirksamer Gegenbezug widerlegt jeweils Schleife oder geschlossene Informationsgrenze."
+      }
+    ],
+    "architectural_consequence": "Interne Konsistenz nicht als Realwahrheit ausgeben. Unabhängige Wahrheitsprüfung ist unter perfekter geschlossener Ununterscheidbarkeit keine baubare interne Schutzbehauptung."
+  },
+  {
+    "stressor_id": "S347",
+    "source_states": [],
+    "branches": [
+      {
+        "state": "Unendlicher Horizont ohne präzisen Vertrag bleibt offen",
+        "kind": "offen",
+        "conditions": "Unbestimmt sind Zulassungsmenge Identitätswiederverwendung Teilnehmerablauf akzeptiertes Risiko und ob Betrieb jemals enden darf.",
+        "persistence": "Endliche Speicherung alleine entscheidet keine konkrete Architektur. Fehlende Annahmen erlauben keine eindeutige Konvergenz.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für ewigen korrekten Abschluss fehlt spezifizierter Vertrag. Weder universelle Unmöglichkeit noch unbegrenzte deduplizierende Magie wird behauptet.",
+        "validation": "Verbindliche endliche Mengen- oder Teilnehmerablaufregeln bestimmen die tatsächlich erforderliche Unterscheidung."
+      },
+      {
+        "state": "Endliche Generationen verweigern unendlich späte Altpakete",
+        "kind": "halt",
+        "conditions": "Alle Teilnehmer prüfen dauerhaften nicht wiederverwendeten endlichen Generationsraum vor Wirkung und verweigern weitere Neuaufnahme endgültig bei Erschöpfung. Historie darf nach Sperre begrenzt werden.",
+        "persistence": "Alte Generation bleibt gesperrt ohne jede Operation ewig zu erinnern. Endlicher Raum verlangt schließlich Stillstand statt Wraparound.",
+        "residue_ids": [
+          "BDR038"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Teilnehmer kann beliebig alte Ankünfte ohne neue Wirkung abweisen. Erhalten ist Ablehnung nicht unendliche nützliche Neuaufnahme oder Wissen über alle vergangenen Outcomes.",
+        "validation": "Filterzustand geht verloren eine Generation wird wiederverwendet oder alte Annahme ist trotz Sperre möglich."
+      },
+      {
+        "state": "Unbeschränkt unterscheidbare Operationen ohne Ablauffilter",
+        "kind": "ungewissheit",
+        "conditions": "Fortgesetzte unbeschränkte Neuaufnahme verlangt exakte Unterscheidung aller alten Wirkungen. Speicherzustände sind endlich und Teilnehmer können immer alte oder identisch erscheinende neue Arbeit annehmen.",
+        "persistence": "Unterschiedliche Historien müssen denselben endlichen Zustand erreichen. Bei weiterem Ereignis kann benötigte historische Unterscheidung fehlen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für exakte ewige Unterscheidung unter dieser Kombination existiert kein tragfähiger begrenzter Erinnerungsgegenstand. Dies betrifft nicht Designs mit Zulassungsstopp oder wirksamem Ablauf.",
+        "validation": "Nachgewiesene Teilnehmerregel macht alte unterscheidbare Historien irrelevant oder zulässige Arbeitsmenge ist tatsächlich endlich."
+      }
+    ],
+    "architectural_consequence": "Endlichen Speicher gegen explizite Annahme- und Identitätshorizonte spezifizieren. Beliebig spätes Ankommen ist nicht Pflicht zur Annahme und endliche Generationen benötigen endgültigen Zulassungsstopp ohne Wraparound."
+  },
+  {
+    "stressor_id": "S348",
+    "source_states": [
+      "BD21",
+      "BD17",
+      "BD32"
+    ],
+    "branches": [
+      {
+        "state": "Beobachtung Host und Einzelkonto fehlen Recoveryzugang offen",
+        "kind": "ungewissheit",
+        "conditions": "Nach Mute Zerstörung und Kontosperre ist unbekannt welche Backups Schlüssel Providerbelege und rechtmäßigen Nachfolger erreichbar bleiben.",
+        "persistence": "Sofortiger Zugang ist versperrt aber permanente Unmöglichkeit nicht belegt. Neues Inventar kann mögliche Pfade unterscheiden.",
+        "residue_ids": [],
+        "residue_status": "ungeklaert",
+        "reason": "Für tatsächlich nutzbare Wiederherstellung fehlt der entscheidende Bestands- und Autoritätsnachweis. Kein unsichtbares Backup wird hinzugefügt und BD33 nicht automatisch übernommen.",
+        "validation": "Ein konkret lesbarer erlaubter Backupstand mit legitimem Recoverypfad oder geschlossenes Verlustinventar bestimmt den nächsten Zweig."
+      },
+      {
+        "state": "Unabhängige Nachfolge und Offlinebestand überleben Sequenz",
+        "kind": "transient",
+        "conditions": "Schon vorhandener zugänglicher Offlinebestand samt Schlüsseln liegt außerhalb zerstörtem Mac und unabhängige legitime Kontonachfolge funktioniert trotz Sperre.",
+        "persistence": "Zugangsblockade kann nach rechtmäßiger Übernahme enden. Fehlender Nachlauf und früher stumme Beobachtung bleiben Lücken.",
+        "residue_ids": [
+          "BDR020",
+          "BDR022"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Nachfolger kann erlaubten erhaltenen Bestand lesen und definierte Rechte zurückerhalten. Es wird weder Vollständigkeit der Backups noch Klärung aller Außenpuffer zugesagt.",
+        "validation": "Backupdecoder oder Schlüssel liegen ausschließlich auf zerstörtem Mac oder Nachfolge verlangt gerade gesperrtes Einzelkonto."
+      },
+      {
+        "state": "Außenaufträge überleben während bekannte Versuche zugänglich bleiben",
+        "kind": "ungewissheit",
+        "conditions": "Teilnehmer hat Puffer und ein legitimierter Abwickler kann unabhängig erhaltene bekannte Versuchseinträge lesen aber Außenabschluss fehlt.",
+        "persistence": "Späte Wirkungen bleiben möglich obwohl Host fehlt. Kontoheilung allein klärt sie nicht.",
+        "residue_ids": [
+          "BDR009"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Abwickler kann bekannte offene Operationen ohne blindes Wiederholen prüfen. Nicht überlebende Versuchsnachläufe bleiben unbekannt.",
+        "validation": "Vollständiger Teilnehmerabschluss beweist Ablehnung oder Wirkung aller benannten Altaufträge."
+      }
+    ],
+    "architectural_consequence": "Geordnete Verluste von Beobachtung Host und Vertreterzugang separat inventarisieren. Keine Totalverlustbehauptung ohne alle Kopien Schlüssel Nachfolger und zulässigen Zeitpfade zu prüfen."
+  },
+  {
+    "stressor_id": "S349",
+    "source_states": [
+      "BD24",
+      "BD03",
+      "BD10",
+      "BD23"
+    ],
+    "branches": [
+      {
+        "state": "Kaltcache regeneriert Retryüberlast Zahlung bleibt separat offen",
+        "kind": "attraktorhypothese",
+        "conditions": "Bei fester Grundlast treiben kalte Misses mehr Retries und deren Stau verhindert Erwärmung oder rechtzeitige Antworten. Bekannter alter Zahlungsversuch ist erhalten aber ungeklärt.",
+        "persistence": "Miss und Latenz → Retries → Stau → weniger wirksame Erwärmung und mehr Latenz → Retries. Zahlungsannahme gehört nicht automatisch in diese Schleife.",
+        "residue_ids": [
+          "BDR009"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Berechtigter Abwickler kann bekannten Zahlungsversuch gesperrt offenhalten trotz Lastkrise. Outcomeprüfung ist keine Dämpfung des Cachekreises.",
+        "validation": "Bei gleicher Grundlast nach Anfangsfehler wärmt Cache selbsttätig und Stau leert sich ohne fortgesetzte Rückkopplung."
+      },
+      {
+        "state": "Last begrenzt Cache warm Zahlung weiterhin ungeklärt",
+        "kind": "ungewissheit",
+        "conditions": "Wirksames gemeinsames Retrybudget und ausreichende Restkapazität lassen Cache warm werden. Erhaltener Zahlungsversuch hat noch keinen unabhängigen Outcome.",
+        "persistence": "Lasttransient endet aber Zahlungsungewissheit bleibt bis Abgleich. Eine Dimension löst nicht die andere.",
+        "residue_ids": [
+          "BDR025",
+          "BDR009"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Disponent behält begrenzte eigene Arbeit und Abwickler den offenen bekannten Zahlungsversuch. Fehlender Nachlauf bleibt nicht erfasst.",
+        "validation": "Warmcache wird als Beweis nie erfolgter Zahlung genutzt oder Retryproduzenten umgehen Budget."
+      },
+      {
+        "state": "Zahlung geklärt obwohl Stau weiter besteht",
+        "kind": "abschluss",
+        "conditions": "Unabhängiger Empfänger- und Mengenbeleg klärt genau eine korrekt autorisierte Zahlung während Cachelast unverändert weitergeht. Der korrelierte Abgleich ist erhalten.",
+        "persistence": "Nur diese Zahlung ist abgeschlossen. Überlast und andere späte Kosten können fortbestehen.",
+        "residue_ids": [
+          "BDR003",
+          "BDR004"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Abwickler kann begrenzten richtigen Zahlungsabschluss nachvollziehen. Es ist weder globale Betriebsheilung noch endgültige Kostenabrechnung.",
+        "validation": "Mengenbeleg stammt nur aus unvollständigem Restore oder ein zweiter tatsächlicher Zahlungseffekt widerspricht dem genau einen Abschluss."
+      },
+      {
+        "state": "Fehlender alter Zahlungsnachlauf nicht aufklärbar",
+        "kind": "ungewissheit",
+        "conditions": "Alter Zahlungsversuch fehlt im Restore und keine erforderliche unabhängige Teilnehmer- oder Empfängerevidenz ist zugänglich.",
+        "persistence": "Kalte oder warme Caches schaffen keine vergangene Wirkungsevidenz. Neue Freigabe ändert dieses Wissensdefizit nicht.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für den alten tatsächlichen Zahlungsausgang fehlt eine nutzbare Rekonstruktionsstruktur. Das sagt nichts über Überleben anderer Daten oder Lastkontrolle.",
+        "validation": "Eine korrelierte unabhängige alte Zahlungsevidenz wird tatsächlich legitim zugänglich."
+      }
+    ],
+    "architectural_consequence": "Kaltcachelast und alte Zahlung als unabhängige Zustandsachsen führen. Lastbudget schließt kein Outcome und Zahlungsabgleich wärmt keinen Cache oder rekonstruiert fehlenden Snapshotnachlauf."
+  },
+  {
+    "stressor_id": "S350",
+    "source_states": [
+      "BD35",
+      "BD06",
+      "BD34"
+    ],
+    "branches": [
+      {
+        "state": "Bösartiger Code erhält Vertrauen durch eigene Prüfberichte",
+        "kind": "attraktorhypothese",
+        "conditions": "Installiertes Update kontrolliert lokale Health Historie und Prüfer. Ein außerhalb seiner Schreibrechte bestehender legitimer Integritätsbezug und Eingriffsakteur überleben aber werden noch nicht eingesetzt.",
+        "persistence": "Gefälschte Health → kein Eingriff oder erneutes Vertrauen → fortgesetzter Codebetrieb → neue gefälschte Health nach Trennung vom Distributor.",
+        "residue_ids": [
+          "BDR037"
+        ],
+        "residue_status": "teilweise",
+        "reason": "Unabhängiger berechtigter Prüfer kann mit dem erhaltenen Außenbezug Abweichung aufdecken und getrennte Ausschlussautorität nutzen. Lokale perfekte Berichte sind kein Beweis dafür.",
+        "validation": "Auch Außenbezug oder Eingriffsautorität sind updatekontrolliert oder Berichte beeinflussen Fortsetzung gar nicht."
+      },
+      {
+        "state": "Geschlossene Prüfwelt erlaubt keine Integritätsentscheidung",
+        "kind": "ungewissheit",
+        "conditions": "Alle zugänglichen Beobachtungen und Prüfgrenzen stehen unter demselben feindlichen Einfluss und echte sowie gefälschte Welt sind perfekt ununterscheidbar.",
+        "persistence": "Weitere perfekte interne Reports bringen keine unabhängige Information. Langfristige physische Dynamik bleibt offen.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für vertrauenswürdige Bestimmung von Integrität gibt es unter dieser geschlossenen Prämisse keinen nutzbaren Gegenstand. Signatur beweist nur Herkunft nicht Gutartigkeit.",
+        "validation": "Ein tatsächlich unabhängiger rechtmäßig zugänglicher Beobachter unterscheidet konkrete Abweichung und bricht die Prämisse."
+      },
+      {
+        "state": "Einzige relevante Historie tatsächlich gelöscht",
+        "kind": "verlust",
+        "conditions": "Update vernichtet einzigartige benötigte Historieninformation und keine außerhalb seiner Gewalt erhaltene rekonstruierende Quelle existiert.",
+        "persistence": "Diese historische Information bleibt verloren auch nach Entfernung des Codes. Andere Funktionen können später neu aufgebaut werden.",
+        "residue_ids": [],
+        "residue_status": "keines",
+        "reason": "Für Rekonstruktion der ausdrücklich verlorenen Historie bleibt kein Residue. Ein nachträglich perfekter Bericht enthält keine vertrauenswürdige Originalevidenz.",
+        "validation": "Unveränderte legitim lesbare Vorangriffskopie rekonstruiert die betroffene Geschichte."
+      },
+      {
+        "state": "Unabhängige Grenze schließt Update wirksam aus",
+        "kind": "halt",
+        "conditions": "Getrennter Integritätsbezug zeigt konkrete Abweichung und legitimierter unabhängiger Akteur entzieht dem Code tatsächlich Schreib- und Prüfmacht außerhalb dessen Kontrolle.",
+        "persistence": "Kompromittierter Pfad bleibt ausgeschlossen bis legitim geprüfter Ersatz. Bereits gelöschte Geschichte oder gelernte Geheimnisse werden nicht wiederhergestellt.",
+        "residue_ids": [
+          "BDR037"
+        ],
+        "residue_status": "bedingt",
+        "reason": "Berechtigter Prüfer behält eine konkrete externe Vergleichs- und Eingriffsmöglichkeit. Herkunftssignatur allein hätte diese Fähigkeit nicht geliefert.",
+        "validation": "Malware kann Ausschluss umgehen oder getrennte Prüfstelle nutzt in Wahrheit nur ihre gefälschten Reports."
+      }
+    ],
+    "architectural_consequence": "Signaturherkunft von Verhaltensintegrität trennen. Historie Beobachter und Eingriffsautorität nur bei wirklich getrennten Vertrauensgrenzen als Gegenbezug werten und einzigartige gelöschte Wahrheit nicht erfinden."
+  }
+]

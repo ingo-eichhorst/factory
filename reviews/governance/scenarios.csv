@@ -1,0 +1,101 @@
+stressor_id;scenario
+S101;Modellanbieter schließt über Nacht
+S102;Modellalias wird still auf andere Gewichte umgestellt
+S103;Modell folgt Prompt Injection in einer Quellseite
+S104;Zwei Prüfer nutzen denselben Modellfehler und bestätigen falsches Ergebnis
+S105;Modell halluziniert nicht existierende Ergebnisdateien
+S106;Lokales Modell belegt gesamten RAM und verdrängt Daemon
+S107;Modell wechselt mitten im Run ohne Telemetriehinweis
+S108;Modell produziert unendlich viele korrekte Zwischenschritte
+S109;Kontextfenster schrumpft nach Harnessupgrade
+S110;Benchmarkfixture wird vom Modell erkannt und speziell ausgetrickst
+S111;Root-AGENTS wird zwischen Queueing und Start geändert
+S112;Ein AGENTS-Quellfile ist plötzlich unlesbar
+S113;Human schreibt Geheimnis in Taskprompt
+S114;Knowledge-Link führt zyklisch durch tausende Notizen
+S115;Zwei Quellen widersprechen sich über aktuelle Freigaberegel
+S116;Quellwebsite ändert Inhalt ohne URLänderung
+S117;Repo enthält bösartige native Harnesskonfiguration
+S118;Agent schreibt Shared Memory im Namen fremden Scopes
+S119;Artefaktnamen unterscheiden sich nur durch Unicode-Normalisierung
+S120;Context wird zum Debuggen vollständig in Telemetrie kopiert
+S121;Plugin läuft als gleicher User und liest Keychain außerhalb Kernel
+S122;Angreifer ersetzt Pluginbinary nach Manifestprüfung
+S123;Transportplugin behauptet falschen authentifizierten Actor
+S124;Agent schreibt absichtlich direkt in SQLite
+S125;SQL-/Pfadinjection steckt in neuem Pluginparameter
+S126;Log enthält Terminalescapes die Diagnoseanzeige fälschen
+S127;Altes gestohlenes Capability-Token wird nach Restore erneut gültig
+S128;Bekannte Integration wird per Dependency-Typosquatting ersetzt
+S129;Ransomware verschlüsselt DB Backups und Knowledge gleichzeitig
+S130;Task erzeugt riesige gültige Delegationsketten ohne Zyklus
+S131;Betroffene Person verlangt Löschung aus append-only History
+S132;Gericht verlangt Legal Hold während Retention löschbereit ist
+S133;Kunde verlangt Datenresidenz die aktueller Modellprovider nicht erfüllt
+S134;Backup enthält Geheimnisse die im Original schon rotiert wurden
+S135;Lizenz einer notwendigen Library wird für neue Releases unbrauchbar
+S136;Audit muss beweisen welcher Mensch konkret freigegeben hat
+S137;Behörde beschlagnahmt Originalgerät und fordert Einsicht
+S138;Ein ursprünglich harmloses Feld wird später als sensibel eingestuft
+S139;Auskunftsanfrage verlangt Provenienz über gelöschte Scopes hinweg
+S140;Versicherer verlangt beweisbare Recovery statt vorhandener Backups
+S141;Tokenpreise steigen über Nacht um Faktor hundert
+S142;Provider ersetzt Prepaid durch unbekannte nachträgliche Abrechnung
+S143;Ein großer Scope monopolisiert alle Slots mit legalen Tasks
+S144;Jeder kleine Task kostet mehr menschliche Freigabe als er spart
+S145;Nachfrage verzehnfacht sich ohne weitere Workspaces
+S146;Budget wird während langer Agentarbeit auf null gesetzt
+S147;Geschäftskunde verlangt garantierte Echtzeitantwort bei lokalem Single-Host
+S148;Ein Fachauftrag ist nach Queuewartezeit wirtschaftlich wertlos
+S149;Unternehmen kann keinen externen Backupdienst mehr bezahlen
+S150;Unbekannte Providerrechnung macht Metrikvergleich irreführend
+S151;Rust-Update ändert Plattformverhalten trotz unverändertem Code
+S152;Release enthält neue Eventversion aber keinen alten Upcaster
+S153;Python-Prototyp und Rust mutieren denselben Tabellennamen mit anderem Schema
+S154;Rollback des Binaries trifft auf bereits migriertes Schema
+S155;Ein Versionspaket ist nach Maintainerwechsel nicht mehr herunterladbar
+S156;Veröffentlichung exportiert versehentlich Company-root statt Projekt
+S157;Tests bestätigen absichtlich unsicheren Missing-ID-Fallback
+S158;README und ADR widersprechen dem aktuellen Library-Schema
+S159;Automatischer Updater aktiviert Plugin vor Manifestverifikation
+S160;Jedes Architekturproblem wird durch weiteren Kerndienst beantwortet
+S161;Firmengründer fällt dauerhaft aus und niemand besitzt Freigabeautorität
+S162;Zwei Geschäftsführer geben widersprüchliche Anweisungen zum selben Effekt
+S163;Unternehmen wird verkauft und bisherige Mitarbeiter verlieren Zugriffsrechte
+S164;Projekt wird ausgegliedert und darf Company-Kontext nicht mitnehmen
+S165;Sicherheitsverantwortlicher und Produktowner streiten über riskanten Resume
+S166;Dienstleister ersetzt komplette Agentflotte mit anderen Instrumenten
+S167;Teams optimieren auf möglichst wenige blocked Runs und umgehen Freigaben
+S168;Scope-Besitzer verweigert Budgetauskunft obwohl gemeinsame Maschine überlastet ist
+S169;Organisation verlangt nachträgliches Umschreiben eines unbequemen Auditfakts
+S170;Ein Partner stellt Betrieb ein und niemand kann seine alten Operationen bestätigen
+S171;Tausend neue Scopes erzeugen je einen Pluginprozess
+S172;Zwei Kunden fordern gegenseitige Geheimhaltung auf derselben User-ID
+S173;Remote-Worker laufen über Tage offline auf fremder Hardware
+S174;Produkt muss auf Smartphone ohne Daemon-Dauerbetrieb laufen
+S175;Firma verlangt Active-active mit automatischem Failover zwischen Städten
+S176;Robotikplugin steuert irreversible Bewegung mit Millisekundenfrist
+S177;Regulierter Betrieb verlangt manipulationssichere Beweise gegen Root-Admin
+S178;Ereignisbestand wächst auf Jahrzehnte und Replay dauert länger als RTO
+S179;Kunde fordert vollständigen Export und Abschaltung aller Factorydienste
+S180;Pluginlandschaft entwickelt wechselseitige Abhängigkeiten mit Startzyklus
+S181;Extremer Sonnensturm zerstört Elektronik in mehreren Backupregionen
+S182;Mac erwacht im Jahr 2046 und alle Termine Zertifikate und Anbieter sind historisch
+S183;Nach zwanzig Jahren versteht niemand mehr Sprache und Geschäftskürzel der Taskprompts
+S184;Alle verfügbaren Modelle und menschlichen Prüfer teilen denselben überzeugenden Irrtum
+S185;Zwei technisch identische Instanzklone erhalten widersprüchliche legitime Weltzustände
+S186;Neue Rechtslage verlangt sofortige Löschung aller Geschäftsdaten und zugleich ewige Beweisbarkeit
+S187;Energie steht künftig nur fünf Minuten pro Monat zur Verfügung
+S188;Alle genutzten Kryptoprimitiven gelten plötzlich als praktisch gebrochen
+S189;Firma spaltet sich rechtlich in zwei Nachfolger die beide alle Freigaberechte beanspruchen
+S190;Alle Geräte Backups Schlüssel und Erinnerungen an das System verschwinden
+S191;Alter Restore trifft auf widerrufene Freigabe und inzwischen ausgeführte queued-Aktion
+S192;Pluginflood füllt SSD genau als dringender Widerruf eingeht
+S193;Herdrausfall hält Leases und einziger Operator stirbt während Rechenbudget ausläuft
+S194;Restoremanifest ist vollständig aber einzige Contentkopie unterliegt gerichtlich angeordneter Löschung
+S195;Providerwechsel verändert Outputformat und derselbe Modelltyp verifiziert seinen Fehler
+S196;Zwei Scopeagenten vervielfachen Tasks während Cron eine monatelange Nachholwelle erzeugt
+S197;Compensation läuft gegen vom Menschen veränderte Daten während ihr Plugin geupdatet wird
+S198;Migrationscutover wird unterbrochen und Backupklon startet parallel den Legacydispatcher
+S199;Geräteverlust trifft auf verlorenen Backup-Key und insolventen Softwarelieferanten
+S200;Incidentbericht behauptet volle Resilienz weil alle Matrixfelder markiert sind und stoppt reale Tests

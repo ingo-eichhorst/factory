@@ -1,0 +1,27 @@
+residue;requires;condition;failure_consequence;safe_response
+R01;R03;Während Belegungs-/Sessionmutation;Zwei Writer können widersprüchliche Belegung behaupten;Keine neue Session legitimieren
+R01;R04;Nach Restart;Letzte Belegungsevidenz fehlt;Workspace nicht aus Abwesenheit der Daten freigeben
+R01;R08;Bei unklarer Runtime;Operator kann Unsicherheit nicht auflösen;Sicher halten statt Timeoutfreigabe
+R02;R04;Vor und nach Außenwirkung;Intent oder Outcome kann nicht dauerhaft erklärt werden;Keine neue Wirkung ohne Commit
+R02;R09;Vor jeder neuen Außenwirkung;Eine bekannte Operation ist nicht automatisch erlaubt;Dispatch sperren
+R02;R06;Während Aufruf und Rekonziliation;Unbegrenzter oder unehrlicher Teilnehmerpfad;Unknown erhalten und Aktivierung begrenzen
+R03;R11;Nach Geräteverlust;Alte Writer-/Inkarnationsgeschichte fehlt;Neuen Betrieb nur nach expliziter exklusiver Autorität
+R04;R11;Nach Verlust kanonischer Daten;Replaymaterial fehlt;Verlustgrenze benennen statt Geschichte erfinden
+R04;R12;Wenn referenzierte sensible Inhalte betroffen sind;Aufbewahrung kann unzulässig oder unvollständig werden;Replay als unvollständig markieren
+R04;R16;Nach Format-/Versionswechsel;Reducer und Daten passen nicht mehr;Read-only Inkompatibilität statt Mutation
+R05;R04;Bei historischer Rekonstruktion;Ausführungsintention ist nicht mehr belegbar;Nicht reproduzierbar kennzeichnen
+R05;R09;Bei erneuter Ausführung;Historische Policy überschreibt aktuellen Widerruf;Aktuell neu autorisieren
+R06;R07;Bei vielen Aktivierungen;Lokale Prozessgrenzen erschöpfen globale Maschine;Admission bremsen und Kontrollreserve halten
+R07;R08;Bei Budgeterschöpfung;Limits können weder erklärt noch geändert werden;Keine neue Aufnahme ohne sichere Kontrolle
+R08;R03;Für jede Recoverymutation;Zweiter Notfallwriter würde Invariante umgehen;Ohne exklusiven Writer nur lesen
+R08;R11;Bei unlesbarem Originalgerät;Lokaler Kontrollpfad existiert physisch nicht;Externes Recoveryverfahren statt Bootstrapversprechen
+R09;R10;Für neue menschliche Freigabe oder Konflikt;Legitime Autorität fehlt;Keine automatische Zustimmung
+R09;R13;Bei zeitlich begrenzter Erlaubnis;Abgelaufene Freigabe scheint aktuell;Gültigkeit explizit klären
+R10;R05;Für informierte menschliche Entscheidung;Person sieht nur nackten Status ohne Zweck;Entscheidungspaket vervollständigen
+R11;R12;Beim Export sensibler Evidenz;Backup erzeugt unkontrollierte zweite Datenhaftung;Klassifizierten freigegebenen Recoveryumfang verwenden
+R11;R16;Bei langfristiger Wiederherstellung;Formate oder Executables sind nicht mehr erschließbar;Lesbaren Export und begrenzte Evidenz erhalten
+R13;R04;Bei Schedulerrestart;Durable Occurrenceidentität fehlt;Kein blinder Catch-up
+R14;R05;Bei Verifikation;Prüfer kennt Inputs und Kriterien nicht;Urteil als unbelegt zurückhalten
+R14;R10;Bei nicht maschinenprüfbarer Domäne;Fachlich legitimer Maßstab fehlt;Kein erfundenes Qualitätsurteil
+R15;R10;Bei Erweiterung des Einsatzbereichs;Niemand hat Sicherheitsmandat ratifiziert;Neue Betriebsart ablehnen
+R16;R04;Beim Cutover;Migration verliert Bedeutung alter Aufgaben;Importbaseline und Lücken explizit erhalten

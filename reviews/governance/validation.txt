@@ -1,0 +1,5 @@
+48 states; 100 trajectories; 100 coverage rows
+Statuses: {'conditional': 89, 'source-supported': 6, 'unresolved': 5}
+Unresolved: S125 S174 S175 S185 S186
+Validation: exact input IDs, unique state/trajectory IDs, exact column schemas, nonempty fields, valid state references, sequence-reference inclusion, matching coverage/destinations, all states used, and UTF-8 semicolon CSV round-trip passed.
+This is structural validation of the review files, not a runtime test or evidence of resilience.

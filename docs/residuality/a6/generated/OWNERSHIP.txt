@@ -1,0 +1,1 @@
+Generated exclusively by docs/residuality/a6/aggregate.py.

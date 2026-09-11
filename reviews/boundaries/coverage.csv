@@ -1,0 +1,76 @@
+stressor_id;state_ids;analysis_status;reason
+S276;BD06;conditional;"Historical disclosure is absorbing only once learned; continued service does not reverse it."
+S277;BD06 BD02;conditional;Payload scope and recipients distinguish disclosure from a blocked or private diagnostic export.
+S278;BD07 BD06 BD18;conditional;Separate an externally driven probing cycle from retained knowledge and a conditional attention loop.
+S279;BD04 BD05 BD02;conditional;"Consistent corruption is not automatically an attractor; only the repeated trust/reuse branch supplies feedback."
+S280;BD04 BD10 BD02;conditional;Distinguish syntactic validity from quantity correctness and from a proven irreversible consequence.
+S281;BD27 BD08 BD01;conditional;Conflicting authentic claims are not evidence of forgery or proof that both may continue writing.
+S282;BD03 BD09 BD10 BD01;conditional;Source-supported local restore behavior does not cover the scenario missing suffix or business consequences.
+S283;BD27 BD08 BD01;conditional;Source identity comparison is only a local session check, not clone exclusion.
+S284;BD09 BD02 BD10;conditional;Recovery success is not proof that start-time rights remain current.
+S285;BD04 BD02 BD10;conditional;Type-valid numeric interoperability does not establish semantic compatibility.
+S286;BD02 BD15 BD12;conditional;Per-scope activation is an instruction/design boundary, not a demonstrated startup property.
+S287;BD02 BD04 BD05;conditional;Version comparison and schema tests do not alone prove historical binary forward compatibility.
+S288;BD10 BD03;conditional;"Code rollback is not a world rollback; no attractor is implied by a one-time irreversible action."
+S289;BD11 BD08 BD01;conditional;A migration transport break is not resolved by citing local SQL atomicity.
+S290;BD12 BD02;conditional;Circular prerequisites establish deadlock under the stated boundary, not empirical attraction.
+S291;BD13 BD14;conditional;A social reinforcing mechanism is required beyond a missing maintainer.
+S292;BD37 BD13 BD22;conditional;Distinguish unavailable repair path from total information loss or permanent impossibility of all future substitutes.
+S293;BD14 BD02;conditional;Authority opacity can be self-reinforcing, but conservative abstention is a competing basin.
+S294;BD15 BD04 BD05 BD02;conditional;Common library creates correlated evidence risk, not proof that replay or monitoring already shares an implemented path.
+S295;BD15 BD37;conditional;Dependency concentration is a startup coupling, not the same as independent provider failures.
+S296;BD08 BD04 BD27;conditional;A second writer is a structural entry condition, not a guarantee of sustained conflict on its own.
+S297;BD16 BD03 BD10 BD24;conditional;"Test inadequacy is explicit; production convergence remains conditional on omitted dynamics."
+S298;BD16;conditional;"Only the evidence-blind state is classified; actual production failure duration and timing remain unknown."
+S299;BD16 BD08 BD10;conditional;"Mock agreement cannot establish real authority extinction; no live provider test was performed."
+S300;BD04 BD05 BD02;conditional;Separate wrong presentation, wrong acted-on quantity, and a recursive false-verification loop.
+S301;BD04 BD01 BD02;conditional;"An old price is not necessarily wrong; intended effective date determines the branch."
+S302;BD04 BD06 BD10 BD02;conditional;Internal identity integrity and real-world referent correctness are different boundaries.
+S303;BD17 BD10;conditional;"A delivered signal is not perceived information; duration depends on actual accessible alternatives."
+S304;BD04 BD17 BD10 BD02;conditional;"An incorrect human intervention is not automatically an attractor; the still-failing original is a separate state."
+S305;BD04 BD10 BD03 BD02;conditional;This is loss of epistemic meaning, not simply unattractive UI text.
+S306;BD17;conditional;"Observation delivery and human availability are separate; multi-day wait is not an attractor."
+S307;BD17 BD18;conditional;The key discriminator is persistence after initial forcing is removed.
+S308;BD19 BD18 BD01;conditional;Distinguish deliberate deferral from an attention overload loop.
+S309;BD20 BD01 BD09 BD10;conditional;This is an authority-semantics gap, not a signature-validation failure.
+S310;BD21;conditional;Loss of governance access is distinct from cloud uptime or destruction of stored data.
+S311;BD21 BD28;conditional;Concentrated authority can preserve blindness without any technical service outage.
+S312;BD15 BD24;conditional;Externally sustained common-mode failure is separate from an optional congestion feedback loop.
+S313;BD15 BD22;conditional;Economic concentration can be a common dependency even across different networks.
+S314;BD01 BD22 BD32 BD23;conditional;Service discontinuity and impossibility of recovering all historical data must not be conflated.
+S315;BD23 BD02;conditional;"This is delayed economic effect evidence; no autonomous attractor follows from one late bill."
+S316;BD24 BD01 BD10 BD23;conditional;"A latency objective alone is not a feedback law; the copied-work response rule supplies the candidate loop."
+S317;BD18 BD19;conditional;"Economic inefficiency alone is not an attractor; queue behavior distinguishes the proposed branches."
+S318;BD09 BD25 BD10;conditional;Local approval history and current permission can diverge during delayed delivery.
+S319;none;unresolved;Unresolved legal compatibility and authority, not a presumed technical deadlock or universal impossibility.
+S320;BD06 BD25;conditional;Geographic compliance, confidentiality and detectability are related but not identical properties.
+S321;BD09 BD10 BD25;conditional;"Physical safety requires evidence at the actuator; no live valve or safety test was performed."
+S322;BD03 BD25 BD10;conditional;Separate shutdown command acknowledgment from physical cessation and irreversibility.
+S323;none;unresolved;"Unresolved normative/safety boundary; no automatic life-versus-budget policy is endorsed or modelled."
+S324;BD03 BD24 BD10;conditional;The current local delivery journal supports withholding attempts, not business-service reachability guarantees.
+S325;BD27 BD09 BD10 BD02 BD01;conditional;"Authenticity does not establish timeliness; harmless commutative telemetry is a counterexample to universal danger."
+S326;BD36 BD08;conditional;Loss of observation and loss of execution must not be collapsed into one health bit.
+S327;BD26 BD09 BD02;conditional;Clock name does not establish suspend semantics or safe year-late continuation.
+S328;BD26 BD17;conditional;Policy-retained timing error differs from an autonomous attractor.
+S329;BD26 BD01 BD02;conditional;Political time semantics cannot be reconstructed from an offset alone.
+S330;BD27 BD04;conditional;"Conflicting liveness requires correlation; none of the three statements alone proves task completion."
+S331;BD04 BD05 BD02;conditional;Reviewer multiplicity does not establish source independence.
+S332;BD27 BD03 BD01;conditional;No log is not proof of no effect, and an attestation is not proof of correct real-world delivery.
+S333;BD28;conditional;Measurement-boundary manipulation can stabilize apparent success while total delivered value falls.
+S334;BD28;conditional;A semantic change to the metric can erase evidence without repairing service.
+S335;BD04 BD28 BD02;conditional;"Source stores a reported result rather than certifying its meaning; incentive dynamics remain hypothetical."
+S336;BD29 BD18 BD17;conditional;Energy intent, service obligations and monitoring semantics can disagree without a hardware defect.
+S337;BD26 BD09 BD02 BD10;conditional;An environmentally beneficial scheduling objective does not settle authority or safety timing.
+S338;none;unresolved;"Unresolved value and resource dynamics; high monitor-to-service consumption alone is not a failure basin."
+S339;BD30 BD04 BD05 BD01;conditional;Recovering bytes is different from recovering their intended meaning.
+S340;BD02 BD31 BD04;conditional;Source runtime alias recognition is not a portable restore manifest or recovery of overwritten information.
+S341;none;unresolved;"Unresolved extreme-horizon dynamics; current format disappearance is not proof of information-theoretic impossibility."
+S342;BD32 BD09 BD10 BD01;conditional;Local lifecycle termination is not global business-effect termination.
+S343;BD32 BD03 BD06;conditional;Operational decommission and contractual observation horizon are separate clocks.
+S344;none;unresolved;"Unresolved privacy/authority semantics; neither an indiscriminate secret export nor automatic erasure is justified."
+S345;BD33;conditional;Absorbing loss and impossible endogenous recovery, explicitly not an attractor.
+S346;BD34 BD05;conditional;Classify the epistemic limit without pretending to know a physical endpoint or a universal actual-world deception.
+S347;none;unresolved;"Unresolved infinite-horizon specification; conditional information-limit argument, not an invented attractor."
+S348;BD21 BD17 BD32;conditional;Sequential loss of visibility, compute and authority compounds recovery, but does not establish loss of every copy or actor.
+S349;BD24 BD03 BD10 BD23;conditional;"Compound trajectory has two separate dimensions; one recovery does not imply the other."
+S350;BD35 BD06 BD34;conditional;"Self-confirming hostile execution is a conditional loop; actual damage cannot be measured from perfect forged internal reports."

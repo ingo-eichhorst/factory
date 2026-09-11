@@ -1,0 +1,21 @@
+Read-only review source fingerprints; not a claim of deployed revision.
+Fingerprint time UTC: 2026-09-09T16:38:29.001680+00:00
+Observed repository HEAD: e93597f4145306a51c1867f1dfb9a2a505df7383
+Hashes cover full file bytes; report.md identifies the portions actually inspected.
+sha256  path (relative to Factory project root)
+c0856bde86dbe5f75642ba70f6cdcd7639ebac00b44a0a375203762147961836  README.md
+c2cccd4e9f02d41de352d1f830f2b5a39b4772868c9732c7fbd5e90afe7b99e7  crates/factory-context/src/lib.rs
+96b680dd8dd5161f7ff27d77ff07cd94f548d743dee668d95caed9c0a7a4232c  crates/factory-task/src/complete.rs
+ac2257f260f2d33d80e68a4a35230d6ccaafb9e60725dbd59e538b616e7d0114  crates/factory-recovery/src/restore.rs
+4f24bf137fe68d764ea763213f426464d5540e94b1597d69c7a376daf81af2af  crates/factory-store/src/migrations.rs
+9d8d8897b77e1404bfc612682391c7f43b9d1c578919f56b6443e2ad80a810af  crates/factory-store/src/schema.rs
+ca047d16212c0ac13a5498bbdb8bfb111eb02bc9b29f2101db6ba3e1af204f55  crates/factory-store/src/backup.rs
+96bb02650e1177529c417e0c04db96332e4262093abdb0c0d2a32d7b52bb44bb  crates/factory-store/src/lib.rs
+78ec58f1c80663bc54630899f525819f114e146d7c6417881be6a3570fb864a6  crates/factory-delegation/src/rule.rs
+6ca7942f51419389b1627dfee989e7909576c48352b8da9dc63100c9f033540d  crates/factory-delegation/src/queue.rs
+636aff81cd6de53bf03cb25d2ae4fd88643f92c9f4da650ce7671eab4debc626  docs/adr/0003-logical-api-and-event-sourcing-v1.md
+7194867a7e7c3b7a29fbad3a6570c3ec70fb35c79d2377b3cdc061d47ac68fa0  docs/adr/0007-supervised-plugin-process-protocol-v1.md
+ce8d8a13ba6d6a9b3514882c3329d5b52d2cf29d9cb5bef5f91f4982a6c26b16  docs/adr/0020-run-telemetry-and-the-evaluation-bench.md
+1516dd78be12c4f9714cf5dc5a696f93d90fd4c7f5f64a8e794d113602a601e8  reviews/REVIEW-PROTOCOL.md
+5db8f0aed1b00945b644a75f789ed6afd87f902285b593384a8e4bea71830876  reviews/governance/AGENTS.md
+e955a81a3abfecc54451f9957f988a707b7062690da9d5f45890c7f30c0f4441  reviews/governance/scenarios.csv

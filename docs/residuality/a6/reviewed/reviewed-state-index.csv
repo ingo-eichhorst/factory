@@ -1,0 +1,157 @@
+reviewer,state_id,author_name,author_kind,findings,qualifications,supplemental_branches,alignment_proposals,status
+operations,OP001,Ordinary bounded processing or recovery,transient or ordinary completion,CF07,QF07,none,AL24 AL45,conditional-author-description-with-review-limits
+operations,OP002,Local execution physically unavailable,externally maintained outage,CF01,QF01,none,AL13,conditional-author-description-with-review-limits
+operations,OP003,Capacity-limited backlog,externally driven congestion,none,none,none,AL43,conditional-author-description-with-review-limits
+operations,OP004,Work-amplification trap,attractor hypothesis,CF10 CF11,QF09 QF10,none,AL44,conditional-author-description-with-review-limits
+operations,OP005,Accepted but invalid work product,persistent erroneous record,CF02 CF08,QF02,none,AL25 AL26,conditional-author-description-with-review-limits
+operations,OP006,Only recoverable information destroyed,absorbing loss relative to stated inventory,CF13,QF12,none,AL34 AL35,conditional-author-description-with-review-limits
+operations,OP007,Authority and confidentiality compromised,persistent exposure with unresolved damage extent,none,none,none,AL39,conditional-author-description-with-review-limits
+operations,OP008,Mutation cannot commit,resource-maintained wait,none,none,none,AL12,conditional-author-description-with-review-limits
+operations,OP009,Canonical reconstruction unavailable,compatibility or integrity hold,none,none,none,AL32,conditional-author-description-with-review-limits
+operations,OP010,History depends on current registry,persistent divergent interpretation,none,none,none,AL30,conditional-author-description-with-review-limits
+operations,OP011,Restored history has an unseen tail,information-starved wait or latent divergence,CF19,QF17,none,AL05,conditional-author-description-with-review-limits
+operations,OP012,Recorded result outlives its bytes,partial information loss,CF16,QF14,none,AL31,conditional-author-description-with-review-limits
+operations,OP013,Intact material inaccessible to owner,access-recovery wait,CF13,QF12,none,AL33 AL35,conditional-author-description-with-review-limits
+operations,OP014,Possibly delivered prompt held for decision,policy hold under delivery uncertainty,CF03 CF05 CF19,QF03 QF05 QF17,none,AL02 AL04 AL11,conditional-author-description-with-review-limits
+operations,OP015,Workspace reserved with uncertain occupant,information-starved lease wait,CF03 CF04,QF03 QF04,none,AL03 AL04,conditional-author-description-with-review-limits
+operations,OP016,Untracked or overlapping writers,conditional ongoing conflict,CF04,QF04,none,AL08 AL09 AL10,conditional-author-description-with-review-limits
+operations,OP017,Permission or approval pending,policy hold,none,none,none,AL19,conditional-author-description-with-review-limits
+operations,OP018,Plugin activation quarantined,policy hold with degraded capability,CF06,QF06,none,AL49,conditional-author-description-with-review-limits
+operations,OP019,Restart without useful service,policy-driven cycle,none,none,none,AL49,conditional-author-description-with-review-limits
+operations,OP020,Apparently live dependency makes no business progress,externally or defect-maintained stall,none,none,none,AL15,conditional-author-description-with-review-limits
+operations,OP021,Partial service with independent local work,degraded operation,CF06,QF06,none,AL52,conditional-author-description-with-review-limits
+operations,OP022,External acceptance unknown,information-starved wait,CF18,QF16,none,AL01,conditional-author-description-with-review-limits
+operations,OP023,Duplicate business effects retained,persistent external damage or excess work,CF14,QF13,none,AL37,conditional-author-description-with-review-limits
+operations,OP024,Observer reports a stale or misleading reality,persistent observer divergence,CF02,QF02,none,AL14,conditional-author-description-with-review-limits
+operations,OP025,Identity points to the wrong object,persistent misassociation,CF04,QF04,none,AL07,conditional-author-description-with-review-limits
+operations,OP026,Guarded request refused without new effect,ordinary rejection endpoint,CF06 CF07,QF06 QF07,none,AL23,conditional-author-description-with-review-limits
+operations,OP027,Effect accepted outside the approved meaning,persistent authorization failure,none,none,none,AL40,conditional-author-description-with-review-limits
+operations,OP028,Irreversible effect already happened,ordinary completed effect with possible regret,CF14,QF13,none,AL37,conditional-author-description-with-review-limits
+operations,OP029,Compensation cannot finish,manual-intervention or information wait,none,none,none,AL41,conditional-author-description-with-review-limits
+operations,OP030,Compensation damages newer work,persistent divergent external state,none,none,none,AL42,conditional-author-description-with-review-limits
+operations,OP031,Decision service has no effective operator,human-dependent wait,none,none,none,AL17,conditional-author-description-with-review-limits
+operations,OP032,Alarm-driven approval degradation,attractor hypothesis,CF12,QF11,none,AL48,conditional-author-description-with-review-limits
+operations,OP033,Remote control unavailable while local state may live,externally maintained access outage,CF01,QF01,none,AL13,conditional-author-description-with-review-limits
+operations,OP034,Work bytes exist but no accepted completion,information-starved result wait,CF16,QF14,none,AL31,conditional-author-description-with-review-limits
+operations,OP035,Cancelled record with potentially continuing delivery,cross-boundary lifecycle inconsistency,CF05,QF05,none,AL11,conditional-author-description-with-review-limits
+governance,GV01,Bounded verified completion,ordinary completion,CF07,QF07,none,AL24,conditional-author-description-with-review-limits
+governance,GV02,Meaning or permission revalidation hold,policy hold,CF06 CF08,QF06,BR01,AL19,conditional-author-description-with-review-limits
+governance,GV03,Missing evidence wait,information-starved wait,none,none,none,none,conditional-author-description-with-review-limits
+governance,GV04,Unavailable dependency wait,externally maintained wait,none,none,none,AL52,conditional-author-description-with-review-limits
+governance,GV05,Self-confirming false knowledge,attractor hypothesis,CF08 CF17,QF15,BR01,AL26 AL27 AL58,conditional-author-description-with-review-limits
+governance,GV06,Captured evaluation and assurance,attractor hypothesis,none,none,none,AL28,conditional-author-description-with-review-limits
+governance,GV07,Unattributable or incomparable run,information-starved wait,none,none,none,AL30,conditional-author-description-with-review-limits
+governance,GV08,Disclosure cannot be recalled,absorbing loss within recipient boundary,CF15,none,none,AL38 AL39,conditional-author-description-with-review-limits
+governance,GV09,Attacker-controlled execution boundary,compromised regime,CF17,QF15,none,AL57,conditional-author-description-with-review-limits
+governance,GV10,Capacity exhaustion under continuing demand,externally driven saturation,none,none,none,AL43,conditional-author-description-with-review-limits
+governance,GV11,Work reproduces faster than it is discharged,attractor hypothesis,CF10 CF11,QF09 QF10,none,AL44 AL46,conditional-author-description-with-review-limits
+governance,GV12,Correct intermediate work without a stopping condition,internally recurrent nontermination hypothesis,CF11,QF10,none,AL46,conditional-author-description-with-review-limits
+governance,GV13,Ambiguous delivery held with leases,information-starved policy hold,CF03 CF04 CF19,QF03 QF04 QF17,none,AL02 AL03 AL04,conditional-author-description-with-review-limits
+governance,GV14,Authority orphanage,organizational policy hold,none,none,none,AL17 AL21,conditional-author-description-with-review-limits
+governance,GV15,Contested legitimate authority,organizational policy hold,none,none,none,AL20 AL21,conditional-author-description-with-review-limits
+governance,GV16,Organizational normalization of bypass,attractor hypothesis,none,none,none,AL28,conditional-author-description-with-review-limits
+governance,GV17,Legally constrained data disposition,legal policy hold,CF15,none,BR06,AL21,conditional-author-description-with-review-limits
+governance,GV18,Required historical provenance unavailable,absorbing information loss conditional on no independent copy,CF13,QF12,none,AL34,conditional-author-description-with-review-limits
+governance,GV19,Sensitive historical copies remain,latent exposure regime,none,none,none,AL39,conditional-author-description-with-review-limits
+governance,GV20,Prohibited service suspended,policy hold,CF15,none,BR06,AL22,conditional-author-description-with-review-limits
+governance,GV21,Economically suspended operation,economic policy hold,none,none,none,AL21,conditional-author-description-with-review-limits
+governance,GV22,Cost exposure cannot yet be bounded,information-starved economic regime,none,none,none,AL53,conditional-author-description-with-review-limits
+governance,GV23,Dominant scope captures shared capacity,attractor hypothesis,none,none,none,none,conditional-author-description-with-review-limits
+governance,GV24,Deadline or opportunity irreversibly missed,ordinary terminal value loss,none,none,none,AL54,conditional-author-description-with-review-limits
+governance,GV25,Frozen dependency island,externally constrained maintenance regime,none,none,none,AL51,conditional-author-description-with-review-limits
+governance,GV26,Incompatible history or schema held,compatibility policy hold,none,none,none,AL32,conditional-author-description-with-review-limits
+governance,GV27,Competing writers and histories,externally maintained divergent regime,none,none,none,AL08 AL09,conditional-author-description-with-review-limits
+governance,GV28,Records no longer justify their claims,integrity and epistemic deficit,none,none,none,none,conditional-author-description-with-review-limits
+governance,GV29,Complexity reinforces central service growth,attractor hypothesis,none,none,none,AL51,conditional-author-description-with-review-limits
+governance,GV30,Operating with narrowed recovery diversity,vulnerable operating regime,none,none,none,none,conditional-author-description-with-review-limits
+governance,GV31,Operational assurance exceeds demonstrated evidence,assurance information deficit,CF09,QF08,none,AL29,conditional-author-description-with-review-limits
+governance,GV32,Custody-constrained operation,externally imposed access regime,none,none,none,AL60,conditional-author-description-with-review-limits
+governance,GV33,Authority transition complete for future work,ordinary organizational transition,none,none,none,none,conditional-author-description-with-review-limits
+governance,GV34,Separated project lacks permitted context,information and legal boundary hold,none,none,none,AL60,conditional-author-description-with-review-limits
+governance,GV35,Instrument continuity broken,measurement discontinuity,none,none,none,AL30,conditional-author-description-with-review-limits
+governance,GV36,Offline work awaits world reconciliation,information-starved wait,none,none,none,none,conditional-author-description-with-review-limits
+governance,GV37,Deployment requirement exceeds established capability,unresolved capability gap,none,none,none,none,conditional-author-description-with-review-limits
+governance,GV38,Irreversible physical or business effect,absorbing consequence,CF14,QF13,none,AL37 AL42,conditional-author-description-with-review-limits
+governance,GV39,History readable but no longer intelligible,semantic information loss conditional on absent decoder,CF13 CF16,QF12 QF14,none,AL31,conditional-author-description-with-review-limits
+governance,GV40,Intermittent duty-cycle operation,externally driven cycle,none,none,none,AL18,conditional-author-description-with-review-limits
+governance,GV41,Cryptographic trust basis withdrawn,epistemic and security hold,none,none,none,AL39,conditional-author-description-with-review-limits
+governance,GV42,System information irrecoverably absent,absorbing loss within stated system boundary,CF13,QF12,none,AL36,conditional-author-description-with-review-limits
+governance,GV43,Stale history mistaken for current permission,unsafe stale-state regime,CF19,QF17,none,AL05 AL06,conditional-author-description-with-review-limits
+governance,GV44,Compensation preconditions no longer hold,information-starved policy hold,none,none,none,AL41,conditional-author-description-with-review-limits
+governance,GV45,Plugin startup dependency deadlock,conditional deadlock,none,none,none,AL49 AL50,conditional-author-description-with-review-limits
+governance,GV46,Service retired with usable handoff,ordinary completion,CF18,QF16,none,AL56,conditional-author-description-with-review-limits
+governance,GV47,Recovery duration exceeds service objective,externally constrained degraded recovery,none,none,none,AL55,conditional-author-description-with-review-limits
+governance,GV48,Essential content inaccessible with known recovery means,unresolved recovery capability,CF13,QF12,none,AL33 AL35,conditional-author-description-with-review-limits
+observability,OB01,Bounded terminal disposition,ordinary completion,CF07,QF07,none,AL24,conditional-author-description-with-review-limits
+observability,OB02,Unobserved outage,externally maintained outage,CF01,QF01,none,AL13,conditional-author-description-with-review-limits
+observability,OB03,Green without useful service,observation mismatch,CF02,QF02,none,AL14 AL15,conditional-author-description-with-review-limits
+observability,OB04,Alert exists but no human receives it,information-starved wait,none,none,none,AL16 AL17,conditional-author-description-with-review-limits
+observability,OB05,Administrative silence,policy hold,CF12,QF11,none,AL18,conditional-author-description-with-review-limits
+observability,OB06,Recovery evidence missing but not proven lost,information-starved wait,CF03 CF04,QF03 QF04,none,AL03 AL04 AL33,conditional-author-description-with-review-limits
+observability,OB07,Explicit authorization or freshness hold,policy hold,none,none,none,AL19,conditional-author-description-with-review-limits
+observability,OB08,Readable store unable to advance,resource-constrained regime,none,none,none,AL12,conditional-author-description-with-review-limits
+observability,OB09,Business deadline missed,ordinary terminal loss,none,none,none,AL54,conditional-author-description-with-review-limits
+observability,OB10,Slots consumed by nonterminating work,accumulating capacity loss,none,none,none,AL47,conditional-author-description-with-review-limits
+observability,OB11,Retry load sustains overload,attractor hypothesis,CF10,QF09,none,AL44,conditional-author-description-with-review-limits
+observability,OB12,Synchronized finite surge,transient,none,none,none,AL45,conditional-author-description-with-review-limits
+observability,OB13,Head-of-line obstruction,resource-constrained wait,none,none,none,AL47,conditional-author-description-with-review-limits
+observability,OB14,Normal work starved by priority demand,externally driven regime,none,none,none,AL43,conditional-author-description-with-review-limits
+observability,OB15,Fast answer with incomplete or biased meaning,observation or semantic mismatch,CF09,QF08,none,AL29,conditional-author-description-with-review-limits
+observability,OB16,External effect unresolved,information-starved wait,CF19,QF17,none,AL01,conditional-author-description-with-review-limits
+observability,OB17,Unwanted irreversible effect occurred,absorbing historical loss,CF05 CF14,QF05 QF13,none,AL11 AL37,conditional-author-description-with-review-limits
+observability,OB18,Child continues beyond parent lifecycle,uncontained execution transient,none,none,none,AL10,conditional-author-description-with-review-limits
+observability,OB19,Two sources share one observation identity,identity ambiguity,none,none,none,AL07,conditional-author-description-with-review-limits
+observability,OB20,Trusted access cannot be established,policy hold,none,none,none,none,conditional-author-description-with-review-limits
+observability,OB21,Confidentiality already lost,absorbing loss,none,none,none,AL38,conditional-author-description-with-review-limits
+observability,OB22,Compromised controller reproduces trust,attractor hypothesis,CF17,QF15,none,AL57 AL58,conditional-author-description-with-review-limits
+observability,OB23,Restore cannot fit or finish in time,resource-constrained wait,none,none,none,AL55,conditional-author-description-with-review-limits
+observability,OB24,Encrypted history irrecoverable,absorbing loss under stated knowledge,CF13,QF12,none,AL35,conditional-author-description-with-review-limits
+observability,OB25,Boundary rejects invalid work locally,ordinary rejection or bounded quarantine,CF06,QF06,none,AL23,conditional-author-description-with-review-limits
+observability,OB26,Cold-path capacity deficit,transient,none,none,none,AL45,conditional-author-description-with-review-limits
+observability,OB27,Observation or message state exhausts resources,resource exhaustion,none,none,none,none,conditional-author-description-with-review-limits
+observability,OB28,Evidence needed for correlation erased,absorbing evidentiary loss,CF13,QF12,none,AL34,conditional-author-description-with-review-limits
+observability,OB29,Stop acknowledged without durable stop evidence,observation and control mismatch,CF05,QF05,none,AL11,conditional-author-description-with-review-limits
+observability,OB30,Finite historical backlog,transient or policy hold,none,none,none,AL45,conditional-author-description-with-review-limits
+observability,OB31,Thermally limited service,externally driven regime or cycle,none,none,none,AL43,conditional-author-description-with-review-limits
+observability,OB32,Concurrent writers after unsupported lease release,unsafe execution regime,CF04,QF04,none,AL08 AL09 AL10,conditional-author-description-with-review-limits
+observability,OB33,Wrong authority accepted for an action,authorization mismatch,none,none,none,AL40,conditional-author-description-with-review-limits
+observability,OB34,Alarm fatigue reinforces silence,attractor hypothesis,CF12,QF11,none,AL48,conditional-author-description-with-review-limits
+observability,OB35,Control path starved by data work,resource-constrained wait,none,none,none,AL47,conditional-author-description-with-review-limits
+observability,OB36,Recursive fan-out expands demand,self-amplifying growth hypothesis,CF11,QF10,none,AL46,conditional-author-description-with-review-limits
+boundaries,BD01,Verified bounded completion,ordinary completion,CF07,QF07,none,AL24,conditional-author-description-with-review-limits
+boundaries,BD02,Explicit validity hold,policy hold,CF06,QF06,none,AL19 AL23,conditional-author-description-with-review-limits
+boundaries,BD03,Effect unknown and retry withheld,information-starved wait,CF03 CF19,QF03 QF17,none,AL01 AL02,conditional-author-description-with-review-limits
+boundaries,BD04,Settled but semantically wrong result,erroneous completion,CF02 CF08 CF16,QF02 QF14,none,AL25 AL26,conditional-author-description-with-review-limits
+boundaries,BD05,Self-confirming false record,attractor hypothesis,CF17,QF15,none,AL26 AL27 AL58,conditional-author-description-with-review-limits
+boundaries,BD06,Confidentiality already lost,absorbing loss,CF15,none,BR06,AL38,conditional-author-description-with-review-limits
+boundaries,BD07,Active probing and response cycle,externally driven cycle,none,none,none,none,conditional-author-description-with-review-limits
+boundaries,BD08,Competing writers and repairs,attractor hypothesis,none,none,none,AL09,conditional-author-description-with-review-limits
+boundaries,BD09,Delayed work has outlived its authority,transient exposure,none,none,none,AL05 AL06 AL40,conditional-author-description-with-review-limits
+boundaries,BD10,Past external effect cannot be rolled back,absorbing loss,CF14,QF13,none,AL37 AL42,conditional-author-description-with-review-limits
+boundaries,BD11,Writer handoff ownership unknown,information-starved wait,none,none,none,none,conditional-author-description-with-review-limits
+boundaries,BD12,Recovery prerequisite deadlock,dependency deadlock,none,none,none,AL49 AL50,conditional-author-description-with-review-limits
+boundaries,BD13,Maintenance lock-in,attractor hypothesis,CF08,none,BR02,AL51,conditional-author-description-with-review-limits
+boundaries,BD14,Exception-driven authority erosion,attractor hypothesis,CF08,none,BR02,AL28,conditional-author-description-with-review-limits
+boundaries,BD15,Common dependency outage,externally sustained outage,none,none,none,AL52,conditional-author-description-with-review-limits
+boundaries,BD16,Test evidence cannot see the defect,unresolved dynamics,CF09,QF08,none,AL29,conditional-author-description-with-review-limits
+boundaries,BD17,Signal present but not actionable by the human,information-starved wait,none,none,none,AL16 AL17,conditional-author-description-with-review-limits
+boundaries,BD18,Alert workload sustains non-response,attractor hypothesis,CF08 CF12,QF11,BR03,AL48,conditional-author-description-with-review-limits
+boundaries,BD19,Acknowledged but deliberately deferred,policy hold,CF08 CF12,QF11,BR03,AL17,conditional-author-description-with-review-limits
+boundaries,BD20,Legitimate authority conflict,policy hold,none,none,none,AL20,conditional-author-description-with-review-limits
+boundaries,BD21,Oversight captured or inaccessible,externally sustained control regime,none,none,none,none,conditional-author-description-with-review-limits
+boundaries,BD22,Provider-bound service ended,service loss relative to a boundary,none,none,none,AL51,conditional-author-description-with-review-limits
+boundaries,BD23,Delayed liabilities still arriving,transient with uncertain horizon,CF18,QF16,none,AL53,conditional-author-description-with-review-limits
+boundaries,BD24,Speculation or retry overload,attractor hypothesis,CF10,QF09,none,AL44,conditional-author-description-with-review-limits
+boundaries,BD25,Legally or safely withheld operation,policy hold,CF06 CF15,QF06,BR06,AL22,conditional-author-description-with-review-limits
+boundaries,BD26,Schedule meaning or expiry drift,policy-retained timing error,none,none,none,AL18 AL59,conditional-author-description-with-review-limits
+boundaries,BD27,Contradictory evidence retained,information-starved wait,none,none,none,AL07,conditional-author-description-with-review-limits
+boundaries,BD28,Rewarded metric substitution,attractor hypothesis,CF08,none,BR04 BR05,AL28,conditional-author-description-with-review-limits
+boundaries,BD29,Planned shutdown mistaken for recurring failure,externally driven cycle,none,none,none,AL18,conditional-author-description-with-review-limits
+boundaries,BD30,Archive bytes without a trustworthy interpreter,information-starved wait,CF13 CF16,QF12 QF14,none,AL31 AL32 AL33,conditional-author-description-with-review-limits
+boundaries,BD31,Distinct names collapsed with information lost,absorbing loss conditional on overwrite,CF13,QF12,none,AL34,conditional-author-description-with-review-limits
+boundaries,BD32,Local shutdown with outstanding external obligations,information-starved wait,CF18,QF16,none,AL56,conditional-author-description-with-review-limits
+boundaries,BD33,All recovery information and legitimate actors gone,absorbing loss,CF13,QF12,none,AL36,conditional-author-description-with-review-limits
+boundaries,BD34,Perfectly consistent observations cannot ground truth,epistemic indistinguishability,CF17,QF15,none,AL58,conditional-author-description-with-review-limits
+boundaries,BD35,Trusted malicious substrate maintains its own credibility,attractor hypothesis,CF17,QF15,none,AL57 AL58,conditional-author-description-with-review-limits
+boundaries,BD36,Business continues outside monitor visibility,externally sustained partial partition,CF01,QF01,none,AL13 AL52,conditional-author-description-with-review-limits
+boundaries,BD37,Necessary prerequisite unavailable,externally sustained wait,none,none,none,AL51,conditional-author-description-with-review-limits
