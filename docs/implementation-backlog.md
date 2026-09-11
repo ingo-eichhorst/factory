@@ -1085,6 +1085,54 @@ roots. Both are gitignored, so a careless move is not recoverable from Git.
 Moving them into `.factory/` and converting the pages to linked notes needs its
 own task with a migration and rollback plan, in the same way the task store does.
 
+**Shipped, and what accepting it found that the tests did not.** Closed
+2026-09-11. `docs/adr/0022-agent-discovery-and-durable-writing.md` holds the
+thirteen decisions; `docs/slice-12-operator-guide.md` is the operator record.
+
+The three questions this section asked to settle first were settled as
+follows. The note body arrives on **standard input**, with no `--body` flag as
+a second path. `knowledge write` **may** update an existing note, but only
+when `--update` is given, because whether a new note contradicts an old one is
+a judgement the CLI cannot make and must leave with the agent. A note name is
+one to sixty-four characters of lowercase letters, digits and hyphens, given
+explicitly and never derived from the title — and there is **no rename**,
+because renaming means rewriting every `[[link]]` pointing at the note.
+
+Three further things had to be decided that this section could not state,
+because they only exist once stations 8, 10 and 11 are in the tree:
+
+- The provenance record is a new `durable_writes` table, not a row in
+  `task_events`. Neither this section nor design §7 names that table; both say
+  the write is recorded "as a task event so the provenance survives the
+  session", and it is the second half that states the purpose. `task_events`
+  could not hold a write with no task, and design §11 projects it into
+  throughput and scrap figures.
+- `agent list` names its caller by **session**, resolved the way `task send`
+  resolves it, so the advisory answer cannot drift from the enforced one.
+  `--scope` remains as an openly hypothetical form for a human.
+- Availability is **ranked**, because an agent may hold several sessions, and
+  `idle` outranks `busy`.
+
+**What accepting it found.** The workspace held 892 passing tests when the
+implementation was complete. A live drill on a throwaway instance then found
+five defects none of them caught — memory filenames containing colons, which
+`rsync` reads as remote host names; microsecond timestamps where a date was
+asked for; a delegation refusal that was not grammatical English; UUIDs
+printed where names were already to hand; and a refusal echoing its own
+structured data as raw JSON. All five are fixed, each with a test that would
+have caught it.
+
+**Open, and outside this station:**
+
+- Connecting to a daemon under a deep instance root fails with `path must be
+  shorter than SUN_LEN`, naming neither the path nor the limit nor the fix.
+- `task send` lists a duplicated scope name twice without remarking on it —
+  the same collision `memory add` refuses.
+- Whether `knowledge write` should ever accept frontmatter keys beyond title,
+  status, updated and sources. Refused today.
+- The migration of `knowledge/wiki/`'s seventeen pages and the `MEMORY.md`
+  files, which this section already defers.
+
 ## 13. Scope-bound secret storage
 
 **Objective:** Give plugins and integrations a credential boundary that keeps
