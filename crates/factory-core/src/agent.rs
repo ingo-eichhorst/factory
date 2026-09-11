@@ -116,6 +116,9 @@ pub struct AgentSession {
     pub agent: String,
     pub runtime: String,
     pub lifetime: Lifetime,
+    /// Defaulted on read: a row written before roles existed is a worker,
+    /// which is the same answer default-closed gives anyway.
+    #[serde(default)]
     pub role: Role,
     pub state: AgentState,
     /// What this agent presents to say which agent it is. Never leaves the

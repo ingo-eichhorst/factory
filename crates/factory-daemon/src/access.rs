@@ -142,6 +142,7 @@ impl Engine {
             Request::Status
             | Request::Adapters
             | Request::Agents
+            | Request::Occupancy { .. }
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }

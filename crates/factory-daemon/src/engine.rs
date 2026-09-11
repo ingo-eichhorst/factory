@@ -31,6 +31,10 @@ pub struct Engine {
     pub factory_bin: PathBuf,
     started: Instant,
     interfaces: Vec<String>,
+    /// The last liveness we wrote down for each session, so a poll that finds
+    /// no change writes nothing. Lost on restart, which is right: after a
+    /// restart the first observation is genuinely new information.
+    pub(crate) seen_status: std::sync::Mutex<std::collections::HashMap<String, RuntimeStatus>>,
 }
 
 impl Engine {
@@ -49,6 +53,7 @@ impl Engine {
             factory_bin,
             started: Instant::now(),
             interfaces,
+            seen_status: Default::default(),
         }
     }
 
@@ -100,6 +105,9 @@ impl Engine {
             Request::Adapters => Ok(self.registry.list().into()),
             Request::Agents => Ok(Payload::Scopes {
                 scopes: self.scope_views().await?,
+            }),
+            Request::Occupancy { minutes } => Ok(Payload::Occupancy {
+                occupancy: self.occupancy(minutes).await?,
             }),
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),
@@ -242,7 +250,7 @@ impl Engine {
     /// what they are doing. One call, because a page that had to join config,
     /// adapters, standing agents, runs and tasks itself would be showing five
     /// different moments in time.
-    async fn scope_views(&self) -> Result<Vec<ScopeView>> {
+    pub(crate) async fn scope_views(&self) -> Result<Vec<ScopeView>> {
         let adapters = self.registry.list();
         let described: std::collections::BTreeMap<String, (String, String)> = adapters
             .adapters
@@ -784,6 +792,13 @@ impl Engine {
             )
             .await?;
         self.bus.publish(Event::RunUpdated { run: run.clone() });
+        // The run's session is released here, so nothing will poll it again.
+        // Close its liveness span now or the chart draws the agent as still
+        // working, forever.
+        if let Ok(Some(task)) = self.store.get(&run.task_id).await {
+            self.record_gone(&format!("run:{}", run.id), &task.scope, &run.agent)
+                .await;
+        }
         self.mirror_to_task(&run).await;
         Ok(run)
     }

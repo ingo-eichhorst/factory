@@ -362,6 +362,11 @@ impl AgentRuntime for HerdrRuntime {
             "working" => RuntimeStatus::Working,
             "blocked" => RuntimeStatus::Blocked,
             "starting" => RuntimeStatus::Starting,
+            // herdr says `done` when an agent has finished its turn and is
+            // sitting there. For occupancy that is the same as idle: the bay
+            // is free. What the agent *achieved* comes from its callback, and
+            // never from here.
+            "done" => RuntimeStatus::Idle,
             _ => RuntimeStatus::Unknown,
         })
     }

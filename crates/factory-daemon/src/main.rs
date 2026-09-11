@@ -5,6 +5,7 @@ mod access;
 mod agents;
 mod engine;
 mod interfaces;
+mod occupancy;
 mod scheduler;
 mod schedule;
 mod ui;
@@ -236,6 +237,9 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     }
     tracing::info!("shutting down");
     let _ = shutdown_tx.send(true);
+    // Before the loops stop: nothing will be watching the agents from here, so
+    // say so in the record rather than leaving a span open across the gap.
+    engine.close_liveness().await;
 
     for (kind, handle) in mounted {
         if tokio::time::timeout(std::time::Duration::from_secs(5), handle)

@@ -167,6 +167,7 @@ impl Engine {
         self.bus.publish(Event::AgentUpdated {
             agent: agent.clone(),
         });
+        self.record_gone(&agent.id, &agent.scope, &agent.name).await;
         tracing::info!(agent = %agent.id, "standing agent stopped");
         Ok(agent)
     }
@@ -226,14 +227,20 @@ impl Engine {
             .ok_or_else(|| FactoryError::TaskNotFound(format!("agent {id}")))
     }
 
+    /// Is the session still there -- and, on the way past, write down what it
+    /// was doing. The supervisor asks the runtime once per tick anyway, and
+    /// that answer is the only record of liveness anyone will ever have.
     async fn agent_alive(&self, agent: &AgentSession) -> bool {
         let Some(session) = &agent.session else {
             return false;
         };
-        match self.registry.runtime(&session.runtime) {
-            Ok(rt) => rt.status(session).await.unwrap_or(RuntimeStatus::Gone) != RuntimeStatus::Gone,
-            Err(_) => false,
-        }
+        let status = match self.registry.runtime(&session.runtime) {
+            Ok(rt) => rt.status(session).await.unwrap_or(RuntimeStatus::Gone),
+            Err(_) => RuntimeStatus::Gone,
+        };
+        self.record_status(&agent.id, &agent.scope, &agent.name, status)
+            .await;
+        status != RuntimeStatus::Gone
     }
 
     /// Line up what the config declares with what is actually still running,

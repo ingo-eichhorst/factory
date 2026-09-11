@@ -325,7 +325,22 @@ the moment a run exists — live from the session while it runs, and the
 transcript kept at the end once it does not — so there is never a button to
 press to find out what an agent is doing.
 
-**Agents** is arranged by scope: each scope, then the agents it declares, then
+**Agents** has two views of the same thing. **Occupancy** is a chart: one row
+per agent, grouped by scope, drawn against a shared clock. Three layers, kept
+deliberately apart because they are different kinds of evidence:
+
+- a **solid block** is a run — Factory started it and the agent reported back;
+- a **dashed block** past the now line is a schedule's next firing, drawn as
+  wide as the median of that task's own finished runs, or as a marker when it
+  has none to measure;
+- the **thin strip** underneath is liveness: what the runtime saw on the
+  screen. A guess about a terminal, never a claim about work.
+
+The right-hand column is utilisation over the window. Clicking any block opens
+the task. The chart looks a quarter of a window ahead of now, so the next
+scheduled run has room to be read.
+
+**Roster** is the list: each scope, then the agents it declares, then
 what each one is doing. A standing agent can be started, stopped, and opened —
 its terminal is live, and there is a line to type into it with keys for Enter,
 Esc, ↑, ↓ and Ctrl-C. That is enough to answer the prompt an agent is sitting
@@ -341,6 +356,12 @@ already chosen. A task run's terminal takes the same input.
 - **No schema migrations.** The database carries a version; one written by a
   different version is dropped and rebuilt. The daemon warns when it does this.
   Fine for a prototype, not for anything you would miss.
+- **Liveness only exists from when Factory started writing it down.** herdr
+  answers "what is this agent doing now" and keeps no history, so the daemon
+  records every change it observes into an append-only table. Nothing before
+  the first recording exists, and the chart says so rather than drawing a flat
+  line back to the beginning of time. The runtime is polled, so a flip and a
+  flip back between two ticks leaves no trace.
 - **A task always opens its own session**, even when it names a standing agent.
   Sending work into an agent's existing session — so it keeps its context — is
   a different feature, with its own questions about whose transcript is whose.
@@ -364,5 +385,10 @@ already chosen. A task run's terminal takes the same input.
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
     crates/factory-cli       the `factory` binary
-    ui/index.html            the web UI, compiled into the daemon
+    ui/                      the web UI, compiled into the daemon
+    ui/index.html              the page skeleton and the two view containers
+    ui/app.css                 every style
+    ui/js/core.js              DOM helpers, client state, the HTTP call, the socket
+    ui/js/app.js               the wiring: which page shows, what an event means
+    ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
     examples/plugins         a worked example of an out-of-process adapter

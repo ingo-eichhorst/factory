@@ -8,9 +8,10 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use factory_core::adapter::TaskStore;
+use factory_core::adapter::{RuntimeStatus, TaskStore};
 use factory_core::error::{FactoryError, Result};
 use factory_core::agent::AgentSession;
+use factory_core::occupancy::StatusChange;
 use factory_core::run::{NewRun, Run, RunPatch, RunStatus};
 use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -64,8 +65,26 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     data  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS agents_scope ON agent_sessions(scope, name);
+
+-- Liveness, append-only. Deliberately outside the version handshake below:
+-- this table is a log of what was observed, not a projection of the domain,
+-- so a schema change to tasks or runs has no business erasing it. Nothing
+-- else will ever have this history -- herdr answers "now" and keeps no past.
+CREATE TABLE IF NOT EXISTS agent_status (
+    seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject TEXT NOT NULL,
+    scope   TEXT NOT NULL,
+    agent   TEXT NOT NULL,
+    status  TEXT NOT NULL,
+    at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_status_at ON agent_status(at);
+CREATE INDEX IF NOT EXISTS agent_status_subject ON agent_status(subject, seq);
 "#;
 
+/// What a version mismatch throws away. `agent_status` is not in here on
+/// purpose: it is an observation log, and the runs it annotates being rebuilt
+/// is no reason to forget what the agents were doing.
 const DROP_ALL: &str = r#"
 DROP TABLE IF EXISTS agent_sessions;
 DROP TABLE IF EXISTS task_entries;
@@ -212,6 +231,14 @@ fn read_task(conn: &Connection, id: &str) -> Result<Task> {
         .optional()
         .map_err(adapter_err)?;
     decode(json.ok_or_else(|| FactoryError::TaskNotFound(id.to_string()))?)
+}
+
+/// A timestamp written by this store and read back. A row we cannot parse is
+/// a bug in us, not bad input, so it is an adapter error rather than a skip.
+fn parse_time(raw: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|e| adapter_err(format!("unreadable timestamp {raw:?}: {e}")))
 }
 
 fn collect<T: serde::de::DeserializeOwned>(
@@ -617,6 +644,90 @@ impl TaskStore for SqliteStore {
                 )
                 .map_err(adapter_err)?;
             collect(&mut stmt, params![run_id, limit])
+        })
+        .await
+    }
+
+    async fn runs_between(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<Run>> {
+        let (from, to) = (from.to_rfc3339(), to.to_rfc3339());
+        self.with_conn(move |conn| {
+            // A run overlaps the window if it started before the window ended
+            // and has not finished before the window began. An open run has no
+            // `ended_at`, and is still going by definition.
+            let mut stmt = conn
+                .prepare(
+                    "SELECT data FROM runs
+                     WHERE started_at <= ?2 AND (ended_at IS NULL OR ended_at >= ?1)
+                     ORDER BY started_at ASC",
+                )
+                .map_err(adapter_err)?;
+            collect(&mut stmt, params![from, to])
+        })
+        .await
+    }
+
+    async fn append_status(&self, change: &StatusChange) -> Result<()> {
+        let (subject, scope, agent) = (
+            change.subject.clone(),
+            change.scope.clone(),
+            change.agent.clone(),
+        );
+        let (status, at) = (change.status.as_str(), change.at.to_rfc3339());
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO agent_status (subject, scope, agent, status, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![subject, scope, agent, status, at],
+            )
+            .map_err(adapter_err)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn status_changes(&self, since: DateTime<Utc>) -> Result<Vec<StatusChange>> {
+        let since = since.to_rfc3339();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT subject, scope, agent, status, at FROM agent_status
+                     WHERE at >= ?1 ORDER BY seq ASC",
+                )
+                .map_err(adapter_err)?;
+            let rows = stmt
+                .query_map(params![since], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(adapter_err)?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (subject, scope, agent, status, at) = row.map_err(adapter_err)?;
+                out.push(StatusChange {
+                    subject,
+                    scope,
+                    agent,
+                    status: RuntimeStatus::parse(&status),
+                    at: parse_time(&at)?,
+                });
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    async fn status_origin(&self) -> Result<Option<DateTime<Utc>>> {
+        self.with_conn(move |conn| {
+            let raw: Option<String> = conn
+                .query_row("SELECT at FROM agent_status ORDER BY seq ASC LIMIT 1", [], |r| r.get(0))
+                .optional()
+                .map_err(adapter_err)?;
+            raw.map(|at| parse_time(&at)).transpose()
         })
         .await
     }

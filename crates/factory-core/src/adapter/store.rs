@@ -1,5 +1,6 @@
 use crate::agent::AgentSession;
 use crate::error::Result;
+use crate::occupancy::StatusChange;
 use crate::run::{NewRun, Run, RunPatch};
 use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch};
 
@@ -54,6 +55,40 @@ pub trait TaskStore: Send + Sync {
 
     /// Tasks whose `next_run_at` has come.
     async fn due(&self, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Task>>;
+
+    // -- liveness history ---------------------------------------------------
+
+    /// Remember that a session's liveness changed. The runtime keeps no past
+    /// -- herdr will tell you what an agent is doing now and nothing about
+    /// what it was doing an hour ago -- so if this is not written down here,
+    /// it is gone.
+    ///
+    /// A store that does not keep history may drop it: the occupancy chart
+    /// then draws runs only, which is the authoritative half anyway.
+    async fn append_status(&self, _change: &StatusChange) -> Result<()> {
+        Ok(())
+    }
+
+    /// Every change from `since` onward, oldest first.
+    async fn status_changes(
+        &self,
+        _since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<StatusChange>> {
+        Ok(Vec::new())
+    }
+
+    /// The oldest change on record. Marks where the chart may start claiming
+    /// that a quiet agent was idle rather than unobserved.
+    async fn status_origin(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        Ok(None)
+    }
+
+    /// Every run that overlaps the window, whatever task it belongs to.
+    async fn runs_between(
+        &self,
+        from: chrono::DateTime<chrono::Utc>,
+        to: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Run>>;
 }
 
 /// Fill in the fields a store owns rather than the caller.

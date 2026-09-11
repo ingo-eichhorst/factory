@@ -7,6 +7,7 @@ pub mod agent;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod occupancy;
 pub mod protocol;
 pub mod run;
 pub mod task;

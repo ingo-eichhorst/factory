@@ -35,6 +35,33 @@ pub enum RuntimeStatus {
     Unknown,
 }
 
+impl RuntimeStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Blocked => "blocked",
+            Self::Gone => "gone",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Anything unrecognised is `Unknown` rather than an error: a runtime is
+    /// free to grow a state we have never heard of, and a chart that says
+    /// "unknown" is better than one that refuses to draw.
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "starting" => Self::Starting,
+            "idle" => Self::Idle,
+            "working" => Self::Working,
+            "blocked" => Self::Blocked,
+            "gone" => Self::Gone,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// Adapter seam 2: where agents actually run. Opens a session, hands it a
 /// prompt, and can be asked whether it is still alive.
 #[async_trait::async_trait]

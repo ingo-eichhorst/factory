@@ -76,9 +76,11 @@ pub struct ForemanConfig {
     /// The name the synthesised agent gets in each scope.
     #[serde(default = "default_foreman_name")]
     pub name: String,
-    /// Which adapter it runs on.
-    #[serde(default = "default_agent")]
-    pub harness: String,
+    /// Which adapter it runs on. Unset means the instance's `default_agent` --
+    /// a synthesised foreman should not quietly run a different harness from
+    /// everything else in the instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     /// Scopes that get none. The instance root is the usual one: it is the
     /// company, not a project.
     #[serde(default = "default_foreman_exclude")]
@@ -97,7 +99,7 @@ impl Default for ForemanConfig {
         Self {
             enabled: false,
             name: default_foreman_name(),
-            harness: default_agent(),
+            harness: None,
             exclude: default_foreman_exclude(),
         }
     }
@@ -276,7 +278,11 @@ impl Scope {
         }
         out.push(ScopeAgent {
             name: Some(foreman.name.clone()),
-            harness: foreman.harness.clone(),
+            harness: foreman
+                .harness
+                .clone()
+                .or_else(|| self.agent_adapter().map(str::to_string))
+                .unwrap_or_else(default_agent),
             lifetime: Lifetime::Permanent,
             role: Role::Foreman,
             autostart: Some(true),

@@ -4,6 +4,7 @@
 
 use crate::agent::AgentSession;
 use crate::event::Event;
+use crate::occupancy::Occupancy;
 use crate::run::Run;
 use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport};
 use serde::{Deserialize, Serialize};
@@ -99,6 +100,14 @@ pub enum Request {
         #[serde(default)]
         lines: Option<u32>,
     },
+    /// What every bay was doing over a window: the runs that held it, what is
+    /// scheduled to hold it next, and what the runtime saw in between.
+    #[serde(rename = "occupancy")]
+    Occupancy {
+        /// How far back to look. Defaults to the last twelve hours.
+        #[serde(default)]
+        minutes: Option<u32>,
+    },
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -124,6 +133,7 @@ pub enum Payload {
     Text { text: String },
     Deleted { deleted: bool },
     Event { event: Event },
+    Occupancy { occupancy: Occupancy },
 }
 
 /// A request plus who is making it.

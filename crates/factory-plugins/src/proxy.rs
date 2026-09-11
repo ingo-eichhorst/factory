@@ -196,6 +196,16 @@ impl TaskStore for PluginStore {
         self.proc.call("run.active_all", json!({})).await
     }
 
+    async fn runs_between(
+        &self,
+        from: chrono::DateTime<chrono::Utc>,
+        to: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Run>> {
+        self.proc
+            .call("run.between", json!({ "from": from, "to": to }))
+            .await
+    }
+
     async fn put_agent(&self, agent: &AgentSession) -> Result<()> {
         self.proc
             .call_raw("agent.put", json!({ "agent": agent }))

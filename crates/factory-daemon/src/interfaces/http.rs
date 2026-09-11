@@ -106,10 +106,12 @@ fn reachable_urls(port: u16) -> Vec<String> {
 fn router(engine: Arc<Engine>) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/ui/{*path}", get(asset))
         .route("/ws", get(ws_upgrade))
         .route("/api/status", get(status))
         .route("/api/adapters", get(adapters))
         .route("/api/agents", get(agents))
+        .route("/api/occupancy", get(occupancy))
         // The id of a standing agent is `<scope>/<name>`, which has a slash in
         // it, so these take it in the body rather than the path.
         .route("/api/agents/start", post(agent_start))
@@ -139,6 +141,16 @@ async fn index() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         crate::ui::INDEX_HTML,
     )
+}
+
+/// The page's own files: stylesheet and ES modules, named in `ui::ASSETS`.
+/// A path that is not in that list is a 404, never a guess at a file on disk --
+/// the daemon serves what it was compiled with and nothing else.
+async fn asset(Path(path): Path<String>) -> AxumResponse {
+    match crate::ui::asset(&path) {
+        Some((mime, body)) => ([(header::CONTENT_TYPE, mime)], body).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such file").into_response(),
+    }
 }
 
 /// Every route funnels through here, so REST and the socket cannot drift apart.
@@ -183,6 +195,24 @@ async fn adapters(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn agents(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Agents).await
+}
+
+#[derive(serde::Deserialize)]
+struct Window {
+    minutes: Option<u32>,
+}
+
+async fn occupancy(
+    State(engine): State<Arc<Engine>>,
+    Query(window): Query<Window>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::Occupancy {
+            minutes: window.minutes,
+        },
+    )
+    .await
 }
 
 async fn list_tasks(
