@@ -892,6 +892,26 @@ fn pi_extension_args() -> Vec<String> {
 /// before this field existed (ADR 0024).
 fn pi_args(model: Option<&str>) -> Vec<String> {
     let mut args = pi_extension_args();
+    // Trust the workspace's own `.pi/` for this run.
+    //
+    // Pi discovers project-local extensions and settings only in a directory a
+    // human has approved, and refuses them everywhere else — a sensible
+    // default for a tool a person points at a checkout they just cloned. Under
+    // Factory the situation is different in one specific way: the workspace is
+    // not somewhere this process wandered into, it is the canonical path of a
+    // scope an operator declared in `.factory/config.yaml`, and Factory is the
+    // one putting an agent there.
+    //
+    // Without this flag project-level harness configuration is inert under
+    // Factory: a provider registered by the scope's own extension never loads,
+    // so a `model:` naming it (ADR 0024) cannot resolve, and the failure
+    // arrives as "model not found" with nothing pointing at the real cause.
+    //
+    // What it grants is bounded by what was already granted: the session about
+    // to start has tool access in this very directory. A workspace that may
+    // not be trusted to register a provider is a workspace no agent should
+    // have been started in.
+    args.push("--approve".to_string());
     if let Some(model) = model {
         args.push("--model".to_string());
         args.push(model.to_string());
@@ -2058,7 +2078,18 @@ mod tests {
             !args.iter().any(|a| a == "--model"),
             "an unnamed model must leave the flag off entirely: {args:?}"
         );
-        assert_eq!(args, pi_extension_args());
+    }
+
+    #[test]
+    fn pi_args_always_approve_the_workspaces_own_project_config() {
+        for model in [None, Some("provider/some-model")] {
+            let args = pi_args(model);
+            assert!(
+                args.iter().any(|a| a == "--approve"),
+                "without this, a provider registered by the scope's own \
+                 extension never loads and `model:` cannot resolve: {args:?}"
+            );
+        }
     }
 
     #[test]

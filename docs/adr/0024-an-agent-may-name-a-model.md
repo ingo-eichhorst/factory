@@ -76,6 +76,32 @@ The key is on the *agent*, not the scope and not the instance, because that is
 where harness already lives: a scope with two agents can already run two
 harnesses, and there is no reason it should not run two models.
 
+## Decision 5: the Pi adapter approves the workspace's own project config
+
+Pi discovers project-local extensions and settings — `.pi/extensions/`,
+`.pi/settings.json` — only in a directory a human has approved, and ignores
+them everywhere else. That is the right default for a tool someone points at a
+checkout they just cloned.
+
+Under Factory the situation differs in one specific way: the workspace is not
+somewhere the process wandered into, it is the canonical path of a scope an
+operator declared in `.factory/config.yaml`, and Factory is the one placing an
+agent there. So `PiAdapter` passes `--approve`.
+
+Without it, project-level harness configuration is **inert under Factory**. A
+provider registered by the scope's own extension never loads, a `model:`
+naming that provider cannot resolve, and the failure surfaces as "model not
+found" with nothing pointing at the real cause. Decision 1 would be usable only
+for models the machine already knows globally — which is exactly the per-machine
+default this ADR exists to escape.
+
+What the flag grants is bounded by what was already granted: the session about
+to start has tool access in this very directory. A workspace that cannot be
+trusted to register a provider is a workspace no agent should have been started
+in.
+
+Claude Code has no equivalent flag and needs none; this decision is Pi's alone.
+
 ## What was exercised, and what was not
 
 `PiAdapter` was verified end to end against a live Pi: the flag reaches the
