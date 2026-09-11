@@ -103,11 +103,16 @@ function queuedAt(name) {
 /// just outside its door, in rows of their own, and the next row of halls
 /// must clear all of them or a busy hall's agents end up standing inside its
 /// neighbour.
+///
+/// Sized from `agents.length` -- what the scope *declares* -- never from how
+/// many of them happen to be working right now. A run starting or ending
+/// must not move a single hall: the apron is reserved whether or not anyone
+/// is standing in it today, the same way the door's queue row is reserved
+/// whether or not a run happens to be waiting there this poll.
 function apron(b) {
   const perRow = Math.max(1, Math.floor(b.w / 1.05));
-  const workerRows = b.workers.length ? Math.ceil(b.workers.length / perRow) : 0;
-  const doorRows = b.queued.length ? 1 : 0;
-  return 0.6 + (workerRows + doorRows) * 0.75;
+  const workerRows = Math.max(1, Math.ceil(Math.max(1, b.agents.length) / perRow));
+  return 0.6 + (workerRows + 1) * 0.75;
 }
 
 /// Declared order, never sorted by size or state: the same scopes must land
@@ -706,6 +711,17 @@ async function ensureRenderLoaded() {
   }
 }
 
+/// A render-mode failure is set here, never appended into `#site-legend`:
+/// that element is rewritten wholesale on every `showSite()`, so a note
+/// stitched into it would vanish the moment someone left this view and came
+/// back -- silent absence, which the issue calls worse than an explicit "no".
+/// This element belongs to no other renderer, so setting it is idempotent
+/// however many times Render is retried.
+function setRenderErr(text) {
+  const el = $("site-render-err");
+  if (el) el.textContent = text || "";
+}
+
 function setMode(m) {
   renderMode = m;
   const seg = $("site-rmode");
@@ -720,13 +736,12 @@ function setMode(m) {
     updateZoomLabel();
     return;
   }
+  setRenderErr("");
   pause();
   ensureRenderLoaded().then((ok) => {
     if (!ok) {
       setMode(0);
-      const note = $("site-legend");
-      if (note) note.insertAdjacentHTML("afterbegin",
-        `<div class="row" style="color:var(--fault)">Render mode needs WebGL and did not load — staying on the plan view.</div>`);
+      setRenderErr("Render mode needs WebGL and did not load — staying on the plan view.");
       return;
     }
     renderMod.start(getScene());
