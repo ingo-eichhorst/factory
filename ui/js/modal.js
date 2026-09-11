@@ -25,7 +25,7 @@ document.addEventListener("keydown", (e) => {
   // Escape closes the modal -- unless the terminal input has focus, where it is
   // a key the agent is waiting for.
   if (e.key !== "Escape") return;
-  if (document.activeElement && document.activeElement.id === "t-input") return;
+  if (document.activeElement && document.activeElement.id === "t-term") return;
   closeModal();
 });
 

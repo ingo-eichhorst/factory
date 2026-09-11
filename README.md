@@ -331,9 +331,9 @@ second, sent only when it changed -- and every keystroke goes back as the bytes
 a terminal would send. Arrows, Tab, Ctrl-C and an agent's own escape hatch all
 work, because herdr passes the bytes to the pane untouched and there is no
 table of key names in between to fall behind what a keyboard can do. Click the
-screen and type; the buttons underneath are for a phone with no Ctrl key. A run
-that has ended has no session left to mirror, and then what is shown is the
-transcript the daemon kept.
+screen and type — there is nothing else under it, because there is nothing a
+button could do that a key does not. A run that has ended has no session left
+to mirror, and then what is shown is the transcript the daemon kept.
 
 There is no terminal emulator in the page. herdr's frames have already had
 every cursor move and scroll applied, so what arrives is text and colour, and

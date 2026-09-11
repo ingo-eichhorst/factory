@@ -102,11 +102,6 @@
   .idle { color: var(--dim); font-size: 13px; font-style: italic; }
 
   /* terminal input */
-  .terminput { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-  .terminput input { flex: 1 1 220px; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
-  .keys { display: flex; gap: 5px; }
-  .keys button { font: 12px ui-monospace, Menlo, monospace; padding: 5px 9px; }
-
   /* modal */
   .scrim { position: fixed; inset: 0; background: rgba(20,19,17,.5); z-index: 20;
     display: flex; align-items: flex-start; justify-content: center; padding: 40px 20px; overflow-y: auto; }
@@ -147,7 +142,7 @@
   .term.idle { color: #8b857b; font-style: italic; white-space: pre-wrap; min-height: 0; }
   .live-tag { color: var(--warn); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
   .term-hint { color: var(--dim); font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
-  .term.focused + .terminput .term-hint, .term.focused ~ * .term-hint { color: var(--accent); }
+  .term-hint.on { color: var(--accent); }
 
   /* ---------------------------------------------------------- occupancy
      One row per agent, one block per run, drawn against a shared clock.

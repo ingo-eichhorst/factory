@@ -18,16 +18,6 @@ export function terminalBlock(label) {
       <span class="term-hint" id="t-hint" hidden>click the screen and type</span>
     </label>
     <pre class="term" id="t-term" tabindex="0">connecting…</pre>
-    <div class="terminput">
-      <span class="keys">
-        <button class="btn" data-key="esc">esc</button>
-        <button class="btn" data-key="up">↑</button>
-        <button class="btn" data-key="down">↓</button>
-        <button class="btn" data-key="tab">⇥</button>
-        <button class="btn" data-key="ctrl-c">^C</button>
-      </span>
-      <input id="t-input" placeholder="…or type a line here and press Enter" autocomplete="off">
-    </div>
     <div class="err" id="t-err"></div>`;
 }
 
@@ -39,9 +29,6 @@ const KEYS = {
   ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", ArrowRight: "\x1b[C", ArrowLeft: "\x1b[D",
   Home: "\x1b[H", End: "\x1b[F", PageUp: "\x1b[5~", PageDown: "\x1b[6~",
 };
-
-/// The same, for the buttons -- a phone has no Ctrl key.
-const BUTTONS = { esc: "\x1b", up: "\x1b[A", down: "\x1b[B", tab: "\t", "ctrl-c": "\x03", enter: "\r" };
 
 function bytesFor(e) {
   if (e.metaKey) return null;                        // leave cmd+C and friends to the browser
@@ -59,28 +46,16 @@ function bytesFor(e) {
 
 export function wireTerminal() {
   const term = $("t-term");
-  if (term) {
-    term.onkeydown = (e) => {
-      const bytes = bytesFor(e);
-      if (bytes === null) return;
-      e.preventDefault();
-      send(bytes);
-    };
-    term.onfocus = () => term.classList.add("focused");
-    term.onblur = () => term.classList.remove("focused");
-  }
-  const input = $("t-input");
-  if (input) {
-    input.onkeydown = (e) => {
-      if (e.key !== "Enter") return;
-      e.preventDefault();
-      send(input.value + "\r");
-      input.value = "";
-    };
-  }
-  for (const b of document.querySelectorAll("[data-key]")) {
-    b.onclick = () => { send(BUTTONS[b.dataset.key] || ""); $("t-term")?.focus(); };
-  }
+  if (!term) return;
+  term.onkeydown = (e) => {
+    const bytes = bytesFor(e);
+    if (bytes === null) return;
+    e.preventDefault();
+    send(bytes);
+  };
+  // The screen is the only way in now, so say plainly when it has the keys.
+  term.onfocus = () => { term.classList.add("focused"); $("t-hint")?.classList.add("on"); };
+  term.onblur = () => { term.classList.remove("focused"); $("t-hint")?.classList.remove("on"); };
 }
 
 export function stopTerminal() {
@@ -99,8 +74,6 @@ export function setTerminal(kind, id, live) {
   state.term = id ? { kind, id } : null;
   if ($("t-live")) $("t-live").hidden = !live;
   if ($("t-hint")) $("t-hint").hidden = !live;
-  if ($("t-input")) $("t-input").disabled = !live;
-  for (const b of document.querySelectorAll("[data-key]")) b.disabled = !live;
   if (!state.term) {
     if ($("t-term")) { $("t-term").textContent = "No run yet. Press Run to start one."; $("t-term").classList.add("idle"); }
     return;
