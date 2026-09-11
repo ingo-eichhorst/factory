@@ -191,17 +191,9 @@ fn doctor_exit_code_always_matches_whether_it_printed_any_findings() {
 
 #[test]
 fn out_of_scope_commands_do_not_exist() {
-    for name in ["secret", "knowledge", "memory"] {
-        let output = factory_cmd().arg(name).output().unwrap();
-        assert!(!output.status.success());
-        assert_eq!(output.status.code(), Some(2), "{name}: {output:?}");
-    }
-}
-
-#[test]
-fn agent_list_does_not_exist() {
-    let output = factory_cmd().args(["agent", "list"]).output().unwrap();
-    assert_eq!(output.status.code(), Some(2));
+    let output = factory_cmd().arg("secret").output().unwrap();
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
 
 // --- no daemon running -------------------------------------------------------
@@ -1057,6 +1049,230 @@ fn remote_error_is_rendered_and_exits_distinctly() {
     assert_eq!(output.status.code(), Some(exit::REMOTE_ERROR), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not_found.task"), "stderr: {stderr}");
+}
+
+// --- Station 12: agent list, knowledge write|list|show, memory add|list ----
+
+/// `agent.list` is the one query in decision 9's table that ignores the
+/// envelope's own `scope_id` (`lib.rs`'s own call-out) — the caller is named
+/// entirely by the payload, so a distinct, non-nil `--scope` here proves the
+/// two never get confused with each other.
+#[test]
+fn agent_list_envelope_matches_decision_9s_payload_table() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |_request| {
+        FakeResponse::Ok(json!({ "scopes": [] }))
+    });
+
+    let scope = "00000000-0000-4000-8000-000000000001";
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args(["agent", "list", "--scope", scope])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["api"], "factory.query/v1");
+    assert_eq!(request["query"], "agent.list");
+    assert_eq!(
+        request["scope_id"], NIL_SCOPE,
+        "the envelope's own scope_id is unused filler"
+    );
+    assert_eq!(request["payload"]["scope_id"], scope);
+    assert!(request["payload"].get("session_id").is_none());
+}
+
+#[test]
+fn agent_list_by_session_sends_session_id_not_scope_id() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |_request| {
+        FakeResponse::Ok(json!({ "scopes": [] }))
+    });
+
+    let session = "00000000-0000-4000-8000-000000000002";
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args(["agent", "list", "--session", session])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["payload"]["session_id"], session);
+    assert!(requests[0]["payload"].get("scope_id").is_none());
+}
+
+/// ADR 0022 decision 4: the note's body arrives on standard input, never as
+/// an argv flag. Proved end to end here — a fresh subprocess with a real
+/// pipe — rather than only checked at the parser level, since a parser test
+/// cannot show the body actually crossing a pipe into the payload the daemon
+/// receives.
+#[test]
+fn knowledge_write_reads_the_body_from_standard_input() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| {
+        FakeResponse::Ok(json!({
+            "name": request["payload"]["name"],
+            "path": ".factory/knowledge/my-note.md",
+            "updated": "2026-09-11T00:00:00+00:00",
+        }))
+    });
+
+    let mut child = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args([
+            "knowledge",
+            "write",
+            "--name",
+            "my-note",
+            "--title",
+            "My Note",
+            "--status",
+            "draft",
+            "--source",
+            "a.md",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn `factory knowledge write`");
+    child
+        .stdin
+        .take()
+        .expect("child stdin is piped")
+        .write_all(b"the note body, from standard input")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["command"], "knowledge.write");
+    assert_eq!(request["payload"]["name"], "my-note");
+    assert_eq!(request["payload"]["title"], "My Note");
+    assert_eq!(request["payload"]["status"], "draft");
+    assert_eq!(request["payload"]["sources"], json!(["a.md"]));
+    assert_eq!(
+        request["payload"]["body"], "the note body, from standard input",
+        "the body must be exactly what was piped in, nothing derived from a flag"
+    );
+    assert_eq!(request["payload"]["update"], false);
+    assert!(request["payload"].get("task_id").is_none());
+}
+
+#[test]
+fn knowledge_list_and_show_send_the_documented_queries() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| match request["query"].as_str() {
+        Some("knowledge.list") => {
+            FakeResponse::Ok(json!({ "notes": [], "unresolved": [], "unreadable": [] }))
+        }
+        Some("knowledge.show") => FakeResponse::Ok(json!({
+            "name": "my-note", "title": "T", "status": "draft", "updated": "2026-09-11T00:00:00+00:00",
+            "sources": ["a.md"], "body": "the body", "text": "---\ntitle: T\n---\n\nthe body",
+        })),
+        other => panic!("unexpected query {other:?}"),
+    });
+
+    let list_output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args(["knowledge", "list"])
+        .output()
+        .unwrap();
+    assert!(list_output.status.success(), "{list_output:?}");
+
+    let show_output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args(["knowledge", "show", "--name", "my-note"])
+        .output()
+        .unwrap();
+    assert!(show_output.status.success(), "{show_output:?}");
+    // `knowledge show` prints the note exactly as it is on disk — the raw
+    // `text` field, not a re-rendering of it.
+    assert_eq!(
+        String::from_utf8_lossy(&show_output.stdout),
+        "---\ntitle: T\n---\n\nthe body"
+    );
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["query"], "knowledge.list");
+    assert_eq!(requests[1]["query"], "knowledge.show");
+    assert_eq!(requests[1]["payload"]["name"], "my-note");
+}
+
+/// ADR 0022 decision 4 again, for `memory add`'s entry — and decision 9's
+/// stance that the target scope rides the envelope's own `scope_id`, the
+/// same as `agent start`.
+#[test]
+fn memory_add_reads_the_entry_from_standard_input() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |request| {
+        FakeResponse::Ok(json!({
+            "id": request["payload"]["entry_id"],
+            "scope": "irrlicht",
+            "path": ".factory/memory/irrlicht/1--x.md",
+            "created_at": "2026-09-11T00:00:00+00:00",
+        }))
+    });
+
+    let mut child = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args(["memory", "add", "--scope", NIL_SCOPE])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn `factory memory add`");
+    child
+        .stdin
+        .take()
+        .expect("child stdin is piped")
+        .write_all(b"remember this thing")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["command"], "memory.add");
+    assert_eq!(request["scope_id"], NIL_SCOPE);
+    assert_eq!(request["payload"]["entry"], "remember this thing");
+    assert!(request["payload"]["entry_id"].is_string());
+}
+
+#[test]
+fn memory_list_sends_the_documented_query() {
+    let dir = TempDir::new().unwrap();
+    let daemon = spawn_fake_daemon(dir.path(), |_request| {
+        FakeResponse::Ok(json!({ "scope": "irrlicht", "entries": [] }))
+    });
+
+    let output = factory_cmd()
+        .args(["--root"])
+        .arg(dir.path())
+        .args(["memory", "list", "--scope", NIL_SCOPE])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["query"], "memory.list");
+    assert_eq!(requests[0]["scope_id"], NIL_SCOPE);
 }
 
 // --- the dispatcher is actually wired into `daemon run` ---------------------

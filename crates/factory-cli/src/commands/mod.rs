@@ -6,6 +6,8 @@ mod context;
 mod daemon;
 mod doctor;
 mod init;
+mod knowledge;
+mod memory;
 mod schedule;
 mod scope;
 mod task;
@@ -13,10 +15,28 @@ mod task;
 use std::path::Path;
 
 use crate::cli::{
-    AgentCommand, Cli, Command, ContextCommand, DaemonCommand, ScheduleCommand, ScopeCommand,
-    TaskCommand,
+    AgentCommand, Cli, Command, ContextCommand, DaemonCommand, KnowledgeCommand, MemoryCommand,
+    ScheduleCommand, ScopeCommand, TaskCommand,
 };
 use crate::exit;
+
+/// Read standard input to end as UTF-8 text — `knowledge write`'s body and
+/// `memory add`'s entry both arrive this way (ADR 0022 decision 4: there is
+/// deliberately no `--body` flag, since prose in argv is mangled by every
+/// shell's own quoting rules differently). An I/O or non-UTF-8 failure is
+/// reported and exits [`exit::GENERIC_ERROR`] — never a panic on a caller's
+/// malformed pipe.
+fn read_stdin_body() -> Result<String, i32> {
+    use std::io::Read;
+    let mut buf = String::new();
+    match std::io::stdin().lock().read_to_string(&mut buf) {
+        Ok(_) => Ok(buf),
+        Err(e) => {
+            eprintln!("factory: could not read standard input: {e}");
+            Err(exit::GENERIC_ERROR)
+        }
+    }
+}
 
 pub fn dispatch(cli: Cli) -> i32 {
     match cli.command {
@@ -73,6 +93,16 @@ pub fn dispatch(cli: Cli) -> i32 {
             AgentCommand::Attach { session } => {
                 with_root(cli.root.as_deref(), |root| agent::attach(root, session))
             }
+            AgentCommand::List { session, scope } => with_root(cli.root.as_deref(), |root| {
+                let scope_id = match &scope {
+                    Some(scope_ref) => match resolve_scope(root, scope_ref) {
+                        Ok(id) => Some(id),
+                        Err(code) => return code,
+                    },
+                    None => None,
+                };
+                agent::list(root, session, scope_id)
+            }),
         },
 
         Command::Task { action } => match action {
@@ -232,6 +262,40 @@ pub fn dispatch(cli: Cli) -> i32 {
                     Err(code) => return code,
                 };
                 context::show(root, scope_id, &agent_name, task_prompt.as_deref())
+            }),
+        },
+
+        Command::Knowledge { action } => match action {
+            KnowledgeCommand::Write {
+                name,
+                title,
+                status,
+                source,
+                update,
+                task_id,
+            } => with_root(cli.root.as_deref(), |root| {
+                knowledge::write(root, &name, &title, &status, &source, update, task_id)
+            }),
+            KnowledgeCommand::List => with_root(cli.root.as_deref(), knowledge::list),
+            KnowledgeCommand::Show { name } => {
+                with_root(cli.root.as_deref(), |root| knowledge::show(root, &name))
+            }
+        },
+
+        Command::Memory { action } => match action {
+            MemoryCommand::Add { scope } => with_root(cli.root.as_deref(), |root| {
+                let scope_id = match resolve_scope(root, &scope) {
+                    Ok(id) => id,
+                    Err(code) => return code,
+                };
+                memory::add(root, scope_id)
+            }),
+            MemoryCommand::List { scope } => with_root(cli.root.as_deref(), |root| {
+                let scope_id = match resolve_scope(root, &scope) {
+                    Ok(id) => id,
+                    Err(code) => return code,
+                };
+                memory::list(root, scope_id)
             }),
         },
     }

@@ -166,15 +166,31 @@ in `factory-delegation` and in `task send`'s path; neither says anything about
 whether `agent list` calls it, or calls it with the right sender. So the
 deleting mutation is run against `agent list` as its own case.
 
-### 9. Availability is reported as unknown when nothing observed it
+### 9. Availability answers "can I send work here now", and never guesses
 
 An agent registered with no live session is listed with its availability
 stated, never omitted. Where ADR 0011's session observation has no reading, the
-entry says `unknown` — it does not say `idle`.
+entry says `unknown` — it does not say `idle`. An agent that is busy but
+reported idle is the failure this prevents: a caller queues work behind a
+session that will not free up, and the queue looks healthy while nothing moves.
+ADR 0017's rule applies unchanged.
 
-An agent that is busy but reported idle is the failure this prevents: a caller
-queues work behind a session that will not free up, and the queue looks healthy
-while nothing moves. ADR 0017's rule applies unchanged.
+One agent may hold several sessions at once (`max_sessions`), so the single
+word has to be ranked. The ranking follows from the question the word answers —
+can a caller send work here now:
+
+1. any `running` session with no running task → `idle`
+2. else any `starting` session → `starting`
+3. else any `running` session with a running task → `busy`
+4. else any `disconnected` session → `unknown`
+5. else → `no_session`
+
+`idle` outranks `busy` because an agent holding one working session and one free
+one is not a queue: the free session takes the work immediately. Ranking `busy`
+first was tried and is the mirror of the failure design §7 names — it sends a
+caller away from an agent that was available. `unknown` sits below `busy`
+because a known fact beats an unknown one, and above `no_session` because a
+session that was seen and then lost is not the same as no session at all.
 
 ### 10. The write invariant is discovered from the parser, not from a list
 
@@ -222,6 +238,23 @@ misconfiguration anyway: two scopes with one name is something the operator
 wants to know about, not something to route around silently. The refusal is the
 observation; merging them would be the wrong answer that looks like one
 (ADR 0017).
+
+### 13. Factory stamps the `updated` date; the caller does not pass it
+
+`knowledge write` takes `--name`, `--title`, `--status`, and `--source`
+(repeatable), and the body on standard input. It does not take the updated
+date. The daemon stamps it at the moment of the write.
+
+The field exists so a reader can tell how stale a note is. A date the writer
+types is a claim about that, and a note carrying a date its author chose is
+worse than one carrying none, because a reader has no way to tell the two
+apart. A date Factory stamps is a fact about when the bytes were written, which
+is the question the field is asked.
+
+`Frontmatter::updated` stays a required field in `factory-knowledge`, and
+`Note::new` still refuses an empty one. The crate validates notes from any
+source, including ones read back off disk and ones a later migration produces;
+only this command's caller is relieved of supplying it.
 
 ## Consequences
 

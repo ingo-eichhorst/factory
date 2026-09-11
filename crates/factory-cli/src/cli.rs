@@ -1,9 +1,10 @@
 //! The `factory` command surface, wired to decision 9's operation
 //! vocabulary. Every subcommand here is one of `init`, `start|stop|status|
-//! doctor`, `scope`, `agent`, `task`, `schedule`, `context` — station 10's
-//! declared scope plus station 11's `schedule` group (ADR 0021 decision 11).
-//! `secret`, `knowledge`, `memory`, and `agent list` are still absent, not
-//! stubbed: there is no variant for them anywhere below.
+//! doctor`, `scope`, `agent` (including `agent list`), `task`, `schedule`,
+//! `knowledge`, `memory`, `context` — station 10's declared scope, station
+//! 11's `schedule` group (ADR 0021 decision 11), and station 12's agent
+//! discovery and durable writing (ADR 0022). `secret` (station 13) is still
+//! absent, not stubbed: there is no variant for it anywhere below.
 
 use std::path::PathBuf;
 
@@ -91,6 +92,25 @@ pub enum Command {
         #[command(subcommand)]
         action: ContextCommand,
     },
+
+    /// The shared, sourced knowledge note graph (design §7, backlog §12;
+    /// ADR 0022). One Markdown file per note under
+    /// `.factory/knowledge/`; the filename is the stable link target — see
+    /// `KnowledgeCommand::Write`'s own doc comment for why there is no
+    /// rename.
+    Knowledge {
+        #[command(subcommand)]
+        action: KnowledgeCommand,
+    },
+
+    /// Scope-local memory (design §7, backlog §12; ADR 0022). Unlike
+    /// `knowledge`, an entry is scope-private and unsourced — a scratch line
+    /// a scope leaves for its future self under
+    /// `.factory/memory/<scope-name>/`.
+    Memory {
+        #[command(subcommand)]
+        action: MemoryCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -163,6 +183,86 @@ pub enum AgentCommand {
     Attach {
         #[arg(long)]
         session: Uuid,
+    },
+
+    /// List every registered scope and its agents: which of them the caller
+    /// may target (design §6, via the same rule `task send` enforces), and
+    /// each agent's live availability (ADR 0022).
+    ///
+    /// Takes exactly one of `--session` or `--scope`, enforced by the daemon
+    /// (this parser accepts either, both, or neither — the same stance
+    /// `schedule create`'s own two forms take toward their own flags).
+    /// `--session` names the caller by the session actually asking, resolved
+    /// the way `task send` resolves it, so the answer here cannot drift from
+    /// what sending a task will actually do. `--scope` answers the same
+    /// question hypothetically, for a human with no live session.
+    List {
+        #[arg(long)]
+        session: Option<Uuid>,
+        #[arg(long)]
+        scope: Option<crate::scope_ref::ScopeRef>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum KnowledgeCommand {
+    /// Write (or, with `--update`, overwrite) one note. The body comes from
+    /// standard input — there is deliberately no `--body` flag (ADR 0022
+    /// decision 4): prose in argv is mangled by every shell's own quoting
+    /// rules differently, and a second path into the same field would grow
+    /// its own escaping bug.
+    ///
+    /// `--name` is a stable identifier, never derived from `--title`: a
+    /// title is edited freely, a name is a link target, and there is no
+    /// `knowledge rename` (ADR 0022 decision 6) — a note that needs a
+    /// different name is written fresh, leaving the old one in place for
+    /// whatever still points at it.
+    Write {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        status: String,
+        /// Repeatable. At least one is required.
+        #[arg(long = "source")]
+        source: Vec<String>,
+        /// Overwrite a note that already exists under this name. Without
+        /// it, writing an existing name is refused (ADR 0022 decision 5).
+        #[arg(long)]
+        update: bool,
+        /// Record this write's provenance against a task.
+        #[arg(long)]
+        task_id: Option<Uuid>,
+    },
+
+    /// List every note: its title, its links, its backlinks, every
+    /// unresolved `[[link]]`, and every unreadable file — all four, since a
+    /// dangling link is a gap and an unreadable file is one file's problem,
+    /// neither one an error that hides the rest.
+    List,
+
+    /// Print one note exactly as it is on disk. Resolves no `[[link]]` and
+    /// renders nothing (ADR 0022's own consequences).
+    Show {
+        #[arg(long)]
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MemoryCommand {
+    /// Add one entry to a scope's memory. The entry comes from standard
+    /// input, for the same reason `knowledge write`'s body does.
+    Add {
+        #[arg(long)]
+        scope: crate::scope_ref::ScopeRef,
+    },
+
+    /// List a scope's memory entries, oldest first.
+    List {
+        #[arg(long)]
+        scope: crate::scope_ref::ScopeRef,
     },
 }
 
@@ -418,20 +518,90 @@ mod tests {
 
     #[test]
     fn out_of_scope_commands_are_absent_not_stubbed() {
-        for name in ["secret", "knowledge", "memory"] {
-            let err = parse(&[name]).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::InvalidSubcommand,
-                "`{name}` must not parse as a command at all"
-            );
-        }
+        let err = parse(&["secret"]).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::InvalidSubcommand,
+            "`secret` must not parse as a command at all"
+        );
+    }
+
+    /// Station 12 (ADR 0022): `agent list`, `knowledge`, and `memory` now
+    /// parse. The daemon owns "exactly one of `--session`/`--scope`"
+    /// (`ops::agent::resolve_caller`) — this parser accepts either, both, or
+    /// neither, the same stance `schedule create`'s own two flag forms take.
+    #[test]
+    fn agent_list_parses_with_session_or_scope_or_neither() {
+        assert!(parse(&["agent", "list"]).is_ok());
+        assert!(
+            parse(&[
+                "agent",
+                "list",
+                "--session",
+                "00000000-0000-4000-8000-000000000001"
+            ])
+            .is_ok()
+        );
+        assert!(parse(&["agent", "list", "--scope", "irrlicht"]).is_ok());
     }
 
     #[test]
-    fn agent_list_is_absent() {
-        let err = parse(&["agent", "list"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    fn knowledge_write_reads_flags_and_takes_no_body_flag() {
+        let cli = parse(&[
+            "knowledge",
+            "write",
+            "--name",
+            "my-note",
+            "--title",
+            "My Note",
+            "--status",
+            "draft",
+            "--source",
+            "a.md",
+            "--source",
+            "b.md",
+        ])
+        .expect("knowledge write parses");
+        match cli.command {
+            Command::Knowledge {
+                action: KnowledgeCommand::Write { name, source, .. },
+            } => {
+                assert_eq!(name, "my-note");
+                assert_eq!(source, vec!["a.md".to_string(), "b.md".to_string()]);
+            }
+            other => panic!("expected KnowledgeCommand::Write, got {other:?}"),
+        }
+
+        // There is deliberately no `--body` flag (ADR 0022 decision 4).
+        let err = parse(&[
+            "knowledge",
+            "write",
+            "--name",
+            "n",
+            "--title",
+            "t",
+            "--status",
+            "s",
+            "--source",
+            "a.md",
+            "--body",
+            "nope",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn knowledge_list_and_show_parse() {
+        assert!(parse(&["knowledge", "list"]).is_ok());
+        assert!(parse(&["knowledge", "show", "--name", "my-note"]).is_ok());
+    }
+
+    #[test]
+    fn memory_add_and_list_require_a_scope() {
+        assert!(parse(&["memory", "add"]).is_err());
+        assert!(parse(&["memory", "add", "--scope", "irrlicht"]).is_ok());
+        assert!(parse(&["memory", "list", "--scope", "irrlicht"]).is_ok());
     }
 
     #[test]

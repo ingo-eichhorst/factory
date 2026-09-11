@@ -267,3 +267,44 @@ pub fn schedule_error(e: factory_task::schedule::ScheduleError) -> ErrorBody {
 pub fn recovery_error(e: factory_recovery::restore::RecoveryError) -> ErrorBody {
     err("internal.recovery_error", e.to_string())
 }
+
+/// A plain `rusqlite`/`factory_store` failure this crate did not expect and
+/// has no more specific code for — the same `internal.store_error` code
+/// every other ops module already spells out for its own store failures
+/// (`ops::scope::store_err`, `ops::schedule`'s `Store(_)` arms). One home
+/// here so `ops::knowledge` and `ops::memory` do not each grow their own
+/// copy of the same one-line function.
+#[must_use]
+pub fn store_error(e: impl std::fmt::Display) -> ErrorBody {
+    err("internal.store_error", e.to_string())
+}
+
+/// Station 12 (ADR 0022): every way staging, reading, or indexing a note or
+/// a memory entry can be refused. `factory_knowledge` has one error type for
+/// both modules (that crate's own doc comment on `NoteError` explains why),
+/// so this is one mapping for both `ops::knowledge` and `ops::memory`.
+///
+/// The message is always `e.to_string()` verbatim — every
+/// [`factory_knowledge::note::NoteError`] variant already carries its own
+/// `help:` line (`NoteError::AlreadyExists` names `--update` by itself, for
+/// instance), and re-wording it here would risk saying something slightly
+/// different from what the crate that actually enforces the rule says.
+pub fn knowledge_error(e: factory_knowledge::note::NoteError) -> ErrorBody {
+    use factory_knowledge::note::NoteError as E;
+    match e {
+        E::InvalidName(_) => err("validation.invalid_note_name", e.to_string()),
+        E::MissingField(_) => err("validation.missing_frontmatter_field", e.to_string()),
+        E::SecretSource { .. } => err("validation.secret_source", e.to_string()),
+        E::SourceTraversal { .. } => err("validation.source_traversal", e.to_string()),
+        E::EmptyBody => err("validation.empty_body", e.to_string()),
+        E::FieldNotSingleLine(_) => err("validation.field_not_single_line", e.to_string()),
+        E::MalformedFrontmatter(_) => err("internal.malformed_note", e.to_string()),
+        E::AlreadyExists(_) => err("conflict.note_already_exists", e.to_string()),
+        E::NotFound(_) => err("not_found.note", e.to_string()),
+        E::InvalidScope(_) => err("validation.invalid_memory_scope", e.to_string()),
+        E::EmptyEntry => err("validation.empty_entry", e.to_string()),
+        E::InvalidCreatedAt(_) => err("internal.invalid_created_at", e.to_string()),
+        E::DuplicateEntry(_) => err("conflict.duplicate_memory_entry", e.to_string()),
+        E::Io(_) => err("internal.io_error", e.to_string()),
+    }
+}

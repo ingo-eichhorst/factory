@@ -1,8 +1,9 @@
-//! `factory agent start|stop|status|attach` (design §2.2, §2.3, §7).
+//! `factory agent start|stop|status|attach|list` (design §2.2, §2.3, §7;
+//! `list` is ADR 0022).
 
 use std::path::Path;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::exit;
@@ -67,6 +68,34 @@ pub fn attach(root: &Path, session: Uuid) -> i32 {
         rpc::RpcOutcome::Ok(result) => exec_argv(&result, session),
         other => rpc::report(root, other, |_| exit::OK),
     }
+}
+
+/// `factory agent list`. Exactly one of `session`/`scope` must already be
+/// `Some` by the time this is called — `dispatch` resolves `--scope` to an
+/// id first, and the daemon (`ops::agent::resolve_caller`) is the one place
+/// that actually refuses `(None, None)` or `(Some, Some)`, so this function
+/// simply forwards whichever the operator gave.
+pub fn list(root: &Path, session: Option<Uuid>, scope: Option<Uuid>) -> i32 {
+    let mut payload = json!({});
+    if let Some(session) = session {
+        payload["session_id"] = json!(session.to_string());
+    }
+    if let Some(scope) = scope {
+        payload["scope_id"] = json!(scope.to_string());
+    }
+
+    // The envelope's own `scope_id` is unused by `agent.list` (`lib.rs`'s
+    // own call-out on the decision-9 table) — the caller is named entirely
+    // by the payload above, so `Uuid::nil()` here is filler, not a claim.
+    let outcome = rpc::query(root, Uuid::nil(), "agent.list", payload);
+    rpc::report(root, outcome, |result| {
+        let count = result
+            .get("scopes")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        rpc::print_result(&format!("factory: {count} scope(s)"), &result);
+        exit::OK
+    })
 }
 
 fn exec_argv(result: &serde_json::Value, session: Uuid) -> i32 {

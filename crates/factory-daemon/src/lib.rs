@@ -90,6 +90,8 @@
 //! | `task.rework` | `factory task rework` |
 //! | `schedule.create` | `factory schedule create` |
 //! | `schedule.enable`, `schedule.disable` | `factory schedule enable\|disable` |
+//! | `knowledge.write` | `factory knowledge write` |
+//! | `memory.add` | `factory memory add` |
 //!
 //! Queries (read only):
 //!
@@ -98,13 +100,16 @@
 //! | `scope.list` | `factory scope list` |
 //! | `agent.status` | `factory agent status` |
 //! | `agent.attach_command` | `factory agent attach` |
+//! | `agent.list` | `factory agent list` |
 //! | `task.list`, `task.show` | `factory task list\|show` |
 //! | `task.wait` | `factory task send --wait` |
 //! | `schedule.list` | `factory schedule list` |
+//! | `knowledge.list`, `knowledge.show` | `factory knowledge list\|show` |
+//! | `memory.list` | `factory memory list` |
 //! | `context.show` | `factory context show` |
 //! | `daemon.status` | `factory status` |
 //!
-//! Eight of these need saying out loud.
+//! Nine of these need saying out loud.
 //!
 //! **`factory init` is not here, because it cannot be.** It creates the
 //! configuration and the database that a daemon needs before one can run. It
@@ -180,6 +185,16 @@
 //! never reads the reworked run's own template, so a reworked run with no
 //! template at all is not a special case here.
 //!
+//! **`agent.list` ignores the envelope's `scope_id` entirely — the one
+//! query in this table that does.** Every other `agent.*` operation reads
+//! the envelope's own `scope_id` as *the* scope the call concerns. `agent.list`
+//! cannot: it has to tell "the caller wrote `--scope`" apart from "the CLI
+//! sent a scope id because the wire envelope requires one," and only a
+//! payload carrying `session_id`/`scope_id` as two independent optional
+//! fields can say that (ADR 0022 decision 7). Giving both, or neither, is
+//! `validation.conflicting_fields` / `validation.missing_field` — see
+//! `ops::agent::resolve_caller`.
+//!
 //! # Station 10's `Handler`: [`handler::FactoryHandler`]
 //!
 //! [`handler::FactoryHandler`] is the `Handler` this crate's own docs (decision
@@ -209,8 +224,10 @@
 //!
 //! Every command and query's envelope carries `scope_id` (ADR 0003 §§2–3);
 //! this crate reads it as *the scope the operation concerns* — the target
-//! scope for `scope.*`/`agent.*`/`task.send`/`task.rework`/`context.show`,
-//! and the scope a listing is filtered by for `agent.status`.
+//! scope for `scope.*`/`agent.*`/`task.send`/`task.rework`/`context.show`/
+//! `memory.add`/`memory.list`, and the scope a listing is filtered by for
+//! `agent.status`. `agent.list` is the one exception — see the call-out
+//! above.
 //!
 //! | Operation | Payload | Result |
 //! |---|---|---|
@@ -237,6 +254,12 @@
 //! | `schedule.create` | `{ "schedule_id": Uuid, "cron": String, "timezone": String, "template_name": String? }` (`--template`) **or** `{ "schedule_id", "cron", "timezone", "template_id": Uuid, "name": String, "task": String, "agent_name": String?, "acceptance_criteria": String? }` (`--task`/`--name`) — exactly one of `template_name` or `template_id`+`name`+`task`, refused otherwise (`ops::schedule`'s own module docs); `scope_id` is read only by the second form | `{ "id", "template_id", "template_name": String?, "template_error": String?, "cron", "timezone", "enabled": bool, "last_fired_at": String?, "next_run": String?, "next_run_state": "scheduled"\|"disabled"\|"never"\|"unreadable", "next_run_error": String? }` — `next_run` is an RFC3339 timestamp only when `next_run_state` is `"scheduled"`; ADR 0021 decision 3a's `None` ("this expression can never fire") stays a distinct, machine-checkable state rather than a prose string sharing the field |
 //! | `schedule.enable`, `schedule.disable` | `{ "schedule_id": Uuid }` | same shape as `schedule.create`'s result |
 //! | `schedule.list` | `{}` | `{ "schedules": [same shape as `schedule.create`'s result] }` |
+//! | `agent.list` | `{ "session_id": Uuid? , "scope_id": Uuid? }` — exactly one of the two, refused otherwise; see the call-out above on why the envelope's own `scope_id` is unused here | `{ "scopes": [{ "scope_id", "scope_name", "targetable": bool, "refusal_reason": String?, "agents": [{ "name", "harness", "max_sessions", "lifetime", "availability": "busy"\|"idle"\|"starting"\|"unknown"\|"no_session" }] }] }` — every registered scope, and every agent its config entry declares, always present (ADR 0022 decisions 7–9) |
+//! | `knowledge.write` | `{ "name": String, "title": String, "status": String, "sources": [String], "body": String, "update": bool = false, "task_id": Uuid? }` (`body` is what the CLI read from standard input — ADR 0022 decision 4; `updated` is never a caller field, see decision 13) | `{ "name", "path", "updated" }` |
+//! | `knowledge.list` | `{}` | `{ "notes": [{ "name", "title", "links": [String], "backlinks": [String] }], "unresolved": [{ "from", "target" }], "unreadable": [{ "filename", "reason" }] }` — an unresolved link and an unreadable file are both reported, never refused (`factory_knowledge::note::index`'s own doc comment) |
+//! | `knowledge.show` | `{ "name": String }` | `{ "name", "title", "status", "updated", "sources": [String], "body", "text" }` — `text` is the note exactly as rendered to disk; this resolves no link (ADR 0022 consequences) |
+//! | `memory.add` | `{ "entry_id": Uuid, "entry": String }` (`entry` is standard input, like `knowledge.write`'s `body`; the target scope is the envelope's own `scope_id`, the same stance `agent.start` takes) | `{ "id", "scope", "path", "created_at" }` |
+//! | `memory.list` | `{}` (scope is the envelope's `scope_id`) | `{ "scope", "entries": [{ "id", "created_at", "text" }] }` |
 //! | `context.show` | `{ "agent_name": String, "task_prompt": String? }` | `{ "text": String, "sources": [SourceReport] }` |
 //! | `daemon.status` | `{}` | `{ "schema_version": i64, "socket_path": String, "lock_path": String }` |
 //!

@@ -7,6 +7,8 @@
 
 pub(crate) mod agent;
 pub(crate) mod context;
+pub(crate) mod knowledge;
+pub(crate) mod memory;
 pub(crate) mod schedule;
 pub(crate) mod scope;
 pub(crate) mod status;
