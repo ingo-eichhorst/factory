@@ -123,8 +123,10 @@ function send(bytes) {
 
 // ------------------------------------------------------------- ANSI to HTML
 
-const BASE = ["#2a2723", "#c14a3d", "#4a9c5c", "#b08a2e", "#4a7fb5", "#9c5fb0", "#3f9c9c", "#c9c4ba"];
-const BRIGHT = ["#6d6862", "#e07a66", "#7cc088", "#d6b55c", "#7aa8d9", "#c08fd6", "#6fc7c7", "#f2efea"];
+/// The sixteen ANSI colours live in the stylesheet, so a change of theme
+/// recolours a frame already on screen without re-rendering it.
+const BASE = ["--t0", "--t1", "--t2", "--t3", "--t4", "--t5", "--t6", "--t7"].map(v => `var(${v})`);
+const BRIGHT = ["--tb0", "--tb1", "--tb2", "--tb3", "--tb4", "--tb5", "--tb6", "--tb7"].map(v => `var(${v})`);
 
 /// herdr hands back a rendered grid: the only escapes left in it are SGR, the
 /// ones that set colour and weight. Every cursor move and every scroll has
@@ -159,7 +161,7 @@ function css(style) {
   let { fg, bg } = style;
   // Reverse video is how a rendered grid marks the cursor, so it has to survive
   // into the page or there is nothing to show where typing will land.
-  if (style.rev) { const t = fg || "var(--term-bg)"; fg = bg || "var(--term-ink)"; bg = t; }
+  if (style.rev) { const t = fg || "var(--term-bg)"; fg = bg || "var(--term-fg)"; bg = t; }
   const parts = [];
   if (fg) parts.push(`color:${fg}`);
   if (bg) parts.push(`background:${bg}`);

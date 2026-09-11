@@ -2,7 +2,7 @@
 //! for it. Every module below is a page or a piece of one; this is the only
 //! file that knows about all of them.
 
-import { $, api, state, connect } from "./core.js";
+import { $, api, state, connect, setTheme, currentTheme, toggleTheme } from "./core.js";
 import { closeModal } from "./modal.js";
 import { renderTasks, renderModal, loadJournal, retimeTerminal } from "./tasks.js";
 import { loadAgents, renderAgents } from "./agents.js";
@@ -62,6 +62,10 @@ async function boot() {
     state.tasks = new Map(tasks.map(t => [t.id, t]));
     renderTasks();
   } catch { /* the websocket snapshot will fill it in */ }
+
+  // The head already applied the theme; this puts its name on the switch.
+  setTheme(currentTheme());
+  $("theme").onclick = () => toggleTheme();
 
   $("tab-tasks").onclick = () => showTab("tasks");
   $("tab-agents").onclick = () => showTab("agents");

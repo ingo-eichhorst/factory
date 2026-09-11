@@ -52,6 +52,31 @@ export function connect(handlers) {
   };
 }
 
+// -------------------------------------------------------------- the theme
+
+/// Two named themes, remembered per browser. The choice is applied by an
+/// inline script in the page head before the first paint; all this does is
+/// change it and write it down. A browser that refuses storage still gets a
+/// working switch, it just forgets by the next visit.
+const THEMES = { "foundry-dark": "foundry dark", "foundry-light": "foundry light" };
+
+export function currentTheme() {
+  const t = document.documentElement.dataset.theme;
+  return THEMES[t] ? t : "foundry-dark";
+}
+
+export function setTheme(name) {
+  const theme = THEMES[name] ? name : "foundry-dark";
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem("factory-theme", theme); } catch (e) { /* private window */ }
+  const button = $("theme");
+  if (button) button.textContent = THEMES[theme];
+}
+
+export function toggleTheme() {
+  setTheme(currentTheme() === "foundry-dark" ? "foundry-light" : "foundry-dark");
+}
+
 // ------------------------------------------------------------ shared shapes
 
 export function statusBadge(s) { return `<span class="badge s-${esc(s)}">${esc(s)}</span>`; }

@@ -115,12 +115,12 @@ export function renderOccupancy() {
       <div class="occ-now" style="left:calc(var(--lab) + (100% - var(--lab) - 58px) * ${(nowLeft / 100).toFixed(4)})"><b>now</b></div>
     </div>
     <div class="occ-legend">
-      <span><i style="background:var(--ok)"></i>finished run</span>
-      <span><i style="background:var(--warn)"></i>running</span>
-      <span><i style="background:var(--bad)"></i>failed</span>
-      <span><i style="background:var(--accent)"></i>blocked</span>
-      <span><i style="border:1px dashed var(--accent);height:6px"></i>scheduled</span>
-      <span><i style="background:var(--ok);opacity:.55;height:4px"></i>runtime saw it busy</span>
+      <span><i style="background:var(--run)"></i>finished run</span>
+      <span><i style="background:var(--wait)"></i>running</span>
+      <span><i style="background:var(--fault)"></i>failed</span>
+      <span><i style="background:var(--signal)"></i>blocked</span>
+      <span><i style="border:1px dashed var(--signal);height:6px"></i>scheduled</span>
+      <span><i style="background:var(--run);opacity:.6;height:4px"></i>runtime saw it busy</span>
     </div>
     <div class="occ-note"><b>Two kinds of fact.</b> A block is a run: Factory started it and the agent
       reported back. The thin strip is only what the runtime saw on the screen, which is a guess about

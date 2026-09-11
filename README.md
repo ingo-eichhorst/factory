@@ -335,6 +335,17 @@ screen and type — there is nothing else under it, because there is nothing a
 button could do that a key does not. A run that has ended has no session left
 to mirror, and then what is shown is the transcript the daemon kept.
 
+The page has two themes, **foundry dark** and **foundry light**, switched from
+the header and remembered per browser. Dark is what a page with nothing stored
+gets. There is no `prefers-color-scheme` rule anywhere: a stored choice and an
+OS query fighting over the same tokens is a bug that only turns up on somebody
+else's laptop. The terminal keeps its dark ground in both, because an agent
+draws for a dark pane and inverting it would invert its own colours.
+
+The type is IBM Plex, loaded from Google Fonts. A machine with no internet
+falls back to a system stack and the page is still readable, just not
+condensed — the only thing this page fetches from anywhere but the daemon.
+
 There is no terminal emulator in the page. herdr's frames have already had
 every cursor move and scroll applied, so what arrives is text and colour, and
 eighty lines turn that into HTML.

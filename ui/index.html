@@ -4,7 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Factory</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- The type is IBM Plex. A machine with no internet falls back to the stack
+     in app.css and the page is still readable, just not condensed. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="/ui/app.css">
+<script>
+  // Before the first paint, and not in a module: a module is deferred, and a
+  // page that renders dark then flips to light has already been seen doing it.
+  try {
+    var saved = localStorage.getItem("factory-theme");
+  } catch (e) { }
+  document.documentElement.dataset.theme =
+    saved === "foundry-light" ? "foundry-light" : "foundry-dark";
+</script>
 </head>
 <body>
 <header>
@@ -15,6 +29,7 @@
     <button id="tab-agents">Agents</button>
   </nav>
   <span class="meta" style="margin-left:auto"><span class="dot" id="dot"></span><span id="conn">connecting</span></span>
+  <button class="theme-switch" id="theme" title="switch theme">foundry dark</button>
 </header>
 
 <main>
