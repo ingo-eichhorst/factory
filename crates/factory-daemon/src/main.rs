@@ -8,6 +8,7 @@ mod interfaces;
 mod occupancy;
 mod scheduler;
 mod schedule;
+mod site;
 mod ui;
 
 use clap::{Parser, Subcommand};

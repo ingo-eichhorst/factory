@@ -8,7 +8,7 @@ export const TERMINAL = ["done", "failed", "cancelled"];
 
 export const state = {
   roles: [],
-  tab: "tasks",
+  tab: "dashboard",
   tasks: new Map(),
   scopes: [],          // the agents page: scopes, each with its agents
   adapters: [],        // every agent adapter name, for the create form
@@ -75,6 +75,10 @@ export function setTheme(name) {
   try { localStorage.setItem("factory-theme", theme); } catch (e) { /* private window */ }
   const button = $("theme");
   if (button) button.textContent = THEMES[theme];
+  // The site plan's two renderers read the palette through CSS custom
+  // properties and cache it, so a switch has to tell them to read it again --
+  // otherwise a scene already on screen keeps the colours it booted with.
+  document.dispatchEvent(new CustomEvent("factory:theme"));
 }
 
 export function toggleTheme() {

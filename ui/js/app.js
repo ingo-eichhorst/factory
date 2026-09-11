@@ -1,5 +1,5 @@
-//! The wiring: which page is showing, and what an event from the daemon means
-//! for it. Every module below is a page or a piece of one; this is the only
+//! The wiring: which view is showing, and what an event from the daemon means
+//! for it. Every module below is a view or a piece of one; this is the only
 //! file that knows about all of them.
 
 import { $, api, state, connect, setTheme, currentTheme, toggleTheme } from "./core.js";
@@ -9,18 +9,45 @@ import { renderTasks, renderModal, loadJournal, retimeTerminal } from "./tasks.j
 import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { openCreate } from "./task-form.js";
+import { loadDashboard, renderDashboard, wireDashboard } from "./dashboard.js";
+import { initActivity, recordEvent } from "./activity.js";
+import { showSite, hideSite, refreshSite } from "./site.js";
+
+// ------------------------------------------------------------------ views
+//
+// Five entries, not two: `showTab` used to toggle exactly two `hidden`
+// containers and two button classes. It is a small registry now, but the
+// rule is the same -- one view visible, one button lit, and whatever that
+// view needs to start or stop doing while it is not the one on screen.
+
+let activityStarted = false;
+
+const VIEWS = {
+  dashboard: { onShow: loadDashboard },
+  activity: {
+    onShow: () => { if (!activityStarted) { initActivity(); activityStarted = true; } },
+  },
+  site: { onShow: () => refreshScopesThenSite(true), onHide: hideSite },
+  tasks: { onShow: () => {} }, // state.tasks is already current; nothing to fetch
+  agents: { onShow: () => showAgentView(state.agentView), onHide: stopAgentPoll },
+};
 
 // ------------------------------------------------------------------- scope
 
 /// What the rail does when the selection changes. Nothing is refetched: every
-/// page already holds the whole answer and the scope only decides how much of it
+/// view already holds the whole answer and the scope only decides how much of it
 /// is drawn. Re-render, never reload -- `loadAgents` rebuilds the rail, and a
 /// reload here would send it straight round again.
 function rerender(route) {
   // Back and forward move the tab as well as the selection. The rail hands the
-  // route over rather than reaching into the page, because which tab is showing
+  // route over rather than reaching into the view, because which view is showing
   // is the page's business.
   if (route && route.tab !== state.tab) showTab(route.tab);
+  if (state.tab === "dashboard") { renderDashboard(); return; }
+  // The activity log is a tail of events as they arrive, not a table of rows
+  // that can be re-drawn narrower, so the selection does not reach it.
+  if (state.tab === "activity") return;
+  if (state.tab === "site") { refreshSite(); return; }
   if (state.tab === "tasks") { renderTasks(); return; }
   if (state.agentView === "occupancy") renderOccupancy(); else renderAgents();
 }
@@ -35,16 +62,22 @@ export function rebuildRail() {
 
 // ------------------------------------------------------------------- tabs
 function showTab(name) {
+  if (!VIEWS[name]) name = "dashboard";
+  const prev = state.tab;
+  if (prev !== name && VIEWS[prev] && VIEWS[prev].onHide) VIEWS[prev].onHide();
   state.tab = name;
   writeHash(name);
-  $("view-tasks").hidden = name !== "tasks";
-  $("view-agents").hidden = name !== "agents";
-  $("tab-tasks").classList.toggle("on", name === "tasks");
-  $("tab-agents").classList.toggle("on", name === "agents");
-  if (state.agentPoll) { clearInterval(state.agentPoll); state.agentPoll = null; }
-  if (name === "agents") {
-    showAgentView(state.agentView);
+  for (const k of Object.keys(VIEWS)) {
+    $(`view-${k}`).hidden = k !== name;
+    $(`tab-${k}`).classList.toggle("on", k === name);
   }
+  VIEWS[name].onShow();
+}
+
+// The Agents view keeps its own two-way switch (Occupancy / Roster), each
+// with a poll of its own -- ticking the now-line, or the elapsed times.
+function stopAgentPoll() {
+  if (state.agentPoll) { clearInterval(state.agentPoll); state.agentPoll = null; }
 }
 
 function showAgentView(view) {
@@ -55,15 +88,12 @@ function showAgentView(view) {
   for (const b of $("agent-view").querySelectorAll("button")) {
     b.classList.toggle("on", b.dataset.view === view);
   }
-  if (state.agentPoll) { clearInterval(state.agentPoll); state.agentPoll = null; }
+  stopAgentPoll();
   if (view === "occupancy") {
     loadOccupancy();
-    // The chart is a clock as much as a record: the now line has to move even
-    // when nothing happens, and a running block has to keep growing.
     state.agentPoll = setInterval(loadOccupancy, 10000);
   } else {
     loadAgents();
-    // Elapsed times tick even when nothing happens.
     state.agentPoll = setInterval(renderAgents, 5000);
   }
 }
@@ -102,16 +132,20 @@ async function boot() {
   setTheme(currentTheme());
   $("theme").onclick = () => toggleTheme();
 
-  $("tab-tasks").onclick = () => showTab("tasks");
-  $("tab-agents").onclick = () => showTab("agents");
+  for (const k of Object.keys(VIEWS)) {
+    $(`tab-${k}`).onclick = () => showTab(k);
+  }
   for (const b of $("agent-view").querySelectorAll("button")) {
     b.onclick = () => showAgentView(b.dataset.view);
   }
   $("occ-window").onchange = () => loadOccupancy();
   $("newTask").onclick = () => openCreate();
+  wireDashboard();
+
+  showTab("dashboard");
 
   connect({
-    snapshot: (tasks) => { state.tasks = new Map(tasks.map(t => [t.id, t])); renderTasks(); },
+    snapshot: (tasks) => { state.tasks = new Map(tasks.map(t => [t.id, t])); renderTasks(); if (state.tab === "dashboard") renderDashboard(); },
     event: onEvent,
   });
 }
@@ -121,19 +155,23 @@ boot();
 // ------------------------------------------------------------------- events
 
 /// What an event means for what is on screen. This is the one place that knows
-/// every page, which is why it lives in the wiring and not in the transport.
+/// every view, which is why it lives in the wiring and not in the transport.
 function onEvent(ev) {
+  recordEvent(ev);
+
   switch (ev.type) {
     case "task_created":
     case "task_updated":
       state.tasks.set(ev.task.id, ev.task);
       renderTasks();
       if (state.open === ev.task.id) renderModal();
+      if (state.tab === "dashboard") renderDashboard();
       break;
     case "task_deleted":
       state.tasks.delete(ev.id);
       renderTasks();
       if (state.open === ev.id) closeModal();
+      if (state.tab === "dashboard") renderDashboard();
       break;
     case "task_entry":
       if (state.open === ev.id) loadJournal();
@@ -150,8 +188,23 @@ function onEvent(ev) {
       }
       break;
   }
-  // The agents page is a view over runs and standing agents alike.
-  if (state.tab === "agents" && (ev.type.startsWith("run_") || ev.type.startsWith("agent_"))) {
-    if (state.agentView === "occupancy") loadOccupancy(); else loadAgents();
+  // The Agents and Site views are both a read over runs and standing agents;
+  // either can change out from under them without a task event at all.
+  if (ev.type.startsWith("run_") || ev.type.startsWith("agent_")) {
+    if (state.tab === "agents") {
+      if (state.agentView === "occupancy") loadOccupancy(); else loadAgents();
+    }
+    if (state.tab === "site") refreshScopesThenSite();
   }
+}
+
+/// The site's halls are built from `state.scopes`, which only the Agents view
+/// otherwise keeps current. Pull a fresh copy before redrawing rather than
+/// let the site quietly fall behind whenever nobody has the Agents tab open.
+/// `opening` also runs the first-load path (footprint fetch, camera fit).
+async function refreshScopesThenSite(opening) {
+  try {
+    state.scopes = (await api("/api/agents")).scopes;
+  } catch { /* keep drawing with what we had */ }
+  if (opening) showSite(); else refreshSite();
 }

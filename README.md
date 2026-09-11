@@ -372,7 +372,13 @@ envelope, not inventing a second API.
 
 ## The web UI
 
-Two pages. **Tasks** is the list; clicking one opens it in a modal with its
+Five views, one selector in the header: **Dashboard** is the landing view, then
+**Activity**, **Site plan**, **Tasks** and **Agents**. Switching between them is
+a small registry, not five special cases — one container shown, one button lit,
+and whatever that view needs to start or stop doing while it is not the one on
+screen.
+
+**Tasks** is the list; clicking one opens it in a modal with its
 runs, the selected run's journal, and its terminal. The terminal is shown from
 the moment a run exists — live from the session while it runs, and the
 transcript kept at the end once it does not — so there is never a button to
@@ -426,6 +432,30 @@ on, which is usually a first-run trust dialog or a login. Every agent also
 offers **Start task…**, which opens the create form with that scope and agent
 already chosen. A task run's terminal takes the same input.
 
+**Dashboard** is five KPI tiles, a by-scope table and an inbox, all read from
+the same `state.tasks` and `state.scopes` every other view already holds —
+nothing here is fetched specially. The inbox lives inside the dashboard rather
+than beside it: every blocked, failed and cancelled task, and every schedule
+that missed its own next run, newest first. `blocked` is a real, first-class
+status — "the agent needs a human before it can go on" — so this is never a
+stub of one; what the daemon genuinely does not record is the *question*
+itself, and the closest thing to an answer is the journal entry the agent
+wrote when it blocked, shown if it wrote one.
+
+**Activity** is a live tail, not an archive: every event this page has seen
+since it was opened, filterable by kind and by free text. There is a `/ws`
+stream and a journal per task, but no queryable history behind either yet, so
+the banner says plainly that nothing earlier than "now" is shown here.
+
+**Site plan** draws the same scopes as a place: one hall per scope, sized by
+its footprint on disk (`/api/site`), and a figure for every agent actually
+present — never a bay, because Factory has no bay ("a row is an agent, not a
+bay", `occupancy.rs`). A second, lit three.js render of the same facts toggles
+from the same HUD, orbits, and picks the same hall the plan would. Both fall
+back to honesty over invention: a scope's own directory tree is not read, so a
+hall's floor says "not recorded" instead of drawing a treemap from nothing; the
+file a session is editing is not read at all, and is not drawn.
+
 ## What this prototype does not do yet
 
 - **Runtime and interface plugins.** The manifest accepts `kind: runtime` and
@@ -472,4 +502,6 @@ already chosen. A task run's terminal takes the same input.
     ui/js/core.js              DOM helpers, client state, the HTTP call, the socket
     ui/js/app.js               the wiring: which page shows, what an event means
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
+    ui/js/{dashboard,activity,site,site-render}.js               the new views
+    ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter

@@ -56,9 +56,37 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../../ui/js/scopes.js"),
     ),
     (
+        "js/dashboard.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/dashboard.js"),
+    ),
+    (
+        "js/activity.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/activity.js"),
+    ),
+    (
+        "js/site.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/site.js"),
+    ),
+    (
+        "js/site-render.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/site-render.js"),
+    ),
+    (
         "js/app.js",
         "text/javascript; charset=utf-8",
         include_str!("../../../ui/js/app.js"),
+    ),
+    // Vendored rather than fetched from a CDN: the daemon compiles this in, so
+    // a machine with no internet still has the render mode available. r128,
+    // unmodified, from https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js
+    (
+        "vendor/three.min.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/vendor/three.min.js"),
     ),
 ];
 
@@ -87,6 +115,20 @@ mod tests {
             assert!(
                 super::asset(&format!("js/{name}")).is_some(),
                 "ui/js/{name} is not in the served list"
+            );
+        }
+    }
+
+    /// The same, for the vendored libraries: a daemon with no internet still
+    /// has to find them under `/ui/vendor/`.
+    #[test]
+    fn every_vendored_file_on_disk_is_served() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/vendor");
+        for entry in std::fs::read_dir(dir).expect("ui/vendor") {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            assert!(
+                super::asset(&format!("vendor/{name}")).is_some(),
+                "ui/vendor/{name} is not in the served list"
             );
         }
     }

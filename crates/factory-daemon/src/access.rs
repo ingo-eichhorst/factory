@@ -170,6 +170,7 @@ impl Engine {
             | Request::Adapters
             | Request::Agents
             | Request::Occupancy { .. }
+            | Request::SiteFootprint
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
