@@ -1,0 +1,921 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Factory Leitstand</title>
+<style>
+*{box-sizing:border-box}html{color-scheme:light dark}body{margin:0}
+img{max-width:100%}[hidden]{display:none!important}
+</style>
+<style>
+:root{
+  --canvas:#E4E8EA; --panel:#F7F9FA; --panel-2:#EDF1F3; --sunk:#DCE3E6;
+  --ink:#101619; --ink-2:#3B4A52; --muted:#66787F; --faint:#8A9AA1;
+  --line:#C2CDD3; --line-soft:#D8E0E4;
+  --signal:#12557E; --signal-wash:rgba(18,85,126,.10);
+  --run:#1B7A55; --idle:#6B7A82; --wait:#9C6806; --fault:#9E3A2B;
+  --run-wash:rgba(27,122,85,.12); --wait-wash:rgba(156,104,6,.13); --fault-wash:rgba(158,58,43,.11);
+  --idle-wash:rgba(107,122,130,.12);
+  --ly1:#47585F; --ly2:#2E7A86; --ly3:#2F79B5; --ly4:#6B4FA3; --ly5:#A8438A; --ly6:#B4841C;
+  --sans:system-ui,-apple-system,"Segoe UI","Helvetica Neue",Arial,sans-serif;
+  --cond:"Avenir Next Condensed","Helvetica Neue",system-ui,Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --canvas:#0F1417; --panel:#161D21; --panel-2:#131A1D; --sunk:#0B1013;
+  --ink:#E2EAED; --ink-2:#AFBFC6; --muted:#8598A0; --faint:#63757C;
+  --line:#2A353A; --line-soft:#222C31;
+  --signal:#5AA6D8; --signal-wash:rgba(90,166,216,.14);
+  --run:#3FA97C; --idle:#7B8C94; --wait:#C79420; --fault:#CF6653;
+  --run-wash:rgba(63,169,124,.15); --wait-wash:rgba(199,148,32,.15); --fault-wash:rgba(207,102,83,.14);
+  --idle-wash:rgba(123,140,148,.14);
+  --ly1:#7D929A; --ly2:#4FAEBB; --ly3:#5CA5DE; --ly4:#9C81D1; --ly5:#D370B4; --ly6:#D9AC44;
+}}
+:root[data-theme="dark"]{
+  --canvas:#0F1417; --panel:#161D21; --panel-2:#131A1D; --sunk:#0B1013;
+  --ink:#E2EAED; --ink-2:#AFBFC6; --muted:#8598A0; --faint:#63757C;
+  --line:#2A353A; --line-soft:#222C31;
+  --signal:#5AA6D8; --signal-wash:rgba(90,166,216,.14);
+  --run:#3FA97C; --idle:#7B8C94; --wait:#C79420; --fault:#CF6653;
+  --run-wash:rgba(63,169,124,.15); --wait-wash:rgba(199,148,32,.15); --fault-wash:rgba(207,102,83,.14);
+  --idle-wash:rgba(123,140,148,.14);
+  --ly1:#7D929A; --ly2:#4FAEBB; --ly3:#5CA5DE; --ly4:#9C81D1; --ly5:#D370B4; --ly6:#D9AC44;
+}
+*{box-sizing:border-box}
+body{background:var(--canvas);color:var(--ink);font:400 13px/1.55 var(--sans);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+h1,h2,h3{margin:0;font-family:var(--cond);text-wrap:balance}
+p{margin:0}
+
+/* ---------- shell ---------- */
+#shell{display:flex;flex-direction:column;min-height:100vh}
+.mast{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+  padding:11px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+.mast .nm{font:700 15px/1 var(--cond);letter-spacing:.02em}
+.mast .sub{font:400 11.5px var(--sans);color:var(--muted)}
+.mast .wire-counts{margin-left:auto;font:500 11px var(--mono);color:var(--faint);display:flex;gap:12px}
+.mast .wire-counts b{color:var(--ink-2);font-weight:600}
+.body{display:grid;grid-template-columns:236px minmax(0,1fr);flex:1;min-height:0}
+.levels{border-right:1px solid var(--line);background:var(--panel-2);padding:8px 0 14px}
+.main{padding:18px 22px 30px;min-width:0}
+.wire{border-top:1px solid var(--line);background:var(--panel);padding:7px 20px;
+  display:flex;gap:18px;flex-wrap:wrap;align-items:center;
+  font:400 11px var(--mono);color:var(--muted)}
+.wire .k{color:var(--faint)}
+.wire .dot{width:6px;height:6px;border-radius:50%;background:var(--run);display:inline-block;margin-right:5px}
+
+/* ---------- level column ---------- */
+.lvtitle{font:600 10px var(--mono);letter-spacing:.12em;text-transform:uppercase;
+  color:var(--faint);padding:6px 14px 8px}
+.lv{display:grid;grid-template-columns:3px 24px minmax(0,1fr) auto;align-items:center;gap:9px;
+  width:100%;padding:0 12px 0 0;border:0;background:none;text-align:left;cursor:pointer;
+  height:46px;border-bottom:1px solid var(--line-soft)}
+.lv:first-of-type{border-top:1px solid var(--line-soft)}
+.lv .rail{height:100%;background:var(--c)}
+.lv .n{font:600 11px var(--mono);color:var(--c);padding-left:3px}
+.lv .t{font:600 13px/1.2 var(--cond);letter-spacing:.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lv .t small{display:block;font:400 10.5px var(--sans);color:var(--muted);letter-spacing:0}
+.lv .c{font:500 11px var(--mono);color:var(--ink-2)}
+.lv:hover{background:var(--panel)}
+.lv[aria-current="true"]{background:var(--panel);box-shadow:inset -2px 0 0 var(--c)}
+.lv.off .t{color:var(--faint)} .lv.off .rail{opacity:.35} .lv.off .n{opacity:.6}
+.lv.off .c{color:var(--faint)}
+.lv:focus-visible{outline:2px solid var(--signal);outline-offset:-2px}
+
+/* ---------- view head ---------- */
+.vhead{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:0 0 16px}
+.vhead h2{font-size:19px;font-weight:700;letter-spacing:.01em}
+.vhead .lvtag{font:600 10.5px var(--mono);color:var(--c);border:1px solid var(--c);
+  border-radius:2px;padding:1px 5px;align-self:center}
+.vhead .lede{flex:1 1 340px;min-width:0;font-size:12.5px;color:var(--muted);max-width:66ch}
+
+/* ---------- panels ---------- */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:13px 15px}
+.card > h3{font:700 12.5px var(--cond);letter-spacing:.04em;text-transform:uppercase;
+  color:var(--ink-2);margin-bottom:9px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.q{font:500 10px var(--mono);color:var(--faint);border:1px solid var(--line-soft);
+  border-radius:2px;padding:1px 5px;letter-spacing:0;text-transform:none;font-weight:500;white-space:nowrap}
+.q.w{color:var(--signal);border-color:var(--signal);opacity:.85}
+.grid{display:grid;gap:13px}
+.g2{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media (max-width:1080px){.g2,.g3{grid-template-columns:minmax(0,1fr)}}
+.note{font-size:12px;color:var(--muted);line-height:1.6}
+.note b,.note strong{color:var(--ink-2);font-weight:600}
+.note code,code.i{font:500 11.5px var(--mono);color:var(--signal);background:var(--signal-wash);
+  padding:1px 4px;border-radius:2px}
+.sep{height:1px;background:var(--line-soft);margin:11px 0}
+
+/* ---------- pills ---------- */
+.pill{font:600 10.5px var(--mono);border-radius:2px;padding:1px 6px;white-space:nowrap;
+  border:1px solid currentColor}
+.pill.run{color:var(--run);background:var(--run-wash)}
+.pill.wait{color:var(--wait);background:var(--wait-wash)}
+.pill.fault{color:var(--fault);background:var(--fault-wash)}
+.pill.idle{color:var(--idle);background:var(--idle-wash)}
+.pill.sig{color:var(--signal);background:var(--signal-wash)}
+.pill.ghost{color:var(--faint);background:transparent;border-style:dashed}
+
+/* ---------- actions ---------- */
+.acts{display:flex;gap:7px;flex-wrap:wrap;margin-top:11px}
+.act{display:inline-flex;align-items:baseline;gap:7px;border:1px solid var(--line);
+  background:var(--panel-2);border-radius:3px;padding:5px 9px;cursor:pointer;
+  font:500 12px var(--sans)}
+.act code{font:500 10.5px var(--mono);color:var(--signal)}
+.act:hover:not([disabled]){border-color:var(--signal);background:var(--signal-wash)}
+.act[disabled]{opacity:.5;cursor:not-allowed}
+.act[disabled] code{color:var(--muted)}
+.act:focus-visible{outline:2px solid var(--signal);outline-offset:1px}
+
+/* ---------- tables ---------- */
+.tw{overflow-x:auto}
+table.t{border-collapse:collapse;width:100%;min-width:520px;font-size:12px}
+table.t th{font:600 10px var(--mono);letter-spacing:.09em;text-transform:uppercase;
+  color:var(--faint);text-align:left;padding:0 10px 6px 0;border-bottom:1px solid var(--line)}
+table.t td{padding:6px 10px 6px 0;border-bottom:1px solid var(--line-soft);vertical-align:top}
+table.t tr:last-child td{border-bottom:0}
+table.t td.m,table.t td .m{font:400 11.5px var(--mono);color:var(--ink-2)}
+table.t td.num{font-variant-numeric:tabular-nums;text-align:right;padding-right:14px}
+.muted{color:var(--muted)} .faint{color:var(--faint)}
+#alarm{padding:9px 20px;background:var(--fault-wash);border-bottom:1px solid var(--fault);
+  color:var(--fault);font:500 12.5px/1.5 var(--sans)}
+#alarm code{color:inherit;background:rgba(0,0,0,.06);border-radius:2px;padding:1px 4px;
+  font:500 11.5px var(--mono)}
+.dot.bad{background:var(--fault)} .dot.warm{background:var(--wait)}
+.empty{padding:26px 22px;text-align:center;border:1px dashed var(--line);border-radius:3px;
+  color:var(--muted);font-size:12.5px}
+.empty b{display:block;font:600 14px var(--cond);color:var(--ink);margin-bottom:5px}
+</style>
+<style>
+/* ---------- scope tree ---------- */
+.tree{margin:0;padding:0;list-style:none;font-size:12.5px}
+.tree ul{list-style:none;margin:0 0 0 9px;padding-left:9px;border-left:1px solid var(--line-soft)}
+.srow{display:flex;align-items:center;gap:9px;width:100%;text-align:left;border:0;background:none;
+  padding:5px 8px;border-radius:3px;cursor:pointer}
+.srow:hover{background:var(--panel-2)}
+.srow[aria-current="true"]{background:var(--signal-wash);box-shadow:inset 2px 0 0 var(--signal)}
+.srow .nm{font:600 12.5px var(--sans)}
+.srow .pth{font:400 11px var(--mono);color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srow .ag{margin-left:auto;font:500 10.5px var(--mono);color:var(--muted);white-space:nowrap}
+.srow.drift .ag{color:var(--wait)}
+.srow:focus-visible{outline:2px solid var(--signal);outline-offset:-2px}
+
+/* ---------- agents & sessions ---------- */
+.arow{display:grid;grid-template-columns:minmax(120px,1.3fr) minmax(90px,1fr) auto auto;
+  gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--line-soft)}
+.arow:last-child{border-bottom:0}
+.arow .an{font:600 12.5px var(--sans)}
+.arow .an small{display:block;font:400 10.5px var(--mono);color:var(--faint)}
+.arow .hx{font:400 11.5px var(--mono);color:var(--ink-2)}
+.sess{border:1px solid var(--line-soft);border-radius:3px;padding:9px 11px;background:var(--panel-2)}
+.sess + .sess{margin-top:8px}
+.sess .sh{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.sess .sid{font:600 12px var(--mono)}
+.sess .ws{font:400 11px var(--mono);color:var(--muted);margin-top:4px;word-break:break-all}
+
+/* ---------- board ---------- */
+.board{display:grid;grid-template-columns:repeat(6,minmax(178px,1fr));gap:11px;
+  overflow-x:auto;padding-bottom:4px;align-items:start}
+.col{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:9px;min-width:0}
+.col > h4{margin:0 0 8px;font:700 10.5px var(--mono);letter-spacing:.09em;text-transform:uppercase;
+  display:flex;justify-content:space-between;align-items:center;gap:6px}
+.col.c-queued > h4{color:var(--muted)} .col.c-running > h4{color:var(--run)}
+.col.c-blocked > h4{color:var(--wait)} .col.c-done > h4{color:var(--ink-2)}
+.col.c-failed > h4{color:var(--fault)} .col.c-cancelled > h4{color:var(--faint)}
+.col > h4 span{font-weight:500;color:var(--faint)}
+.tk{display:block;width:100%;text-align:left;border:1px solid var(--line-soft);background:var(--panel-2);
+  border-radius:3px;padding:8px 9px;cursor:pointer;margin-bottom:7px}
+.tk:last-child{margin-bottom:0}
+.tk:hover{border-color:var(--signal)}
+.tk[aria-current="true"]{border-color:var(--signal);box-shadow:inset 0 0 0 1px var(--signal)}
+.tk .ti{display:flex;align-items:center;gap:6px;font:600 11px var(--mono);color:var(--muted)}
+.tk .ti .src{margin-left:auto;font-weight:500;color:var(--faint)}
+.tk .tp{font:400 12px/1.4 var(--sans);color:var(--ink);margin:4px 0 6px;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.tk .tm{display:flex;gap:8px;flex-wrap:wrap;font:400 10.5px var(--mono);color:var(--faint)}
+.tk .tm b{font-weight:500;color:var(--muted)}
+.col.empty-hint{opacity:.75}
+.col .none{font:400 11px var(--sans);color:var(--faint);padding:3px 1px}
+.tk:focus-visible{outline:2px solid var(--signal);outline-offset:1px}
+
+/* ---------- task detail ---------- */
+.dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 14px;font-size:12px;margin:0}
+.dl dt{font:500 10.5px var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:.06em;
+  padding-top:2px;white-space:nowrap}
+.dl dd{margin:0;font:400 11.5px var(--mono);color:var(--ink-2);word-break:break-word}
+.dl dd.s{font:400 12px var(--sans);color:var(--ink)}
+.prompt{font:400 12.5px/1.55 var(--sans);background:var(--panel-2);border:1px solid var(--line-soft);
+  border-left:2px solid var(--ly4);border-radius:0 3px 3px 0;padding:9px 11px;margin:0 0 11px}
+.blank{border:1px dashed var(--line);border-radius:3px;padding:11px 13px;background:transparent}
+.blank .bt{font:600 12px var(--cond);letter-spacing:.03em;text-transform:uppercase;color:var(--wait);
+  display:flex;align-items:center;gap:8px;margin-bottom:6px}
+
+/* ---------- missing / build plan ---------- */
+.miss{display:grid;grid-template-columns:auto minmax(0,1fr);gap:9px 13px;align-items:start;font-size:12.5px}
+.miss .qn{font:600 11.5px var(--mono);color:var(--wait);white-space:nowrap;padding-top:1px}
+.miss .qd{color:var(--muted)} .miss .qd b{color:var(--ink-2);font-weight:600}
+.evts{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.evts i{font:500 11px var(--mono);font-style:normal;border:1px solid var(--line);border-radius:2px;
+  padding:2px 6px;color:var(--ink-2);background:var(--panel-2)}
+.evts i.na{color:var(--faint);border-style:dashed;background:transparent}
+.big{font:700 27px/1 var(--cond);font-variant-numeric:tabular-nums;color:var(--ink)}
+.big + .bl{font:400 11px var(--sans);color:var(--muted);margin-top:3px}
+.stack{display:flex;flex-direction:column;gap:13px}
+@media (max-width:860px){
+  .body{grid-template-columns:minmax(0,1fr)}
+  .levels{border-right:0;border-bottom:1px solid var(--line);display:flex;overflow-x:auto;padding:0}
+  .lv{height:auto;padding:8px 12px 8px 0;border-bottom:0;border-right:1px solid var(--line-soft);
+     grid-template-columns:3px 22px auto;flex:0 0 auto}
+  .lv .c{display:none} .lv .t small{display:none}
+  .main{padding:14px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+</head>
+<body>
+<div id="shell">
+  <div class="mast">
+    <span class="nm">Factory Leitstand</span>
+    <span class="sub">Was die Fabrik heute beantworten kann — und was noch nicht.</span>
+    <span class="wire-counts">
+      <span><b>13</b> Queries</span><span><b>20</b> Kommandos</span><span><b>0</b> Abos</span>
+    </span>
+  </div>
+  <div id="alarm" hidden></div>
+  <div class="body">
+    <nav class="levels" id="levels" aria-label="Entscheidungsebenen"></nav>
+    <main class="main" id="main"></main>
+  </div>
+  <div class="wire">
+    <span><span class="dot" id="dot"></span><b id="live">verbinde …</b></span>
+    <span><span class="k">socket</span> <b id="sock">—</b></span>
+    <span><span class="k">letzter aufruf</span> <b id="lastcall">—</b></span>
+    <span><span class="k">aufrufe</span> <b id="ncalls">—</b> je Durchgang</span>
+    <span><span class="k">aktualisierung</span> alle 5 s — kein Abo auf dem Draht</span>
+  </div>
+</div>
+<script>
+(function(){
+'use strict';
+
+/* ------------------------------------------------------------------ *
+ * The data layer. Every value this page shows comes back from one of
+ * the daemon's own queries, through the one endpoint the HTTP
+ * transport exposes — the same ADR 0003 envelope the Unix socket
+ * takes. Nothing here is stored, derived from a second source, or
+ * carried over from a previous poll.
+ * ------------------------------------------------------------------ */
+
+var ZERO='00000000-0000-0000-0000-000000000000';
+var POLL_MS=5000;
+
+var S={scopes:[],agents:{},targetable:{},refusal:{},sessions:[],leases:[],tasks:[],
+       schedules:[],daemon:null,root:ZERO,calls:0,loaded:false};
+var cur='harn', selScope=null, selTask=null, timer=null, inflight=false;
+
+function $(s){return document.querySelector(s)}
+function uuid(){
+  if(window.crypto&&window.crypto.randomUUID)return window.crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx'.replace(/x/g,function(){
+    return (Math.random()*16|0).toString(16);
+  });
+}
+
+/* One request. A refusal from the daemon is thrown with its code attached, so
+   a caller can tell `not_found.scope` from a transport failure. */
+function send(kind,name,payload,scopeId){
+  var body={request_id:uuid(),scope_id:scopeId||ZERO,payload:payload||{}};
+  body.api=(kind==='q')?'factory.query/v1':'factory.command/v1';
+  if(kind==='q')body.query=name; else body.command=name;
+  S.calls++;
+  return fetch('/api',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)
+  }).then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(function(j){
+    if(j.api==='factory.error/v1'){
+      var e=new Error(j.error.message); e.code=j.error.code; throw e;
+    }
+    return j.result;
+  });
+}
+function q(name,payload,scopeId){return send('q',name,payload,scopeId)}
+
+function load(){
+  var calls0=S.calls, agents={}, targ={}, refus={}, sessions=[], leases=[];
+  return q('daemon.status').then(function(d){
+    S.daemon=d;
+    return q('scope.list');
+  }).then(function(r){
+    S.scopes=r.scopes||[];
+    var root=S.scopes.filter(function(s){return !s.parent_id})[0];
+    S.root=root?root.id:ZERO;
+    if(!S.scopes.length)return {scopes:[]};
+    // `agent.list` is the one operation that reads the caller's scope from the
+    // payload rather than the envelope: targetability is relative to whoever
+    // is asking. The page asks as the root scope, and says so on L3.
+    return q('agent.list',{scope_id:S.root},S.root);
+  }).then(function(r){
+    (r.scopes||[]).forEach(function(e){
+      agents[e.scope_id]=e.agents||[];
+      targ[e.scope_id]=e.targetable;
+      if(e.refusal_reason)refus[e.scope_id]=e.refusal_reason;
+    });
+    S.agents=agents; S.targetable=targ; S.refusal=refus;
+    // One call per scope: `agent.status` filters on the envelope's scope and
+    // there is no factory-wide session query. See the note on L3.
+    return S.scopes.reduce(function(chain,sc){
+      return chain.then(function(){
+        return q('agent.status',{},sc.id).then(function(r2){
+          (r2.sessions||[]).forEach(function(x){sessions.push(x)});
+        });
+      });
+    },Promise.resolve());
+  }).then(function(){
+    S.sessions=sessions;
+    // And one more per session: leases come back only when a single
+    // `session_id` is named, and the row itself does not carry it — the
+    // pairing below is the page's, not the store's.
+    return sessions.reduce(function(chain,se){
+      return chain.then(function(){
+        return q('agent.status',{session_id:se.id},se.scope_id).then(function(r3){
+          (r3.leases||[]).forEach(function(l){l.session=se.id; leases.push(l)});
+        });
+      });
+    },Promise.resolve());
+  }).then(function(){
+    S.leases=leases;
+    return q('task.list');
+  }).then(function(r){
+    S.tasks=r.tasks||[];
+    return q('schedule.list');
+  }).then(function(r){
+    S.schedules=r.schedules||[];
+    S.loaded=true;
+    // Keep the selection only while it still exists: a task can finish and a
+    // scope can be removed between two polls.
+    if(!S.scopes.some(function(x){return x.id===selScope}))
+      selScope=S.scopes.length?S.root:null;
+    if(!S.tasks.some(function(t){return t.id===selTask}))
+      selTask=S.tasks.length?S.tasks[0].id:null;
+    return S.calls-calls0;
+  });
+}
+
+function alarm(message){
+  var el=$('#alarm');
+  if(!message){el.hidden=true; el.textContent=''; return}
+  el.hidden=false; el.innerHTML=message;
+}
+function wire(nCalls,ok){
+  $('#dot').className='dot'+(ok?'':' bad');
+  $('#live').textContent=ok?'daemon antwortet':'daemon antwortet nicht';
+  $('#sock').textContent=S.daemon?S.daemon.socket_path:'—';
+  if(nCalls!=null)$('#ncalls').textContent=nCalls;
+}
+
+/* ------------------------------------------------------------------ *
+ * Rendering. Six destinations, one per decision level; two of them are
+ * grey because no query can fill them, and they say so.
+ * ------------------------------------------------------------------ */
+
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function ago(iso){
+  if(!iso)return '—';
+  var t=Date.parse(iso.length<=19&&iso.indexOf('Z')<0?iso+'Z':iso);
+  if(isNaN(t))return '—';
+  var m=Math.round((Date.now()-t)/60000);
+  if(m<0)return 'in '+(-m)+' min';
+  if(m<1)return 'gerade eben';
+  if(m<60)return m+' min';
+  var h=Math.floor(m/60);
+  if(h<24)return h+' h'+(m%60?' '+(m%60)+' min':'');
+  return Math.floor(h/24)+' d'+(h%24?' '+(h%24)+' h':'');
+}
+function stamp(iso){return iso?esc(String(iso).replace('T',' ').replace(/\.\d+Z?$/,'').replace(/Z$/,'')):'—'}
+function kn(n){return n==null?'—':(n>=1000?(Math.round(n/100)/10).toFixed(1).replace('.',',')+'k':String(n))}
+function dur(ms){
+  if(ms==null)return '—';
+  var m=Math.round(ms/60000);
+  return m<60?m+' min':Math.floor(m/60)+' h '+(m%60)+' min';
+}
+/* The tail, not the head: the store mints UUIDv7, whose leading bytes are a
+   timestamp. Two ids created in the same second share their first eight
+   characters, so a leading abbreviation makes every card look alike. */
+function shortId(id){return id?String(id).replace(/-/g,'').slice(-8):'—'}
+function tilde(p){return String(p||'').replace(/^\/Users\/[^/]+/,'~')}
+function qc(n,w){return '<span class="q'+(w?' w':'')+'">'+esc(n)+'</span>'}
+function act(label,cmd,dis,why){
+  return '<button class="act" data-cmd="'+esc(cmd)+'"'+
+    (dis?' disabled title="'+esc(why||'')+'"':'')+'>'+esc(label)+' <code>'+esc(cmd)+'</code></button>';
+}
+var STATE_CLS={running:'run',starting:'wait',disconnected:'wait',failed:'fault',stopped:'idle'};
+var AVAIL_CLS={busy:'run',idle:'idle',starting:'wait',no_session:'ghost',unknown:'ghost'};
+var TASK_CLS={running:'run',queued:'sig',blocked:'wait',failed:'fault',done:'idle',cancelled:'ghost'};
+var STATUSES=[
+ {k:'queued',t:'queued'},{k:'running',t:'running'},{k:'blocked',t:'blocked'},
+ {k:'done',t:'done'},{k:'failed',t:'failed'},{k:'cancelled',t:'cancelled'}
+];
+/* task_events.event_type — the thirteen strings the CHECK allows. */
+var EVENT_TYPES=['created','assigned','delivered','refused','running','progress','blocked',
+ 'done','failed','cancelled','resumed','verification','rework'];
+
+function heldLeases(){return S.leases.filter(function(l){return !l.released_at})}
+function liveSessions(){return S.sessions.filter(function(s){
+  return s.state!=='stopped'&&s.state!=='failed'})}
+function openTasks(){return S.tasks.filter(function(t){
+  return t.status==='queued'||t.status==='running'||t.status==='blocked'})}
+
+var LEVELS=[
+ {k:'dir',  n:'L6',t:'Richtung',     s:'Ziele, Budget, Stückkosten',c:'--ly6',off:true,
+  badge:function(){return '—'}},
+ {k:'imp',  n:'L5',t:'Verbesserung', s:'Verlauf und Entscheidungen',c:'--ly5',off:true,
+  badge:function(){return '—'}},
+ {k:'proc', n:'L4',t:'Prozess',      s:'Aufträge',            c:'--ly4',
+  badge:function(){return S.loaded?openTasks().length+' offen':'…'}},
+ {k:'harn', n:'L3',t:'Harness',      s:'Scopes und Agenten',  c:'--ly3',
+  badge:function(){return S.loaded?liveSessions().length+' Sitz.':'…'}},
+ {k:'env',  n:'L2',t:'Umgebung',     s:'Workspaces und Leases',c:'--ly2',
+  badge:function(){return S.loaded?heldLeases().length+' Lease':'…'}},
+ {k:'infra',n:'L1',t:'Infrastruktur',s:'Daemon und Store',    c:'--ly1',
+  badge:function(){return S.loaded?'läuft':'…'}}
+];
+function lv(kk){for(var i=0;i<LEVELS.length;i++)if(LEVELS[i].k===kk)return LEVELS[i]}
+
+function renderLevels(){
+  $('#levels').innerHTML='<div class="lvtitle">Entscheidungsebenen</div>'+LEVELS.map(function(l){
+    return '<button class="lv'+(l.off?' off':'')+'" data-go="'+l.k+'" style="--c:var('+l.c+')"'+
+      (l.k===cur?' aria-current="true"':'')+'>'+
+      '<span class="rail"></span><span class="n">'+l.n+'</span>'+
+      '<span class="t">'+esc(l.t)+'<small>'+esc(l.s)+'</small></span>'+
+      '<span class="c">'+esc(l.badge())+'</span></button>';
+  }).join('');
+}
+function vhead(kk,lede){
+  var l=lv(kk);
+  return '<div class="vhead" style="--c:var('+l.c+')"><span class="lvtag">'+l.n+'</span>'+
+    '<h2>'+esc(l.t)+' — '+esc(l.s)+'</h2><p class="lede">'+lede+'</p></div>';
+}
+function empty(title,body){
+  return '<div class="empty"><b>'+esc(title)+'</b>'+body+'</div>';
+}
+function scopeById(id){for(var i=0;i<S.scopes.length;i++)if(S.scopes[i].id===id)return S.scopes[i]}
+function sessById(id){for(var i=0;i<S.sessions.length;i++)if(S.sessions[i].id===id)return S.sessions[i]}
+function taskById(id){for(var i=0;i<S.tasks.length;i++)if(S.tasks[i].id===id)return S.tasks[i]}
+function kids(pid){return S.scopes.filter(function(s){return (s.parent_id||null)===pid})}
+
+/* ---------- L3: scopes and agents ---------- */
+function treeHtml(pid){
+  var ks=kids(pid); if(!ks.length)return '';
+  return '<ul class="tree">'+ks.map(function(s){
+    var ag=S.agents[s.id]||[];
+    return '<li><button class="srow'+(ag.length?'':' drift')+'" data-scope="'+esc(s.id)+'"'+
+      (s.id===selScope?' aria-current="true"':'')+'>'+
+      '<span class="nm">'+esc(s.name)+'</span>'+
+      '<span class="pth">'+esc(s.declared_path)+'</span>'+
+      '<span class="ag">'+(ag.length?ag.length+(ag.length===1?' Agent':' Agenten'):'keine Agenten')+
+      '</span></button>'+treeHtml(s.id)+'</li>';
+  }).join('')+'</ul>';
+}
+
+function viewHarn(){
+  var lede='Ein Klick auf die Ebene zeigt zuerst die Übersicht: welche Scopes es gibt, welche Agenten dort '+
+   'deklariert sind und welche Sitzungen gerade laufen. Das ist die Ebene mit der besten Datenlage — vier der '+
+   'dreizehn Queries bedienen sie.';
+
+  if(!S.scopes.length)return vhead('harn',lede)+empty('Keine Scopes registriert',
+    '<p>Eine frische Instanz kennt noch keinen Scope. Trag ihn in <code class="i">.factory/config.yaml</code> ein und '+
+    'projiziere ihn mit <code class="i">factory scope reconcile --apply</code>. Der Daemon schreibt selbst kein YAML — '+
+    'siehe den Knopf links, der genau deshalb aus ist.</p>');
+
+  var s=scopeById(selScope)||S.scopes[0];
+  var ag=S.agents[s.id]||[];
+  var ss=S.sessions.filter(function(x){return x.scope_id===s.id});
+
+  var agentsHtml=ag.length?ag.map(function(a){
+    return '<div class="arow"><span class="an">'+esc(a.name)+'<small>'+esc(a.lifetime)+'</small></span>'+
+      '<span class="hx">'+esc(a.harness)+'</span>'+
+      '<span class="hx">max '+esc(a.max_sessions)+'</span>'+
+      '<span class="pill '+(AVAIL_CLS[a.availability]||'ghost')+'">'+esc(a.availability)+'</span></div>';
+  }).join(''):
+    '<div class="blank"><div class="bt">Keine Agenten</div><p class="note">Der Scope steht in der Registry, aber '+
+    '<code>config.yaml</code> führt keinen Agenten für ihn. <b>agent.list liest die Konfiguration, nicht die '+
+    'Scope-Tabelle</b> — eine leere Agentenliste unter einem registrierten Scope ist deshalb ein echter '+
+    'Betriebszustand, keine Fehlanzeige der Oberfläche. Das ist der Fall, für den <code>scope.reconcile</code> '+
+    'da ist.</p></div>';
+
+  var sessHtml=ss.length?ss.map(function(x){
+    var lease=S.leases.filter(function(l){return l.session===x.id&&!l.released_at})[0];
+    return '<div class="sess"><div class="sh"><span class="sid">'+esc(shortId(x.id))+'</span>'+
+      '<span class="pill '+(STATE_CLS[x.state]||'idle')+'">'+esc(x.state)+'</span>'+
+      '<span class="muted" style="font-size:11.5px">'+esc(x.agent_name)+'</span>'+
+      '<span class="faint" style="margin-left:auto;font:400 11px var(--mono)">seit '+ago(x.created_at)+'</span>'+
+      '</div><div class="ws">'+esc(tilde(x.workspace_path))+
+      (lease?'':' <span class="faint">· kein Lease</span>')+'</div>'+
+      '<div class="acts">'+act('Beenden','agent.stop')+act('Anhängen','agent.attach_command')+
+      '</div></div>';
+  }).join(''):'<p class="note faint">Keine Sitzung in diesem Scope.</p>';
+
+  var tgt=S.targetable[s.id], ref=S.refusal[s.id];
+  var rootName=(scopeById(S.root)||{}).name||'—';
+
+  return vhead('harn',lede)+
+  '<div class="grid" style="grid-template-columns:minmax(240px,310px) minmax(0,1fr);gap:13px">'+
+    '<div class="card"><h3>Scopes '+qc('scope.list')+'</h3>'+
+      '<ul class="tree" style="margin:0;padding:0;list-style:none">'+
+      kids(null).map(function(r){
+        var ag2=S.agents[r.id]||[];
+        return '<li><button class="srow'+(ag2.length?'':' drift')+'" data-scope="'+esc(r.id)+'"'+
+          (r.id===selScope?' aria-current="true"':'')+'>'+
+          '<span class="nm">'+esc(r.name)+'</span><span class="pth">'+esc(r.declared_path)+'</span>'+
+          '<span class="ag">'+(ag2.length?ag2.length+' Agent':'keine Agenten')+'</span></button>'+
+          treeHtml(r.id)+'</li>';
+      }).join('')+'</ul>'+
+      '<div class="sep"></div>'+
+      '<p class="note">Die Verschachtelung kommt aus <code>parent_id</code>, nicht aus dem Pfad.</p>'+
+      '<div class="acts">'+
+        act('Scope registrieren','scope.add',true,
+          'internal.scope_add_unsupported — der Daemon hat keinen YAML-Schreiber für .factory/config.yaml, und '+
+          'ADR 0009 verlangt, dass unbekannte Schlüssel erhalten bleiben. Scope direkt eintragen, dann '+
+          'scope.reconcile mit apply:true.')+
+        act('Abgleichen','scope.reconcile')+'</div>'+
+      '<p class="note faint" style="margin-top:7px">Registrieren ist ein Zweischritt: <code>config.yaml</code> '+
+      'von Hand, dann <code>scope.reconcile --apply</code>.</p>'+
+    '</div>'+
+    '<div class="stack">'+
+      '<div class="card"><h3>'+esc(s.name)+' '+qc('agent.list')+'</h3>'+
+        '<dl class="dl">'+
+          '<dt>id</dt><dd>'+esc(s.id)+'</dd>'+
+          '<dt>declared</dt><dd>'+esc(s.declared_path)+'</dd>'+
+          '<dt>canonical</dt><dd>'+(s.canonical_path?esc(tilde(s.canonical_path)):
+            '<span class="pill fault">nicht aufgelöst</span>')+'</dd>'+
+          '<dt>git</dt><dd>'+(s.git?esc(s.git):'<span class="faint">—</span>')+'</dd>'+
+          '<dt>adressierbar</dt><dd>'+(tgt?'<span class="pill run">ja</span>':
+            '<span class="pill fault">nein</span>')+
+            (ref?'<div class="faint" style="margin-top:3px;font-size:11px">'+esc(ref)+'</div>':'')+
+            '<div class="faint" style="margin-top:3px;font-size:11px">aus Sicht von <b>'+esc(rootName)+
+            '</b> — dieses Feld hängt am Aufrufer</div></dd>'+
+        '</dl><div class="sep"></div>'+agentsHtml+
+        '<div class="acts">'+act('Agent starten','agent.start')+act('Auftrag senden','task.send')+'</div>'+
+      '</div>'+
+      '<div class="card"><h3>Sitzungen '+qc('agent.status')+'</h3>'+sessHtml+'</div>'+
+    '</div>'+
+  '</div>'+
+  '<div class="card" style="margin-top:13px"><h3>Was dieser Baum kostet</h3>'+
+    '<p class="note"><b>Er verschmilzt zwei Quellen.</b> Die Scopes kommen aus der Registry-Tabelle, die Agenten '+
+    'aus <code>config.yaml</code>. Beide können auseinanderlaufen, und genau dann ist die Agentenliste leer.</p>'+
+    '<p class="note" style="margin-top:7px"><b>Und er kostet einen Aufruf je Scope.</b> <code>agent.status</code> '+
+    'filtert auf den Scope des Aufrufers; eine fabrikweite Sitzungsliste gibt es auf dem Draht nicht. Die Zahl '+
+    'unten in der Leiste ist deshalb kein Schätzwert, sondern gezählt.</p>'+
+  '</div>';
+}
+
+/* ---------- L4: tasks ---------- */
+function viewProc(){
+  var lede='Die Liste kommt in einem Aufruf und trägt alles, was eine Karte braucht — Status, Auslöser, Vorlage, '+
+   'Sitzung, Zeiten und sogar die Token. Die sechs Spalten sind nicht gewählt, sondern die sechs Werte, die '+
+   '<code>tasks.status</code> per CHECK zulässt.';
+
+  var board=STATUSES.map(function(st){
+    var list=S.tasks.filter(function(t){return t.status===st.k});
+    return '<div class="col c-'+st.k+'"><h4>'+esc(st.t)+' <span>'+list.length+'</span></h4>'+
+      (list.length?list.map(function(t){
+        var sc=scopeById(t.target_scope_id);
+        return '<button class="tk" data-task="'+esc(t.id)+'"'+(t.id===selTask?' aria-current="true"':'')+'>'+
+          '<span class="ti">'+esc(shortId(t.id))+'<span class="src">'+
+          esc(t.triggered_by==='cron'?'cron':'manuell')+'</span></span>'+
+          '<span class="tp">'+esc(t.prompt)+'</span>'+
+          '<span class="tm"><b>'+esc(sc?sc.name:shortId(t.target_scope_id))+'</b>'+
+          (t.template_id?'<span>'+esc(t.template_id)+(t.template_version!=null?'@v'+esc(t.template_version):'')+
+            '</span>':'')+
+          '<span>'+ago(t.updated_at)+'</span></span></button>';
+      }).join(''):'<p class="none">—</p>')+'</div>';
+  }).join('');
+
+  var detail;
+  var t=selTask?taskById(selTask):null;
+  if(!t){
+    detail=empty(S.tasks.length?'Keine Task ausgewählt':'Noch kein Auftrag',
+      S.tasks.length?'<p>Wähle oben eine Karte.</p>':
+      '<p>Diese Instanz hat noch nichts zu tun bekommen. <code class="i">task.send</code> ist das Kommando, '+
+      'das den ersten Auftrag anlegt.</p>');
+  }else{
+    var sc=scopeById(t.target_scope_id), se=t.assigned_session_id?sessById(t.assigned_session_id):null;
+    var rows='';
+    function row(l,v){rows+='<dt>'+esc(l)+'</dt><dd>'+v+'</dd>'}
+    row('id',esc(t.id));
+    row('status','<span class="pill '+(TASK_CLS[t.status]||'idle')+'">'+esc(t.status)+'</span>');
+    row('scope',esc(sc?sc.name:'—')+' <span class="faint">'+esc(shortId(t.target_scope_id))+'</span>');
+    row('session',t.assigned_session_id?
+      esc(shortId(t.assigned_session_id))+(se?' <span class="faint">'+esc(se.agent_name)+' · '+
+      esc(se.state)+'</span>':''):'<span class="faint">nicht zugeteilt</span>');
+    row('triggered_by',esc(t.triggered_by||'—')+(t.schedule_id?' <span class="faint">'+
+      esc(shortId(t.schedule_id))+(t.fired_for_minute?' · '+esc(t.fired_for_minute):'')+'</span>':''));
+    row('template',t.template_id?esc(t.template_id)+(t.template_version!=null?'@v'+esc(t.template_version):''):
+      '<span class="faint">—</span>');
+    row('created',stamp(t.created_at)+' <span class="faint">vor '+ago(t.created_at)+'</span>');
+    row('updated',stamp(t.updated_at)+' <span class="faint">vor '+ago(t.updated_at)+'</span>');
+    if(t.cost_model||t.cost_input_tokens!=null)
+      row('kosten',kn(t.cost_input_tokens)+' in / '+kn(t.cost_output_tokens)+' out'+
+        (t.cost_model?' · '+esc(t.cost_model):'')+' · '+dur(t.cost_duration_ms)+
+        (t.context_utilization_percent!=null?' · Kontext '+esc(t.context_utilization_percent)+' %':''));
+    if(t.reworks_task_id)row('nacharbeit an',esc(shortId(t.reworks_task_id))+
+      (t.rework_finding?'<div class="s" style="margin-top:3px">'+esc(t.rework_finding)+'</div>':''));
+    if(t.blocked_reason)row('blocked_reason','<span class="s">'+esc(t.blocked_reason)+'</span>');
+    if(t.result_summary)row('result','<span class="s">'+esc(t.result_summary)+'</span>');
+    if(t.result_artifact_paths&&t.result_artifact_paths.length)
+      row('artefakte',t.result_artifact_paths.map(function(p){return esc(tilde(p))}).join('<br>'));
+
+    var actions=[];
+    if(t.status==='queued')actions.push(act('Zuteilen','task.assign'),act('Abbrechen','task.cancel'));
+    if(t.status==='running')actions.push(act('Abbrechen','task.cancel'),act('Blockieren','task.block'),
+      act('Notiz anhängen','task.progress'));
+    if(t.status==='blocked')actions.push(act('Fortsetzen','task.resume'),act('Abbrechen','task.cancel'));
+    if(t.status==='done')actions.push(act('Abnehmen','task.verify'),act('Nacharbeit','task.rework'));
+    if(t.status==='failed')actions.push(act('Nacharbeit','task.rework'));
+    if(t.status==='cancelled')actions.push(act('Nacharbeit','task.rework',true,
+      'Eine zurückgezogene Task ist terminal; rework legt eine neue an, aber hier ist nichts nachzuarbeiten.'));
+
+    detail='<div class="card"><h3>'+esc(shortId(t.id))+' '+qc('task.show')+'</h3>'+
+      '<p class="prompt">'+esc(t.prompt)+'</p><dl class="dl">'+rows+'</dl>'+
+      (actions.length?'<div class="acts">'+actions.join('')+'</div>':'')+'</div>';
+  }
+
+  return vhead('proc',lede)+
+  '<div class="acts" style="margin:0 0 12px">'+act('Auftrag senden','task.send')+'</div>'+
+  '<div class="board">'+board+'</div>'+
+  '<div class="grid g2" style="margin-top:14px">'+detail+
+    '<div class="stack">'+
+      '<div class="blank"><div class="bt">Verlauf nicht abrufbar</div>'+
+      '<p class="note">Der Store ist ereignisbasiert: jede Zustandsänderung, jede Fortschrittsnotiz und jedes '+
+      'Abnahmeurteil steht als Zeile in <code>task_events</code>. <b>Keine Query gibt sie heraus.</b> '+
+      '<code>task.show</code> liefert die Task-Zeile plus Delegationskette — mehr nicht. Deshalb hat diese Karte '+
+      'keine Zeitachse.</p>'+
+      '<div class="evts">'+EVENT_TYPES.map(function(e){return '<i class="na">'+esc(e)+'</i>'}).join('')+'</div>'+
+      '<p class="note faint" style="margin-top:7px">Dreizehn Typen, per CHECK festgelegt. Geschrieben werden '+
+      'alle, gelesen keiner.</p></div>'+
+      '<div class="card"><h3>Was die Karte trägt '+qc('task.list')+'</h3>'+
+        '<p class="note">Alle Felder oben stammen aus einem einzigen <code>task.list</code>. Damit sind zwei Dinge '+
+        'reine Klientenrechnung: <b>eine Schätzung</b> (p50 je <code>template_id</code>+<code>template_version</code> '+
+        'über <code>cost_duration_ms</code> der abgeschlossenen Läufe) und <b>ein Tagesraster</b> (Zählung über '+
+        '<code>created_at</code>). Beides ist nicht blockiert — es braucht nur erst eine Historie.</p>'+
+        '<p class="note" style="margin-top:7px">Was nicht geht: <b>Geld.</b> Es gibt '+
+        '<code>cost_input_tokens</code>, <code>cost_output_tokens</code> und <code>cost_model</code>, aber keine '+
+        'Preistabelle. Also Token, kein Euro.</p></div>'+
+    '</div>'+
+  '</div>';
+}
+
+/* ---------- L2: workspaces and leases ---------- */
+function viewEnv(){
+  var lede='Die Umgebung ist heute genau eine Frage: <b>wer hält welches Arbeitsverzeichnis.</b> Ein Lease '+
+   'verhindert, dass zwei Sitzungen dasselbe Verzeichnis bearbeiten — das ist die einzige Isolation, die '+
+   'Version 1 zusagt.';
+
+  if(!S.leases.length)return vhead('env',lede)+empty('Kein Lease vergeben',
+    '<p>Ein Lease entsteht, wenn eine Sitzung startet, und wird in <code class="i">starting</code>, '+
+    '<code class="i">running</code> und <code class="i">disconnected</code> gehalten. Solange keine Sitzung läuft, '+
+    'ist diese Tabelle korrekt leer.</p>');
+
+  var held=S.leases.filter(function(l){return !l.released_at});
+  var paths={}; S.leases.forEach(function(l){paths[l.canonical_workspace_path]=1});
+
+  var rows=S.leases.slice().sort(function(a,b){
+    return (a.released_at?1:0)-(b.released_at?1:0)||String(a.acquired_at).localeCompare(b.acquired_at);
+  }).map(function(l){
+    var se=sessById(l.session), sc=se?scopeById(se.scope_id):null;
+    return '<tr><td class="m">'+esc(tilde(l.canonical_workspace_path))+'</td>'+
+      '<td class="m">'+esc(shortId(l.session))+'<br><span class="faint">'+
+      esc(sc&&se?sc.name+' / '+se.agent_name:'—')+'</span></td>'+
+      '<td><span class="pill '+(se?(STATE_CLS[se.state]||'idle'):'ghost')+'">'+
+      esc(se?se.state:'—')+'</span></td>'+
+      '<td class="m">'+stamp(l.acquired_at)+'</td>'+
+      '<td class="m">'+(l.released_at?stamp(l.released_at)+'<br><span class="faint">'+
+      esc(l.release_reason||'')+'</span>':'<span class="pill run">gehalten</span>')+'</td></tr>';
+  }).join('');
+
+  /* The case this page exists for: a lease still held by a session that is no
+     longer attached. Named only when it is actually true right now. */
+  var stuck=held.filter(function(l){
+    var se=sessById(l.session); return se&&se.state==='disconnected';
+  });
+  var stuckNote=stuck.length?
+    '<p class="note" style="margin-top:7px"><b>Gerade blockiert ohne zu arbeiten:</b> '+
+    stuck.map(function(l){
+      return '<code>'+esc(shortId(l.session))+'</code> hält '+esc(tilde(l.canonical_workspace_path))+
+        ' seit '+ago(l.acquired_at)+', ist aber abgehängt.';
+    }).join(' ')+'</p>':'';
+
+  return vhead('env',lede)+
+  '<div class="grid g3" style="margin-bottom:13px">'+
+    '<div class="card"><div class="big">'+held.length+'</div><div class="bl">Leases gehalten</div></div>'+
+    '<div class="card"><div class="big">'+(S.leases.length-held.length)+
+      '</div><div class="bl">freigegeben</div></div>'+
+    '<div class="card"><div class="big">'+Object.keys(paths).length+
+      '</div><div class="bl">Verzeichnisse insgesamt</div></div>'+
+  '</div>'+
+  '<div class="card"><h3>Workspace-Leases '+qc('agent.status')+'</h3>'+
+    '<div class="tw"><table class="t"><thead><tr>'+
+    '<th>kanonischer Pfad</th><th>Sitzung</th><th>Zustand</th><th>erworben</th><th>freigegeben</th>'+
+    '</tr></thead><tbody>'+rows+'</tbody></table></div>'+
+    '<div class="sep"></div>'+
+    '<p class="note">Gehalten wird ein Lease in genau drei Sitzungszuständen: <code>starting</code>, '+
+    '<code>running</code>, <code>disconnected</code>. Eine abgestürzte Sitzung gibt frei, eine abgehängte '+
+    'nicht.</p>'+stuckNote+
+  '</div>'+
+  '<div class="card" style="margin-top:13px"><h3>Was hier fehlt</h3>'+
+    '<p class="note">Diese Tabelle gibt es auf dem Draht nicht als Tabelle. <code>agent.status</code> liefert '+
+    'Leases nur, wenn man ihm <b>eine</b> <code>session_id</code> nennt, und die Lease-Zeile trägt diese Sitzung '+
+    'selbst nicht — die Spalte „Sitzung" oben ist die Zuordnung <b>dieser Seite</b>, nicht die des Stores.</p>'+
+    '<p class="note" style="margin-top:7px">Und sie sagt nichts über die andere Hälfte einer Umgebung: '+
+    '<b>Netz, Zugangsdaten, Reichweite.</b> Solange nichts davon auf dem Draht steht, kann keine Oberfläche '+
+    'ehrlich behaupten, wie riskant ein Lauf ist.</p>'+
+  '</div>';
+}
+
+/* ---------- L1: daemon and store ---------- */
+function viewInfra(){
+  var d=S.daemon||{};
+  var scheds=S.schedules.length?S.schedules.map(function(s){
+    return '<tr><td class="m">'+esc(shortId(s.id))+'</td>'+
+      '<td class="m">'+esc(s.template_name||s.template_id||'—')+'</td>'+
+      '<td class="m">'+esc(s.cron||'—')+'<br><span class="faint">'+esc(s.timezone||'')+'</span></td>'+
+      '<td><span class="pill '+(s.enabled?'run':'idle')+'">'+(s.enabled?'aktiv':'aus')+'</span>'+
+      (s.next_run?'<br><span class="faint" style="font:400 10.5px var(--mono)">nächster '+
+        esc(s.next_run)+'</span>':'')+
+      (s.template_error?'<br><span class="faint" style="color:var(--fault)">'+esc(s.template_error)+
+        '</span>':'')+'</td></tr>';
+  }).join(''):'<tr><td colspan="4" class="faint">Kein Zeitplan angelegt.</td></tr>';
+
+  return vhead('infra',
+    'Die unterste Ebene beantwortet eine Frage — <b>läuft sie</b> — und zwar mit genau vier Werten. Was '+
+    '<code>daemon.status</code> zurückgibt, steht unten vollständig; alles andere hier ist ein lokaler Befehl.')+
+  '<div class="grid g2">'+
+    '<div class="card"><h3>Daemon '+qc('daemon.status')+'</h3>'+
+      '<dl class="dl">'+
+        '<dt>schema_version</dt><dd>'+esc(d.schema_version!=null?d.schema_version:'—')+'</dd>'+
+        '<dt>database_path</dt><dd>'+esc(tilde(d.database_path))+'</dd>'+
+        '<dt>socket_path</dt><dd>'+esc(tilde(d.socket_path))+'</dd>'+
+        '<dt>lock_path</dt><dd>'+esc(tilde(d.lock_path))+'</dd>'+
+      '</dl><div class="sep"></div>'+
+      '<p class="note"><b>Das ist die ganze Antwort.</b> Keine Laufzeit, kein Gesundheitswert, keine '+
+      'Warteschlangentiefe, keine Speicherzahl. Dass die Antwort überhaupt kommt, ist die Statusmeldung — '+
+      'deshalb steht der Punkt unten in der Leiste und nicht in einer Kachel.</p>'+
+      '<div class="acts">'+
+        act('Prüfen','doctor',true,
+          'factory doctor läuft lokal gegen den Instanzpfad, nicht über den Socket — es gibt keine doctor-Query.')+
+        act('Stoppen','daemon.stop',true,
+          'start und stop laufen über den Prozess, nicht über den Socket.')+'</div>'+
+    '</div>'+
+    '<div class="stack">'+
+      '<div class="card"><h3>Zeitplan '+qc('schedule.list')+'</h3>'+
+        '<div class="tw"><table class="t" style="min-width:0"><thead><tr>'+
+        '<th>Plan</th><th>Vorlage</th><th>cron</th><th>Zustand</th></tr></thead><tbody>'+scheds+
+        '</tbody></table></div>'+
+        '<div class="acts">'+act('Anlegen','schedule.create')+act('Ausschalten','schedule.disable')+'</div>'+
+      '</div>'+
+      '<div class="blank"><div class="bt">Zustellung nicht einsehbar</div>'+
+      '<p class="note">Jeder Zustellversuch wird <b>vor</b> dem Schreiben in <code>delivery_attempts</code> '+
+      'journalisiert — genau deshalb kann ein Absturz keine stille Doppelzustellung erzeugen, und genau deshalb '+
+      'kann ein Versuch als <i>unbekannt</i> enden. <b>Keine Query liest diese Tabelle.</b> Was die Fabrik über '+
+      'ihre eigenen Zustellungen weiß, weiß heute niemand sonst.</p></div>'+
+    '</div>'+
+  '</div>';
+}
+
+/* ---------- L5: improvement (grey) ---------- */
+function viewImp(){
+  var miss=[
+   ['task.events','Der Ereignisverlauf einer Task. <b>Schaltet diese ganze Ebene frei</b> — plus die Zeitachse '+
+     'auf L4 und die Fortschrittsnotizen. Die Leseseite gibt es schon: <code>events::for_task()</code>, mit '+
+     'ausschließlich Test-Aufrufern.'],
+   ['task.decisions','Die Begründungen. <code>task.decision</code> schreibt in <code>task_decisions</code>, '+
+     '<code>decisions::for_task()</code> liest sie zurück — und hat ebenfalls keinen Aufrufer außerhalb '+
+     'der Tests.'],
+   ['session.list','Eine fabrikweite Sitzungsliste. Heute filtert <code>agent.status</code> auf den Scope des '+
+     'Aufrufers, also kostet jede Übersicht einen Aufruf je Scope.'],
+   ['delivery.attempts','Das Zustelljournal. Ohne diese Query bleibt ein unklarer Zustellversuch unsichtbar, und '+
+     'die Regel „ein Mensch autorisiert genau einen Resend" hat keine Oberfläche.']
+  ];
+  return vhead('imp',
+    'Diese Ebene ist ausgegraut, und das ist keine Designentscheidung: <b>es gibt keine Query, die sie füllen '+
+    'könnte.</b> Die Daten werden geschrieben, vollständig und geordnet — sie kommen nur nicht zurück heraus.')+
+  '<div class="grid g2">'+
+    '<div class="card"><h3>Was geschrieben wird</h3>'+
+      '<p class="note"><code>task_events</code>, per CHECK auf dreizehn Typen festgelegt, unveränderlich und in '+
+      'Anfügereihenfolge. Korrigiert wird durch ein neues Ereignis, nie durch Ändern.</p>'+
+      '<div class="evts">'+EVENT_TYPES.map(function(e){return '<i class="na">'+esc(e)+'</i>'}).join('')+'</div>'+
+      '<div class="sep"></div>'+
+      '<p class="note">Dazu <code>task_decisions</code> mit Begründung, verworfenen Alternativen und akzeptierter '+
+      'Folge — geschrieben von <code>task.decision</code>, jedes Mal, wenn ein Lauf eine Frage entscheiden '+
+      'musste.</p>'+
+    '</div>'+
+    '<div class="card"><h3>Was fehlt — vier Queries</h3>'+
+      '<div class="miss">'+miss.map(function(m){
+        return '<span class="qn">'+esc(m[0])+'</span><span class="qd">'+m[1]+'</span>';
+      }).join('')+'</div><div class="sep"></div>'+
+      '<p class="note">Alle vier sind Leseoperationen auf Tabellen, die es gibt, und für zwei davon existiert die '+
+      'Funktion bereits. Das ist kein Ausbau, das ist eine Durchreiche — und die kürzeste Strecke von diesem '+
+      'Leitstand zu einer Oberfläche, die die Fabrik auch verbessern und nicht nur bedienen kann.</p>'+
+    '</div>'+
+  '</div>';
+}
+
+/* ---------- L6: direction (grey) ---------- */
+function viewDir(){
+  return vhead('dir',
+    'Ausgegraut, und hier ist der Grund härter als eine Ebene tiefer: <b>es gibt nichts zu lesen, weil es nichts '+
+    'gibt.</b>')+
+  '<div class="grid g2">'+
+    '<div class="card"><h3>Was hier stehen würde</h3>'+
+      '<div class="miss">'+
+        '<span class="qn">Ziel</span><span class="qd">Wofür die Fabrik überhaupt läuft — als Satz, an dem ein '+
+        'Auftrag scheitern kann.</span>'+
+        '<span class="qn">Budget</span><span class="qd">Eine Obergrenze, die der Dispatcher <b>vor</b> dem Start '+
+        'liest, nicht eine Zahl, die man hinterher bedauert.</span>'+
+        '<span class="qn">Stückkosten</span><span class="qd">Was ein abgeschlossener Auftrag gekostet hat, in '+
+        'Geld — nicht in Token.</span>'+
+      '</div>'+
+    '</div>'+
+    '<div class="card"><h3>Warum es leer ist</h3>'+
+      '<p class="note">Weder die Entwurfsgrundlage noch der Code kennen ein Ziel, ein Budget oder eine '+
+      'Stückkostenrechnung. Was im Code „budget" heißt, sind Wiederholungs- und Sitzungskontingente — Schutz '+
+      'gegen Durchdrehen, keine Richtungsentscheidung.</p>'+
+      '<p class="note" style="margin-top:7px"><b>Die Ebene steht trotzdem im Menü.</b> Eine Fabrik ohne '+
+      'Richtungsebene ist eine Fabrik, die sehr effizient irgendwohin läuft; dass das Feld leer ist, gehört auf '+
+      'den Leitstand und nicht in eine Fußnote.</p>'+
+    '</div>'+
+  '</div>';
+}
+
+/* ---------- router ---------- */
+var VIEWS={harn:viewHarn,proc:viewProc,env:viewEnv,infra:viewInfra,imp:viewImp,dir:viewDir};
+var CALL={harn:'scope.list + agent.list + agent.status',proc:'task.list',env:'agent.status',
+  infra:'daemon.status + schedule.list',imp:'—',dir:'—'};
+
+function render(){
+  renderLevels();
+  $('#main').innerHTML=VIEWS[cur]();
+  $('#lastcall').textContent=CALL[cur];
+}
+
+function poll(){
+  if(inflight)return;
+  inflight=true;
+  load().then(function(n){
+    inflight=false;
+    alarm(null);
+    wire(n,true);
+    render();
+  }).catch(function(e){
+    inflight=false;
+    wire(null,false);
+    alarm('<b>Der Daemon antwortet nicht:</b> '+esc(e.message)+
+      (e.code?' <code>'+esc(e.code)+'</code>':'')+
+      ' — die Seite zeigt weiter den letzten Stand. Läuft <code>factory start</code>?');
+    if(S.loaded)render();
+  });
+}
+
+document.addEventListener('click',function(e){
+  var b=e.target.closest('[data-go],[data-scope],[data-task],[data-cmd]');
+  if(!b)return;
+  if(b.hasAttribute('data-cmd')){
+    if(b.disabled)return;
+    // The acting half is declared, not wired: every button names the command
+    // it would send, and sending it needs a form this version does not have.
+    $('#lastcall').textContent='→ '+b.getAttribute('data-cmd');
+    return;
+  }
+  if(b.hasAttribute('data-go')){
+    cur=b.getAttribute('data-go');
+    // The level is in the address bar, so a view can be bookmarked and a
+    // reload comes back where it was.
+    if(window.location.hash!=='#'+cur)window.location.hash=cur;
+    render(); window.scrollTo(0,0); return;
+  }
+  if(b.hasAttribute('data-scope')){selScope=b.getAttribute('data-scope'); render(); return}
+  if(b.hasAttribute('data-task')){selTask=b.getAttribute('data-task'); render(); return}
+});
+
+function fromHash(){
+  var h=String(window.location.hash||'').replace(/^#/,'');
+  if(VIEWS[h])cur=h;
+}
+window.addEventListener('hashchange',function(){fromHash(); render(); });
+
+fromHash();
+renderLevels();
+$('#main').innerHTML='<div class="empty"><b>Verbinde mit dem Daemon …</b></div>';
+poll();
+timer=window.setInterval(poll,POLL_MS);
+})();
+</script>
+</body>
+</html>

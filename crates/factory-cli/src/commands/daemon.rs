@@ -118,6 +118,40 @@ fn serve_with<A: factory_adapter::Adapter + Send + Sync + 'static>(root: &Path, 
     let (_dispatch_join, _dispatch_stop, _dispatch_ticked) =
         factory_daemon::dispatch::spawn(std::sync::Arc::clone(&handler), DISPATCH_INTERVAL);
 
+    // The UI listener is deliberately not fatal. A port already in use — a
+    // second checkout, a stale process, anything — must not stop a daemon
+    // whose actual job is the socket below. It reports and carries on.
+    let _ui_join = match factory_daemon::Ui::configured_addr() {
+        Ok(None) => {
+            println!(
+                "factory: the browser UI is off ({})",
+                factory_daemon::http::ADDR_ENV
+            );
+            None
+        }
+        Ok(Some(addr)) => match factory_daemon::Ui::bind(addr) {
+            Ok(ui) => {
+                println!("factory: the browser UI is at http://{}", ui.addr());
+                // Method-call `.clone()` rather than the `Arc::clone(&x)`
+                // form used above: the unsized coercion to `dyn Handler`
+                // happens at this binding, and `Arc::clone` would resolve to
+                // `Arc::<dyn Handler>::clone` and reject the argument.
+                let ui_handler: std::sync::Arc<dyn factory_daemon::Handler> = handler.clone();
+                Some(ui.spawn(ui_handler))
+            }
+            Err(source) => {
+                eprintln!("factory: {source}");
+                eprintln!("factory: carrying on without the browser UI");
+                None
+            }
+        },
+        Err(source) => {
+            eprintln!("factory: {source}");
+            eprintln!("factory: carrying on without the browser UI");
+            None
+        }
+    };
+
     println!(
         "factory: daemon listening at {}",
         daemon.socket_path().display()

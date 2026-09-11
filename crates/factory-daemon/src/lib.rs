@@ -300,6 +300,7 @@ pub mod dispatch;
 pub mod envelope;
 mod errors;
 pub mod handler;
+pub mod http;
 pub mod lock;
 mod notify;
 pub mod observe;
@@ -315,6 +316,7 @@ pub use envelope::{
     QueryRequest, RESPONSE_API, Request, Response, SuccessResponse,
 };
 pub use handler::FactoryHandler;
+pub use http::{Ui, UiError};
 pub use lock::{InstallationLock, LockError};
 pub use server::{Daemon, DaemonError, Handler, HandlerOutcome, HandlerSuccess};
 pub use socket::SocketError;

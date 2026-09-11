@@ -133,7 +133,12 @@ fn serve_connection(stream: &UnixStream, handler: &dyn Handler) -> std::io::Resu
 /// resulting envelope back to one line. This never fails outward: a request
 /// that cannot be parsed becomes an error envelope, not a dropped
 /// connection.
-fn dispatch_line(line: &str, handler: &dyn Handler) -> String {
+///
+/// `pub(crate)` rather than private because [`crate::http`] is a second
+/// transport for the *same* envelope (ADR 0023): it reframes this function's
+/// input and output as an HTTP body and decides nothing else, which is what
+/// keeps the two transports from drifting into two APIs.
+pub(crate) fn dispatch_line(line: &str, handler: &dyn Handler) -> String {
     let response = match envelope::parse_request(line) {
         Ok(Request::Command(request)) => {
             respond(request.request_id, || handler.handle_command(request))
