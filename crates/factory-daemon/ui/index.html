@@ -146,6 +146,54 @@ table.t td.num{font-variant-numeric:tabular-nums;text-align:right;padding-right:
 .empty{padding:26px 22px;text-align:center;border:1px dashed var(--line);border-radius:3px;
   color:var(--muted);font-size:12.5px}
 .empty b{display:block;font:600 14px var(--cond);color:var(--ink);margin-bottom:5px}
+
+/* ---------- command dialog ---------- */
+dialog#dlg{border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--ink);
+  padding:0;max-width:min(680px,93vw);width:100%;box-shadow:0 18px 48px rgba(0,0,0,.22)}
+dialog#dlg::backdrop{background:rgba(16,22,25,.45)}
+.dwrap{padding:15px 17px;display:flex;flex-direction:column;gap:12px;max-height:88vh;overflow-y:auto}
+.dhead{display:flex;align-items:center;gap:10px}
+.dhead h3{font:700 15px var(--cond);letter-spacing:.02em}
+.dx{margin-left:auto;border:0;background:none;cursor:pointer;color:var(--muted);
+  font-size:13px;padding:2px 6px;border-radius:3px;line-height:1}
+.dx:hover{background:var(--sunk);color:var(--ink)}
+.dlede{font-size:12.5px;line-height:1.6;color:var(--muted);max-width:62ch;margin:0}
+.dlede code{font:500 11.5px var(--mono);color:var(--signal)}
+.dfields{display:flex;flex-direction:column;gap:11px}
+.fr{display:flex;flex-direction:column;gap:4px}
+.fl{font:600 10.5px var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--faint)}
+.fl .opt{font-weight:400;text-transform:none;letter-spacing:0}
+.fi{font:400 12.5px var(--sans);color:var(--ink);background:var(--panel-2);
+  border:1px solid var(--line);border-radius:3px;padding:6px 8px;width:100%;display:block}
+textarea.fi{font:400 12.5px/1.55 var(--sans);resize:vertical}
+.fi:focus-visible{outline:2px solid var(--signal);outline-offset:-1px;border-color:var(--signal)}
+.fi.ro{font:400 11.5px var(--mono);color:var(--muted);background:transparent}
+.fi.empty-sel{color:var(--wait);border-style:dashed}
+.fh{font:400 11px/1.5 var(--sans);color:var(--faint);margin:0}
+.fh code{font:500 10.5px var(--mono);color:var(--signal)}
+.fradio{display:flex;gap:15px;flex-wrap:wrap;font-size:12.5px}
+.fradio label,.fcheck{display:flex;align-items:center;gap:6px;cursor:pointer}
+.fcheck{font-size:12.5px}
+.dprev{border:1px solid var(--line-soft);border-radius:3px;background:var(--sunk)}
+.dprev .pt{font:500 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;
+  color:var(--faint);padding:6px 9px 0}
+.dprev .pt code{color:var(--signal);text-transform:none;letter-spacing:0}
+.dprev pre{margin:0;padding:5px 9px 9px;font:400 11px/1.5 var(--mono);color:var(--ink-2);
+  overflow-x:auto;max-height:200px}
+.derr{border:1px solid var(--fault);border-left-width:2px;border-radius:3px;
+  background:var(--fault-wash);padding:8px 10px}
+.derr b{font:600 11px var(--mono);color:var(--fault)}
+.derr p{margin:3px 0 0;font-size:12px;line-height:1.55;color:var(--ink-2);white-space:pre-wrap}
+.dres{border:1px solid var(--run);border-left-width:2px;border-radius:3px;
+  background:var(--run-wash);padding:8px 10px}
+.dres .rt{font:600 11px var(--mono);color:var(--run)}
+.dres table.t{margin-top:6px;min-width:0}
+.argv{margin:6px 0 0;padding:8px 10px;background:var(--ink);color:var(--panel);border-radius:3px;
+  font:400 11.5px/1.55 var(--mono);overflow-x:auto;white-space:pre-wrap;word-break:break-all}
+.dacts{display:flex;gap:8px;justify-content:flex-end}
+.act.go{background:var(--signal);border-color:var(--signal);color:#fff;font-weight:600}
+.act.go:hover:not([disabled]){filter:brightness(1.12)}
+.act.go.danger{background:var(--fault);border-color:var(--fault)}
 </style>
 <style>
 /* ---------- scope tree ---------- */
@@ -256,6 +304,7 @@ table.t td.num{font-variant-numeric:tabular-nums;text-align:right;padding-right:
     <span><span class="k">aktualisierung</span> alle 5 s — kein Abo auf dem Draht</span>
   </div>
 </div>
+<dialog id="dlg" aria-label="Kommando"></dialog>
 <script>
 (function(){
 'use strict';
@@ -411,8 +460,11 @@ function dur(ms){
 function shortId(id){return id?String(id).replace(/-/g,'').slice(-8):'—'}
 function tilde(p){return String(p||'').replace(/^\/Users\/[^/]+/,'~')}
 function qc(n,w){return '<span class="q'+(w?' w':'')+'">'+esc(n)+'</span>'}
-function act(label,cmd,dis,why){
+/* `ctx` is what the dialog cannot work out for itself: which scope the
+   envelope is addressed to, and which ids the payload already carries. */
+function act(label,cmd,dis,why,ctx){
   return '<button class="act" data-cmd="'+esc(cmd)+'"'+
+    (ctx?' data-ctx="'+esc(JSON.stringify(ctx))+'"':'')+
     (dis?' disabled title="'+esc(why||'')+'"':'')+'>'+esc(label)+' <code>'+esc(cmd)+'</code></button>';
 }
 var STATE_CLS={running:'run',starting:'wait',disconnected:'wait',failed:'fault',stopped:'idle'};
@@ -518,7 +570,7 @@ function viewHarn(){
       '<span class="faint" style="margin-left:auto;font:400 11px var(--mono)">seit '+ago(x.created_at)+'</span>'+
       '</div><div class="ws">'+esc(tilde(x.workspace_path))+
       (lease?'':' <span class="faint">· kein Lease</span>')+'</div>'+
-      '<div class="acts">'+act('Beenden','agent.stop')+act('Anhängen','agent.attach_command')+
+      '<div class="acts">'+act('Beenden','agent.stop',false,null,{scope_id:x.scope_id,payload:{session_id:x.id}})+act('Anhängen','agent.attach_command',false,null,{scope_id:x.scope_id,payload:{session_id:x.id}})+
       '</div></div>';
   }).join(''):'<p class="note faint">Keine Sitzung in diesem Scope.</p>';
 
@@ -544,7 +596,7 @@ function viewHarn(){
           'internal.scope_add_unsupported — der Daemon hat keinen YAML-Schreiber für .factory/config.yaml, und '+
           'ADR 0009 verlangt, dass unbekannte Schlüssel erhalten bleiben. Scope direkt eintragen, dann '+
           'scope.reconcile mit apply:true.')+
-        act('Abgleichen','scope.reconcile')+'</div>'+
+        act('Abgleichen','scope.reconcile',false,null,{})+'</div>'+
       '<p class="note faint" style="margin-top:7px">Registrieren ist ein Zweischritt: <code>config.yaml</code> '+
       'von Hand, dann <code>scope.reconcile --apply</code>.</p>'+
     '</div>'+
@@ -562,7 +614,7 @@ function viewHarn(){
             '<div class="faint" style="margin-top:3px;font-size:11px">aus Sicht von <b>'+esc(rootName)+
             '</b> — dieses Feld hängt am Aufrufer</div></dd>'+
         '</dl><div class="sep"></div>'+agentsHtml+
-        '<div class="acts">'+act('Agent starten','agent.start')+act('Auftrag senden','task.send')+'</div>'+
+        '<div class="acts">'+act('Agent starten','agent.start',false,null,{scope_id:s.id})+act('Auftrag senden','task.send',false,null,{scope_id:s.id})+'</div>'+
       '</div>'+
       '<div class="card"><h3>Sitzungen '+qc('agent.status')+'</h3>'+sessHtml+'</div>'+
     '</div>'+
@@ -632,13 +684,21 @@ function viewProc(){
     if(t.result_artifact_paths&&t.result_artifact_paths.length)
       row('artefakte',t.result_artifact_paths.map(function(p){return esc(tilde(p))}).join('<br>'));
 
+    // Every action carries the run it acts on. `rework` is the exception:
+    // its `task_id` is the *new* run's, minted in the dialog, and the old
+    // one travels as `reworks_task_id`.
+    var on={scope_id:t.target_scope_id,payload:{task_id:t.id}};
+    var rw={scope_id:t.target_scope_id,payload:{reworks_task_id:t.id}};
+    var A=function(label,cmd,ctx){return act(label,cmd,false,null,ctx)};
     var actions=[];
-    if(t.status==='queued')actions.push(act('Zuteilen','task.assign'),act('Abbrechen','task.cancel'));
-    if(t.status==='running')actions.push(act('Abbrechen','task.cancel'),act('Blockieren','task.block'),
-      act('Notiz anhängen','task.progress'));
-    if(t.status==='blocked')actions.push(act('Fortsetzen','task.resume'),act('Abbrechen','task.cancel'));
-    if(t.status==='done')actions.push(act('Abnehmen','task.verify'),act('Nacharbeit','task.rework'));
-    if(t.status==='failed')actions.push(act('Nacharbeit','task.rework'));
+    if(t.status==='queued')actions.push(A('Zuteilen','task.assign',on),A('Abbrechen','task.cancel',on));
+    if(t.status==='running')actions.push(A('Abbrechen','task.cancel',on),
+      A('Blockieren','task.block',on),A('Notiz anhängen','task.progress',on));
+    if(t.status==='blocked')actions.push(A('Fortsetzen','task.resume',on),
+      A('Abbrechen','task.cancel',on));
+    if(t.status==='done')actions.push(A('Abnehmen','task.verify',on),A('Nacharbeit','task.rework',rw));
+    if(t.status==='failed')actions.push(A('Abnehmen','task.verify',on),
+      A('Nacharbeit','task.rework',rw));
     if(t.status==='cancelled')actions.push(act('Nacharbeit','task.rework',true,
       'Eine zurückgezogene Task ist terminal; rework legt eine neue an, aber hier ist nichts nachzuarbeiten.'));
 
@@ -648,7 +708,7 @@ function viewProc(){
   }
 
   return vhead('proc',lede)+
-  '<div class="acts" style="margin:0 0 12px">'+act('Auftrag senden','task.send')+'</div>'+
+  '<div class="acts" style="margin:0 0 12px">'+act('Auftrag senden','task.send',false,null,{scope_id:selScope||S.root})+'</div>'+
   '<div class="board">'+board+'</div>'+
   '<div class="grid g2" style="margin-top:14px">'+detail+
     '<div class="stack">'+
@@ -750,8 +810,10 @@ function viewInfra(){
       (s.next_run?'<br><span class="faint" style="font:400 10.5px var(--mono)">nächster '+
         esc(s.next_run)+'</span>':'')+
       (s.template_error?'<br><span class="faint" style="color:var(--fault)">'+esc(s.template_error)+
-        '</span>':'')+'</td></tr>';
-  }).join(''):'<tr><td colspan="4" class="faint">Kein Zeitplan angelegt.</td></tr>';
+        '</span>':'')+'</td>'+
+      '<td>'+act(s.enabled?'Aus':'Ein',s.enabled?'schedule.disable':'schedule.enable',
+        false,null,{payload:{schedule_id:s.id}})+'</td></tr>';
+  }).join(''):'<tr><td colspan="5" class="faint">Kein Zeitplan angelegt.</td></tr>';
 
   return vhead('infra',
     'Die unterste Ebene beantwortet eine Frage — <b>läuft sie</b> — und zwar mit genau vier Werten. Was '+
@@ -776,9 +838,9 @@ function viewInfra(){
     '<div class="stack">'+
       '<div class="card"><h3>Zeitplan '+qc('schedule.list')+'</h3>'+
         '<div class="tw"><table class="t" style="min-width:0"><thead><tr>'+
-        '<th>Plan</th><th>Vorlage</th><th>cron</th><th>Zustand</th></tr></thead><tbody>'+scheds+
-        '</tbody></table></div>'+
-        '<div class="acts">'+act('Anlegen','schedule.create')+act('Ausschalten','schedule.disable')+'</div>'+
+        '<th>Plan</th><th>Vorlage</th><th>cron</th><th>Zustand</th><th></th>'+
+        '</tr></thead><tbody>'+scheds+'</tbody></table></div>'+
+        '<div class="acts">'+act('Anlegen','schedule.create',false,null,{scope_id:S.root})+'</div>'+
       '</div>'+
       '<div class="blank"><div class="bt">Zustellung nicht einsehbar</div>'+
       '<p class="note">Jeder Zustellversuch wird <b>vor</b> dem Schreiben in <code>delivery_attempts</code> '+
@@ -854,6 +916,371 @@ function viewDir(){
   '</div>';
 }
 
+/* ------------------------------------------------------------------ *
+ * The acting half.
+ *
+ * Every button opens one dialog, and the dialog shows the exact envelope
+ * it is about to POST — built from the same object that is sent, never a
+ * display copy, so the two cannot drift. Nothing is validated here: the
+ * daemon's error corpus already says precisely what is wrong with a
+ * payload, and a second copy of those rules in this file is the copy
+ * that would go stale.
+ * ------------------------------------------------------------------ */
+
+/* A UUIDv7, because `ids.rs` mints v7 and `create::list` orders by
+   `created_at, id`: a v4 id sorts arbitrarily inside a timestamp tie, and
+   nothing on the daemon side checks the version. `crypto.randomUUID()` is
+   v4, so it is deliberately not used. */
+function newId(){
+  var b=new Uint8Array(16), i;
+  if(window.crypto&&window.crypto.getRandomValues)window.crypto.getRandomValues(b);
+  else for(i=0;i<16;i++)b[i]=Math.random()*256|0;
+  var ms=Date.now();
+  b[0]=Math.floor(ms/0x10000000000)&0xff;
+  b[1]=Math.floor(ms/0x100000000)&0xff;
+  b[2]=Math.floor(ms/0x1000000)&0xff;
+  b[3]=Math.floor(ms/0x10000)&0xff;
+  b[4]=Math.floor(ms/0x100)&0xff;
+  b[5]=ms&0xff;
+  b[6]=(b[6]&0x0f)|0x70;   /* version 7 */
+  b[8]=(b[8]&0x3f)|0x80;   /* RFC 9562 variant */
+  var h='';
+  for(i=0;i<16;i++)h+=(b[i]<0x10?'0':'')+b[i].toString(16);
+  return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
+}
+
+function agentOptions(scopeId){
+  return (S.agents[scopeId]||[]).map(function(a){
+    return {v:a.name,l:a.name+' · '+a.harness+' · '+a.availability};
+  });
+}
+function sessionOptions(scopeId){
+  return S.sessions.filter(function(x){return !scopeId||x.scope_id===scopeId})
+    .map(function(x){return {v:x.id,l:shortId(x.id)+' · '+x.agent_name+' · '+x.state}});
+}
+function scopeOptions(){
+  return S.scopes.map(function(s){return {v:s.id,l:s.name}});
+}
+
+/* The command table. `mint` names a field the client must generate — ADR
+   0003's client-minted ids, the same ones `factory-cli`'s `ids::new_id`
+   produces. `keep` means the answer is the point, so the dialog stays open
+   and renders it. */
+var CMD={
+ 'task.send':{k:'c',title:'Auftrag senden',mint:'task_id',
+  lede:'Legt den Lauf an, teilt ihn zu und stellt ihn zu — in einem Kommando. '+
+       'Der Scope unten ist das Ziel, nicht der Absender.',
+  fields:function(ctx){return [
+    {k:'__scope',t:'select',label:'Ziel-Scope',env:true,options:scopeOptions(),
+     value:ctx.scope_id||S.root},
+    {k:'prompt',t:'area',rows:5,label:'Auftrag',req:true,
+     help:'Der Text, den die Sitzung bekommt. Er wird nie aus einer Vorlage ergänzt.'},
+    {k:'__mode',t:'radio',label:'Zustellen an',value:'agent',options:[
+      {v:'agent',l:'einen Agenten'},{v:'session',l:'eine bestimmte Sitzung'}],
+     help:'Eines von beiden muss gesetzt sein — der Daemon weist ab, wenn keines kommt.'},
+    {k:'agent_name',t:'select',label:'Agent',when:{__mode:'agent'},
+     options:agentOptions(ctx.scope_id||S.root)},
+    {k:'target_session_id',t:'select',label:'Sitzung',when:{__mode:'session'},
+     options:sessionOptions(ctx.scope_id||S.root)},
+    {k:'target_workspace_path',t:'text',label:'Workspace',opt:true,
+     help:'Leer lassen heißt: der kanonische Pfad des Scopes.'}
+  ]}},
+
+ 'task.assign':{k:'c',title:'Auftrag zuteilen',
+  lede:'Sucht eine Sitzung des genannten Agenten, oder startet eine, und stellt zu.',
+  fields:function(ctx){return [
+    {k:'agent_name',t:'select',label:'Agent',options:agentOptions(ctx.scope_id)}
+  ]}},
+
+ 'task.cancel':{k:'c',title:'Auftrag abbrechen',danger:true,
+  lede:'Setzt den Lauf terminal. Was die Sitzung bereits geschrieben hat, nimmt das nicht zurück.',
+  fields:function(){return []}},
+
+ 'task.block':{k:'c',title:'Auftrag blockieren',
+  lede:'Hält den Lauf an, bis ein Mensch ihn fortsetzt. Der Grund steht im Ereignisprotokoll.',
+  fields:function(){return [
+    {k:'reason',t:'area',rows:3,label:'Grund',req:true}
+  ]}},
+
+ 'task.resume':{k:'c',title:'Auftrag fortsetzen',
+  lede:'Nimmt die Blockade zurück. Der Lauf geht zurück in die Warteschlange.',
+  fields:function(){return []}},
+
+ 'task.progress':{k:'c',title:'Notiz anhängen',
+  lede:'Eine Zeile im Ereignisprotokoll. Sie ändert nichts am Zustand des Laufs.',
+  fields:function(){return [
+    {k:'note',t:'area',rows:3,label:'Notiz',req:true,
+     help:'Eine leere Notiz ist eine Logzeile, keine Notiz — der Daemon weist sie ab.'}
+  ]}},
+
+ 'task.verify':{k:'c',title:'Abnahme eintragen',
+  lede:'Ein Urteil annotiert den Lauf, es verschiebt ihn nie. Der abgeschlossene Lauf bleibt '+
+       'abgeschlossen, auch wenn das Urteil negativ ausfällt.',
+  fields:function(){return [
+    {k:'verdict',t:'text',label:'Urteil',req:true,
+     help:'Freier Text — der Store schreibt hier kein Vokabular vor.'},
+    {k:'note',t:'area',rows:3,label:'Notiz',opt:true,
+     help:'Ein kurzer strukturierter Befund, kein Bericht.'}
+  ]}},
+
+ 'task.rework':{k:'c',title:'Nacharbeit anlegen',mint:'task_id',
+  lede:'Legt einen neuen Lauf an, der auf den alten zeigt. Der alte wird nie verändert, und der '+
+       'neue erbt seinen Auftragstext nicht — der kommt von hier.',
+  fields:function(ctx){return [
+    {k:'__scope',t:'select',label:'Ziel-Scope',env:true,options:scopeOptions(),
+     value:ctx.scope_id||S.root,
+     help:'Nacharbeit darf bewusst in einem anderen Scope landen.'},
+    {k:'prompt',t:'area',rows:4,label:'Auftrag',req:true},
+    {k:'rework_finding',t:'area',rows:3,label:'Befund',req:true,
+     help:'Was am alten Lauf nicht stimmte.'}
+  ]}},
+
+ 'agent.start':{k:'c',title:'Agent starten',mint:'session_id',
+  lede:'Startet eine Sitzung des Agenten im Harness des Scopes und nimmt ein Workspace-Lease.',
+  fields:function(ctx){return [
+    {k:'agent_name',t:'select',label:'Agent',options:agentOptions(ctx.scope_id)},
+    {k:'workspace_path',t:'text',label:'Workspace',opt:true,
+     help:'Leer lassen heißt: der kanonische Pfad des Scopes.'}
+  ]}},
+
+ 'agent.stop':{k:'c',title:'Sitzung beenden',danger:true,
+  lede:'Beendet die Sitzung und gibt ihr Lease frei. Ein laufender Auftrag wird dadurch nicht abgebrochen.',
+  fields:function(){return [
+    {k:'reason',t:'text',label:'Grund',opt:true}
+  ]}},
+
+ 'agent.attach_command':{k:'q',title:'Anhängen',keep:true,
+  lede:'Diese Oberfläche hängt sich nicht an — sie sagt dir, womit du es im Terminal tust.',
+  fields:function(){return []}},
+
+ 'scope.reconcile':{k:'c',title:'Registry abgleichen',
+  lede:'Berichtet zuerst, was zwischen <code>config.yaml</code> und der Scope-Tabelle auseinanderläuft. '+
+       'Ohne Häkchen wird nichts geändert.',
+  keep:true,
+  fields:function(){return [
+    {k:'apply',t:'bool',label:'Abweichungen auch beheben',value:false,
+     help:'Angewendet wird parent-first, damit ein Kind nie vor seinem Elternteil projiziert wird.'}
+  ]}},
+
+ 'schedule.enable':{k:'c',title:'Zeitplan einschalten',fields:function(){return []},
+  lede:'Ab dem nächsten Tick feuert der Plan wieder.'},
+ 'schedule.disable':{k:'c',title:'Zeitplan ausschalten',fields:function(){return []},
+  lede:'Der Plan bleibt stehen und feuert nicht mehr.'},
+
+ 'schedule.create':{k:'c',title:'Zeitplan anlegen',mint:'schedule_id',
+  lede:'Entweder für eine Vorlage, die es schon gibt, oder mit einer neuen Vorlage in einem Schritt.',
+  fields:function(ctx){return [
+    {k:'__scope',t:'select',label:'Scope',env:true,options:scopeOptions(),value:ctx.scope_id||S.root},
+    {k:'cron',t:'text',label:'cron',req:true,value:'0 7 * * 1-5',
+     help:'Fünf Felder, wie geschrieben — keine Sekunden.'},
+    {k:'timezone',t:'text',label:'Zeitzone',req:true,value:'Europe/Berlin',
+     help:'Ein IANA-Name. Ein Offset überlebt keine Zeitumstellung.'},
+    {k:'__form',t:'radio',label:'Vorlage',value:'new',options:[
+      {v:'new',l:'neue Vorlage anlegen'},{v:'existing',l:'bestehende Vorlage'}]},
+    {k:'template_name',t:'text',label:'Name der Vorlage',when:{__form:'existing'},req:true},
+    {k:'template_id',t:'readonly',label:'template_id',when:{__form:'new'},mint:true},
+    {k:'name',t:'text',label:'Name',when:{__form:'new'},req:true},
+    {k:'task',t:'area',rows:4,label:'Auftragstext',when:{__form:'new'},req:true},
+    {k:'agent_name',t:'select',label:'Agent',when:{__form:'new'},opt:true,
+     options:[{v:'',l:'— keiner —'}].concat(agentOptions(ctx.scope_id||S.root))},
+    {k:'acceptance_criteria',t:'area',rows:3,label:'Abnahmekriterien',when:{__form:'new'},opt:true}
+  ]}}
+};
+
+/* ---------- the dialog ---------- */
+var DLG=null;
+
+function openCmd(cmd,ctx){
+  var spec=CMD[cmd];
+  if(!spec)return;
+  DLG={spec:spec,cmd:cmd,ctx:ctx||{},vals:{},ids:{},req:newId(),busy:false,err:null,result:null};
+  if(spec.mint)DLG.ids[spec.mint]=newId();
+  spec.fields(DLG.ctx).forEach(function(f){
+    if(f.mint){DLG.ids[f.k]=newId(); return}
+    DLG.vals[f.k]=(f.value!=null)?f.value:
+      (f.t==='bool'?false:
+      (f.t==='select'&&f.options&&f.options.length?f.options[0].v:''));
+  });
+  paintDialog();
+  var d=$('#dlg');
+  if(!d.open)d.showModal();
+  var first=d.querySelector('[data-f]:not([disabled])');
+  if(first)first.focus();
+}
+
+/* Only the fields whose `when` matches the current choice. A field that is
+   not shown is not sent — that is how the two "exactly one of" forms
+   (`task.send`'s agent vs session, `schedule.create`'s new vs existing
+   template) stay unambiguous without this file knowing the rule. */
+function activeFields(){
+  return DLG.spec.fields(DLG.ctx).filter(function(f){
+    if(!f.when)return true;
+    var key=Object.keys(f.when)[0];
+    return DLG.vals[key]===f.when[key];
+  });
+}
+
+/* The one envelope. What the preview renders and what `submit` posts are
+   this same object — there is deliberately no second, prettier copy. */
+function envelopeOf(){
+  var spec=DLG.spec, e={};
+  e.api=(spec.k==='q')?'factory.query/v1':'factory.command/v1';
+  e.request_id=DLG.req;
+  e.scope_id=DLG.vals.__scope||DLG.ctx.scope_id||S.root;
+  if(spec.k==='q')e.query=DLG.cmd; else e.command=DLG.cmd;
+
+  var p={};
+  var given=DLG.ctx.payload||{};
+  Object.keys(given).forEach(function(k){p[k]=given[k]});
+  if(spec.mint)p[spec.mint]=DLG.ids[spec.mint];
+  activeFields().forEach(function(f){
+    if(f.k.slice(0,2)==='__')return;
+    if(f.mint){p[f.k]=DLG.ids[f.k]; return}
+    var v=DLG.vals[f.k];
+    if(f.t==='bool'){p[f.k]=!!v; return}
+    // An empty required field is sent as an empty string rather than
+    // omitted, so the daemon answers with its own message about *that*
+    // field instead of a generic "missing".
+    if(v===''||v==null){ if(f.req)p[f.k]=''; return }
+    p[f.k]=v;
+  });
+  e.payload=p;
+  return e;
+}
+
+function fieldHtml(f){
+  var v=DLG.vals[f.k], id='f_'+f.k;
+  var lab='<label class="fl" for="'+id+'">'+esc(f.label)+
+    (f.opt?' <span class="opt">optional</span>':'')+'</label>';
+  var ctl;
+  if(f.mint){
+    ctl='<output class="fi ro" id="'+id+'">'+esc(DLG.ids[f.k])+'</output>';
+  }else if(f.t==='area'){
+    ctl='<textarea class="fi" id="'+id+'" data-f="'+esc(f.k)+'" rows="'+(f.rows||3)+'">'+
+      esc(v)+'</textarea>';
+  }else if(f.t==='select'){
+    var opts=(f.options||[]);
+    ctl=opts.length?
+      '<select class="fi" id="'+id+'" data-f="'+esc(f.k)+'">'+opts.map(function(o){
+        return '<option value="'+esc(o.v)+'"'+(String(o.v)===String(v)?' selected':'')+'>'+
+          esc(o.l)+'</option>';
+      }).join('')+'</select>':
+      '<output class="fi ro empty-sel">nichts zur Auswahl</output>';
+  }else if(f.t==='radio'){
+    ctl='<div class="fradio">'+(f.options||[]).map(function(o){
+      return '<label><input type="radio" name="'+id+'" data-f="'+esc(f.k)+'" value="'+esc(o.v)+'"'+
+        (String(o.v)===String(v)?' checked':'')+'> '+esc(o.l)+'</label>';
+    }).join('')+'</div>';
+  }else if(f.t==='bool'){
+    ctl='<label class="fcheck"><input type="checkbox" data-f="'+esc(f.k)+'"'+(v?' checked':'')+
+      '> '+esc(f.label)+'</label>';
+    lab='';
+  }else{
+    ctl='<input class="fi" type="text" id="'+id+'" data-f="'+esc(f.k)+'" value="'+esc(v)+'">';
+  }
+  return '<div class="fr">'+lab+ctl+
+    (f.help?'<p class="fh">'+f.help+'</p>':'')+'</div>';
+}
+
+function resultHtml(){
+  if(!DLG.result)return '';
+  var r=DLG.result;
+  if(DLG.cmd==='agent.attach_command'){
+    var argv=(r.argv||[]).map(function(a){
+      return /[\s"'$]/.test(a)?"'"+String(a).replace(/'/g,"'\\''")+"'":a;
+    }).join(' ');
+    return '<div class="dres"><div class="rt">Im Terminal ausführen</div>'+
+      '<pre class="argv">'+esc(argv)+'</pre>'+
+      '<p class="fh">Der Leitstand hängt sich nicht selbst an: eine Sitzung gehört in ein Terminal, '+
+      'nicht in einen Browser-Tab.</p></div>';
+  }
+  if(DLG.cmd==='scope.reconcile'){
+    var drift=r.drift||[], applied=r.applied||[];
+    var rows=function(list){
+      return list.map(function(d){
+        return '<tr><td class="m">'+esc(d.name||shortId(d.id))+'</td><td class="m">'+
+          esc(d.kind)+'</td></tr>';
+      }).join('');
+    };
+    return '<div class="dres"><div class="rt">'+
+      (r.clean?'Keine Abweichung':drift.length+' Abweichung'+(drift.length===1?'':'en'))+'</div>'+
+      (drift.length?'<table class="t"><thead><tr><th>Scope</th><th>Art</th></tr></thead><tbody>'+
+        rows(drift)+'</tbody></table>':'')+
+      (applied.length?'<p class="fh"><b>'+applied.length+' behoben.</b></p>':
+        (drift.length?'<p class="fh">Nur berichtet — nichts geändert.</p>':''))+
+    '</div>';
+  }
+  return '<div class="dres"><div class="rt">Angenommen</div><pre class="argv">'+
+    esc(JSON.stringify(r,null,2))+'</pre></div>';
+}
+
+function paintDialog(){
+  var spec=DLG.spec;
+  var fields=activeFields().map(fieldHtml).join('');
+  var env=envelopeOf();
+  var err=DLG.err?'<div class="derr"><b>'+esc(DLG.err.code)+'</b>'+
+    '<p>'+esc(DLG.err.message)+'</p></div>':'';
+  $('#dlg').innerHTML=
+   '<form method="dialog" class="dwrap">'+
+    '<div class="dhead"><h3>'+esc(spec.title)+'</h3><span class="q w">'+esc(DLG.cmd)+'</span>'+
+      '<button class="dx" value="cancel" aria-label="Schließen">✕</button></div>'+
+    '<p class="dlede">'+spec.lede+'</p>'+
+    (fields?'<div class="dfields">'+fields+'</div>':'')+
+    err+resultHtml()+
+    '<div class="dprev"><div class="pt">Das geht an <code>POST /api</code></div>'+
+      '<pre>'+esc(JSON.stringify(env,null,2))+'</pre></div>'+
+    '<div class="dacts">'+
+      '<button class="act" value="cancel">'+(DLG.result?'Schließen':'Abbrechen')+'</button>'+
+      (DLG.result&&spec.keep?'':
+        '<button class="act go'+(spec.danger?' danger':'')+'" id="dgo" type="button"'+
+        (DLG.busy?' disabled':'')+'>'+(DLG.busy?'sendet …':'Senden')+'</button>')+
+    '</div>'+
+   '</form>';
+}
+
+function submit(){
+  if(DLG.busy)return;
+  DLG.busy=true; DLG.err=null; paintDialog();
+  var env=envelopeOf();
+  fetch('/api',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(env)
+  }).then(function(r){return r.json()}).then(function(j){
+    DLG.busy=false;
+    if(j.api==='factory.error/v1'){DLG.err=j.error; paintDialog(); return}
+    DLG.result=j.result;
+    $('#lastcall').textContent='→ '+DLG.cmd;
+    if(DLG.spec.keep)paintDialog(); else $('#dlg').close();
+    poll();
+  }).catch(function(e){
+    DLG.busy=false;
+    DLG.err={code:'transport',message:e.message};
+    paintDialog();
+  });
+}
+
+document.addEventListener('input',function(e){
+  var el=e.target.closest('[data-f]');
+  if(!el||!DLG||!$('#dlg').open)return;
+  DLG.vals[el.getAttribute('data-f')]=(el.type==='checkbox')?el.checked:el.value;
+  // Repaint only the preview while typing; repainting the fields would move
+  // the caret. A radio or checkbox changes which fields apply, so it gets
+  // the full repaint through the `change` listener below.
+  var prev=$('#dlg .dprev pre');
+  if(prev)prev.textContent=JSON.stringify(envelopeOf(),null,2);
+});
+document.addEventListener('change',function(e){
+  var el=e.target.closest('[data-f]');
+  if(!el||!DLG||!$('#dlg').open)return;
+  if(el.type!=='radio'&&el.type!=='checkbox'&&el.tagName!=='SELECT')return;
+  DLG.vals[el.getAttribute('data-f')]=(el.type==='checkbox')?el.checked:el.value;
+  paintDialog();
+});
+document.addEventListener('click',function(e){
+  if(e.target&&e.target.id==='dgo')submit();
+});
+
 /* ---------- router ---------- */
 var VIEWS={harn:viewHarn,proc:viewProc,env:viewEnv,infra:viewInfra,imp:viewImp,dir:viewDir};
 var CALL={harn:'scope.list + agent.list + agent.status',proc:'task.list',env:'agent.status',
@@ -888,9 +1315,10 @@ document.addEventListener('click',function(e){
   if(!b)return;
   if(b.hasAttribute('data-cmd')){
     if(b.disabled)return;
-    // The acting half is declared, not wired: every button names the command
-    // it would send, and sending it needs a form this version does not have.
-    $('#lastcall').textContent='→ '+b.getAttribute('data-cmd');
+    var raw=b.getAttribute('data-ctx');
+    var ctx={};
+    if(raw){try{ctx=JSON.parse(raw)}catch(err){ctx={}}}
+    openCmd(b.getAttribute('data-cmd'),ctx);
     return;
   }
   if(b.hasAttribute('data-go')){

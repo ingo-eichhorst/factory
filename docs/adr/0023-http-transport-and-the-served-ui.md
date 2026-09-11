@@ -127,6 +127,49 @@ worse than one that does not start.
 A `config.yaml` key remains available later if an instance ever needs the
 address to travel with it. It is deliberately not built now.
 
+## Decision 6: the dialog shows the envelope, and validates nothing
+
+Every acting control opens one dialog, and the dialog renders the exact
+envelope it is about to POST — built from the same object that is sent, never
+a second display copy. Two renderings of one payload is the same drift bug this
+ADR's decision 1 avoids one layer up, and the preview is also the confirmation:
+an operator about to cancel a run can read the run's id in the payload before
+pressing the button.
+
+**The page runs no validation of its own.** The error corpus is a deliverable in
+this repository, `deny_unknown_fields` is on every payload, and the
+`validation.*` codes already say precisely what is wrong with a request. So the
+dialog sends what the operator typed, renders `error.code` and `error.message`
+verbatim, and stays open. A second copy of those rules in JavaScript would be
+the copy that goes stale, and it would answer in worse words.
+
+Two consequences follow from that stance and are visible in the page:
+
+- An empty required field is sent as an empty string rather than omitted, so
+  the daemon answers about *that* field — "a progress note with no text is a
+  log line, not a note" — instead of a generic "missing".
+- Where an operation refuses a combination rather than a value —
+  `task.send`'s "an agent or a session, never neither",
+  `schedule.create`'s "an existing template or a new one" — the dialog offers a
+  choice and sends only the fields that choice selects. It keeps the operator
+  out of the refusal without knowing why the refusal exists.
+
+Client-minted ids are minted as **UUIDv7**, the way `factory-cli`'s `ids::new_id`
+does, because `create::list` orders by `created_at, id` and nothing on the
+daemon side checks the version — a v4 id would sort arbitrarily inside a
+timestamp tie and nothing would say so. `crypto.randomUUID()` is v4 and is
+deliberately unused.
+
+Two operations keep the dialog open because their answer *is* the point:
+`scope.reconcile` returns the drift report, and `agent.attach_command` returns
+the argv. The page does not attach to a session — a session belongs in a
+terminal, not a browser tab — so it hands over the command line instead.
+
+`task.done`, `task.fail` and `task.decision` are deliberately absent. They are
+what a worker writes about its own run, not what an operator does to someone
+else's; putting them on this surface would invite a human to close a run the
+session is still inside.
+
 ## Consequences
 
 - The daemon binds a TCP port by default where it previously bound only a Unix

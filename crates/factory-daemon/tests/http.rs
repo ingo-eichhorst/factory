@@ -263,6 +263,27 @@ fn a_preflight_is_not_answered() {
 }
 
 #[test]
+fn a_query_string_still_reaches_the_page() {
+    let addr = serve();
+    // Browsers append these without being asked, and a shared link carries
+    // them. `/?x=1` is the same page as `/`.
+    let response = request(
+        addr,
+        &format!(
+            "GET /?from=a%20link HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+            addr.port()
+        ),
+    );
+
+    assert!(
+        status_line(&response).starts_with("HTTP/1.1 200"),
+        "expected 200, got {:?}",
+        status_line(&response)
+    );
+    assert!(body(&response).contains("Factory Leitstand"));
+}
+
+#[test]
 fn an_unknown_path_is_not_found() {
     let addr = serve();
     let response = request(
@@ -398,5 +419,125 @@ fn the_served_pages_own_query_sequence_answers_over_http() {
     assert!(
         schedules["schedules"].is_array(),
         "schedule.list must carry `schedules`"
+    );
+}
+
+/// A command envelope over HTTP changes state, and the next query sees it.
+///
+/// The twelve tests above all prove framing and refusal; this one proves the
+/// POST actually reaches the store. It is also the shape the served page's
+/// dialog produces: a client-minted `task_id`, an `agent_name` rather than a
+/// target session (`ops::task::send` refuses a payload carrying neither),
+/// and the envelope's own `scope_id` naming the target scope.
+#[test]
+fn a_command_over_http_changes_state_and_the_next_query_sees_it() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let store =
+        factory_store::Store::open(fixture.instance_root()).expect("open the fixture store");
+    let alpha = fixture.scope("alpha");
+    let handler = FactoryHandler::new(store, common::FakeAdapter::new(), fixture.instance_root());
+
+    let ui = factory_daemon::Ui::bind("127.0.0.1:0".parse().expect("a literal address parses"))
+        .expect("binding an ephemeral loopback port");
+    let addr = ui.addr();
+    let _join = ui.spawn(Arc::new(handler));
+
+    let post = |envelope: serde_json::Value| -> serde_json::Value {
+        let response = post_api(
+            addr,
+            "Content-Type: application/json\r\n",
+            &envelope.to_string(),
+        );
+        serde_json::from_str(body_of(&response)).expect("a response envelope")
+    };
+
+    // A UUIDv7 the client mints, exactly as `factory-cli`'s `ids::new_id`
+    // and the page's own `newId()` do.
+    let task_id = "01a08fd4-1111-7111-8111-111111111111";
+
+    let sent = post(serde_json::json!({
+        "api": "factory.command/v1",
+        "request_id": "44444444-4444-4444-8444-444444444444",
+        "scope_id": alpha.to_string(),
+        "command": "task.send",
+        "payload": {
+            "task_id": task_id,
+            "prompt": "Prüfe, ob der Leitstand wirklich schreibt.",
+            "agent_name": "agent",
+        },
+    }));
+    assert_eq!(
+        sent["api"], "factory.response/v1",
+        "task.send did not succeed: {sent}"
+    );
+
+    let listed = post(serde_json::json!({
+        "api": "factory.query/v1",
+        "request_id": "55555555-5555-4555-8555-555555555555",
+        "scope_id": uuid::Uuid::nil().to_string(),
+        "query": "task.list",
+        "payload": {},
+    }));
+    let tasks = listed["result"]["tasks"]
+        .as_array()
+        .expect("tasks is an array");
+    let created = tasks
+        .iter()
+        .find(|t| t["id"] == task_id)
+        .unwrap_or_else(|| panic!("the run this test sent is not in task.list: {tasks:?}"));
+    assert_eq!(created["target_scope_id"], alpha.to_string());
+    assert_eq!(created["triggered_by"], "manual");
+    assert_eq!(
+        created["prompt"],
+        "Prüfe, ob der Leitstand wirklich schreibt."
+    );
+}
+
+/// A refusal comes back as the daemon's own code and message, at HTTP 200.
+///
+/// The page renders `error.code` and `error.message` verbatim and keeps the
+/// dialog open, which only works if a refused command is an ordinary
+/// response rather than a transport failure.
+#[test]
+fn a_refused_command_keeps_its_code_and_message() {
+    let fixture = common::build(&[common::ScopeSpec::new("alpha", "alpha")]);
+    let store =
+        factory_store::Store::open(fixture.instance_root()).expect("open the fixture store");
+    let handler = FactoryHandler::new(store, common::FakeAdapter::new(), fixture.instance_root());
+
+    let ui = factory_daemon::Ui::bind("127.0.0.1:0".parse().expect("a literal address parses"))
+        .expect("binding an ephemeral loopback port");
+    let addr = ui.addr();
+    let _join = ui.spawn(Arc::new(handler));
+
+    // Neither `agent_name` nor `target_session_id`: `ops::task::send`'s own
+    // guard, and the one the dialog's radio exists to keep the operator out of.
+    let envelope = serde_json::json!({
+        "api": "factory.command/v1",
+        "request_id": "66666666-6666-4666-8666-666666666666",
+        "scope_id": fixture.scope("alpha").to_string(),
+        "command": "task.send",
+        "payload": {
+            "task_id": "01a08fd4-2222-7222-8222-222222222222",
+            "prompt": "kein Ziel",
+        },
+    });
+    let response = post_api(
+        addr,
+        "Content-Type: application/json\r\n",
+        &envelope.to_string(),
+    );
+
+    assert!(
+        status_line(&response).starts_with("HTTP/1.1 200"),
+        "a refusal is an application-level answer, not a transport failure"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(body_of(&response)).expect("a response envelope");
+    assert_eq!(parsed["api"], "factory.error/v1");
+    assert_eq!(parsed["error"]["code"], "validation.missing_field");
+    assert!(
+        !parsed["error"]["message"].as_str().unwrap_or("").is_empty(),
+        "the page shows this message verbatim, so it must not be empty"
     );
 }

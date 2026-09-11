@@ -232,9 +232,16 @@ fn read_request(reader: &mut BufReader<TcpStream>, port: u16) -> Result<Request,
         .next()
         .ok_or_else(|| Response::text(400, "malformed request line"))?
         .to_string();
-    let path = parts
+    // The request target, with any query string cut off: `/?x=1` and `/#a`
+    // are the same page as `/`, and a browser adds both without asking. A
+    // router that compared the whole target would 404 a link someone shared.
+    let target = parts
         .next()
-        .ok_or_else(|| Response::text(400, "malformed request line"))?
+        .ok_or_else(|| Response::text(400, "malformed request line"))?;
+    let path = target
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(target)
         .to_string();
 
     let mut host_ok = false;
