@@ -126,6 +126,38 @@ pub struct Screen {
     pub frame: String,
 }
 
+/// A push from a runtime that can push, rather than only answer when asked.
+/// Narrow, and about sessions rather than panes -- this vocabulary must never
+/// grow the nouns of whichever runtime happens to implement it. A variant is
+/// added because the daemon needs it, not because one runtime's protocol
+/// happens to have it.
+#[derive(Debug, Clone)]
+pub struct RuntimeEvent {
+    pub session: SessionRef,
+    pub kind: RuntimeEventKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum RuntimeEventKind {
+    /// The session's liveness changed. Carries `RuntimeStatus`, which already
+    /// degrades anything unrecognised to `Unknown` rather than erroring, so a
+    /// push naming a state core has never heard of still lands somewhere
+    /// sane.
+    StatusChanged(RuntimeStatus),
+    /// The session produced output. Nothing reads this yet -- output is a
+    /// second pass, coalesced, once there is something to judge the volume
+    /// against: unthrottled, it would blow the activity view's 500-row
+    /// client-side window in seconds.
+    OutputMoved,
+    /// The session is no longer there.
+    SessionGone,
+}
+
+/// A stream of a runtime's own pushes. A plain channel rather than a `Stream`
+/// trait object -- nothing downstream needs combinators, and this way core
+/// gains no dependency to get it.
+pub type RuntimeEventStream = tokio::sync::mpsc::Receiver<RuntimeEvent>;
+
 /// Adapter seam 2: where agents actually run. Opens a session, hands it a
 /// prompt, and can be asked whether it is still alive.
 #[async_trait::async_trait]
@@ -179,6 +211,17 @@ pub trait AgentRuntime: Send + Sync {
     /// than the transcript. `None` is an honest answer from a runtime that can
     /// only produce scrollback -- the caller falls back to `read`.
     async fn screen(&self, _session: &SessionRef) -> Result<Option<Screen>> {
+        Ok(None)
+    }
+
+    /// Events this runtime pushes on its own, for one that can. `None` is an
+    /// honest "poll me" -- exactly what happens today -- not a failure:
+    /// an out-of-process runtime cannot offer this yet (`proxy.rs` has no
+    /// runtime proxy, and the plugin host is request/response with no
+    /// notification path) and should not have to pretend otherwise. The poll
+    /// stays the floor underneath this either way: a subscription that later
+    /// drops falls back to it rather than the daemon going quiet.
+    async fn watch(&self) -> Result<Option<RuntimeEventStream>> {
         Ok(None)
     }
 

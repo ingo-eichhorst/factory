@@ -72,6 +72,12 @@ enum AgentCmd {
         #[arg(long, default_value_t = 200)]
         lines: u32,
     },
+    /// Give it a role, or clear the one it was given.
+    Role {
+        id: String,
+        /// The role to give it. Leave it out to go back to the config's.
+        role: Option<String>,
+    },
     /// Type at it: text, then any keys. `--key enter` submits.
     Input {
         id: String,
@@ -299,7 +305,7 @@ async fn main() -> Result<()> {
         Command::Agents => {
             let payload = client.send(Request::Agents).await?;
             print(&payload, cli.json, |p| match p {
-                Payload::Scopes { scopes } => {
+                Payload::Scopes { scopes, roles } => {
                     let mut out = String::new();
                     for s in scopes {
                         out.push_str(&format!(
@@ -307,7 +313,13 @@ async fn main() -> Result<()> {
                             s.name, s.path, s.default_agent, s.runtime
                         ));
                         for a in &s.agents {
-                            let mut flags = vec![a.role.clone(), a.lifetime.clone()];
+                            let mut flags = vec![
+                                match &a.assigned_role {
+                                    Some(r) => format!("{r}, given"),
+                                    None => a.role.clone(),
+                                },
+                                a.lifetime.clone(),
+                            ];
                             if a.is_default {
                                 flags.push("default".into());
                             }
@@ -338,6 +350,14 @@ async fn main() -> Result<()> {
                         }
                         out.push('\n');
                     }
+                    // What there is to give an agent, so nobody has to guess a
+                    // name and be told no.
+                    for r in roles {
+                        out.push_str(&format!(
+                            "role {:<14} {:<6} {}\n",
+                            r.name, r.reach, r.describe
+                        ));
+                    }
                     Some(out.trim_end().to_string())
                 }
                 _ => None,
@@ -363,6 +383,22 @@ async fn agent_cmd(json: bool, client: &Client, cmd: AgentCmd) -> Result<()> {
             let payload = client.send(Request::AgentStop { id }).await?;
             print(&payload, json, |p| match p {
                 Payload::Agent { agent } => Some(agent_line(agent)),
+                _ => None,
+            })
+        }
+        AgentCmd::Role { id, role } => {
+            let payload = client.send(Request::AgentRole { id, role }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Agent { agent } => Some(format!(
+                    "{}  {}{}",
+                    agent.id,
+                    agent.role,
+                    if agent.assigned_role.is_some() {
+                        " (given)"
+                    } else {
+                        " (from the config)"
+                    }
+                )),
                 _ => None,
             })
         }
@@ -907,6 +943,9 @@ fn describe_event(e: &Event) -> String {
             format!("agent    {}  {}", agent.id, agent.state.as_str())
         }
         Event::AgentRemoved { id } => format!("agent    {id}  removed"),
+        Event::AgentActivity {
+            subject, status, ..
+        } => format!("activity {subject}  {}", status.as_str()),
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::adapter::RuntimeStatus;
 use crate::agent::AgentSession;
 use crate::run::Run;
 use crate::task::{Task, TaskEntry};
@@ -40,6 +41,20 @@ pub enum Event {
     AgentRemoved {
         id: String,
     },
+    /// A push from a runtime, mapped onto whichever standing agent or run's
+    /// session it was about. This never moves a task or a run -- only the
+    /// agent's own `factory task report` may do that -- so `task_id()` is
+    /// `None` here on purpose: this is activity with no task behind it, the
+    /// exact gap the activity view has when nothing is running.
+    AgentActivity {
+        /// A standing agent's id (`scope/name`), or `run:<id>` for a task's
+        /// session.
+        subject: String,
+        scope: String,
+        agent: String,
+        status: RuntimeStatus,
+        at: DateTime<Utc>,
+    },
 }
 
 impl Event {
@@ -64,6 +79,7 @@ impl Event {
             Event::TaskDeleted { id } | Event::TaskEntry { id, .. } => Some(id),
             Event::RunStarted { run } | Event::RunUpdated { run } => Some(&run.task_id),
             Event::AgentUpdated { .. } | Event::AgentRemoved { .. } => None,
+            Event::AgentActivity { .. } => None,
             Event::DaemonStarted { .. } => None,
         }
     }

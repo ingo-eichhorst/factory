@@ -124,6 +124,43 @@ An agent says which one it is by presenting the token Factory put in its
 session as `FACTORY_TOKEN`; the CLI sends it on every request. No token means
 the owner.
 
+Those two are not the whole list. A role is a **name**, a set of **grants**, and
+a **reach**, and an instance names as many as its way of working needs:
+
+```yaml
+roles:
+  runner:
+    describe: starts the work that is already on the board, and nothing else
+    grants: [task.run, task.cancel]
+    reach: scope          # own (its own work) or scope (everything in it)
+  reviewer:
+    describe: works its own tasks and says what it found
+    grants: [task.edit, task.report]
+    reach: own
+```
+
+The grants decide **which** requests an agent may make; the reach decides
+**whose** tasks, agents and sessions it may make them about. `task.*`,
+`agent.*` and `*` are wildcards; a grant that names nothing is refused at load
+rather than ignored, and so is an agent given a role the instance never defined
+— the message says which agent it was. The grants are:
+
+    task.create  task.edit  task.delete  task.run  task.cancel  task.report
+    agent.start  agent.stop  agent.input  run.input
+
+Reading is not among them, because reading is open to every agent: one that
+cannot see the board cannot coordinate with anyone.
+
+`worker` and `foreman` ship written in that same vocabulary — a worker is
+`[task.edit, task.report, run.input]` at `reach: own`, a foreman is everything
+at `reach: scope` — and neither can be redefined. An instance that could
+rewrite `worker` from one line would widen every agent that never asked for a
+role.
+
+What a grant cannot say is written out in `access.rs`, in the arm it belongs
+to: handing a task to somebody else is not editing it, so a role that reaches
+only its own work may change what its task says and never whose it is.
+
 > **This is not a security boundary.** Every agent runs as the owner of the
 > instance and can reach the same socket, so an agent that simply leaves the
 > token out is indistinguishable from a person. Roles keep an agent that
@@ -142,12 +179,28 @@ daemon:
 
 A scope that already declares an agent with `role: foreman` keeps its own.
 
+A role can also be given to a standing agent while it is running, from the
+roster or from the CLI, without editing the config:
+
+```sh
+factory agent role demo/watcher reviewer   # until somebody says otherwise
+factory agent role demo/watcher            # back to what the config says
+```
+
+The assignment is kept with the agent, not written into `config.yaml`: the file
+stays something a person owns, and the roster says when an agent is wearing a
+role its declaration does not give it. The session it is already in keeps
+running — a role is checked when an agent asks for something, so the new one
+holds from its next request. Only the owner may do this. An agent that could
+hand itself a role would not be bounded by the one it has.
+
 ```sh
 factory agents                       # scopes, their agents, and what each is doing
 factory agent start demo watcher
 factory agent stop demo/watcher      # stays stopped until someone asks again
 factory agent output demo/watcher
 factory agent input demo/watcher --text "how is it going?" --key enter
+factory agent role demo/watcher reviewer
 ```
 
 Each standing agent also carries the command to get into its terminal yourself —
@@ -371,7 +424,13 @@ envelope, not inventing a second API.
 
 ## The web UI
 
-Two pages. **Tasks** is the list; clicking one opens it in a modal with its
+Five views, one selector in the header: **Dashboard** is the landing view, then
+**Activity**, **Site plan**, **Tasks** and **Agents**. Switching between them is
+a small registry, not five special cases — one container shown, one button lit,
+and whatever that view needs to start or stop doing while it is not the one on
+screen.
+
+**Tasks** is the list; clicking one opens it in a modal with its
 runs, the selected run's journal, and its terminal. The terminal is shown from
 the moment a run exists — live from the session while it runs, and the
 transcript kept at the end once it does not — so there is never a button to
@@ -424,6 +483,30 @@ Esc, ↑, ↓ and Ctrl-C. That is enough to answer the prompt an agent is sittin
 on, which is usually a first-run trust dialog or a login. Every agent also
 offers **Start task…**, which opens the create form with that scope and agent
 already chosen. A task run's terminal takes the same input.
+
+**Dashboard** is five KPI tiles, a by-scope table and an inbox, all read from
+the same `state.tasks` and `state.scopes` every other view already holds —
+nothing here is fetched specially. The inbox lives inside the dashboard rather
+than beside it: every blocked, failed and cancelled task, and every schedule
+that missed its own next run, newest first. `blocked` is a real, first-class
+status — "the agent needs a human before it can go on" — so this is never a
+stub of one; what the daemon genuinely does not record is the *question*
+itself, and the closest thing to an answer is the journal entry the agent
+wrote when it blocked, shown if it wrote one.
+
+**Activity** is a live tail, not an archive: every event this page has seen
+since it was opened, filterable by kind and by free text. There is a `/ws`
+stream and a journal per task, but no queryable history behind either yet, so
+the banner says plainly that nothing earlier than "now" is shown here.
+
+**Site plan** draws the same scopes as a place: one hall per scope, sized by
+its footprint on disk (`/api/site`), and a figure for every agent actually
+present — never a bay, because Factory has no bay ("a row is an agent, not a
+bay", `occupancy.rs`). A second, lit three.js render of the same facts toggles
+from the same HUD, orbits, and picks the same hall the plan would. Both fall
+back to honesty over invention: a scope's own directory tree is not read, so a
+hall's floor says "not recorded" instead of drawing a treemap from nothing; the
+file a session is editing is not read at all, and is not drawn.
 
 ## What this prototype does not do yet
 
@@ -480,4 +563,6 @@ already chosen. A task run's terminal takes the same input.
     ui/js/core.js              DOM helpers, client state, the HTTP call, the socket
     ui/js/app.js               the wiring: which page shows, what an event means
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
+    ui/js/{dashboard,activity,site,site-render}.js               the new views
+    ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter

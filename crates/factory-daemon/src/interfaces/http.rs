@@ -13,7 +13,7 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use factory_core::adapter::interface::{Interface, InterfaceContext};
 use factory_core::error::{FactoryError, Result};
-use factory_core::protocol::{Envelope, Payload, Request, Response};
+use factory_core::protocol::{Envelope, Payload, ProductionBin, Request, Response};
 use factory_core::task::{NewTask, TaskFilter, TaskPatch, TaskReport};
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use std::sync::Arc;
@@ -113,10 +113,13 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/adapters", get(adapters))
         .route("/api/agents", get(agents))
         .route("/api/occupancy", get(occupancy))
+        .route("/api/production", get(production))
+        .route("/api/site", get(site_footprint))
         // The id of a standing agent is `<scope>/<name>`, which has a slash in
         // it, so these take it in the body rather than the path.
         .route("/api/agents/start", post(agent_start))
         .route("/api/agents/stop", post(agent_stop))
+        .route("/api/agents/role", post(agent_role))
         .route("/api/agents/input", post(agent_input))
         .route("/api/agents/output", post(agent_output))
         .route("/api/rpc", post(rpc))
@@ -214,6 +217,32 @@ async fn occupancy(
         },
     )
     .await
+}
+
+#[derive(serde::Deserialize)]
+struct ProductionQuery {
+    minutes: Option<u32>,
+    bin: Option<ProductionBin>,
+    scope: Option<String>,
+}
+
+async fn production(
+    State(engine): State<Arc<Engine>>,
+    Query(q): Query<ProductionQuery>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::Production {
+            minutes: q.minutes,
+            bin: q.bin,
+            scope: q.scope,
+        },
+    )
+    .await
+}
+
+async fn site_footprint(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::SiteFootprint).await
 }
 
 async fn list_tasks(
@@ -323,6 +352,13 @@ struct StartAgent {
 }
 
 #[derive(serde::Deserialize)]
+struct AgentRole {
+    id: String,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 struct AgentId {
     id: String,
     #[serde(default)]
@@ -355,6 +391,22 @@ async fn agent_start(
 
 async fn agent_stop(State(engine): State<Arc<Engine>>, Json(body): Json<AgentId>) -> AxumResponse {
     run(&engine, Request::AgentStop { id: body.id }).await
+}
+
+async fn agent_role(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<AgentRole>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::AgentRole {
+            id: body.id,
+            // An empty pick from a `<select>` means "back to the config's",
+            // which is the same thing as naming none.
+            role: body.role.filter(|r| !r.is_empty()),
+        },
+    )
+    .await
 }
 
 async fn agent_output(

@@ -9,13 +9,15 @@ pub mod error;
 pub mod event;
 pub mod occupancy;
 pub mod protocol;
+pub mod role;
 pub mod run;
 pub mod task;
 
 pub use adapter::{Agent, AdapterKind, AgentRuntime, Interface, TaskStore};
 pub use config::{Config, Factory, Scope};
 pub use error::{FactoryError, Result};
-pub use agent::{AgentSession, AgentState, Lifetime, Role};
+pub use agent::{AgentSession, AgentState, Lifetime};
+pub use role::{Grant, Reach, Role, RoleDef, RoleSpec, Roles};
 pub use event::{Event, EventBus};
 pub use run::{BlockSource, NewRun, Run, RunPatch, RunStatus, Trigger};
 pub use task::{

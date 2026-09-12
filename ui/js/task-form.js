@@ -2,14 +2,14 @@
 //! made in the browser can say everything a task made on the command line can.
 
 import { $, esc, api, state } from "./core.js";
-import { scrim, closeModal } from "./modal.js";
+import { scrim, closeModal, dropModal } from "./modal.js";
 // The form and the task modal open each other: edit comes from the modal, and
 // saving goes back to it. A cycle ES modules handle, because nothing here runs
 // until a button is pressed.
 import { openTask, renderTasks } from "./tasks.js";
 
 export function openCreate(prefill) {
-  closeModal();
+  dropModal();
   prefill = prefill || {};
   scrim(`
     <header><div><h2>New task</h2></div><button class="x" id="c-close">&times;</button></header>
@@ -32,7 +32,7 @@ export function openCreate(prefill) {
 /// rescheduled by the daemon, which is why this is a PATCH rather than a write
 /// straight into the store.
 export function openEdit(task) {
-  closeModal();
+  dropModal();
   scrim(`
     <header><div><h2>Edit task</h2><code class="id">${esc(task.id)}</code></div>
       <button class="x" id="c-close">&times;</button></header>
@@ -103,8 +103,11 @@ export function agentOptions(scopeName, selected) {
 }
 
 export function scopeOptions(selected) {
+  // Someone looking at one scope is almost certainly making a task for it, so
+  // the selection stands in for a prefill the caller did not give.
+  const on = selected || state.scope;
   return `<option value="">(first scope)</option>` + state.scopeNames.map(s =>
-    `<option value="${esc(s)}" ${s === selected ? "selected" : ""}>${esc(s)}</option>`).join("");
+    `<option value="${esc(s)}" ${s === on ? "selected" : ""}>${esc(s)}</option>`).join("");
 }
 
 /// Whether a scope, as the agents page last reported it, can host a worktree
@@ -132,8 +135,10 @@ function worktreeHint(capable, reason, editing) {
 export function taskFields(v) {
   v = v || {};
   const editing = v.editing === true;
-  const scopeName = v.scope || state.scopeNames[0];
-  const { capable, reason } = worktreeCapability(scopeName);
+  // Which scope the agent list is for has to be the one the scope select shows,
+  // selection included, or the form offers agents that scope never declared.
+  const scope = v.scope || state.scope || state.scopeNames[0];
+  const { capable, reason } = worktreeCapability(scope);
   const checked = capable && v.worktree !== false;
   const disabled = editing || !capable;
   return `
@@ -145,7 +150,7 @@ export function taskFields(v) {
       <div><label for="c-scope">Scope</label>
         <select id="c-scope">${scopeOptions(v.scope)}</select></div>
       <div><label for="c-agent">Agent</label>
-        <select id="c-agent">${agentOptions(v.scope || state.scopeNames[0], v.agent)}</select></div>
+        <select id="c-agent">${agentOptions(scope, v.agent)}</select></div>
     </div>
     <label for="c-worktree">Worktree</label>
     <div class="checkrow">

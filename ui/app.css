@@ -22,6 +22,17 @@
   --term-bg: #0D1316; --term-fg: #B9CAD1; --term-dim: #6C8189; --term-line: #1D272B;
   --on-signal: #08131C;
   --shadow: 0 16px 44px rgba(0,0,0,.55);
+  /* The site plan's own palette. Both renderers read these through
+     `getComputedStyle`, never a literal, so a theme switch repaints a scene
+     already on screen instead of needing a reload. */
+  --ground: #0A0E11; --ground2: #141B1F; --plate: #1C2429; --paint: #D9A445;
+  --roof: #2B363D; --roof2: #3A4750; --wallA: #232D33; --wallB: #1A2227;
+  /* The six decision levels, L1 through L6 -- one colour each, read by the
+     header's level row. `--lvl4`/`--lvl3` are the two Factory has built.
+     Not `--ly1`..`--ly6` -- the site plan's floor treemap already claims
+     those names below, for an unrelated ramp of lightness levels. */
+  --lvl1: #5FA8DC; --lvl2: #57BDBD; --lvl3: #3EB183;
+  --lvl4: #D9A445; --lvl5: #B98AD0; --lvl6: #D97158;
 }
 
 :root[data-theme="foundry-light"] {
@@ -34,6 +45,10 @@
   --term-bg: #0D1316; --term-fg: #B9CAD1; --term-dim: #6C8189; --term-line: #1D272B;
   --on-signal: #FFFFFF;
   --shadow: 0 16px 44px rgba(16,22,25,.22);
+  --ground: #CBD3D8; --ground2: #D8E0E4; --plate: #E7ECEE; --paint: #9C6806;
+  --roof: #B9C3C9; --roof2: #9FACB3; --wallA: #CED8DC; --wallB: #B7C3C8;
+  --lvl1: #12557E; --lvl2: #0E7A7A; --lvl3: #1B7A55;
+  --lvl4: #9C6806; --lvl5: #6B3F94; --lvl6: #9E3A2B;
 }
 
 /* The sixteen ANSI colours, so a terminal frame is coloured by the theme
@@ -67,22 +82,70 @@ body {
 }
 
 /* ------------------------------------------------------------- chrome */
+/* The title bar, the level row and the view-tab row stick as one unit --
+   `position: sticky` lives here rather than on `header` alone, because
+   `header` wraps (`flex-wrap: wrap`) and changes height with the viewport,
+   which would make any hardcoded `top` on the rows below it wrong at some
+   width. One sticky ancestor has no such offset to get right. */
+.chrome {
+  position: sticky; top: 0; z-index: 5;
+}
 header {
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
   padding: 9px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
-  position: sticky; top: 0; z-index: 5;
 }
 header h1 {
   margin: 0; font: 700 15px/1 var(--cond); letter-spacing: .14em; text-transform: uppercase;
 }
 .meta { color: var(--muted); font: 400 11px/1.4 var(--mono); }
-.tabs { display: flex; gap: 2px; }
+/* The second row: the same five view tabs as before, now a full-width row of
+   its own under the level row rather than squeezed in beside the title. */
+.tabs {
+  display: flex; gap: 2px; padding: 6px 18px; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
 .tabs button {
   border: 1px solid transparent; background: none; color: var(--muted);
   padding: 5px 11px; border-radius: 3px; font: 500 12px/1 var(--sans); cursor: pointer;
 }
 .tabs button:hover { color: var(--ink); }
 .tabs button.on { background: var(--panel-2); color: var(--ink); font-weight: 600; }
+
+/* The level row: its own full-width row under the header, not squeezed into
+   it. Six three-line tabs, `flex:1 1 0` so they share the row evenly with a
+   floor on how narrow one gets, a colour per level via `--lvl1`..`--lvl6`,
+   and the four Factory has not built yet shown `disabled` -- which is also
+   what drops them out of the tab order, so tabbing the row only visits the
+   two that work. */
+.levels {
+  display: flex; flex-wrap: wrap; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.lvl {
+  --lv: var(--muted);
+  flex: 1 1 0; min-width: 108px; display: flex; flex-direction: column; gap: 2px;
+  align-items: flex-start; text-align: left; cursor: pointer;
+  border: 0; border-right: 1px solid var(--line-soft); border-top: 3px solid transparent;
+  background: none; padding: 7px 12px 8px;
+}
+.lvl:last-child { border-right: 0; }
+.lvl:hover:not(:disabled) { background: var(--panel-2); }
+.lvl.on { background: var(--panel-2); border-top-color: var(--lv); }
+.lvl:disabled { cursor: default; opacity: .42; }
+.lvl .lv-n {
+  font: 700 10px/1 var(--cond); letter-spacing: .1em; color: var(--lv);
+}
+.lvl .lv-name { font: 600 12.5px/1.2 var(--sans); color: var(--ink); }
+.lvl .lv-sub { font: 400 10.5px/1.3 var(--sans); color: var(--muted); }
+.lvl[data-lv="1"] { --lv: var(--lvl1); }
+.lvl[data-lv="2"] { --lv: var(--lvl2); }
+.lvl[data-lv="3"] { --lv: var(--lvl3); }
+.lvl[data-lv="4"] { --lv: var(--lvl4); }
+.lvl[data-lv="5"] { --lv: var(--lvl5); }
+.lvl[data-lv="6"] { --lv: var(--lvl6); }
+@media (max-width: 860px) {
+  .lvl .lv-sub { display: none; }
+}
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--fault); margin-right: 6px; }
 .dot.live { background: var(--run); }
 .theme-switch {
@@ -91,7 +154,15 @@ header h1 {
   padding: 6px 9px; border-radius: 3px; cursor: pointer;
 }
 .theme-switch:hover { border-color: var(--signal); color: var(--signal); }
-main { padding: 18px 18px 48px; max-width: 1560px; margin: 0 auto; }
+/* Two tracks: the scope rail, and whichever view is showing. The second one is
+   `minmax(0, 1fr)` and not `1fr` because a grid track is otherwise as wide as
+   its widest child, and a terminal frame is as wide as the runtime drew it --
+   one wide transcript would push the rail off the screen. */
+main {
+  padding: 18px 18px 48px; max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 16px; align-items: start;
+}
+#content { min-width: 0; }
 section { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
 .bar { display: flex; align-items: center; gap: 10px; margin-bottom: 11px; }
 .bar h2 {
@@ -209,6 +280,16 @@ code.id { font: 400 11px/1.4 var(--mono); color: var(--faint); }
 .tag.plug { color: var(--signal); border-color: var(--signal); }
 .tag.perm { color: var(--run); border-color: var(--run); }
 .tag.foreman { color: var(--wait); border-color: var(--wait); }
+.tag.role { color: var(--signal-ink); border-color: var(--signal); }
+
+/* The role an agent is working under, changed in place. */
+select.rolepick {
+  width: auto; background: var(--panel); color: var(--ink-2); cursor: pointer;
+  border: 1px solid var(--line); border-radius: 3px; padding: 5px 6px;
+  font: 500 11.5px/1 var(--sans); margin-right: 6px;
+}
+select.rolepick:hover:not(:disabled) { border-color: var(--signal); color: var(--signal); }
+select.rolepick:disabled { opacity: .38; cursor: default; }
 .attach { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
 .attach code {
   background: var(--sunk); border: 1px solid var(--line-soft); padding: 3px 7px; border-radius: 3px;
@@ -366,3 +447,234 @@ code.id { font: 400 11px/1.4 var(--mono); color: var(--faint); }
 }
 .occ-note b { color: var(--ink); font-weight: 600; }
 @media (max-width: 720px) { .occ { --lab: 110px; } }
+
+/* --------------------------------------------------------------- the rail
+   The scope tree. Depth is a custom property rather than nesting, because the
+   narrow layout below lays the same rows out in a line and has to be able to
+   drop the indent without unpicking the markup. */
+#rail {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+  padding: 7px 6px 9px; min-width: 0;
+}
+#rail ul { list-style: none; margin: 0; padding: 0; }
+.rail-row {
+  display: block; width: 100%; text-align: left; border: 1px solid transparent;
+  background: none; border-radius: 3px; color: var(--ink-2);
+  padding: 5px 8px 5px calc(8px + var(--d, 0) * 9px);
+  font: 400 12px/1.35 var(--sans);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+button.rail-row { cursor: pointer; }
+button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
+.rail-row:focus-visible { outline: 1px solid var(--signal); outline-offset: -1px; }
+.rail-row[aria-current="true"] {
+  background: var(--signal-wash); color: var(--ink); font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--signal);
+}
+.rail-all { margin-bottom: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line-soft); border-radius: 3px 3px 0 0; }
+/* A path segment nobody registered a scope on. It is a label and not a
+   control: there is nothing the daemon could be asked about it. */
+.rail-row.group {
+  color: var(--faint); font: 600 9px/1 var(--cond); letter-spacing: .13em;
+  text-transform: uppercase; padding-top: 10px; padding-bottom: 4px;
+}
+.rail-empty { margin: 0; padding: 6px 8px 8px; color: var(--muted); font-size: 11.5px; }
+
+/* A tree cannot keep its indent lying on its side, so on a narrow screen the
+   rail becomes one strip of rows in tree order that scrolls sideways. */
+@media (max-width: 900px) {
+  main { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  #rail { display: flex; align-items: center; gap: 4px; overflow-x: auto; padding: 6px; }
+  #rail ul, #rail li { display: contents; }
+  /* `flex: 0 0 auto` is what makes the strip scroll instead of squeeze. A flex
+     item shrinks by default, and these rows are already told to ellipsize, so
+     without it a dozen scopes are compressed to a few pixels of first letter
+     each -- every name reads as "f…" and `overflow-x` never has anything to
+     scroll, because nothing ever overflows. */
+  .rail-row { width: auto; flex: 0 0 auto; padding: 5px 9px; }
+  .rail-row.group { padding: 5px 9px; }
+  .rail-all { margin-bottom: 0; padding-bottom: 5px; border-bottom: 0; border-right: 1px solid var(--line-soft); border-radius: 3px; }
+}
+/* ------------------------------------------------------------- site plan
+   Two canvases over one stage, only one shown at a time -- Plan is a flat
+   2D isometric draw, Render is the lit three.js scene. Both read the hall
+   colours above through CSS custom properties, never a literal, so a theme
+   switch repaints whichever one is on screen. */
+.site-wrap { display: flex; gap: 12px; align-items: flex-start; }
+.stage {
+  position: relative; flex: 1; min-width: 0; min-height: 460px; height: 64vh; max-height: 720px;
+  background: var(--ground2); border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
+}
+.stage canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+.stage canvas.drag { cursor: grabbing; }
+.stage canvas.off { display: none !important; }
+.hud { position: absolute; pointer-events: none; }
+.hud.tl { top: 10px; left: 10px; display: flex; gap: 6px; flex-wrap: wrap; pointer-events: auto; }
+.hud.tr { top: 10px; right: 10px; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; pointer-events: auto; }
+.hud.bl { bottom: 10px; left: 10px; }
+.hud.br { bottom: 10px; right: 10px; display: flex; gap: 6px; align-items: flex-end; pointer-events: auto; }
+.render-only { display: none !important; }
+.stage.rm3 .render-only { display: flex !important; }
+.hbtn {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 5px 9px;
+  font: 500 10.5px/1 var(--sans); color: var(--ink-2); display: flex; align-items: center; gap: 6px; cursor: pointer;
+}
+.hbtn:hover { border-color: var(--signal); color: var(--signal); }
+.hbtn.on { background: var(--signal); border-color: var(--signal); color: var(--on-signal); }
+.hbtn.sq { width: 28px; height: 28px; justify-content: center; padding: 0; font: 500 14px/1 var(--mono); }
+.hbtn:disabled { opacity: .4; cursor: default; }
+.zoomlv {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 5px 9px;
+  font: 500 10.5px/1 var(--mono); color: var(--muted);
+}
+.tip {
+  position: absolute; pointer-events: none; background: var(--ink); color: var(--panel); border-radius: 3px;
+  padding: 6px 9px; font: 500 11px/1.45 var(--sans); max-width: 230px; opacity: 0; transition: opacity .1s; z-index: 5;
+}
+.tip .k { font: 400 10px/1.4 var(--mono); opacity: .72; display: block; }
+.slegend {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 6px 9px;
+  display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--muted);
+}
+.slegend .row { display: flex; align-items: center; gap: 7px; }
+.slegend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.tod { display: flex; flex-direction: column; gap: 5px; align-items: flex-end; }
+.todr { display: flex; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; background: var(--panel); }
+.todr button { padding: 5px 9px; font: 500 10.5px/1 var(--mono); color: var(--muted); background: transparent; border: 0; cursor: pointer; }
+.todr button + button { border-left: 1px solid var(--line); }
+.todr button.on { background: var(--signal); color: var(--on-signal); }
+.chint {
+  font: 400 10px/1.5 var(--mono); color: var(--faint); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 3px; padding: 4px 7px; text-align: right;
+}
+/* The inspector rail: the same vocabulary as the agents page -- a click on a
+   hall is a second door into the same facts, not a different data model. */
+.rail { flex: 0 0 300px; max-width: 340px; display: flex; flex-direction: column; gap: 10px; }
+.rail .scope, .rail .agent { font-size: 12px; }
+.rail .empty { padding: 14px; }
+/* In a column flex container, `align-items: flex-start` on .site-wrap governs
+   the cross axis -- width, now -- so without an explicit stretch here .stage
+   shrinks to the width of its content. Its only children are two absolutely
+   positioned canvases, which contribute none, so it silently computes to 0px:
+   no canvas, no HUD, no error, nothing a person could tell from an empty
+   instance. Stretching it is the fix, not a resize of anything inside it. */
+@media (max-width: 980px) {
+  .site-wrap { flex-direction: column; }
+  .stage { align-self: stretch; }
+  .rail { flex: 1 1 auto; max-width: none; }
+}
+
+/* --------------------------------------------------------------- dashboard */
+.dash { display: flex; flex-direction: column; gap: 14px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.kpi {
+  border: 1px solid var(--line); border-radius: 4px; background: var(--panel); padding: 10px 12px 11px;
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+}
+.kpi .k { font: 600 9px/1 var(--cond); letter-spacing: .14em; text-transform: uppercase; color: var(--faint); }
+.kpi .v { font: 500 24px/1.15 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.kpi .v small { font-size: 11px; color: var(--muted); font-weight: 400; letter-spacing: 0; }
+.kpi .d { font: 400 10.5px/1.4 var(--sans); color: var(--muted); }
+.drow { display: grid; grid-template-columns: minmax(0,2fr) minmax(0,1fr); gap: 14px; }
+.dcard { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); padding: 12px 14px 14px; min-width: 0; }
+.dcard h3 {
+  margin: 0 0 11px; font: 600 9.5px/1 var(--cond); letter-spacing: .15em; text-transform: uppercase; color: var(--faint);
+  display: flex; align-items: baseline; gap: 9px;
+}
+.dcard h3 .r { margin-left: auto; font: 400 10px/1 var(--mono); letter-spacing: 0; text-transform: none; color: var(--faint); }
+.dcard table { font-size: 11.5px; }
+.inbox-item {
+  display: flex; align-items: baseline; gap: 9px; padding: 7px 0; border-bottom: 1px solid var(--line-soft);
+  font-size: 11.5px; cursor: pointer;
+}
+.inbox-item:last-child { border-bottom: 0; }
+.inbox-item:hover .it-t { color: var(--signal); }
+.inbox-item .it-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; margin-top: 3px; }
+.inbox-item .it-t { flex: 1; min-width: 0; color: var(--ink-2); }
+.inbox-item .it-t b { color: var(--ink); font-weight: 500; }
+.inbox-item .it-t .sub { display: block; }
+.inbox-item .it-age { flex: 0 0 auto; color: var(--faint); font: 400 10.5px/1.4 var(--mono); }
+@media (max-width: 980px) { .drow { grid-template-columns: 1fr; } }
+
+/* ===== dashboard: history ===== */
+/* Everything below is new for issue #14: the window selector's active state,
+   KPI sparklines, the throughput chart, the on-the-line breakdown and the
+   production-year grid. No rule above this line is touched. */
+
+.kpi .d.up { color: var(--run); }
+.kpi .d.down { color: var(--fault); }
+.kpi .d.flat { color: var(--faint); }
+.kpi svg { margin-top: 2px; width: 100%; height: 26px; display: block; }
+
+.dnote { margin: 10px 0 0; font: 400 10.5px/1.55 var(--sans); color: var(--faint); }
+
+.bigchart { width: 100%; height: auto; display: block; }
+.bc-run { fill: var(--run); }
+.bc-rework { fill: var(--wait); }
+.bc-mean { stroke: var(--faint); stroke-width: 1; stroke-dasharray: 3 3; }
+.bc-partial { opacity: .55; }
+.chleg { display: flex; gap: 14px; margin-top: 8px; font: 400 10px/1 var(--mono); color: var(--muted); }
+.chleg i { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 1px; }
+.chleg .l-run { background: var(--run); }
+.chleg .l-rework { background: var(--wait); }
+
+.stngrp {
+  font: 600 8.5px/1 var(--cond); letter-spacing: .13em; text-transform: uppercase; color: var(--faint);
+  margin: 9px 0 4px; padding-top: 7px; border-top: 1px solid var(--line-soft);
+}
+.stngrp:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+.stn { display: flex; align-items: center; gap: 9px; padding: 4px 0; font-size: 11.5px; }
+.stn .nm { flex: 0 0 92px; color: var(--ink-2); }
+.stn .track { flex: 1; height: 7px; background: var(--sunk); border-radius: 2px; overflow: hidden; min-width: 0; }
+.stn .track i { display: block; height: 100%; border-radius: 2px; }
+.stn .c { font: 500 11px/1 var(--mono); color: var(--ink); width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* The production year: a GitHub-contribution-style grid, one tile per day,
+   53 weeks ending today. A tile before the earliest recorded run is drawn as
+   "no record", not as a zero -- see `dashboard.js`'s `calTile`. */
+.calwrap { overflow-x: auto; padding-bottom: 2px; }
+.calmon { display: flex; gap: 3px; margin: 0 0 4px 34px; min-width: 640px; }
+.calmon span { flex: 0 0 11px; font: 500 8.5px/1 var(--mono); color: var(--faint); white-space: nowrap; overflow: visible; }
+.calbody { display: flex; gap: 5px; min-width: 640px; }
+.caldow { display: flex; flex-direction: column; gap: 3px; flex: 0 0 29px; }
+.caldow span { height: 11px; font: 400 8.5px/11px var(--mono); color: var(--faint); text-align: right; }
+.calgrid { display: flex; gap: 3px; }
+.cw { display: flex; flex-direction: column; gap: 3px; }
+.cw i { width: 11px; height: 11px; border-radius: 2px; display: block; background: var(--sunk); }
+.calwrap i.future { background: transparent; }
+.calwrap i.no-record { background: transparent; box-shadow: inset 0 0 0 1px var(--line-soft); }
+.calwrap i.l0, .calwrap i.s0 { background: var(--sunk); }
+.calwrap i.l1 { background: color-mix(in srgb, var(--run) 28%, var(--sunk)); }
+.calwrap i.l2 { background: color-mix(in srgb, var(--run) 52%, var(--sunk)); }
+.calwrap i.l3 { background: color-mix(in srgb, var(--run) 76%, var(--sunk)); }
+.calwrap i.l4 { background: var(--run); }
+.calwrap i.s1 { background: color-mix(in srgb, var(--fault) 28%, var(--sunk)); }
+.calwrap i.s2 { background: color-mix(in srgb, var(--fault) 52%, var(--sunk)); }
+.calwrap i.s3 { background: color-mix(in srgb, var(--fault) 76%, var(--sunk)); }
+.calwrap i.s4 { background: var(--fault); }
+.calwrap i.bad {
+  box-shadow: inset 0 0 0 1px var(--fault);
+  background-image: repeating-linear-gradient(135deg, color-mix(in srgb, var(--fault) 55%, transparent) 0 2px, transparent 2px 4px);
+}
+.calleg { display: flex; align-items: center; gap: 14px; margin-top: 11px; flex-wrap: wrap; font: 400 10px/1 var(--mono); color: var(--faint); }
+.calleg .k { display: inline-flex; align-items: center; gap: 5px; }
+.calleg i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.calfoot { margin: 12px 0 0; font: 400 11px/1.6 var(--sans); color: var(--ink-2); max-width: 96ch; }
+/* ===== site plan: hall floor =====
+   A dedicated ramp for the floor treemap's tiles, read by both site
+   renderers the same way they already read `--wallA` and friends. It is
+   separate from `--wallA`/`--roof2`/`--paint` and the rest of the hall's own
+   greys on purpose: those sit close enough in lightness to each other and to
+   the ground around them that a treemap painted from them reads as one slab.
+   It is also separate from `--run`/`--idle`/`--wait`/`--fault`: those four
+   already mean something specific about a run, and a directory tile
+   borrowing one would read as a claim about work rather than about size. */
+:root,
+:root[data-theme="foundry-dark"] {
+  --ly1: #6E7CD8; --ly2: #896ED8; --ly3: #B16ED8;
+  --ly4: #D86ED8; --ly5: #D86EB1; --ly6: #D86E8A;
+}
+:root[data-theme="foundry-light"] {
+  --ly1: #2E3D9E; --ly2: #4A2E9E; --ly3: #752E9E;
+  --ly4: #9E2E9E; --ly5: #9E2E75; --ly6: #9E2E4C;
+}

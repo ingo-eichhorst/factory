@@ -2,15 +2,26 @@
 //! the buttons that start, stop and type at them.
 
 import { $, esc, api, state, since, statusBadge } from "./core.js";
-import { scrim, closeModal } from "./modal.js";
+import { inScope, scopeLabel } from "./scopes.js";
+import { scrim, closeModal, dropModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
+// The roster and the wiring open each other: the wiring builds the rail at
+// boot, and this is the other place /api/agents is refetched, which is the
+// only thing the rail's tree is made of. A cycle ES modules handle, because
+// nothing here runs until a page is shown.
+import { rebuildRail } from "./app.js";
 
 export async function loadAgents() {
   try {
-    state.scopes = (await api("/api/agents")).scopes;
+    const board = await api("/api/agents");
+    state.scopes = board.scopes;
+    state.roles = board.roles || [];
     if (state.scopes.length) state.adapters = state.scopes[0].available;
+    // A scope added or dropped in the config has to reach the rail, not just
+    // the roster underneath it.
+    rebuildRail();
     renderAgents();
   } catch (e) {
     $("agents").innerHTML = `<div class="err">${esc(e.message)}</div>`;
@@ -20,7 +31,11 @@ export async function loadAgents() {
 
 export function agentTags(a) {
   const tags = [];
-  if (a.role === "foreman") tags.push(`<span class="tag foreman">foreman</span>`);
+  // Every role shows, not just the one that used to be the only one worth
+  // saying. A role somebody gave says so, because the config says otherwise.
+  if (a.role && a.role !== "worker")
+    tags.push(`<span class="tag ${a.role === "foreman" ? "foreman" : "role"}">${esc(a.role)}</span>`);
+  if (a.assigned_role) tags.push(`<span class="tag">given</span>`);
   if (a.lifetime === "permanent") tags.push(`<span class="tag perm">permanent</span>`);
   else if (a.lifetime === "temporary") tags.push(`<span class="tag">temporary</span>`);
   if (a.is_default) tags.push(`<span class="tag">default</span>`);
@@ -30,7 +45,12 @@ export function agentTags(a) {
 }
 
 export function renderAgents() {
-  $("agents").innerHTML = state.scopes.map(s => {
+  // Filtered down to nothing is a fact about the selection. An instance that
+  // declares no scopes at all is a different thing to say, and says it.
+  const nothing = state.scope
+    ? `No agents in ${esc(scopeLabel())}.`
+    : "This instance declares no scopes.";
+  $("agents").innerHTML = state.scopes.filter(s => inScope(s.name)).map(s => {
     const rows = s.agents.map(a => {
       const standing = a.lifetime !== "task";
       const live = a.state === "ready" || a.state === "starting";
@@ -41,6 +61,15 @@ export function renderAgents() {
         buttons.push(`<button class="btn" data-act="term" data-id="${esc(a.id || "")}" ${live ? "" : "disabled"}>Terminal</button>`);
       }
       buttons.push(`<button class="btn" data-act="task" data-scope="${esc(s.name)}" data-agent="${esc(a.adapter)}">Start task…</button>`);
+
+      const rolePicker = standing && a.id
+        ? `<select class="rolepick" data-act="role" data-id="${esc(a.id)}" title="What this agent is allowed to do">
+             ${(state.roles || []).map(r => `
+               <option value="${esc(r.name)}" ${r.name === a.role ? "selected" : ""}
+                       title="${esc(r.describe)}">${esc(r.name)}</option>`).join("")}
+             ${a.assigned_role ? `<option value="">use the config's</option>` : ""}
+           </select>`
+        : "";
 
       const attach = a.attach
         ? `<div class="attach"><span class="sub">attach</span><code>${esc(a.attach)}</code>
@@ -64,6 +93,7 @@ export function renderAgents() {
           ${standing ? statusBadge(a.state) : ""}
           ${agentTags(a)}
           <span style="margin-left:auto"></span>
+          ${rolePicker}
           <span class="row-btns">${buttons.join("")}</span>
         </div>
         <div class="sub">${esc(a.description)}</div>
@@ -82,10 +112,11 @@ export function renderAgents() {
       </div>
       ${rows || `<div class="empty">No agents declared.</div>`}
     </div>`;
-  }).join("") || `<div class="empty">This instance declares no scopes.</div>`;
+  }).join("") || `<div class="empty">${nothing}</div>`;
 
   for (const el of $("agents").querySelectorAll("[data-act]")) {
-    el.onclick = (e) => { e.stopPropagation(); agentAction(el); };
+    if (el.tagName === "SELECT") el.onchange = (e) => { e.stopPropagation(); agentAction(el); };
+    else el.onclick = (e) => { e.stopPropagation(); agentAction(el); };
   }
   for (const job of $("agents").querySelectorAll(".job")) {
     job.onclick = () => openTask(job.dataset.task, job.dataset.run);
@@ -101,6 +132,9 @@ export async function agentAction(el) {
     } else if (act === "stop") {
       el.disabled = true;
       await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id: el.dataset.id }) });
+    } else if (act === "role") {
+      el.disabled = true;
+      await api("/api/agents/role", { method: "POST", body: JSON.stringify({ id: el.dataset.id, role: el.value }) });
     } else if (act === "term") {
       return openAgent(el.dataset.id);
     } else if (act === "task") {
@@ -117,7 +151,7 @@ export async function agentAction(el) {
 }
 
 export async function openAgent(id) {
-  closeModal();
+  dropModal();
   const found = findAgent(id);
   scrim(`
     <header>

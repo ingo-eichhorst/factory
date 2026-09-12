@@ -21,19 +21,157 @@
 </script>
 </head>
 <body>
+<!-- The title bar, the level row and the view-tab row stick together as one
+     unit. On origin/main the five view tabs lived inside `header` itself and
+     stuck with it; splitting them into two rows below it would otherwise
+     scroll both away on a long table, with the content then sliding under
+     the still-sticky title bar. One sticky wrapper is also the only version
+     of this that stays right as `header`'s own height changes -- it wraps at
+     narrow widths -- since nothing here hardcodes a `top` for the rows under
+     it (see `.chrome` in app.css). -->
+<div class="chrome">
 <header>
   <h1>Factory</h1>
   <span class="meta" id="instance">—</span>
-  <nav class="tabs">
-    <button id="tab-tasks" class="on">Tasks</button>
-    <button id="tab-agents">Agents</button>
-  </nav>
   <span class="meta" style="margin-left:auto"><span class="dot" id="dot"></span><span id="conn">connecting</span></span>
   <button class="theme-switch" id="theme" title="switch theme">foundry dark</button>
 </header>
 
+<!-- The six decision levels Factory runs at, L6 (what it is for) on the left
+     through L1 (what it runs on) on the right. Only L4 and L3 are built; the
+     other four carry `disabled` -- not just a dimming class -- so tabbing the
+     row skips straight over them, and a `title` says why. Which of the five
+     view tabs below belongs to which live level is `LEVEL_VIEWS` in app.js. -->
+<nav class="levels" id="levels" aria-label="Decision level">
+  <button id="lv-dir" class="lvl" data-level="dir" data-lv="6" disabled title="Not built yet">
+    <span class="lv-n">L6</span><span class="lv-name">Direction</span><span class="lv-sub">Goals, budget, unit cost</span>
+  </button>
+  <button id="lv-imp" class="lvl" data-level="imp" data-lv="5" disabled title="Not built yet">
+    <span class="lv-n">L5</span><span class="lv-name">Improvement</span><span class="lv-sub">History and decisions</span>
+  </button>
+  <button id="lv-proc" class="lvl on" data-level="proc" data-lv="4">
+    <span class="lv-n">L4</span><span class="lv-name">Process</span><span class="lv-sub">Rules and runs</span>
+  </button>
+  <button id="lv-harn" class="lvl" data-level="harn" data-lv="3">
+    <span class="lv-n">L3</span><span class="lv-name">Agent</span><span class="lv-sub">Who may work</span>
+  </button>
+  <button id="lv-env" class="lvl" data-level="env" data-lv="2" disabled title="Not built yet">
+    <span class="lv-n">L2</span><span class="lv-name">Environment</span><span class="lv-sub">Directory and lease</span>
+  </button>
+  <button id="lv-infra" class="lvl" data-level="infra" data-lv="1" disabled title="Not built yet">
+    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Daemon and store</span>
+  </button>
+</nav>
+
+<!-- The second row: the same five views as before, now filtered to whichever
+     ones belong to the selected level (`renderTabRow` in app.js). Hidden by
+     default here matches the default level, L4 Process, so the page looks
+     right even a moment before the boot script runs. -->
+<nav class="tabs" aria-label="View">
+  <button id="tab-dashboard" class="on">Dashboard</button>
+  <button id="tab-activity">Activity</button>
+  <button id="tab-site">Site plan</button>
+  <button id="tab-tasks">Tasks</button>
+  <button id="tab-agents" hidden>Agents</button>
+</nav>
+</div>
+
 <main>
-  <div id="view-tasks">
+  <!-- The rail is a sibling of every view, not a part of one: the selected
+       scope is not a property of a page, and it has to survive the tab
+       switch. -->
+  <nav id="rail" aria-label="Scopes"></nav>
+  <div id="content">
+  <div id="view-dashboard">
+    <div class="bar">
+      <h2>Dashboard</h2>
+      <span class="sp"></span>
+      <div class="seg" id="dash-window" title="how far back the history cards look">
+        <button data-w="day">Today</button>
+        <button data-w="d14" class="on">14 days</button>
+        <button data-w="d90">90 days</button>
+      </div>
+      <button class="btn primary" id="newTaskFromDash">New task</button>
+    </div>
+    <div class="dash" id="dash">loading…</div>
+  </div>
+
+  <div id="view-activity" hidden>
+    <div class="bar">
+      <h2>Activity</h2>
+      <span class="sub" id="activity-note" style="text-transform:none"></span>
+      <span class="sp"></span>
+      <div class="seg" id="activity-kind">
+        <button data-k="all" class="on">All</button>
+        <button data-k="task_">Tasks</button>
+        <button data-k="run_">Runs</button>
+        <button data-k="agent_">Agents</button>
+        <button data-k="runtime_">Runtime</button>
+      </div>
+    </div>
+    <section>
+      <div class="bar" style="margin:10px 14px 0 14px">
+        <input id="activity-q" type="text" placeholder="Filter — scope, task, message…" style="flex:1">
+        <span class="sub" id="activity-count"></span>
+      </div>
+      <table>
+        <thead><tr><th style="width:76px">Time</th><th style="width:130px">Event</th><th>Detail</th></tr></thead>
+        <tbody id="activity-rows"></tbody>
+      </table>
+      <div class="empty" id="activity-empty">Nothing seen yet. Only events received while this page has been open
+        are shown here — Factory keeps no separate event history to look back through.</div>
+    </section>
+  </div>
+
+  <div id="view-site" hidden>
+    <div class="bar">
+      <h2>Site plan</h2>
+      <span class="err" id="site-render-err"></span>
+      <span class="sp"></span>
+    </div>
+    <div class="site-wrap" id="site-wrap">
+      <div class="stage" id="site-stage">
+        <canvas id="site-plan-cv" tabindex="0" role="img"
+          aria-label="Isometric site plan. Halls are scopes, sized by their codebase; figures are agents, not bays. The same facts are available as text in the Dashboard and Agents views."></canvas>
+        <canvas id="site-render-cv" class="off" tabindex="0" role="img"
+          aria-label="Lit three-dimensional render of the same site. A lit window marks a bay an agent is occupying; the amber beacon marks a hall with a run waiting on a human. The same facts are available as text in the Dashboard and Agents views."></canvas>
+        <div class="hud tl">
+          <div class="seg" id="site-rmode"><button class="on" data-rm="0">Plan</button><button data-rm="1">Render</button></div>
+          <button class="hbtn on" data-layer="agents">Agents</button>
+          <button class="hbtn on" data-layer="flow">Flow</button>
+          <button class="hbtn on" data-layer="zones">Zones</button>
+          <button class="hbtn on" data-layer="labels">Labels</button>
+        </div>
+        <div class="hud tr">
+          <div class="zoomlv" id="site-zoom">zoom 0.60×</div>
+          <button class="hbtn" id="site-roof">Open roof</button>
+          <div style="display:flex;gap:6px">
+            <button class="hbtn sq" id="site-zout" title="Zoom out">&minus;</button>
+            <button class="hbtn sq" id="site-zin" title="Zoom in">+</button>
+            <button class="hbtn" id="site-zfit">Fit site</button>
+          </div>
+        </div>
+        <div class="hud bl">
+          <div class="slegend" id="site-legend"></div>
+        </div>
+        <div class="hud br render-only" id="site-tod-wrap">
+          <div class="tod">
+            <div class="chint">drag to orbit &middot; shift-drag to pan &middot; wheel to zoom</div>
+            <div class="todr" id="site-tod">
+              <button data-tod="day">09:00</button>
+              <button class="on" data-tod="dusk">19:40</button>
+              <button data-tod="night">02:15</button>
+            </div>
+          </div>
+        </div>
+        <div class="tip" id="site-tip"></div>
+      </div>
+      <aside class="rail" id="site-rail"></aside>
+    </div>
+    <div class="empty" id="site-empty" hidden></div>
+  </div>
+
+  <div id="view-tasks" hidden>
     <div class="bar">
       <h2>Tasks</h2>
       <span class="sp"></span>
@@ -71,6 +209,7 @@
     </div>
     <section id="view-occupancy"><div class="occ" id="occ" style="--lab:186px">loading…</div></section>
     <div class="agents" id="agents" hidden></div>
+  </div>
   </div>
 </main>
 

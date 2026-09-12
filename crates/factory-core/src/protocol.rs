@@ -26,6 +26,15 @@ pub enum Request {
     /// Take one down and leave it down.
     #[serde(rename = "agent.stop")]
     AgentStop { id: String },
+    /// Give a standing agent a role, or take the given one away and let the
+    /// config decide again. The owner's to do, and nobody else's.
+    #[serde(rename = "agent.role")]
+    AgentRole {
+        id: String,
+        /// `None` clears an assignment rather than naming one.
+        #[serde(default)]
+        role: Option<String>,
+    },
     /// Type at a standing agent's session.
     #[serde(rename = "agent.input")]
     AgentInput {
@@ -116,6 +125,29 @@ pub enum Request {
         #[serde(default)]
         minutes: Option<u32>,
     },
+    /// The run history the dashboard's window, sparklines, throughput chart
+    /// and production-year grid all read from one request -- not one per
+    /// card. A run carries no scope of its own; narrowed by joining through
+    /// its task, the way `Occupancy` above already does.
+    #[serde(rename = "production")]
+    Production {
+        /// How far back the throughput window looks, in minutes. Defaults to
+        /// fourteen days.
+        #[serde(default)]
+        minutes: Option<u32>,
+        /// Hour, day or week. Defaults to day. Sent by the caller rather than
+        /// inferred from `minutes`, so a view can ask for exactly the
+        /// granularity it draws instead of being silently regrouped.
+        #[serde(default)]
+        bin: Option<ProductionBin>,
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    /// How big each scope is on disk, for the site plan's hall sizes. Nothing
+    /// else needs this, which is why it is its own request rather than a field
+    /// every `agents` call would have to pay for.
+    #[serde(rename = "site.footprint")]
+    SiteFootprint,
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -136,13 +168,20 @@ pub enum Payload {
     Run { run: Run },
     Runs { runs: Vec<Run> },
     Agent { agent: AgentSession },
-    Scopes { scopes: Vec<ScopeView> },
+    Scopes {
+        scopes: Vec<ScopeView>,
+        /// Every role this instance knows, so a picker can offer them.
+        #[serde(default)]
+        roles: Vec<RoleView>,
+    },
     Entries { entries: Vec<TaskEntry> },
     Text { text: String },
     Deleted { deleted: bool },
     Event { event: Event },
     Occupancy { occupancy: Occupancy },
+    Production { production: Production },
     Screen { screen: Screen },
+    SiteFootprint { footprint: SiteFootprint },
 }
 
 /// A request plus who is making it.
@@ -255,8 +294,13 @@ pub struct AgentView {
     pub source: String,
     /// `permanent`, `temporary`, or `task`.
     pub lifetime: String,
-    /// `worker` or `foreman`.
+    /// The role it is working under -- the config's, unless somebody gave it
+    /// another.
     pub role: String,
+    /// Set when a person gave it this role, so the roster can say that the
+    /// config says something else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_role: Option<String>,
     pub autostart: bool,
     /// For a standing agent: `starting`, `ready`, `gone`, `stopped`.
     /// For a task agent: `task`.
@@ -275,6 +319,17 @@ pub struct AgentView {
     pub error: Option<String>,
     /// Task runs this agent is working on in this scope right now.
     pub active: Vec<AgentActivity>,
+}
+
+/// One role, as the roster and the pickers show it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleView {
+    pub name: String,
+    pub describe: String,
+    /// What it may do, written the way the config writes it.
+    pub grants: Vec<String>,
+    /// `own` or `scope`.
+    pub reach: String,
 }
 
 /// A scope and everything that runs in it.
@@ -304,6 +359,109 @@ pub struct ScopeView {
     /// `None` exactly when `worktree_capable` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_reason: Option<String>,
+}
+
+/// How big a scope is on disk, for the site plan's hall footprint. The
+/// prototype this is ported from sized a hall as `2.6 + sqrt(k) * 0.85`
+/// where `k` is the codebase's megabytes; this is where `k` comes from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeFootprint {
+    pub name: String,
+    /// `None` when the scope's directory could not be read -- gone, or a
+    /// permission the daemon does not have. A hall with no footprint is drawn
+    /// at a default size and says so, rather than claiming a number nobody
+    /// measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// The scope's top-level entries -- a directory, or every loose file in
+    /// the root as one entry -- largest first, for the site plan to treemap
+    /// onto the hall's floor. Empty both when `size_bytes` is `None` (the
+    /// scope could not be walked, so there is nothing to show) and when it is
+    /// genuinely `Some(0)` (walked, and there was nothing there): the two
+    /// stay tellable apart by `size_bytes` alone, the way they already were
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<ScopeArea>,
+    /// Whether the walk that produced `size_bytes` and `areas` stopped at
+    /// `ENTRY_CAP` before it finished the tree. A truncated walk's numbers
+    /// are a lower bound, not a measurement -- enough to size a hall next to
+    /// its neighbours, not enough for the floor's proportions to be trusted,
+    /// so the hall has to say "partial" rather than draw them as exact.
+    pub truncated: bool,
+}
+
+/// One top-level entry of a scope's root, as the floor treemap draws it. A
+/// directory keeps its own name; every file lying loose in the root -- a
+/// `Cargo.toml`, a `README.md` -- is one entry rather than one per file, and
+/// is named for what it is rather than invented as a directory that does not
+/// exist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeArea {
+    pub name: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SiteFootprint {
+    pub scopes: Vec<ScopeFootprint>,
+}
+
+/// Hour, day or week. Decided by the caller and sent with every request
+/// rather than derived from the window on the server, so a view always gets
+/// the granularity it actually draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionBin {
+    Hour,
+    Day,
+    Week,
+}
+
+/// One period of finished runs. `scrapped` and `reworked` are both read
+/// against `finished`, not tallied separately from it -- a run that fails on
+/// its second attempt is one run, counted once, in both.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductionBucket {
+    /// The bucket's real start. Equal to the bin's own calendar boundary
+    /// (the top of the hour, midnight, Monday) except for the very first
+    /// bucket of a query, which is clipped forward to the window's start.
+    pub from: chrono::DateTime<chrono::Utc>,
+    /// The bucket's real end. Equal to the next calendar boundary except for
+    /// the last bucket, which is clipped back to the moment the query ran --
+    /// a bucket still filling in is not the same fact as a slow one.
+    pub to: chrono::DateTime<chrono::Utc>,
+    pub finished: u32,
+    pub scrapped: u32,
+    pub reworked: u32,
+    /// True when `to - from` falls short of the bin's nominal width. Decided
+    /// once, here -- so a chart never has to guess whether a short bar is a
+    /// quiet period or a bucket that has not finished collecting yet.
+    pub partial: bool,
+}
+
+/// The run history the dashboard draws: a bucketed window for the throughput
+/// chart and the KPI sparklines that read the same series, and the year of
+/// daily totals the production grid always shows regardless of what window
+/// is selected above it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Production {
+    /// The bin `buckets` is drawn in. `daily` is always day-grain, whatever
+    /// this says.
+    pub bin: ProductionBin,
+    pub from: chrono::DateTime<chrono::Utc>,
+    pub to: chrono::DateTime<chrono::Utc>,
+    pub buckets: Vec<ProductionBucket>,
+    /// Fifty-three weeks of daily totals ending today, scoped the same as
+    /// `buckets`. Independent of `bin`: the production-year grid does not
+    /// rebin with the window above it.
+    pub daily: Vec<ProductionBucket>,
+    /// The earliest finished run this query found, scoped the same as
+    /// everything else here. `None` when it found none at all. This is a
+    /// lower bound on the instance's life, not its birthday -- the store
+    /// does not record when the instance was set up -- so a day before it is
+    /// drawn as "no record", never as "before this factory existed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_run: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[cfg(test)]

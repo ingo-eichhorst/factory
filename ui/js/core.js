@@ -7,11 +7,19 @@ export const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({'&':'&amp;',
 export const TERMINAL = ["done", "failed", "cancelled"];
 
 export const state = {
-  tab: "tasks",
+  roles: [],
+  tab: "dashboard",
   tasks: new Map(),
   scopes: [],          // the agents page: scopes, each with its agents
   adapters: [],        // every agent adapter name, for the create form
   scopeNames: [],
+  root: "",            // the instance root, so the rail can read a scope path
+                       // as the config wrote it and not as the disk spells it
+  scope: null,         // the rail's selection, by name; null is every scope
+  level: null,         // the selected decision level's key ("proc", "harn", …);
+                       // null until boot derives it from the tab, or a hash
+                       // names one -- app.js's LEVEL_VIEWS is the one place
+                       // that says which
   open: null,          // task id shown in the modal
   runs: [],            // runs of the open task
   run: null,           // selected run id
@@ -35,10 +43,17 @@ export async function api(path, opts) {
 }
 
 /// The socket, and nothing about what is on it. `handlers.snapshot` gets the
-/// task list the daemon sends on connect, `handlers.event` every event after.
+/// task list the daemon sends on connect, `handlers.event` every event after,
+/// and the optional `handlers.open` fires the moment the socket is live --
+/// which is the true start of "what this page has seen", for anything that
+/// needs to say so honestly rather than counting from when its own view
+/// happened to first be shown.
 export function connect(handlers) {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
-  ws.onopen = () => { $("dot").classList.add("live"); $("conn").textContent = "live"; };
+  ws.onopen = () => {
+    $("dot").classList.add("live"); $("conn").textContent = "live";
+    if (handlers.open) handlers.open();
+  };
   ws.onclose = () => {
     $("dot").classList.remove("live"); $("conn").textContent = "reconnecting";
     setTimeout(() => connect(handlers), 1500);
@@ -71,6 +86,10 @@ export function setTheme(name) {
   try { localStorage.setItem("factory-theme", theme); } catch (e) { /* private window */ }
   const button = $("theme");
   if (button) button.textContent = THEMES[theme];
+  // The site plan's two renderers read the palette through CSS custom
+  // properties and cache it, so a switch has to tell them to read it again --
+  // otherwise a scene already on screen keeps the colours it booted with.
+  document.dispatchEvent(new CustomEvent("factory:theme"));
 }
 
 export function toggleTheme() {

@@ -6,8 +6,10 @@ mod agents;
 mod engine;
 mod interfaces;
 mod occupancy;
+mod production;
 mod scheduler;
 mod schedule;
+mod site;
 mod stores;
 mod ui;
 mod worktree;
@@ -112,6 +114,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
             // none of its own and takes the instance default.
             task_store: None,
         }],
+        roles: Default::default(),
         plugins_dir: None,
     };
     std::fs::write(&config_path, serde_yaml_ng::to_string(&config)?)?;
@@ -245,6 +248,10 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // Line up declared standing agents with whatever is still running before
     // anything else can look at them.
     engine.reconcile_agents().await;
+
+    // Listen for whatever a runtime pushes on its own, before falling back to
+    // the poll below as the floor underneath it.
+    engine.watch_runtimes().await;
 
     let sched = tokio::spawn(scheduler::run(engine.clone(), shutdown_rx.clone()));
 

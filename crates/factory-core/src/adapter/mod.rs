@@ -9,7 +9,10 @@ pub mod store;
 
 pub use agent::{Agent, AgentContext, LaunchKind, LaunchSpec, TaskBinding};
 pub use interface::{Interface, InterfaceContext};
-pub use runtime::{AgentRuntime, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource};
+pub use runtime::{
+    AgentRuntime, RuntimeEvent, RuntimeEventKind, RuntimeEventStream, RuntimeStatus, Screen,
+    StartRequest, StatusReport, StatusSource,
+};
 pub use store::TaskStore;
 
 /// Which seam an adapter plugs into. A plugin manifest names one of these.

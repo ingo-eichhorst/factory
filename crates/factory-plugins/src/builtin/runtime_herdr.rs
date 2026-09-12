@@ -3,21 +3,66 @@
 //!
 //! One workspace per task. It is the unit herdr can close cleanly, and it makes
 //! a running task something a person can find and watch.
+//!
+//! `watch()` pushes the same way: `herdr agent wait <pane> --until idle
+//! --until working --until blocked --until done`, blocked on in a loop, one
+//! child process per session being watched. herdr also offers
+//! `events.subscribe` over its socket -- one subscription for the whole
+//! runtime, no per-agent process, and pane lifecycle and output alongside
+//! status -- and that is the better answer once this needs more than status
+//! changes. It is not what is built here: the CLI route keeps this adapter
+//! inside its existing shape, at the price named above, plus a race between
+//! one `wait` returning and the next starting. That race is closed by
+//! re-reading `status()` itself the moment a wait comes back, rather than
+//! trusting the state it happened to wait for.
 
 use async_trait::async_trait;
 use factory_core::adapter::agent::LaunchKind;
 use factory_core::adapter::runtime::{
-    AgentRuntime, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
+    AgentRuntime, RuntimeEvent, RuntimeEventKind, RuntimeEventStream, RuntimeStatus, Screen,
+    StartRequest, StatusReport, StatusSource,
 };
 use factory_core::error::{FactoryError, Result};
 use factory_core::task::SessionRef;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 const ADAPTER: &str = "herdr";
+/// How long a single `agent wait` blocks before rearming itself. A bound here
+/// is what stops a watched agent's child process outliving its session
+/// forever if herdr never reports a matching transition -- it is not a poll
+/// interval; the wait still returns the moment a real change happens.
+const WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+/// Which herdr states `agent wait` should block for, given the one Factory
+/// currently believes the agent is in. Excludes whatever `current` already
+/// is, so the wait genuinely blocks rather than matching immediately on
+/// entry -- `herdr agent wait` is satisfied the instant the state it names is
+/// already true, not only on a transition into it.
+///
+/// `status()` folds herdr's own `done` into `RuntimeStatus::Idle` (an agent
+/// sitting on a finished turn reads the same as an empty bay to the
+/// occupancy chart), so when `current` is `Idle` there is no way to tell
+/// from that folded value alone whether the *raw* state is `idle` or `done`.
+/// Excluding both is the safe answer: a transition between the two would not
+/// change what Factory reports anyway, so failing to distinguish them here
+/// costs nothing.
+fn until_args(current: RuntimeStatus) -> &'static [&'static str] {
+    match current {
+        RuntimeStatus::Working => &["idle", "blocked", "done"],
+        RuntimeStatus::Blocked => &["idle", "working", "done"],
+        RuntimeStatus::Idle => &["working", "blocked"],
+        RuntimeStatus::Starting | RuntimeStatus::Unknown | RuntimeStatus::Gone => {
+            &["idle", "working", "blocked", "done"]
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct HerdrRuntime {
     bin: String,
     /// How long to wait for an agent to become ready for input.
@@ -25,6 +70,19 @@ pub struct HerdrRuntime {
     /// Which herdr session this daemon talks to, so the attach command it
     /// hands a person points at the same one.
     herdr_session: Option<String>,
+    /// Shared with every clone of this runtime. `watch()` hands out the
+    /// sender once; a session noted afterward through any of the calls below
+    /// gets a wait loop of its own, fed into that same channel.
+    watch: Arc<Mutex<WatchState>>,
+}
+
+#[derive(Default)]
+struct WatchState {
+    tx: Option<mpsc::Sender<RuntimeEvent>>,
+    /// Panes that already have a wait loop running, so a session seen twice
+    /// -- once from `start()`, again from the next `status()` poll -- does
+    /// not get two.
+    watching: HashSet<String>,
 }
 
 impl HerdrRuntime {
@@ -35,6 +93,7 @@ impl HerdrRuntime {
             bin,
             start_timeout: Duration::from_secs(60),
             herdr_session,
+            watch: Arc::new(Mutex::new(WatchState::default())),
         }
     }
 
@@ -45,9 +104,129 @@ impl HerdrRuntime {
         }
     }
 
+    /// Make sure a session that just flowed through here has a wait loop
+    /// backing it, if anyone is watching. Cheap to call from every method
+    /// that receives a `SessionRef`: `start()` catches a session the moment
+    /// it exists, and `status()` catches the rest, including one adopted from
+    /// a store row on restart that never passed through `start()` here at
+    /// all.
+    fn note_session(&self, session: &SessionRef) {
+        // A shell-mode session has no agent for herdr to detect, so `agent
+        // wait` can never see it settle -- it fails `agent_not_found`
+        // immediately and forever. There is nothing to watch; the poll
+        // already covers it exactly as it does today.
+        if session.meta.get("mode").map(String::as_str) != Some("agent") {
+            return;
+        }
+        let pane = Self::pane_of(session).to_string();
+        let tx = match self.watch.lock() {
+            Ok(mut w) => match w.tx.clone() {
+                Some(tx) if w.watching.insert(pane.clone()) => tx,
+                _ => return,
+            },
+            Err(_) => return,
+        };
+        let this = self.clone();
+        let session = session.clone();
+        tokio::spawn(async move { this.watch_loop(session, tx).await });
+    }
+
+    fn forget_session(&self, pane: &str) {
+        if let Ok(mut w) = self.watch.lock() {
+            w.watching.remove(pane);
+        }
+    }
+
+    /// One session's half of the push side: block on `herdr agent wait` for
+    /// any state other than the one Factory currently believes the agent is
+    /// in, then -- whatever it answered -- ask `status()` what is true right
+    /// now. That closes the race named in the adapter's header: between a
+    /// wait returning and the next one starting, a flip could otherwise go
+    /// unseen, so what is published is always a fresh read rather than the
+    /// state that happened to be waited for.
+    ///
+    /// A bounded `--timeout` is the safety net under that: it rearms the wait
+    /// periodically even if herdr never reports a matching transition, so a
+    /// child process cannot outlive its session forever. On a timeout `wait`
+    /// answers an error, which is treated exactly like any other -- the
+    /// status re-read afterward decides whether anything is worth sending.
+    async fn watch_loop(&self, session: SessionRef, tx: mpsc::Sender<RuntimeEvent>) {
+        let pane = Self::pane_of(&session).to_string();
+        let mut current = self.status(&session).await.unwrap_or(RuntimeStatus::Gone);
+        if current == RuntimeStatus::Gone {
+            let _ = tx
+                .send(RuntimeEvent {
+                    session,
+                    kind: RuntimeEventKind::SessionGone,
+                })
+                .await;
+            self.forget_session(&pane);
+            return;
+        }
+
+        loop {
+            let mut args = vec![s("agent"), s("wait"), pane.clone()];
+            for state in until_args(current) {
+                args.push(s("--until"));
+                args.push(s(state));
+            }
+            args.push(s("--timeout"));
+            args.push(WAIT_TIMEOUT.as_millis().to_string());
+
+            let waited = self.run(&args).await;
+            let status = self.status(&session).await.unwrap_or(RuntimeStatus::Gone);
+
+            // A real match (`waited` succeeded) is, by construction, a state
+            // other than `current` -- always worth sending, even in the rare
+            // case where it has already moved on again by the time of the
+            // re-read above. A timed-out or otherwise failed wait proves
+            // nothing changed, so only send if the fresh read disagrees with
+            // what we already believed.
+            if waited.is_ok() || status != current {
+                let kind = if status == RuntimeStatus::Gone {
+                    RuntimeEventKind::SessionGone
+                } else {
+                    RuntimeEventKind::StatusChanged(status)
+                };
+                if tx
+                    .send(RuntimeEvent {
+                        session: session.clone(),
+                        kind,
+                    })
+                    .await
+                    .is_err()
+                {
+                    // Nobody reading any more -- the listener side went away,
+                    // not this session.
+                    self.forget_session(&pane);
+                    return;
+                }
+            }
+            if status == RuntimeStatus::Gone {
+                self.forget_session(&pane);
+                return;
+            }
+            current = status;
+            // A failure that was not the timeout above -- an internal
+            // hiccup, or a target herdr does not recognise as an agent yet --
+            // is not a reason to spin. Give it a moment before asking again
+            // rather than hammering a call that may keep failing the same
+            // way.
+            if waited.is_err() {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+
     async fn run(&self, args: &[String]) -> Result<Value> {
         let output = Command::new(&self.bin)
             .args(args)
+            // `agent wait` can block for up to `WAIT_TIMEOUT`; if the future
+            // driving it is ever dropped before that -- the daemon shutting
+            // down while a watch loop is mid-wait, in particular -- this is
+            // what stops the child outliving it as an orphan against
+            // whatever herdr server the daemon was talking to.
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(|e| {
@@ -93,6 +272,7 @@ impl HerdrRuntime {
     async fn run_text(&self, args: &[String]) -> Result<String> {
         let output = Command::new(&self.bin)
             .args(args)
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(|e| {
@@ -226,6 +406,7 @@ impl AgentRuntime for HerdrRuntime {
         if matches!(req.launch.kind, LaunchKind::Named(_)) {
             if let Some(session) = self.adopt_named(&req.name).await {
                 tracing::info!(name = %req.name, "adopting an agent that was already running");
+                self.note_session(&session);
                 return Ok(session);
             }
         }
@@ -309,11 +490,13 @@ impl AgentRuntime for HerdrRuntime {
             }
         }
 
-        Ok(SessionRef {
+        let session = SessionRef {
             runtime: ADAPTER.into(),
             handle: pane,
             meta,
-        })
+        };
+        self.note_session(&session);
+        Ok(session)
     }
 
     async fn submit(&self, session: &SessionRef, text: &str) -> Result<()> {
@@ -372,6 +555,7 @@ impl AgentRuntime for HerdrRuntime {
     }
 
     async fn status(&self, session: &SessionRef) -> Result<RuntimeStatus> {
+        self.note_session(session);
         let pane = Self::pane_of(session);
         let got = match self.run(&[s("pane"), s("get"), s(pane)]).await {
             Ok(v) => v,
@@ -519,7 +703,19 @@ impl AgentRuntime for HerdrRuntime {
         Ok(Some(Screen { cols, rows, frame }))
     }
 
+    async fn watch(&self) -> Result<Option<RuntimeEventStream>> {
+        let (tx, rx) = mpsc::channel(64);
+        match self.watch.lock() {
+            Ok(mut w) => w.tx = Some(tx),
+            // A poisoned lock is not a reason to fail the daemon over a
+            // backchannel; the poll still covers everything without it.
+            Err(_) => return Ok(None),
+        }
+        Ok(Some(rx))
+    }
+
     async fn stop(&self, session: &SessionRef) -> Result<()> {
+        self.forget_session(Self::pane_of(session));
         if let Some(ws) = session.meta.get("workspace_id").filter(|w| !w.is_empty()) {
             self.run(&[s("workspace"), s("close"), ws.clone()]).await?;
         } else {
@@ -527,5 +723,49 @@ impl AgentRuntime for HerdrRuntime {
                 .await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `until_args` is the one piece of branching logic in the push side
+    //! that a stub runtime cannot exercise -- everything else there talks
+    //! straight to the `herdr` binary. Pinned here instead: never include the
+    //! state a wait is built from, or it is satisfied on entry instead of
+    //! blocking for a real transition.
+
+    use super::*;
+
+    #[test]
+    fn a_wait_never_includes_the_state_it_is_built_from() {
+        for current in [
+            RuntimeStatus::Idle,
+            RuntimeStatus::Working,
+            RuntimeStatus::Blocked,
+            RuntimeStatus::Starting,
+            RuntimeStatus::Unknown,
+        ] {
+            let until = until_args(current);
+            assert!(!until.is_empty(), "{current:?} names nothing to wait for");
+            let raw = match current {
+                RuntimeStatus::Working => "working",
+                RuntimeStatus::Blocked => "blocked",
+                // `Idle` folds two raw herdr states (`idle` and `done`); both
+                // must be excluded, since the folded value cannot say which
+                // one is actually current.
+                _ => continue,
+            };
+            assert!(
+                !until.contains(&raw),
+                "{current:?} must not wait for its own state ({raw})"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_excludes_both_raw_states_that_fold_into_it() {
+        let until = until_args(RuntimeStatus::Idle);
+        assert!(!until.contains(&"idle"));
+        assert!(!until.contains(&"done"));
     }
 }
