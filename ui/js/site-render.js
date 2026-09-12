@@ -235,12 +235,15 @@ function hall(b, PAL) {
   );
   ring.rotation.x = -Math.PI / 2; ring.position.set(hw / 2, 0.24, hd / 2); g.add(ring);
 
-  const lt = labelTex(b.name, hallSub(b));
+  const sub = hallSub(b);
+  const lt = labelTex(b.name, sub);
   const sp = new T.Sprite(new T.SpriteMaterial({ map: lt.tex, depthWrite: false, transparent: true, depthTest: false }));
   sp.scale.set(2.4 * lt.ar * 0.4, 2.4 * 0.4, 1); sp.position.set(hw / 2, hh + 1.7, hd / 2); cap.add(sp); labels.push(sp);
 
   sceneGroup.add(g);
-  halls[b.id] = { b, g, shell, cap, rows, hh, beacon, beaconGlow, label: sp, ring, floorTiles, picks };
+  // `sub` is recorded here so `applyHallFacts` does not immediately build a
+  // second texture for the label it was just given.
+  halls[b.id] = { b, g, shell, cap, rows, hh, beacon, beaconGlow, label: sp, sub, ring, floorTiles, picks };
 }
 
 /// What the roof light is saying, in the palette's own words. The daemon

@@ -684,8 +684,12 @@ function shellTop(b, hi) {
         const c = x + 0.3 + i * paneW, c2 = c + paneW * 0.62;
         const right = [[x + w, a, z1], [x + w, a2, z1], [x + w, a2, z0], [x + w, a, z0]];
         const front = [[c, y + d, z1], [c2, y + d, z1], [c2, y + d, z0], [c, y + d, z0]];
-        poly(right, C.line, null);
-        poly(front, C.line, null);
+        // An unlit pane is drawn dark and outlined, not filled in the wall's
+        // own near-colour: the row count is the size signal now, and a pane
+        // that disappears into the wall in one of the two themes would take
+        // that signal with it.
+        poly(right, C.sunk, C.line, 0.5);
+        poly(front, C.sunk, C.line, 0.5);
         if (light > 0.02) {
           // Drawn over the dark pane rather than instead of it, so a floor
           // coming on fades up through it instead of switching.

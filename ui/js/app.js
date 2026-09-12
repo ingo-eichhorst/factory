@@ -39,8 +39,8 @@ const VIEWS = {
     tail: { write: activityFilter, read: ([f]) => setActivityFilter(f || "all") },
   },
   site: {
-    onShow: () => refreshScopesThenSite(true),
-    onHide: hideSite,
+    onShow: startSite,
+    onHide: stopSite,
     tail: { write: siteMode, read: ([m]) => setSiteMode(m) },
   },
   tasks: { onShow: () => {} }, // state.tasks is already current; nothing to fetch
@@ -247,6 +247,26 @@ function showTab(name, tail) {
 // with a poll of its own -- ticking the now-line, or the elapsed times.
 function stopAgentPoll() {
   if (state.agentPoll) { clearInterval(state.agentPoll); state.agentPoll = null; }
+}
+
+/// A hall says two things, and only one of them announces itself. What Factory
+/// is doing arrives as events and redraws the site the moment it changes; how
+/// big a scope is changes when somebody commits, which fires no event Factory
+/// will ever hear. So the site also ticks, slowly: without it, a page left
+/// open on a quiet instance would keep drawing a hall at the size it was when
+/// the tab was opened. The daemon caches the walk, so a tick that finds
+/// nothing new costs a query, and `update` keeps the scene standing.
+const SITE_TICK_MS = 60000;
+
+function startSite() {
+  refreshScopesThenSite(true);
+  stopSite();
+  state.sitePoll = setInterval(() => refreshScopesThenSite(), SITE_TICK_MS);
+}
+
+function stopSite() {
+  if (state.sitePoll) { clearInterval(state.sitePoll); state.sitePoll = null; }
+  hideSite();
 }
 
 function showAgentView(view) {
