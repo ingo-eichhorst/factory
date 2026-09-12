@@ -33,6 +33,8 @@
 //!     `active` runs are the only bays Factory has, because Factory has no
 //!     bay: "a row is an agent, not a bay" (`occupancy.rs`). A figure is drawn
 //!     per agent that is actually present, not per slot a scope could fill.
+//!     The shared position is on the apron; Render moves only a focused hall's
+//!     figures onto its floor, where the open roof makes them visible.
 //!   - the runs queued at its door come from `state.tasks`, filtered to this
 //!     scope's pending tasks -- the same list the Tasks view already holds.
 //!
@@ -45,6 +47,7 @@ import { inScope, scopeLabel } from "./scopes.js";
 import { agentTags } from "./agents.js";
 import { openTask } from "./tasks.js";
 import { writeHash } from "./scopes.js";
+import { focusForMode, scopesForMode } from "./site-focus.js";
 
 // ------------------------------------------------------------- the data layer
 
@@ -86,6 +89,11 @@ const UNMEASURED = {
 /// those wholesale every time an event lands.
 const eased = {};
 
+/// Roof position and intent survive `buildSite`, just as height and lighting
+/// do above. A scope or activity refresh replaces every hall data object; it
+/// must not slam an opening roof shut halfway through the transition.
+const roofs = {};
+
 /// What the roof beacon is coloured by. The same four state colours the rest
 /// of the page uses, in the same order of urgency `hallState` has always
 /// applied: a person waited on comes first.
@@ -99,6 +107,7 @@ const BEACON_COLOUR = { blocked: "wait", fault: "fault", working: "run", waiting
 /// lighting queued work in `--idle` would be a light nobody could see was on.
 function litKey() { return "lit"; }
 let sel = null;               // selected hall id
+let scopeFocus = null;        // rail-selected hall focused by Render mode
 
 /// The floor's inset from the hall's own walls -- the same margin `shellBase`
 /// already clips its hatch to, so the treemap and the fallback hatch occupy
@@ -245,10 +254,11 @@ function queuedAt(name) {
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
-/// How much depth a hall needs beyond its own footprint: its workers stand
-/// just outside its door, in rows of their own, and the next row of halls
+/// How much depth a hall needs beyond its own footprint: its workers normally
+/// stand just outside its door, in rows of their own, and the next row of halls
 /// must clear all of them or a busy hall's agents end up standing inside its
-/// neighbour.
+/// neighbour. Render can temporarily put the focused ones inside without
+/// changing this reservation, so selecting a scope never moves another hall.
 ///
 /// Sized from `agents.length` -- what the scope *declares* -- never from how
 /// many of them happen to be working right now. A run starting or ending
@@ -283,9 +293,10 @@ function layoutHalls(scopes) {
 }
 
 export function buildSite() {
-  // The rail decides which halls stand. A selection is a narrower site, not a
-  // different one: the same scopes, the same footprints, fewer buildings.
-  SITE = state.scopes.filter((scope) => inScope(scope.name)).map((scope) => {
+  // Plan keeps the established scoped subset. Render uses the same rail
+  // selection as a focus instead and keeps the whole campus standing around
+  // it; `scopesForMode` is the one place that draws that distinction.
+  SITE = scopesForMode(state.scopes, renderMode, inScope).map((scope) => {
     const bytes = footprintByName[scope.name];
     const known = footprintLoaded && bytes != null;
     const served = hallByName[scope.name] || UNMEASURED;
@@ -299,6 +310,7 @@ export function buildSite() {
     // Where this hall had got to last time, so a rebuild picks the animation
     // up rather than starting it again -- `buildSite` runs on every event.
     const was = eased[scope.name] || { h: hT, lit: cues.lit_floors, glow: cues.glow_pct / 100 };
+    const roof = roofs[scope.name] || { open: 0, target: 0 };
     return {
       id: scope.name,
       name: scope.name,
@@ -331,14 +343,14 @@ export function buildSite() {
       areas: areaInfo.areas,
       areasTruncated: areaInfo.truncated,
       floor: computeFloor(areaInfo.areas, w, d),
-      open: 0,
-      openT: 0,
+      open: roof.open,
+      openT: roof.target,
     };
   });
   layoutHalls(SITE);
-  // Worker positions are geometry, computed once here rather than twice --
-  // the plan canvas and the lit render must put the same agent in the same
-  // place, or "the same facts, two views" stops being true.
+  // The apron positions are geometry, computed once here rather than twice --
+  // Plan and an unfocused Render put the same agent in the same place. Render
+  // deliberately replaces these with an interior grid for its focused hall.
   SITE.forEach((b) => {
     const perRow = Math.max(1, Math.floor(b.w / 1.05));
     b.workers.forEach((wk, i) => {
@@ -367,6 +379,7 @@ export function buildSite() {
   AISLE = [[minX, aisleY], [maxX, aisleY]];
   SPURS = SITE.map((b) => [[b.x + b.w / 2, b.y + b.d], [b.x + b.w / 2, aisleY]]);
   if (!byId[sel]) sel = SITE[0].id;
+  syncScopeFocus();
 }
 
 /// Close the gap between where each hall is drawn and where the last answer
@@ -404,6 +417,16 @@ export function tickHalls(dt) {
   });
 }
 
+/// Roof travel belongs to the shared scene data, not to either renderer. Only
+/// one renderer runs at once, and whichever one is visible advances the same
+/// value and records it for the next rebuild.
+export function tickRoof(b, dt) {
+  const k = STILL ? 1 : 1 - Math.exp(-Math.max(0, Math.min(dt, 1)) / 0.18);
+  b.open += (b.openT - b.open) * k;
+  if (Math.abs(b.openT - b.open) < 0.002) b.open = b.openT;
+  roofs[b.id] = { open: b.open, target: b.openT };
+}
+
 /// How lit floor `i` is, 0..1, counting from the ground. A fraction rather
 /// than a flag: it is what lets the lights come up one storey at a time
 /// instead of the whole facade switching at once.
@@ -412,7 +435,8 @@ export function floorLight(b, i) {
 }
 
 export function getScene() {
-  return { SITE, byId, ZONE, AISLE, SPURS, layers, getSel: () => sel, setRoof, select };
+  const focus = focusForMode(byId, state.scope, renderMode);
+  return { SITE, byId, ZONE, AISLE, SPURS, layers, focus: focus ? focus.id : null, getSel: () => sel, setRoof, select };
 }
 
 export function getPalette() { return C; }
@@ -423,8 +447,33 @@ function openable(b) {
 
 function setRoof(b, want) {
   if (!openable(b)) return;
-  SITE.forEach((o) => { if (o !== b) o.openT = 0; });
+  SITE.forEach((o) => {
+    if (o !== b) o.openT = 0;
+    roofs[o.id] = { open: o.open, target: o.openT };
+  });
   b.openT = want ? 1 : 0;
+  roofs[b.id] = { open: b.open, target: b.openT };
+  syncRoofBtn();
+}
+
+/// A scope chosen in the shared rail becomes a 3D close-up, not a filter. The
+/// exact hall follows the rail into the inspector, opens automatically, and
+/// replaces the previous focus in one roof transition. Returning to Plan or
+/// All scopes closes that automatic focus again.
+function syncScopeFocus() {
+  const next = focusForMode(byId, state.scope, renderMode);
+  const nextId = next ? next.id : null;
+  if (nextId === scopeFocus) return;
+  scopeFocus = nextId;
+  if (next) {
+    sel = next.id;
+    setRoof(next, true);
+    return;
+  }
+  SITE.forEach((b) => {
+    b.openT = 0;
+    roofs[b.id] = { open: b.open, target: 0 };
+  });
   syncRoofBtn();
 }
 
@@ -799,11 +848,11 @@ function draw(now) {
   if (paused || !cv || !cv.clientWidth) return;
   if (Math.abs(cv.clientWidth - W) > 1 || Math.abs(cv.clientHeight - H) > 1) resize();
   const t = (now - t0) / 1000;
-  tickHalls(last2d ? (now - last2d) / 1000 : 0);
+  const dt = last2d ? (now - last2d) / 1000 : 0;
+  tickHalls(dt);
   last2d = now;
   SITE.forEach((b) => {
-    b.open += ((b.openT || 0) - b.open) * 0.13;
-    if (Math.abs((b.openT || 0) - b.open) < 0.002) b.open = b.openT || 0;
+    tickRoof(b, dt);
   });
   if (tween) {
     const k = Math.min(1, (now - tween.t0) / tween.dur), e = 1 - Math.pow(1 - k, 3);
@@ -1170,6 +1219,12 @@ function setMode(m) {
   $("site-plan-cv").classList.toggle("off", m === 1);
   $("site-render-cv").classList.toggle("off", m !== 1);
   if (tip) tip.classList.remove("on");
+  // The two modes differ only in how the rail selection is applied: Plan
+  // keeps its filtered subset, while Render needs the complete campus plus a
+  // focus id. Rebuild that data before starting whichever canvas is now live.
+  buildSite();
+  renderRail();
+  syncRoofBtn();
   if (m === 0) {
     if (renderMod) renderMod.stop();
     resume();
