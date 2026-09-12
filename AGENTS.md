@@ -38,7 +38,11 @@ model call. Use it for anything that is not specifically about an AI harness.
 ## The rules that matter
 
 - A task's status comes from the agent calling `factory task report`, never from
-  looking at a terminal and guessing. Runtime status is a liveness signal only.
+  looking at a terminal and guessing. Runtime status is a liveness signal only --
+  except a `blocked` a runtime reports through a lifecycle hook, which is the
+  harness itself speaking, not a guess about a terminal, and the daemon may
+  mark the run `Blocked` on that alone. A `blocked` a runtime only infers from
+  the screen stays a suspicion: it may be shown, never asserted.
 - A task is the standing intent; a run is one attempt at it. Sessions, tokens
   and outcomes belong to the run. The task mirrors its newest run so lists stay
   cheap -- if you add a field to that mirror, clear it too, or a successful

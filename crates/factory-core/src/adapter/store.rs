@@ -108,6 +108,7 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         runs: 0,
         ack_timeout_seconds: new.ack_timeout_seconds,
         timeout_seconds: new.timeout_seconds,
+        blocked_timeout_seconds: new.blocked_timeout_seconds,
         labels: new.labels,
         created_at: now,
         updated_at: now,

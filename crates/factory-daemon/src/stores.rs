@@ -306,6 +306,7 @@ mod tests {
             runs: 0,
             ack_timeout_seconds: None,
             timeout_seconds: None,
+            blocked_timeout_seconds: None,
             labels: Default::default(),
             created_at: at,
             updated_at: at,

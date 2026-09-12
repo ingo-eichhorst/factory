@@ -106,6 +106,14 @@ pub struct Task {
     pub ack_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
+    /// How long a run of this task may sit `Blocked` before the daemon stops
+    /// waiting for a human to answer it. `None` uses the instance's default
+    /// (`DaemonConfig::blocked_timeout_seconds`). Kept apart from
+    /// `timeout_seconds` on purpose: a blocked run is not the "went quiet"
+    /// failure that field exists for, and wants a clock long enough that a
+    /// person actually gets the chance to see it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     pub created_at: DateTime<Utc>,
@@ -133,6 +141,8 @@ pub struct NewTask {
     pub ack_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
 }
@@ -172,12 +182,16 @@ pub struct TaskPatch {
     pub ack_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_timeout_seconds: Option<u64>,
     /// `None` means "leave alone", so going back to the instance default and
     /// dropping a schedule each need a field that can say so.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_ack_timeout: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_timeout: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_blocked_timeout: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_schedule: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -382,6 +382,12 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.timeout_seconds {
                 task.timeout_seconds = Some(v);
             }
+            if patch.clear_blocked_timeout {
+                task.blocked_timeout_seconds = None;
+            }
+            if let Some(v) = patch.blocked_timeout_seconds {
+                task.blocked_timeout_seconds = Some(v);
+            }
             if patch.clear_result {
                 task.result = None;
             }
@@ -459,6 +465,9 @@ impl TaskStore for SqliteStore {
                 error: None,
                 started_at: Utc::now(),
                 ended_at: None,
+                blocked_since: None,
+                blocked_source: None,
+                block_suspected_since: None,
             };
             write_run(&tx, &run)?;
 
@@ -525,6 +534,22 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.ended_at {
                 run.ended_at = Some(v);
+            }
+            if patch.clear_blocked {
+                run.blocked_since = None;
+                run.blocked_source = None;
+            }
+            if let Some(v) = patch.blocked_since {
+                run.blocked_since = Some(v);
+            }
+            if let Some(v) = patch.blocked_source {
+                run.blocked_source = Some(v);
+            }
+            if patch.clear_block_suspicion {
+                run.block_suspected_since = None;
+            }
+            if let Some(v) = patch.block_suspected_since {
+                run.block_suspected_since = Some(v);
             }
             // A run that reached a terminal state is over, whether or not the
             // caller remembered to say when.
@@ -785,7 +810,7 @@ impl TaskStore for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use factory_core::run::Trigger;
+    use factory_core::run::{BlockSource, Trigger};
     use factory_core::task::TaskStatus;
 
     fn sample_task(id: &str) -> Task {
@@ -804,6 +829,7 @@ mod tests {
             runs: 0,
             ack_timeout_seconds: None,
             timeout_seconds: None,
+            blocked_timeout_seconds: None,
             labels: Default::default(),
             created_at: now,
             updated_at: now,
@@ -883,5 +909,106 @@ mod tests {
 
         assert!(a.get("only-in-a").await.unwrap().is_some());
         assert!(b.get("only-in-a").await.unwrap().is_none());
+    }
+
+    /// `Run` is kept as JSON in a `data` column with nothing lifted out for
+    /// the three new fields, so nothing here needed a schema change -- this
+    /// pins down that the round trip actually holds, not just that it ought
+    /// to.
+    #[tokio::test]
+    async fn a_runs_block_state_round_trips_through_sqlite() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.create(&sample_task("t1")).await.unwrap();
+        let run = store
+            .create_run(&NewRun {
+                task_id: "t1".into(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "herdr".into(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+        assert!(run.blocked_since.is_none(), "a fresh run starts with no block at all");
+
+        let since = Utc::now();
+        store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Blocked),
+                    blocked_since: Some(since),
+                    blocked_source: Some(BlockSource::Runtime),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let reloaded = store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.status, RunStatus::Blocked);
+        assert_eq!(reloaded.blocked_source, Some(BlockSource::Runtime));
+        assert_eq!(reloaded.blocked_since, Some(since));
+
+        let cleared = store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    clear_blocked: true,
+                    block_suspected_since: Some(since),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(cleared.blocked_since.is_none(), "clear_blocked drops the timestamp");
+        assert!(cleared.blocked_source.is_none(), "clear_blocked drops the source too");
+        assert_eq!(cleared.block_suspected_since, Some(since), "a suspicion is a separate field");
+
+        let unsuspected = store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    clear_block_suspicion: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(unsuspected.block_suspected_since.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_tasks_blocked_timeout_override_round_trips_and_clears() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.create(&sample_task("t1")).await.unwrap();
+
+        let with_override = store
+            .update(
+                "t1",
+                &TaskPatch {
+                    blocked_timeout_seconds: Some(7200),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(with_override.blocked_timeout_seconds, Some(7200));
+
+        let reloaded = store.get("t1").await.unwrap().unwrap();
+        assert_eq!(reloaded.blocked_timeout_seconds, Some(7200));
+
+        let cleared = store
+            .update(
+                "t1",
+                &TaskPatch {
+                    clear_blocked_timeout: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(cleared.blocked_timeout_seconds.is_none());
     }
 }

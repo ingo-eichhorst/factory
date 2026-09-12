@@ -3,7 +3,7 @@
 
 use chrono::Utc;
 use factory_core::adapter::agent::{AgentContext, TaskBinding};
-use factory_core::adapter::runtime::{RuntimeStatus, Screen, StartRequest};
+use factory_core::adapter::runtime::{RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource};
 use factory_core::adapter::TaskStore;
 use factory_core::config::Factory;
 use factory_core::error::{FactoryError, Result};
@@ -12,7 +12,7 @@ use factory_core::protocol::{
     AgentActivity, AgentView, Envelope, Payload, Request, Response, ScopeView, StatusInfo,
 };
 use factory_core::agent::{AgentSession, AgentState, Role};
-use factory_core::run::{NewRun, Run, RunPatch, RunStatus, Trigger};
+use factory_core::run::{BlockSource, NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
     NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
 };
@@ -772,12 +772,29 @@ impl Engine {
         )
         .await;
 
-        let patch = RunPatch {
+        let mut patch = RunPatch {
             status: report.status,
             result: report.result,
             error: report.error,
             ..Default::default()
         };
+
+        // The agent's own report is the one thing that may set or clear
+        // `Blocked` honestly for its own sake -- see `AGENTS.md` and issue
+        // #7. Reporting `blocked` again while already blocked leaves
+        // `blocked_since` alone, so the clock still reads from when the
+        // block actually began; reporting anything else always lets go of
+        // it, agent-set or not, because this report is the agent speaking.
+        match report.status {
+            Some(RunStatus::Blocked) => {
+                patch.blocked_source = Some(BlockSource::Agent);
+                if run.status != RunStatus::Blocked {
+                    patch.blocked_since = Some(Utc::now());
+                }
+            }
+            Some(_) => patch.clear_blocked = true,
+            None => {}
+        }
 
         match report.status {
             Some(status) if status.is_terminal() => {
@@ -831,7 +848,12 @@ impl Engine {
 
     /// The task's own row carries the latest run's outcome, so a list does not
     /// have to read every run.
-    async fn mirror_to_task(&self, run: &Run) {
+    ///
+    /// `pub(crate)`: `occupancy::record_run_liveness` mirrors a run it just
+    /// moved into or out of `Blocked` the same way `report` does here --
+    /// the same pattern as `record_gone`, which already crosses this
+    /// boundary the other way.
+    pub(crate) async fn mirror_to_task(&self, run: &Run) {
         let recurring = self
             .store
             .get(&run.task_id)
@@ -997,6 +1019,25 @@ impl Engine {
         }
     }
 
+    /// `session_status`, plus where the answer came from. The one caller that
+    /// needs provenance is `record_run_liveness` -- the scheduler's `Gone`
+    /// check and `supervise_agents` only ever need the status, so they keep
+    /// calling `status` through `session_status` rather than paying for a
+    /// question they do not ask.
+    pub async fn session_status_report(&self, run: &Run) -> StatusReport {
+        let unknown = StatusReport {
+            status: RuntimeStatus::Unknown,
+            source: StatusSource::Unknown,
+        };
+        let Some(session) = &run.session else {
+            return unknown;
+        };
+        match self.registry.runtime(&session.runtime) {
+            Ok(rt) => rt.status_report(session).await.unwrap_or(unknown),
+            Err(_) => unknown,
+        }
+    }
+
     // -- small helpers ------------------------------------------------------
 
     async fn require(&self, id: &str) -> Result<Task> {
@@ -1019,7 +1060,10 @@ impl Engine {
         }
     }
 
-    async fn entry(&self, task_id: &str, entry: TaskEntry) {
+    /// `pub(crate)`: `occupancy::record_run_liveness` journals a hook-reported
+    /// block or unblock the same way any other daemon-caused change is
+    /// journaled here.
+    pub(crate) async fn entry(&self, task_id: &str, entry: TaskEntry) {
         if let Err(e) = self.store.append_entry(task_id, &entry).await {
             tracing::warn!(task = task_id, "could not record journal entry: {e}");
         }

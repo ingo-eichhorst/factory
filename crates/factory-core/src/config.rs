@@ -55,6 +55,13 @@ pub struct DaemonConfig {
     /// open for the full run timeout to find that out.
     #[serde(default = "default_ack_timeout")]
     pub ack_timeout_seconds: u64,
+    /// How long a run reported `Blocked` by a runtime hook may sit waiting
+    /// for a human before the daemon gives up on it too. Deliberately its own
+    /// clock rather than a reuse of `task_timeout_seconds`: a person needs a
+    /// real chance to notice and answer, but a wedged run still cannot wait
+    /// forever with nobody told. A day by default.
+    #[serde(default = "default_blocked_timeout")]
+    pub blocked_timeout_seconds: u64,
     /// Defaults for tasks that do not name their own.
     #[serde(default = "default_agent")]
     pub default_agent: String,
@@ -117,6 +124,9 @@ fn default_task_timeout() -> u64 {
 fn default_ack_timeout() -> u64 {
     180
 }
+fn default_blocked_timeout() -> u64 {
+    86400
+}
 fn default_agent() -> String {
     "claude-code".into()
 }
@@ -144,6 +154,7 @@ impl Default for DaemonConfig {
             tick_seconds: default_tick(),
             task_timeout_seconds: default_task_timeout(),
             ack_timeout_seconds: default_ack_timeout(),
+            blocked_timeout_seconds: default_blocked_timeout(),
             default_agent: default_agent(),
             default_runtime: default_runtime(),
             foreman: ForemanConfig::default(),

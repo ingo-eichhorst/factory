@@ -140,6 +140,10 @@ enum TaskCmd {
         /// Seconds a run of this task may take.
         #[arg(long)]
         timeout: Option<u64>,
+        /// Seconds a run may sit `blocked` waiting for a human before the
+        /// daemon gives up on it too.
+        #[arg(long)]
+        blocked_timeout: Option<u64>,
         /// Repeatable: `--label area=infra`.
         #[arg(long = "label")]
         labels: Vec<String>,
@@ -169,6 +173,8 @@ enum TaskCmd {
         ack_timeout: Option<u64>,
         #[arg(long)]
         timeout: Option<u64>,
+        #[arg(long)]
+        blocked_timeout: Option<u64>,
         /// Go back to the instance defaults.
         #[arg(long)]
         default_timeouts: bool,
@@ -487,6 +493,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             schedule,
             ack_timeout,
             timeout,
+            blocked_timeout,
             labels,
             run,
         } => {
@@ -501,6 +508,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     schedule,
                     ack_timeout_seconds: ack_timeout,
                     timeout_seconds: timeout,
+                    blocked_timeout_seconds: blocked_timeout,
                     labels: parse_labels(&labels)?,
                 }))
                 .await?;
@@ -536,6 +544,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             no_schedule,
             ack_timeout,
             timeout,
+            blocked_timeout,
             default_timeouts,
             labels,
         } => {
@@ -549,8 +558,10 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 clear_schedule: no_schedule,
                 ack_timeout_seconds: ack_timeout,
                 timeout_seconds: timeout,
+                blocked_timeout_seconds: blocked_timeout,
                 clear_ack_timeout: default_timeouts,
                 clear_timeout: default_timeouts,
+                clear_blocked_timeout: default_timeouts,
                 labels: if labels.is_empty() {
                     None
                 } else {
@@ -760,6 +771,16 @@ fn run_detail(r: &Run) -> String {
     if let Some(session) = &r.session {
         s.push_str(&format!("  session    {} {}\n", session.runtime, session.handle));
     }
+    if let Some(since) = r.blocked_since {
+        let source = r.blocked_source.map(|s| s.as_str()).unwrap_or("?");
+        s.push_str(&format!("  blocked    since {} ({source})\n", since.to_rfc3339()));
+    }
+    if let Some(since) = r.block_suspected_since {
+        s.push_str(&format!(
+            "  suspected  blocked since {} -- a guess from the screen, unconfirmed\n",
+            since.to_rfc3339()
+        ));
+    }
     if let Some(v) = &r.result {
         s.push_str(&format!("\nresult:\n{v}\n"));
     }
@@ -813,6 +834,9 @@ fn detail(t: &Task) -> String {
     }
     if let Some(v) = t.timeout_seconds {
         s.push_str(&format!("  timeout    {v}s\n"));
+    }
+    if let Some(v) = t.blocked_timeout_seconds {
+        s.push_str(&format!("  blocked    {v}s\n"));
     }
     if !t.labels.is_empty() {
         let labels: Vec<String> = t.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();

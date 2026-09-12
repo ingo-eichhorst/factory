@@ -214,14 +214,25 @@ until the first ends or is cancelled.
 **Status comes from the agent, not from the terminal.** A runtime can say
 whether a session is alive; it cannot say whether the work is finished, and
 anything that reads that from a terminal's appearance will be wrong sometimes.
-Runtime status is used only to notice sessions that died.
+Runtime status is used only to notice sessions that died -- with one carved-out
+exception. Some runtimes (herdr, for `pi`) have a harness that tells them
+directly, through a lifecycle hook, that the agent is waiting on a human: that
+is a report, not a guess, so the daemon trusts it enough to mark the run
+`Blocked` on its own, with no callback from the agent at all. The same runtime
+guessing `blocked` from the screen's appearance -- what it does for `claude`,
+`codex` and `opencode` -- is not trusted the same way: it is recorded as a
+suspicion the UI can show, and it changes no status and stops no timeout.
 
-Two timeouts catch the rest:
+Three timeouts catch the rest:
 
 - `ack_timeout_seconds` (180 by default) — the agent is up but has not said a
   word. This is what an agent sitting on a first-run trust prompt or a login
   looks like.
 - `task_timeout_seconds` (3600 by default) — it acknowledged and then went quiet.
+- `blocked_timeout_seconds` (86400 by default) — a run a hook reported
+  `Blocked` is exempt from the two above and given this much longer clock
+  instead, counted from when the block began rather than when the run did, so
+  a person has a real chance to see it and answer before the daemon gives up.
 
 ## Configuration
 
@@ -243,6 +254,7 @@ daemon:
   tick_seconds: 5
   ack_timeout_seconds: 180
   task_timeout_seconds: 3600
+  blocked_timeout_seconds: 86400
   default_agent: claude-code
   default_runtime: herdr
 
@@ -448,7 +460,11 @@ already chosen. A task run's terminal takes the same input.
   decision, and it has not been made.
 - **First-run agent prompts.** An agent that has never seen a directory may ask
   a human to trust it before it will read the task. Factory cannot answer that
-  for you — it will time the task out and tell you where to look.
+  for you. For a harness whose runtime reports through a lifecycle hook (`pi`,
+  today), this now surfaces as a hook-reported `Blocked` run rather than
+  silence, and is governed by `blocked_timeout_seconds` instead of the run
+  timeout. For every other harness it is still exactly what it always was: the
+  task times out and tells you where to look.
 - **One workspace per task, closed on completion.** A task that never reaches a
   terminal state leaves its session open on purpose, so it can be looked at.
 

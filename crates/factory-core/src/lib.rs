@@ -17,7 +17,7 @@ pub use config::{Config, Factory, Scope};
 pub use error::{FactoryError, Result};
 pub use agent::{AgentSession, AgentState, Lifetime, Role};
 pub use event::{Event, EventBus};
-pub use run::{NewRun, Run, RunPatch, RunStatus, Trigger};
+pub use run::{BlockSource, NewRun, Run, RunPatch, RunStatus, Trigger};
 pub use task::{
     NewTask, Schedule, SessionRef, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
 };
