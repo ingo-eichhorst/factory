@@ -1,0 +1,14 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+
+test("agent screens are peer header tabs without an Agents wrapper", () => {
+  assert.match(page, /id="tab-occupancy"[^>]*>Occupancy<\/button>/);
+  assert.match(page, /id="tab-roster"[^>]*>Roster<\/button>/);
+  assert.match(page, /id="tab-agent-runtime"[^>]*>Agent-runtime<\/button>/);
+  assert.doesNotMatch(page, /id="tab-agents"/);
+  assert.doesNotMatch(page, /id="agent-view"/);
+  assert.doesNotMatch(page, /id="view-agents"/);
+});

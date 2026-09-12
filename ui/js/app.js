@@ -8,6 +8,7 @@ import { closeModal, dropModal } from "./modal.js";
 import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyTasksView, currentTasksView, setTasksView } from "./tasks.js";
 import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
+import { legacyAgentRoute, loadRuntimeConnections, renderRuntimeConnections } from "./agent-runtime.js";
 import { openCreate } from "./task-form.js";
 import { loadDashboard, renderDashboard, renderInbox, wireDashboard } from "./dashboard.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
@@ -15,7 +16,7 @@ import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint }
 
 // ------------------------------------------------------------------ views
 //
-// Six entries, not two: `showTab` used to toggle exactly two `hidden`
+// Eight entries, not two: `showTab` used to toggle exactly two `hidden`
 // containers and two button classes. It is a small registry now, but the
 // rule is the same -- one view visible, one button lit, and whatever that
 // view needs to start or stop doing while it is not the one on screen.
@@ -25,11 +26,6 @@ import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint }
 // puts a link's segments back. Both are the view's own vocabulary -- the router
 // carries the array and never looks in it.
 //
-// `read(tail, live)`: `live` is true when the view is already on screen and no
-// `onShow` is coming behind this to apply what it sets. Only the Agents view
-// cares -- switching between the chart and the roster starts a poll, and doing
-// it twice on one navigation fetches twice.
-
 let activityStarted = false;
 
 const VIEWS = {
@@ -45,17 +41,12 @@ const VIEWS = {
     tail: { write: siteMode, read: ([m]) => setSiteMode(m) },
   },
   tasks: { onShow: () => {} }, // state.tasks is already current; nothing to fetch
-  agents: {
-    onShow: () => showAgentView(state.agentView),
+  occupancy: {
+    onShow: startOccupancy,
     onHide: stopAgentPoll,
-    tail: {
-      write: () => (state.agentView === "roster" ? ["roster"] : []),
-      read: ([v], live) => {
-        state.agentView = v === "roster" ? "roster" : "occupancy";
-        if (live) showAgentView(state.agentView);
-      },
-    },
   },
+  roster: { onShow: startRoster, onHide: stopAgentPoll },
+  "agent-runtime": { onShow: startAgentRuntime, onHide: stopAgentPoll },
 };
 
 // ------------------------------------------------------------------- the URL
@@ -77,6 +68,12 @@ function viewTail(page) {
 
 setRouter({
   pages: Object.keys(VIEWS),
+  // Links written while these three screens lived behind one Agents tab keep
+  // working. The router consumes the old inner-view segment and writes the
+  // equivalent peer page back into the hash.
+  redirects: {
+    agents: legacyAgentRoute,
+  },
   tailOf: () => {
     const tail = viewTail(state.tab);
     if (!state.open) return tail;
@@ -125,7 +122,7 @@ function applyModal([taskId, runId]) {
 const LEVEL_VIEWS = {
   dash: ["dashboard", "site", "activity", "inbox"],
   proc: ["tasks"],
-  harn: ["agents"],
+  harn: ["occupancy", "roster", "agent-runtime"],
 };
 
 /// The live level that claims `tab`, for backfilling `state.level` before any
@@ -207,7 +204,9 @@ function rerender(route) {
   if (state.tab === "activity") { renderActivity(); return; }
   if (state.tab === "site") { refreshSite(); return; }
   if (state.tab === "tasks") { renderTasks(); return; }
-  if (state.agentView === "occupancy") renderOccupancy(); else renderAgents();
+  if (state.tab === "occupancy") renderOccupancy();
+  else if (state.tab === "roster") renderAgents();
+  else if (state.tab === "agent-runtime") renderRuntimeConnections();
 }
 
 /// The rail is a view over `state.scopes`, so it is rebuilt wherever that is
@@ -240,8 +239,8 @@ function showTab(name, tail) {
   writeHash();
 }
 
-// The Agents view keeps its own two-way switch (Occupancy / Roster), each
-// with a poll of its own -- ticking the now-line, or the elapsed times.
+// Each live agent read gets its own cadence: the now-line, roster elapsed
+// times, or the runtime connection.
 function stopAgentPoll() {
   if (state.agentPoll) { clearInterval(state.agentPoll); state.agentPoll = null; }
 }
@@ -266,22 +265,22 @@ function stopSite() {
   hideSite();
 }
 
-function showAgentView(view) {
-  state.agentView = view;
-  $("view-occupancy").hidden = view !== "occupancy";
-  $("agents").hidden = view !== "roster";
-  $("occ-window").hidden = view !== "occupancy";
-  for (const b of $("agent-view").querySelectorAll("button")) {
-    b.classList.toggle("on", b.dataset.view === view);
-  }
+function startOccupancy() {
   stopAgentPoll();
-  if (view === "occupancy") {
-    loadOccupancy();
-    state.agentPoll = setInterval(loadOccupancy, 10000);
-  } else {
-    loadAgents();
-    state.agentPoll = setInterval(renderAgents, 5000);
-  }
+  loadOccupancy();
+  state.agentPoll = setInterval(loadOccupancy, 10000);
+}
+
+function startRoster() {
+  stopAgentPoll();
+  loadAgents();
+  state.agentPoll = setInterval(renderAgents, 5000);
+}
+
+function startAgentRuntime() {
+  stopAgentPoll();
+  loadRuntimeConnections();
+  state.agentPoll = setInterval(loadRuntimeConnections, 30000);
 }
 
 // ---------------------------------------------------------------------- boot
@@ -338,9 +337,7 @@ async function boot() {
   for (const b of $("tasks-view").querySelectorAll("button")) {
     b.onclick = () => setTasksView(b.dataset.view);
   }
-  for (const b of $("agent-view").querySelectorAll("button")) {
-    b.onclick = () => { showAgentView(b.dataset.view); writeHash(); };
-  }
+  $("runtime-refresh").onclick = () => loadRuntimeConnections();
   $("occ-window").onchange = () => loadOccupancy();
   $("newTask").onclick = () => openCreate();
   wireDashboard();
@@ -416,12 +413,11 @@ function onEvent(ev) {
       }
       break;
   }
-  // The Agents view is a read over runs and standing agents; either can change
-  // out from under it without a task event at all.
+  // Occupancy and roster are reads over runs and standing agents; either can
+  // change out from under them without a task event at all.
   if (ev.type.startsWith("run_") || ev.type.startsWith("agent_")) {
-    if (state.tab === "agents") {
-      if (state.agentView === "occupancy") loadOccupancy(); else loadAgents();
-    }
+    if (state.tab === "occupancy") loadOccupancy();
+    else if (state.tab === "roster") loadAgents();
   }
   // The site draws queued work too -- the crates at a hall's door, and the
   // floors its scope's load lights -- so a task arriving, being taken or being
@@ -438,7 +434,7 @@ function onEvent(ev) {
   if (ev.type === "run_updated" && state.tab === "dashboard") loadDashboard();
 }
 
-/// The site's halls are built from `state.scopes`, which only the Agents view
+/// The site's halls are built from `state.scopes`, which only the Roster view
 /// otherwise keeps current, and from `/api/site`, which is the only thing that
 /// knows how big each scope is and how much of it is working. Both, together,
 /// in one wait: the figures outside a hall and the lights on it are the same

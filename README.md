@@ -402,7 +402,7 @@ The practical consequence for whoever writes a store adapter is six methods:
 store nothing else. `examples/plugins/file-store/` refuses the rest out loud, so
 a store that is asked something it should not be says so instead of guessing.
 
-The engine a scope uses is shown on the agents page, and is not editable there
+The engine a scope uses is shown in the Roster, and is not editable there
 -- see the last section of this file for why.
 
 ## Writing a plugin
@@ -466,17 +466,18 @@ echo '{"op":"task.list","params":{}}' | nc -U .factory/factory.sock
 HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`,
 `GET /api/runs/{id}/entries`, `GET /api/runs/{id}/output`, `GET /api/agents`,
-and `POST /api/rpc` for the raw envelope. `GET /ws` is the event stream: a
-snapshot of every task first, then one message per event.
+`GET /api/agent-runtime`, and `POST /api/rpc` for the raw envelope. `GET /ws`
+is the event stream: a snapshot of every task first, then one message per event.
 
 Adding an interface — mcp, or anything else — means translating to that
 envelope, not inventing a second API.
 
 ## The web UI
 
-Five views, one selector in the header: **Dashboard** is the landing view, then
-**Activity**, **Site plan**, **Tasks** and **Agents**. Switching between them is
-a small registry, not five special cases — one container shown, one button lit,
+Eight views, grouped by level in the header: **Dashboard** is the landing view,
+then **Activity**, **Site plan**, **Inbox**, **Tasks**, **Occupancy**, **Roster**
+and **Agent-runtime**. Switching between them is a small registry — one
+container shown, one button lit,
 and whatever that view needs to start or stop doing while it is not the one on
 screen.
 
@@ -511,8 +512,8 @@ There is no terminal emulator in the page. herdr's frames have already had
 every cursor move and scroll applied, so what arrives is text and colour, and
 eighty lines turn that into HTML.
 
-**Agents** has two views of the same thing. **Occupancy** is a chart: one row
-per agent, grouped by scope, drawn against a shared clock. Three layers, kept
+**Occupancy** is a chart: one row per agent, grouped by scope, drawn against a
+shared clock. Three layers, kept
 deliberately apart because they are different kinds of evidence:
 
 - a **solid block** is a run — Factory started it and the agent reported back;
@@ -535,6 +536,13 @@ Esc, ↑, ↓ and Ctrl-C. That is enough to answer the prompt an agent is sittin
 on, which is usually a first-run trust dialog or a login. Every agent also
 offers **Start task…**, which opens the create form with that scope and agent
 already chosen. A task run's terminal takes the same input.
+
+**Agent-runtime** shows the connection underneath those sessions. It groups
+scopes that use the same effective runtime and asks the adapter for a
+read-only diagnostic. For Herdr that includes its session and socket, client
+and server versions and protocols, compatibility, restart-needed state and
+capabilities. An unsupported adapter or failed probe remains a card with an
+honest state; it does not take the daemon or the other runtime cards down.
 
 **Dashboard** is five KPI tiles, a by-scope table and an inbox, all read from
 the same `state.tasks` and `state.scopes` every other view already holds —
@@ -607,8 +615,8 @@ the file a session is editing is not read at all, and is not drawn.
   on every start when it is bound past loopback, and prints the address a
   person would actually type. The warning is the whole of the protection: put
   this on a network you would hand a shell to, or leave it on loopback.
-- **A scope's task engine is configuration, not a control.** The agents page
-  says which engine a scope's tasks live in; changing it means editing
+- **A scope's task engine is configuration, not a control.** The Roster says
+  which engine a scope's tasks live in; changing it means editing
   that scope's `.factory/config.yaml` and restarting. A selector that rewrote the
   configuration over an interface with no authentication is a different
   decision, and it has not been made.

@@ -1,5 +1,5 @@
 //! The vocabulary every page shares: the DOM helpers, the client state, the
-//! HTTP call and the socket. Nothing here knows that a task page or an agents
+//! HTTP call and the socket. Nothing here knows that a task or roster
 //! page exists -- `connect` hands events back to whoever wired it up.
 
 export const $ = (id) => document.getElementById(id);
@@ -10,7 +10,7 @@ export const state = {
   roles: [],
   tab: "dashboard",
   tasks: new Map(),
-  scopes: [],          // the agents page: scopes, each with its agents
+  scopes: [],          // configured scopes, each with its agents
   adapters: [],        // every agent adapter name, for the create form
   scopeNames: [],
   root: "",            // the instance root, so the rail can read a scope path
@@ -27,8 +27,9 @@ export const state = {
   poll: null,          // terminal poll timer, for a transcript that is not live
   termSocket: null,    // the live terminal's socket, while one is open
   agentPoll: null,
+  runtimeConnections: [], // one diagnostic per effective runtime connection
+  runtimeConnectionError: null,
   sitePoll: null,        // the site view's slow tick, for the half of it no event announces
-  agentView: "occupancy", // the agents page: the chart, or the roster with its controls
   occ: null,              // the occupancy answer, as the daemon assembled it
 };
 

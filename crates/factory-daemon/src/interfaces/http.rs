@@ -112,6 +112,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/ws/term", get(term_upgrade))
         .route("/api/status", get(status))
         .route("/api/adapters", get(adapters))
+        .route("/api/agent-runtime", get(runtime_connections))
         .route("/api/agents", get(agents))
         .route("/api/occupancy", get(occupancy))
         .route("/api/production", get(production))
@@ -200,6 +201,10 @@ async fn status(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn adapters(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Adapters).await
+}
+
+async fn runtime_connections(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::RuntimeConnections).await
 }
 
 async fn agents(State(engine): State<Arc<Engine>>) -> AxumResponse {

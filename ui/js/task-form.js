@@ -117,7 +117,7 @@ export function scopeOptions(selected) {
     `<option value="${esc(s.name)}" ${s.name === on ? "selected" : ""}>${esc(s.name)}</option>`).join("");
 }
 
-/// Whether a scope, as the agents page last reported it, can host a worktree
+/// Whether a scope, as the Roster last reported it, can host a worktree
 /// -- and if not, why. An unknown scope (not loaded yet, or named freehand)
 /// is assumed capable rather than blocking the form on a question it cannot
 /// yet answer.

@@ -10,8 +10,9 @@ pub mod store;
 pub use agent::{Agent, AgentContext, LaunchKind, LaunchSpec, TaskBinding};
 pub use interface::{Interface, InterfaceContext};
 pub use runtime::{
-    AgentRuntime, RuntimeEvent, RuntimeEventKind, RuntimeEventStream, RuntimeStatus, Screen,
-    StartRequest, StatusReport, StatusSource,
+    AgentRuntime, RuntimeConnectionDiagnostic, RuntimeConnectionState, RuntimeEvent,
+    RuntimeEventKind, RuntimeEventStream, RuntimePeer, RuntimeStatus, Screen, StartRequest,
+    StatusReport, StatusSource,
 };
 pub use store::TaskStore;
 

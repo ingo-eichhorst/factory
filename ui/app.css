@@ -312,6 +312,52 @@ select.rolepick:disabled { opacity: .38; cursor: default; }
 .jt { font-weight: 500; font-size: 12.5px; }
 .idle { color: var(--faint); font-size: 11.5px; }
 
+/* ----------------------------------------------- agent runtime connection */
+.runtime-connections { display: grid; gap: 12px; }
+.runtime-card {
+  background: var(--panel); border: 1px solid var(--line); border-left-width: 3px;
+  border-radius: 4px; padding: 13px 14px;
+}
+.runtime-card[data-state="healthy"] { border-left-color: var(--run); }
+.runtime-card[data-state="degraded"] { border-left-color: var(--wait); }
+.runtime-card[data-state="stopped"],
+.runtime-card[data-state="unreachable"],
+.runtime-card[data-state="incompatible"],
+.runtime-card[data-state="error"] { border-left-color: var(--fault); }
+.runtime-head { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.runtime-head > div:first-child { flex: 1 1 260px; }
+.runtime-head h3 { margin: 0 0 2px; font: 600 14px/1.3 var(--cond); }
+.runtime-state {
+  display: inline-block; padding: 4px 7px; border-radius: 2px;
+  font: 600 8.5px/1 var(--cond); letter-spacing: .11em; text-transform: uppercase;
+  color: var(--muted); background: var(--panel-2);
+}
+.runtime-state.rt-healthy { color: var(--run); background: var(--run-wash); }
+.runtime-state.rt-degraded { color: var(--wait); background: var(--wait-wash); }
+.runtime-state.rt-stopped, .runtime-state.rt-unreachable,
+.runtime-state.rt-incompatible, .runtime-state.rt-error {
+  color: var(--fault); background: var(--fault-wash);
+}
+.runtime-note { margin: 11px 0 0; color: var(--ink-2); font-size: 12px; }
+.runtime-facts {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1px; margin: 12px 0; background: var(--line-soft); border: 1px solid var(--line-soft);
+  border-radius: 3px; overflow: hidden;
+}
+.runtime-facts > div { min-width: 0; background: var(--sunk); padding: 8px 10px; }
+.runtime-facts dt {
+  margin-bottom: 4px; color: var(--faint); font: 600 8.5px/1 var(--cond);
+  letter-spacing: .12em; text-transform: uppercase;
+}
+.runtime-facts dd { margin: 0; color: var(--ink-2); }
+.runtime-facts dd code { display: block; overflow-wrap: anywhere; font: 400 11px/1.45 var(--mono); }
+.runtime-facts dd .sub { display: block; margin-top: 2px; }
+.runtime-line { display: flex; align-items: baseline; gap: 10px; margin-top: 7px; flex-wrap: wrap; }
+.runtime-line > .sub { flex: 0 0 80px; }
+.runtime-tags { display: flex; gap: 5px; flex-wrap: wrap; }
+.runtime-checked { margin-top: 11px; text-align: right; font-family: var(--mono); }
+.runtime-load-error { padding: 14px; margin: 0; background: var(--panel); border: 1px solid var(--fault); border-radius: 4px; }
+
 /* -------------------------------------------------------------- modal */
 .scrim {
   position: fixed; inset: 0; background: rgba(5,9,11,.62); z-index: 20;
@@ -574,7 +620,7 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
   font: 400 10px/1.5 var(--mono); color: var(--faint); background: var(--panel); border: 1px solid var(--line);
   border-radius: 3px; padding: 4px 7px; text-align: right;
 }
-/* The inspector rail: the same vocabulary as the agents page -- a click on a
+/* The inspector rail: the same vocabulary as the Roster -- a click on a
    hall is a second door into the same facts, not a different data model. */
 .rail { flex: 0 0 300px; max-width: 340px; display: flex; flex-direction: column; gap: 10px; }
 .rail .scope, .rail .agent { font-size: 12px; }

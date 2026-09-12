@@ -111,6 +111,88 @@ pub struct StatusReport {
     pub source: StatusSource,
 }
 
+/// Whether Factory can reach the runtime connection behind an adapter. This
+/// is deliberately about the connection, not any agent session on it: a
+/// healthy runtime can host no agents, and an unhealthy one says nothing
+/// about whether a task finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeConnectionState {
+    Healthy,
+    Stopped,
+    Unreachable,
+    Incompatible,
+    Degraded,
+    /// The adapter does not implement connection diagnostics.
+    Unsupported,
+    /// The adapter answered, but its diagnostic could not be understood.
+    Error,
+}
+
+/// One side of a runtime connection. A stopped runtime has a client but no
+/// server peer, so each peer is optional in the diagnostic below.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePeer {
+    pub version: String,
+    pub protocol: u32,
+}
+
+/// Runtime-neutral, safe-to-display connection facts. Concrete adapters own
+/// the probe and translate into this vocabulary; neither the daemon nor a UI
+/// should know the shape of a Herdr response (or any future runtime's).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeConnectionDiagnostic {
+    pub state: RuntimeConnectionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<RuntimePeer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<RuntimePeer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_needed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl RuntimeConnectionDiagnostic {
+    pub fn unsupported() -> Self {
+        Self {
+            state: RuntimeConnectionState::Unsupported,
+            session: None,
+            endpoint: None,
+            client: None,
+            server: None,
+            compatible: None,
+            restart_needed: None,
+            capabilities: Vec::new(),
+            error: Some("this runtime does not report connection diagnostics".into()),
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            state: RuntimeConnectionState::Error,
+            error: Some(message.into()),
+            ..Self::unsupported()
+        }
+    }
+
+    pub fn unreachable(message: impl Into<String>) -> Self {
+        Self {
+            state: RuntimeConnectionState::Unreachable,
+            error: Some(message.into()),
+            ..Self::unsupported()
+        }
+    }
+}
+
 /// One frame of a session's screen: what a person attached to it would be
 /// looking at right now.
 ///
@@ -166,6 +248,15 @@ pub trait AgentRuntime: Send + Sync {
 
     fn description(&self) -> String {
         format!("{} runtime", self.name())
+    }
+
+    /// Facts about the runtime connection itself, when this adapter can
+    /// provide them. Unsupported is an honest answer and keeps existing and
+    /// out-of-process implementations source-compatible. Probe failures are
+    /// returned as errors so the daemon can isolate them to one diagnostic
+    /// card rather than fail a whole request.
+    async fn connection_diagnostic(&self) -> Result<RuntimeConnectionDiagnostic> {
+        Ok(RuntimeConnectionDiagnostic::unsupported())
     }
 
     /// Bring up a session with the agent running in it, ready for input.
@@ -296,5 +387,13 @@ mod tests {
             StatusSource::Unknown,
             "a runtime that never says how it knows must not come out Reported"
         );
+    }
+
+    #[tokio::test]
+    async fn an_existing_runtime_without_a_probe_is_honestly_unsupported() {
+        let diagnostic = BareRuntime.connection_diagnostic().await.unwrap();
+        assert_eq!(diagnostic.state, RuntimeConnectionState::Unsupported);
+        assert!(diagnostic.client.is_none());
+        assert!(diagnostic.server.is_none());
     }
 }
