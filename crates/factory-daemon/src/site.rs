@@ -41,6 +41,7 @@ use crate::engine::Engine;
 /// Directories that are not the codebase: dependencies, build output, version
 /// control. Walking into them would measure `node_modules`, not the project.
 const SKIP: &[&str] = &[
+    ".factory",
     ".git",
     "node_modules",
     "target",
@@ -64,7 +65,7 @@ const ENTRY_CAP: usize = 40_000;
 /// How long a walk's numbers stand before the directory is counted again. The
 /// page asks for this view every time a run or an agent changes, which is
 /// often; a repository's size changes when somebody commits, which is not. A
-/// scope that grew is a hall that grows within the minute, and nothing pays
+/// scope that grew is a hall that grows within five minutes, and nothing pays
 /// for a filesystem walk per websocket event.
 const WALK_TTL: Duration = Duration::from_secs(300);
 
@@ -467,6 +468,8 @@ mod tests {
         fs::write(s.path().join("node_modules/huge.js"), vec![0u8; 1000]).unwrap();
         fs::create_dir(s.path().join(".git")).unwrap();
         fs::write(s.path().join(".git/pack"), vec![0u8; 1000]).unwrap();
+        fs::create_dir(s.path().join(".factory")).unwrap();
+        fs::write(s.path().join(".factory/factory.db"), vec![0u8; 1000]).unwrap();
         let walk = walk_scope(s.path()).unwrap();
         assert_eq!(walk.total, 10);
     }
