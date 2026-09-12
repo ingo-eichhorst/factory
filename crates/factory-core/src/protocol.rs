@@ -339,6 +339,32 @@ pub struct ScopeFootprint {
     /// measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
+    /// The scope's top-level entries -- a directory, or every loose file in
+    /// the root as one entry -- largest first, for the site plan to treemap
+    /// onto the hall's floor. Empty both when `size_bytes` is `None` (the
+    /// scope could not be walked, so there is nothing to show) and when it is
+    /// genuinely `Some(0)` (walked, and there was nothing there): the two
+    /// stay tellable apart by `size_bytes` alone, the way they already were
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<ScopeArea>,
+    /// Whether the walk that produced `size_bytes` and `areas` stopped at
+    /// `ENTRY_CAP` before it finished the tree. A truncated walk's numbers
+    /// are a lower bound, not a measurement -- enough to size a hall next to
+    /// its neighbours, not enough for the floor's proportions to be trusted,
+    /// so the hall has to say "partial" rather than draw them as exact.
+    pub truncated: bool,
+}
+
+/// One top-level entry of a scope's root, as the floor treemap draws it. A
+/// directory keeps its own name; every file lying loose in the root -- a
+/// `Cargo.toml`, a `README.md` -- is one entry rather than one per file, and
+/// is named for what it is rather than invented as a directory that does not
+/// exist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeArea {
+    pub name: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

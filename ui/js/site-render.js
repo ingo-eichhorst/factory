@@ -175,12 +175,24 @@ function hall(b, PAL) {
   band(-0.02, hd / 2, hd * 0.86, -Math.PI / 2);
   band(hw + 0.02, hd / 2, hd * 0.86, Math.PI / 2);
 
-  // The shop floor: one plain pad, because Factory does not read a scope's
-  // directory tree and a treemap drawn from nothing would be a guess dressed
-  // up as a measurement.
-  const floor = new T.Mesh(new T.BoxGeometry(hw - 0.6, 0.09, hd - 0.6), matFloor);
-  floor.position.set(hw / 2, 0.27, hd / 2); floor.receiveShadow = true; floor.userData.bid = b.id;
-  g.add(floor); pick.push(floor);
+  // The shop floor. A hall with areas gets the same tiles `site.js` treemapped
+  // once, flat on the floor -- not extruded, which would read as machinery
+  // rather than a plan -- so the same directory lands in the same corner in
+  // both views. A hall with nothing measured gets one plain pad instead: a
+  // treemap drawn from nothing would be a guess dressed up as a measurement.
+  const floorTiles = [];
+  if (b.floor && b.floor.tiles.length) {
+    b.floor.tiles.forEach((t) => {
+      const fmat = new T.MeshStandardMaterial({ color: col(PAL[t.colorKey]), roughness: 0.92 });
+      const tile = new T.Mesh(new T.BoxGeometry(Math.max(t.w, 0.02), 0.09, Math.max(t.h, 0.02)), fmat);
+      tile.position.set(t.x + t.w / 2, 0.27, t.y + t.h / 2); tile.receiveShadow = true; tile.userData.bid = b.id;
+      g.add(tile); pick.push(tile); floorTiles.push({ mat: fmat, key: t.colorKey });
+    });
+  } else {
+    const floor = new T.Mesh(new T.BoxGeometry(hw - 0.6, 0.09, hd - 0.6), matFloor);
+    floor.position.set(hw / 2, 0.27, hd / 2); floor.receiveShadow = true; floor.userData.bid = b.id;
+    g.add(floor); pick.push(floor);
+  }
 
   const roof = new T.Group();
   const slab = new T.Mesh(new T.BoxGeometry(hw + 0.3, 0.2, hd + 0.3), matRoof);
@@ -204,13 +216,16 @@ function hall(b, PAL) {
   ring.rotation.x = -Math.PI / 2; ring.position.set(hw / 2, 0.24, hd / 2); g.add(ring);
 
   const size = b.footprintKnown ? mb(b.sizeBytes) : "size unknown";
-  const sub = `${size} · ${b.agents.length} agent${b.agents.length === 1 ? "" : "s"}`;
+  const sub = `${size} · ${b.agents.length} agent${b.agents.length === 1 ? "" : "s"}${b.areasTruncated ? " · floor partial" : ""}`;
   const lt = labelTex(b.name, sub);
   const sp = new T.Sprite(new T.SpriteMaterial({ map: lt.tex, depthWrite: false, transparent: true, depthTest: false }));
   sp.scale.set(2.4 * lt.ar * 0.4, 2.4 * 0.4, 1); sp.position.set(hw / 2, hh + 1.7, hd / 2); g.add(sp); labels.push(sp);
 
   sceneGroup.add(g);
-  halls[b.id] = { b, win: winMeshes, lit, roof, hh, beacon, beaconGlow, label: sp, ring, pulses: b.state === "run" || b.state === "wait" || b.state === "fault" };
+  halls[b.id] = {
+    b, win: winMeshes, lit, roof, hh, beacon, beaconGlow, label: sp, ring, floorTiles,
+    pulses: b.state === "run" || b.state === "wait" || b.state === "fault",
+  };
 }
 
 function figure(wk, PAL) {
@@ -349,6 +364,10 @@ export function repaint() {
   if (matTrim) matTrim.color.set(PAL.roof2);
   if (matFloor) matFloor.color.set(PAL.plate);
   if (matPaint) matPaint.color.set(PAL.paint);
+  // Each floor tile keeps its own material (one colour per area, cycled from
+  // the palette), so a theme change has to walk them by hand rather than
+  // recolouring one shared `matFloor` the way every other surface does.
+  Object.values(halls).forEach((h) => (h.floorTiles || []).forEach(({ mat, key }) => mat.color.set(PAL[key])));
   applyTOD();
 }
 
