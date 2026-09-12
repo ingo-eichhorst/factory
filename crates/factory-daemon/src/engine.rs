@@ -2,10 +2,10 @@
 //! and leaves as a `Response`; the interfaces themselves hold no logic.
 
 use chrono::Utc;
-use factory_core::adapter::agent::{AgentContext, TaskBinding};
+use factory_core::adapter::agent::{AgentContext, LaunchSpec, TaskBinding};
 use factory_core::adapter::runtime::{RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource};
 use factory_core::adapter::TaskStore;
-use factory_core::config::Factory;
+use factory_core::config::{Factory, ScopeAgent};
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
@@ -30,6 +30,15 @@ use crate::worktree;
 /// checkbox available should not have to wait five minutes to see it, and the
 /// answer is two `git` calls rather than a directory walk.
 const CAPABILITY_TTL: Duration = Duration::from_secs(60);
+
+/// Put declaration-specific arguments after the adapter's defaults. Harnesses
+/// generally let the last occurrence of a flag win, so this ordering lets one
+/// scope override an adapter default as well as add to it.
+pub(crate) fn append_declared_args(launch: &mut LaunchSpec, declaration: Option<&ScopeAgent>) {
+    if let Some(declaration) = declaration {
+        launch.args.extend(declaration.args.iter().cloned());
+    }
+}
 
 pub struct Engine {
     pub factory: Factory,
@@ -597,16 +606,24 @@ impl Engine {
     /// and the adapter behind it follows from the config. An adapter name
     /// still works for a scope that declares nothing, or for a one-off with
     /// `--agent claude-code`.
-    pub fn resolve_agent(&self, scope_name: &str, name: &str) -> Result<(String, String)> {
+    pub fn resolve_agent(
+        &self,
+        scope_name: &str,
+        name: &str,
+    ) -> Result<(String, String, Option<ScopeAgent>)> {
         let scope = self.factory.scope(scope_name)?;
         let declared_here = scope.agents_with(&self.factory.config.daemon.foreman);
         if let Some(declared) = declared_here.iter().find(|a| a.name() == name).cloned() {
             // The name resolves; the adapter behind it still has to exist.
             self.registry.agent(&declared.harness)?;
-            return Ok((declared.name(), declared.harness));
+            return Ok((
+                declared.name(),
+                declared.harness.clone(),
+                Some(declared),
+            ));
         }
         if self.registry.agent(name).is_ok() {
-            return Ok((name.to_string(), name.to_string()));
+            return Ok((name.to_string(), name.to_string(), None));
         }
 
         let declared: Vec<String> = declared_here.iter().map(|a| a.name()).collect();
@@ -647,7 +664,7 @@ impl Engine {
         }
         match &patch.agent {
             Some(agent) => {
-                let (name, _) = self.resolve_agent(&scope, agent)?;
+                let (name, _, _) = self.resolve_agent(&scope, agent)?;
                 patch.agent = Some(name);
             }
             // A task moved to another scope must still have an agent there.
@@ -702,7 +719,7 @@ impl Engine {
 
         // Refuse now, with the list of what this scope offers, rather than at
         // dispatch time when whoever asked has stopped watching.
-        let (agent, _adapter) = self.resolve_agent(&scope, &agent)?;
+        let (agent, _adapter, _) = self.resolve_agent(&scope, &agent)?;
         self.registry.runtime(&runtime)?;
 
         // The scope's canonical identity, not necessarily what the caller
@@ -763,7 +780,8 @@ impl Engine {
         let task = self.require(task_id).await?;
         // Resolve again rather than trusting what was written down: the config
         // may have changed since the task was created.
-        let (agent_name, adapter_name) = self.resolve_agent(&task.scope, &task.agent)?;
+        let (agent_name, adapter_name, declaration) =
+            self.resolve_agent(&task.scope, &task.agent)?;
         let agent = self.registry.agent(&adapter_name)?;
         let runtime = self.registry.runtime(&task.runtime)?;
         let scope_path = self.factory.scope_path(&task.scope)?;
@@ -823,7 +841,8 @@ impl Engine {
             identity_token: None,
         };
 
-        let launch = agent.launch_spec(&ctx).await?;
+        let mut launch = agent.launch_spec(&ctx).await?;
+        append_declared_args(&mut launch, declaration.as_ref());
         let session = runtime
             .start(&StartRequest {
                 id: run.id.clone(),
