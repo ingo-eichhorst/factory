@@ -32,6 +32,67 @@ const VIEWS = {
   agents: { onShow: () => showAgentView(state.agentView), onHide: stopAgentPoll },
 };
 
+// -------------------------------------------------------------- decision levels
+//
+// Factory is six decision levels; the header names them L6 (what the factory
+// is for) through L1 (what it runs on). Only two are built, and which of the
+// five views hangs off each was the open question left for whoever picked
+// this up -- this map is the answer. Dashboard and Site plan are
+// cross-cutting and sit under both; change the assignment here and the
+// second tab row, the level row's own switching, and the hash's fallback in
+// `scopes.js` (handed this same map through `initRail`) all follow.
+//
+// `proc` is listed first on purpose: a tab shared by both levels (Dashboard,
+// Site plan) resolves to whichever level's list is checked first when a hash
+// names no level at all, so the order here decides that, not just this row.
+const LEVEL_VIEWS = {
+  proc: ["dashboard", "activity", "site", "tasks"],
+  harn: ["dashboard", "site", "agents"],
+};
+
+/// The live level that claims `tab`, for backfilling `state.level` before any
+/// hash has been read -- `scopes.js` keeps the same lookup for the hash
+/// itself, but it works from a copy of this map handed in through `initRail`,
+/// not from this function.
+function levelForTab(tab) {
+  for (const level of Object.keys(LEVEL_VIEWS)) {
+    if (LEVEL_VIEWS[level].includes(tab)) return level;
+  }
+  return null;
+}
+
+/// Light the selected level button and nothing else.
+function renderLevels() {
+  const row = $("levels");
+  if (!row) return;
+  for (const b of row.querySelectorAll(".lvl")) {
+    b.classList.toggle("on", b.dataset.level === state.level);
+  }
+}
+
+/// Show only the second-row tabs that belong to the selected level. A
+/// disabled level cannot reach this -- its buttons carry `disabled` and never
+/// fire a click -- so `LEVEL_VIEWS` only ever needs the two live levels.
+function renderTabRow() {
+  const views = LEVEL_VIEWS[state.level] || [];
+  for (const k of Object.keys(VIEWS)) {
+    $(`tab-${k}`).hidden = !views.includes(k);
+  }
+}
+
+/// What clicking a level button does: light it, swap the second row to its
+/// views, and land on the first of them if the tab on screen is not one --
+/// the same rule a hash-driven level change follows in `rerender`.
+function setLevel(level) {
+  if (level === state.level || !LEVEL_VIEWS[level]) return;
+  state.level = level;
+  renderLevels();
+  renderTabRow();
+  const views = LEVEL_VIEWS[level];
+  if (!views.includes(state.tab)) showTab(views[0]);
+  else writeHash(state.tab);
+}
+
 // ------------------------------------------------------------------- scope
 
 /// What the rail does when the selection changes. Nothing is refetched: every
@@ -39,6 +100,16 @@ const VIEWS = {
 /// is drawn. Re-render, never reload -- `loadAgents` rebuilds the rail, and a
 /// reload here would send it straight round again.
 function rerender(route) {
+  // Back and forward move the level as well as the tab and the scope
+  // selection. `route.level` is only ever present when the change came from
+  // the hash (a plain rail click carries none), and re-lighting the row and
+  // re-filtering the second one is cheap enough to do unconditionally rather
+  // than compare against what is already there.
+  if (route && route.level) {
+    state.level = route.level;
+    renderLevels();
+    renderTabRow();
+  }
   // Back and forward move the tab as well as the selection. The rail hands the
   // route over rather than reaching into the view, because which view is showing
   // is the page's business.
@@ -60,7 +131,7 @@ function rerender(route) {
 /// refetches /api/agents. Exported so that one does not have to know what the
 /// rail has to be rebuilt with.
 export function rebuildRail() {
-  initRail(rerender);
+  initRail(rerender, LEVEL_VIEWS);
 }
 
 // ------------------------------------------------------------------- tabs
@@ -122,8 +193,15 @@ async function boot() {
 
   // /api/agents is the only endpoint that carries a scope's path, so the tree
   // cannot be built before it has answered. The rail reads the hash on the way
-  // up, which is why the selection is in place before anything below draws.
+  // up, which is why the selection is in place before anything below draws --
+  // a hash naming a level as well as a scope leaves `state.level` set too.
   rebuildRail();
+  // No hash named a level (a fresh install, or a link with none): fall back to
+  // whichever live level owns the default tab, so the row and the second one
+  // are never drawn with no level lit at all.
+  if (!state.level) state.level = levelForTab(state.tab);
+  renderLevels();
+  renderTabRow();
 
   try {
     const tasks = (await api("/api/tasks")).tasks;
@@ -138,6 +216,12 @@ async function boot() {
   for (const k of Object.keys(VIEWS)) {
     $(`tab-${k}`).onclick = () => showTab(k);
   }
+  // Only the two live levels reach here with a working click -- the four
+  // greyed ones carry `disabled` in the markup, and a disabled button never
+  // fires one.
+  for (const b of $("levels").querySelectorAll(".lvl")) {
+    b.onclick = () => setLevel(b.dataset.level);
+  }
   for (const b of $("agent-view").querySelectorAll("button")) {
     b.onclick = () => showAgentView(b.dataset.view);
   }
@@ -145,7 +229,11 @@ async function boot() {
   $("newTask").onclick = () => openCreate();
   wireDashboard();
 
-  showTab("dashboard");
+  // Not a hardcoded "dashboard": a hash read on the way up may already have
+  // moved `state.tab` (and `state.level` with it) before this runs, and
+  // overwriting that back to the default would undo a bookmarked level and
+  // view on every fresh load.
+  showTab(state.tab);
 
   connect({
     snapshot: (tasks) => { state.tasks = new Map(tasks.map(t => [t.id, t])); renderTasks(); if (state.tab === "dashboard") renderDashboard(); },

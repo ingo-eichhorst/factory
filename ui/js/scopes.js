@@ -21,9 +21,15 @@ import { $, esc, state } from "./core.js";
 
 /// The hash segment that stands for no selection at all.
 const ALL = "all";
-const TABS = ["tasks", "agents"];
+const TABS = ["dashboard", "activity", "site", "tasks", "agents"];
 
 let onSelect = () => {};
+/// Which of the five views hangs off each live level -- app.js's, handed in
+/// through `initRail` rather than imported, so the assignment stays the one
+/// map app.js owns and this file never has to know a view by name beyond the
+/// strings the hash is written in. Read by `readHash`/`writeHash` to fill in
+/// a level the hash left out, or correct one that names a level nothing owns.
+let levelViews = {};
 let wired = false;
 /// The markup the rail is currently showing, so an unchanged tree is left
 /// alone. See `render`.
@@ -144,8 +150,12 @@ function select(name) {
   onSelect({ scope: state.scope, tab: state.tab });
 }
 
-export function initRail(onChange) {
+export function initRail(onChange, levelViewsMap) {
   if (onChange) onSelect = onChange;
+  // `rebuildRail()` calls this again on every `/api/agents` refresh without
+  // repeating the map -- only the boot call carries one, and it never changes
+  // afterward, so a later call simply keeps what is already here.
+  if (levelViewsMap) levelViews = levelViewsMap;
   const first = !wired;
   const route = readHash();
   const before = state.scope;
@@ -154,6 +164,7 @@ export function initRail(onChange) {
   // `/api/agents` came back again -- the hash has long been normalised and what
   // matters is whether the tree still holds what is selected.
   state.scope = known(first && route ? route.scope : state.scope);
+  if (first && route) state.level = route.level;
   render();
 
   if (first) {
@@ -165,7 +176,22 @@ export function initRail(onChange) {
 
   // A link straight to `#factory/agents` has to reach the page as a change even
   // though nothing was selected before it; after boot, only a real change is.
-  if (state.scope !== before || (first && route)) onSelect({ scope: state.scope, tab });
+  if (state.scope !== before || (first && route)) {
+    onSelect({ scope: state.scope, level: state.level, tab });
+  }
+}
+
+/// The live level whose view list names `tab` -- the fallback for a hash with
+/// no level segment, or one that names a level nothing owns. `levelViews`
+/// iterates in the order `app.js` wrote it, so a view listed under more than
+/// one level (Dashboard, Site plan) resolves to whichever level comes first
+/// in that map -- L4 today. That ordering is load-bearing: reorder the map
+/// and a bare `#scope/dashboard` link starts landing under a different level.
+function levelForTab(tab) {
+  for (const level of Object.keys(levelViews)) {
+    if (levelViews[level].includes(tab)) return level;
+  }
+  return null;
 }
 
 /// True when `scopeName` is inside the selection, inclusive of the selection
@@ -199,18 +225,22 @@ export function scopeLabel() {
 
 // -------------------------------------------------------------------- the URL
 
-/// `#<scope>/<tab>`, so a link names both halves of what is on screen. A click
-/// is a navigation and pushes; `replace` is for the writes that only say what is
-/// already on screen -- boot, and correcting a hash that named a scope the tree
-/// no longer has -- because an entry pushed there costs a Back press to get past
-/// and is not somewhere the user has been.
+/// `#<scope>/<level>/<tab>`, so a link names all three of what is on screen.
+/// A click is a navigation and pushes; `replace` is for the writes that only
+/// say what is already on screen -- boot, and correcting a hash that named a
+/// scope the tree no longer has -- because an entry pushed there costs a Back
+/// press to get past and is not somewhere the user has been.
 export function writeHash(tab, replace) {
   // `all` is the keyword for no selection, so a scope actually called `all` has
   // to be written as something that decodes back to its name without reading as
-  // the keyword. Every other name survives encodeURIComponent unchanged.
+  // the keyword. Every other name survives encodeURIComponent unchanged. The
+  // scope head is the only segment that can itself carry a `/` -- once encoded
+  // it holds none, which is what lets the two `lastIndexOf` cuts in `readHash`
+  // find the level and the tab regardless of what the scope is named.
   const head = state.scope === null ? ALL
     : state.scope === ALL ? "%61ll" : encodeURIComponent(state.scope);
-  const next = `#${head}/${tab}`;
+  const level = state.level || levelForTab(tab);
+  const next = `#${head}/${level}/${tab}`;
   written = next;
   // Assigning the hash it already carries would push nothing anyway; assigning
   // a different one fires `hashchange`, and this runs on every tab switch.
@@ -219,22 +249,40 @@ export function writeHash(tab, replace) {
   else location.hash = next;
 }
 
-/// `{scope, tab}` for a hash that names a route, `null` for anything else.
+/// `{scope, level, tab}` for a hash that names a route, `null` for anything
+/// else. Parsed right to left -- `lastIndexOf` for the tab, then again on what
+/// is left for the level -- so the scope head keeps whatever is left over,
+/// `/` and all, still percent-encoded. That is what lets a scope name that
+/// itself contains `/` survive: it is decoded only here, after both cuts,
+/// never split on.
+///
+/// A hash with only two segments is the format this page wrote before this
+/// change (`#<scope>/<tab>`) -- there is no level to find, so the level comes
+/// from the tab instead, the same as a hash naming one nothing owns or one
+/// that is greyed. Either way the scope head is never touched: the segment
+/// before the last cut is always the scope, whatever it says.
+///
 /// Deliberately syntax only: boot reads the hash before `/api/agents` has
-/// answered, so there is no tree yet to check the name against. `initRail` does
-/// that part.
+/// answered, so there is no tree yet to check the scope name against.
+/// `initRail` does that part.
 export function readHash() {
   const raw = location.hash.replace(/^#/, "");
-  const cut = raw.lastIndexOf("/");
-  if (cut < 0) return null;
-  const tab = raw.slice(cut + 1);
+  const cutTab = raw.lastIndexOf("/");
+  if (cutTab < 0) return null;
+  const tab = raw.slice(cutTab + 1);
   if (!TABS.includes(tab)) return null;
-  const head = raw.slice(0, cut);
-  if (head === ALL) return { scope: null, tab };
+  const rest = raw.slice(0, cutTab);
+  const cutLevel = rest.lastIndexOf("/");
+  const levelSeg = cutLevel < 0 ? null : rest.slice(cutLevel + 1);
+  const head = cutLevel < 0 ? rest : rest.slice(0, cutLevel);
+  const level = levelSeg && levelViews[levelSeg] && levelViews[levelSeg].includes(tab)
+    ? levelSeg
+    : levelForTab(tab);
+  if (head === ALL) return { scope: null, level, tab };
   // A hash can be typed by hand, and a broken escape in one makes
   // decodeURIComponent throw. A route nobody can read is no route.
   try {
-    return { scope: decodeURIComponent(head), tab };
+    return { scope: decodeURIComponent(head), level, tab };
   } catch {
     return null;
   }
@@ -251,9 +299,11 @@ function onHashChange() {
   // corrected where it stands rather than pushed: an entry written on top of the
   // one the user just went back to is an entry Back can never get past.
   state.scope = known(route.scope);
+  state.level = route.level;
   writeHash(route.tab, true);
   render();
-  // Back and forward move the tab as well as the selection, and the tabs are
-  // the page's. Whoever wired the rail up gets told what the URL now says.
-  onSelect({ scope: state.scope, tab: route.tab });
+  // Back and forward move the level and the tab as well as the scope
+  // selection, and the tabs are the page's. Whoever wired the rail up gets
+  // told what the URL now says.
+  onSelect({ scope: state.scope, level: route.level, tab: route.tab });
 }
