@@ -21,6 +21,15 @@
 //! differently from a card built on `state.tasks`, the dashboard says so in
 //! its own prose rather than this endpoint inventing a second containment
 //! rule in a second language.
+//!
+//! A run whose task has since been deleted has nothing to join through, so a
+//! *scoped* query correctly finds it in none of them -- but an *unscoped*
+//! query ("All scopes") still counts it, the same way `occupancy.rs` still
+//! draws a row for a run whose agent the config no longer declares rather
+//! than dropping it. The consequence is the same shape as there: the
+//! instance-wide total can be larger than every scope's total added
+//! together. That is the honest answer for a run that happened, not a bug in
+//! the arithmetic.
 
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use factory_core::error::Result;
