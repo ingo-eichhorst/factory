@@ -41,6 +41,7 @@ impl Engine {
 
         let runs = self.store.runs_between(from, now).await?;
         let tasks = self.store.list(&Default::default()).await?;
+        let factory = self.factory_snapshot();
         let titles: BTreeMap<&str, &str> = tasks
             .iter()
             .map(|t| (t.id.as_str(), t.title.as_str()))
@@ -58,7 +59,7 @@ impl Engine {
         // an orphan row of its own instead of on the scope's actual line.
         let scope_of: BTreeMap<&str, String> = tasks
             .iter()
-            .map(|t| (t.id.as_str(), self.factory.canonical_scope_name(&t.scope)))
+            .map(|t| (t.id.as_str(), factory.canonical_scope_name(&t.scope)))
             .collect();
         let mut blocks: BTreeMap<(String, String), Vec<OccupancyBlock>> = BTreeMap::new();
         for run in &runs {

@@ -92,6 +92,8 @@ pub enum Grant {
     TaskReport,
     #[serde(rename = "agent.start")]
     AgentStart,
+    #[serde(rename = "agent.configure")]
+    AgentConfigure,
     #[serde(rename = "agent.stop")]
     AgentStop,
     #[serde(rename = "agent.input")]
@@ -101,7 +103,7 @@ pub enum Grant {
 }
 
 impl Grant {
-    pub const ALL: [Grant; 10] = [
+    pub const ALL: [Grant; 11] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -109,6 +111,7 @@ impl Grant {
         Grant::TaskCancel,
         Grant::TaskReport,
         Grant::AgentStart,
+        Grant::AgentConfigure,
         Grant::AgentStop,
         Grant::AgentInput,
         Grant::RunInput,
@@ -123,6 +126,7 @@ impl Grant {
             Self::TaskCancel => "task.cancel",
             Self::TaskReport => "task.report",
             Self::AgentStart => "agent.start",
+            Self::AgentConfigure => "agent.configure",
             Self::AgentStop => "agent.stop",
             Self::AgentInput => "agent.input",
             Self::RunInput => "run.input",
@@ -139,6 +143,7 @@ impl Grant {
             Self::TaskCancel => "cancel runs",
             Self::TaskReport => "report on tasks",
             Self::AgentStart => "start agents",
+            Self::AgentConfigure => "configure agents",
             Self::AgentStop => "stop agents",
             Self::AgentInput => "type into an agent's session",
             Self::RunInput => "type into a run's session",

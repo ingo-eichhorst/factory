@@ -130,6 +130,8 @@ function scopeOf(ev) {
     }
     case "agent_activity":
       return ev.scope;
+    case "agent_configured":
+      return ev.scope;
     default:
       return undefined;
   }
@@ -159,6 +161,8 @@ function describe(ev) {
       return { at, kind: "agent_", label: "agent updated", detail: `${ev.agent.scope}/${ev.agent.name} · ${ev.agent.state}` };
     case "agent_removed":
       return { at, kind: "agent_", label: "agent removed", detail: ev.id };
+    case "agent_configured":
+      return { at, kind: "agent_", label: "agent configured", detail: `${ev.scope}/${ev.name}` };
     case "agent_activity":
       return { at, kind: "runtime_", label: `${ev.agent} → ${ev.status}`, detail: `${ev.scope} · ${ev.subject}` };
     case "daemon_started":

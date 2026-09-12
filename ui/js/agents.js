@@ -7,6 +7,7 @@ import { scrim, closeModal, dropModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
+import { agentConfigurePayload } from "./agent-config.js";
 // The roster and the wiring open each other: the wiring builds the rail at
 // boot, and this is the other place /api/agents is refetched, which is the
 // only thing the rail's tree is made of. A cycle ES modules handle, because
@@ -112,6 +113,7 @@ export function renderAgents() {
         <code class="id" title="Stable scope ID">${esc(s.id)}</code>
         <span style="margin-left:auto"></span>
         <span class="sub">tasks default to ${esc(s.default_agent)} on ${esc(s.runtime)}, kept in ${esc(s.task_store)}</span>
+        ${state.scope === s.name ? `<button class="btn primary" data-act="configure" data-scope="${esc(s.name)}">New agent…</button>` : ""}
       </div>
       ${rows || `<div class="empty">No agents declared.</div>`}
     </div>`;
@@ -142,6 +144,8 @@ export async function agentAction(el) {
       return openAgent(el.dataset.id);
     } else if (act === "task") {
       return openCreate({ scope: el.dataset.scope, agent: el.dataset.agent });
+    } else if (act === "configure") {
+      return openAgentCreate(el.dataset.scope);
     } else if (act === "copy") {
       await navigator.clipboard.writeText(el.dataset.copy).catch(() => {});
       const was = el.textContent; el.textContent = "Copied"; setTimeout(() => { el.textContent = was; }, 1200);
@@ -151,6 +155,90 @@ export async function agentAction(el) {
     alert(e.message);
   }
   loadAgents();
+}
+
+export function openAgentCreate(scope) {
+  if (!scope || state.scope !== scope) return;
+  dropModal();
+  const adapters = state.adapters.map(adapter =>
+    `<option value="${esc(adapter)}">${esc(adapter)}</option>`).join("");
+  const roles = state.roles.map(role =>
+    `<option value="${esc(role.name)}" ${role.name === "worker" ? "selected" : ""} title="${esc(role.describe)}">${esc(role.name)}</option>`).join("");
+  scrim(`
+    <header><div><h2>New agent</h2><code class="id">${esc(scope)}</code></div>
+      <button class="x" id="na-close">&times;</button></header>
+    <div class="body">
+      <div class="grid2">
+        <div><label for="na-name">Name <span class="sub" style="text-transform:none">(blank = harness)</span></label>
+          <input id="na-name" placeholder="reviewer"></div>
+        <div><label for="na-harness">Harness</label>
+          <select id="na-harness">${adapters}</select></div>
+      </div>
+      <div class="grid2">
+        <div><label for="na-lifetime">Lifetime</label>
+          <select id="na-lifetime">
+            <option value="task">task</option>
+            <option value="temporary">temporary</option>
+            <option value="permanent">permanent</option>
+          </select></div>
+        <div><label for="na-role">Role</label>
+          <select id="na-role">${roles}</select></div>
+      </div>
+      <label for="na-autostart">Autostart</label>
+      <div class="checkrow">
+        <input type="checkbox" id="na-autostart" disabled>
+        <span id="na-autostart-note">Task agents start with their tasks.</span>
+      </div>
+      <label for="na-args">CLI arguments <span class="sub" style="text-transform:none">(one argument per line, in order)</span></label>
+      <textarea id="na-args" placeholder="--model&#10;opus"></textarea>
+      <div class="err" id="na-err"></div>
+      <div class="row-btns" style="margin-top:16px">
+        <button class="btn primary" id="na-create">Create agent</button>
+        <button class="btn" id="na-cancel">Cancel</button>
+      </div>
+    </div>`);
+  $("na-close").onclick = closeModal;
+  $("na-cancel").onclick = closeModal;
+  $("na-lifetime").onchange = syncAgentAutostart;
+  $("na-create").onclick = () => createAgent(scope);
+  $("na-name").focus();
+}
+
+function syncAgentAutostart() {
+  const lifetime = $("na-lifetime").value;
+  const autostart = $("na-autostart");
+  autostart.disabled = lifetime === "task";
+  autostart.checked = lifetime === "permanent";
+  $("na-autostart-note").textContent = lifetime === "task"
+    ? "Task agents start with their tasks."
+    : lifetime === "permanent"
+      ? "Start now and restart it if its session disappears."
+      : "Start it only when somebody asks.";
+}
+
+async function createAgent(scope) {
+  const button = $("na-create");
+  $("na-err").textContent = "";
+  try {
+    const payload = agentConfigurePayload(scope, {
+      name: $("na-name").value,
+      harness: $("na-harness").value,
+      lifetime: $("na-lifetime").value,
+      role: $("na-role").value,
+      autostart: $("na-autostart").checked,
+      arguments: $("na-args").value,
+    });
+    button.disabled = true;
+    await api("/api/agents/configure", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    closeModal();
+    await loadAgents();
+  } catch (e) {
+    button.disabled = false;
+    $("na-err").textContent = e.message;
+  }
 }
 
 export async function openAgent(id) {

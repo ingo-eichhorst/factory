@@ -158,7 +158,7 @@ rather than ignored, and so is an agent given a role the instance never defined
 — the message says which agent it was. The grants are:
 
     task.create  task.edit  task.delete  task.run  task.cancel  task.report
-    agent.start  agent.stop  agent.input  run.input
+    agent.start  agent.configure  agent.stop  agent.input  run.input
 
 Reading is not among them, because reading is open to every agent: one that
 cannot see the board cannot coordinate with anyone.
@@ -214,6 +214,17 @@ factory agent output demo/watcher
 factory agent input demo/watcher --text "how is it going?" --key enter
 factory agent role demo/watcher reviewer
 ```
+
+The roster can add a declaration to the scope currently selected in the rail.
+**New agent…** writes the declaration into that scope's own
+`.factory/config.yaml`; it does not create an in-memory-only agent or choose a
+scope while **All scopes** is selected. The running daemon adopts the saved
+declaration immediately, and a permanent declaration whose autostart box is on
+is brought up in the background. The `agent.configure` grant carries this
+write only to roles with scope reach; it ships with `foreman`, not `worker`.
+
+CLI arguments are entered one argument per line. A line such as `local model`
+is one argument, not two shell words, and their order is preserved in `args:`.
 
 Each standing agent also carries the command to get into its terminal yourself —
 `herdr --session factory agent attach factory-demo-watcher`. A shell session has

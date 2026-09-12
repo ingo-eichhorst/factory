@@ -32,9 +32,10 @@ fn runtime_name(scope: &str, name: &str) -> String {
 
 impl Engine {
     fn declared(&self, scope: &str, name: &str) -> Result<ScopeAgent> {
-        self.factory
+        let factory = self.factory_snapshot();
+        factory
             .scope(scope)?
-            .agents_with(&self.factory.config.daemon.foreman)
+            .agents_with(&factory.config.daemon.foreman)
             .into_iter()
             .find(|a| a.name() == name)
             .ok_or_else(|| {
@@ -43,11 +44,12 @@ impl Engine {
     }
 
     fn runtime_for(&self, scope: &str) -> String {
-        self.factory
+        let factory = self.factory_snapshot();
+        factory
             .scope(scope)
             .ok()
             .and_then(|s| s.runtime.clone())
-            .unwrap_or_else(|| self.factory.config.daemon.default_runtime.clone())
+            .unwrap_or_else(|| factory.config.daemon.default_runtime.clone())
     }
 
     /// The session already on file for `(canonical_scope, name)`, migrating
@@ -86,12 +88,13 @@ impl Engine {
     /// Bring a declared standing agent up. Idempotent: an agent already live is
     /// returned as it is rather than started twice.
     pub async fn start_agent(&self, scope: &str, name: &str) -> Result<AgentSession> {
+        let factory = self.factory_snapshot();
         // Canonical from here down, whatever the caller typed -- a bare name
         // from before a scope's identity became its path still resolves
         // (`Factory::scope`'s fallback), and a session started from it must
         // land under the same id reconciliation and the occupancy chart both
         // expect.
-        let scope = self.factory.scope(scope)?.name.clone();
+        let scope = factory.scope(scope)?.name.clone();
         let scope = scope.as_str();
 
         let decl = self.declared(scope, name)?;
@@ -111,7 +114,7 @@ impl Engine {
         let runtime_name_ = self.runtime_for(scope);
         let adapter = self.registry.agent(&decl.harness)?;
         let runtime = self.registry.runtime(&runtime_name_)?;
-        let cwd = self.factory.scope_path(scope)?;
+        let cwd = factory.scope_path(scope)?;
         if !cwd.is_dir() {
             return Err(FactoryError::BadRequest(format!(
                 "scope {scope:?} points at {}, which is not a directory",
@@ -147,7 +150,7 @@ impl Engine {
             scope: scope.to_string(),
             cwd: cwd.clone(),
             factory_bin: self.factory_bin.clone(),
-            socket: self.factory.socket_path(),
+            socket: factory.socket_path(),
             task: None,
             identity_token: Some(identity),
         };
@@ -341,11 +344,12 @@ impl Engine {
     /// after a restart or a config change. Three different things can be true
     /// and each needs its own answer.
     pub async fn reconcile_agents(self: &Arc<Self>) {
+        let factory = self.factory_snapshot();
         let stored = self.store.agents().await.unwrap_or_default();
         let mut seen = std::collections::BTreeSet::new();
 
-        for scope in &self.factory.config.scopes {
-            for decl in scope.standing_agents_with(&self.factory.config.daemon.foreman) {
+        for scope in &factory.config.scopes {
+            for decl in scope.standing_agents_with(&factory.config.daemon.foreman) {
                 let id = AgentSession::id_for(&scope.name, &decl.name());
                 let legacy_id = AgentSession::legacy_id_for(&scope.name, &decl.name());
                 seen.insert(id.clone());

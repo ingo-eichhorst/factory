@@ -41,7 +41,12 @@ pub(crate) fn append_declared_args(launch: &mut LaunchSpec, declaration: Option<
 }
 
 pub struct Engine {
-    pub factory: Factory,
+    /// The instance settings are stable, while a successful scope-config edit
+    /// replaces the affected scope in this snapshot. Readers clone it before
+    /// awaiting so no filesystem or runtime operation holds the lock.
+    factory: std::sync::RwLock<Factory>,
+    /// Serializes read-modify-write edits to local scope config files.
+    pub(crate) configuration_edit: std::sync::Mutex<()>,
     pub registry: Registry,
     /// Every role this instance knows, resolved once. Nothing asks the config
     /// again: two answers to "what may this agent do" is how they drift.
@@ -102,7 +107,8 @@ impl Engine {
             Roles::presets()
         });
         Self {
-            factory,
+            factory: std::sync::RwLock::new(factory),
+            configuration_edit: Default::default(),
             registry,
             roles,
             store,
@@ -114,6 +120,26 @@ impl Engine {
             site_walks: Default::default(),
             worktree_caps: Default::default(),
             site_memory: Default::default(),
+        }
+    }
+
+    /// A coherent configuration snapshot for one operation. A poisoned lock
+    /// still contains the last value; recovering it keeps a failed request
+    /// from taking the daemon down with it.
+    pub(crate) fn factory_snapshot(&self) -> Factory {
+        self.factory
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn replace_scope(&self, id: &str, replacement: factory_core::config::Scope) {
+        let mut factory = self
+            .factory
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(scope) = factory.config.scopes.iter_mut().find(|scope| scope.id == id) {
+            *scope = replacement;
         }
     }
 
@@ -183,6 +209,24 @@ impl Engine {
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),
             }),
+            Request::AgentConfigure { scope, agent } => {
+                let (scope, agent) = self.configure_agent(&scope, agent)?;
+                let name = agent.name();
+                let autostart = agent.lifetime.is_standing() && agent.autostart();
+                self.bus.publish(Event::AgentConfigured {
+                    scope: scope.clone(),
+                    name: name.clone(),
+                });
+                if autostart {
+                    let engine = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = engine.start_agent(&scope, &name).await {
+                            tracing::warn!(scope, name, "could not start newly configured agent: {error}");
+                        }
+                    });
+                }
+                Ok(Payload::Ok)
+            }
             Request::AgentStop { id } => Ok(Payload::Agent {
                 agent: self.stop_agent(&id).await?.redacted(),
             }),
@@ -323,18 +367,19 @@ impl Engine {
     }
 
     async fn status(&self) -> Result<StatusInfo> {
+        let factory = self.factory_snapshot();
         let tasks = self.store.list(&TaskFilter::default()).await?;
         Ok(StatusInfo {
-            instance: self.factory.config.instance.name.clone(),
-            instance_id: self.factory.config.instance.id.clone(),
-            root: self.factory.root.display().to_string(),
+            instance: factory.config.instance.name.clone(),
+            instance_id: factory.config.instance.id.clone(),
+            root: factory.root.display().to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_seconds: self.started.elapsed().as_secs(),
             tasks_total: tasks.len(),
             tasks_active: self.store.active_runs().await?.len(),
             subscribers: self.bus.subscriber_count(),
             interfaces: self.interfaces.clone(),
-            scopes: self.factory.scope_names(),
+            scopes: factory.scope_names(),
         })
     }
 
@@ -361,6 +406,7 @@ impl Engine {
     }
 
     pub(crate) async fn scope_views(&self) -> Result<(Vec<ScopeView>, Vec<String>)> {
+        let factory = self.factory_snapshot();
         let adapters = self.registry.list();
         let described: std::collections::BTreeMap<String, (String, String)> = adapters
             .adapters
@@ -393,7 +439,7 @@ impl Engine {
             // it.
             let scope = task
                 .as_ref()
-                .map(|t| self.factory.canonical_scope_name(&t.scope))
+                .map(|t| factory.canonical_scope_name(&t.scope))
                 .unwrap_or_default();
             work.entry((scope.clone(), run.agent.clone()))
                 .or_default()
@@ -413,10 +459,10 @@ impl Engine {
                 });
         }
 
-        let instance_default = self.factory.config.daemon.default_agent.clone();
+        let instance_default = factory.config.daemon.default_agent.clone();
         let mut views = Vec::new();
 
-        for scope in &self.factory.config.scopes {
+        for scope in &factory.config.scopes {
             let default_agent = scope
                 .agent_adapter()
                 .unwrap_or(&instance_default)
@@ -424,10 +470,9 @@ impl Engine {
             let runtime = scope
                 .runtime
                 .clone()
-                .unwrap_or_else(|| self.factory.config.daemon.default_runtime.clone());
-            let task_store = self.factory.task_store_for(&scope.name).to_string();
-            let scope_dir = self
-                .factory
+                .unwrap_or_else(|| factory.config.daemon.default_runtime.clone());
+            let task_store = factory.task_store_for(&scope.name).to_string();
+            let scope_dir = factory
                 .scope_path(&scope.name)
                 .unwrap_or_else(|_| scope.path.clone());
             let (worktree_capable, worktree_reason) = self.worktree_capability(&scope.name, &scope_dir).await;
@@ -435,7 +480,7 @@ impl Engine {
             let mut agents = Vec::new();
             let mut covered = std::collections::BTreeSet::new();
 
-            for decl in scope.agents_with(&self.factory.config.daemon.foreman) {
+            for decl in scope.agents_with(&factory.config.daemon.foreman) {
                 let name = decl.name();
                 // Runs are keyed by the name a task asked for, which is this
                 // name -- not the harness behind it. Key both sides the same
@@ -612,8 +657,9 @@ impl Engine {
         scope_name: &str,
         name: &str,
     ) -> Result<(String, String, Option<ScopeAgent>)> {
-        let scope = self.factory.scope(scope_name)?;
-        let declared_here = scope.agents_with(&self.factory.config.daemon.foreman);
+        let factory = self.factory_snapshot();
+        let scope = factory.scope(scope_name)?;
+        let declared_here = scope.agents_with(&factory.config.daemon.foreman);
         if let Some(declared) = declared_here.iter().find(|a| a.name() == name).cloned() {
             // The name resolves; the adapter behind it still has to exist.
             self.registry.agent(&declared.harness)?;
@@ -650,6 +696,7 @@ impl Engine {
     /// after creation, which would otherwise never fire because nothing
     /// recomputed when it is next due.
     pub async fn update(&self, id: &str, mut patch: TaskPatch) -> Result<Task> {
+        let factory = self.factory_snapshot();
         let current = self.require(id).await?;
         // The bookkeeping is the daemon's, not a caller's.
         patch.runs = None;
@@ -666,7 +713,7 @@ impl Engine {
             // paths still resolves (`Factory::scope`'s fallback), but writing
             // it back down unchanged would keep manufacturing the very
             // ambiguity that fallback exists to paper over.
-            patch.scope = Some(self.factory.scope(&scope)?.name.clone());
+            patch.scope = Some(factory.scope(&scope)?.name.clone());
         }
         match &patch.agent {
             Some(agent) => {
@@ -694,6 +741,7 @@ impl Engine {
     // -- creating ----------------------------------------------------------
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {
+        let factory = self.factory_snapshot();
         if new.title.trim().is_empty() {
             return Err(FactoryError::BadRequest("a task needs a title".into()));
         }
@@ -705,8 +753,7 @@ impl Engine {
 
         let scope = match new.scope.clone() {
             Some(s) => s,
-            None => self
-                .factory
+            None => factory
                 .config
                 .scopes
                 .first()
@@ -715,18 +762,18 @@ impl Engine {
                     FactoryError::BadRequest("no scope given and the instance declares none".into())
                 })?,
         };
-        let declared = self.factory.scope(&scope)?.clone();
+        let declared = factory.scope(&scope)?.clone();
 
         let agent = new
             .agent
             .clone()
             .or_else(|| declared.agent_adapter().map(str::to_string))
-            .unwrap_or_else(|| self.factory.config.daemon.default_agent.clone());
+            .unwrap_or_else(|| factory.config.daemon.default_agent.clone());
         let runtime = new
             .runtime
             .clone()
             .or_else(|| declared.runtime.clone())
-            .unwrap_or_else(|| self.factory.config.daemon.default_runtime.clone());
+            .unwrap_or_else(|| factory.config.daemon.default_runtime.clone());
 
         // Refuse now, with the list of what this scope offers, rather than at
         // dispatch time when whoever asked has stopped watching.
@@ -795,7 +842,8 @@ impl Engine {
             self.resolve_agent(&task.scope, &task.agent)?;
         let agent = self.registry.agent(&adapter_name)?;
         let runtime = self.registry.runtime(&task.runtime)?;
-        let scope_path = self.factory.scope_path(&task.scope)?;
+        let factory = self.factory_snapshot();
+        let scope_path = factory.scope_path(&task.scope)?;
         if !scope_path.is_dir() {
             return Err(FactoryError::BadRequest(format!(
                 "scope {:?} points at {}, which is not a directory",
@@ -841,7 +889,7 @@ impl Engine {
             scope: task.scope.clone(),
             cwd: cwd.clone(),
             factory_bin: self.factory_bin.clone(),
-            socket: self.factory.socket_path(),
+            socket: factory.socket_path(),
             task: Some(TaskBinding {
                 task: task.clone(),
                 run_id: run.id.clone(),
@@ -907,7 +955,7 @@ impl Engine {
             return Ok((scope_path.to_path_buf(), run));
         }
         let branch = worktree::branch_name(&task.id, &task.title, run.attempt);
-        let dir = self.factory.worktrees_dir().join(&run.id);
+        let dir = self.factory_snapshot().worktrees_dir().join(&run.id);
         worktree::create(scope_path, &dir, &branch)
             .await
             .map_err(|e| FactoryError::adapter("git", e))?;
@@ -1566,7 +1614,7 @@ mod tests {
         }
 
         let engine = test_engine(scope_dir.clone());
-        let root = engine.factory.root.clone();
+        let root = engine.factory_snapshot().root.clone();
         let task = engine
             .create(NewTask {
                 title: "do the thing".into(),
@@ -1594,7 +1642,7 @@ mod tests {
 
         let (cwd, run) = engine.place_run(&task, run, &scope_dir).await.unwrap();
         assert_ne!(cwd, scope_dir, "the checkbox is on, so this is not the scope itself");
-        assert_eq!(cwd, engine.factory.worktrees_dir().join(&run_id), "named after the run");
+        assert_eq!(cwd, engine.factory_snapshot().worktrees_dir().join(&run_id), "named after the run");
         assert!(cwd.join(".git").exists(), "a real worktree, not just a path");
         assert_eq!(run.worktree_path.as_deref(), Some(cwd.display().to_string().as_str()));
         assert!(

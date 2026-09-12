@@ -71,6 +71,7 @@ impl Engine {
         let earliest_fetch = from.min(year_from);
 
         let tasks = self.store.list(&Default::default()).await?;
+        let factory = self.factory_snapshot();
         // Canonicalized, the same way `occupancy.rs` canonicalizes this same
         // join: a task written before a scope's identity became its path
         // still carries the bare name it was given, and a request narrowed to
@@ -79,7 +80,7 @@ impl Engine {
         // `finished_in_scope` -- and its own tests -- expect.
         let canonical_scopes: Vec<String> = tasks
             .iter()
-            .map(|t| self.factory.canonical_scope_name(&t.scope))
+            .map(|t| factory.canonical_scope_name(&t.scope))
             .collect();
         let scope_of: BTreeMap<&str, &str> = tasks
             .iter()

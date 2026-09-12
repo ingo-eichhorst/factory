@@ -299,8 +299,9 @@ impl Engine {
     /// filesystem walk is paid exactly once per scope a local config opted in.
     pub async fn site_footprint(self: &Arc<Self>) -> Result<SiteFootprint> {
         let activity = self.scope_activity().await?;
+        let factory = self.factory_snapshot();
         let mut scopes = Vec::new();
-        for name in self.factory.scope_names() {
+        for name in factory.scope_names() {
             let measured = self.measure_scope(&name).await?;
             let activity = activity.get(&name).copied().unwrap_or_default();
             let previous = self.site_memory.lock().unwrap().get(&name).copied();
@@ -336,7 +337,7 @@ impl Engine {
                 return Ok(measured.clone());
             }
         }
-        let path = self.factory.scope_path(name)?;
+        let path = self.factory_snapshot().scope_path(name)?;
         let walk = tokio::task::spawn_blocking(move || walk_scope(&path))
             .await
             .unwrap_or(None);
@@ -354,8 +355,9 @@ impl Engine {
     /// lookup per run, which is what `scope_views` pays to answer a different
     /// question.
     async fn scope_activity(self: &Arc<Self>) -> Result<BTreeMap<String, Activity>> {
+        let factory = self.factory_snapshot();
         let mut out: BTreeMap<String, Activity> = BTreeMap::new();
-        for scope in &self.factory.config.scopes {
+        for scope in &factory.config.scopes {
             // Capacity is what the scope *declares*, never how many agents
             // happen to be up: a hall whose only agent is down is a hall with
             // work it cannot start, and dividing by the agents present would
@@ -364,7 +366,7 @@ impl Engine {
                 scope.name.clone(),
                 Activity {
                     declared_agents: scope
-                        .agents_with(&self.factory.config.daemon.foreman)
+                        .agents_with(&factory.config.daemon.foreman)
                         .len() as u32,
                     ..Default::default()
                 },

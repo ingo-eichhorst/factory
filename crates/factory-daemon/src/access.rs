@@ -112,10 +112,11 @@ impl Engine {
     /// The role the config gives an agent. An agent nobody named -- a one-off
     /// `--agent claude-code` -- is a worker.
     pub fn role_of(&self, scope: &str, name: &str) -> Role {
-        self.factory
+        let factory = self.factory_snapshot();
+        factory
             .scope(scope)
             .ok()
-            .map(|s| s.agents_with(&self.factory.config.daemon.foreman))
+            .map(|s| s.agents_with(&factory.config.daemon.foreman))
             .unwrap_or_default()
             .into_iter()
             .find(|a| a.name() == name)
@@ -162,6 +163,7 @@ impl Engine {
             Request::TaskCancel { .. } => Grant::TaskCancel,
             Request::TaskReport { .. } => Grant::TaskReport,
             Request::AgentStart { .. } => Grant::AgentStart,
+            Request::AgentConfigure { .. } => Grant::AgentConfigure,
             Request::AgentStop { .. } => Grant::AgentStop,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
@@ -296,6 +298,11 @@ impl Engine {
                 Reach::Own => Err(deny("start an agent other than itself")),
             },
 
+            Request::AgentConfigure { scope: s, .. } => match def.reach {
+                Reach::Scope => in_scope(s),
+                Reach::Own => Err(deny("configure an agent declaration")),
+            },
+
             Request::AgentStop { id } | Request::AgentInput { id, .. } => match def.reach {
                 Reach::Scope => match self.store.get_agent(id).await? {
                     Some(agent) => in_scope(&agent.scope),
@@ -334,7 +341,7 @@ mod tests {
     use crate::engine::Engine;
     use chrono::Utc;
     use factory_core::agent::Lifetime;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance};
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance, ScopeAgent};
     use factory_core::run::{NewRun, RunStatus, Trigger};
     use factory_core::task::{NewTask, Task, TaskPatch, TaskReport, TaskStatus};
     use factory_plugins::registry::Registry;
@@ -474,6 +481,10 @@ mod tests {
         }
     }
 
+    fn declaration() -> ScopeAgent {
+        serde_yaml_ng::from_str("name: reviewer\nharness: pi\nlifetime: task\n").unwrap()
+    }
+
     fn titled(title: &str) -> TaskPatch {
         TaskPatch {
             title: Some(title.into()),
@@ -496,6 +507,10 @@ mod tests {
             Request::AgentStart {
                 scope: "other".into(),
                 name: "x".into(),
+            },
+            Request::AgentConfigure {
+                scope: "other".into(),
+                agent: declaration(),
             },
         ] {
             assert!(allowed(&e, &Caller::Owner, request).await);
@@ -712,6 +727,10 @@ mod tests {
                 scope: "demo".into(),
                 name: "w".into(),
             },
+            Request::AgentConfigure {
+                scope: "demo".into(),
+                agent: declaration(),
+            },
             Request::AgentStop {
                 id: "demo/w".into(),
             },
@@ -761,6 +780,10 @@ mod tests {
                 scope: "demo".into(),
                 name: "w".into(),
             },
+            Request::AgentConfigure {
+                scope: "demo".into(),
+                agent: declaration(),
+            },
             Request::RunInput {
                 id: run,
                 text: Some("hi".into()),
@@ -805,6 +828,10 @@ mod tests {
             Request::AgentStart {
                 scope: "other".into(),
                 name: "w".into(),
+            },
+            Request::AgentConfigure {
+                scope: "other".into(),
+                agent: declaration(),
             },
             Request::RunInput {
                 id: run,
@@ -863,6 +890,21 @@ mod tests {
             )
             .await
         );
+    }
+
+    #[tokio::test]
+    async fn configuring_agents_requires_scope_reach() {
+        let e = engine_with_roles(
+            "roles:\n  self-editor:\n    grants: [agent.configure]\n    reach: own\n  scope-editor:\n    grants: [agent.configure]\n    reach: scope\n",
+        );
+        let request = |scope: &str| Request::AgentConfigure {
+            scope: scope.into(),
+            agent: declaration(),
+        };
+
+        assert!(!allowed(&e, &wearing("self-editor"), request("demo")).await);
+        assert!(allowed(&e, &wearing("scope-editor"), request("demo")).await);
+        assert!(!allowed(&e, &wearing("scope-editor"), request("other")).await);
     }
 
     #[tokio::test]

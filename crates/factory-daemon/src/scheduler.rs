@@ -10,10 +10,11 @@ use std::time::Duration;
 use crate::engine::Engine;
 
 pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-    let tick = Duration::from_secs(engine.factory.config.daemon.tick_seconds.max(1));
-    let default_timeout = engine.factory.config.daemon.task_timeout_seconds as i64;
-    let default_ack = engine.factory.config.daemon.ack_timeout_seconds as i64;
-    let default_blocked = engine.factory.config.daemon.blocked_timeout_seconds as i64;
+    let factory = engine.factory_snapshot();
+    let tick = Duration::from_secs(factory.config.daemon.tick_seconds.max(1));
+    let default_timeout = factory.config.daemon.task_timeout_seconds as i64;
+    let default_ack = factory.config.daemon.ack_timeout_seconds as i64;
+    let default_blocked = factory.config.daemon.blocked_timeout_seconds as i64;
     let mut ticker = tokio::time::interval(tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
