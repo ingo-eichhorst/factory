@@ -132,4 +132,21 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn dashboard_menu_owns_the_requested_views_in_order() {
+        let dashboard = super::INDEX_HTML
+            .find("id=\"lv-dash\"")
+            .expect("Dashboard primary menu");
+        let l6 = super::INDEX_HTML.find("id=\"lv-dir\"").expect("L6 menu");
+        assert!(dashboard < l6, "Dashboard should be a peer before L6-L1");
+
+        let tabs = ["tab-dashboard", "tab-site", "tab-activity", "tab-inbox"];
+        let positions: Vec<_> = tabs
+            .iter()
+            .map(|id| super::INDEX_HTML.find(&format!("id=\"{id}\"")).expect(id))
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(super::INDEX_HTML.contains("id=\"view-inbox\""));
+    }
 }

@@ -30,11 +30,9 @@
 //! already is that view -- a tail of what this page has seen since it opened,
 //! carrying its own "not an archive" banner (`activity.js`) -- and a second
 //! copy on the dashboard would either repeat it one click away or have to
-//! become the event store this prototype does not have. Needs-attention stays
-//! the one place blocked/failed/cancelled/overdue work is collected.
-//!
-//! The inbox lives inside this view, not beside it: a task the agent cannot
-//! finish alone is a dashboard fact before it is anything else. `blocked` is a
+//! become the event store this prototype does not have. Needs-attention has its
+//! own Inbox view, where blocked/failed/cancelled/overdue work is collected.
+//! A task the agent cannot finish alone is an operational fact. `blocked` is a
 //! real, first-class status -- "the agent needs a human before it can go on"
 //! (`task.rs`) -- set the only way a status ever is, by the agent calling
 //! `factory task report`. It sits beside failures and cancellations, newest
@@ -47,8 +45,6 @@ import { $, esc, api, state, since } from "./core.js";
 import { inScope, scopeLabel } from "./scopes.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
-
-const INBOX_LIMIT = 10;
 
 /// The three presets the window selector offers. `bin` travels with every
 /// request rather than being guessed from `minutes` server-side, so a caller
@@ -128,17 +124,12 @@ export function renderDashboard() {
     </div>
     ${productionYear(prod, everFinished)}
     <div class="drow">
-      <section class="dcard">
+      <section class="dcard wide">
         <h3>By scope<span class="r">${scopes.length} scope${scopes.length === 1 ? "" : "s"}</span></h3>
         ${byScopeTable(tasks, scopes)}
       </section>
-      <section class="dcard">
-        <h3>Needs attention<span class="r">nothing here is something an agent may decide for itself</span></h3>
-        <div id="dash-inbox"></div>
-      </section>
     </div>`;
 
-  renderInbox(tasks);
   wireCalToggle();
 
   // Restore scroll after the new `.calwrap` (if any -- a card with nothing
@@ -493,10 +484,10 @@ function inboxItems(tasks) {
   return out;
 }
 
-function renderInbox(tasks) {
-  const host = $("dash-inbox");
+export function renderInbox(tasks) {
+  const host = $("inbox");
   if (!host) return;
-  const items = inboxItems(tasks).slice(0, INBOX_LIMIT);
+  const items = inboxItems(tasks);
   if (!items.length) {
     host.innerHTML = `<div class="empty">Nothing waiting on a person right now.</div>`;
     return;

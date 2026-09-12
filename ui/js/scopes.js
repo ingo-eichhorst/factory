@@ -48,7 +48,7 @@ export function setRouter(r) {
 }
 
 let onSelect = () => {};
-/// Which of the five views hangs off each live level -- app.js's, handed in
+/// Which views hang off each primary-menu entry -- app.js's, handed in
 /// through `initRail` rather than imported, so the assignment stays the one
 /// map app.js owns and this file never has to know a view by name beyond the
 /// strings the hash is written in. Read by `readHash`/`writeHash` to fill in
@@ -223,10 +223,8 @@ export function initRail(onChange, levelViewsMap) {
 
 /// The live level whose view list names `page` -- the fallback for a hash with
 /// no level segment, or one that names a level nothing owns. `levelViews`
-/// iterates in the order `app.js` wrote it, so a view listed under more than
-/// one level (Dashboard, Site plan) resolves to whichever level comes first
-/// in that map -- L4 today. That ordering is load-bearing: reorder the map
-/// and a bare `#scope/dashboard` link starts landing under a different level.
+/// iterates in the order `app.js` wrote it; each view has one owner today,
+/// making old bare `#scope/page` links land under the right primary entry.
 function levelForPage(page) {
   for (const level of Object.keys(levelViews)) {
     if (levelViews[level].includes(page)) return level;
