@@ -13,6 +13,88 @@ export function scheduleLabel(s) {
   return "scheduled";
 }
 
+// -------------------------------------------------------------- the shape
+// Kanban or table, remembered per browser the same way the theme is: a live
+// value here, seeded once from `localStorage` and best-effort mirrored back
+// to it. A browser that refuses storage still switches, it just forgets by
+// the next visit.
+const VIEW_KEY = "factory-tasks-view";
+let tasksView = "board";
+try { if (localStorage.getItem(VIEW_KEY) === "table") tasksView = "table"; }
+catch (e) { /* private window */ }
+
+export function currentTasksView() { return tasksView; }
+
+/// Which container shows, and which button looks pressed. No data here --
+/// that is `renderTasks`'s business, so this alone can run before the first
+/// task ever loads.
+export function applyTasksView(view) {
+  tasksView = view === "table" ? "table" : "board";
+  $("tasks-table").hidden = tasksView !== "table";
+  $("kanban").hidden = tasksView !== "board";
+  for (const b of $("tasks-view").querySelectorAll("button")) b.classList.toggle("on", b.dataset.view === tasksView);
+}
+
+export function setTasksView(view) {
+  applyTasksView(view);
+  try { localStorage.setItem(VIEW_KEY, tasksView); } catch (e) { /* private window */ }
+  renderTasks();
+}
+
+// -------------------------------------------------------------- the board
+// Columns are `TaskStatus` and nothing else. Blocked is first because it is
+// the one column a person has to act on; pending splits by how it will
+// start, so a scheduled task never sits in the same pile as a manual one;
+// dispatching and running share a column because a session still opening is
+// not yet work; done, failed and cancelled share a closed column, but each
+// card says its outcome plainly so a failure cannot read as done.
+const KANBAN_COLUMNS = [
+  { key: "blocked", label: "Blocked" },
+  { key: "manual", label: "Manual" },
+  { key: "scheduled", label: "Scheduled" },
+  { key: "active", label: "In progress" },
+  { key: "closed", label: "Closed" },
+];
+
+function columnFor(t) {
+  if (t.status === "blocked") return "blocked";
+  if (t.status === "pending") return t.schedule ? "scheduled" : "manual";
+  if (t.status === "dispatching" || t.status === "running") return "active";
+  return "closed";
+}
+
+/// Only what `/api/tasks` already serves: title, short id, status, scope,
+/// agent, the schedule rule or the run count, and how long the newest run
+/// has been going. No estimate -- there is no template here to read one from.
+function taskCard(t) {
+  const bits = [];
+  bits.push(t.schedule ? scheduleLabel(t.schedule) : (t.runs ? `${t.runs} run${t.runs === 1 ? "" : "s"}` : "no runs yet"));
+  if (!TERMINAL.includes(t.status) && t.status !== "pending" && t.last_run_at) bits.push(since(t.last_run_at));
+  return `
+    <div class="kbc" data-id="${esc(t.id)}">
+      <div class="kbc-top">${statusBadge(t.status)}<code class="id">${esc(t.id.slice(0, 8))}</code></div>
+      <div class="title">${esc(t.title)}</div>
+      <div class="sub">${esc(t.scope)} · ${esc(t.agent)}</div>
+      <div class="sub">${esc(bits.join(" · "))}</div>
+    </div>`;
+}
+
+function renderBoard(rows) {
+  const byCol = new Map(KANBAN_COLUMNS.map(c => [c.key, []]));
+  for (const t of rows) byCol.get(columnFor(t)).push(t);
+  $("kanban").innerHTML = KANBAN_COLUMNS.map(c => {
+    const items = byCol.get(c.key);
+    return `
+      <div class="kbcol" data-col="${c.key}">
+        <div class="kbcol-head"><span>${esc(c.label)}</span><span class="kbcol-count">${items.length}</span></div>
+        <div class="kbcol-body">${items.length ? items.map(taskCard).join("") : `<div class="kbcol-empty">—</div>`}</div>
+      </div>`;
+  }).join("");
+  for (const el of $("kanban").querySelectorAll(".kbc")) {
+    el.onclick = () => openTask(el.dataset.id);
+  }
+}
+
 export function renderTasks() {
   const rows = [...state.tasks.values()].sort((a, b) => b.created_at.localeCompare(a.created_at));
   $("noTasks").hidden = rows.length > 0;
@@ -28,6 +110,11 @@ export function renderTasks() {
   for (const tr of $("tasks").querySelectorAll("tr.row")) {
     tr.onclick = () => openTask(tr.dataset.id);
   }
+
+  renderBoard(rows);
+  // Six empty columns say less than one sentence: with nothing to show, the
+  // board steps aside for the same "Nothing here yet." the table already has.
+  if (tasksView === "board") $("kanban").hidden = rows.length === 0;
 }
 
 export async function openTask(id, runId) {
