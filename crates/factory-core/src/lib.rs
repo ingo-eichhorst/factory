@@ -4,6 +4,7 @@
 
 pub mod adapter;
 pub mod agent;
+pub mod building;
 pub mod config;
 pub mod error;
 pub mod event;

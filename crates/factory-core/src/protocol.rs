@@ -3,6 +3,7 @@
 //! third interface means translating to this, not inventing a new API.
 
 use crate::adapter::Screen;
+use crate::building::{Activity, Cues, RepoMetrics, Shape};
 use crate::agent::AgentSession;
 use crate::event::Event;
 use crate::occupancy::Occupancy;
@@ -388,6 +389,22 @@ pub struct ScopeFootprint {
     /// its neighbours, not enough for the floor's proportions to be trusted,
     /// so the hall has to say "partial" rather than draw them as exact.
     pub truncated: bool,
+    /// The same walk's counts, gathered into the shape the size mapping
+    /// takes: files, source files, bytes and the directories holding them.
+    /// `bytes` and `truncated` repeat what is above rather than being read
+    /// from it, so that `building::size_score` has one whole input and no
+    /// caller can hand it half of one.
+    #[serde(default)]
+    pub metrics: RepoMetrics,
+    /// What that size makes the building: its tier, its floors, its footprint
+    /// in tenths of a grid unit, and the window bays on a face. Structure
+    /// only -- nothing here moves when a run starts.
+    pub shape: Shape,
+    /// What Factory is doing in the scope right now.
+    pub activity: Activity,
+    /// What that activity lights: how far up the building, what the roof
+    /// beacon says, how fast it beats. Emissive only -- no dimensions.
+    pub cues: Cues,
 }
 
 /// One top-level entry of a scope's root, as the floor treemap draws it. A

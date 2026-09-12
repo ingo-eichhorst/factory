@@ -40,6 +40,25 @@ pub struct Engine {
     /// no change writes nothing. Lost on restart, which is right: after a
     /// restart the first observation is genuinely new information.
     pub(crate) seen_status: std::sync::Mutex<std::collections::HashMap<String, RuntimeStatus>>,
+    /// The last walk of each scope's directory, with when it was taken. The
+    /// site view asks for a scope's size on every run and agent event now, and
+    /// a repository does not change size between two of them -- see
+    /// `site::WALK_TTL`.
+    pub(crate) site_walks:
+        std::sync::Mutex<std::collections::HashMap<String, (Instant, crate::site::Measured)>>,
+    /// The tier and activity level each hall was last drawn at, which is what
+    /// makes both steps sticky instead of flipping whenever a metric sits on a
+    /// threshold. Lost on restart, like `seen_status`, and for the same
+    /// reason: the first answer after one is genuinely new.
+    pub(crate) site_memory: std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            (
+                factory_core::building::Tier,
+                factory_core::building::ActivityLevel,
+            ),
+        >,
+    >,
 }
 
 impl Engine {
@@ -67,6 +86,8 @@ impl Engine {
             started: Instant::now(),
             interfaces,
             seen_status: Default::default(),
+            site_walks: Default::default(),
+            site_memory: Default::default(),
         }
     }
 
