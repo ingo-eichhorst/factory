@@ -91,8 +91,8 @@ export function renderDashboard() {
   if (!scopes.length) {
     el.innerHTML = state.scope
       ? `<div class="empty">Nothing in ${esc(scopeLabel())}.</div>`
-      : `<div class="empty">This instance declares no scopes yet. Add one to
-      <code>.factory/config.yaml</code> and the dashboard, the activity log and the site plan all
+      : `<div class="empty">This instance has no configured scopes yet. Add a scope block to a
+      directory's <code>.factory/config.yaml</code> and the dashboard, activity log, and site plan
       have something to draw -- right now there is nothing to show but this sentence.</div>`;
     return;
   }

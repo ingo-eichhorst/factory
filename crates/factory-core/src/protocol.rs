@@ -344,6 +344,8 @@ pub struct RoleView {
 /// A scope and everything that runs in it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeView {
+    /// Stable identity from this scope's local Factory config.
+    pub id: String,
     pub name: String,
     pub path: String,
     /// The adapter a task here runs on unless it says otherwise.

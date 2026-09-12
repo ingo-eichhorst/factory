@@ -43,10 +43,8 @@ use crate::engine::Engine;
 /// control. Walking into them would measure `node_modules`, not the project.
 /// Shared with `discovery.rs`, which walks the same tree for a different
 /// reason and must stay out of the same directories for the same reason --
-/// doubly so for `FACTORY_DIR` there: "nothing Factory owns is written
-/// inside a scope" (`AGENTS.md`) is not just a rule about writes. A scope
-/// discovery could hand out for `.factory` itself would be a place a task
-/// could be given to run an agent against the daemon's own database.
+/// `FACTORY_DIR` is inspected as a scope marker by discovery but never walked:
+/// configuration and instance state beneath it are not child scopes.
 pub(crate) const SKIP: &[&str] = &[
     FACTORY_DIR,
     ".git",
@@ -297,12 +295,8 @@ impl Engine {
     /// memory as `seen_status`, and lost on restart for the same reason: after
     /// a restart the first answer is genuinely new.
     ///
-    /// Declared scopes only, deliberately: discovery can turn a real project
-    /// into thousands of scopes nested inside one another, and a footprint
-    /// walk per one of them would mean walking the same tree that many times
-    /// over. A hall for an undeclared scope draws at the default size and
-    /// says its footprint was not recorded -- the same fallback the protocol
-    /// already documents for a directory the daemon simply could not read.
+    /// Configured scopes only. Ordinary directories are not halls, so the
+    /// filesystem walk is paid exactly once per scope a local config opted in.
     pub async fn site_footprint(self: &Arc<Self>) -> Result<SiteFootprint> {
         let activity = self.scope_activity().await?;
         let mut scopes = Vec::new();
@@ -665,6 +659,7 @@ mod tests {
             version: 1,
             instance: Instance { id: "i".into(), name: "test".into() },
             daemon: DaemonConfig::default(),
+            scope: None,
             scopes: vec![serde_yaml_ng::from_str(&format!(
                 "name: demo\npath: {}\n",
                 path.display()

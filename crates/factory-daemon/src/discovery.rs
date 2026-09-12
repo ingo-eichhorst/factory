@@ -1,52 +1,41 @@
-//! Every directory under the instance root becomes a scope, so the rail can
-//! select a directory nobody wrote into the config -- `projects`, on the
-//! instance that builds this repo, which only ever held other directories
-//! and so was furniture in the tree rather than a place work could be given
-//! to.
+//! Scope discovery is marker-based: a directory becomes a scope only when its
+//! own `.factory/config.yaml` contains a `scope:` block. The file carries the
+//! stable identity and runtime configuration; its containing directory is the
+//! working path.
 //!
-//! Bounded three ways, on purpose: `SKIP` and `ENTRY_CAP` are `site.rs`'s own
-//! (a walk has to stay out of dependency trees and answer in bounded time
-//! for the same reason regardless of what it is walking for), and
-//! `DEPTH_LIMIT` is new -- without it, "every folder" means every folder
-//! inside `node_modules` too, the moment a walk ever gets that deep, and the
-//! rail becomes unusable on the first real project anyone points it at.
-//!
-//! What this does not do: give a discovered directory an agent, a runtime
-//! override, or a foreman. Those stay exactly what `scopes:` says. A
-//! discovered `Scope` runs on defaults until an entry there overlays onto
-//! it -- see `Scope::discovered` and `apply` below.
+//! The walk is bounded three ways. `SKIP` and `ENTRY_CAP` are shared with the
+//! site walk so dependencies and build products cannot dominate startup, and
+//! `DEPTH_LIMIT` prevents an unfamiliar tree from becoming unbounded. A
+//! `.factory` directory is inspected as a marker but never traversed: the
+//! instance root's runtime state and a scope's configuration are not scopes
+//! beneath that scope.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use factory_core::config::{scope_identity, Factory, Scope};
+use factory_core::config::{Factory, Scope, CONFIG_FILE, FACTORY_DIR};
+use factory_core::error::{FactoryError, Result};
+use serde::Deserialize;
 
 use crate::site::{ENTRY_CAP, SKIP};
 
-/// How many path segments below the instance root a directory can be and
-/// still become a scope. Four is deep enough for the shape a real monorepo
-/// actually has -- `projects/<repo>/crates/<one>` is already four deep -- and
-/// shallow enough that a tree with no `SKIP` entry of its own (a language
-/// this instance has never heard of, say) still cannot turn into an unbounded
-/// number of rows nobody asked for.
+/// How many path segments below the instance root discovery will inspect.
 pub const DEPTH_LIMIT: usize = 4;
 
-/// Every directory at or under `root`, root included, breadth-first -- so a
-/// shallow directory is always found before anything nested in it, which is
-/// what lets `apply` below match the shallower one first on a path collision.
-/// Bounded by `SKIP` (kept out of dependency trees), `entry_cap` (answers in
-/// bounded time), and `DEPTH_LIMIT` (a deep tree stays a small number of
-/// rows). `entry_cap` is a parameter rather than always `site::ENTRY_CAP` so
-/// a test can set it low without creating tens of thousands of files, the way
-/// `site.rs`'s own cap test has to.
+/// Directories at or below `root` that contain a Factory config marker. The
+/// result includes `root` when it has one, is breadth-first, and is bounded by
+/// the same exclusions and entry cap as the site walk.
 pub fn walk(root: &Path, entry_cap: usize) -> Vec<PathBuf> {
-    let mut found = vec![root.to_path_buf()];
+    let mut found = Vec::new();
     let mut visited = 0usize;
     let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
     queue.push_back((root.to_path_buf(), 0));
 
     while let Some((dir, depth)) = queue.pop_front() {
+        if dir.join(FACTORY_DIR).join(CONFIG_FILE).is_file() {
+            found.push(dir.clone());
+        }
         if depth >= DEPTH_LIMIT {
             continue;
         }
@@ -64,94 +53,118 @@ pub fn walk(root: &Path, entry_cap: usize) -> Vec<PathBuf> {
             let Ok(meta) = entry.metadata() else {
                 continue;
             };
-            if !meta.is_dir() {
-                continue;
+            if meta.is_dir() {
+                queue.push_back((entry.path(), depth + 1));
             }
-            let path = entry.path();
-            found.push(path.clone());
-            queue.push_back((path, depth + 1));
         }
     }
     found
 }
 
-/// `path`, resolved against `root` the way `Factory::scope_path` resolves a
-/// scope's own path -- absolute paths kept as they are, everything else
-/// joined onto the root.
-fn absolute(root: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root.join(path)
-    }
-}
-
-/// Best-effort canonical form, for comparing two paths that might reach the
-/// same directory through a symlink -- `/tmp` resolving to `/private/tmp` on
-/// macOS is the case that bites if only one side of a comparison is
-/// resolved. Falls back to the path as given when it cannot be resolved (it
-/// does not exist yet, or the daemon cannot read one of its parents), which
-/// keeps a scope pointed at a not-yet-created directory from vanishing from
-/// the merge entirely.
 fn canonical(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Turn every directory under the instance root into a scope, then let each
-/// `scopes:` entry make its own directory special. Declared entries keep
-/// their place and go first, in the order they were written -- `create`'s
-/// no-scope default is the first scope, and the site plan lays halls out in
-/// list order, and neither should move just because a big tree added
-/// thousands of undeclared ones after them.
-///
-/// An existing config is not edited for this: every scope it already names
-/// keeps meaning the same directory, just under the identity that directory
-/// gets from `scope_identity` now rather than the bare name that used to be
-/// the whole of it. That rename is exactly what `Factory::scope`'s bare-name
-/// fallback exists to paper over for anything already written down under the
-/// old one.
-pub fn apply(factory: &mut Factory) {
-    let root = factory.root.clone();
-    let root_canon = canonical(&root);
+fn relative_path(root: &Path, dir: &Path) -> PathBuf {
+    let rel = dir.strip_prefix(root).unwrap_or(dir);
+    if rel.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        rel.to_path_buf()
+    }
+}
 
-    let declared = std::mem::take(&mut factory.config.scopes);
-    let mut claimed: HashSet<PathBuf> = HashSet::new();
-    let mut resolved: Vec<Scope> = Vec::with_capacity(declared.len());
-    for mut scope in declared {
-        let abs = canonical(&absolute(&root, &scope.path));
-        claimed.insert(abs.clone());
-        scope.name = scope_identity(&root_canon, &abs, &scope.name);
-        scope.declared = true;
-        resolved.push(scope);
+#[derive(Deserialize)]
+struct ScopeFile {
+    scope: Scope,
+}
+
+fn read_scope(path: &Path) -> Result<Scope> {
+    let text = fs::read_to_string(path).map_err(|e| {
+        FactoryError::Other(anyhow::anyhow!(
+            "reading scope config {}: {e}",
+            path.display()
+        ))
+    })?;
+    let file: ScopeFile = serde_yaml_ng::from_str(&text).map_err(|e| {
+        FactoryError::Other(anyhow::anyhow!(
+            "parsing scope config {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(file.scope)
+}
+
+fn validate_identity(scope: &Scope, path: &Path) -> Result<()> {
+    if scope.id.trim().is_empty() {
+        return Err(FactoryError::BadRequest(format!(
+            "scope config {} has no scope.id",
+            path.display()
+        )));
+    }
+    if scope.name.trim().is_empty() {
+        return Err(FactoryError::BadRequest(format!(
+            "scope config {} has no scope.name",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Replace the runtime scope list with the configs found in scope directories.
+/// The root scope has already been parsed as part of `Factory::load`; nested
+/// files are parsed here. Duplicate names or stable IDs are refused with both
+/// source files named, before any engine or standing agent starts.
+pub fn apply(factory: &mut Factory) -> Result<()> {
+    let root = canonical(&factory.root);
+    let mut scopes = Vec::new();
+    let mut ids: HashMap<String, PathBuf> = HashMap::new();
+    let mut names: HashMap<String, PathBuf> = HashMap::new();
+
+    for dir in walk(&root, ENTRY_CAP) {
+        let config_path = dir.join(FACTORY_DIR).join(CONFIG_FILE);
+        let mut scope = if dir == root {
+            let Some(scope) = factory.config.scope.clone() else {
+                // An older instance config may not opt the root itself into
+                // being a scope. It still anchors discovery for nested ones.
+                continue;
+            };
+            scope
+        } else {
+            read_scope(&config_path)?
+        };
+
+        validate_identity(&scope, &config_path)?;
+        if let Some(first) = ids.insert(scope.id.clone(), config_path.clone()) {
+            return Err(FactoryError::BadRequest(format!(
+                "duplicate scope id {:?} in {} and {}",
+                scope.id,
+                first.display(),
+                config_path.display()
+            )));
+        }
+        if let Some(first) = names.insert(scope.name.clone(), config_path.clone()) {
+            return Err(FactoryError::BadRequest(format!(
+                "duplicate scope name {:?} in {} and {}",
+                scope.name,
+                first.display(),
+                config_path.display()
+            )));
+        }
+
+        scope.path = relative_path(&root, &dir);
+        scopes.push(scope);
     }
 
-    let mut discovered: Vec<Scope> = walk(&root_canon, ENTRY_CAP)
-        .into_iter()
-        .filter(|abs| !claimed.contains(abs))
-        .map(|abs| {
-            let rel = abs.strip_prefix(&root_canon).unwrap_or(&abs);
-            let path = if rel.as_os_str().is_empty() {
-                PathBuf::from(".")
-            } else {
-                rel.to_path_buf()
-            };
-            let fallback = abs
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| factory.config.instance.name.clone());
-            let name = scope_identity(&root_canon, &abs, &fallback);
-            Scope::discovered(name, path)
-        })
-        .collect();
-    discovered.sort_by(|a, b| a.path.cmp(&b.path));
-
-    resolved.extend(discovered);
-    factory.config.scopes = resolved;
+    scopes.sort_by(|a, b| a.path.cmp(&b.path));
+    factory.config.scopes = scopes;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use factory_core::config::{Config, DaemonConfig, Instance};
 
     struct Scratch(PathBuf);
     impl Scratch {
@@ -170,11 +183,42 @@ mod tests {
         fn path(&self) -> PathBuf {
             canonical(&self.0)
         }
+        fn write_scope(&self, rel: &str, yaml: &str) -> PathBuf {
+            let dir = self.path().join(rel).join(FACTORY_DIR);
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(CONFIG_FILE);
+            fs::write(&path, yaml).unwrap();
+            path
+        }
     }
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn factory(root: &Path, root_scope: Option<Scope>) -> Factory {
+        let mut legacy = configured("legacy-id", "legacy-central-entry");
+        legacy.path = PathBuf::from("ordinary");
+        Factory {
+            root: root.to_path_buf(),
+            config: Config {
+                version: 1,
+                instance: Instance {
+                    id: "instance-id".into(),
+                    name: "instance".into(),
+                },
+                daemon: DaemonConfig::default(),
+                scope: root_scope,
+                scopes: vec![legacy],
+                roles: Default::default(),
+                plugins_dir: None,
+            },
+        }
+    }
+
+    fn configured(id: &str, name: &str) -> Scope {
+        serde_yaml_ng::from_str(&format!("id: {id}\nname: {name}\n")).unwrap()
     }
 
     fn rel(root: &Path, found: &[PathBuf]) -> Vec<String> {
@@ -194,158 +238,141 @@ mod tests {
     }
 
     #[test]
-    fn the_walk_finds_the_root_and_every_directory_under_it() {
-        let s = Scratch::new("basic");
-        fs::create_dir_all(s.path().join("projects/demo/src/inner")).unwrap();
-        fs::write(s.path().join("projects/demo/readme.md"), b"hi").unwrap();
-        let found = walk(&s.path(), ENTRY_CAP);
+    fn the_walk_returns_only_directories_with_factory_config() {
+        let s = Scratch::new("markers");
+        fs::create_dir_all(s.path().join("ordinary/child")).unwrap();
+        s.write_scope("projects/demo", "scope: { id: demo-id, name: demo }");
+        s.write_scope("projects/other", "scope: { id: other-id, name: other }");
+
         assert_eq!(
-            rel(&s.path(), &found),
-            vec![
-                ".",
-                "projects",
-                "projects/demo",
-                "projects/demo/src",
-                "projects/demo/src/inner",
-            ]
+            rel(&s.path(), &walk(&s.path(), ENTRY_CAP)),
+            vec!["projects/demo", "projects/other"]
         );
     }
 
     #[test]
-    fn the_walk_skips_what_site_rs_skips() {
+    fn the_walk_skips_dependency_and_factory_internals() {
         let s = Scratch::new("skip");
-        fs::create_dir_all(s.path().join("node_modules/left-pad")).unwrap();
-        fs::create_dir_all(s.path().join("real")).unwrap();
+        s.write_scope(
+            "node_modules/left-pad",
+            "scope: { id: hidden, name: hidden }",
+        );
+        s.write_scope(
+            ".factory/worktrees/run",
+            "scope: { id: state, name: state }",
+        );
+        s.write_scope("real", "scope: { id: real, name: real }");
+
         let found = rel(&s.path(), &walk(&s.path(), ENTRY_CAP));
-        assert!(!found.iter().any(|p| p.contains("node_modules")), "{found:?}");
-        assert!(found.contains(&"real".to_string()));
+        assert_eq!(found, vec!["real"]);
     }
 
     #[test]
-    fn the_walk_never_surfaces_factorys_own_directory() {
-        // "Nothing Factory owns is written inside a scope" (AGENTS.md) is not
-        // only a rule about writes -- a scope discovery handed out for
-        // `.factory` itself would be a place a task could be given to run an
-        // agent straight at the daemon's own database.
-        let s = Scratch::new("dotfactory");
-        fs::create_dir_all(s.path().join(".factory/plugins")).unwrap();
-        fs::create_dir_all(s.path().join("real")).unwrap();
-        let found = rel(&s.path(), &walk(&s.path(), ENTRY_CAP));
-        assert!(!found.iter().any(|p| p.contains(".factory")), "{found:?}");
-        assert!(found.contains(&"real".to_string()));
-    }
+    fn the_walk_stops_at_the_depth_limit_and_entry_cap() {
+        let s = Scratch::new("bounds");
+        s.write_scope("a/b/c/d", "scope: { id: in, name: in }");
+        s.write_scope("a/b/c/d/e", "scope: { id: out, name: out }");
+        for i in 0..20 {
+            fs::create_dir_all(s.path().join(format!("d{i}"))).unwrap();
+        }
 
-    #[test]
-    fn the_walk_stops_at_the_depth_limit() {
-        let s = Scratch::new("depth");
-        // Root (0) / a (1) / b (2) / c (3) / d (4) / e (5). `d` is in bounds;
-        // `e`, one level past the limit, is not.
-        fs::create_dir_all(s.path().join("a/b/c/d/e")).unwrap();
         let found = rel(&s.path(), &walk(&s.path(), ENTRY_CAP));
         assert!(found.contains(&"a/b/c/d".to_string()), "{found:?}");
         assert!(!found.contains(&"a/b/c/d/e".to_string()), "{found:?}");
+        assert!(
+            walk(&s.path(), 5).len() <= 1,
+            "only marked dirs can be returned"
+        );
     }
 
     #[test]
-    fn the_walk_respects_a_low_entry_cap() {
-        let s = Scratch::new("cap");
-        for i in 0..20 {
-            fs::create_dir(s.path().join(format!("d{i}"))).unwrap();
-        }
-        // A cap far below the real count still returns *something* rather
-        // than nothing -- a lower bound, not a crash -- and never exceeds it.
-        let found = walk(&s.path(), 5);
-        assert!(found.len() > 1, "the root plus at least a few directories");
-        assert!(found.len() <= 1 + 5, "{found:?}");
+    fn apply_loads_the_complete_local_scope_config_and_ignores_central_scopes() {
+        let s = Scratch::new("config");
+        s.write_scope(
+            "projects/demo",
+            "version: 1\nscope:\n  id: scope-1\n  name: demo\n  agent: pi\n  runtime: tmux\n  git: main\n  task_store: github\n  agents:\n    - name: reviewer\n      harness: codex\n      lifetime: permanent\n",
+        );
+        fs::create_dir_all(s.path().join("ordinary")).unwrap();
+        let mut f = factory(&s.path(), None);
+
+        apply(&mut f).unwrap();
+
+        assert_eq!(f.config.scopes.len(), 1);
+        let scope = &f.config.scopes[0];
+        assert_eq!(scope.id, "scope-1");
+        assert_eq!(scope.name, "demo");
+        assert_eq!(scope.path, PathBuf::from("projects/demo"));
+        assert_eq!(scope.agent_adapter(), Some("pi"));
+        assert_eq!(scope.runtime.as_deref(), Some("tmux"));
+        assert_eq!(scope.git.as_deref(), Some("main"));
+        assert_eq!(scope.task_store.as_deref(), Some("github"));
+        assert_eq!(scope.declared_agents()[0].name(), "reviewer");
     }
 
     #[test]
-    fn a_declared_scope_overlays_onto_the_directory_discovery_already_found() {
-        let s = Scratch::new("overlay");
-        fs::create_dir_all(s.path().join("projects/demo")).unwrap();
-        let mut factory = Factory {
-            root: s.path(),
-            config: bare_config(vec![Scope {
-                name: "demo".into(),
-                path: PathBuf::from("projects/demo"),
-                agent: Some(factory_core::config::AgentRef::Name("pi".into())),
-                agents: vec![],
-                runtime: None,
-                git: None,
-                declared: true,
-                task_store: None,
-            }]),
-        };
-        apply(&mut factory);
+    fn the_instance_root_can_also_be_a_scope() {
+        let s = Scratch::new("root");
+        s.write_scope(
+            "",
+            "instance: { id: i, name: instance }\nscope: { id: root-id, name: root }",
+        );
+        let mut f = factory(&s.path(), Some(configured("root-id", "root")));
 
-        // One scope for `projects/demo`, not two -- the declared entry and
-        // the directory discovery found are the same fact.
-        let demo: Vec<_> = factory
-            .config
-            .scopes
-            .iter()
-            .filter(|sc| sc.path == PathBuf::from("projects/demo"))
-            .collect();
-        assert_eq!(demo.len(), 1, "{:?}", factory.config.scopes);
-        assert_eq!(demo[0].name, "projects/demo", "identity is the path, not the declared name");
-        assert!(demo[0].declared);
-        assert_eq!(demo[0].agent_adapter(), Some("pi"), "the overlay's own settings survive the merge");
+        apply(&mut f).unwrap();
 
-        // `projects` itself is real too, discovered and undeclared.
-        let projects = factory
-            .config
-            .scopes
-            .iter()
-            .find(|sc| sc.path == PathBuf::from("projects"))
-            .expect("projects is discovered");
-        assert!(!projects.declared);
+        assert_eq!(f.config.scopes.len(), 1);
+        assert_eq!(f.config.scopes[0].id, "root-id");
+        assert_eq!(f.config.scopes[0].path, PathBuf::from("."));
     }
 
     #[test]
-    fn declared_scopes_stay_first_and_in_their_written_order() {
-        let s = Scratch::new("order");
-        fs::create_dir_all(s.path().join("projects/a")).unwrap();
-        fs::create_dir_all(s.path().join("projects/b")).unwrap();
-        let mut factory = Factory {
-            root: s.path(),
-            config: bare_config(vec![
-                // `b` written before `a` -- alphabetically the wrong way
-                // round, which is the point: this proves order survives from
-                // the config rather than falling out of sorting the paths.
-                Scope::discovered("b-declared".into(), PathBuf::from("projects/b")),
-                Scope::discovered("a-declared".into(), PathBuf::from("projects/a")),
-            ]),
-        };
-        // The two above were built with `Scope::discovered` only to skip
-        // writing out every field; mark them declared as `scopes:` parsing
-        // would.
-        for s in &mut factory.config.scopes {
-            s.declared = true;
-        }
-        apply(&mut factory);
+    fn malformed_nested_scope_config_names_the_file() {
+        let s = Scratch::new("malformed");
+        let path = s.write_scope("bad", "scope: [not, a, map]");
+        let mut f = factory(&s.path(), None);
 
-        // Identity is recomputed from the path for both -- `b-declared` does
-        // not survive -- but *which* path comes first still reflects the
-        // order they were written in, not alphabetical path order.
-        let paths: Vec<String> = factory
-            .config
-            .scopes
-            .iter()
-            .take(2)
-            .map(|s| s.path.display().to_string())
-            .collect();
-        assert_eq!(paths, vec!["projects/b", "projects/a"], "{:?}", factory.config.scopes);
-        assert!(factory.config.scopes[0].declared && factory.config.scopes[1].declared);
+        let error = apply(&mut f).unwrap_err().to_string();
+        assert!(error.contains(&path.display().to_string()), "{error}");
     }
 
-    fn bare_config(scopes: Vec<Scope>) -> factory_core::config::Config {
-        factory_core::config::Config {
-            version: 1,
-            instance: factory_core::config::Instance { id: "i".into(), name: "n".into() },
-            daemon: Default::default(),
-            scopes,
-            roles: Default::default(),
-            plugins_dir: None,
-        }
+    #[test]
+    fn missing_identity_is_refused_with_the_file_named() {
+        let s = Scratch::new("identity");
+        let path = s.write_scope("bad", "scope: { name: nameless-id }");
+        let mut f = factory(&s.path(), None);
+
+        let error = apply(&mut f).unwrap_err().to_string();
+        assert!(error.contains("scope.id"), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn duplicate_ids_and_names_are_refused_with_both_files_named() {
+        let s = Scratch::new("duplicates");
+        let a = s.write_scope("a", "scope: { id: same, name: a }");
+        let b = s.write_scope("b", "scope: { id: same, name: b }");
+        let mut f = factory(&s.path(), None);
+        let error = apply(&mut f).unwrap_err().to_string();
+        assert!(error.contains("duplicate scope id"), "{error}");
+        assert!(error.contains(&a.display().to_string()), "{error}");
+        assert!(error.contains(&b.display().to_string()), "{error}");
+
+        fs::write(&b, "scope: { id: other, name: a }").unwrap();
+        let error = apply(&mut f).unwrap_err().to_string();
+        assert!(error.contains("duplicate scope name"), "{error}");
+        assert!(error.contains(&a.display().to_string()), "{error}");
+        assert!(error.contains(&b.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn two_equal_leaf_directories_can_use_distinct_configured_names() {
+        let s = Scratch::new("names");
+        s.write_scope("one/src", "scope: { id: one-id, name: one-source }");
+        s.write_scope("two/src", "scope: { id: two-id, name: two-source }");
+        let mut f = factory(&s.path(), None);
+
+        apply(&mut f).unwrap();
+
+        assert_eq!(f.scope_names(), vec!["one-source", "two-source"]);
     }
 }

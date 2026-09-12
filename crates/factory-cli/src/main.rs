@@ -309,8 +309,8 @@ async fn main() -> Result<()> {
                     let mut out = String::new();
                     for s in scopes {
                         out.push_str(&format!(
-                            "{}  {}\n              default {} on {}\n",
-                            s.name, s.path, s.default_agent, s.runtime
+                            "{}  {}\n              id {} · default {} on {}\n",
+                            s.name, s.path, s.id, s.default_agent, s.runtime
                         ));
                         for a in &s.agents {
                             let mut flags = vec![

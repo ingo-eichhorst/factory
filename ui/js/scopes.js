@@ -2,12 +2,9 @@
 //! whether a thing belongs to what is selected.
 //!
 //! The tree is derived, never declared. A `ScopeView` carries a `path` and
-//! nothing about nesting, so the shape is whatever the paths say. The daemon
-//! now discovers every directory under the instance root as a scope, so a
-//! path segment with no scope on it is rare -- outside the root altogether,
-//! or past the discovery walk's own depth limit -- but still possible; those
-//! segments are drawn as an unselectable grouping node rather than left out,
-//! or everything under them would hang off the root as if it were flat.
+//! nothing about nesting, so the shape is whatever the paths say. Only a
+//! directory with its own Factory scope config is represented; intervening
+//! ordinary directories do not get rows of their own.
 //!
 //! This file filters nothing and knows about no view. It owns the selection,
 //! the rail and the URL; every view asks `inScope` and draws itself.
@@ -69,14 +66,8 @@ let written = "";
 /// wrote -- so every path begins with the root's own segments and the scope
 /// registered on the root is a prefix of all the others.
 ///
-/// Those leading segments are where the instance happens to live, not anything
-/// the config declared, so they are cut off: left in, the trie grows one
-/// unselectable grouping node per segment of the root -- `USERS` above
-/// `FACTORY` above the whole tree -- and pushes every real scope that much
-/// further right. What is left is the path as `.factory/config.yaml` wrote it,
-/// which is the shape the rail is supposed to show. A scope configured with an
-/// absolute path outside the root matches nothing here and keeps its own
-/// segments, which is the honest answer: it really does sit somewhere else.
+/// Those leading segments describe where the instance happens to live, not
+/// scope nesting, so they are cut off before paths are compared.
 function segments(path) {
   let p = String(path ?? "");
   const root = String(state.root ?? "").replace(/\/+$/, "");
@@ -84,51 +75,43 @@ function segments(path) {
   return p.split("/").filter(s => s !== "" && s !== ".");
 }
 
-/// Every path threaded onto one trie, so the nesting falls out of the segments
-/// instead of being computed by comparing paths to each other -- a trie node is
-/// a whole segment, so `projects/factory` can never swallow `projects/factory-x`.
-/// A node with no `scope` is a segment nobody registered.
+/// Build a tree from configured scopes only. Each scope hangs from its nearest
+/// configured ancestor; unmarked path segments affect containment but never
+/// become rows. Segment comparison keeps `projects/factory` from swallowing
+/// `projects/factory-x`.
 function buildTree() {
-  const root = { label: null, scope: null, children: new Map() };
-  for (const scope of state.scopes) {
-    let node = root;
-    for (const seg of segments(scope.path)) {
-      if (!node.children.has(seg)) {
-        node.children.set(seg, { label: seg, scope: null, children: new Map() });
+  const root = { scope: null, path: [], children: [] };
+  const nodes = state.scopes.map(scope => ({
+    scope,
+    path: segments(scope.path),
+    children: [],
+  }));
+  for (const node of nodes) {
+    let parent = root;
+    for (const candidate of nodes) {
+      if (candidate === node || candidate.path.length >= node.path.length) continue;
+      if (under(node.path, candidate.path) &&
+          (!parent.scope || candidate.path.length > parent.path.length)) {
+        parent = candidate;
       }
-      node = node.children.get(seg);
     }
-    // Two scopes on one path is a mistake in the config rather than a shape to
-    // draw twice. The first one registered keeps the node; the second is still
-    // reachable through its parent's selection, because `inScope` reads paths.
-    if (!node.scope) node.scope = scope;
+    parent.children.push(node);
   }
   return root;
 }
 
 function branch(node, depth) {
-  if (!node.children.size) return "";
-  // Registration order, not alphabetical: the config is a list someone wrote in
-  // an order, and the roster already shows the scopes in it.
-  return `<ul>${[...node.children.values()].map(c => row(c, depth)).join("")}</ul>`;
+  if (!node.children.length) return "";
+  // Discovery serves path order, which is also the roster's order.
+  return `<ul>${node.children.map(c => row(c, depth)).join("")}</ul>`;
 }
 
 function row(node, depth) {
-  const on = node.scope && node.scope.name === state.scope ? ` aria-current="true"` : "";
-  // A scope's identity is its path from the instance root now, not a short
-  // name -- `projects/factory/crates` -- so the row draws just the last
-  // segment (`node.label`, already the piece `segments()` isolated to place
-  // this node in the tree) and leaves the full identity for the tooltip and
-  // for `data-scope`, which is what selection actually keys on. The one node
-  // with no `label` of its own is the trie's root, which a scope registered
-  // directly on the instance root attaches to -- there is no path segment to
-  // shorten there, so it falls back to the scope's own name.
-  const text = node.label ?? node.scope?.name;
+  const on = node.scope.name === state.scope ? ` aria-current="true"` : "";
+  const text = node.scope.name;
   // A deep name does not fit the column and is cut short there, so the tooltip
   // carries the whole of it as well as the path it sits on.
-  const head = node.scope
-    ? `<button class="rail-row" style="--d:${depth}" data-scope="${esc(node.scope.name)}" title="${esc(node.scope.name)} · ${esc(node.scope.path)}"${on}>${esc(text)}</button>`
-    : `<span class="rail-row group" style="--d:${depth}">${esc(text)}</span>`;
+  const head = `<button class="rail-row" style="--d:${depth}" data-scope="${esc(node.scope.name)}" title="${esc(node.scope.name)} · ${esc(node.scope.id)} · ${esc(node.scope.path)}"${on}>${esc(text)}</button>`;
   return `<li>${head}${branch(node, depth + 1)}</li>`;
 }
 
@@ -137,18 +120,14 @@ function render() {
   if (!rail) return;
 
   const root = buildTree();
-  // Every directory under the instance root is a scope now, discovered or
-  // not, so an empty list is no longer a config with nothing declared in it
-  // -- it means `/api/agents` has not answered yet, or could not. An empty
-  // tree drawn around either looks like a page that failed to load, so it
-  // says which. A scope on the instance root owns the trie's own root, so it
-  // becomes the one row everything else hangs under; with none, whatever is
-  // shallowest is a root, and there can be several.
+  // An empty list means no local scope config was found or `/api/agents`
+  // could not answer. Whatever configured scope is shallowest becomes a root,
+  // and there can be several.
   const html = !state.scopes.length
-    ? `<p class="rail-empty">No scopes yet -- still loading, or the instance root could not be read.</p>`
+    ? `<p class="rail-empty">No configured scopes found.</p>`
     : `
     <button class="rail-row rail-all" id="rail-all"${state.scope === null ? ` aria-current="true"` : ""}>All scopes</button>
-    ${root.scope ? `<ul>${row(root, 0)}</ul>` : branch(root, 0)}`;
+    ${branch(root, 0)}`;
 
   // `loadAgents` rebuilds the rail on every agent event, and replacing the
   // markup takes the focus with it -- a keyboard user would lose their place
@@ -170,8 +149,7 @@ function render() {
 // ------------------------------------------------------------ the selection
 
 /// The name, but only if the tree still has it: a link outlives the scope it
-/// names, and a refreshed `/api/agents` can drop one. A grouping node never
-/// gets here -- it carries no name to click.
+/// names, and a refreshed `/api/agents` can drop one.
 function known(name) {
   if (!name) return null;
   return state.scopes.some(s => s.name === name) ? name : null;

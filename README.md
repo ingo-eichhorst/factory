@@ -31,7 +31,7 @@ about sqlite, herdr, axum, or any other concrete choice.
 cargo build --workspace
 
 mkdir -p /tmp/demo-factory/projects/demo
-target/debug/factory-daemon --root /tmp/demo-factory init
+target/debug/factory-daemon --root /tmp/demo-factory init --scope projects/demo
 target/debug/factory-daemon --root /tmp/demo-factory run
 ```
 
@@ -70,20 +70,22 @@ assistant to talk to, a session kept warm in a project you work in every day.
 Those are **standing agents**, and a scope declares them:
 
 ```yaml
-scopes:
-  - name: demo
-    path: projects/demo
-    agents:
-      - name: watcher
-        harness: pi
-        lifetime: permanent     # started with the daemon, restarted if it dies
-        args: ["--model", "opus"] # arguments for this declaration only
-      - name: scratch
-        harness: shell
-        lifetime: temporary     # startable, but nothing starts it on its own
-      - name: reviewer
-        harness: claude-code
-        lifetime: task          # not standing: offered for tasks in this scope
+# projects/demo/.factory/config.yaml
+version: 1
+scope:
+  id: 8fc86b67-aeba-4935-a623-d75f59d77acd
+  name: demo
+  agents:
+    - name: watcher
+      harness: pi
+      lifetime: permanent     # started with the daemon, restarted if it dies
+      args: ["--model", "opus"] # arguments for this declaration only
+    - name: scratch
+      harness: shell
+      lifetime: temporary     # startable, but nothing starts it on its own
+    - name: reviewer
+      harness: claude-code
+      lifetime: task          # not standing: offered for tasks in this scope
 ```
 
 A permanent agent is **never failed for being quiet** — being quiet is what it
@@ -111,14 +113,16 @@ Every agent has a **role**, and a task names a **concrete agent**, not a
 harness. `assistant` and `scratch` are different agents even when both are pi.
 
 ```yaml
-scopes:
-  - name: demo
-    path: projects/demo
-    agents:
-      - name: assistant
-        harness: pi
-        lifetime: permanent
-        role: foreman        # worker is the default
+# projects/demo/.factory/config.yaml
+version: 1
+scope:
+  id: 8fc86b67-aeba-4935-a623-d75f59d77acd
+  name: demo
+  agents:
+    - name: assistant
+      harness: pi
+      lifetime: permanent
+      role: foreman        # worker is the default
 ```
 
 - **worker** reads tasks, and updates the ones assigned to it — its own scope,
@@ -258,7 +262,7 @@ until the first ends or is cancelled.
 ## How a task actually runs
 
 1. `task.create` resolves the scope, agent, and runtime — from the request, then
-   the scope's declaration, then the instance defaults — and refuses right away
+   the scope's local config, then the instance defaults — and refuses right away
    if any of them names an adapter that does not exist.
 2. `task.run` opens a run, mints a callback token for it, and asks the runtime
    for a session in the scope's directory.
@@ -297,8 +301,9 @@ Three timeouts catch the rest:
 
 ## Configuration
 
-`.factory/` at the instance root is the whole configuration surface. Nothing of
-Factory's is ever written inside a scope.
+The instance root's `.factory/config.yaml` owns daemon-wide settings and may
+also configure the root directory as a scope. Daemon state — the database,
+socket, plugins, and task worktrees — stays in this root `.factory/`.
 
 ```yaml
 version: 1
@@ -319,15 +324,36 @@ daemon:
   default_agent: claude-code
   default_runtime: herdr
 
-scopes:
-  - name: demo
-    path: projects/demo
-    agent: pi                # this scope's default, overriding the instance's
-
-  - name: upstream
-    path: projects/upstream
-    task_store: file-store   # and this scope's tasks live somewhere else
+scope:                       # optional: make the instance root a scope too
+  id: cc23161d-82b9-4e75-8d88-e5195bc6d6e8
+  name: root
 ```
+
+Every other scope owns a `.factory/config.yaml` in its own directory. That file
+is both the opt-in marker discovery looks for and the source of the scope's
+stable ID, name, agents, and overrides. Its path comes from the directory, so it
+is not repeated in YAML:
+
+```yaml
+# projects/demo/.factory/config.yaml
+version: 1
+scope:
+  id: 8fc86b67-aeba-4935-a623-d75f59d77acd
+  name: demo
+  agent: pi                  # this scope's default, overriding the instance's
+  agents:
+    - name: reviewer
+      harness: claude-code
+      lifetime: task
+  task_store: file-store     # this scope's tasks live somewhere else
+```
+
+Only directories with a valid local scope block appear in the CLI or UI. A
+configured scope is nested below its nearest configured ancestor in the rail;
+ordinary directories get no row and cannot be selected or receive work.
+Discovery is performed at daemon startup; add or remove a marker, then restart
+to refresh the scope list. Duplicate IDs and names, malformed files, and
+missing IDs or names stop startup with the files involved named in the error.
 
 ### Where a scope's tasks live
 
@@ -565,7 +591,7 @@ the file a session is editing is not read at all, and is not drawn.
   this on a network you would hand a shell to, or leave it on loopback.
 - **A scope's task engine is configuration, not a control.** The agents page
   says which engine a scope's tasks live in; changing it means editing
-  `.factory/config.yaml` and restarting. A selector that rewrote the instance's
+  that scope's `.factory/config.yaml` and restarting. A selector that rewrote the
   configuration over an interface with no authentication is a different
   decision, and it has not been made.
 - **First-run agent prompts.** An agent that has never seen a directory may ask

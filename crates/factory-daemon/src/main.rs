@@ -24,6 +24,7 @@ use factory_core::event::Event;
 use factory_plugins::registry::Registry;
 use factory_plugins::SqliteStore;
 use std::collections::HashMap;
+use std::path::Component;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -50,7 +51,7 @@ enum Command {
         /// Name for the instance. Defaults to the directory's own name.
         #[arg(long)]
         name: Option<String>,
-        /// Register this path as the first scope.
+        /// Put the first scope marker at this path below the instance root.
         #[arg(long, default_value = ".")]
         scope: PathBuf,
     },
@@ -81,6 +82,29 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
     if config_path.exists() {
         anyhow::bail!("{} already exists", config_path.display());
     }
+
+    if scope.is_absolute()
+        || scope
+            .components()
+            .any(|c| match c {
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => true,
+                Component::Normal(p) => p == std::ffi::OsStr::new(factory_core::config::FACTORY_DIR),
+                _ => false,
+            })
+    {
+        anyhow::bail!("--scope must be below the instance root and outside .factory");
+    }
+    let root_is_scope = scope.as_os_str().is_empty() || scope == std::path::Path::new(".");
+    let nested_scope_config = (!root_is_scope).then(|| {
+        root.join(&scope)
+            .join(factory_core::config::FACTORY_DIR)
+            .join(factory_core::config::CONFIG_FILE)
+    });
+    if let Some(path) = &nested_scope_config {
+        if path.exists() {
+            anyhow::bail!("{} already exists", path.display());
+        }
+    }
     std::fs::create_dir_all(dir.join("plugins"))?;
 
     let name = name.unwrap_or_else(|| {
@@ -88,7 +112,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "factory".into())
     });
-    let scope_name = if scope == PathBuf::from(".") {
+    let scope_name = if root_is_scope {
         name.clone()
     } else {
         scope
@@ -97,6 +121,16 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
             .unwrap_or_else(|| "scope".into())
     };
 
+    let first_scope = Scope {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: scope_name,
+        path: PathBuf::new(),
+        agent: None,
+        agents: Vec::new(),
+        runtime: None,
+        git: None,
+        task_store: None,
+    };
     let config = Config {
         version: 1,
         instance: Instance {
@@ -104,23 +138,30 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
             name: name.clone(),
         },
         daemon: DaemonConfig::default(),
-        scopes: vec![Scope {
-            name: scope_name,
-            path: scope,
-            agent: None,
-            agents: Vec::new(),
-            runtime: None,
-            git: None,
-            declared: true,
-            // A fresh instance has one engine, so the scope it writes names
-            // none of its own and takes the instance default.
-            task_store: None,
-        }],
+        scope: root_is_scope.then(|| first_scope.clone()),
+        scopes: Vec::new(),
         roles: Default::default(),
         plugins_dir: None,
     };
     std::fs::write(&config_path, serde_yaml_ng::to_string(&config)?)?;
     println!("wrote {}", config_path.display());
+
+    if !root_is_scope {
+        #[derive(serde::Serialize)]
+        struct ScopeFile<'a> {
+            version: u32,
+            scope: &'a Scope,
+        }
+
+        let scope_config = nested_scope_config.expect("a nested scope has a config path");
+        let scope_dir = scope_config.parent().expect("a config path has a parent");
+        std::fs::create_dir_all(scope_dir)?;
+        std::fs::write(
+            &scope_config,
+            serde_yaml_ng::to_string(&ScopeFile { version: 1, scope: &first_scope })?,
+        )?;
+        println!("wrote {}", scope_config.display());
+    }
     println!("start it with: factory-daemon --root {} run", root.display());
     Ok(())
 }
@@ -135,12 +176,11 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
         })?,
     };
     let mut factory = Factory::load(&root)?;
-    // Every directory under the root becomes a scope here, once, before
-    // anything else looks at `factory.config.scopes` -- the engine, the
-    // interfaces, the scheduler all read that list as if it always held
-    // every scope there could be, and this is what makes that true.
+    // Resolve directories that opt in through their own Factory config before
+    // the engine, interfaces, or scheduler read the runtime scope list.
     let discovery_started = std::time::Instant::now();
-    discovery::apply(&mut factory);
+    discovery::apply(&mut factory)?;
+    factory.config.validate()?;
     tracing::info!(
         instance = %factory.config.instance.name,
         root = %factory.root.display(),
