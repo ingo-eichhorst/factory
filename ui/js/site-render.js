@@ -10,8 +10,13 @@
 //! returns `false` and `site.js` falls back to the plan view and says so --
 //! a render mode that fails silently would be worse than one that is simply
 //! not offered.
+//!
+//! Unlike Plan, a scope rail selection does not narrow this scene. It drives a
+//! camera close-up, the selected hall's roof, and the position of its figures;
+//! every other hall remains in the scene as the campus around it.
 
-import { mb, hallSub, tickHalls, floorLight, STILL } from "./site.js";
+import { mb, hallSub, tickHalls, tickRoof, floorLight, STILL } from "./site.js";
+import { hallFrame, interiorPlacements, siteFrame } from "./site-focus.js";
 
 let T = null;
 let scene, cam, rr, sun, hemi, amb, ray, mouse;
@@ -26,6 +31,7 @@ let matWall, matWall2, matRoof, matTrim, matFloor, matPaint, ribT;
 let getSceneFn, getPaletteFn;
 let drag = null, moved = 0;
 let orb = { az: -0.91, pol: 1.05, r: 40, tx: 0, ty: 0.6, tz: 0 };
+let orbReady = false, focusFrameSig = "", orbTween = null;
 
 const TODS = {
   day: { sky: "#7FA2C4", hor: "#C6D6E2", sun: "#FFF4E2", si: 2.5, hs: "#BAD1E4", hg: "#4E4E48", hi: 1.05, ai: 0.20, el: 0.92, az: 2.3, emi: 0.14, lamp: 0.0, fn: 48, ff: 150, exp: 0.98 },
@@ -158,9 +164,19 @@ function hall(b, PAL) {
   const shell = new T.Group(), cap = new T.Group();
   g.add(shell); g.add(cap);
 
-  const wall = new T.Mesh(new T.BoxGeometry(hw, hh, hd), matWall);
-  wall.position.set(hw / 2, hh / 2, hd / 2); wall.castShadow = true; wall.receiveShadow = true; wall.userData.bid = b.id;
-  shell.add(wall); picks.push(wall);
+  // Four real walls, rather than one closed box. With the roof in place they
+  // read exactly like the old solid hall; once it slides away there is no
+  // hidden top face left behind to cover the shop floor and its agents.
+  const wtWall = 0.16;
+  const wallPanel = (geometry, x, z, material) => {
+    const wall = new T.Mesh(geometry, material);
+    wall.position.set(x, hh / 2, z); wall.castShadow = true; wall.receiveShadow = true; wall.userData.bid = b.id;
+    shell.add(wall); picks.push(wall);
+  };
+  wallPanel(new T.BoxGeometry(hw, hh, wtWall), hw / 2, wtWall / 2, matWall2);
+  wallPanel(new T.BoxGeometry(hw, hh, wtWall), hw / 2, hd - wtWall / 2, matWall);
+  wallPanel(new T.BoxGeometry(wtWall, hh, Math.max(0.1, hd - wtWall * 2)), wtWall / 2, hd / 2, matWall2);
+  wallPanel(new T.BoxGeometry(wtWall, hh, Math.max(0.1, hd - wtWall * 2)), hw - wtWall / 2, hd / 2, matWall);
 
   const pl = new T.Mesh(new T.BoxGeometry(hw + 0.5, 0.2, hd + 0.5), matTrim);
   pl.position.set(hw / 2, 0.1, hd / 2); pl.receiveShadow = true; pl.userData.bid = b.id;
@@ -238,7 +254,7 @@ function hall(b, PAL) {
   const sub = hallSub(b);
   const lt = labelTex(b.name, sub);
   const sp = new T.Sprite(new T.SpriteMaterial({ map: lt.tex, depthWrite: false, transparent: true, depthTest: false }));
-  sp.scale.set(2.4 * lt.ar * 0.4, 2.4 * 0.4, 1); sp.position.set(hw / 2, hh + 1.7, hd / 2); cap.add(sp); labels.push(sp);
+  sp.scale.set(2.4 * lt.ar * 0.4, 2.4 * 0.4, 1); sp.position.set(hw / 2, hh + 1.7, hd / 2); g.add(sp); labels.push(sp);
 
   sceneGroup.add(g);
   // `sub` is recorded here so `applyHallFacts` does not immediately build a
@@ -273,7 +289,7 @@ function dropGroup(group) {
   if (group.parent) group.parent.remove(group);
 }
 
-function figure(wk, PAL) {
+function figure(wk, PAL, placement) {
   const g = new T.Group();
   const c = stateCol(wk.state, PAL);
   const body = new T.Mesh(new T.CylinderGeometry(0.13, 0.17, 0.42, 8),
@@ -282,10 +298,23 @@ function figure(wk, PAL) {
   const head = new T.Mesh(new T.SphereGeometry(0.105, 10, 8), new T.MeshStandardMaterial({ color: new T.Color("#E8DCC8"), roughness: 0.8 }));
   head.position.y = 0.53; head.castShadow = true; g.add(head);
   const gl = glowSprite(c, 1.2, 0.7); gl.position.y = 0.42; g.add(gl);
-  g.scale.set(1.4, 1.4, 1.4);
-  g.position.set(wk.gx, 0.3, wk.gy);
+  const scale = placement ? placement.scale : 1.4;
+  g.scale.set(scale, scale, scale);
+  g.position.set(placement ? placement.x : wk.gx, 0.3, placement ? placement.z : wk.gy);
   sceneGroup.add(g);
-  return { g, wk };
+  return { g, wk, phase: placement ? placement.x : wk.gx };
+}
+
+/// Rebuild only the cheap agent figures. A focused hall gets a collision-free
+/// grid on its floor; every other hall keeps the exterior apron positions that
+/// communicate presence in the full-campus view.
+function placeWorkers(sceneData, PAL) {
+  workers.forEach((w) => dropGroup(w.g));
+  workers = [];
+  sceneData.SITE.forEach((b) => {
+    const inside = b.id === sceneData.focus ? interiorPlacements(b, b.workers.length) : [];
+    b.workers.forEach((wk, i) => workers.push(figure(wk, PAL, inside[i])));
+  });
 }
 
 function streetLamp(x, z, PAL) {
@@ -353,6 +382,28 @@ function buildBounds(sceneData) {
   return { x0: sceneData.ZONE.x - 5, x1: sceneData.ZONE.x + sceneData.ZONE.w + 5, y0: sceneData.ZONE.y - 5, y1: sceneData.ZONE.y + sceneData.ZONE.d + 5 };
 }
 
+function moveOrbit(frame) {
+  if (STILL) { Object.assign(orb, frame); orbTween = null; return; }
+  orbTween = {
+    from: { ...orb },
+    to: frame,
+    at: performance.now(),
+    duration: 650,
+  };
+}
+
+/// Follow the rail, but only when its focus or the geometry behind that focus
+/// actually changed. Activity refreshes arrive often and must not keep
+/// restarting the same camera move under a person's orbit or zoom gesture.
+function syncFocus(sceneData) {
+  const hall = sceneData.focus ? sceneData.byId[sceneData.focus] : null;
+  const frame = hall ? hallFrame(hall, orb.az) : siteFrame(sceneData);
+  const sig = `${hall ? hall.id : "all"}:${frame.tx}:${frame.ty}:${frame.tz}:${frame.r}`;
+  if (sig === focusFrameSig) return;
+  focusFrameSig = sig;
+  moveOrbit(frame);
+}
+
 export function start(sceneData) {
   const PAL = getPaletteFn();
   makeMaterials(PAL);
@@ -390,13 +441,13 @@ export function start(sceneData) {
     const mid = [(a[0] + b2[0]) / 2, (a[1] + b2[1]) / 2];
     [a, mid, b2].forEach((p) => streetLamp(p[0], p[1] - 1.1, PAL));
   }
-  sceneData.SITE.forEach((b) => b.workers.forEach((wk) => workers.push(figure(wk, PAL))));
+  placeWorkers(sceneData, PAL);
 
-  if (!orb.tx && sceneData.ZONE) {
-    orb.tx = sceneData.ZONE.x + sceneData.ZONE.w / 2;
-    orb.tz = sceneData.ZONE.y + sceneData.ZONE.d / 2;
-    orb.r = Math.max(18, Math.max(sceneData.ZONE.w, sceneData.ZONE.d) * 0.9);
+  if (!orbReady) {
+    Object.assign(orb, siteFrame(sceneData));
+    orbReady = true;
   }
+  syncFocus(sceneData);
 
   applyTOD();
   resize();
@@ -438,11 +489,9 @@ export function update(sceneData) {
     applyHallFacts(h, PAL);
   }
 
-  // The figures outside are one per run and per standing agent, so they come
-  // and go with the work; they are cheap, and rebuilt rather than diffed.
-  workers.forEach((w) => dropGroup(w.g));
-  workers = [];
-  sceneData.SITE.forEach((b) => b.workers.forEach((wk) => workers.push(figure(wk, PAL))));
+  // Figures come and go with the work and move between apron and interior as
+  // the focus changes; they are cheap, and rebuilt rather than diffed.
+  placeWorkers(sceneData, PAL);
 
   // The crates at a hall's door are baked into the ground texture, so that one
   // is only worth redrawing when the queue actually changed.
@@ -454,6 +503,7 @@ export function update(sceneData) {
     groundMat.needsUpdate = true;
     queueSig = q;
   }
+  syncFocus(sceneData);
   return true;
 }
 
@@ -548,6 +598,7 @@ function applyTOD() {
 function bindInput() {
   cv.addEventListener("pointerdown", (e) => {
     cv.setPointerCapture && cv.setPointerCapture(e.pointerId);
+    orbTween = null;
     drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 2 }; moved = 0;
     cv.classList.add("drag");
   });
@@ -568,7 +619,10 @@ function bindInput() {
   function up(e) { if (drag && moved < 5) clickAt(e); drag = null; cv.classList.remove("drag"); }
   cv.addEventListener("pointerup", up);
   cv.addEventListener("pointercancel", () => { drag = null; cv.classList.remove("drag"); });
-  cv.addEventListener("wheel", (e) => { e.preventDefault(); orb.r = Math.max(9, Math.min(140, orb.r * Math.exp(e.deltaY * 0.0012))); }, { passive: false });
+  cv.addEventListener("wheel", (e) => {
+    e.preventDefault(); orbTween = null;
+    orb.r = Math.max(9, Math.min(140, orb.r * Math.exp(e.deltaY * 0.0012)));
+  }, { passive: false });
   cv.addEventListener("contextmenu", (e) => e.preventDefault());
 }
 
@@ -585,11 +639,11 @@ function clickAt(e) {
   if (id && onSelect) onSelect(id);
 }
 
-export function zoom(factor) { orb.r = Math.max(9, Math.min(140, orb.r / factor)); }
+export function zoom(factor) { orbTween = null; orb.r = Math.max(9, Math.min(140, orb.r / factor)); }
 export function fit() {
   const s = getSceneFn();
-  if (s.ZONE) { orb.tx = s.ZONE.x + s.ZONE.w / 2; orb.tz = s.ZONE.y + s.ZONE.d / 2; orb.r = Math.max(18, Math.max(s.ZONE.w, s.ZONE.d) * 0.9); }
-  orb.az = -0.91; orb.pol = 1.05;
+  orbTween = null;
+  Object.assign(orb, siteFrame(s));
 }
 
 function resize() {
@@ -610,20 +664,41 @@ function tick(now) {
   // Both views draw the same halls, so only the one on screen eases them --
   // and it has to, or a hall would sit half-grown for as long as this mode is
   // the one being looked at.
-  tickHalls(lastFrame ? (now - lastFrame) / 1000 : 0);
+  const dt = lastFrame ? (now - lastFrame) / 1000 : 0;
+  tickHalls(dt);
+  s.SITE.forEach((b) => tickRoof(b, dt));
   lastFrame = now;
   const tod = TODS[TOD];
+
+  if (orbTween) {
+    const k = Math.min(1, (now - orbTween.at) / orbTween.duration);
+    const ease = 1 - Math.pow(1 - k, 3);
+    for (const key of ["tx", "ty", "tz", "r", "az", "pol"]) {
+      orb[key] = orbTween.from[key] + (orbTween.to[key] - orbTween.from[key]) * ease;
+    }
+    if (k >= 1) orbTween = null;
+  }
 
   Object.keys(halls).forEach((id) => {
     const h = halls[id], b = h.b;
     h.ring.material.opacity = (id === sel ? 0.85 : 0) * (0.7 + 0.3 * Math.sin(t * 3));
+    // Full-site labels are sized to read from the fitted camera and become
+    // billboards across the close-up. The selected name is already fixed in
+    // the scope rail and inspector, so clear the view into its open roof while
+    // focused and restore every label with the campus framing.
+    h.label.visible = s.layers.labels && !s.focus;
 
     // Where the building has got to between the height it had and the one its
     // size now asks for. The shell stretches; the roof and its mast ride on
     // top rather than stretching with it.
     const k = Math.max(0.04, (b.h * 1.15) / h.hh);
     h.shell.scale.y = k;
-    h.cap.position.y = h.hh * (k - 1);
+    h.cap.position.set(
+      -b.open * Math.min(2.2, b.w * 0.28),
+      h.hh * (k - 1) + b.open * Math.min(3.2, h.hh * 0.55 + 1.0),
+      -b.open * Math.min(1.8, b.d * 0.24),
+    );
+    h.label.position.y = h.hh * k + 1.7;
 
     lightHall(h, tod);
 
@@ -643,8 +718,8 @@ function tick(now) {
     }
   });
   workers.forEach((w) => {
-    w.g.rotation.y = Math.sin(t * 0.6 + w.wk.gx) * 0.3;
-    w.g.position.y = 0.3 + (w.wk.state !== "idle" ? Math.abs(Math.sin(t * 1.6 + w.wk.gx)) * 0.04 : 0);
+    w.g.rotation.y = Math.sin(t * 0.6 + w.phase) * 0.3;
+    w.g.position.y = 0.3 + (w.wk.state !== "idle" ? Math.abs(Math.sin(t * 1.6 + w.phase)) * 0.04 : 0);
   });
 
   const sp = Math.sin(orb.pol), cp = Math.cos(orb.pol);

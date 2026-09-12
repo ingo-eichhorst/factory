@@ -71,6 +71,11 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../../ui/js/site.js"),
     ),
     (
+        "js/site-focus.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/site-focus.js"),
+    ),
+    (
         "js/site-render.js",
         "text/javascript; charset=utf-8",
         include_str!("../../../ui/js/site-render.js"),

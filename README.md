@@ -503,7 +503,11 @@ the banner says plainly that nothing earlier than "now" is shown here.
 figure for every agent actually present — never a bay, because Factory has no
 bay ("a row is an agent, not a bay", `occupancy.rs`). A second, lit three.js
 render of the same facts toggles from the same HUD, orbits, and picks the same
-hall the plan would.
+hall the plan would. In that 3D render the scope rail is a focus rather than a
+filter: the full site remains standing while the camera moves to the selected
+hall, its roof opens, and its present agents move onto the shop floor. Clearing
+the scope returns to the fitted site. The isometric Plan keeps the narrower
+scoped view used by the rest of the interface.
 
 A hall carries two signals, and `factory-core/src/building.rs` is the one place
 that decides either. **Size** — the files, bytes and directories a bounded walk
