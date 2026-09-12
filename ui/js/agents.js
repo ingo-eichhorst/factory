@@ -18,7 +18,9 @@ export async function loadAgents() {
     const board = await api("/api/agents");
     state.scopes = board.scopes;
     state.roles = board.roles || [];
-    if (state.scopes.length) state.adapters = state.scopes[0].available;
+    // Served once alongside the scopes now, not copied onto each of them --
+    // see `Payload::Scopes` -- so `available` comes off the board itself.
+    state.adapters = board.available;
     // A scope added or dropped in the config has to reach the rail, not just
     // the roster underneath it.
     rebuildRail();

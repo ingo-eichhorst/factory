@@ -10,7 +10,7 @@ import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { openCreate } from "./task-form.js";
 import { loadDashboard, renderDashboard, wireDashboard } from "./dashboard.js";
-import { initActivity, recordEvent, markWatching } from "./activity.js";
+import { initActivity, recordEvent, markWatching, renderActivity } from "./activity.js";
 import { showSite, hideSite, refreshSite } from "./site.js";
 
 // ------------------------------------------------------------------ views
@@ -47,9 +47,10 @@ function rerender(route) {
   // server (`/api/production` takes a scope), not just re-drawn narrower --
   // so a rail change has to refetch, not merely re-render.
   if (state.tab === "dashboard") { loadDashboard(); return; }
-  // The activity log is a tail of events as they arrive, not a table of rows
-  // that can be re-drawn narrower, so the selection does not reach it.
-  if (state.tab === "activity") return;
+  // Everything already in the tail is still there; a scope change only
+  // changes how much of it is drawn, the same re-render `renderTasks` does
+  // below for the tasks it already holds.
+  if (state.tab === "activity") { renderActivity(); return; }
   if (state.tab === "site") { refreshSite(); return; }
   if (state.tab === "tasks") { renderTasks(); return; }
   if (state.agentView === "occupancy") renderOccupancy(); else renderAgents();
@@ -116,8 +117,12 @@ async function boot() {
   } catch (e) { $("instance").textContent = e.message; }
 
   try {
-    state.scopes = (await api("/api/agents")).scopes;
-    if (state.scopes.length) state.adapters = state.scopes[0].available;
+    // `available` is served once, alongside the scopes rather than copied
+    // onto each of them -- see `Payload::Scopes` -- so it is read from the
+    // board itself, not from `scopes[0]` any more.
+    const board = await api("/api/agents");
+    state.scopes = board.scopes;
+    state.adapters = board.available;
   } catch { state.scopes = []; }
 
   // /api/agents is the only endpoint that carries a scope's path, so the tree

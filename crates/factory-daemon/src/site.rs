@@ -15,6 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use factory_core::config::FACTORY_DIR;
 use factory_core::error::Result;
 use factory_core::protocol::{ScopeArea, ScopeFootprint, SiteFootprint};
 
@@ -22,7 +23,14 @@ use crate::engine::Engine;
 
 /// Directories that are not the codebase: dependencies, build output, version
 /// control. Walking into them would measure `node_modules`, not the project.
-const SKIP: &[&str] = &[
+/// Shared with `discovery.rs`, which walks the same tree for a different
+/// reason and must stay out of the same directories for the same reason --
+/// doubly so for `FACTORY_DIR` there: "nothing Factory owns is written
+/// inside a scope" (`AGENTS.md`) is not just a rule about writes. A scope
+/// discovery could hand out for `.factory` itself would be a place a task
+/// could be given to run an agent against the daemon's own database.
+pub(crate) const SKIP: &[&str] = &[
+    FACTORY_DIR,
     ".git",
     "node_modules",
     "target",
@@ -41,7 +49,9 @@ const SKIP: &[&str] = &[
 /// something enormous still answers in bounded time. What this returns once
 /// the cap is hit is a lower bound, not a measurement -- fine for sizing a
 /// hall relative to its neighbours, which is the only thing it is used for.
-const ENTRY_CAP: usize = 40_000;
+/// `discovery.rs` reuses this rather than inventing its own: the reason a
+/// walk needs a cap does not change with what the walk is for.
+pub(crate) const ENTRY_CAP: usize = 40_000;
 
 /// The area a file lying loose in a scope's root is filed under. A scope
 /// root usually holds a few of these -- a `Cargo.toml`, a `README.md` -- and
@@ -143,10 +153,16 @@ fn walk_scope(root: &Path) -> Option<ScopeWalk> {
 }
 
 impl Engine {
-    /// Every scope's size on disk, and the top-level breakdown behind it.
-    /// Sequential and one `spawn_blocking` per scope: a handful of bounded
-    /// walks, not a hot path -- the site view asks for this once when it
-    /// opens, not on every poll.
+    /// Every *declared* scope's size on disk, and the top-level breakdown
+    /// behind it. Sequential and one `spawn_blocking` per scope: a handful of
+    /// bounded walks, not a hot path -- the site view asks for this once when
+    /// it opens, not on every poll. Declared only, deliberately: discovery
+    /// can turn a real project into thousands of scopes nested inside one
+    /// another, and a footprint walk per one of them would mean walking the
+    /// same tree that many times over. A hall for an undeclared scope draws
+    /// at the default size and says its footprint was not recorded -- the
+    /// same fallback the protocol already documents for a directory the
+    /// daemon simply could not read.
     pub async fn site_footprint(self: &Arc<Self>) -> Result<SiteFootprint> {
         let mut scopes = Vec::new();
         for name in self.factory.scope_names() {

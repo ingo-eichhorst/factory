@@ -9,6 +9,7 @@
 //! is not, which is worse than admitting the hole.
 
 import { $, esc, state } from "./core.js";
+import { inScope } from "./scopes.js";
 
 const LIMIT = 500;
 let log = [];
@@ -62,9 +63,45 @@ export function initActivity() {
 export function recordEvent(ev) {
   const row = describe(ev);
   if (!row) return;
+  // Kept separate from `describe`: the scope a row belongs to is read off
+  // the raw event, not the rendered summary, so it has to be worked out here
+  // regardless of which fields `describe` chose to put in `label`/`detail`.
+  row.scope = scopeOf(ev);
   log.unshift(row);
   if (log.length > LIMIT) log.length = LIMIT;
   if (state.tab === "activity") renderActivity();
+}
+
+/// The scope a task-keyed event happened in, read off `state.tasks` -- which
+/// still has it, for `task_deleted`, because this runs before `app.js`
+/// removes the entry. `undefined` for a task the snapshot never covered (a
+/// very old event, or one that raced the initial load), or for an event with
+/// no scope of its own (`daemon_started`); `renderActivity`'s filter treats
+/// either as nothing to narrow, the way `inScope` fails open elsewhere for a
+/// selection it cannot resolve yet.
+function scopeOf(ev) {
+  switch (ev.type) {
+    case "task_created":
+    case "task_updated":
+      return ev.task.scope;
+    case "task_deleted":
+    case "task_entry":
+      return state.tasks.get(ev.id)?.scope;
+    case "run_started":
+    case "run_updated":
+      return state.tasks.get(ev.run.task_id)?.scope;
+    case "agent_updated":
+      return ev.agent.scope;
+    case "agent_removed": {
+      // `<scope>/<name>`, split on the *last* `/` -- a scope's own identity
+      // can contain one now that it is a path, so only the agent's own name,
+      // after it, is guaranteed to have none.
+      const cut = ev.id.lastIndexOf("/");
+      return cut < 0 ? undefined : ev.id.slice(0, cut);
+    }
+    default:
+      return undefined;
+  }
 }
 
 function describe(ev) {
@@ -98,12 +135,17 @@ function describe(ev) {
   }
 }
 
-function renderActivity() {
+export function renderActivity() {
   const tbody = $("activity-rows");
   const empty = $("activity-empty");
   if (!tbody) return;
   const rows = log.filter((r) => {
     if (kind !== "all" && r.kind !== kind) return false;
+    // Same narrowing every other view applies -- `tasks.js`, `agents.js`,
+    // `dashboard.js`, `occupancy.js`, `site.js`. `r.scope == null` is an
+    // event with no scope of its own (`daemon_started`) or one this page
+    // never learned the scope of; either way there is nothing to narrow.
+    if (r.scope != null && !inScope(r.scope)) return false;
     if (!q) return true;
     return (r.label + " " + r.detail).toLowerCase().includes(q);
   });
