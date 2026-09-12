@@ -435,6 +435,8 @@ mod tests {
             runs: 0,
             ack_timeout_seconds: None,
             timeout_seconds: None,
+            blocked_timeout_seconds: None,
+            worktree: false,
             labels: Default::default(),
             created_at: now,
             updated_at: now,

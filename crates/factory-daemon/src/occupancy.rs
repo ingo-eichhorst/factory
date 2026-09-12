@@ -11,12 +11,14 @@
 //!   that does not exist before Factory started writing it down.
 
 use chrono::{DateTime, Duration, Utc};
-use factory_core::adapter::RuntimeStatus;
+use factory_core::adapter::{RuntimeStatus, StatusReport, StatusSource};
 use factory_core::error::Result;
+use factory_core::event::Event;
 use factory_core::occupancy::{
     spans_from, Occupancy, OccupancyBlock, OccupancyPlan, OccupancyRow, OccupancyScope, StatusChange,
 };
-use factory_core::run::{Run, RunStatus};
+use factory_core::run::{BlockSource, Run, RunPatch, RunStatus};
+use factory_core::task::TaskEntry;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -247,6 +249,14 @@ impl Engine {
     /// Poll every running run's session and write down what it says. The run
     /// itself is already a block on the chart; this is what the agent looked
     /// like while it held the bay.
+    ///
+    /// This is also the one place a hook-reported `blocked` (or the runtime
+    /// saying working again) is acted on. The scheduler has its own poll of
+    /// the runtime for the `Gone` check, but that is an existing, unrelated
+    /// call to plain `status` -- putting the block/unblock logic here instead
+    /// means `status_report`, the one call that can cost an extra
+    /// subprocess (`herdr agent explain`), is asked for exactly once per run
+    /// per tick, not twice.
     pub async fn record_run_liveness(self: &Arc<Self>) {
         let runs = self.store.active_runs().await.unwrap_or_default();
         for run in runs {
@@ -256,10 +266,126 @@ impl Engine {
             let Ok(Some(task)) = self.store.get(&run.task_id).await else {
                 continue;
             };
-            let status = self.session_status(&run).await;
+            let report = self.session_status_report(&run).await;
             let subject = format!("run:{}", run.id);
-            self.record_status(&subject, &task.scope, &run.agent, status)
+            self.record_status(&subject, &task.scope, &run.agent, report.status)
                 .await;
+            let action = block_action(
+                &report,
+                run.status,
+                run.blocked_source,
+                run.block_suspected_since.is_some(),
+            );
+            self.apply_block_action(&run, action).await;
+        }
+    }
+
+    /// Carry out what `block_action` decided. Split from it so the decision
+    /// stays a pure function -- see `occupancy::tests` -- while this half
+    /// does the actual writing, journalling and publishing.
+    async fn apply_block_action(&self, run: &Run, action: BlockAction) {
+        match action {
+            BlockAction::Nothing => {}
+            BlockAction::Suspect => {
+                self.patch_run(
+                    run,
+                    RunPatch {
+                        block_suspected_since: Some(Utc::now()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
+            BlockAction::ClearSuspicion => {
+                self.patch_run(
+                    run,
+                    RunPatch {
+                        clear_block_suspicion: true,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
+            // A hook told the runtime the agent is blocked, and nothing
+            // already says so -- move the run (and, mirrored, the task)
+            // into `Blocked`, sourced from the runtime rather than the
+            // agent, so only this same poll noticing "working" again may
+            // take it back out.
+            BlockAction::Confirm => {
+                let Some(updated) = self
+                    .patch_run(
+                        run,
+                        RunPatch {
+                            status: Some(RunStatus::Blocked),
+                            blocked_since: Some(Utc::now()),
+                            blocked_source: Some(BlockSource::Runtime),
+                            clear_block_suspicion: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                else {
+                    return;
+                };
+                self.entry(
+                    &run.task_id,
+                    TaskEntry::new(
+                        "daemon",
+                        "blocked",
+                        format!(
+                            "{} reports the session is blocked and waiting for a human",
+                            run.runtime
+                        ),
+                    )
+                    .in_run(&run.id),
+                )
+                .await;
+                self.mirror_to_task(&updated).await;
+            }
+            // The same hook that set this block says the session is active
+            // again. Only fires when the daemon is the one holding the
+            // block open (`blocked_source == Runtime`) -- an agent-set
+            // block is untouched here no matter what the runtime says; see
+            // `AGENTS.md` and issue #7.
+            BlockAction::Unblock => {
+                let Some(updated) = self
+                    .patch_run(
+                        run,
+                        RunPatch {
+                            status: Some(RunStatus::Running),
+                            clear_blocked: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                else {
+                    return;
+                };
+                self.entry(
+                    &run.task_id,
+                    TaskEntry::new(
+                        "daemon",
+                        "unblocked",
+                        format!("{} reports the session is active again", run.runtime),
+                    )
+                    .in_run(&run.id),
+                )
+                .await;
+                self.mirror_to_task(&updated).await;
+            }
+        }
+    }
+
+    async fn patch_run(&self, run: &Run, patch: RunPatch) -> Option<Run> {
+        match self.store.update_run(&run.id, &patch).await {
+            Ok(updated) => {
+                self.bus.publish(Event::RunUpdated { run: updated.clone() });
+                Some(updated)
+            }
+            Err(e) => {
+                tracing::warn!(run = %run.id, "could not record a block/unblock: {e}");
+                None
+            }
         }
     }
 
@@ -281,6 +407,71 @@ impl Engine {
         let samples = lengths.len() as u32;
         (Some(lengths[lengths.len() / 2]), samples)
     }
+}
+
+/// What a fresh status report should do to a run's block state. A pure
+/// decision, on purpose: no store, no runtime, so "an inferred block does not
+/// change a status" and "an agent-set block is not cleared by the runtime
+/// looking busy" are things a test can assert directly against this function
+/// rather than against a fake `AgentRuntime` wired through `Engine`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockAction {
+    /// Move the run itself into `Blocked`, sourced from the runtime.
+    Confirm,
+    /// Not a status -- record the timestamp as a suspicion only.
+    Suspect,
+    /// A suspicion was recorded and no longer applies.
+    ClearSuspicion,
+    /// The daemon set this block and may honestly take it back.
+    Unblock,
+    /// Nothing to do. Covers, among other things, an agent-set block the
+    /// runtime is not the one allowed to touch.
+    Nothing,
+}
+
+/// `report` is what the runtime just said; `run_status`, `blocked_source` and
+/// `suspected` are the run's own state going into this tick.
+fn block_action(
+    report: &StatusReport,
+    run_status: RunStatus,
+    blocked_source: Option<BlockSource>,
+    suspected: bool,
+) -> BlockAction {
+    if report.status == RuntimeStatus::Blocked {
+        return match report.source {
+            // Hook authority. If the run is not already `Blocked` -- by
+            // either source -- this is the report that makes it so. If it
+            // already is, there is nothing left to set, only a suspicion
+            // recorded moments earlier (before this same report caught up)
+            // to let go of.
+            StatusSource::Reported if run_status != RunStatus::Blocked => BlockAction::Confirm,
+            StatusSource::Reported if suspected => BlockAction::ClearSuspicion,
+            StatusSource::Reported => BlockAction::Nothing,
+            // A screen's guess, or no attribution at all -- never a status,
+            // only a suspicion, and only worth writing once.
+            StatusSource::Inferred | StatusSource::Unknown if suspected => BlockAction::Nothing,
+            StatusSource::Inferred | StatusSource::Unknown => BlockAction::Suspect,
+        };
+    }
+
+    // Not `blocked` any more, by whatever measure. A standing suspicion is no
+    // longer supported by anything and comes off first.
+    if suspected {
+        return BlockAction::ClearSuspicion;
+    }
+
+    // The runtime saying the session looks active again may only undo a
+    // block the runtime itself put there. An agent-set block stands until
+    // the agent's own next report says otherwise -- see `AGENTS.md`.
+    let recovered = matches!(
+        report.status,
+        RuntimeStatus::Working | RuntimeStatus::Idle | RuntimeStatus::Starting
+    );
+    if recovered && run_status == RunStatus::Blocked && blocked_source == Some(BlockSource::Runtime) {
+        return BlockAction::Unblock;
+    }
+
+    BlockAction::Nothing
 }
 
 fn block_of(run: &Run, title: Option<&str>) -> OccupancyBlock {
@@ -386,5 +577,87 @@ mod tests {
     #[test]
     fn an_open_run_counts_up_to_now() {
         assert_eq!(busy_seconds(&[block(10, None)], at(0), at(60)), 50);
+    }
+
+    fn report(status: RuntimeStatus, source: StatusSource) -> StatusReport {
+        StatusReport { status, source }
+    }
+
+    #[test]
+    fn a_hook_reported_block_moves_a_running_run_into_blocked() {
+        let action = block_action(&report(RuntimeStatus::Blocked, StatusSource::Reported), RunStatus::Running, None, false);
+        assert_eq!(action, BlockAction::Confirm);
+    }
+
+    #[test]
+    fn an_inferred_block_does_not_change_a_status() {
+        // Whatever state the run is actually in, a screen's guess never
+        // produces `Confirm` or `Unblock` -- the only two actions that touch
+        // `RunStatus`.
+        for status in [RunStatus::Dispatching, RunStatus::Running, RunStatus::Blocked] {
+            let action = block_action(&report(RuntimeStatus::Blocked, StatusSource::Inferred), status, None, false);
+            assert_ne!(action, BlockAction::Confirm, "inferred must never confirm a block");
+            assert_ne!(action, BlockAction::Unblock, "inferred must never unblock either");
+        }
+        // What it does instead is raise a suspicion, once.
+        assert_eq!(
+            block_action(&report(RuntimeStatus::Blocked, StatusSource::Inferred), RunStatus::Running, None, false),
+            BlockAction::Suspect,
+        );
+        assert_eq!(
+            block_action(&report(RuntimeStatus::Blocked, StatusSource::Inferred), RunStatus::Running, None, true),
+            BlockAction::Nothing,
+            "a suspicion already recorded is not re-raised every tick",
+        );
+    }
+
+    #[test]
+    fn an_unattributed_block_is_treated_as_a_guess_not_a_report() {
+        // `Unknown` is what a runtime that never implemented `status_report`
+        // hands back. It must not be trusted any more than `Inferred` is.
+        let action = block_action(&report(RuntimeStatus::Blocked, StatusSource::Unknown), RunStatus::Running, None, false);
+        assert_eq!(action, BlockAction::Suspect);
+    }
+
+    #[test]
+    fn a_runtime_set_block_is_lifted_once_the_session_looks_active_again() {
+        let action = block_action(
+            &report(RuntimeStatus::Working, StatusSource::Unknown),
+            RunStatus::Blocked,
+            Some(BlockSource::Runtime),
+            false,
+        );
+        assert_eq!(action, BlockAction::Unblock);
+    }
+
+    #[test]
+    fn an_agent_set_block_is_not_cleared_by_the_runtime_looking_busy() {
+        for working_status in [RuntimeStatus::Working, RuntimeStatus::Idle, RuntimeStatus::Starting] {
+            let action = block_action(
+                &report(working_status, StatusSource::Unknown),
+                RunStatus::Blocked,
+                Some(BlockSource::Agent),
+                false,
+            );
+            assert_eq!(
+                action,
+                BlockAction::Nothing,
+                "only the agent's own next report may clear a block it set"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cleared_suspicion_does_not_masquerade_as_an_unblock() {
+        // The run was never actually put into `Blocked` by anything -- there
+        // was only a suspicion -- so the runtime looking active again just
+        // drops the suspicion, not a status nothing set.
+        let action = block_action(
+            &report(RuntimeStatus::Working, StatusSource::Unknown),
+            RunStatus::Running,
+            None,
+            true,
+        );
+        assert_eq!(action, BlockAction::ClearSuspicion);
     }
 }

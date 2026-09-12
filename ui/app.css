@@ -21,6 +21,11 @@
   --run-wash: rgba(62,177,131,.14); --wait-wash: rgba(217,164,69,.15); --fault-wash: rgba(217,113,88,.14);
   --term-bg: #0D1316; --term-fg: #B9CAD1; --term-dim: #6C8189; --term-line: #1D272B;
   --on-signal: #08131C;
+  /* A window with its light on. Not one of the three state colours: how far up
+     a hall is lit says how much of it is working, and what kind of work that
+     is belongs to the beacon -- a lit floor drawn in `--idle` would be a light
+     nobody can see is on. */
+  --lit: #FFC98A;
   --shadow: 0 16px 44px rgba(0,0,0,.55);
   /* The site plan's own palette. Both renderers read these through
      `getComputedStyle`, never a literal, so a theme switch repaints a scene
@@ -44,6 +49,9 @@
   --run-wash: rgba(27,122,85,.12); --wait-wash: rgba(156,104,6,.13); --fault-wash: rgba(158,58,43,.11);
   --term-bg: #0D1316; --term-fg: #B9CAD1; --term-dim: #6C8189; --term-line: #1D272B;
   --on-signal: #FFFFFF;
+  /* Warm still, but it has to carry on a pale wall rather than glow on a dark
+     one, so it is the same light two stops down. */
+  --lit: #B5762A;
   --shadow: 0 16px 44px rgba(16,22,25,.22);
   --ground: #CBD3D8; --ground2: #D8E0E4; --plate: #E7ECEE; --paint: #9C6806;
   --roof: #B9C3C9; --roof2: #9FACB3; --wallA: #CED8DC; --wallB: #B7C3C8;
@@ -195,6 +203,38 @@ tr.row:hover { background: var(--panel-2); }
 .s-done { color: var(--run); border-color: transparent; background: var(--run-wash); }
 .s-failed, .s-cancelled { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
 
+/* ---------------------------------------------------------- tasks board
+   Columns are statuses and nothing else: blocked sits leftmost because it is
+   the one column a person has to act on, the two pending flavours stay apart
+   so a scheduled task never hides in a manual pile, dispatching and running
+   share a column because a session still opening is not yet work, and a
+   closed card always spells out its outcome so a failure cannot read as done.
+   No drag anywhere here -- a card is clickable and nothing else, because
+   status comes from `factory task report`, never from where a card sits. */
+.kbcols { display: flex; gap: 10px; padding: 14px; overflow-x: auto; align-items: flex-start; }
+.kbcol {
+  flex: 0 0 210px; display: flex; flex-direction: column; gap: 7px;
+  background: var(--panel-2); border: 1px solid var(--line); border-top: 2px solid var(--line);
+  border-radius: 4px; padding: 9px;
+}
+.kbcol[data-col="blocked"] { border-top-color: var(--signal); }
+.kbcol[data-col="active"] { border-top-color: var(--wait); }
+.kbcol-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
+  font: 600 9.5px/1 var(--cond); letter-spacing: .13em; text-transform: uppercase; color: var(--faint);
+  padding-bottom: 6px; border-bottom: 1px solid var(--line);
+}
+.kbcol-count { font: 500 10px/1 var(--mono); color: var(--muted); letter-spacing: 0; text-transform: none; }
+.kbcol-body { display: flex; flex-direction: column; gap: 7px; min-height: 6px; }
+.kbcol-empty { color: var(--faint); font-size: 11px; padding: 3px 2px; }
+.kbc {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 3px;
+  padding: 8px 9px; cursor: pointer; display: flex; flex-direction: column; gap: 5px;
+}
+.kbc:hover { border-color: var(--signal); }
+.kbc-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.kbc .title { font-size: 12px; }
+
 /* --------------------------------------------------------------- form */
 label {
   display: block; margin: 12px 0 4px; color: var(--faint);
@@ -206,6 +246,9 @@ input, textarea, select {
 }
 input:focus, textarea:focus, select:focus { outline: 1px solid var(--signal); outline-offset: -1px; }
 textarea { min-height: 84px; resize: vertical; font: 400 12px/1.6 var(--mono); }
+.checkrow { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.checkrow input[type="checkbox"] { width: auto; }
+.checkrow span { font-size: 12.5px; color: var(--ink-2); }
 button.btn {
   background: var(--panel); color: var(--ink-2); cursor: pointer;
   border: 1px solid var(--line); border-radius: 3px; padding: 6px 12px;
@@ -501,8 +544,20 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
   background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 6px 9px;
   display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--muted);
 }
-.slegend .row { display: flex; align-items: center; gap: 7px; }
-.slegend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.slegend .row { display: flex; align-items: flex-start; gap: 7px; max-width: 38ch; }
+.slegend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto; margin-top: 2px; }
+/* A hall says two things at once -- how much repository it is, and how much
+   work is in it -- so the legend is two groups rather than one list of
+   colours. The size swatches are drawn as a building, not a colour: nothing
+   about a hall's size is carried by hue. */
+.slegend .grp {
+  font: 600 9.5px/1.4 var(--cond); letter-spacing: .1em; text-transform: uppercase;
+  color: var(--faint); margin-top: 4px;
+}
+.slegend .grp:first-child { margin-top: 0; }
+.slegend .sw.sz { background: var(--wallA); border: 1px solid var(--muted); height: 12px; margin-top: 1px; }
+.slegend .sw.lt { background: var(--lit); }
+.slegend .sw.sz.sm { height: 6px; margin-top: 4px; }
 .tod { display: flex; flex-direction: column; gap: 5px; align-items: flex-end; }
 .todr { display: flex; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; background: var(--panel); }
 .todr button { padding: 5px 9px; font: 500 10.5px/1 var(--mono); color: var(--muted); background: transparent; border: 0; cursor: pointer; }

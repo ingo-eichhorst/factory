@@ -110,7 +110,7 @@ export function renderAgents() {
         <h3>${esc(s.name)}</h3>
         <span class="sub">${esc(s.path)}</span>
         <span style="margin-left:auto"></span>
-        <span class="sub">tasks default to ${esc(s.default_agent)} on ${esc(s.runtime)}</span>
+        <span class="sub">tasks default to ${esc(s.default_agent)} on ${esc(s.runtime)}, kept in ${esc(s.task_store)}</span>
       </div>
       ${rows || `<div class="empty">No agents declared.</div>`}
     </div>`;

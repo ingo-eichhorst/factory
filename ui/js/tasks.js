@@ -14,6 +14,89 @@ export function scheduleLabel(s) {
   return "scheduled";
 }
 
+// -------------------------------------------------------------- the shape
+// Kanban or table, remembered per browser the same way the theme is: a live
+// value here, seeded once from `localStorage` and best-effort mirrored back
+// to it. A browser that refuses storage still switches, it just forgets by
+// the next visit.
+const VIEW_KEY = "factory-tasks-view";
+let tasksView = "board";
+try { if (localStorage.getItem(VIEW_KEY) === "table") tasksView = "table"; }
+catch (e) { /* private window */ }
+
+export function currentTasksView() { return tasksView; }
+
+/// Which container shows, and which button looks pressed. No data here --
+/// that is `renderTasks`'s business, so this alone can run before the first
+/// task ever loads.
+export function applyTasksView(view) {
+  tasksView = view === "table" ? "table" : "board";
+  $("tasks-table").hidden = tasksView !== "table";
+  $("kanban").hidden = tasksView !== "board";
+  for (const b of $("tasks-view").querySelectorAll("button")) b.classList.toggle("on", b.dataset.view === tasksView);
+}
+
+export function setTasksView(view) {
+  applyTasksView(view);
+  try { localStorage.setItem(VIEW_KEY, tasksView); } catch (e) { /* private window */ }
+  renderTasks();
+}
+
+// -------------------------------------------------------------- the board
+// Columns are `TaskStatus` and nothing else. Blocked is first because it is
+// the one column a person has to act on; pending splits by how it will
+// start, so a scheduled task never sits in the same pile as a manual one;
+// dispatching and running share a column because a session still opening is
+// not yet work; done, failed and cancelled share a closed column, but each
+// card says its outcome plainly so a failure cannot read as done.
+const KANBAN_COLUMNS = [
+  { key: "blocked", label: "Blocked" },
+  { key: "manual", label: "Manual" },
+  { key: "scheduled", label: "Scheduled" },
+  { key: "active", label: "In progress" },
+  { key: "closed", label: "Closed" },
+];
+
+function columnFor(t) {
+  if (t.status === "blocked") return "blocked";
+  if (t.status === "pending") return t.schedule ? "scheduled" : "manual";
+  if (t.status === "dispatching" || t.status === "running") return "active";
+  return "closed";
+}
+
+/// Only what `/api/tasks` already serves: title, short id, status, scope,
+/// agent, the schedule rule or the run count, and how long the newest run
+/// has been going. No estimate -- there is no template here to read one from.
+function taskCard(t) {
+  const bits = [];
+  bits.push(t.schedule ? scheduleLabel(t.schedule) : (t.runs ? `${t.runs} run${t.runs === 1 ? "" : "s"}` : "no runs yet"));
+  if (!TERMINAL.includes(t.status) && t.status !== "pending" && t.last_run_at) bits.push(since(t.last_run_at));
+  const wt = t.worktree ? ` <span class="tag" title="runs in a git worktree of its own">worktree</span>` : "";
+  return `
+    <div class="kbc" data-id="${esc(t.id)}">
+      <div class="kbc-top">${statusBadge(t.status)}<code class="id">${esc(t.id.slice(0, 8))}</code></div>
+      <div class="title">${esc(t.title)}</div>
+      <div class="sub">${esc(t.scope)} · ${esc(t.agent)}${wt}</div>
+      <div class="sub">${esc(bits.join(" · "))}</div>
+    </div>`;
+}
+
+function renderBoard(rows) {
+  const byCol = new Map(KANBAN_COLUMNS.map(c => [c.key, []]));
+  for (const t of rows) byCol.get(columnFor(t)).push(t);
+  $("kanban").innerHTML = KANBAN_COLUMNS.map(c => {
+    const items = byCol.get(c.key);
+    return `
+      <div class="kbcol" data-col="${c.key}">
+        <div class="kbcol-head"><span>${esc(c.label)}</span><span class="kbcol-count">${items.length}</span></div>
+        <div class="kbcol-body">${items.length ? items.map(taskCard).join("") : `<div class="kbcol-empty">—</div>`}</div>
+      </div>`;
+  }).join("");
+  for (const el of $("kanban").querySelectorAll(".kbc")) {
+    el.onclick = () => openTask(el.dataset.id);
+  }
+}
+
 export function renderTasks() {
   // The selection is applied here and not by asking the daemon for one scope:
   // the socket sends the whole task list again on connect and after a lag, and
@@ -31,11 +114,16 @@ export function renderTasks() {
       <td>${statusBadge(t.status)}</td>
       <td class="sub">${t.runs || 0}</td>
       <td class="sub">${esc(t.scope)}</td>
-      <td class="sub">${esc(t.agent)}</td>
+      <td class="sub">${esc(t.agent)}${t.worktree ? ` <span class="tag" title="runs in a git worktree of its own">worktree</span>` : ""}</td>
     </tr>`).join("");
   for (const tr of $("tasks").querySelectorAll("tr.row")) {
     tr.onclick = () => openTask(tr.dataset.id);
   }
+
+  renderBoard(rows);
+  // Six empty columns say less than one sentence: with nothing to show, the
+  // board steps aside for the same "Nothing here yet." the table already has.
+  if (tasksView === "board") $("kanban").hidden = rows.length === 0;
 }
 
 /// A task is a place, and it opens over whichever view you were on -- the list,
@@ -125,6 +213,7 @@ export function renderModal() {
   if (t.next_run_at) meta += ` · next ${new Date(t.next_run_at).toLocaleString()}`;
   if (t.ack_timeout_seconds) meta += ` · ack ${t.ack_timeout_seconds}s`;
   if (t.timeout_seconds) meta += ` · timeout ${t.timeout_seconds}s`;
+  if (t.worktree) meta += ` · own worktree`;
   meta += `</div>`;
   const labels = Object.entries(t.labels || {});
   if (labels.length) {
@@ -132,6 +221,13 @@ export function renderModal() {
   }
   if (t.instructions) meta += `<label>Instructions</label><pre>${esc(t.instructions)}</pre>`;
   const r = selectedRun();
+  // The branch and the path this attempt worked in, next to the attach
+  // command a person would use to go look at the session itself.
+  if (r && r.worktree_branch) {
+    meta += `<div class="sub">worktree <code>${esc(r.worktree_branch)}</code>`;
+    if (r.worktree_path) meta += ` at <code>${esc(r.worktree_path)}</code>`;
+    meta += `</div>`;
+  }
   if (r && r.result) meta += `<label>Result</label><pre>${esc(r.result)}</pre>`;
   if (r && r.error) meta += `<label>Error</label><pre>${esc(r.error)}</pre>`;
   $("m-meta").innerHTML = meta;

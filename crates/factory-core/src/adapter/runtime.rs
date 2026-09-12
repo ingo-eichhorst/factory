@@ -62,6 +62,55 @@ impl RuntimeStatus {
     }
 }
 
+/// How a `RuntimeStatus` was arrived at. `RuntimeStatus` on its own cannot
+/// tell a harness that told the runtime the truth apart from a runtime that
+/// guessed from the pane's appearance, and that difference is the whole of
+/// what makes `Blocked` safe to act on -- see issue #7 and `AGENTS.md`'s "a
+/// task's status comes from the agent calling `factory task report`, never
+/// from looking at a terminal and guessing".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusSource {
+    /// The harness told the runtime through a lifecycle hook. This is a
+    /// report.
+    Reported,
+    /// The runtime guessed from the terminal's appearance. This is a guess.
+    Inferred,
+    /// The runtime does not say which it did.
+    Unknown,
+}
+
+impl StatusSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reported => "reported",
+            Self::Inferred => "inferred",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Anything unrecognised is `Unknown`, the same convention `RuntimeStatus`
+    /// uses just above: a runtime is free to grow a provenance nobody has
+    /// named yet, and "we don't know how it knows" is the honest answer to
+    /// that, not a parse error.
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "reported" => Self::Reported,
+            "inferred" => Self::Inferred,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// A status plus how much Factory is allowed to trust it. Only a `Reported`
+/// `Blocked` is a fact the daemon may act on; an `Inferred` or `Unknown` one
+/// is a suspicion, and stays one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusReport {
+    pub status: RuntimeStatus,
+    pub source: StatusSource,
+}
+
 /// One frame of a session's screen: what a person attached to it would be
 /// looking at right now.
 ///
@@ -127,6 +176,19 @@ pub trait AgentRuntime: Send + Sync {
 
     async fn status(&self, session: &SessionRef) -> Result<RuntimeStatus>;
 
+    /// `status`, plus whether it is a report or a guess. Deliberately a
+    /// separate method rather than a change to `status`'s return type --
+    /// `status` is a public seam `examples/plugins` and every existing
+    /// runtime already implement, and this default keeps all of them
+    /// compiling and correct: a runtime that never says how it knows is
+    /// honestly `Unknown`, not silently `Reported`.
+    async fn status_report(&self, session: &SessionRef) -> Result<StatusReport> {
+        Ok(StatusReport {
+            status: self.status(session).await?,
+            source: StatusSource::Unknown,
+        })
+    }
+
     /// Type literal text into the session without submitting it.
     async fn send_text(&self, session: &SessionRef, text: &str) -> Result<()>;
 
@@ -164,4 +226,75 @@ pub trait AgentRuntime: Send + Sync {
     }
 
     async fn stop(&self, session: &SessionRef) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_status_source_round_trips_through_its_wire_string() {
+        for s in [StatusSource::Reported, StatusSource::Inferred, StatusSource::Unknown] {
+            assert_eq!(StatusSource::parse(s.as_str()), s);
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_status_source_parses_to_unknown_rather_than_erroring() {
+        // The same convention as `RuntimeStatus::parse`: a runtime is free to
+        // grow a provenance nobody named yet, and that is not a parse error.
+        assert_eq!(StatusSource::parse("guessed-from-tea-leaves"), StatusSource::Unknown);
+    }
+
+    /// A runtime that only ever implements what the trait required before
+    /// this issue -- every runtime that existed until now, and any plugin
+    /// written against the old seam.
+    struct BareRuntime;
+
+    #[async_trait::async_trait]
+    impl AgentRuntime for BareRuntime {
+        fn name(&self) -> &str {
+            "bare"
+        }
+        async fn start(&self, _req: &StartRequest) -> Result<SessionRef> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn submit(&self, _session: &SessionRef, _text: &str) -> Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn status(&self, _session: &SessionRef) -> Result<RuntimeStatus> {
+            Ok(RuntimeStatus::Blocked)
+        }
+        async fn send_text(&self, _session: &SessionRef, _text: &str) -> Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn send_keys(&self, _session: &SessionRef, _keys: &[String]) -> Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn read(&self, _session: &SessionRef, _lines: u32) -> Result<String> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn stop(&self, _session: &SessionRef) -> Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
+    fn session() -> SessionRef {
+        SessionRef {
+            runtime: "bare".into(),
+            handle: "h".into(),
+            meta: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_status_report_calls_through_to_status_and_says_unknown() {
+        let report = BareRuntime.status_report(&session()).await.unwrap();
+        assert_eq!(report.status, RuntimeStatus::Blocked, "still answers what status() says");
+        assert_eq!(
+            report.source,
+            StatusSource::Unknown,
+            "a runtime that never says how it knows must not come out Reported"
+        );
+    }
 }

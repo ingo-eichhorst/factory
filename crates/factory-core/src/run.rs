@@ -90,6 +90,31 @@ impl Trigger {
     }
 }
 
+/// Who put a run into `Blocked`. `RunStatus::Blocked` alone does not say
+/// this, and it has to be said somewhere: the daemon may honestly take back
+/// only what it put there itself. An agent that called
+/// `factory task report --status blocked` gets to be the only one who calls
+/// it back, even if the runtime later thinks the pane looks busy again --
+/// see `AGENTS.md` on statuses coming from the agent, never from a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockSource {
+    /// The agent said so itself, over the reporting contract.
+    Agent,
+    /// A runtime's lifecycle hook told Factory, with no report from the agent
+    /// involved at all.
+    Runtime,
+}
+
+impl BlockSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
     pub id: String,
@@ -107,6 +132,16 @@ pub struct Run {
     /// The adapter that actually ran, once the name above was resolved.
     #[serde(default)]
     pub adapter: String,
+    /// Where this attempt worked, when its task asked for a worktree of its
+    /// own: the branch it is on and the path it was checked out at. `None`
+    /// for a run that worked in the scope directly, and for any run this
+    /// daemon made before the field existed. Set once, when the worktree is
+    /// made, and never cleared -- the daemon does not clean these up, so this
+    /// is the only record of where the work went once the run ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
     pub runtime: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionRef>,
@@ -120,6 +155,23 @@ pub struct Run {
     pub started_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
+    /// When the current block began. `None` whenever `status` is not
+    /// `Blocked` -- this is the block's own clock, not a history of every
+    /// block the run has ever had, so it is cleared the moment the block
+    /// ends and `blocked_timeout_seconds` is measured from it rather than
+    /// from `started_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_since: Option<DateTime<Utc>>,
+    /// Who set the current block. Governs who may honestly take it back off
+    /// -- see `BlockSource`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_source: Option<BlockSource>,
+    /// Not a status, and never treated as one: a timestamp the runtime's own
+    /// screen-guess put here, so the UI can show "the runtime thinks this may
+    /// be waiting, since T" without Factory ever having asserted it. Cleared
+    /// the moment the guess stops being `blocked`, confirmed or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_suspected_since: Option<DateTime<Utc>>,
 }
 
 impl Run {
@@ -163,4 +215,24 @@ pub struct RunPatch {
     pub clear_token: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_since: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_source: Option<BlockSource>,
+    /// `blocked_since` and `blocked_source` are never meaningfully set apart,
+    /// so one flag clears both -- the `clear_session`/`clear_token` pattern
+    /// above, applied to the pair together.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_suspected_since: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_block_suspicion: bool,
+    /// Set once, right after `git worktree add` succeeds. Nothing ever clears
+    /// these -- there is no "leave the worktree" patch, because there is
+    /// nothing else for the run to have used once it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
 }

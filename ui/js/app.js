@@ -4,14 +4,14 @@
 
 import { $, api, state, connect, setTheme, currentTheme, toggleTheme } from "./core.js";
 import { initRail, writeHash, setRouter, readHash, applyRoute } from "./scopes.js";
-import { dropModal } from "./modal.js";
-import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal } from "./tasks.js";
+import { closeModal, dropModal } from "./modal.js";
+import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyTasksView, currentTasksView, setTasksView } from "./tasks.js";
 import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { openCreate } from "./task-form.js";
 import { loadDashboard, renderDashboard, wireDashboard } from "./dashboard.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
-import { showSite, hideSite, refreshSite, siteMode, setSiteMode } from "./site.js";
+import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 
 // ------------------------------------------------------------------ views
 //
@@ -39,8 +39,8 @@ const VIEWS = {
     tail: { write: activityFilter, read: ([f]) => setActivityFilter(f || "all") },
   },
   site: {
-    onShow: () => refreshScopesThenSite(true),
-    onHide: hideSite,
+    onShow: startSite,
+    onHide: stopSite,
     tail: { write: siteMode, read: ([m]) => setSiteMode(m) },
   },
   tasks: { onShow: () => {} }, // state.tasks is already current; nothing to fetch
@@ -250,6 +250,26 @@ function stopAgentPoll() {
   if (state.agentPoll) { clearInterval(state.agentPoll); state.agentPoll = null; }
 }
 
+/// A hall says two things, and only one of them announces itself. What Factory
+/// is doing arrives as events and redraws the site the moment it changes; how
+/// big a scope is changes when somebody commits, which fires no event Factory
+/// will ever hear. So the site also ticks, slowly: without it, a page left
+/// open on a quiet instance would keep drawing a hall at the size it was when
+/// the tab was opened. The daemon caches the walk, so a tick that finds
+/// nothing new costs a query, and `update` keeps the scene standing.
+const SITE_TICK_MS = 60000;
+
+function startSite() {
+  refreshScopesThenSite(true);
+  stopSite();
+  state.sitePoll = setInterval(() => refreshScopesThenSite(), SITE_TICK_MS);
+}
+
+function stopSite() {
+  if (state.sitePoll) { clearInterval(state.sitePoll); state.sitePoll = null; }
+  hideSite();
+}
+
 function showAgentView(view) {
   state.agentView = view;
   $("view-occupancy").hidden = view !== "occupancy";
@@ -271,6 +291,10 @@ function showAgentView(view) {
 // ---------------------------------------------------------------------- boot
 
 async function boot() {
+  // Before anything loads, so a returning visitor never sees the other shape
+  // flash up first.
+  applyTasksView(currentTasksView());
+
   try {
     const info = (await api("/api/status")).status;
     $("instance").textContent = `${info.instance} · ${info.root}`;
@@ -314,6 +338,9 @@ async function boot() {
   // fires one.
   for (const b of $("levels").querySelectorAll(".lvl")) {
     b.onclick = () => setLevel(b.dataset.level);
+  }
+  for (const b of $("tasks-view").querySelectorAll("button")) {
+    b.onclick = () => setTasksView(b.dataset.view);
   }
   for (const b of $("agent-view").querySelectorAll("button")) {
     b.onclick = () => { showAgentView(b.dataset.view); writeHash(); };
@@ -386,13 +413,21 @@ function onEvent(ev) {
       }
       break;
   }
-  // The Agents and Site views are both a read over runs and standing agents;
-  // either can change out from under them without a task event at all.
+  // The Agents view is a read over runs and standing agents; either can change
+  // out from under it without a task event at all.
   if (ev.type.startsWith("run_") || ev.type.startsWith("agent_")) {
     if (state.tab === "agents") {
       if (state.agentView === "occupancy") loadOccupancy(); else loadAgents();
     }
-    if (state.tab === "site") refreshScopesThenSite();
+  }
+  // The site draws queued work too -- the crates at a hall's door, and the
+  // floors its scope's load lights -- so a task arriving, being taken or being
+  // deleted changes what it shows even when no run has started yet. Not
+  // `task_entry`, which is one event per line an agent writes: the journal
+  // says nothing about how full a hall is.
+  if (state.tab === "site" && (ev.type.startsWith("run_") || ev.type.startsWith("agent_")
+      || ev.type === "task_created" || ev.type === "task_updated" || ev.type === "task_deleted")) {
+    refreshScopesThenSite();
   }
   // A run reaching a terminal state is the one event that can change what
   // `/api/production` answers -- the dashboard's history cards refetch on it
@@ -401,12 +436,18 @@ function onEvent(ev) {
 }
 
 /// The site's halls are built from `state.scopes`, which only the Agents view
-/// otherwise keeps current. Pull a fresh copy before redrawing rather than
-/// let the site quietly fall behind whenever nobody has the Agents tab open.
+/// otherwise keeps current, and from `/api/site`, which is the only thing that
+/// knows how big each scope is and how much of it is working. Both, together,
+/// in one wait: the figures outside a hall and the lights on it are the same
+/// fact seen twice, and fetching them a moment apart is how they come to
+/// disagree. The daemon caches the walk behind `/api/site`, so asking again on
+/// every event costs a query rather than a tree walk.
+///
 /// `opening` also runs the first-load path (footprint fetch, camera fit).
 async function refreshScopesThenSite(opening) {
   try {
-    state.scopes = (await api("/api/agents")).scopes;
+    const [agents] = await Promise.all([api("/api/agents"), loadFootprint()]);
+    state.scopes = agents.scopes;
   } catch { /* keep drawing with what we had */ }
   if (opening) showSite(); else refreshSite();
 }

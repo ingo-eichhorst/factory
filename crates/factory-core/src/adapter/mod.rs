@@ -11,7 +11,7 @@ pub use agent::{Agent, AgentContext, LaunchKind, LaunchSpec, TaskBinding};
 pub use interface::{Interface, InterfaceContext};
 pub use runtime::{
     AgentRuntime, RuntimeEvent, RuntimeEventKind, RuntimeEventStream, RuntimeStatus, Screen,
-    StartRequest,
+    StartRequest, StatusReport, StatusSource,
 };
 pub use store::TaskStore;
 

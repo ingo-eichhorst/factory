@@ -175,10 +175,15 @@
     <div class="bar">
       <h2>Tasks</h2>
       <span class="sp"></span>
+      <div class="seg" id="tasks-view">
+        <button data-view="board" class="on">Kanban</button>
+        <button data-view="table">Table</button>
+      </div>
       <button class="btn primary" id="newTask">New task</button>
     </div>
     <section>
-      <table>
+      <div class="kbcols" id="kanban"></div>
+      <table id="tasks-table" hidden>
         <thead><tr><th style="width:42%">Task</th><th>Status</th><th>Runs</th><th>Scope</th><th>Agent</th></tr></thead>
         <tbody id="tasks"></tbody>
       </table>

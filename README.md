@@ -19,7 +19,7 @@ the daemon cannot tell a built-in implementation from a plugin:
 | --- | --- | --- |
 | **Agent** | how a harness is started, and what a task sounds like to it | `claude-code`, `pi`, `codex`, `opencode`, `shell` |
 | **Agent runtime** | where agents actually run | `herdr` |
-| **Task store** | where tasks and runs live — the CRUD contract | `sqlite` |
+| **Task store** | where tasks live — the CRUD contract, chosen per scope | `sqlite` |
 | **Interface** | how the outside reaches the daemon | `cli` (unix socket), `http` (REST + WebSocket + UI) |
 
 The traits are in `crates/factory-core/src/adapter/`. Nothing in core knows
@@ -267,14 +267,25 @@ until the first ends or is cancelled.
 **Status comes from the agent, not from the terminal.** A runtime can say
 whether a session is alive; it cannot say whether the work is finished, and
 anything that reads that from a terminal's appearance will be wrong sometimes.
-Runtime status is used only to notice sessions that died.
+Runtime status is used only to notice sessions that died -- with one carved-out
+exception. Some runtimes (herdr, for `pi`) have a harness that tells them
+directly, through a lifecycle hook, that the agent is waiting on a human: that
+is a report, not a guess, so the daemon trusts it enough to mark the run
+`Blocked` on its own, with no callback from the agent at all. The same runtime
+guessing `blocked` from the screen's appearance -- what it does for `claude`,
+`codex` and `opencode` -- is not trusted the same way: it is recorded as a
+suspicion the UI can show, and it changes no status and stops no timeout.
 
-Two timeouts catch the rest:
+Three timeouts catch the rest:
 
 - `ack_timeout_seconds` (180 by default) — the agent is up but has not said a
   word. This is what an agent sitting on a first-run trust prompt or a login
   looks like.
 - `task_timeout_seconds` (3600 by default) — it acknowledged and then went quiet.
+- `blocked_timeout_seconds` (86400 by default) — a run a hook reported
+  `Blocked` is exempt from the two above and given this much longer clock
+  instead, counted from when the block began rather than when the run did, so
+  a person has a real chance to see it and answer before the daemon gives up.
 
 ## Configuration
 
@@ -296,6 +307,7 @@ daemon:
   tick_seconds: 5
   ack_timeout_seconds: 180
   task_timeout_seconds: 3600
+  blocked_timeout_seconds: 86400
   default_agent: claude-code
   default_runtime: herdr
 
@@ -303,7 +315,45 @@ scopes:
   - name: demo
     path: projects/demo
     agent: pi                # this scope's default, overriding the instance's
+
+  - name: upstream
+    path: projects/upstream
+    task_store: file-store   # and this scope's tasks live somewhere else
 ```
+
+### Where a scope's tasks live
+
+`daemon.task_store` names the engine for the instance; a scope that names its
+own overrides it. That is how one project's tasks can be issues in a tracker
+while another's stay in the built-in sqlite, and it is the whole of the
+configuration: the adapter has to be registered, as a built-in or a plugin, and
+a scope naming one that is not registered stops the daemon at startup rather
+than quietly landing that project's tasks in the wrong database.
+
+What does not move with the task is the ledger. Runs, the journal, the standing
+agents and the liveness history stay in the instance's default store, whatever
+engine holds the task:
+
+| | where the scope says | the instance's default store |
+| --- | --- | --- |
+| the task, and its schedule | yes | |
+| runs: attempt, token, session, start and end | | yes |
+| journal entries | | yes |
+| standing agents, liveness history | | yes |
+
+That is not a limitation dressed up as a design. An issue has a title, a body
+and a state; it has nowhere to put an attempt number or a callback token, and
+an `AgentSession` is not something a tracker has heard of. Keeping one ledger
+is also what makes `active_runs()` complete, so the watchdog and the scheduler
+never have to ask every engine in turn whether it has forgotten a run.
+
+The practical consequence for whoever writes a store adapter is six methods:
+`create`, `get`, `list`, `update`, `delete`, `due`. The daemon asks a scope's
+store nothing else. `examples/plugins/file-store/` refuses the rest out loud, so
+a store that is asked something it should not be says so instead of guessing.
+
+The engine a scope uses is shown on the agents page, and is not editable there
+-- see the last section of this file for why.
 
 ## Writing a plugin
 
@@ -347,7 +397,9 @@ side: `run.create`, `run.get`, `run.update`, `run.list`, `run.active`,
 issue tracker instead of the local database.
 
 `examples/plugins/shell-plugin/` is a complete, working example in about eighty
-lines of Python. Copy it.
+lines of Python. Copy it. `examples/plugins/file-store/` is the same for the
+task-store seam -- tasks in one JSON file, and a refusal of everything that
+belongs in the instance's ledger store instead.
 
 A plugin may not take the name of an adapter that already exists; the registry
 refuses the collision rather than silently shadowing a built-in.
@@ -447,14 +499,29 @@ since it was opened, filterable by kind and by free text. There is a `/ws`
 stream and a journal per task, but no queryable history behind either yet, so
 the banner says plainly that nothing earlier than "now" is shown here.
 
-**Site plan** draws the same scopes as a place: one hall per scope, sized by
-its footprint on disk (`/api/site`), and a figure for every agent actually
-present — never a bay, because Factory has no bay ("a row is an agent, not a
-bay", `occupancy.rs`). A second, lit three.js render of the same facts toggles
-from the same HUD, orbits, and picks the same hall the plan would. Both fall
-back to honesty over invention: a scope's own directory tree is not read, so a
-hall's floor says "not recorded" instead of drawing a treemap from nothing; the
-file a session is editing is not read at all, and is not drawn.
+**Site plan** draws the same scopes as a place: one hall per scope, and a
+figure for every agent actually present — never a bay, because Factory has no
+bay ("a row is an agent, not a bay", `occupancy.rs`). A second, lit three.js
+render of the same facts toggles from the same HUD, orbits, and picks the same
+hall the plan would.
+
+A hall carries two signals, and `factory-core/src/building.rs` is the one place
+that decides either. **Size** — the files, bytes and directories a bounded walk
+of the scope finds (`/api/site`, cached for five minutes) — becomes a tier, a
+floor count, a footprint and a number of window bays. **Activity** — runs in
+flight, tasks queued, agents standing up, all out of the daemon's own records —
+becomes lit floors, a roof beacon and how fast it beats. Neither reaches the
+other: activity may light a hall and never build one, or height would stop
+meaning size and a run starting would shove the hall's neighbours across the
+apron. Both steps are stepped and sticky, so a metric sitting on a threshold
+does not flip the building between two shapes on every poll, and the page eases
+between them rather than cutting.
+
+Both views fall back to honesty over invention. A scope whose directory cannot
+be read is drawn plain rather than small — "could not be read" is not a
+measurement of zero — and its floor says "not recorded" instead of a treemap
+drawn from nothing; a walk that hit its cap says its numbers are a lower bound;
+the file a session is editing is not read at all, and is not drawn.
 
 ## What this prototype does not do yet
 
@@ -484,9 +551,18 @@ file a session is editing is not read at all, and is not drawn.
   on every start when it is bound past loopback, and prints the address a
   person would actually type. The warning is the whole of the protection: put
   this on a network you would hand a shell to, or leave it on loopback.
+- **A scope's task engine is configuration, not a control.** The agents page
+  says which engine a scope's tasks live in; changing it means editing
+  `.factory/config.yaml` and restarting. A selector that rewrote the instance's
+  configuration over an interface with no authentication is a different
+  decision, and it has not been made.
 - **First-run agent prompts.** An agent that has never seen a directory may ask
   a human to trust it before it will read the task. Factory cannot answer that
-  for you — it will time the task out and tell you where to look.
+  for you. For a harness whose runtime reports through a lifecycle hook (`pi`,
+  today), this now surfaces as a hook-reported `Blocked` run rather than
+  silence, and is governed by `blocked_timeout_seconds` instead of the run
+  timeout. For every other harness it is still exactly what it always was: the
+  task times out and tells you where to look.
 - **One workspace per task, closed on completion.** A task that never reaches a
   terminal state leaves its session open on purpose, so it can be looked at.
 

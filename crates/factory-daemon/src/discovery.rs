@@ -273,6 +273,7 @@ mod tests {
                 runtime: None,
                 git: None,
                 declared: true,
+                task_store: None,
             }]),
         };
         apply(&mut factory);
