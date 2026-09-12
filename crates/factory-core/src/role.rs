@@ -100,10 +100,20 @@ pub enum Grant {
     AgentInput,
     #[serde(rename = "run.input")]
     RunInput,
+    #[serde(rename = "workflow.create")]
+    WorkflowCreate,
+    #[serde(rename = "workflow.edit")]
+    WorkflowEdit,
+    #[serde(rename = "workflow.delete")]
+    WorkflowDelete,
+    #[serde(rename = "workflow.run")]
+    WorkflowRun,
+    #[serde(rename = "workflow.cancel")]
+    WorkflowCancel,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 11] = [
+    pub const ALL: [Grant; 16] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -115,6 +125,11 @@ impl Grant {
         Grant::AgentStop,
         Grant::AgentInput,
         Grant::RunInput,
+        Grant::WorkflowCreate,
+        Grant::WorkflowEdit,
+        Grant::WorkflowDelete,
+        Grant::WorkflowRun,
+        Grant::WorkflowCancel,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -130,6 +145,11 @@ impl Grant {
             Self::AgentStop => "agent.stop",
             Self::AgentInput => "agent.input",
             Self::RunInput => "run.input",
+            Self::WorkflowCreate => "workflow.create",
+            Self::WorkflowEdit => "workflow.edit",
+            Self::WorkflowDelete => "workflow.delete",
+            Self::WorkflowRun => "workflow.run",
+            Self::WorkflowCancel => "workflow.cancel",
         }
     }
 
@@ -147,6 +167,11 @@ impl Grant {
             Self::AgentStop => "stop agents",
             Self::AgentInput => "type into an agent's session",
             Self::RunInput => "type into a run's session",
+            Self::WorkflowCreate => "create workflows",
+            Self::WorkflowEdit => "change workflows",
+            Self::WorkflowDelete => "delete workflows",
+            Self::WorkflowRun => "start workflows",
+            Self::WorkflowCancel => "cancel workflows",
         }
     }
 
@@ -163,7 +188,10 @@ impl Grant {
                     .filter(|g| g.as_str().starts_with(prefix))
                     .collect()
             }
-            exact => Self::ALL.into_iter().filter(|g| g.as_str() == exact).collect(),
+            exact => Self::ALL
+                .into_iter()
+                .filter(|g| g.as_str() == exact)
+                .collect(),
         };
         if matched.is_empty() {
             return Err(FactoryError::BadRequest(format!(
@@ -353,7 +381,10 @@ mod tests {
     fn a_grant_that_names_nothing_is_refused() {
         let e = Grant::expand("task.approve").unwrap_err().to_string();
         assert!(e.contains("task.approve"), "{e}");
-        assert!(e.contains("task.create"), "the message lists what there is: {e}");
+        assert!(
+            e.contains("task.create"),
+            "the message lists what there is: {e}"
+        );
         assert!(Grant::expand("wat.*").is_err());
     }
 

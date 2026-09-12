@@ -13,6 +13,7 @@ pub mod protocol;
 pub mod role;
 pub mod run;
 pub mod task;
+pub mod workflow;
 
 pub use adapter::{Agent, AdapterKind, AgentRuntime, Interface, TaskStore};
 pub use config::{Config, Factory, Scope};
@@ -23,6 +24,11 @@ pub use event::{Event, EventBus};
 pub use run::{BlockSource, NewRun, Run, RunPatch, RunStatus, Trigger};
 pub use task::{
     NewTask, Schedule, SessionRef, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
+    WorkflowOrigin,
+};
+pub use workflow::{
+    CanvasPoint, WorkflowDefinition, WorkflowDraft, WorkflowEdge, WorkflowNode, WorkflowNodeKind,
+    WorkflowNodeRun, WorkflowNodeStatus, WorkflowRun, WorkflowRunStatus,
 };
 
 /// A short, unguessable string for a task's callback token. Not cryptographic

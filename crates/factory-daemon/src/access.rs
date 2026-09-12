@@ -167,6 +167,11 @@ impl Engine {
             Request::AgentStop { .. } => Grant::AgentStop,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
+            Request::WorkflowCreate(_) => Grant::WorkflowCreate,
+            Request::WorkflowUpdate { .. } => Grant::WorkflowEdit,
+            Request::WorkflowDelete { .. } => Grant::WorkflowDelete,
+            Request::WorkflowStart { .. } => Grant::WorkflowRun,
+            Request::WorkflowRunCancel { .. } => Grant::WorkflowCancel,
 
             Request::Status
             | Request::Adapters
@@ -186,6 +191,10 @@ impl Engine {
             | Request::AgentOutput { .. }
             | Request::AgentScreen { .. }
             | Request::RunScreen { .. }
+            | Request::WorkflowGet { .. }
+            | Request::WorkflowList { .. }
+            | Request::WorkflowRunGet { .. }
+            | Request::WorkflowRunList { .. }
             | Request::Subscribe => return Needs::Nothing,
 
             // Giving an agent a role is the owner's alone. An agent that could
@@ -325,6 +334,35 @@ impl Engine {
                 },
             },
 
+            Request::WorkflowCreate(draft) => match def.reach {
+                Reach::Scope => in_scope(&draft.scope),
+                Reach::Own => Err(deny("manage workflows; that requires scope reach")),
+            },
+            Request::WorkflowUpdate { id, workflow } => match def.reach {
+                Reach::Scope => {
+                    in_scope(&workflow.scope)?;
+                    if let Some(found) = self.workflows.get_definition(id).await? {
+                        in_scope(&found.scope)?;
+                    }
+                    Ok(())
+                }
+                Reach::Own => Err(deny("manage workflows; that requires scope reach")),
+            },
+            Request::WorkflowDelete { id } | Request::WorkflowStart { id } => match def.reach {
+                Reach::Scope => match self.workflows.get_definition(id).await? {
+                    Some(found) => in_scope(&found.scope),
+                    None => Ok(()),
+                },
+                Reach::Own => Err(deny("manage workflows; that requires scope reach")),
+            },
+            Request::WorkflowRunCancel { id } => match def.reach {
+                Reach::Scope => match self.workflows.get_run(id).await? {
+                    Some(found) => in_scope(&found.scope),
+                    None => Ok(()),
+                },
+                Reach::Own => Err(deny("manage workflows; that requires scope reach")),
+            },
+
             // Reads returned above, and anything needing a grant nobody holds
             // was refused above. Nothing should arrive here.
             _ => Err(deny("do that")),
@@ -346,6 +384,7 @@ mod tests {
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, ScopeAgent};
     use factory_core::run::{NewRun, RunStatus, Trigger};
     use factory_core::task::{NewTask, Task, TaskPatch, TaskReport, TaskStatus};
+    use factory_core::workflow::WorkflowDraft;
     use factory_plugins::registry::Registry;
     use factory_plugins::SqliteStore;
     use std::path::PathBuf;
@@ -429,6 +468,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn workflow_grants_require_scope_reach_and_stop_at_the_scope_boundary() {
+        let e = engine();
+        let here = Request::WorkflowCreate(WorkflowDraft {
+            name: "flow".into(), scope: "demo".into(), ..Default::default()
+        });
+        let elsewhere = Request::WorkflowCreate(WorkflowDraft {
+            name: "flow".into(), scope: "other".into(), ..Default::default()
+        });
+        assert!(allowed(&e, &foreman(), here.clone()).await);
+        assert!(!allowed(&e, &foreman(), elsewhere).await);
+        assert!(!allowed(&e, &worker("w"), here).await);
+
+        let own_reach = engine_with_roles("roles:\n  workflow-author:\n    grants: [workflow.create, workflow.edit, workflow.delete, workflow.run, workflow.cancel]\n    reach: own\n");
+        assert!(!allowed(
+            &own_reach,
+            &wearing("workflow-author"),
+            Request::WorkflowCreate(WorkflowDraft {
+                name: "flow".into(), scope: "demo".into(), ..Default::default()
+            })
+        ).await, "workflow mutation is deliberately a scope-level ability");
+    }
+
     async fn task_in(engine: &Engine, id: &str, scope: &str, agent: &str) -> Task {
         let now = Utc::now();
         let task = Task {
@@ -453,6 +515,7 @@ mod tests {
             updated_at: now,
             last_run_at: None,
             next_run_at: None,
+            workflow_origin: None,
         };
         engine.store.create(&task).await.unwrap()
     }

@@ -2,6 +2,7 @@ use crate::adapter::RuntimeStatus;
 use crate::agent::AgentSession;
 use crate::run::Run;
 use crate::task::{Task, TaskEntry};
+use crate::workflow::{WorkflowDefinition, WorkflowRun};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,18 @@ pub enum Event {
     },
     TaskDeleted {
         id: String,
+    },
+    WorkflowCreated {
+        workflow: WorkflowDefinition,
+    },
+    WorkflowUpdated {
+        workflow: WorkflowDefinition,
+    },
+    WorkflowDeleted {
+        id: String,
+    },
+    WorkflowRunUpdated {
+        run: WorkflowRun,
     },
     /// A journal line was appended. Carries the task id so a UI can route it,
     /// and the entry carries the run it belongs to.
@@ -92,6 +105,10 @@ impl Event {
             | Event::AgentRemoved { .. }
             | Event::AgentConfigured { .. }
             | Event::AgentDeleted { .. } => None,
+            Event::WorkflowCreated { .. }
+            | Event::WorkflowUpdated { .. }
+            | Event::WorkflowDeleted { .. }
+            | Event::WorkflowRunUpdated { .. } => None,
             Event::AgentActivity { .. } => None,
             Event::DaemonStarted { .. } => None,
         }

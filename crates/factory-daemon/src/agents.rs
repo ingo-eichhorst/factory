@@ -723,6 +723,7 @@ mod tests {
             updated_at: now,
             last_run_at: None,
             next_run_at: None,
+            workflow_origin: None,
         };
         let task = engine.store.create(&task).await.unwrap();
         let run = engine

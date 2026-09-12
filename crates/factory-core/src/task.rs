@@ -135,6 +135,18 @@ pub struct Task {
     /// tasks created after this shipped carry the field explicitly.
     #[serde(default)]
     pub worktree: bool,
+    /// The workflow attempt that created this task, when there is one. This is
+    /// stored with the task so adapters preserve the relationship without
+    /// parsing labels or titles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_origin: Option<WorkflowOrigin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowOrigin {
+    pub workflow_id: String,
+    pub workflow_run_id: String,
+    pub node_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
