@@ -82,10 +82,17 @@ body {
 }
 
 /* ------------------------------------------------------------- chrome */
+/* The title bar, the level row and the view-tab row stick as one unit --
+   `position: sticky` lives here rather than on `header` alone, because
+   `header` wraps (`flex-wrap: wrap`) and changes height with the viewport,
+   which would make any hardcoded `top` on the rows below it wrong at some
+   width. One sticky ancestor has no such offset to get right. */
+.chrome {
+  position: sticky; top: 0; z-index: 5;
+}
 header {
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
   padding: 9px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
-  position: sticky; top: 0; z-index: 5;
 }
 header h1 {
   margin: 0; font: 700 15px/1 var(--cond); letter-spacing: .14em; text-transform: uppercase;
