@@ -106,6 +106,17 @@ export function renderDashboard() {
   const prod = production === undefined ? null : production;
   const everFinished = !!(prod && prod.earliest_run);
 
+  // `#dash` is rebuilt from scratch below, which replaces `.calwrap` with a
+  // fresh element at `scrollLeft: 0` -- the oldest 53 weeks, not the one
+  // column anybody actually opens the card to look at. Read where the old
+  // element was scrolled before it is thrown away: "at its right edge" (true
+  // with no element yet, on the very first render) means the new one is put
+  // at ITS right edge too, so the fix tracks today rather than a fixed pixel
+  // count; anywhere else the reader chose is preserved as-is.
+  const oldCal = el.querySelector(".calwrap");
+  const calWasAtEdge = !oldCal || oldCal.scrollLeft >= oldCal.scrollWidth - oldCal.clientWidth - 2;
+  const calScrollLeft = oldCal ? oldCal.scrollLeft : 0;
+
   el.innerHTML = `
     <div class="kpis">${kpis(tasks, scopes, prod, everFinished).join("")}</div>
     <div class="drow">
@@ -129,6 +140,15 @@ export function renderDashboard() {
 
   renderInbox(tasks);
   wireCalToggle();
+
+  // Restore scroll after the new `.calwrap` (if any -- a card with nothing
+  // finished yet draws no grid at all) has real dimensions to measure. A
+  // viewport wide enough to show every week has nothing to scroll past, so
+  // the edge and 0 are the same place and this is a no-op there.
+  const newCal = el.querySelector(".calwrap");
+  if (newCal) {
+    newCal.scrollLeft = calWasAtEdge ? newCal.scrollWidth - newCal.clientWidth : calScrollLeft;
+  }
 }
 
 // -------------------------------------------------------------------- KPIs
@@ -524,6 +544,8 @@ function renderInbox(tasks) {
 /// The production-year's Runs/Scrap-share toggle is redrawn with the rest of
 /// `#dash` on every render, so it is rewired every time -- unlike the window
 /// selector below, which lives in the static bar and is wired once.
+/// `renderDashboard` itself carries `.calwrap`'s scroll position across the
+/// rebuild this causes, the same as it does for any other re-render.
 function wireCalToggle() {
   const cal = $("cal-seg");
   if (!cal) return;
@@ -531,14 +553,7 @@ function wireCalToggle() {
     b.onclick = () => {
       if (b.dataset.c === calMode) return;
       calMode = b.dataset.c;
-      // A full `#dash` re-render replaces `.calwrap` with a fresh element, so
-      // switching colour modes would otherwise snap a scrolled-over view of
-      // the grid back to the start of the year for no reason connected to
-      // what was actually asked for.
-      const scrollLeft = document.querySelector(".calwrap")?.scrollLeft;
       renderDashboard();
-      const wrap = document.querySelector(".calwrap");
-      if (wrap && scrollLeft) wrap.scrollLeft = scrollLeft;
     };
   }
 }
