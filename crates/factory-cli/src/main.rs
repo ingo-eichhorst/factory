@@ -140,6 +140,9 @@ enum TaskCmd {
         /// `every 300`, `every 5m`, or a cron expression.
         #[arg(long)]
         schedule: Option<String>,
+        /// Expected seconds one run will occupy its agent (advisory only).
+        #[arg(long)]
+        estimate: Option<u64>,
         /// Seconds this task's agent has to acknowledge a run.
         #[arg(long)]
         ack_timeout: Option<u64>,
@@ -181,6 +184,12 @@ enum TaskCmd {
         /// Drop the schedule and go back to manual.
         #[arg(long)]
         no_schedule: bool,
+        /// Expected seconds one run will occupy its agent (advisory only).
+        #[arg(long)]
+        estimate: Option<u64>,
+        /// Remove the task's duration estimate.
+        #[arg(long)]
+        no_estimate: bool,
         #[arg(long)]
         ack_timeout: Option<u64>,
         #[arg(long)]
@@ -533,6 +542,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             agent,
             runtime,
             schedule,
+            estimate,
             ack_timeout,
             timeout,
             blocked_timeout,
@@ -560,6 +570,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     agent,
                     runtime,
                     schedule,
+                    estimate_seconds: estimate,
                     ack_timeout_seconds: ack_timeout,
                     timeout_seconds: timeout,
                     blocked_timeout_seconds: blocked_timeout,
@@ -597,6 +608,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             runtime,
             schedule,
             no_schedule,
+            estimate,
+            no_estimate,
             ack_timeout,
             timeout,
             blocked_timeout,
@@ -611,6 +624,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 runtime,
                 schedule: schedule.as_deref().map(parse_schedule).transpose()?,
                 clear_schedule: no_schedule,
+                estimate_seconds: estimate,
+                clear_estimate: no_estimate,
                 ack_timeout_seconds: ack_timeout,
                 timeout_seconds: timeout,
                 blocked_timeout_seconds: blocked_timeout,
@@ -886,6 +901,9 @@ fn detail(t: &Task) -> String {
     }
     if let Some(next) = t.next_run_at {
         s.push_str(&format!("  next run   {}\n", next.to_rfc3339()));
+    }
+    if let Some(v) = t.estimate_seconds {
+        s.push_str(&format!("  estimate   {v}s\n"));
     }
     if t.worktree {
         s.push_str("  worktree   yes, a fresh one before each run\n");

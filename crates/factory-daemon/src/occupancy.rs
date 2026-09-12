@@ -45,6 +45,10 @@ impl Engine {
             .iter()
             .map(|t| (t.id.as_str(), t.title.as_str()))
             .collect();
+        let estimates: BTreeMap<&str, u64> = tasks
+            .iter()
+            .filter_map(|t| t.estimate_seconds.map(|e| (t.id.as_str(), e)))
+            .collect();
 
         // Runs by (scope, agent name). A run records the agent it was given to,
         // and the task records the scope -- key both the way the agents page
@@ -62,7 +66,11 @@ impl Engine {
             blocks
                 .entry((scope, run.agent.clone()))
                 .or_default()
-                .push(block_of(run, titles.get(run.task_id.as_str()).copied()));
+                .push(block_of(
+                    run,
+                    titles.get(run.task_id.as_str()).copied(),
+                    estimates.get(run.task_id.as_str()).copied(),
+                ));
         }
 
         // What a schedule says is coming, drawn as wide as the task's own
@@ -73,7 +81,13 @@ impl Engine {
             if at < now || at > to {
                 continue;
             }
-            let (estimate, samples) = self.estimate_for(&task.id).await;
+            let historical = if task.estimate_seconds.is_some() {
+                (None, 0)
+            } else {
+                self.historical_estimate_for(&task.id).await
+            };
+            let (estimate, samples, user_estimate) =
+                plan_estimate(task.estimate_seconds, historical);
             let scope = scope_of.get(task.id.as_str()).cloned().unwrap_or_default();
             planned
                 .entry((scope, task.agent.clone()))
@@ -84,6 +98,7 @@ impl Engine {
                     at,
                     estimate_seconds: estimate,
                     samples,
+                    user_estimate,
                 });
         }
 
@@ -392,7 +407,7 @@ impl Engine {
     /// How long this task usually takes, from its own finished runs. The median
     /// rather than the mean: one run that sat waiting for a human all night
     /// should not move the estimate for the rest.
-    async fn estimate_for(&self, task_id: &str) -> (Option<i64>, u32) {
+    async fn historical_estimate_for(&self, task_id: &str) -> (Option<u64>, u32) {
         let runs = self.store.runs(task_id, 50).await.unwrap_or_default();
         let mut lengths: Vec<i64> = runs
             .iter()
@@ -405,7 +420,19 @@ impl Engine {
         }
         lengths.sort_unstable();
         let samples = lengths.len() as u32;
-        (Some(lengths[lengths.len() / 2]), samples)
+        (Some(lengths[lengths.len() / 2] as u64), samples)
+    }
+}
+
+/// The task's own estimate is the planning fact somebody deliberately wrote.
+/// History only fills the gap when they did not write one.
+fn plan_estimate(
+    user: Option<u64>,
+    historical: (Option<u64>, u32),
+) -> (Option<u64>, u32, bool) {
+    match user {
+        Some(estimate) => (Some(estimate), 0, true),
+        None => (historical.0, historical.1, false),
     }
 }
 
@@ -474,7 +501,7 @@ fn block_action(
     BlockAction::Nothing
 }
 
-fn block_of(run: &Run, title: Option<&str>) -> OccupancyBlock {
+fn block_of(run: &Run, title: Option<&str>, estimate_seconds: Option<u64>) -> OccupancyBlock {
     OccupancyBlock {
         run_id: run.id.clone(),
         task_id: run.task_id.clone(),
@@ -484,6 +511,11 @@ fn block_of(run: &Run, title: Option<&str>) -> OccupancyBlock {
         attempt: run.attempt,
         from: run.started_at,
         to: run.ended_at,
+        estimate_seconds: if run.ended_at.is_none() {
+            estimate_seconds
+        } else {
+            None
+        },
     }
 }
 
@@ -543,7 +575,67 @@ mod tests {
             attempt: 1,
             from: at(from),
             to: to.map(at),
+            estimate_seconds: None,
         }
+    }
+
+    fn run(to: Option<i64>) -> Run {
+        Run {
+            id: "r".into(),
+            task_id: "t".into(),
+            attempt: 1,
+            status: if to.is_some() {
+                RunStatus::Done
+            } else {
+                RunStatus::Running
+            },
+            trigger: factory_core::run::Trigger::Manual,
+            agent: "a".into(),
+            adapter: "shell".into(),
+            worktree_path: None,
+            worktree_branch: None,
+            runtime: "herdr".into(),
+            session: None,
+            token: None,
+            result: None,
+            error: None,
+            started_at: at(0),
+            ended_at: to.map(at),
+            blocked_since: None,
+            blocked_source: None,
+            block_suspected_since: None,
+        }
+    }
+
+    #[test]
+    fn an_open_run_carries_the_tasks_estimate_but_a_finished_one_does_not() {
+        assert_eq!(
+            block_of(&run(None), Some("estimated"), Some(900)).estimate_seconds,
+            Some(900)
+        );
+        assert_eq!(
+            block_of(&run(Some(60)), Some("finished"), Some(900)).estimate_seconds,
+            None
+        );
+    }
+
+    #[test]
+    fn an_exceeded_estimate_stays_fixed_instead_of_following_now() {
+        let projected = block_of(&run(None), Some("slow"), Some(60));
+        let expected_end =
+            projected.from + Duration::seconds(projected.estimate_seconds.unwrap() as i64);
+        assert!(expected_end < at(120));
+        assert_eq!(projected.estimate_seconds, Some(60));
+    }
+
+    #[test]
+    fn a_user_estimate_wins_over_history_for_a_scheduled_plan() {
+        assert_eq!(
+            plan_estimate(Some(900), (Some(120), 4)),
+            (Some(900), 0, true)
+        );
+        assert_eq!(plan_estimate(None, (Some(120), 4)), (Some(120), 4, false));
+        assert_eq!(plan_estimate(None, (None, 0)), (None, 0, false));
     }
 
     #[test]

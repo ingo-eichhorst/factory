@@ -429,6 +429,10 @@ select.rolepick:disabled { opacity: .38; cursor: default; }
 .blk.failed { background: var(--fault); background-image: repeating-linear-gradient(135deg, rgba(255,255,255,.26) 0 4px, transparent 4px 8px); }
 .blk.cancelled { background: var(--idle); background-image: repeating-linear-gradient(135deg, rgba(255,255,255,.26) 0 4px, transparent 4px 8px); }
 .blk.blocked { background: var(--signal); }
+.blk.run { z-index: 2; }
+.blk.estimate {
+  background: none; border: 2px dotted var(--wait); color: var(--wait); line-height: 11px; z-index: 1;
+}
 .blk.plan {
   background: none; border: 1px dashed var(--signal); color: var(--signal); line-height: 13px;
 }

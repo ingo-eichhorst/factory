@@ -92,6 +92,10 @@ pub struct OccupancyBlock {
     /// Absent while the run is still going.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<DateTime<Utc>>,
+    /// The task's user-authored expected duration, carried only while this run
+    /// is open. It is a projection for the chart, never a completion signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_seconds: Option<u64>,
 }
 
 /// A run that has not happened yet. The width is the median of what this task
@@ -103,9 +107,13 @@ pub struct OccupancyPlan {
     pub title: String,
     pub at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimate_seconds: Option<i64>,
-    /// How many finished runs the estimate came from. `0` means no estimate.
+    pub estimate_seconds: Option<u64>,
+    /// How many finished runs the historical estimate came from. Zero for a
+    /// user estimate, or when there is no estimate at all.
     pub samples: u32,
+    /// True when the task's explicit estimate won over its run history.
+    #[serde(default)]
+    pub user_estimate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

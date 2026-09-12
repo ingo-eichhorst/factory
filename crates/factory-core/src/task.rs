@@ -91,6 +91,10 @@ pub struct Task {
     pub status: TaskStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
+    /// How long one run is expected to occupy its agent. Advisory only: this
+    /// never stops a run or changes its status (`timeout_seconds` does that).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_seconds: Option<u64>,
     /// The most recent run's outcome, mirrored so a list does not have to read
     /// every run. `Run` is where it actually lives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -147,6 +151,8 @@ pub struct NewTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ack_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
@@ -176,6 +182,8 @@ pub struct TaskPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -200,14 +208,17 @@ pub struct TaskPatch {
     pub timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_timeout_seconds: Option<u64>,
-    /// `None` means "leave alone", so going back to the instance default and
-    /// dropping a schedule each need a field that can say so.
+    /// `None` means "leave alone", so going back to the instance default,
+    /// dropping an estimate, and dropping a schedule each need a field that
+    /// can say so.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_ack_timeout: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_timeout: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_blocked_timeout: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_estimate: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_schedule: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -310,5 +321,17 @@ mod tests {
         }"#;
         let task: Task = serde_json::from_str(json).unwrap();
         assert!(!task.worktree);
+        assert_eq!(task.estimate_seconds, None, "old tasks remain unestimated");
+    }
+
+    #[test]
+    fn estimate_and_clear_estimate_have_distinct_patch_spellings() {
+        let set: TaskPatch = serde_json::from_str(r#"{"estimate_seconds":900}"#).unwrap();
+        assert_eq!(set.estimate_seconds, Some(900));
+        assert!(!set.clear_estimate);
+
+        let clear: TaskPatch = serde_json::from_str(r#"{"clear_estimate":true}"#).unwrap();
+        assert_eq!(clear.estimate_seconds, None);
+        assert!(clear.clear_estimate);
     }
 }
