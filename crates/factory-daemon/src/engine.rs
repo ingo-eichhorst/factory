@@ -653,6 +653,11 @@ impl Engine {
         let current = self.require(id).await?;
         // The bookkeeping is the daemon's, not a caller's.
         patch.runs = None;
+        if patch.estimate_seconds == Some(0) {
+            return Err(FactoryError::BadRequest(
+                "a task estimate must be at least one second".into(),
+            ));
+        }
 
         let scope = patch.scope.clone().unwrap_or_else(|| current.scope.clone());
         if patch.scope.is_some() {
@@ -691,6 +696,11 @@ impl Engine {
     pub async fn create(&self, new: NewTask) -> Result<Task> {
         if new.title.trim().is_empty() {
             return Err(FactoryError::BadRequest("a task needs a title".into()));
+        }
+        if new.estimate_seconds == Some(0) {
+            return Err(FactoryError::BadRequest(
+                "a task estimate must be at least one second".into(),
+            ));
         }
 
         let scope = match new.scope.clone() {

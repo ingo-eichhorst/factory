@@ -501,8 +501,10 @@ deliberately apart because they are different kinds of evidence:
 
 - a **solid block** is a run — Factory started it and the agent reported back;
 - a **dashed block** past the now line is a schedule's next firing, drawn as
-  wide as the median of that task's own finished runs, or as a marker when it
-  has none to measure;
+  wide as that task's explicit estimate when it has one, otherwise as the
+  median of its own finished runs, or as a marker when it has none to measure;
+- a **dotted yellow outline** around an active run is the task's user-authored
+  estimated duration; the solid run grows past it when the estimate is exceeded;
 - the **thin strip** underneath is liveness: what the runtime saw on the
   screen. A guess about a terminal, never a claim about work.
 

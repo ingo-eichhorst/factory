@@ -1,7 +1,7 @@
 //! The task list and the task modal: its runs, its journal, and the terminal of
 //! whichever run is selected.
 
-import { $, esc, api, state, since, statusBadge, TERMINAL } from "./core.js";
+import { $, esc, api, state, since, shortSpan, statusBadge, TERMINAL } from "./core.js";
 import { inScope, scopeLabel, writeHash } from "./scopes.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
@@ -65,11 +65,12 @@ function columnFor(t) {
 }
 
 /// Only what `/api/tasks` already serves: title, short id, status, scope,
-/// agent, the schedule rule or the run count, and how long the newest run
-/// has been going. No estimate -- there is no template here to read one from.
+/// agent, the schedule rule or the run count, its estimate when it has one,
+/// and how long the newest run has been going.
 function taskCard(t) {
   const bits = [];
   bits.push(t.schedule ? scheduleLabel(t.schedule) : (t.runs ? `${t.runs} run${t.runs === 1 ? "" : "s"}` : "no runs yet"));
+  if (t.estimate_seconds) bits.push(`est. ${shortSpan(t.estimate_seconds)}`);
   if (!TERMINAL.includes(t.status) && t.status !== "pending" && t.last_run_at) bits.push(since(t.last_run_at));
   const wt = t.worktree ? ` <span class="tag" title="runs in a git worktree of its own">worktree</span>` : "";
   return `
@@ -211,6 +212,7 @@ export function renderModal() {
 
   let meta = `<div class="sub">${esc(t.scope)} · ${esc(t.agent)} on ${esc(t.runtime)} · ${esc(scheduleLabel(t.schedule))}`;
   if (t.next_run_at) meta += ` · next ${new Date(t.next_run_at).toLocaleString()}`;
+  if (t.estimate_seconds) meta += ` · estimate ${shortSpan(t.estimate_seconds)}`;
   if (t.ack_timeout_seconds) meta += ` · ack ${t.ack_timeout_seconds}s`;
   if (t.timeout_seconds) meta += ` · timeout ${t.timeout_seconds}s`;
   if (t.worktree) meta += ` · own worktree`;

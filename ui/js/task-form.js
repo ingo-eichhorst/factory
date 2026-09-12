@@ -43,6 +43,7 @@ export function openEdit(task) {
         scope: task.scope,
         agent: task.agent,
         scheduleText: scheduleText(task.schedule),
+        estimate_seconds: task.estimate_seconds,
         ack_timeout_seconds: task.ack_timeout_seconds,
         timeout_seconds: task.timeout_seconds,
         labelText: Object.entries(task.labels || {}).map(([k, v]) => `${k}=${v}`).join("\n"),
@@ -68,6 +69,7 @@ export function openEdit(task) {
           // `null` means "leave alone" on the wire, so going back to the
           // instance default and dropping a schedule say so explicitly.
           clear_schedule: f.schedule === null,
+          clear_estimate: f.estimate_seconds === null,
           clear_ack_timeout: f.ack_timeout_seconds === null,
           clear_timeout: f.timeout_seconds === null,
         }),
@@ -166,6 +168,8 @@ export function taskFields(v) {
     <div class="sub" id="c-worktree-sub">${worktreeHint(capable, reason, editing)}</div>
     <label for="c-schedule">Schedule <span class="sub" style="text-transform:none">(blank = manual)</span></label>
     <input id="c-schedule" placeholder="every 5m  ·  0 9 * * 1-5" value="${esc(v.scheduleText || "")}">
+    <label for="c-estimate">Estimated duration <span class="sub" style="text-transform:none">seconds · planning only</span></label>
+    <input id="c-estimate" type="number" min="1" placeholder="no estimate" value="${v.estimate_seconds ?? ""}">
     <div class="grid2">
       <div><label for="c-ack">Acknowledge within <span class="sub" style="text-transform:none">seconds</span></label>
         <input id="c-ack" type="number" min="1" placeholder="instance default" value="${v.ack_timeout_seconds ?? ""}"></div>
@@ -221,6 +225,7 @@ export function readTaskFields() {
     scope: $("c-scope").value || null,
     agent: $("c-agent").value || null,
     schedule: parseSchedule($("c-schedule").value),
+    estimate_seconds: num("c-estimate"),
     ack_timeout_seconds: num("c-ack"),
     timeout_seconds: num("c-timeout"),
     labels,

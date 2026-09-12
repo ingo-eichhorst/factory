@@ -217,6 +217,10 @@ def task_update(params):
         task["next_run_at"] = None
     if patch.get("schedule") is not None:
         task["schedule"] = patch["schedule"]
+    if patch.get("clear_estimate"):
+        task["estimate_seconds"] = None
+    if patch.get("estimate_seconds") is not None:
+        task["estimate_seconds"] = patch["estimate_seconds"]
     if patch.get("scope") is not None:
         task["scope"] = patch["scope"]
     if patch.get("agent") is not None:

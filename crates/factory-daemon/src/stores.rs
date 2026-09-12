@@ -301,6 +301,7 @@ mod tests {
             runtime: "shell".into(),
             status: TaskStatus::Pending,
             schedule: None,
+            estimate_seconds: None,
             result: None,
             error: None,
             runs: 0,

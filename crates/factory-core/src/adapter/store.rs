@@ -103,6 +103,7 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         runtime,
         status: crate::task::TaskStatus::Pending,
         schedule: new.schedule,
+        estimate_seconds: new.estimate_seconds,
         result: None,
         error: None,
         runs: 0,
@@ -148,5 +149,20 @@ mod tests {
         };
         let task = task_from_new(new, "demo".into(), "shell".into(), "herdr".into());
         assert!(!task.worktree, "an explicit no is not the same as silence");
+    }
+
+    #[test]
+    fn a_new_tasks_estimate_reaches_the_stored_task() {
+        let task = task_from_new(
+            NewTask {
+                title: "do the thing".into(),
+                estimate_seconds: Some(900),
+                ..Default::default()
+            },
+            "demo".into(),
+            "shell".into(),
+            "herdr".into(),
+        );
+        assert_eq!(task.estimate_seconds, Some(900));
     }
 }

@@ -361,6 +361,12 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.schedule {
                 task.schedule = Some(v);
             }
+            if patch.clear_estimate {
+                task.estimate_seconds = None;
+            }
+            if let Some(v) = patch.estimate_seconds {
+                task.estimate_seconds = Some(v);
+            }
             if let Some(v) = patch.scope {
                 task.scope = v;
             }
@@ -835,6 +841,7 @@ mod tests {
             runtime: "shell".into(),
             status: TaskStatus::Pending,
             schedule: None,
+            estimate_seconds: None,
             result: None,
             error: None,
             runs: 0,
@@ -1022,5 +1029,43 @@ mod tests {
             .await
             .unwrap();
         assert!(cleared.blocked_timeout_seconds.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_tasks_estimate_round_trips_and_clears() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.create(&sample_task("t1")).await.unwrap();
+
+        let estimated = store
+            .update(
+                "t1",
+                &TaskPatch {
+                    estimate_seconds: Some(900),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(estimated.estimate_seconds, Some(900));
+        assert_eq!(
+            store.get("t1").await.unwrap().unwrap().estimate_seconds,
+            Some(900)
+        );
+
+        let cleared = store
+            .update(
+                "t1",
+                &TaskPatch {
+                    clear_estimate: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared.estimate_seconds, None);
+        assert_eq!(
+            store.get("t1").await.unwrap().unwrap().estimate_seconds,
+            None
+        );
     }
 }

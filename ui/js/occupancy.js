@@ -66,9 +66,19 @@ export function renderOccupancy() {
 
       for (const b of r.blocks) {
         const l = clamp(pct(b.from));
+        if (b.estimate_seconds) {
+          const expected = new Date(new Date(b.from).getTime() + b.estimate_seconds * 1000);
+          const ew = clamp(pct(expected)) - l;
+          if (ew > 0) {
+            parts.push(`<div class="blk estimate${ew < 6 ? " tiny" : ""}"
+              data-task="${esc(b.task_id)}"
+              style="left:${l.toFixed(3)}%;width:${Math.min(Math.max(0.4, ew), 100 - l).toFixed(3)}%"
+              title="estimated: ${esc(b.title)} — user estimate ${shortSpan(b.estimate_seconds)}, expected until ${esc(expected.toLocaleString())}">${esc(b.title)}</div>`);
+          }
+        }
         const w = Math.max(0.25, clamp(pct(b.to || now)) - l);
         const secs = ((b.to ? new Date(b.to) : new Date(now)) - new Date(b.from)) / 1000;
-        parts.push(`<div class="blk ${esc(b.status)}${w < 6 ? " tiny" : ""}"
+        parts.push(`<div class="blk run ${esc(b.status)}${w < 6 ? " tiny" : ""}"
           data-task="${esc(b.task_id)}" data-run="${esc(b.run_id)}"
           style="left:${l.toFixed(3)}%;width:${w.toFixed(3)}%"
           title="${esc(b.title)} — attempt ${b.attempt}, ${esc(b.trigger)}, ${esc(b.status)}, ${shortSpan(secs)}">${esc(b.title)}</div>`);
@@ -79,10 +89,12 @@ export function renderOccupancy() {
         // A task that has never finished gives nothing to measure. Draw a
         // marker and say so, rather than inventing a width.
         const w = p.estimate_seconds ? Math.max(0.4, (p.estimate_seconds * 1000) / span * 100) : 0.5;
-        const why = p.samples
-          ? `median of ${p.samples} finished run${p.samples === 1 ? "" : "s"}`
-          : "no finished run to measure";
-        parts.push(`<div class="blk plan${p.samples ? "" : " noeta"}${w < 6 ? " tiny" : ""}"
+        const why = p.user_estimate
+          ? "user estimate"
+          : (p.samples
+            ? `median of ${p.samples} finished run${p.samples === 1 ? "" : "s"}`
+            : "no estimate and no finished run to measure");
+        parts.push(`<div class="blk plan${p.estimate_seconds ? "" : " noeta"}${w < 6 ? " tiny" : ""}"
           data-task="${esc(p.task_id)}"
           style="left:${l.toFixed(3)}%;width:${Math.min(w, 100 - l).toFixed(3)}%"
           title="scheduled: ${esc(p.title)} — ${why}">${esc(p.title)}</div>`);
@@ -128,6 +140,7 @@ export function renderOccupancy() {
       <span><i style="background:var(--fault)"></i>failed</span>
       <span><i style="background:var(--signal)"></i>blocked</span>
       <span><i style="border:1px dashed var(--signal);height:6px"></i>scheduled</span>
+      <span><i style="border:1px dotted var(--wait);height:6px"></i>estimated duration</span>
       <span><i style="background:var(--run);opacity:.6;height:4px"></i>runtime saw it busy</span>
     </div>
     <div class="occ-note"><b>Two kinds of fact.</b> A block is a run: Factory started it and the agent
@@ -139,6 +152,9 @@ export function renderOccupancy() {
     el.onclick = () => openTask(el.dataset.task, el.dataset.run);
   }
   for (const el of $("occ").querySelectorAll(".blk.plan")) {
+    el.onclick = () => openTask(el.dataset.task);
+  }
+  for (const el of $("occ").querySelectorAll(".blk.estimate")) {
     el.onclick = () => openTask(el.dataset.task);
   }
 }

@@ -172,6 +172,7 @@ mod tests {
             runtime: "herdr".into(),
             status: TaskStatus::Dispatching,
             schedule: None,
+            estimate_seconds: None,
             result: None,
             error: None,
             runs: 1,
