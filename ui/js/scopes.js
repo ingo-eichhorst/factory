@@ -13,15 +13,39 @@
 //! the rail and the URL; every view asks `inScope` and draws itself.
 //!
 //! `initRail`'s callback is handed the route it is reacting to -- `{scope,
-//! tab}` -- because back and forward move the tab as well as the selection, and
-//! the tabs belong to the page. A callback that only cares about the selection
-//! can take no arguments and ignore it.
+//! page, tail}` -- because back and forward move the page and what is open
+//! inside it as well as the selection, and those belong to the page. A callback
+//! that only cares about the selection can take no arguments and ignore it.
+//!
+//! `tail` is the segments after the page, and this file never looks inside it.
+//! What they mean is the view's business; `app.js` registers the one function
+//! that can turn what is on screen back into them.
 
 import { $, esc, state } from "./core.js";
 
 /// The hash segment that stands for no selection at all.
 const ALL = "all";
-const TABS = ["tasks", "agents"];
+
+/// The pages a hash may name, and where the segments after the page come from.
+/// Both are registered by `app.js` rather than written down here: this file
+/// knows about no view, and the hand-kept copy that used to sit here said
+/// `["tasks", "agents"]` long after there were five views -- so three of them
+/// could be written into the URL and none of the three could be read back.
+let pages = [];
+let tailOf = () => [];
+
+/// True while a route read out of the URL is being applied to the page. The
+/// views write the URL as they change -- a tab lighting up, a task opening --
+/// and every one of those writes during an apply would push an entry for a
+/// place nobody navigated to. See `applyRoute`.
+let applying = false;
+
+/// What `app.js` has to tell the router before the first hash is read: which
+/// pages exist, and how to ask the one on screen what its tail is.
+export function setRouter(r) {
+  pages = r.pages;
+  if (r.tailOf) tailOf = r.tailOf;
+}
 
 let onSelect = () => {};
 let wired = false;
@@ -140,8 +164,8 @@ function select(name) {
   if (name === state.scope) return;
   state.scope = name;
   render();
-  writeHash(state.tab);
-  onSelect({ scope: state.scope, tab: state.tab });
+  writeHash();
+  onSelect({ scope: state.scope, page: state.tab, tail: null });
 }
 
 export function initRail(onChange) {
@@ -159,13 +183,20 @@ export function initRail(onChange) {
   if (first) {
     window.addEventListener("hashchange", onHashChange);
     wired = true;
+    // Which page a link asked for, and what it had open, are put in place by
+    // `boot` -- the views have to be wired before they can be shown, and that
+    // happens after this. The rail owns the selection and stops there.
+    return;
   }
-  const tab = route && TABS.includes(route.tab) ? route.tab : state.tab;
-  writeHash(tab, true);
 
-  // A link straight to `#factory/agents` has to reach the page as a change even
-  // though nothing was selected before it; after boot, only a real change is.
-  if (state.scope !== before || (first && route)) onSelect({ scope: state.scope, tab });
+  // Every later call is `loadAgents` rebuilding the rail. The URL already says
+  // what is on screen and re-reading it would re-open the task just closed; all
+  // that can have changed is whether the tree still holds the selection.
+  if (state.scope !== before) {
+    applyRoute(() => onSelect({ scope: state.scope, page: state.tab, tail: null }));
+  } else {
+    writeHash(true);
+  }
 }
 
 /// True when `scopeName` is inside the selection, inclusive of the selection
@@ -199,18 +230,26 @@ export function scopeLabel() {
 
 // -------------------------------------------------------------------- the URL
 
-/// `#<scope>/<tab>`, so a link names both halves of what is on screen. A click
-/// is a navigation and pushes; `replace` is for the writes that only say what is
-/// already on screen -- boot, and correcting a hash that named a scope the tree
-/// no longer has -- because an entry pushed there costs a Back press to get past
-/// and is not somewhere the user has been.
-export function writeHash(tab, replace) {
+/// `#<scope>/<page>/<tail...>`, so a link names the whole of what is on screen
+/// and not just the half of it the rail owns. The tail is whatever `tailOf`
+/// hands back -- this file neither builds it nor reads it.
+///
+/// A click is a navigation and pushes; `replace` is for the writes that only say
+/// what is already on screen -- boot, correcting a hash that named a scope the
+/// tree no longer has, and filling in a detail the page settled on its own, like
+/// the run a task opened on -- because an entry pushed there costs a Back press
+/// to get past and is not somewhere the user has been.
+export function writeHash(replace) {
+  // While a route is being applied the URL is the truth and the page is the one
+  // catching up. `applyRoute` writes the corrected hash once, at the end.
+  if (applying) return;
   // `all` is the keyword for no selection, so a scope actually called `all` has
   // to be written as something that decodes back to its name without reading as
   // the keyword. Every other name survives encodeURIComponent unchanged.
   const head = state.scope === null ? ALL
     : state.scope === ALL ? "%61ll" : encodeURIComponent(state.scope);
-  const next = `#${head}/${tab}`;
+  const tail = tailOf().filter(seg => seg !== null && seg !== undefined && seg !== "");
+  const next = `#${[head, state.tab, ...tail.map(encodeURIComponent)].join("/")}`;
   written = next;
   // Assigning the hash it already carries would push nothing anyway; assigning
   // a different one fires `hashchange`, and this runs on every tab switch.
@@ -219,25 +258,54 @@ export function writeHash(tab, replace) {
   else location.hash = next;
 }
 
-/// `{scope, tab}` for a hash that names a route, `null` for anything else.
-/// Deliberately syntax only: boot reads the hash before `/api/agents` has
-/// answered, so there is no tree yet to check the name against. `initRail` does
-/// that part.
+/// `{scope, page, tail}` for a hash that names a route, `null` for anything
+/// else. Deliberately syntax only: boot reads the hash before `/api/agents` has
+/// answered, so there is no tree yet to check the name against, and no view has
+/// been asked whether its tail means anything. `initRail` does the first, the
+/// views do the second.
+///
+/// Split from the left, one segment at a time. The old two-segment hash was
+/// found with `lastIndexOf`, which stops being the page the moment anything
+/// follows it -- and a scope name is written with `encodeURIComponent`, so a
+/// name containing a slash arrives as `%2F` and never splits.
 export function readHash() {
   const raw = location.hash.replace(/^#/, "");
-  const cut = raw.lastIndexOf("/");
-  if (cut < 0) return null;
-  const tab = raw.slice(cut + 1);
-  if (!TABS.includes(tab)) return null;
-  const head = raw.slice(0, cut);
-  if (head === ALL) return { scope: null, tab };
+  if (!raw) return null;
+  const parts = raw.split("/");
+  if (parts.length < 2 || !pages.includes(parts[1])) return null;
   // A hash can be typed by hand, and a broken escape in one makes
   // decodeURIComponent throw. A route nobody can read is no route.
   try {
-    return { scope: decodeURIComponent(head), tab };
+    const tail = parts.slice(2).map(decodeURIComponent);
+    const head = parts[0];
+    return { scope: head === ALL ? null : decodeURIComponent(head), page: parts[1], tail };
   } catch {
     return null;
   }
+}
+
+/// Put a route on the page, then write down what the page made of it. The views
+/// correct what they cannot honour -- a task that has been deleted, a render
+/// mode this browser has no WebGL for -- and the URL should end up naming what
+/// is actually on screen rather than what was asked for.
+///
+/// Their writes on the way are suppressed rather than allowed and then undone:
+/// showing a tab, opening a task and selecting its newest run are three writes
+/// on the way to one destination, and Back should not have to walk through all
+/// three to leave a link somebody pasted. What is written at the end replaces,
+/// because arriving somewhere by link or by Back is not a navigation away from
+/// it.
+///
+/// Exported because boot is a route application too -- the first hash is read
+/// there, once the views can be shown.
+export function applyRoute(fn) {
+  applying = true;
+  try {
+    fn();
+  } finally {
+    applying = false;
+  }
+  writeHash(true);
 }
 
 function onHashChange() {
@@ -251,9 +319,9 @@ function onHashChange() {
   // corrected where it stands rather than pushed: an entry written on top of the
   // one the user just went back to is an entry Back can never get past.
   state.scope = known(route.scope);
-  writeHash(route.tab, true);
   render();
-  // Back and forward move the tab as well as the selection, and the tabs are
-  // the page's. Whoever wired the rail up gets told what the URL now says.
-  onSelect({ scope: state.scope, tab: route.tab });
+  // Back and forward move the page and whatever is open inside it as well as the
+  // selection, and those are the page's. Whoever wired the rail up gets told what
+  // the URL now says.
+  applyRoute(() => onSelect({ scope: state.scope, page: route.page, tail: route.tail }));
 }

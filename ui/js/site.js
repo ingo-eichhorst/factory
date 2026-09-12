@@ -32,6 +32,7 @@ import { $, esc, api, state, since, statusBadge } from "./core.js";
 import { inScope, scopeLabel } from "./scopes.js";
 import { agentTags } from "./agents.js";
 import { openTask } from "./tasks.js";
+import { writeHash } from "./scopes.js";
 
 // ------------------------------------------------------------- the data layer
 
@@ -865,6 +866,15 @@ export async function showSite() {
   renderLegend();
   renderRail();
   syncRoofBtn();
+  // A link straight to Render lands here with the stage finally in place.
+  // `fitSite` first anyway: `setMode` can fall back to the plan view on a
+  // machine with no WebGL, and an unfitted camera is what it would fall back to.
+  if (wantedMode !== null) {
+    wantedMode = null;
+    fitSite();
+    setMode(1);
+    return;
+  }
   if (renderMode === 1 && renderMod) {
     renderMod.start(getScene());
   } else {
@@ -930,6 +940,31 @@ function setRenderErr(text) {
   if (el) el.textContent = text || "";
 }
 
+/// Which mode the URL names. Plan is the default and writes nothing: a link
+/// should not carry a segment saying "the ordinary one".
+export function siteMode() {
+  return renderMode === 1 ? ["render"] : [];
+}
+
+/// Applied from the URL. A route is read long before this view has ever been
+/// built -- `setMode` needs the stage, the canvases and the palette that `init`
+/// puts in place -- so a wish for Render made too early is parked and honoured
+/// by `showSite` once there is something to switch. Plan needs no parking: it is
+/// where the view starts.
+let wantedMode = null;
+export function setSiteMode(name) {
+  const m = name === "render" ? 1 : 0;
+  if (initialised) { setMode(m); return; }
+  if (m !== 1) return;
+  // `renderMode` moves now even though nothing can be switched yet, so that the
+  // URL the router writes at the end of the route already says `render`. Left at
+  // 0 until `showSite` got round to it, the write would say `plan` and the mode
+  // arriving a moment later would push a second entry for the place the link
+  // already named.
+  renderMode = 1;
+  wantedMode = 1;
+}
+
 function setMode(m) {
   renderMode = m;
   const seg = $("site-rmode");
@@ -950,6 +985,9 @@ function setMode(m) {
     if (!ok) {
       setMode(0);
       setRenderErr("Render mode needs WebGL and did not load — staying on the plan view.");
+      // A link that asked for Render on a machine that cannot draw it should
+      // stop saying so. Replace: the page corrected itself, nobody navigated.
+      writeHash(true);
       return;
     }
     renderMod.start(getScene());
@@ -977,7 +1015,9 @@ function init() {
   });
   $("site-rmode").addEventListener("click", (e) => {
     const b = e.target.closest("button");
-    if (b && b.dataset.rm !== undefined) setMode(Number(b.dataset.rm));
+    if (!b || b.dataset.rm === undefined) return;
+    setMode(Number(b.dataset.rm));
+    writeHash();
   });
   $("site-tod").addEventListener("click", (e) => {
     const b = e.target.closest("button");
