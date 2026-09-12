@@ -32,3 +32,11 @@ export function agentConfigurePayload(scope, values) {
   if (lifetime !== "task") agent.autostart = Boolean(values.autostart);
   return { scope: target, agent };
 }
+
+export function agentDeletePayload(scope, name) {
+  const target = String(scope ?? "").trim();
+  if (!target) throw new Error("Select one scope before deleting an agent.");
+  const agent = String(name ?? "");
+  if (!agent) throw new Error("Choose an agent declaration to delete.");
+  return { scope: target, name: agent };
+}

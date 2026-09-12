@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { agentConfigurePayload, argumentsFromLines } from "../js/agent-config.js";
+import { agentConfigurePayload, agentDeletePayload, argumentsFromLines } from "../js/agent-config.js";
 
 test("CLI arguments keep their order and one-line boundaries", () => {
   assert.deepEqual(argumentsFromLines("--model\nlocal model\n\n--approve"), [
@@ -50,4 +50,13 @@ test("an all-scopes target and names containing a path separator are rejected", 
     name: "other/reviewer",
     harness: "pi",
   }), /cannot contain/);
+});
+
+test("deletion targets one exact scope and declaration", () => {
+  assert.deepEqual(agentDeletePayload(" model-lab ", "Codex Builder"), {
+    scope: "model-lab",
+    name: "Codex Builder",
+  });
+  assert.throws(() => agentDeletePayload("", "reviewer"), /Select one scope/);
+  assert.throws(() => agentDeletePayload("demo", ""), /Choose an agent/);
 });

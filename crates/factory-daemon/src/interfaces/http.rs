@@ -119,7 +119,10 @@ fn router(engine: Arc<Engine>) -> Router {
         // The id of a standing agent is `<scope>/<name>`, which has a slash in
         // it, so these take it in the body rather than the path.
         .route("/api/agents/start", post(agent_start))
-        .route("/api/agents/configure", post(agent_configure))
+        .route(
+            "/api/agents/configure",
+            post(agent_configure).delete(agent_delete),
+        )
         .route("/api/agents/stop", post(agent_stop))
         .route("/api/agents/role", post(agent_role))
         .route("/api/agents/input", post(agent_input))
@@ -360,6 +363,12 @@ struct ConfigureAgent {
 }
 
 #[derive(serde::Deserialize)]
+struct DeleteAgent {
+    scope: String,
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
 struct AgentRole {
     id: String,
     #[serde(default)]
@@ -406,6 +415,20 @@ async fn agent_configure(
         Request::AgentConfigure {
             scope: body.scope,
             agent: body.agent,
+        },
+    )
+    .await
+}
+
+async fn agent_delete(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<DeleteAgent>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::AgentDelete {
+            scope: body.scope,
+            name: body.name,
         },
     )
     .await

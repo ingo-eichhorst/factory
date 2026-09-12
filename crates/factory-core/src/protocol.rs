@@ -28,6 +28,9 @@ pub enum Request {
     /// Add an agent declaration to one scope's local Factory config.
     #[serde(rename = "agent.configure")]
     AgentConfigure { scope: String, agent: ScopeAgent },
+    /// Remove an agent declaration from one scope's local Factory config.
+    #[serde(rename = "agent.delete")]
+    AgentDelete { scope: String, name: String },
     /// Take one down and leave it down.
     #[serde(rename = "agent.stop")]
     AgentStop { id: String },
@@ -322,6 +325,9 @@ pub struct AgentView {
     pub is_default: bool,
     /// False once the config stops declaring it.
     pub declared: bool,
+    /// True only for a declaration physically owned by this scope's config.
+    /// Synthesized foremen and bare adapter defaults cannot be deleted here.
+    pub deletable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -554,5 +560,16 @@ mod tests {
         let back = serde_json::to_string(&env).unwrap();
         let again: Envelope = serde_json::from_str(&back).unwrap();
         assert!(matches!(again.request, Request::AgentConfigure { .. }));
+    }
+
+    #[test]
+    fn an_agent_deletion_request_names_its_scope_and_declaration() {
+        let json = r#"{"op":"agent.delete","params":{"scope":"demo","name":"reviewer"}}"#;
+        let env: Envelope = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            env.request,
+            Request::AgentDelete { scope, name }
+                if scope == "demo" && name == "reviewer"
+        ));
     }
 }

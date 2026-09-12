@@ -163,7 +163,7 @@ impl Engine {
             Request::TaskCancel { .. } => Grant::TaskCancel,
             Request::TaskReport { .. } => Grant::TaskReport,
             Request::AgentStart { .. } => Grant::AgentStart,
-            Request::AgentConfigure { .. } => Grant::AgentConfigure,
+            Request::AgentConfigure { .. } | Request::AgentDelete { .. } => Grant::AgentConfigure,
             Request::AgentStop { .. } => Grant::AgentStop,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
@@ -298,7 +298,8 @@ impl Engine {
                 Reach::Own => Err(deny("start an agent other than itself")),
             },
 
-            Request::AgentConfigure { scope: s, .. } => match def.reach {
+            Request::AgentConfigure { scope: s, .. }
+            | Request::AgentDelete { scope: s, .. } => match def.reach {
                 Reach::Scope => in_scope(s),
                 Reach::Own => Err(deny("configure an agent declaration")),
             },
@@ -905,6 +906,28 @@ mod tests {
         assert!(!allowed(&e, &wearing("self-editor"), request("demo")).await);
         assert!(allowed(&e, &wearing("scope-editor"), request("demo")).await);
         assert!(!allowed(&e, &wearing("scope-editor"), request("other")).await);
+        assert!(
+            allowed(
+                &e,
+                &wearing("scope-editor"),
+                Request::AgentDelete {
+                    scope: "demo".into(),
+                    name: "reviewer".into(),
+                },
+            )
+            .await
+        );
+        assert!(
+            !allowed(
+                &e,
+                &wearing("scope-editor"),
+                Request::AgentDelete {
+                    scope: "other".into(),
+                    name: "reviewer".into(),
+                },
+            )
+            .await
+        );
     }
 
     #[tokio::test]

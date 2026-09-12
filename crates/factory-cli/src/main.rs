@@ -964,6 +964,9 @@ fn describe_event(e: &Event) -> String {
         Event::AgentConfigured { scope, name } => {
             format!("agent    {scope}/{name}  configured")
         }
+        Event::AgentDeleted { scope, name } => {
+            format!("agent    {scope}/{name}  deleted")
+        }
         Event::AgentActivity {
             subject, status, ..
         } => format!("activity {subject}  {}", status.as_str()),
