@@ -1,7 +1,7 @@
 use crate::agent::Lifetime;
 use crate::role::{Role, RoleSpec, Roles};
 use crate::error::{FactoryError, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -51,6 +51,13 @@ impl Config {
         let roles = self.roles()?;
         for scope in self.scope.iter().chain(&self.scopes) {
             for agent in scope.declared_agents() {
+                if agent.harness == "shell" && !agent.args.is_empty() {
+                    return Err(FactoryError::BadRequest(format!(
+                        "scope {:?} gives shell agent {:?} arguments, but the shell agent runs the task's instructions directly and cannot use them",
+                        scope.name,
+                        agent.name(),
+                    )));
+                }
                 if !roles.contains(&agent.role) {
                     return Err(FactoryError::BadRequest(format!(
                         "scope {:?} gives {:?} the role {:?}, which this instance does not define. \
@@ -72,6 +79,13 @@ impl Config {
         let roles = self.roles()?;
         if let Some(scope) = &self.scope {
             for agent in scope.declared_agents() {
+                if agent.harness == "shell" && !agent.args.is_empty() {
+                    return Err(FactoryError::BadRequest(format!(
+                        "scope {:?} gives shell agent {:?} arguments, but the shell agent runs the task's instructions directly and cannot use them",
+                        scope.name,
+                        agent.name(),
+                    )));
+                }
                 if !roles.contains(&agent.role) {
                     return Err(FactoryError::BadRequest(format!(
                         "scope {:?} gives {:?} the role {:?}, which this instance does not define. \
@@ -249,7 +263,7 @@ impl InterfaceConfig {
 /// adapters existed spell it as a block with a `harness:` in it, and those
 /// files are still on disk in front of people -- so read both, and let the
 /// harness name be the adapter name, which is what it always was.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum AgentRef {
     Name(String),
@@ -266,7 +280,57 @@ pub enum AgentRef {
         autostart: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<Role>,
+        /// Arguments added after the adapter's own defaults for this agent.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
     },
+}
+
+impl<'de> Deserialize<'de> for AgentRef {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Declaration {
+            harness: String,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            lifetime: Option<Lifetime>,
+            #[serde(default)]
+            autostart: Option<bool>,
+            #[serde(default)]
+            role: Option<Role>,
+            #[serde(default)]
+            args: Vec<String>,
+            // Older Factory configs wrote this in the singular declaration.
+            // It has no effect now, but those files must continue to load.
+            #[serde(default, rename = "max_sessions")]
+            _max_sessions: Option<u32>,
+        }
+
+        let value = serde_yaml_ng::Value::deserialize(deserializer)?;
+        match value {
+            serde_yaml_ng::Value::String(name) => Ok(Self::Name(name)),
+            serde_yaml_ng::Value::Mapping(_) => {
+                let declaration: Declaration =
+                    serde_yaml_ng::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::Declared {
+                    harness: declaration.harness,
+                    name: declaration.name,
+                    lifetime: declaration.lifetime,
+                    autostart: declaration.autostart,
+                    role: declaration.role,
+                    args: declaration.args,
+                })
+            }
+            _ => Err(serde::de::Error::custom(
+                "agent must be an adapter name or a declaration",
+            )),
+        }
+    }
 }
 
 impl AgentRef {
@@ -290,6 +354,7 @@ impl AgentRef {
 ///     lifetime: permanent
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeAgent {
     /// Unique within the scope. Defaults to the harness name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -303,6 +368,9 @@ pub struct ScopeAgent {
     /// yes, everything else to no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autostart: Option<bool>,
+    /// Arguments added after the adapter's own defaults for this agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
 }
 
 impl ScopeAgent {
@@ -388,6 +456,7 @@ impl Scope {
             lifetime: Lifetime::Permanent,
             role: Role::foreman(),
             autostart: Some(true),
+            args: Vec::new(),
         });
         out
     }
@@ -409,6 +478,7 @@ impl Scope {
             lifetime,
             autostart,
             role,
+            args,
         }) = &self.agent
         {
             out.push(ScopeAgent {
@@ -417,6 +487,7 @@ impl Scope {
                 lifetime: lifetime.unwrap_or_default(),
                 role: role.clone().unwrap_or_default(),
                 autostart: *autostart,
+                args: args.clone(),
             });
         }
         for a in &self.agents {
@@ -809,6 +880,51 @@ mod tests {
     }
 
     #[test]
+    fn shell_agent_arguments_are_refused_with_the_declaration_named() {
+        for declaration in [
+            "    agent:\n      harness: shell\n      args: [--login]\n",
+            "    agents:\n      - name: scripted\n        harness: shell\n        args: [--login]\n",
+        ] {
+            let c = config_with(&format!(
+                "scopes:\n  - name: demo\n    path: .\n{declaration}"
+            ));
+            let e = c.validate().unwrap_err().to_string();
+            assert!(e.contains("demo"), "{e}");
+            assert!(e.contains("shell"), "{e}");
+            assert!(e.contains("arguments"), "{e}");
+        }
+    }
+
+    #[test]
+    fn misspelled_agent_arguments_are_not_silently_ignored() {
+        for yaml in [
+            "name: a\npath: .\nagent:\n  harness: pi\n  arg: [--model, opus]\n",
+            "name: a\npath: .\nagents:\n  - harness: pi\n    arg: [--model, opus]\n",
+        ] {
+            let e = serde_yaml_ng::from_str::<Scope>(yaml)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                e.contains("arg"),
+                "the error should name the bad field: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_arguments_have_to_be_a_list() {
+        let e = serde_yaml_ng::from_str::<Scope>(
+            "name: a\npath: .\nagent:\n  harness: pi\n  args: --model opus\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("sequence"),
+            "the error should say what args expects: {e}"
+        );
+    }
+
+    #[test]
     fn the_two_that_ship_need_no_declaring() {
         let c = config_with(
             "scopes:\n  - name: demo\n    path: .\n    agents:\n      - name: boss\n        harness: pi\n        role: foreman\n",
@@ -819,14 +935,17 @@ mod tests {
     #[test]
     fn a_scope_collects_agents_from_both_spellings() {
         let s: Scope = serde_yaml_ng::from_str(
-            "name: a\npath: .\nagent:\n  harness: pi\n  lifetime: permanent\n\
+            "name: a\npath: .\nagent:\n  harness: pi\n  lifetime: permanent\n  args: [--model, opus]\n\
              agents:\n  - name: watcher\n    harness: claude-code\n    lifetime: permanent\n\
+             \x20   args: [--model, haiku]\n\
              \x20 - name: helper\n    harness: codex\n",
         )
         .unwrap();
         let declared = s.declared_agents();
         assert_eq!(declared.len(), 3);
         assert_eq!(s.agent_adapter(), Some("pi"));
+        assert_eq!(declared[0].args, ["--model", "opus"]);
+        assert_eq!(declared[1].args, ["--model", "haiku"]);
         let standing: Vec<String> = s.standing_agents().iter().map(|a| a.name()).collect();
         assert_eq!(standing, vec!["pi", "watcher"], "codex is a task agent, not standing");
     }

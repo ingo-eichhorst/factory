@@ -79,6 +79,7 @@ scope:
     - name: watcher
       harness: pi
       lifetime: permanent     # started with the daemon, restarted if it dies
+      args: ["--model", "opus"] # arguments for this declaration only
     - name: scratch
       harness: shell
       lifetime: temporary     # startable, but nothing starts it on its own
@@ -100,6 +101,13 @@ longer declares is **closed** rather than left for somebody to find next week.
 
 `lifetime` may also sit inside the singular `agent:` block, which is how
 instances written before standing agents existed already spell it.
+
+`args` works in both the singular `agent:` block and entries in `agents:`. The
+daemon appends these arguments after any defaults supplied by the adapter, so a
+declaration can override a repeated flag for one scope without changing the
+shared adapter. A task that names a bare adapter with no matching declaration
+still uses only that adapter's defaults. The `shell` agent does not accept
+`args`: it runs the task instructions as the command itself.
 
 Every agent has a **role**, and a task names a **concrete agent**, not a
 harness. `assistant` and `scratch` are different agents even when both are pi.
@@ -529,7 +537,11 @@ the banner says plainly that nothing earlier than "now" is shown here.
 figure for every agent actually present — never a bay, because Factory has no
 bay ("a row is an agent, not a bay", `occupancy.rs`). A second, lit three.js
 render of the same facts toggles from the same HUD, orbits, and picks the same
-hall the plan would.
+hall the plan would. In that 3D render the scope rail is a focus rather than a
+filter: the full site remains standing while the camera moves to the selected
+hall, its roof opens, and its present agents move onto the shop floor. Clearing
+the scope returns to the fitted site. The isometric Plan keeps the narrower
+scoped view used by the rest of the interface.
 
 A hall carries two signals, and `factory-core/src/building.rs` is the one place
 that decides either. **Size** — the files, bytes and directories a bounded walk

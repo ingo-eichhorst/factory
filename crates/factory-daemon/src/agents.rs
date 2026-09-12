@@ -18,7 +18,7 @@ use factory_core::event::Event;
 use factory_core::task::SessionRef;
 use std::sync::Arc;
 
-use crate::engine::Engine;
+use crate::engine::{append_declared_args, Engine};
 
 /// herdr and anything like it want a name without spaces in it.
 fn runtime_name(scope: &str, name: &str) -> String {
@@ -152,10 +152,11 @@ impl Engine {
             identity_token: Some(identity),
         };
 
-        let launch = match adapter.launch_spec(&ctx).await {
+        let mut launch = match adapter.launch_spec(&ctx).await {
             Ok(l) => l,
             Err(e) => return self.mark_agent_failed(agent, e).await,
         };
+        append_declared_args(&mut launch, Some(&decl));
 
         let session = match runtime
             .start(&StartRequest {
@@ -589,9 +590,9 @@ mod tests {
     use factory_core::adapter::runtime::AgentRuntime;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance};
     use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
-    use factory_core::task::{Task, TaskStatus};
+    use factory_core::task::{NewTask, Task, TaskStatus};
     use factory_plugins::registry::Registry;
-    use factory_plugins::SqliteStore;
+    use factory_plugins::{HarnessAgent, SqliteStore};
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -842,12 +843,14 @@ mod tests {
     /// channel and stores the sending half so the test can push through it.
     struct StubRuntime {
         tx: std::sync::Mutex<Option<mpsc::Sender<RuntimeEvent>>>,
+        starts: std::sync::Mutex<Vec<StartRequest>>,
     }
 
     impl StubRuntime {
         fn new() -> Self {
             Self {
                 tx: std::sync::Mutex::new(None),
+                starts: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -857,8 +860,13 @@ mod tests {
         fn name(&self) -> &str {
             "stub"
         }
-        async fn start(&self, _req: &StartRequest) -> Result<SessionRef> {
-            unimplemented!("not exercised here")
+        async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
+            self.starts.lock().unwrap().push(req.clone());
+            Ok(SessionRef {
+                runtime: "stub".into(),
+                handle: format!("stub-{}", req.id),
+                meta: Default::default(),
+            })
         }
         async fn submit(&self, _session: &SessionRef, _text: &str) -> Result<()> {
             Ok(())
@@ -883,6 +891,115 @@ mod tests {
             *self.tx.lock().unwrap() = Some(tx);
             Ok(Some(rx))
         }
+    }
+
+    fn recording_engine(scope_yaml: &str) -> (Arc<Engine>, Arc<StubRuntime>, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("factory-agent-args-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "i".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig::default(),
+            scope: None,
+            scopes: vec![serde_yaml_ng::from_str(scope_yaml).unwrap()],
+            roles: Default::default(),
+            plugins_dir: None,
+        };
+        let mut registry = Registry::with_builtins();
+        registry.add_agent(
+            Arc::new(
+                HarnessAgent::new("configured", "pi", "configured test agent")
+                    .with_args(vec!["--model".into(), "sonnet".into()]),
+            ),
+            "test",
+        );
+        let stub = Arc::new(StubRuntime::new());
+        registry.add_runtime(stub.clone(), "test");
+        let engine = Arc::new(Engine::new(
+            Factory {
+                root: root.clone(),
+                config,
+            },
+            registry,
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            vec![],
+        ));
+        (engine, stub, root)
+    }
+
+    #[tokio::test]
+    async fn standing_agent_arguments_follow_the_adapter_defaults() {
+        let (engine, stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: watcher\n    harness: configured\n    lifetime: permanent\n    args: [--model, opus]\n",
+        );
+
+        engine.start_agent("demo", "watcher").await.unwrap();
+
+        let starts = stub.starts.lock().unwrap();
+        assert_eq!(
+            starts[0].launch.args,
+            ["--model", "sonnet", "--model", "opus"]
+        );
+        drop(starts);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn task_agent_arguments_follow_the_adapter_defaults() {
+        let (engine, stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n    args: [--model, opus]\n",
+        );
+        let task = engine
+            .create(NewTask {
+                title: "exercise configured args".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("builder".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+
+        let starts = stub.starts.lock().unwrap();
+        assert_eq!(
+            starts[0].launch.args,
+            ["--model", "sonnet", "--model", "opus"]
+        );
+        drop(starts);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_bare_adapter_does_not_borrow_arguments_from_another_declaration() {
+        let (engine, stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n    args: [--model, opus]\n",
+        );
+        let task = engine
+            .create(NewTask {
+                title: "use the adapter directly".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("configured".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+
+        let starts = stub.starts.lock().unwrap();
+        assert_eq!(starts[0].launch.args, ["--model", "sonnet"]);
+        drop(starts);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]
