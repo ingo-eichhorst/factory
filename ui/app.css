@@ -735,6 +735,49 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 .calleg .k { display: inline-flex; align-items: center; gap: 5px; }
 .calleg i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 .calfoot { margin: 12px 0 0; font: 400 11px/1.6 var(--sans); color: var(--ink-2); max-width: 96ch; }
+
+/* ===== workflow canvas ================================================== */
+.workflow-shell { display: grid; grid-template-columns: 190px minmax(420px, 1fr) 250px; min-height: calc(100vh - 148px); border-top: 1px solid var(--line); }
+.workflow-list, .workflow-inspector { background: var(--panel); padding: 12px; overflow: auto; }
+.workflow-list { border-right: 1px solid var(--line); }
+.workflow-inspector { border-left: 1px solid var(--line); }
+.workflow-list-item { width: 100%; display: flex; flex-direction: column; gap: 4px; padding: 10px; margin-bottom: 6px; text-align: left; color: var(--ink); background: transparent; border: 1px solid var(--line-soft); border-radius: 3px; }
+.workflow-list-item:hover, .workflow-list-item.on { border-color: var(--run); background: color-mix(in srgb, var(--run) 8%, transparent); }
+.workflow-list-item strong { font: 600 12px/1.2 var(--sans); }
+.workflow-list-item span { font: 400 9px/1.2 var(--mono); color: var(--faint); }
+.workflow-editor { min-width: 0; display: flex; flex-direction: column; background: var(--sunk); }
+.workflow-toolbar { display: flex; gap: 6px; align-items: center; padding: 8px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+.workflow-canvas { position: relative; flex: 1 1 520px; min-height: 480px; overflow: hidden; cursor: grab; outline: none; background-color: var(--sunk); background-image: radial-gradient(var(--line) 1px, transparent 1px); background-size: 20px 20px; }
+.workflow-canvas:focus-visible { box-shadow: inset 0 0 0 2px var(--run); }
+.workflow-world { position: absolute; width: 2400px; height: 1600px; transform-origin: 0 0; }
+#workflow-edges { position: absolute; inset: 0; width: 2400px; height: 1600px; overflow: visible; }
+#workflow-edges marker path { fill: var(--muted); }
+.workflow-edge { fill: none; stroke: var(--muted); stroke-width: 2; }
+.workflow-node { position: absolute; width: 184px; min-height: 84px; padding: 10px 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; text-align: left; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--faint); border-radius: 4px; box-shadow: 0 5px 16px rgba(0,0,0,.18); cursor: move; }
+.workflow-node.selected { outline: 2px solid var(--run); outline-offset: 2px; }
+.workflow-node.connecting { box-shadow: 0 0 0 4px color-mix(in srgb, var(--wait) 30%, transparent); }
+.workflow-node.s-running, .workflow-node.s-dispatching, .workflow-node.s-pending { border-left-color: var(--run); }
+.workflow-node.s-blocked { border-left-color: var(--wait); }
+.workflow-node.s-done { border-left-color: var(--idle); }
+.workflow-node.s-failed, .workflow-node.s-cancelled, .workflow-node.s-skipped { border-left-color: var(--fault); }
+.workflow-node-kind { font: 700 8px/1 var(--cond); letter-spacing: .14em; color: var(--faint); }
+.workflow-node strong { font: 600 12px/1.2 var(--sans); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-node > span:last-of-type { font: 400 9px/1 var(--mono); color: var(--muted); }
+.workflow-node i { font: 500 9px/1 var(--mono); color: var(--run); cursor: pointer; font-style: normal; }
+.workflow-zoom { position: absolute; right: 10px; bottom: 10px; padding: 4px 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 3px; font: 500 9px/1 var(--mono); color: var(--faint); }
+.workflow-inspector h3 { margin: 5px 0 10px; font: 700 10px/1 var(--cond); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.workflow-inspector label { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; font: 600 9px/1 var(--cond); letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.workflow-inspector input, .workflow-inspector textarea, .workflow-inspector select { width: 100%; box-sizing: border-box; text-transform: none; letter-spacing: normal; }
+.workflow-inspector .check { flex-direction: row; align-items: center; }
+.workflow-inspector .check input { width: auto; }
+.workflow-summary { border-top: 1px solid var(--line); padding: 9px 12px; background: var(--panel); }
+.workflow-summary summary { font: 600 10px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); cursor: pointer; }
+.workflow-summary ol { margin: 8px 0 0; padding-left: 24px; }
+.workflow-summary li { margin: 4px 0; font: 400 10px/1.4 var(--mono); color: var(--muted); }
+.workflow-summary li button { color: var(--ink); border: 0; background: none; padding: 0; font: inherit; text-decoration: underline; }
+.workflow-summary li span:last-child { color: var(--faint); }
+.loading { opacity: .55; pointer-events: none; }
+@media (max-width: 1000px) { .workflow-shell { grid-template-columns: 160px minmax(360px, 1fr); } .workflow-inspector { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; } }
 /* ===== site plan: hall floor =====
    A dedicated ramp for the floor treemap's tiles, read by both site
    renderers the same way they already read `--wallA` and friends. It is

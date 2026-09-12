@@ -159,6 +159,7 @@ rather than ignored, and so is an agent given a role the instance never defined
 
     task.create  task.edit  task.delete  task.run  task.cancel  task.report
     agent.start  agent.configure  agent.stop  agent.input  run.input
+    workflow.create  workflow.edit  workflow.delete  workflow.run  workflow.cancel
 
 Reading is not among them, because reading is open to every agent: one that
 cannot see the board cannot coordinate with anyone.
@@ -274,6 +275,29 @@ factory run output <run-id>    # its terminal, live or from the transcript
 Only one run of a task can be in progress at a time — two attempts at once
 would race for the same working directory — so starting a second is refused
 until the first ends or is cancelled.
+
+## Workflows
+
+A workflow is reusable Process-level intent: a scoped, finite DAG of ordinary
+task templates. A workflow run keeps an immutable snapshot of the definition
+revision it started with. Root nodes create and run tasks immediately; every
+other node waits until all incoming predecessors have reported `done`.
+Fan-out starts every newly eligible node and fan-in waits for every parent.
+A failed or cancelled task stops the attempt and leaves downstream nodes
+`skipped`; a blocked task simply pauses it. The task remains authoritative for
+all of these states.
+
+Workflow definitions and runs are daemon orchestration state. They are stored
+in additive tables in the instance root's `.factory/factory.db`, never in a
+scope config or browser storage, even when that scope uses a plugin task store.
+Each spawned task carries `workflow_origin` with the definition, run, and node
+IDs. The run persists its chosen task ID before task creation, so restart
+reconciliation recreates that exact decision instead of spawning a duplicate.
+
+The web UI exposes **Workflows** beside **Tasks**. Its canvas supports moving,
+connecting, duplicating and deleting task nodes, with pan/zoom and a properties
+inspector. The ordered textual summary and keyboard node controls carry the
+same graph for people who do not use the canvas.
 
 ## How a task actually runs
 
@@ -466,7 +490,9 @@ echo '{"op":"task.list","params":{}}' | nc -U .factory/factory.sock
 HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`,
 `GET /api/runs/{id}/entries`, `GET /api/runs/{id}/output`, `GET /api/agents`,
-`GET /api/agent-runtime`, and `POST /api/rpc` for the raw envelope. `GET /ws`
+`GET /api/agent-runtime`, workflow CRUD under `/api/workflows`, workflow-run
+start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
+`POST /api/rpc` for the raw envelope. `GET /ws`
 is the event stream: a snapshot of every task first, then one message per event.
 
 Adding an interface — mcp, or anything else — means translating to that
@@ -474,9 +500,9 @@ envelope, not inventing a second API.
 
 ## The web UI
 
-Eight views, grouped by level in the header: **Dashboard** is the landing view,
-then **Activity**, **Site plan**, **Inbox**, **Tasks**, **Occupancy**, **Roster**
-and **Agent-runtime**. Switching between them is a small registry — one
+Nine views, grouped by level in the header: **Dashboard** is the landing view,
+then **Activity**, **Site plan**, **Inbox**, **Tasks**, **Workflows**,
+**Occupancy**, **Roster**, and **Agent-runtime**. Switching between them is a small registry — one
 container shown, one button lit,
 and whatever that view needs to start or stop doing while it is not the one on
 screen.
