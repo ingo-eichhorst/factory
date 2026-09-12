@@ -458,6 +458,11 @@ impl TaskStore for SqliteStore {
                 trigger: new.trigger,
                 agent: new.agent.clone(),
                 adapter: new.adapter.clone(),
+                // Not known until the daemon has decided whether this run
+                // gets one and, if so, made it -- which happens after the
+                // run row exists, since the worktree is named after it.
+                worktree_path: None,
+                worktree_branch: None,
                 runtime: new.runtime.clone(),
                 session: None,
                 token: Some(new.token.clone()),
@@ -555,6 +560,12 @@ impl TaskStore for SqliteStore {
             // caller remembered to say when.
             if run.status.is_terminal() && run.ended_at.is_none() {
                 run.ended_at = Some(Utc::now());
+            }
+            if let Some(v) = patch.worktree_path {
+                run.worktree_path = Some(v);
+            }
+            if let Some(v) = patch.worktree_branch {
+                run.worktree_branch = Some(v);
             }
 
             write_run(conn, &run)?;
@@ -835,6 +846,7 @@ mod tests {
             updated_at: now,
             last_run_at: None,
             next_run_at: None,
+            worktree: false,
         }
     }
 

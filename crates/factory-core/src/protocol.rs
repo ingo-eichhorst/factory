@@ -295,6 +295,15 @@ pub struct ScopeView {
     /// Every registered task-store adapter, so the page can say what the
     /// alternatives are.
     pub available_stores: Vec<String>,
+    /// Whether this scope's directory can host a git worktree at all: a git
+    /// repository with at least one commit to branch a worktree from. When
+    /// it cannot, a task's "work in its own worktree" checkbox is disabled
+    /// rather than quietly ignored.
+    pub worktree_capable: bool,
+    /// Why it cannot, in words fit to show next to the disabled checkbox.
+    /// `None` exactly when `worktree_capable` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_reason: Option<String>,
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ mod scheduler;
 mod schedule;
 mod stores;
 mod ui;
+mod worktree;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};

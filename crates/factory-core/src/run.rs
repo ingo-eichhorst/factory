@@ -132,6 +132,16 @@ pub struct Run {
     /// The adapter that actually ran, once the name above was resolved.
     #[serde(default)]
     pub adapter: String,
+    /// Where this attempt worked, when its task asked for a worktree of its
+    /// own: the branch it is on and the path it was checked out at. `None`
+    /// for a run that worked in the scope directly, and for any run this
+    /// daemon made before the field existed. Set once, when the worktree is
+    /// made, and never cleared -- the daemon does not clean these up, so this
+    /// is the only record of where the work went once the run ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
     pub runtime: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionRef>,
@@ -218,4 +228,11 @@ pub struct RunPatch {
     pub block_suspected_since: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_block_suspicion: bool,
+    /// Set once, right after `git worktree add` succeeds. Nothing ever clears
+    /// these -- there is no "leave the worktree" patch, because there is
+    /// nothing else for the run to have used once it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
 }

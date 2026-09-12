@@ -147,6 +147,12 @@ enum TaskCmd {
         /// Repeatable: `--label area=infra`.
         #[arg(long = "label")]
         labels: Vec<String>,
+        /// Give this task its own git worktree, made fresh before each run.
+        /// On unless you pass `--no-worktree`.
+        #[arg(long)]
+        worktree: bool,
+        #[arg(long)]
+        no_worktree: bool,
         /// Dispatch it immediately as well.
         #[arg(long)]
         run: bool,
@@ -495,9 +501,21 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             timeout,
             blocked_timeout,
             labels,
+            worktree,
+            no_worktree,
             run,
         } => {
             let schedule = schedule.as_deref().map(parse_schedule).transpose()?;
+            // Absent means on -- so passing neither flag says the same thing
+            // as passing `--worktree` does. `--no-worktree` is the only way
+            // to mean off, and it wins if both are somehow given.
+            let worktree = if no_worktree {
+                Some(false)
+            } else if worktree {
+                Some(true)
+            } else {
+                None
+            };
             let payload = client
                 .send(Request::TaskCreate(NewTask {
                     title,
@@ -510,6 +528,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     timeout_seconds: timeout,
                     blocked_timeout_seconds: blocked_timeout,
                     labels: parse_labels(&labels)?,
+                    worktree,
                 }))
                 .await?;
             let created = match &payload {
@@ -781,6 +800,12 @@ fn run_detail(r: &Run) -> String {
             since.to_rfc3339()
         ));
     }
+    if let Some(branch) = &r.worktree_branch {
+        s.push_str(&format!("  branch     {branch}\n"));
+    }
+    if let Some(path) = &r.worktree_path {
+        s.push_str(&format!("  worktree   {path}\n"));
+    }
     if let Some(v) = &r.result {
         s.push_str(&format!("\nresult:\n{v}\n"));
     }
@@ -825,6 +850,9 @@ fn detail(t: &Task) -> String {
     }
     if let Some(next) = t.next_run_at {
         s.push_str(&format!("  next run   {}\n", next.to_rfc3339()));
+    }
+    if t.worktree {
+        s.push_str("  worktree   yes, a fresh one before each run\n");
     }
     if t.runs > 0 {
         s.push_str(&format!("  runs       {}\n", t.runs));

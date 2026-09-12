@@ -38,6 +38,11 @@ pub struct TaskBinding {
     pub attempt: u32,
     /// The secret the agent must present when reporting on this run.
     pub token: String,
+    /// Set when this run is working in a git worktree of its own rather than
+    /// the scope, so the prompt can say so and name the branch. `None` for a
+    /// run that used the scope directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
 }
 
 /// Everything an agent adapter needs to phrase a prompt and a launch.

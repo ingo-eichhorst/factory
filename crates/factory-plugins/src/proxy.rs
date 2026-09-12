@@ -36,6 +36,11 @@ struct WireContext {
     /// front of the agent; it is stripped from everything else.
     #[serde(skip_serializing_if = "Option::is_none")]
     token: Option<String>,
+    /// Set when the run is working in a git worktree of its own rather than
+    /// the scope, so a plugin agent can say so too instead of only the
+    /// built-ins knowing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree_branch: Option<String>,
     /// The same contract the built-in agents put in their prompts, so a plugin
     /// can paste it instead of reconstructing the commands.
     reporting_contract: String,
@@ -53,6 +58,7 @@ impl From<&AgentContext> for WireContext {
             run_id: ctx.task.as_ref().map(|b| b.run_id.clone()),
             attempt: ctx.task.as_ref().map(|b| b.attempt),
             token: ctx.task.as_ref().map(|b| b.token.clone()),
+            worktree_branch: ctx.task.as_ref().and_then(|b| b.worktree_branch.clone()),
             reporting_contract: ctx.reporting_contract(),
             env: ctx.env(),
         }

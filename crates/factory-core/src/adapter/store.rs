@@ -114,5 +114,39 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         updated_at: now,
         last_run_at: None,
         next_run_at: None,
+        // Resolved here, once, rather than left for a reader of `Task` to
+        // guess at: `new.worktree` absent means on, and writing the resolved
+        // bool down now is what keeps that ambiguity from ever reaching the
+        // store. See `Task::worktree` for why an absent key means the
+        // opposite once a task already exists.
+        worktree: new.worktree.unwrap_or(true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::NewTask;
+
+    #[test]
+    fn a_new_task_with_an_absent_worktree_reads_as_on() {
+        let new = NewTask {
+            title: "do the thing".into(),
+            ..Default::default()
+        };
+        assert_eq!(new.worktree, None, "the wire says nothing either way");
+        let task = task_from_new(new, "demo".into(), "shell".into(), "herdr".into());
+        assert!(task.worktree, "absent on a new task means on");
+    }
+
+    #[test]
+    fn a_new_task_that_says_no_worktree_is_believed() {
+        let new = NewTask {
+            title: "do the thing".into(),
+            worktree: Some(false),
+            ..Default::default()
+        };
+        let task = task_from_new(new, "demo".into(), "shell".into(), "herdr".into());
+        assert!(!task.worktree, "an explicit no is not the same as silence");
     }
 }

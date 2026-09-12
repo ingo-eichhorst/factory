@@ -17,11 +17,12 @@ use factory_core::task::{
     NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
 };
 use factory_plugins::registry::Registry;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::schedule;
+use crate::worktree;
 
 pub struct Engine {
     pub factory: Factory,
@@ -323,6 +324,11 @@ impl Engine {
                 .clone()
                 .unwrap_or_else(|| self.factory.config.daemon.default_runtime.clone());
             let task_store = self.factory.task_store_for(&scope.name).to_string();
+            let scope_dir = self
+                .factory
+                .scope_path(&scope.name)
+                .unwrap_or_else(|_| scope.path.clone());
+            let (worktree_capable, worktree_reason) = worktree::capability(&scope_dir).await;
 
             let mut agents = Vec::new();
             let mut covered = std::collections::BTreeSet::new();
@@ -449,17 +455,15 @@ impl Engine {
 
             views.push(ScopeView {
                 name: scope.name.clone(),
-                path: self
-                    .factory
-                    .scope_path(&scope.name)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| scope.path.display().to_string()),
+                path: scope_dir.display().to_string(),
                 default_agent,
                 runtime,
                 agents,
                 available: available.clone(),
                 task_store,
                 available_stores: available_stores.clone(),
+                worktree_capable,
+                worktree_reason,
             });
         }
 
@@ -634,12 +638,12 @@ impl Engine {
         let (agent_name, adapter_name) = self.resolve_agent(&task.scope, &task.agent)?;
         let agent = self.registry.agent(&adapter_name)?;
         let runtime = self.registry.runtime(&task.runtime)?;
-        let cwd = self.factory.scope_path(&task.scope)?;
-        if !cwd.is_dir() {
+        let scope_path = self.factory.scope_path(&task.scope)?;
+        if !scope_path.is_dir() {
             return Err(FactoryError::BadRequest(format!(
                 "scope {:?} points at {}, which is not a directory",
                 task.scope,
-                cwd.display()
+                scope_path.display()
             )));
         }
 
@@ -669,6 +673,13 @@ impl Engine {
         )
         .await;
 
+        // A worktree of its own, made now rather than left to the harness --
+        // the run row already exists, so it is named after it. Nothing below
+        // this point may hand the agent the scope itself when the checkbox is
+        // on: a failure here ends the run right here, with git's own
+        // complaint, rather than quietly falling back to the scope.
+        let (cwd, run) = self.place_run(&task, run, &scope_path).await?;
+
         let ctx = AgentContext {
             scope: task.scope.clone(),
             cwd: cwd.clone(),
@@ -679,6 +690,7 @@ impl Engine {
                 run_id: run.id.clone(),
                 attempt: run.attempt,
                 token,
+                worktree_branch: run.worktree_branch.clone(),
             }),
             identity_token: None,
         };
@@ -721,6 +733,49 @@ impl Engine {
         )
         .await;
         Ok(run)
+    }
+
+    /// Where a run actually works: its own worktree, or the scope directly.
+    /// Pulled out of `dispatch` so the decision -- and the one way it can
+    /// fail -- has no need of a real agent or runtime on the other end of it,
+    /// which is what lets it be tested on its own.
+    ///
+    /// `task.worktree` off is the whole of the "quietly ignored" case this
+    /// function refuses to have: it is checked once, here, and every path out
+    /// of it either returns the scope path unchanged or a worktree that
+    /// `git worktree add` actually made. There is no third path.
+    async fn place_run(&self, task: &Task, run: Run, scope_path: &Path) -> Result<(PathBuf, Run)> {
+        if !task.worktree {
+            return Ok((scope_path.to_path_buf(), run));
+        }
+        let branch = worktree::branch_name(&task.id, &task.title, run.attempt);
+        let dir = self.factory.worktrees_dir().join(&run.id);
+        worktree::create(scope_path, &dir, &branch)
+            .await
+            .map_err(|e| FactoryError::adapter("git", e))?;
+        let run = self
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    worktree_path: Some(dir.display().to_string()),
+                    worktree_branch: Some(branch.clone()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        self.bus.publish(Event::RunUpdated { run: run.clone() });
+        self.entry(
+            &run.task_id,
+            TaskEntry::new(
+                "daemon",
+                "worktree",
+                format!("working in {} on {branch}", dir.display()),
+            )
+            .in_run(&run.id),
+        )
+        .await;
+        Ok((dir, run))
     }
 
     /// What an agent says about its own run. The token is what makes this a
@@ -1080,5 +1135,202 @@ fn truncate(s: &str, n: usize) -> String {
     } else {
         let head: String = s.chars().take(n.saturating_sub(1)).collect();
         format!("{head}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use factory_core::config::{Config, DaemonConfig, Instance, Scope};
+    use factory_core::run::RunStatus;
+    use factory_plugins::{Registry, SqliteStore};
+
+    /// A scope pointed at `scope_path`, one store in memory, and every
+    /// built-in adapter registered -- enough to dispatch a task without a
+    /// real herdr or a real agent, since the paths under test here never
+    /// reach either.
+    fn test_engine(scope_path: PathBuf) -> Arc<Engine> {
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig::default(),
+            scopes: vec![Scope {
+                name: "demo".into(),
+                path: scope_path,
+                agent: None,
+                agents: Vec::new(),
+                runtime: None,
+                git: None,
+                task_store: None,
+            }],
+            plugins_dir: None,
+        };
+        let factory = Factory {
+            root: std::env::temp_dir().join(format!("factory-engine-test-{}", uuid::Uuid::new_v4())),
+            config,
+        };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(
+            factory,
+            registry,
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("factory-engine-test-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_worktree_creation_fails_does_not_get_a_session_and_reports_gits_error() {
+        // Not a git repository, so `git worktree add` has nothing to work
+        // with. The checkbox defaults to on, so this is the ordinary case for
+        // a scope nobody has run `git init` in yet -- exactly what a person
+        // must never see silently turn into a run in the scope itself.
+        let scope_dir = temp_dir("scope");
+        let engine = test_engine(scope_dir.clone());
+
+        let task = engine
+            .create(NewTask {
+                title: "try the worktree".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(task.worktree, "on by default, and this task never said otherwise");
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+
+        let runs = engine.store.runs(&task.id, 10).await.unwrap();
+        assert_eq!(runs.len(), 1, "the run row was made before the worktree was attempted");
+        let run = &runs[0];
+        assert_eq!(run.status, RunStatus::Failed);
+        assert!(run.session.is_none(), "it never got as far as opening a session");
+        assert!(run.worktree_path.is_none(), "nothing to record -- the worktree never existed");
+        let error = run.error.clone().unwrap_or_default();
+        assert!(
+            error.contains("not a git repository"),
+            "run.error should carry git's own complaint, got: {error:?}"
+        );
+
+        let entries = engine.store.run_entries(&run.id, 50).await.unwrap();
+        assert!(
+            entries.iter().any(|e| e.message.contains("not a git repository")),
+            "the journal gets git's complaint too"
+        );
+
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_with_the_checkbox_off_still_runs_in_the_scope_even_when_it_is_not_a_git_repository() {
+        // `place_run` is called directly rather than through `dispatch`,
+        // which would go on to call a real runtime -- this machine actually
+        // has herdr installed, and a unit test has no business starting a
+        // real session. `place_run` is the whole of the decision `dispatch`
+        // makes here, so exercising it alone is exercising the real thing.
+        let scope_dir = temp_dir("scope"); // not a git repository, on purpose
+        let engine = test_engine(scope_dir.clone());
+
+        let task = engine
+            .create(NewTask {
+                title: "stay in the scope".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(!task.worktree);
+
+        let run = engine
+            .store
+            .create_run(&factory_core::run::NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: task.runtime.clone(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+
+        let (cwd, run) = engine.place_run(&task, run, &scope_dir).await.unwrap();
+        assert_eq!(cwd, scope_dir, "the checkbox is off, so this stays the scope itself");
+        assert!(run.worktree_path.is_none());
+        assert!(run.worktree_branch.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_capable_scope_gives_the_run_its_own_worktree_and_the_run_remembers_where() {
+        let scope_dir = temp_dir("scope");
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "factory@example.com"][..],
+            &["config", "user.name", "factory"][..],
+            &["commit", "-q", "--allow-empty", "-m", "base"][..],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&scope_dir)
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        let engine = test_engine(scope_dir.clone());
+        let root = engine.factory.root.clone();
+        let task = engine
+            .create(NewTask {
+                title: "do the thing".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let run = engine
+            .store
+            .create_run(&factory_core::run::NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: task.runtime.clone(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+        let run_id = run.id.clone();
+
+        let (cwd, run) = engine.place_run(&task, run, &scope_dir).await.unwrap();
+        assert_ne!(cwd, scope_dir, "the checkbox is on, so this is not the scope itself");
+        assert_eq!(cwd, engine.factory.worktrees_dir().join(&run_id), "named after the run");
+        assert!(cwd.join(".git").exists(), "a real worktree, not just a path");
+        assert_eq!(run.worktree_path.as_deref(), Some(cwd.display().to_string().as_str()));
+        assert!(
+            run.worktree_branch.as_deref().unwrap_or_default().starts_with("factory/"),
+            "the branch reads as this daemon's, got {:?}",
+            run.worktree_branch
+        );
+
+        std::fs::remove_dir_all(&scope_dir).ok();
+        std::fs::remove_dir_all(&root).ok();
     }
 }

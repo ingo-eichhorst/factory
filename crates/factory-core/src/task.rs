@@ -122,6 +122,15 @@ pub struct Task {
     pub last_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run_at: Option<DateTime<Utc>>,
+    /// Whether a run of this task works in a git worktree of its own rather
+    /// than the scope. `#[serde(default)]` reads a missing key as `false` --
+    /// deliberately the opposite of `NewTask::worktree`'s absent-means-on,
+    /// because the field is new and a database full of tasks that have been
+    /// running against their scope for weeks must not all move to a worktree
+    /// on the next restart just because nobody wrote this key down yet. Only
+    /// tasks created after this shipped carry the field explicitly.
+    #[serde(default)]
+    pub worktree: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -145,6 +154,13 @@ pub struct NewTask {
     pub blocked_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// Give this task its own git worktree, made fresh before each run.
+    /// Absent means on, so every way of making a task -- the form, `factory
+    /// task create`, the HTTP API, another agent -- gets the same default
+    /// without having to say so. `Some(false)` is how a caller means it, not
+    /// merely fails to mention it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<bool>,
 }
 
 /// A partial update. `None` means "leave alone" throughout, so a store can
@@ -266,4 +282,33 @@ pub struct TaskReport {
     /// Presented by the agent, checked against `Task::token`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_task_with_no_worktree_key_parses_as_absent_not_off() {
+        // The wire says nothing either way; `unwrap_or(true)` at creation is
+        // what turns this into "on". Confirming it deserializes to `None`
+        // rather than `Some(false)` is what makes that later default honest.
+        let new: NewTask = serde_json::from_str(r#"{"title":"do the thing"}"#).unwrap();
+        assert_eq!(new.worktree, None);
+    }
+
+    #[test]
+    fn a_stored_task_with_no_worktree_key_reads_as_off() {
+        // A row written before this field existed. `#[serde(default)]` must
+        // land on `false` here, not on the same "absent means on" `NewTask`
+        // uses -- otherwise every task already in the database would move
+        // into a worktree the next time the daemon starts.
+        let json = r#"{
+            "id": "t1", "title": "an old task", "instructions": "", "scope": "demo",
+            "agent": "shell", "runtime": "herdr", "status": "pending",
+            "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert!(!task.worktree);
+    }
 }
