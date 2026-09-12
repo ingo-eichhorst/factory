@@ -46,14 +46,17 @@ impl Engine {
 
         // Runs by (scope, agent name). A run records the agent it was given to,
         // and the task records the scope -- key both the way the agents page
-        // keys them, by name and never by harness.
-        let scope_of: BTreeMap<&str, &str> = tasks
+        // keys them, by name and never by harness. Canonicalized: a task
+        // written before a scope's identity became its path still carries the
+        // bare name it was given, and without this a run of one would land in
+        // an orphan row of its own instead of on the scope's actual line.
+        let scope_of: BTreeMap<&str, String> = tasks
             .iter()
-            .map(|t| (t.id.as_str(), t.scope.as_str()))
+            .map(|t| (t.id.as_str(), self.factory.canonical_scope_name(&t.scope)))
             .collect();
         let mut blocks: BTreeMap<(String, String), Vec<OccupancyBlock>> = BTreeMap::new();
         for run in &runs {
-            let scope = scope_of.get(run.task_id.as_str()).unwrap_or(&"").to_string();
+            let scope = scope_of.get(run.task_id.as_str()).cloned().unwrap_or_default();
             blocks
                 .entry((scope, run.agent.clone()))
                 .or_default()
@@ -69,8 +72,9 @@ impl Engine {
                 continue;
             }
             let (estimate, samples) = self.estimate_for(&task.id).await;
+            let scope = scope_of.get(task.id.as_str()).cloned().unwrap_or_default();
             planned
-                .entry((task.scope.clone(), task.agent.clone()))
+                .entry((scope, task.agent.clone()))
                 .or_default()
                 .push(OccupancyPlan {
                     task_id: task.id.clone(),
@@ -101,7 +105,8 @@ impl Engine {
         let liveness_since = self.store.status_origin().await?;
 
         let mut out = Vec::new();
-        for view in self.scope_views().await? {
+        let (views, _available) = self.scope_views().await?;
+        for view in views {
             let path = view.path.clone();
             let mut rows = Vec::new();
             for agent in &view.agents {

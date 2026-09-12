@@ -291,19 +291,92 @@ pub struct Scope {
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<String>,
+    /// Named in `scopes:`, rather than surfaced by the discovery walk on its
+    /// own. Every scope a config written before discovery existed declares is
+    /// this by construction, which is what lets that config keep meaning what
+    /// it always meant -- so this defaults to `true` on the way in from YAML,
+    /// and a discovered directory is the one thing that ever sets it to
+    /// `false` (`Scope::discovered`). Never written back out: it is what the
+    /// daemon worked out about a `scopes:` entry, not something for a person
+    /// to spell in one. What it gates: the foreman. `ForemanConfig` starts one
+    /// real agent session per scope it reaches, and every directory being a
+    /// scope makes "every scope" the wrong reach for that -- see
+    /// `agents_with`.
+    #[serde(default = "default_declared", skip_serializing)]
+    pub declared: bool,
+}
+
+fn default_declared() -> bool {
+    true
+}
+
+/// The last `/`-separated segment of `s`, or all of `s` when it has none.
+/// This is what a bare scope name -- one written before a scope's identity
+/// became its path -- is compared against: see `Factory::scope` and the
+/// `exclude` check in `agents_with`.
+fn last_segment(s: &str) -> &str {
+    s.rsplit('/').next().unwrap_or(s)
+}
+
+/// Whether `pattern` (an `exclude` entry, or a name somebody typed) means
+/// `scope_name`: exactly, or -- when `pattern` carries no `/` of its own --
+/// by matching just its last segment. A pattern that does name a path is
+/// never loosened this way, so a full path always means exactly itself.
+fn names_scope(pattern: &str, scope_name: &str) -> bool {
+    pattern == scope_name || (!pattern.contains('/') && last_segment(scope_name) == pattern)
+}
+
+/// A scope's identity: its path relative to the instance root, joined with
+/// `/` regardless of platform -- it is typed by hand and carried in a URL, so
+/// it does not get to vary with `std::path::MAIN_SEPARATOR`. The instance
+/// root has no such path (relative to itself it is empty), and neither does a
+/// scope configured outside the root altogether; both keep `fallback`
+/// instead, which is the name they already had.
+pub fn scope_identity(root: &Path, absolute_path: &Path, fallback: &str) -> String {
+    match absolute_path.strip_prefix(root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+        _ => fallback.to_string(),
+    }
 }
 
 impl Scope {
+    /// A directory nobody named in `scopes:`, given the defaults it runs with
+    /// until an entry there says otherwise -- no agent of its own, the
+    /// instance's runtime, and (the part that matters) no foreman, whatever
+    /// `daemon.foreman` says. See `declared`.
+    pub fn discovered(name: String, path: PathBuf) -> Self {
+        Self {
+            name,
+            path,
+            agent: None,
+            agents: Vec::new(),
+            runtime: None,
+            git: None,
+            declared: false,
+        }
+    }
+
     /// The adapter a task in this scope runs on unless it says otherwise.
     pub fn agent_adapter(&self) -> Option<&str> {
         self.agent.as_ref().map(AgentRef::adapter)
     }
 
     /// Every agent this scope declares, plus the foreman the instance adds to
-    /// each scope when it is configured to.
+    /// each scope when it is configured to -- but only a scope `scopes:`
+    /// actually names. Discovery makes every directory a scope; it must not
+    /// make every directory a standing agent session the moment somebody
+    /// flips `foreman.enabled`, or an instance with a real tree of folders
+    /// starts one real session per folder and spends real money on it.
     pub fn agents_with(&self, foreman: &ForemanConfig) -> Vec<ScopeAgent> {
         let mut out = self.declared_agents();
-        if !foreman.enabled || foreman.exclude.iter().any(|e| e == &self.name) {
+        if !self.declared || !foreman.enabled {
+            return out;
+        }
+        if foreman.exclude.iter().any(|e| names_scope(e, &self.name)) {
             return out;
         }
         // A scope that already has a foreman of its own keeps it.
@@ -448,16 +521,71 @@ impl Factory {
         tmp.join(format!("factory-{}.sock", short_hash(&self.root)))
     }
 
+    /// The scopes `scopes:` actually names -- not the (possibly enormous)
+    /// rest that discovery added, which nobody wrote down and a status line
+    /// or a create-task picker has no business enumerating.
     pub fn scope_names(&self) -> Vec<String> {
-        self.config.scopes.iter().map(|s| s.name.clone()).collect()
-    }
-
-    pub fn scope(&self, name: &str) -> Result<&Scope> {
         self.config
             .scopes
             .iter()
-            .find(|s| s.name == name)
-            .ok_or_else(|| FactoryError::NoSuchScope(name.to_string()))
+            .filter(|s| s.declared)
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
+    /// Look a scope up by its identity -- its path relative to the instance
+    /// root, per `scope_identity` -- or, failing that, by backward
+    /// compatibility.
+    ///
+    /// A scope's identity used to just be a short name; a task written down
+    /// under the old scheme still carries one (`factory`, say), and that name
+    /// may now belong to no scope at all if the directory it meant sits
+    /// somewhere with siblings -- `projects/factory` once discovery gives
+    /// every directory a path-shaped identity. So a `name` with no `/` in it
+    /// that matches no scope outright is tried again against the *last*
+    /// segment of every scope's identity, and resolves if exactly one
+    /// matches. More than one is refused rather than guessed at -- two
+    /// scopes sharing a last segment (`src` under two different projects) is
+    /// exactly the case this migration exists to make possible, and a bare
+    /// name can no longer tell them apart. The same fallback is what makes
+    /// the CLI's `--scope` keep accepting the short names people already
+    /// type.
+    pub fn scope(&self, name: &str) -> Result<&Scope> {
+        if let Some(s) = self.config.scopes.iter().find(|s| s.name == name) {
+            return Ok(s);
+        }
+        if !name.contains('/') {
+            let matches: Vec<&Scope> = self
+                .config
+                .scopes
+                .iter()
+                .filter(|s| last_segment(&s.name) == name)
+                .collect();
+            match matches.len() {
+                0 => {}
+                1 => return Ok(matches[0]),
+                _ => {
+                    let candidates: Vec<&str> = matches.iter().map(|s| s.name.as_str()).collect();
+                    return Err(FactoryError::BadRequest(format!(
+                        "{name:?} could mean any of: {} -- name one of these instead",
+                        candidates.join(", ")
+                    )));
+                }
+            }
+        }
+        Err(FactoryError::NoSuchScope(name.to_string()))
+    }
+
+    /// `name`'s canonical identity, for joining data written under the name a
+    /// scope used to have -- a task's `scope` field, a run's liveness --
+    /// against `Scope.name` as it reads today. Falls back to `name` itself
+    /// when nothing resolves it at all, so a scope that is genuinely gone
+    /// still groups its old data under the name it was last known by instead
+    /// of losing it to a join that silently matches nothing.
+    pub fn canonical_scope_name(&self, name: &str) -> String {
+        self.scope(name)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|_| name.to_string())
     }
 
     /// The absolute working directory for a scope.
@@ -500,6 +628,14 @@ mod tests {
         }
     }
 
+    /// A factory rooted at `/inst`, carrying exactly the scopes given --
+    /// for the resolution tests below, where the root itself never matters.
+    fn factory_with(scopes: Vec<Scope>) -> Factory {
+        let mut f = factory("/inst");
+        f.config.scopes = scopes;
+        f
+    }
+
     #[test]
     fn a_foreman_is_added_to_every_scope_but_the_excluded_ones() {
         let s: Scope = serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap();
@@ -525,6 +661,100 @@ mod tests {
         let cfg = ForemanConfig { enabled: true, ..Default::default() };
         let names: Vec<String> = s.agents_with(&cfg).iter().map(|a| a.name()).collect();
         assert_eq!(names, vec!["chef"], "no second foreman is bolted on");
+    }
+
+    #[test]
+    fn a_discovered_scope_never_gets_a_foreman() {
+        // Same directory, same config -- the only difference is whether
+        // `scopes:` named it. Discovery adding a foreman here is exactly the
+        // "one real session per folder" the doc comment on `agents_with`
+        // warns about.
+        let discovered = Scope::discovered("projects/demo".into(), PathBuf::from("projects/demo"));
+        let cfg = ForemanConfig { enabled: true, ..Default::default() };
+        assert!(
+            discovered.agents_with(&cfg).is_empty(),
+            "exclude is not what protects an undeclared scope -- declared is"
+        );
+    }
+
+    #[test]
+    fn foreman_exclude_matches_a_bare_name_by_its_last_segment() {
+        // A pre-migration `exclude: ["demo"]` must keep meaning the same
+        // directory once that scope's identity becomes `projects/demo`.
+        let s: Scope = serde_yaml_ng::from_str("name: projects/demo\npath: projects/demo\n").unwrap();
+        let cfg = ForemanConfig {
+            enabled: true,
+            exclude: vec!["demo".into()],
+            ..Default::default()
+        };
+        assert!(s.agents_with(&cfg).is_empty(), "the bare exclude entry still reaches it");
+
+        // A full path in `exclude` is not loosened the same way -- it means
+        // exactly the scope it names.
+        let other: Scope = serde_yaml_ng::from_str("name: projects/other\npath: projects/other\n").unwrap();
+        let cfg = ForemanConfig {
+            enabled: true,
+            exclude: vec!["projects/demo".into()],
+            ..Default::default()
+        };
+        assert!(!other.agents_with(&cfg).is_empty(), "a path-shaped exclude does not match a sibling");
+    }
+
+    #[test]
+    fn scope_identity_is_the_path_relative_to_root() {
+        let root = Path::new("/inst");
+        assert_eq!(
+            scope_identity(root, Path::new("/inst/projects/factory/crates"), "fallback"),
+            "projects/factory/crates"
+        );
+    }
+
+    #[test]
+    fn scope_identity_falls_back_at_the_root_and_outside_it() {
+        let root = Path::new("/inst");
+        assert_eq!(scope_identity(root, Path::new("/inst"), "factory"), "factory");
+        assert_eq!(
+            scope_identity(root, Path::new("/elsewhere/other"), "kept-name"),
+            "kept-name"
+        );
+    }
+
+    #[test]
+    fn a_bare_name_resolves_to_the_scope_whose_last_segment_matches() {
+        let f = factory_with(vec![
+            Scope::discovered("projects/factory".into(), PathBuf::from("projects/factory")),
+            Scope::discovered("projects/other".into(), PathBuf::from("projects/other")),
+        ]);
+        // No scope is literally named "factory" any more -- only the last
+        // segment of one matches -- and the fallback still finds it.
+        assert_eq!(f.scope("factory").unwrap().name, "projects/factory");
+        // The full identity keeps working too.
+        assert_eq!(f.scope("projects/other").unwrap().name, "projects/other");
+    }
+
+    #[test]
+    fn an_ambiguous_bare_name_is_refused_with_the_candidates_named() {
+        let f = factory_with(vec![
+            Scope::discovered("projects/a/src".into(), PathBuf::from("projects/a/src")),
+            Scope::discovered("projects/b/src".into(), PathBuf::from("projects/b/src")),
+        ]);
+        let e = f.scope("src").unwrap_err().to_string();
+        assert!(e.contains("projects/a/src"), "{e}");
+        assert!(e.contains("projects/b/src"), "{e}");
+    }
+
+    #[test]
+    fn canonical_scope_name_normalizes_a_legacy_bare_name_and_keeps_an_unknown_one() {
+        let f = factory_with(vec![Scope::discovered(
+            "projects/factory".into(),
+            PathBuf::from("projects/factory"),
+        )]);
+        assert_eq!(f.canonical_scope_name("factory"), "projects/factory");
+        assert_eq!(
+            f.canonical_scope_name("gone"),
+            "gone",
+            "a scope that resolves to nothing keeps its old data grouped under the name it had"
+        );
     }
 
     fn config_with(yaml: &str) -> Config {

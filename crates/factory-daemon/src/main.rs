@@ -105,6 +105,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
             agents: Vec::new(),
             runtime: None,
             git: None,
+            declared: true,
         }],
         roles: Default::default(),
         plugins_dir: None,

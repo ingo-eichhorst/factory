@@ -131,6 +131,21 @@ impl AgentSession {
         format!("{scope}/{name}")
     }
 
+    /// The id this agent would have been given before a scope's identity
+    /// became its path -- keyed on just the last segment. A session persisted
+    /// under the old, shorter scheme is found this way instead of being
+    /// treated as gone and started a second time next to the one already
+    /// running. `None` when there is nothing shorter to try: the root scope's
+    /// name never changes, and a scope whose canonical name was already this
+    /// short has no legacy form to distinguish it from the current one.
+    pub fn legacy_id_for(scope: &str, name: &str) -> Option<String> {
+        let last = scope.rsplit('/').next().unwrap_or(scope);
+        if last == scope {
+            return None;
+        }
+        Some(Self::id_for(last, name))
+    }
+
     /// The role this agent works under, given what the config declares for it.
     /// One rule, in one place: an assignment wins until it is cleared, and the
     /// config decides for everything else.

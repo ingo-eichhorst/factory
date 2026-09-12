@@ -115,10 +115,14 @@ impl Engine {
                 status: self.status().await?,
             }),
             Request::Adapters => Ok(self.registry.list().into()),
-            Request::Agents => Ok(Payload::Scopes {
-                scopes: self.scope_views().await?,
-                roles: self.role_views(),
-            }),
+            Request::Agents => {
+                let (scopes, available) = self.scope_views().await?;
+                Ok(Payload::Scopes {
+                    scopes,
+                    available,
+                    roles: self.role_views(),
+                })
+            }
             Request::Occupancy { minutes } => Ok(Payload::Occupancy {
                 occupancy: self.occupancy(minutes).await?,
             }),
@@ -287,10 +291,12 @@ impl Engine {
     }
 
     /// The agents page: scopes first, then the agents each one declares, then
-    /// what they are doing. One call, because a page that had to join config,
-    /// adapters, standing agents, runs and tasks itself would be showing five
-    /// different moments in time.
-    pub(crate) async fn scope_views(&self) -> Result<Vec<ScopeView>> {
+    /// what they are doing -- and, once, every adapter registered, which
+    /// belongs to the whole answer rather than to any one scope in it. One
+    /// call, because a page that had to join config, adapters, standing
+    /// agents, runs and tasks itself would be showing five different moments
+    /// in time.
+    pub(crate) async fn scope_views(&self) -> Result<(Vec<ScopeView>, Vec<String>)> {
         let adapters = self.registry.list();
         let described: std::collections::BTreeMap<String, (String, String)> = adapters
             .adapters
@@ -308,7 +314,15 @@ impl Engine {
             Default::default();
         for run in &active {
             let task = self.store.get(&run.task_id).await?;
-            let scope = task.as_ref().map(|t| t.scope.clone()).unwrap_or_default();
+            // Canonicalized: a task written before a scope's identity became
+            // its path still carries the bare name it was given, and this is
+            // what lets its active runs land on the same row as everything
+            // else in that scope rather than opening an orphan one next to
+            // it.
+            let scope = task
+                .as_ref()
+                .map(|t| self.factory.canonical_scope_name(&t.scope))
+                .unwrap_or_default();
             work.entry((scope.clone(), run.agent.clone()))
                 .or_default()
                 .push(AgentActivity {
@@ -482,11 +496,15 @@ impl Engine {
                 default_agent,
                 runtime,
                 agents,
-                available: available.clone(),
+                // Nothing today gives one scope a different roster of
+                // adapters than any other, so there is no per-scope override
+                // to carry -- the shared list returned alongside `views` is
+                // the whole answer.
+                available: None,
             });
         }
 
-        Ok(views)
+        Ok((views, available))
     }
 
     /// Every role this instance knows, for a roster and for a picker.
@@ -551,7 +569,12 @@ impl Engine {
 
         let scope = patch.scope.clone().unwrap_or_else(|| current.scope.clone());
         if patch.scope.is_some() {
-            self.factory.scope(&scope)?;
+            // Store the identity the scope actually has, not necessarily the
+            // one the caller typed -- a bare name from before scopes had
+            // paths still resolves (`Factory::scope`'s fallback), but writing
+            // it back down unchanged would keep manufacturing the very
+            // ambiguity that fallback exists to paper over.
+            patch.scope = Some(self.factory.scope(&scope)?.name.clone());
         }
         match &patch.agent {
             Some(agent) => {
@@ -613,7 +636,11 @@ impl Engine {
         let (agent, _adapter) = self.resolve_agent(&scope, &agent)?;
         self.registry.runtime(&runtime)?;
 
-        let mut task = factory_core::adapter::store::task_from_new(new, scope, agent, runtime);
+        // The scope's canonical identity, not necessarily what the caller
+        // typed -- `declared` is already resolved through the bare-name
+        // fallback above, and storing its own name keeps a freshly created
+        // task from starting life needing that fallback itself.
+        let mut task = factory_core::adapter::store::task_from_new(new, declared.name.clone(), agent, runtime);
         if let Some(s) = &task.schedule {
             task.next_run_at = Some(schedule::next_after(s, Utc::now())?);
         }
