@@ -46,6 +46,8 @@ export function openEdit(task) {
         ack_timeout_seconds: task.ack_timeout_seconds,
         timeout_seconds: task.timeout_seconds,
         labelText: Object.entries(task.labels || {}).map(([k, v]) => `${k}=${v}`).join("\n"),
+        worktree: task.worktree,
+        editing: true,
       })}
       <div class="err" id="c-err"></div>
       <div class="row-btns" style="margin-top:16px">
@@ -108,13 +110,37 @@ export function scopeOptions(selected) {
     `<option value="${esc(s)}" ${s === on ? "selected" : ""}>${esc(s)}</option>`).join("");
 }
 
+/// Whether a scope, as the agents page last reported it, can host a worktree
+/// -- and if not, why. An unknown scope (not loaded yet, or named freehand)
+/// is assumed capable rather than blocking the form on a question it cannot
+/// yet answer.
+function worktreeCapability(scopeName) {
+  const scope = state.scopes.find(s => s.name === scopeName);
+  if (!scope) return { capable: true, reason: null };
+  return { capable: scope.worktree_capable !== false, reason: scope.worktree_reason || null };
+}
+
+/// The line under the checkbox: what it does, why it is disabled, or that
+/// editing cannot move a task that is already running somewhere.
+function worktreeHint(capable, reason, editing) {
+  if (editing) return "Set when the task was created; its runs keep using it.";
+  if (!capable) return `Disabled -- ${esc(reason || "this scope cannot have one")}.`;
+  return "A fresh git worktree and branch, made before each run. Nothing merges it for you.";
+}
+
 /// The fields a task carries beyond its title. Shared by create and edit so the
-/// two cannot drift into offering different things.
+/// two cannot drift into offering different things -- except the worktree
+/// checkbox, which edit shows but cannot move: a task's worktree setting is
+/// fixed at creation, the same as its id.
 export function taskFields(v) {
   v = v || {};
+  const editing = v.editing === true;
   // Which scope the agent list is for has to be the one the scope select shows,
   // selection included, or the form offers agents that scope never declared.
   const scope = v.scope || state.scope || state.scopeNames[0];
+  const { capable, reason } = worktreeCapability(scope);
+  const checked = capable && v.worktree !== false;
+  const disabled = editing || !capable;
   return `
     <label for="c-title">Title</label>
     <input id="c-title" placeholder="What should happen" value="${esc(v.title || "")}">
@@ -126,6 +152,13 @@ export function taskFields(v) {
       <div><label for="c-agent">Agent</label>
         <select id="c-agent">${agentOptions(scope, v.agent)}</select></div>
     </div>
+    <label for="c-worktree">Worktree</label>
+    <div class="checkrow">
+      <input type="checkbox" id="c-worktree" data-editing="${editing ? "1" : "0"}"
+        ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}>
+      <span>Work in its own git worktree</span>
+    </div>
+    <div class="sub" id="c-worktree-sub">${worktreeHint(capable, reason, editing)}</div>
     <label for="c-schedule">Schedule <span class="sub" style="text-transform:none">(blank = manual)</span></label>
     <input id="c-schedule" placeholder="every 5m  ·  0 9 * * 1-5" value="${esc(v.scheduleText || "")}">
     <div class="grid2">
@@ -140,12 +173,27 @@ export function taskFields(v) {
 
 /// Changing the scope changes which agents exist, so the second select is
 /// rebuilt rather than left showing an agent the new scope has never heard of.
+/// It can also change whether a worktree is possible at all, so the checkbox
+/// is re-read the same way.
 export function wireScopeAgent() {
   const scope = $("c-scope");
   if (!scope) return;
   scope.onchange = () => {
     $("c-agent").innerHTML = agentOptions(scope.value || state.scopeNames[0], null);
+    refreshWorktreeField(scope.value || state.scopeNames[0]);
   };
+}
+
+function refreshWorktreeField(scopeName) {
+  const box = $("c-worktree");
+  if (!box) return;
+  const editing = box.dataset.editing === "1";
+  const { capable, reason } = worktreeCapability(scopeName);
+  box.disabled = editing || !capable;
+  if (!capable) box.checked = false;
+  else if (!editing) box.checked = true;
+  const sub = $("c-worktree-sub");
+  if (sub) sub.innerHTML = worktreeHint(capable, reason, editing);
 }
 
 export function readTaskFields() {
@@ -196,9 +244,16 @@ export function parseSchedule(text) {
 export async function create(andRun) {
   $("c-err").textContent = "";
   try {
+    const box = $("c-worktree");
     const data = await api("/api/tasks", {
       method: "POST",
-      body: JSON.stringify(readTaskFields()),
+      body: JSON.stringify({
+        ...readTaskFields(),
+        // Sent explicitly either way, not left absent: absent would mean
+        // "on" to the daemon too, which is wrong the moment the scope itself
+        // cannot have one and the box is unchecked because of it.
+        worktree: box ? box.checked : true,
+      }),
     });
     const task = data.task;
     state.tasks.set(task.id, task);

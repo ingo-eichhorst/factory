@@ -228,6 +228,11 @@ mod tests {
             error: None,
             started_at: started,
             ended_at: ended,
+            blocked_since: None,
+            blocked_source: None,
+            block_suspected_since: None,
+            worktree_path: None,
+            worktree_branch: None,
         }
     }
 

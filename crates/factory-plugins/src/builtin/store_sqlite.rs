@@ -94,14 +94,28 @@ DROP TABLE IF EXISTS tasks;
 
 pub struct SqliteStore {
     conn: Arc<Mutex<Connection>>,
+    name: String,
 }
 
+// The `adapter` field names the kind of adapter, not this instance: an error
+// saying "sqlite" is what tells a reader which engine failed, whatever name a
+// second sqlite database happens to be registered under.
 fn adapter_err(e: impl std::fmt::Display) -> FactoryError {
     FactoryError::adapter("sqlite", e.to_string())
 }
 
 impl SqliteStore {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_named(path, "sqlite")
+    }
+
+    pub fn in_memory() -> Result<Self> {
+        Self::in_memory_named("sqlite")
+    }
+
+    /// A second sqlite database, registered under a name of its own so a
+    /// scope can be routed to it while another scope keeps the default one.
+    pub fn open_named(path: &Path, name: &str) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(adapter_err)?;
         }
@@ -111,14 +125,16 @@ impl SqliteStore {
         Self::prepare(&conn, Some(path))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            name: name.to_string(),
         })
     }
 
-    pub fn in_memory() -> Result<Self> {
+    pub fn in_memory_named(name: &str) -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(adapter_err)?;
         Self::prepare(&conn, None)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            name: name.to_string(),
         })
     }
 
@@ -225,12 +241,18 @@ fn write_run(conn: &Connection, run: &Run) -> Result<()> {
     Ok(())
 }
 
-fn read_task(conn: &Connection, id: &str) -> Result<Task> {
+/// `None` when this database is not the one holding the task -- true for any
+/// scope whose tasks live in another engine, and not an error on its own.
+fn read_task_opt(conn: &Connection, id: &str) -> Result<Option<Task>> {
     let json: Option<String> = conn
         .query_row("SELECT data FROM tasks WHERE id = ?1", params![id], |r| r.get(0))
         .optional()
         .map_err(adapter_err)?;
-    decode(json.ok_or_else(|| FactoryError::TaskNotFound(id.to_string()))?)
+    json.map(decode).transpose()
+}
+
+fn read_task(conn: &Connection, id: &str) -> Result<Task> {
+    read_task_opt(conn, id)?.ok_or_else(|| FactoryError::TaskNotFound(id.to_string()))
 }
 
 /// A timestamp written by this store and read back. A row we cannot parse is
@@ -258,11 +280,18 @@ fn collect<T: serde::de::DeserializeOwned>(
 #[async_trait]
 impl TaskStore for SqliteStore {
     fn name(&self) -> &str {
-        "sqlite"
+        &self.name
     }
 
     fn description(&self) -> String {
-        "tasks, runs and journal in the instance's own sqlite database".into()
+        if self.name == "sqlite" {
+            "tasks, runs and journal in the instance's own sqlite database".into()
+        } else {
+            format!(
+                "tasks, runs and journal in the instance's own sqlite database, registered as \"{}\"",
+                self.name
+            )
+        }
     }
 
     async fn create(&self, task: &Task) -> Result<Task> {
@@ -353,6 +382,12 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.timeout_seconds {
                 task.timeout_seconds = Some(v);
             }
+            if patch.clear_blocked_timeout {
+                task.blocked_timeout_seconds = None;
+            }
+            if let Some(v) = patch.blocked_timeout_seconds {
+                task.blocked_timeout_seconds = Some(v);
+            }
             if patch.clear_result {
                 task.result = None;
             }
@@ -423,6 +458,11 @@ impl TaskStore for SqliteStore {
                 trigger: new.trigger,
                 agent: new.agent.clone(),
                 adapter: new.adapter.clone(),
+                // Not known until the daemon has decided whether this run
+                // gets one and, if so, made it -- which happens after the
+                // run row exists, since the worktree is named after it.
+                worktree_path: None,
+                worktree_branch: None,
                 runtime: new.runtime.clone(),
                 session: None,
                 token: Some(new.token.clone()),
@@ -430,16 +470,24 @@ impl TaskStore for SqliteStore {
                 error: None,
                 started_at: Utc::now(),
                 ended_at: None,
+                blocked_since: None,
+                blocked_source: None,
+                block_suspected_since: None,
             };
             write_run(&tx, &run)?;
 
-            // The task's mirror of where it stands, updated in the same breath.
-            let mut task = read_task(&tx, &new.task_id)?;
-            task.runs = attempt;
-            task.status = RunStatus::Dispatching.as_task_status();
-            task.last_run_at = Some(run.started_at);
-            task.updated_at = Utc::now();
-            write_task(&tx, &task)?;
+            // The task's mirror of where it stands, updated in the same breath
+            // -- but only when this database is the one holding the task. A
+            // scope can keep its tasks in another engine while every run still
+            // lands in the local ledger, and then mirroring the task is that
+            // other store's job, not ours.
+            if let Some(mut task) = read_task_opt(&tx, &new.task_id)? {
+                task.runs = attempt;
+                task.status = RunStatus::Dispatching.as_task_status();
+                task.last_run_at = Some(run.started_at);
+                task.updated_at = Utc::now();
+                write_task(&tx, &task)?;
+            }
 
             tx.commit().map_err(adapter_err)?;
             Ok(run)
@@ -492,10 +540,32 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.ended_at {
                 run.ended_at = Some(v);
             }
+            if patch.clear_blocked {
+                run.blocked_since = None;
+                run.blocked_source = None;
+            }
+            if let Some(v) = patch.blocked_since {
+                run.blocked_since = Some(v);
+            }
+            if let Some(v) = patch.blocked_source {
+                run.blocked_source = Some(v);
+            }
+            if patch.clear_block_suspicion {
+                run.block_suspected_since = None;
+            }
+            if let Some(v) = patch.block_suspected_since {
+                run.block_suspected_since = Some(v);
+            }
             // A run that reached a terminal state is over, whether or not the
             // caller remembered to say when.
             if run.status.is_terminal() && run.ended_at.is_none() {
                 run.ended_at = Some(Utc::now());
+            }
+            if let Some(v) = patch.worktree_path {
+                run.worktree_path = Some(v);
+            }
+            if let Some(v) = patch.worktree_branch {
+                run.worktree_branch = Some(v);
             }
 
             write_run(conn, &run)?;
@@ -745,5 +815,212 @@ impl TaskStore for SqliteStore {
             collect(&mut stmt, params![now])
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use factory_core::run::{BlockSource, Trigger};
+    use factory_core::task::TaskStatus;
+
+    fn sample_task(id: &str) -> Task {
+        let now = Utc::now();
+        Task {
+            id: id.to_string(),
+            title: "a title".into(),
+            instructions: "do the thing".into(),
+            scope: "demo".into(),
+            agent: "assistant".into(),
+            runtime: "shell".into(),
+            status: TaskStatus::Pending,
+            schedule: None,
+            result: None,
+            error: None,
+            runs: 0,
+            ack_timeout_seconds: None,
+            timeout_seconds: None,
+            blocked_timeout_seconds: None,
+            labels: Default::default(),
+            created_at: now,
+            updated_at: now,
+            last_run_at: None,
+            next_run_at: None,
+            worktree: false,
+        }
+    }
+
+    fn sample_new_run(task_id: &str) -> NewRun {
+        NewRun {
+            task_id: task_id.to_string(),
+            trigger: Trigger::Manual,
+            agent: "assistant".into(),
+            adapter: "shell".into(),
+            runtime: "shell".into(),
+            token: "tok".into(),
+        }
+    }
+
+    // The regression guard: a task this database actually holds must still
+    // get its mirror updated exactly as before, whatever else `create_run`
+    // now tolerates.
+    #[tokio::test]
+    async fn a_run_for_a_task_the_store_holds_still_bumps_its_mirror() {
+        let store = SqliteStore::in_memory().unwrap();
+        let task = sample_task("t1");
+        store.create(&task).await.unwrap();
+
+        let run = store.create_run(&sample_new_run("t1")).await.unwrap();
+        assert_eq!(run.attempt, 1);
+
+        let mirrored = store.get("t1").await.unwrap().unwrap();
+        assert_eq!(mirrored.runs, 1);
+        assert_eq!(mirrored.status, TaskStatus::Dispatching);
+        assert_eq!(mirrored.last_run_at, Some(run.started_at));
+    }
+
+    // A scope's tasks can live in another engine entirely; the run still
+    // belongs in this local ledger, and there is no row here to mirror it onto.
+    #[tokio::test]
+    async fn a_run_can_be_created_for_a_task_this_database_does_not_hold() {
+        let store = SqliteStore::in_memory().unwrap();
+
+        let run = store.create_run(&sample_new_run("elsewhere-1")).await.unwrap();
+        assert_eq!(run.attempt, 1);
+        assert_eq!(run.task_id, "elsewhere-1");
+
+        // Nothing was ever written to the tasks table for it.
+        assert!(store.get("elsewhere-1").await.unwrap().is_none());
+        assert!(store.list(&TaskFilter::default()).await.unwrap().is_empty());
+    }
+
+    // The attempt counter is read from the runs table, not the task row, so it
+    // still climbs correctly when there is no task row to read.
+    #[tokio::test]
+    async fn a_second_run_for_a_task_the_store_does_not_hold_gets_attempt_two() {
+        let store = SqliteStore::in_memory().unwrap();
+
+        let first = store.create_run(&sample_new_run("elsewhere-2")).await.unwrap();
+        let second = store.create_run(&sample_new_run("elsewhere-2")).await.unwrap();
+
+        assert_eq!(first.attempt, 1);
+        assert_eq!(second.attempt, 2);
+    }
+
+    // Two sqlite databases can be registered side by side under different
+    // names -- proof that the routing a multi-store instance depends on
+    // actually works, not just that the type signature allows it.
+    #[tokio::test]
+    async fn two_in_memory_named_stores_report_different_names_and_do_not_see_each_others_tasks() {
+        let a = SqliteStore::in_memory_named("a").unwrap();
+        let b = SqliteStore::in_memory_named("b").unwrap();
+        assert_eq!(a.name(), "a");
+        assert_eq!(b.name(), "b");
+
+        a.create(&sample_task("only-in-a")).await.unwrap();
+
+        assert!(a.get("only-in-a").await.unwrap().is_some());
+        assert!(b.get("only-in-a").await.unwrap().is_none());
+    }
+
+    /// `Run` is kept as JSON in a `data` column with nothing lifted out for
+    /// the three new fields, so nothing here needed a schema change -- this
+    /// pins down that the round trip actually holds, not just that it ought
+    /// to.
+    #[tokio::test]
+    async fn a_runs_block_state_round_trips_through_sqlite() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.create(&sample_task("t1")).await.unwrap();
+        let run = store
+            .create_run(&NewRun {
+                task_id: "t1".into(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "herdr".into(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+        assert!(run.blocked_since.is_none(), "a fresh run starts with no block at all");
+
+        let since = Utc::now();
+        store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Blocked),
+                    blocked_since: Some(since),
+                    blocked_source: Some(BlockSource::Runtime),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let reloaded = store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.status, RunStatus::Blocked);
+        assert_eq!(reloaded.blocked_source, Some(BlockSource::Runtime));
+        assert_eq!(reloaded.blocked_since, Some(since));
+
+        let cleared = store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    clear_blocked: true,
+                    block_suspected_since: Some(since),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(cleared.blocked_since.is_none(), "clear_blocked drops the timestamp");
+        assert!(cleared.blocked_source.is_none(), "clear_blocked drops the source too");
+        assert_eq!(cleared.block_suspected_since, Some(since), "a suspicion is a separate field");
+
+        let unsuspected = store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    clear_block_suspicion: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(unsuspected.block_suspected_since.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_tasks_blocked_timeout_override_round_trips_and_clears() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.create(&sample_task("t1")).await.unwrap();
+
+        let with_override = store
+            .update(
+                "t1",
+                &TaskPatch {
+                    blocked_timeout_seconds: Some(7200),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(with_override.blocked_timeout_seconds, Some(7200));
+
+        let reloaded = store.get("t1").await.unwrap().unwrap();
+        assert_eq!(reloaded.blocked_timeout_seconds, Some(7200));
+
+        let cleared = store
+            .update(
+                "t1",
+                &TaskPatch {
+                    clear_blocked_timeout: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(cleared.blocked_timeout_seconds.is_none());
     }
 }

@@ -195,6 +195,38 @@ tr.row:hover { background: var(--panel-2); }
 .s-done { color: var(--run); border-color: transparent; background: var(--run-wash); }
 .s-failed, .s-cancelled { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
 
+/* ---------------------------------------------------------- tasks board
+   Columns are statuses and nothing else: blocked sits leftmost because it is
+   the one column a person has to act on, the two pending flavours stay apart
+   so a scheduled task never hides in a manual pile, dispatching and running
+   share a column because a session still opening is not yet work, and a
+   closed card always spells out its outcome so a failure cannot read as done.
+   No drag anywhere here -- a card is clickable and nothing else, because
+   status comes from `factory task report`, never from where a card sits. */
+.kbcols { display: flex; gap: 10px; padding: 14px; overflow-x: auto; align-items: flex-start; }
+.kbcol {
+  flex: 0 0 210px; display: flex; flex-direction: column; gap: 7px;
+  background: var(--panel-2); border: 1px solid var(--line); border-top: 2px solid var(--line);
+  border-radius: 4px; padding: 9px;
+}
+.kbcol[data-col="blocked"] { border-top-color: var(--signal); }
+.kbcol[data-col="active"] { border-top-color: var(--wait); }
+.kbcol-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
+  font: 600 9.5px/1 var(--cond); letter-spacing: .13em; text-transform: uppercase; color: var(--faint);
+  padding-bottom: 6px; border-bottom: 1px solid var(--line);
+}
+.kbcol-count { font: 500 10px/1 var(--mono); color: var(--muted); letter-spacing: 0; text-transform: none; }
+.kbcol-body { display: flex; flex-direction: column; gap: 7px; min-height: 6px; }
+.kbcol-empty { color: var(--faint); font-size: 11px; padding: 3px 2px; }
+.kbc {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 3px;
+  padding: 8px 9px; cursor: pointer; display: flex; flex-direction: column; gap: 5px;
+}
+.kbc:hover { border-color: var(--signal); }
+.kbc-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.kbc .title { font-size: 12px; }
+
 /* --------------------------------------------------------------- form */
 label {
   display: block; margin: 12px 0 4px; color: var(--faint);
@@ -206,6 +238,9 @@ input, textarea, select {
 }
 input:focus, textarea:focus, select:focus { outline: 1px solid var(--signal); outline-offset: -1px; }
 textarea { min-height: 84px; resize: vertical; font: 400 12px/1.6 var(--mono); }
+.checkrow { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.checkrow input[type="checkbox"] { width: auto; }
+.checkrow span { font-size: 12.5px; color: var(--ink-2); }
 button.btn {
   background: var(--panel); color: var(--ink-2); cursor: pointer;
   border: 1px solid var(--line); border-radius: 3px; padding: 6px 12px;

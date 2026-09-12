@@ -1,7 +1,7 @@
 //! Two loops on one timer: fire what is due, and notice which runs have gone
 //! quiet.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use factory_core::adapter::runtime::RuntimeStatus;
 use factory_core::run::{RunStatus, Trigger};
 use std::sync::Arc;
@@ -13,6 +13,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
     let tick = Duration::from_secs(engine.factory.config.daemon.tick_seconds.max(1));
     let default_timeout = engine.factory.config.daemon.task_timeout_seconds as i64;
     let default_ack = engine.factory.config.daemon.ack_timeout_seconds as i64;
+    let default_blocked = engine.factory.config.daemon.blocked_timeout_seconds as i64;
     let mut ticker = tokio::time::interval(tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -66,7 +67,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         };
 
         for run in active {
-            let age = (Utc::now() - run.started_at).num_seconds();
+            let now = Utc::now();
 
             // A task may set its own patience. Read it per run rather than
             // once before the loop, or an override would only take effect
@@ -82,43 +83,161 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 .and_then(|t| t.timeout_seconds)
                 .map(|v| v as i64)
                 .unwrap_or(default_timeout);
+            let blocked_secs = task
+                .as_ref()
+                .and_then(|t| t.blocked_timeout_seconds)
+                .map(|v| v as i64)
+                .unwrap_or(default_blocked);
 
-            // Still `dispatching` means the agent was given the task and has
-            // not said a word about it. Something is in front of it.
-            if run.status == RunStatus::Dispatching && age > ack_secs {
-                engine
-                    .fail_run(
-                        &run.id,
-                        &format!(
-                            "the agent never acknowledged the task within {ack_secs}s. \
-                             Its session is usually still there -- look at it: an agent \
-                             waiting on a trust prompt or a login looks exactly like this."
-                        ),
-                    )
-                    .await;
-                continue;
-            }
-
-            if age > timeout_secs {
-                engine
-                    .fail_run(
-                        &run.id,
-                        &format!(
-                            "no report in {timeout_secs}s; giving up. The agent may still \
-                             be working -- look at its session before starting it again."
-                        ),
-                    )
-                    .await;
+            if let Some(why) = overdue(
+                run.status,
+                run.started_at,
+                run.blocked_since,
+                now,
+                ack_secs,
+                timeout_secs,
+                blocked_secs,
+            ) {
+                engine.fail_run(&run.id, &why).await;
                 continue;
             }
 
             // A session that is gone will never report. Give it a grace period
             // so a pane that is still coming up is not mistaken for a corpse.
+            // Applies to a `Blocked` run too -- a block is honest only as long
+            // as the session it names is actually still there.
+            let age = (now - run.started_at).num_seconds();
             if age > 30 && engine.session_status(&run).await == RuntimeStatus::Gone {
                 engine
                     .fail_run(&run.id, "the agent's session is gone and it never reported back")
                     .await;
             }
         }
+    }
+}
+
+/// Whether an active run has run out of patience, and why -- judged only by
+/// its own status and timestamps, so this is testable without a store, a
+/// runtime, or an `Engine`. `None` means "leave it running"; the caller still
+/// has its own, separate `Gone`-session check to make afterwards.
+///
+/// A `Blocked` run is measured against `blocked_secs` from `blocked_since`,
+/// never against `ack_secs` or `timeout_secs` from `started_at` -- both of
+/// those exist to catch a run that went quiet on its own, and a run sitting
+/// on a hook-reported block is the opposite of quiet, it is being watched.
+fn overdue(
+    status: RunStatus,
+    started_at: DateTime<Utc>,
+    blocked_since: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    ack_secs: i64,
+    timeout_secs: i64,
+    blocked_secs: i64,
+) -> Option<String> {
+    if status == RunStatus::Blocked {
+        // `blocked_since` should always be set by whatever put the run into
+        // `Blocked`, but a run that somehow lacks it is still a run someone
+        // is waiting on, not a run to lose track of -- fall back to when it
+        // started rather than never expiring it at all.
+        let since = blocked_since.unwrap_or(started_at);
+        let blocked_age = (now - since).num_seconds();
+        if blocked_age > blocked_secs {
+            return Some(format!(
+                "blocked and waiting for a human for {blocked_secs}s and nobody answered. \
+                 Its session is still open -- it is sitting on a question."
+            ));
+        }
+        return None;
+    }
+
+    let age = (now - started_at).num_seconds();
+
+    // Still `dispatching` means the agent was given the task and has not
+    // said a word about it. Something is in front of it.
+    if status == RunStatus::Dispatching && age > ack_secs {
+        return Some(format!(
+            "the agent never acknowledged the task within {ack_secs}s. \
+             Its session is usually still there -- look at it: an agent \
+             waiting on a trust prompt or a login looks exactly like this."
+        ));
+    }
+
+    // `age` is still `now - started_at`, unmodified, which is deliberate but
+    // has a sharp edge: a run just returned from a long `Blocked` spell
+    // reaches this line with `age` counting the whole time it sat blocked,
+    // because `started_at` is never nudged forward to buy that time back --
+    // occupancy's own rule is that a blocked run still honestly occupies its
+    // bay, and shifting `started_at` to hide the wait would make that chart
+    // lie about it. In practice that means a run blocked for longer than
+    // `timeout_secs` will very likely fail here on the very next tick after
+    // it unblocks. A task that expects to sit blocked for a while wants a
+    // correspondingly generous `timeout_seconds`, the same way it would for
+    // any run that legitimately takes long.
+    if age > timeout_secs {
+        return Some(format!(
+            "no report in {timeout_secs}s; giving up. The agent may still \
+             be working -- look at its session before starting it again."
+        ));
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap()
+    }
+
+    #[test]
+    fn a_reported_blocks_timeout_is_measured_from_blocked_since_not_started_at() {
+        // Started long ago, but only blocked recently -- well inside the
+        // blocked timeout, even though `now - started_at` alone would not be.
+        let started = at(0);
+        let blocked_since = at(500);
+        let now = at(500 + 600);
+        assert_eq!(
+            overdue(RunStatus::Blocked, started, Some(blocked_since), now, 100, 100, 1000),
+            None,
+            "600s blocked is under a 1000s blocked timeout, however old the run itself is"
+        );
+
+        let now_past = at(500 + 1001);
+        assert!(
+            overdue(RunStatus::Blocked, started, Some(blocked_since), now_past, 100, 100, 1000).is_some(),
+            "1001s blocked exceeds a 1000s blocked timeout"
+        );
+    }
+
+    #[test]
+    fn a_blocked_run_is_exempt_from_the_ordinary_ack_and_task_timeouts() {
+        // Ack and task timeouts are tiny; the blocked timeout is generous.
+        // A `Blocked` run must answer to none of the first two.
+        let started = at(0);
+        let blocked_since = at(0);
+        let now = at(50_000);
+        assert_eq!(
+            overdue(RunStatus::Blocked, started, Some(blocked_since), now, 1, 1, 100_000),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_run_still_dispatching_past_its_ack_timeout_fails_with_that_reason() {
+        let why = overdue(RunStatus::Dispatching, at(0), None, at(200), 100, 10_000, 10_000).unwrap();
+        assert!(why.contains("never acknowledged"), "{why}");
+    }
+
+    #[test]
+    fn a_running_run_past_its_task_timeout_fails_with_that_reason() {
+        let why = overdue(RunStatus::Running, at(0), None, at(4000), 100, 3600, 10_000).unwrap();
+        assert!(why.contains("no report in"), "{why}");
+    }
+
+    #[test]
+    fn a_run_within_every_timeout_is_left_alone() {
+        assert_eq!(overdue(RunStatus::Running, at(0), None, at(10), 100, 3600, 10_000), None);
     }
 }

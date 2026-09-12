@@ -4,8 +4,8 @@
 
 import { $, api, state, connect, setTheme, currentTheme, toggleTheme } from "./core.js";
 import { initRail, writeHash, setRouter, readHash, applyRoute } from "./scopes.js";
-import { dropModal } from "./modal.js";
-import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal } from "./tasks.js";
+import { closeModal, dropModal } from "./modal.js";
+import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyTasksView, currentTasksView, setTasksView } from "./tasks.js";
 import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { openCreate } from "./task-form.js";
@@ -270,6 +270,10 @@ function showAgentView(view) {
 // ---------------------------------------------------------------------- boot
 
 async function boot() {
+  // Before anything loads, so a returning visitor never sees the other shape
+  // flash up first.
+  applyTasksView(currentTasksView());
+
   try {
     const info = (await api("/api/status")).status;
     $("instance").textContent = `${info.instance} · ${info.root}`;
@@ -309,6 +313,9 @@ async function boot() {
   // fires one.
   for (const b of $("levels").querySelectorAll(".lvl")) {
     b.onclick = () => setLevel(b.dataset.level);
+  }
+  for (const b of $("tasks-view").querySelectorAll("button")) {
+    b.onclick = () => setTasksView(b.dataset.view);
   }
   for (const b of $("agent-view").querySelectorAll("button")) {
     b.onclick = () => { showAgentView(b.dataset.view); writeHash(); };

@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use factory_core::adapter::agent::LaunchKind;
 use factory_core::adapter::runtime::{
     AgentRuntime, RuntimeEvent, RuntimeEventKind, RuntimeEventStream, RuntimeStatus, Screen,
-    StartRequest,
+    StartRequest, StatusReport, StatusSource,
 };
 use factory_core::error::{FactoryError, Result};
 use factory_core::task::SessionRef;
@@ -580,6 +580,59 @@ impl AgentRuntime for HerdrRuntime {
             "done" => RuntimeStatus::Idle,
             _ => RuntimeStatus::Unknown,
         })
+    }
+
+    /// `status`, plus whether herdr is reporting a hook's word or guessing
+    /// from the screen. Only worth asking about `blocked`: `pane get` already
+    /// answers every other status for free, and `agent explain` is a second
+    /// subprocess herdr has to run -- paying for it every five seconds on
+    /// every active run, for a question that only `blocked` needs answered,
+    /// is not a trade worth making.
+    async fn status_report(&self, session: &SessionRef) -> Result<StatusReport> {
+        let status = self.status(session).await?;
+        if status != RuntimeStatus::Blocked {
+            return Ok(StatusReport {
+                status,
+                source: StatusSource::Unknown,
+            });
+        }
+
+        let pane = Self::pane_of(session);
+        let source = match self
+            .run(&[s("agent"), s("explain"), s(pane), s("--format"), s("json")])
+            .await
+        {
+            // `pane get`'s answer is enveloped as `{"id":..,"result":{..}}`;
+            // `explain`'s is the bare object. `run` already unwraps either
+            // shape (it hands back `result` when there is one, the whole
+            // object otherwise), but look in both places explicitly rather
+            // than lean on that alone -- the two commands are not guaranteed
+            // to agree on their envelope forever.
+            Ok(explained) => {
+                let skipped = explained
+                    .get("screen_detection_skipped")
+                    .or_else(|| explained.get("result").and_then(|r| r.get("screen_detection_skipped")))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if skipped {
+                    // A `pi` pane looks like this: `screen_detection_skipped:
+                    // true`, `skip_reason: "full_lifecycle_hook_authority"`,
+                    // `evaluated_rules: []`. The harness told herdr; herdr is
+                    // just the messenger.
+                    StatusSource::Reported
+                } else {
+                    // `claude`, `codex` and `opencode` panes come back with a
+                    // `matched_rule` from herdr's screen-region regexes. That
+                    // is inference, however confident it looks.
+                    StatusSource::Inferred
+                }
+            }
+            // `explain` failing tells us nothing either way about how the
+            // `blocked` we already have came about. A guess is the safe
+            // assumption -- never claim a report we could not actually read.
+            Err(_) => StatusSource::Inferred,
+        };
+        Ok(StatusReport { status, source })
     }
 
     async fn read(&self, session: &SessionRef, lines: u32) -> Result<String> {
