@@ -9,12 +9,17 @@
 //! is not, which is worse than admitting the hole.
 
 import { $, esc, state } from "./core.js";
-import { inScope } from "./scopes.js";
+import { inScope, writeHash } from "./scopes.js";
 
 const LIMIT = 500;
 let log = [];
 let kind = "all";
 let q = "";
+
+/// The filter as a URL says it, against the filter as the buttons say it. The
+/// `data-k` values are event-type prefixes -- `task_`, `run_` -- which are the
+/// right thing to match on and the wrong thing to read in a link.
+const SLUGS = { all: "all", tasks: "task_", runs: "run_", agents: "agent_" };
 /// When the socket actually opened, not when this view first happened to be
 /// shown. app.js's boot() connects the socket once, before anyone can have
 /// clicked anything, so an event can already be sitting in `log` by the time
@@ -39,13 +44,37 @@ function updateNote() {
     : "connecting…";
 }
 
+/// The filter for the URL: nothing while it is on the default, because a link
+/// should not carry a segment that says "unfiltered".
+export function activityFilter() {
+  const slug = Object.keys(SLUGS).find(k => SLUGS[k] === kind);
+  return slug && slug !== "all" ? [slug] : [];
+}
+
+/// Applied from the URL, which can arrive before `initActivity` has run -- the
+/// view is wired the first time it is shown, and a link can name a filter on a
+/// page that is still booting. Everything here reads the static markup and the
+/// module's own state, so either order works.
+export function setActivityFilter(slug) {
+  kind = SLUGS[slug] || "all";
+  syncFilterButtons();
+  renderActivity();
+}
+
+function syncFilterButtons() {
+  for (const b of $("activity-kind").querySelectorAll("button")) {
+    b.classList.toggle("on", b.dataset.k === kind);
+  }
+}
+
 export function initActivity() {
   updateNote();
+  syncFilterButtons();
   for (const b of $("activity-kind").querySelectorAll("button")) {
     b.onclick = () => {
-      for (const o of $("activity-kind").querySelectorAll("button")) o.classList.remove("on");
-      b.classList.add("on");
       kind = b.dataset.k;
+      syncFilterButtons();
+      writeHash();
       renderActivity();
     };
   }
@@ -99,6 +128,8 @@ function scopeOf(ev) {
       const cut = ev.id.lastIndexOf("/");
       return cut < 0 ? undefined : ev.id.slice(0, cut);
     }
+    case "agent_activity":
+      return ev.scope;
     default:
       return undefined;
   }
@@ -128,6 +159,8 @@ function describe(ev) {
       return { at, kind: "agent_", label: "agent updated", detail: `${ev.agent.scope}/${ev.agent.name} · ${ev.agent.state}` };
     case "agent_removed":
       return { at, kind: "agent_", label: "agent removed", detail: ev.id };
+    case "agent_activity":
+      return { at, kind: "runtime_", label: `${ev.agent} → ${ev.status}`, detail: `${ev.scope} · ${ev.subject}` };
     case "daemon_started":
       return { at, kind: "all", label: "daemon started", detail: ev.instance };
     default:

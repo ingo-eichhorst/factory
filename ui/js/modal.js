@@ -3,6 +3,7 @@
 //! page, so closing is one rule in one place.
 
 import { $, state } from "./core.js";
+import { writeHash } from "./scopes.js";
 import { stopTerminal } from "./terminal.js";
 
 export function scrim(inner) {
@@ -14,11 +15,23 @@ export function scrim(inner) {
   return el;
 }
 
-export function closeModal() {
+/// Tear the modal down and leave the URL alone. For the places that put another
+/// modal up in the same breath -- opening a task over a task, the edit form over
+/// the task it edits -- where a URL written in between would name a page nobody
+/// was ever on and cost a Back press to get past.
+export function dropModal() {
   for (const el of document.querySelectorAll(".scrim")) el.remove();
   state.open = null; state.runs = []; state.run = null;
   stopTerminal();
   state.term = null;
+}
+
+/// Closing is a navigation: an open task is in the URL, so shutting it has to
+/// come back out of the URL. Harmless over a modal that was never routed -- the
+/// hash comes out the same and nothing is written.
+export function closeModal() {
+  dropModal();
+  writeHash();
 }
 
 document.addEventListener("keydown", (e) => {

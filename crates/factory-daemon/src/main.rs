@@ -226,6 +226,10 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // anything else can look at them.
     engine.reconcile_agents().await;
 
+    // Listen for whatever a runtime pushes on its own, before falling back to
+    // the poll below as the floor underneath it.
+    engine.watch_runtimes().await;
+
     let sched = tokio::spawn(scheduler::run(engine.clone(), shutdown_rx.clone()));
 
     engine.bus.publish(Event::DaemonStarted {

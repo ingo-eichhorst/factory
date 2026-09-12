@@ -16,6 +16,10 @@ export const state = {
   root: "",            // the instance root, so the rail can read a scope path
                        // as the config wrote it and not as the disk spells it
   scope: null,         // the rail's selection, by name; null is every scope
+  level: null,         // the selected decision level's key ("proc", "harn", …);
+                       // null until boot derives it from the tab, or a hash
+                       // names one -- app.js's LEVEL_VIEWS is the one place
+                       // that says which
   open: null,          // task id shown in the modal
   runs: [],            // runs of the open task
   run: null,           // selected run id

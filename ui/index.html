@@ -21,19 +21,60 @@
 </script>
 </head>
 <body>
+<!-- The title bar, the level row and the view-tab row stick together as one
+     unit. On origin/main the five view tabs lived inside `header` itself and
+     stuck with it; splitting them into two rows below it would otherwise
+     scroll both away on a long table, with the content then sliding under
+     the still-sticky title bar. One sticky wrapper is also the only version
+     of this that stays right as `header`'s own height changes -- it wraps at
+     narrow widths -- since nothing here hardcodes a `top` for the rows under
+     it (see `.chrome` in app.css). -->
+<div class="chrome">
 <header>
   <h1>Factory</h1>
   <span class="meta" id="instance">—</span>
-  <nav class="tabs">
-    <button id="tab-dashboard" class="on">Dashboard</button>
-    <button id="tab-activity">Activity</button>
-    <button id="tab-site">Site plan</button>
-    <button id="tab-tasks">Tasks</button>
-    <button id="tab-agents">Agents</button>
-  </nav>
   <span class="meta" style="margin-left:auto"><span class="dot" id="dot"></span><span id="conn">connecting</span></span>
   <button class="theme-switch" id="theme" title="switch theme">foundry dark</button>
 </header>
+
+<!-- The six decision levels Factory runs at, L6 (what it is for) on the left
+     through L1 (what it runs on) on the right. Only L4 and L3 are built; the
+     other four carry `disabled` -- not just a dimming class -- so tabbing the
+     row skips straight over them, and a `title` says why. Which of the five
+     view tabs below belongs to which live level is `LEVEL_VIEWS` in app.js. -->
+<nav class="levels" id="levels" aria-label="Decision level">
+  <button id="lv-dir" class="lvl" data-level="dir" data-lv="6" disabled title="Not built yet">
+    <span class="lv-n">L6</span><span class="lv-name">Direction</span><span class="lv-sub">Goals, budget, unit cost</span>
+  </button>
+  <button id="lv-imp" class="lvl" data-level="imp" data-lv="5" disabled title="Not built yet">
+    <span class="lv-n">L5</span><span class="lv-name">Improvement</span><span class="lv-sub">History and decisions</span>
+  </button>
+  <button id="lv-proc" class="lvl on" data-level="proc" data-lv="4">
+    <span class="lv-n">L4</span><span class="lv-name">Process</span><span class="lv-sub">Rules and runs</span>
+  </button>
+  <button id="lv-harn" class="lvl" data-level="harn" data-lv="3">
+    <span class="lv-n">L3</span><span class="lv-name">Agent</span><span class="lv-sub">Who may work</span>
+  </button>
+  <button id="lv-env" class="lvl" data-level="env" data-lv="2" disabled title="Not built yet">
+    <span class="lv-n">L2</span><span class="lv-name">Environment</span><span class="lv-sub">Directory and lease</span>
+  </button>
+  <button id="lv-infra" class="lvl" data-level="infra" data-lv="1" disabled title="Not built yet">
+    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Daemon and store</span>
+  </button>
+</nav>
+
+<!-- The second row: the same five views as before, now filtered to whichever
+     ones belong to the selected level (`renderTabRow` in app.js). Hidden by
+     default here matches the default level, L4 Process, so the page looks
+     right even a moment before the boot script runs. -->
+<nav class="tabs" aria-label="View">
+  <button id="tab-dashboard" class="on">Dashboard</button>
+  <button id="tab-activity">Activity</button>
+  <button id="tab-site">Site plan</button>
+  <button id="tab-tasks">Tasks</button>
+  <button id="tab-agents" hidden>Agents</button>
+</nav>
+</div>
 
 <main>
   <!-- The rail is a sibling of every view, not a part of one: the selected
@@ -65,6 +106,7 @@
         <button data-k="task_">Tasks</button>
         <button data-k="run_">Runs</button>
         <button data-k="agent_">Agents</button>
+        <button data-k="runtime_">Runtime</button>
       </div>
     </div>
     <section>
