@@ -177,6 +177,12 @@ impl Engine {
     /// doing an hour ago, so a status that is not appended here when it is
     /// seen is gone for good. What that costs is honest to state: the runtime
     /// is polled, so a flip and a flip back between two ticks leaves no trace.
+    ///
+    /// Skipping a sample when nothing changed is right for this record and
+    /// wrong for anything that wants to know an agent is still doing what it
+    /// was doing -- `agents.rs`'s pushed-event handler feeds this for the
+    /// chart and publishes on the bus separately, on purpose, rather than
+    /// folding that into here.
     pub(crate) async fn record_status(
         &self,
         subject: &str,

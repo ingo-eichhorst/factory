@@ -91,6 +91,8 @@ function describe(ev) {
       return { at, kind: "agent_", label: "agent updated", detail: `${ev.agent.scope}/${ev.agent.name} · ${ev.agent.state}` };
     case "agent_removed":
       return { at, kind: "agent_", label: "agent removed", detail: ev.id };
+    case "agent_activity":
+      return { at, kind: "runtime_", label: `${ev.agent} → ${ev.status}`, detail: `${ev.scope} · ${ev.subject}` };
     case "daemon_started":
       return { at, kind: "all", label: "daemon started", detail: ev.instance };
     default:
