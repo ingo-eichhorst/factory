@@ -9,13 +9,13 @@ import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyT
 import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { openCreate } from "./task-form.js";
-import { loadDashboard, renderDashboard, wireDashboard } from "./dashboard.js";
+import { loadDashboard, renderDashboard, renderInbox, wireDashboard } from "./dashboard.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 
 // ------------------------------------------------------------------ views
 //
-// Five entries, not two: `showTab` used to toggle exactly two `hidden`
+// Six entries, not two: `showTab` used to toggle exactly two `hidden`
 // containers and two button classes. It is a small registry now, but the
 // rule is the same -- one view visible, one button lit, and whatever that
 // view needs to start or stop doing while it is not the one on screen.
@@ -34,6 +34,7 @@ let activityStarted = false;
 
 const VIEWS = {
   dashboard: { onShow: loadDashboard },
+  inbox: { onShow: () => renderInbox([...state.tasks.values()]) },
   activity: {
     onShow: () => { if (!activityStarted) { initActivity(); activityStarted = true; } },
     tail: { write: activityFilter, read: ([f]) => setActivityFilter(f || "all") },
@@ -115,22 +116,16 @@ function applyModal([taskId, runId]) {
   openTask(taskId, runId);
 }
 
-// -------------------------------------------------------------- decision levels
+// --------------------------------------------------------------- primary menu
 //
-// Factory is six decision levels; the header names them L6 (what the factory
-// is for) through L1 (what it runs on). Only two are built, and which of the
-// five views hangs off each was the open question left for whoever picked
-// this up -- this map is the answer. Dashboard and Site plan are
-// cross-cutting and sit under both; change the assignment here and the
-// second tab row, the level row's own switching, and the hash's fallback in
-// `scopes.js` (handed this same map through `initRail`) all follow.
-//
-// `proc` is listed first on purpose: a tab shared by both levels (Dashboard,
-// Site plan) resolves to whichever level's list is checked first when a hash
-// names no level at all, so the order here decides that, not just this row.
+// Dashboard is a peer of Factory's six decision levels in the first row. Its
+// four operational views live together beneath it; the two implemented levels
+// keep the view specific to each. This single map drives the second row, menu
+// switching and the hash fallback in `scopes.js`.
 const LEVEL_VIEWS = {
-  proc: ["dashboard", "activity", "site", "tasks"],
-  harn: ["dashboard", "site", "agents"],
+  dash: ["dashboard", "site", "activity", "inbox"],
+  proc: ["tasks"],
+  harn: ["agents"],
 };
 
 /// The live level that claims `tab`, for backfilling `state.level` before any
@@ -205,6 +200,7 @@ function rerender(route) {
   // server (`/api/production` takes a scope), not just re-drawn narrower --
   // so a rail change has to refetch, not merely re-render.
   if (state.tab === "dashboard") { loadDashboard(); return; }
+  if (state.tab === "inbox") { renderInbox([...state.tasks.values()]); return; }
   // Everything already in the tail is still there; a scope change only
   // changes how much of it is drawn, the same re-render `renderTasks` does
   // below for the tasks it already holds.
@@ -333,7 +329,7 @@ async function boot() {
   for (const k of Object.keys(VIEWS)) {
     $(`tab-${k}`).onclick = () => showTab(k);
   }
-  // Only the two live levels reach here with a working click -- the four
+  // Only Dashboard and the two live levels reach here with a working click -- the four
   // greyed ones carry `disabled` in the markup, and a disabled button never
   // fires one.
   for (const b of $("levels").querySelectorAll(".lvl")) {
@@ -369,7 +365,12 @@ async function boot() {
   });
 
   connect({
-    snapshot: (tasks) => { state.tasks = new Map(tasks.map(t => [t.id, t])); renderTasks(); if (state.tab === "dashboard") renderDashboard(); },
+    snapshot: (tasks) => {
+      state.tasks = new Map(tasks.map(t => [t.id, t]));
+      renderTasks();
+      if (state.tab === "dashboard") renderDashboard();
+      if (state.tab === "inbox") renderInbox(tasks);
+    },
     event: onEvent,
     open: markWatching,
   });
@@ -391,12 +392,14 @@ function onEvent(ev) {
       renderTasks();
       if (state.open === ev.task.id) renderModal();
       if (state.tab === "dashboard") renderDashboard();
+      if (state.tab === "inbox") renderInbox([...state.tasks.values()]);
       break;
     case "task_deleted":
       state.tasks.delete(ev.id);
       renderTasks();
       if (state.open === ev.id) { dropModal(); writeHash(true); }
       if (state.tab === "dashboard") renderDashboard();
+      if (state.tab === "inbox") renderInbox([...state.tasks.values()]);
       break;
     case "task_entry":
       if (state.open === ev.id) loadJournal();

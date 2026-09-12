@@ -106,8 +106,9 @@ header h1 {
   margin: 0; font: 700 15px/1 var(--cond); letter-spacing: .14em; text-transform: uppercase;
 }
 .meta { color: var(--muted); font: 400 11px/1.4 var(--mono); }
-/* The second row: the same five view tabs as before, now a full-width row of
-   its own under the level row rather than squeezed in beside the title. */
+/* The second row: view tabs for the selected primary-menu entry, in a
+   full-width row of its own under the level row rather than squeezed in
+   beside the title. */
 .tabs {
   display: flex; gap: 2px; padding: 6px 18px; background: var(--panel);
   border-bottom: 1px solid var(--line);
@@ -119,9 +120,10 @@ header h1 {
 .tabs button:hover { color: var(--ink); }
 .tabs button.on { background: var(--panel-2); color: var(--ink); font-weight: 600; }
 
-/* The level row: its own full-width row under the header, not squeezed into
-   it. Six three-line tabs, `flex:1 1 0` so they share the row evenly with a
-   floor on how narrow one gets, a colour per level via `--lvl1`..`--lvl6`,
+/* The primary-menu row: its own full-width row under the header, not squeezed
+   into it. Dashboard plus six three-line level tabs, `flex:1 1 0` so they
+   share the row evenly with a floor on how narrow one gets, a colour per
+   level via `--lvl1`..`--lvl6`,
    and the four Factory has not built yet shown `disabled` -- which is also
    what drops them out of the tab order, so tabbing the row only visits the
    two that work. */
@@ -151,6 +153,7 @@ header h1 {
 .lvl[data-lv="4"] { --lv: var(--lvl4); }
 .lvl[data-lv="5"] { --lv: var(--lvl5); }
 .lvl[data-lv="6"] { --lv: var(--lvl6); }
+.lvl[data-level="dash"] { --lv: var(--signal); }
 @media (max-width: 860px) {
   .lvl .lv-sub { display: none; }
 }
@@ -603,6 +606,8 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 }
 .dcard h3 .r { margin-left: auto; font: 400 10px/1 var(--mono); letter-spacing: 0; text-transform: none; color: var(--faint); }
 .dcard table { font-size: 11.5px; }
+.dcard.wide { grid-column: 1 / -1; }
+.inbox-list { padding: 7px 14px; }
 .inbox-item {
   display: flex; align-items: baseline; gap: 9px; padding: 7px 0; border-bottom: 1px solid var(--line-soft);
   font-size: 11.5px; cursor: pointer;
