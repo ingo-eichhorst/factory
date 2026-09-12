@@ -5,6 +5,7 @@
 use crate::adapter::Screen;
 use crate::building::{Activity, Cues, RepoMetrics, Shape};
 use crate::agent::AgentSession;
+use crate::config::ScopeAgent;
 use crate::event::Event;
 use crate::occupancy::Occupancy;
 use crate::run::Run;
@@ -24,6 +25,9 @@ pub enum Request {
     /// Bring a declared standing agent up.
     #[serde(rename = "agent.start")]
     AgentStart { scope: String, name: String },
+    /// Add an agent declaration to one scope's local Factory config.
+    #[serde(rename = "agent.configure")]
+    AgentConfigure { scope: String, agent: ScopeAgent },
     /// Take one down and leave it down.
     #[serde(rename = "agent.stop")]
     AgentStop { id: String },
@@ -531,5 +535,24 @@ mod tests {
             Request::TaskGet { id } => assert_eq!(id, "t1"),
             other => panic!("wrong request: {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_agent_configuration_request_round_trips_every_declaration_field() {
+        let json = r#"{"op":"agent.configure","params":{"scope":"demo","agent":{"name":"reviewer","harness":"pi","lifetime":"permanent","role":"foreman","autostart":false,"args":["--model","local model"]}}}"#;
+        let env: Envelope = serde_json::from_str(json).unwrap();
+        match &env.request {
+            Request::AgentConfigure { scope, agent } => {
+                assert_eq!(scope, "demo");
+                assert_eq!(agent.name(), "reviewer");
+                assert_eq!(agent.harness, "pi");
+                assert_eq!(agent.args, vec!["--model", "local model"]);
+                assert!(!agent.autostart());
+            }
+            other => panic!("wrong request: {other:?}"),
+        }
+        let back = serde_json::to_string(&env).unwrap();
+        let again: Envelope = serde_json::from_str(&back).unwrap();
+        assert!(matches!(again.request, Request::AgentConfigure { .. }));
     }
 }

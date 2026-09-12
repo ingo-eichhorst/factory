@@ -46,6 +46,11 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../../ui/js/agents.js"),
     ),
     (
+        "js/agent-config.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/agent-config.js"),
+    ),
+    (
         "js/occupancy.js",
         "text/javascript; charset=utf-8",
         include_str!("../../../ui/js/occupancy.js"),

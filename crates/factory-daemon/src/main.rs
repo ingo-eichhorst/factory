@@ -3,6 +3,7 @@
 
 mod access;
 mod agents;
+mod configuration;
 mod discovery;
 mod engine;
 mod interfaces;

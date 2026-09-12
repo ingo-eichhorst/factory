@@ -12,6 +12,7 @@ use axum::response::{IntoResponse, Response as AxumResponse};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use factory_core::adapter::interface::{Interface, InterfaceContext};
+use factory_core::config::ScopeAgent;
 use factory_core::error::{FactoryError, Result};
 use factory_core::protocol::{Envelope, Payload, ProductionBin, Request, Response};
 use factory_core::task::{NewTask, TaskFilter, TaskPatch, TaskReport};
@@ -118,6 +119,7 @@ fn router(engine: Arc<Engine>) -> Router {
         // The id of a standing agent is `<scope>/<name>`, which has a slash in
         // it, so these take it in the body rather than the path.
         .route("/api/agents/start", post(agent_start))
+        .route("/api/agents/configure", post(agent_configure))
         .route("/api/agents/stop", post(agent_stop))
         .route("/api/agents/role", post(agent_role))
         .route("/api/agents/input", post(agent_input))
@@ -352,6 +354,12 @@ struct StartAgent {
 }
 
 #[derive(serde::Deserialize)]
+struct ConfigureAgent {
+    scope: String,
+    agent: ScopeAgent,
+}
+
+#[derive(serde::Deserialize)]
 struct AgentRole {
     id: String,
     #[serde(default)]
@@ -384,6 +392,20 @@ async fn agent_start(
         Request::AgentStart {
             scope: body.scope,
             name: body.name,
+        },
+    )
+    .await
+}
+
+async fn agent_configure(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<ConfigureAgent>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::AgentConfigure {
+            scope: body.scope,
+            agent: body.agent,
         },
     )
     .await
