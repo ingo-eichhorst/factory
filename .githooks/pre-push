@@ -1,0 +1,59 @@
+#!/bin/sh
+# Refuse to push to `main`. Work reaches it through a pull request and a merge,
+# never from a keyboard here -- see AGENTS.md, "Branches, worktrees and pull
+# requests".
+#
+# GitHub cannot enforce this for us: the repository is private on a free plan,
+# and rulesets and branch protection are both paid features there. So this hook
+# is the enforcement, which means it is only as good as its installation --
+# `git config core.hooksPath .githooks`, once per clone.
+#
+# stdin gives one line per ref being pushed:
+#     <local ref> <local sha> <remote ref> <remote sha>
+# The remote ref is what matters. Reading the local branch name instead would
+# wave `git push origin HEAD:main` straight through.
+
+protected='refs/heads/main'
+blocked=''
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    [ -z "$remote_ref" ] && continue
+    for ref in $protected; do
+        [ "$remote_ref" = "$ref" ] && blocked="$blocked ${remote_ref#refs/heads/}"
+    done
+done
+
+[ -z "$blocked" ] && exit 0
+
+branch=$(git symbolic-ref --short -q HEAD || echo HEAD)
+
+# Somebody standing on main needs a branch first and does not have a name for
+# it yet; somebody on a branch already has one, so name theirs back at them.
+if [ "$branch" = "main" ] || [ "$branch" = "HEAD" ]; then
+    target='some-branch-name'
+    switch="      git switch -c $target
+"
+else
+    target="$branch"
+    switch=''
+fi
+
+cat >&2 <<MSG
+
+  Refused: this would push straight into$blocked.
+
+  Nothing lands on main from here. Put the work on a branch of its own and
+  let a pull request carry it:
+
+$switch      git push -u origin $target
+      gh pr create --fill
+
+  A merge on GitHub is what moves main; afterwards, fast-forward locally with
+  \`git switch main && git pull --ff-only\`.
+
+  This hook is the only thing enforcing that -- GitHub rulesets need a paid
+  plan on a private repository. If you are certain you want to bypass it, you
+  have to say so out loud: git push --no-verify.
+
+MSG
+exit 1
