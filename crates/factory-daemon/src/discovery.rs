@@ -23,6 +23,23 @@ use crate::site::{ENTRY_CAP, SKIP};
 /// How many path segments below the instance root discovery will inspect.
 pub const DEPTH_LIMIT: usize = 4;
 
+/// A `.factory/config.yaml` may belong to another tool that shares the
+/// directory. Only a document with Factory's `scope:` key is a scope marker.
+/// Malformed YAML is still returned so `read_scope` can report the file rather
+/// than silently hiding a broken scope declaration.
+fn is_scope_config(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return true;
+    };
+    match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) {
+        Ok(serde_yaml_ng::Value::Mapping(values)) => {
+            values.contains_key(serde_yaml_ng::Value::String("scope".into()))
+        }
+        Err(_) => true,
+        _ => false,
+    }
+}
+
 /// Directories at or below `root` that contain a Factory config marker. The
 /// result includes `root` when it has one, is breadth-first, and is bounded by
 /// the same exclusions and entry cap as the site walk.
@@ -33,7 +50,8 @@ pub fn walk(root: &Path, entry_cap: usize) -> Vec<PathBuf> {
     queue.push_back((root.to_path_buf(), 0));
 
     while let Some((dir, depth)) = queue.pop_front() {
-        if dir.join(FACTORY_DIR).join(CONFIG_FILE).is_file() {
+        let config = dir.join(FACTORY_DIR).join(CONFIG_FILE);
+        if config.is_file() && is_scope_config(&config) {
             found.push(dir.clone());
         }
         if depth >= DEPTH_LIMIT {
@@ -243,6 +261,7 @@ mod tests {
         fs::create_dir_all(s.path().join("ordinary/child")).unwrap();
         s.write_scope("projects/demo", "scope: { id: demo-id, name: demo }");
         s.write_scope("projects/other", "scope: { id: other-id, name: other }");
+        s.write_scope("runtime-only", "runtime: { version: 1 }");
 
         assert_eq!(
             rel(&s.path(), &walk(&s.path(), ENTRY_CAP)),
