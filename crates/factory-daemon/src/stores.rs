@@ -311,6 +311,7 @@ mod tests {
             updated_at: at,
             last_run_at: None,
             next_run_at: None,
+            worktree: false,
         }
     }
 

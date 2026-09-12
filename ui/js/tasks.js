@@ -70,11 +70,12 @@ function taskCard(t) {
   const bits = [];
   bits.push(t.schedule ? scheduleLabel(t.schedule) : (t.runs ? `${t.runs} run${t.runs === 1 ? "" : "s"}` : "no runs yet"));
   if (!TERMINAL.includes(t.status) && t.status !== "pending" && t.last_run_at) bits.push(since(t.last_run_at));
+  const wt = t.worktree ? ` <span class="tag" title="runs in a git worktree of its own">worktree</span>` : "";
   return `
     <div class="kbc" data-id="${esc(t.id)}">
       <div class="kbc-top">${statusBadge(t.status)}<code class="id">${esc(t.id.slice(0, 8))}</code></div>
       <div class="title">${esc(t.title)}</div>
-      <div class="sub">${esc(t.scope)} · ${esc(t.agent)}</div>
+      <div class="sub">${esc(t.scope)} · ${esc(t.agent)}${wt}</div>
       <div class="sub">${esc(bits.join(" · "))}</div>
     </div>`;
 }
@@ -105,7 +106,7 @@ export function renderTasks() {
       <td>${statusBadge(t.status)}</td>
       <td class="sub">${t.runs || 0}</td>
       <td class="sub">${esc(t.scope)}</td>
-      <td class="sub">${esc(t.agent)}</td>
+      <td class="sub">${esc(t.agent)}${t.worktree ? ` <span class="tag" title="runs in a git worktree of its own">worktree</span>` : ""}</td>
     </tr>`).join("");
   for (const tr of $("tasks").querySelectorAll("tr.row")) {
     tr.onclick = () => openTask(tr.dataset.id);
@@ -196,6 +197,7 @@ export function renderModal() {
   if (t.next_run_at) meta += ` · next ${new Date(t.next_run_at).toLocaleString()}`;
   if (t.ack_timeout_seconds) meta += ` · ack ${t.ack_timeout_seconds}s`;
   if (t.timeout_seconds) meta += ` · timeout ${t.timeout_seconds}s`;
+  if (t.worktree) meta += ` · own worktree`;
   meta += `</div>`;
   const labels = Object.entries(t.labels || {});
   if (labels.length) {
@@ -203,6 +205,13 @@ export function renderModal() {
   }
   if (t.instructions) meta += `<label>Instructions</label><pre>${esc(t.instructions)}</pre>`;
   const r = selectedRun();
+  // The branch and the path this attempt worked in, next to the attach
+  // command a person would use to go look at the session itself.
+  if (r && r.worktree_branch) {
+    meta += `<div class="sub">worktree <code>${esc(r.worktree_branch)}</code>`;
+    if (r.worktree_path) meta += ` at <code>${esc(r.worktree_path)}</code>`;
+    meta += `</div>`;
+  }
   if (r && r.result) meta += `<label>Result</label><pre>${esc(r.result)}</pre>`;
   if (r && r.error) meta += `<label>Error</label><pre>${esc(r.error)}</pre>`;
   $("m-meta").innerHTML = meta;

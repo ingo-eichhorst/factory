@@ -400,6 +400,14 @@ impl Factory {
         self.factory_dir().join("factory.sqlite")
     }
 
+    /// Where a run's own worktree lives, when its task asked for one. Under
+    /// `.factory/`, never inside a scope -- one subdirectory per run, named
+    /// after the run once it exists, so a retry never inherits the dirty tree
+    /// a failed attempt left behind.
+    pub fn worktrees_dir(&self) -> PathBuf {
+        self.factory_dir().join("worktrees")
+    }
+
     /// The control socket.
     ///
     /// It belongs in `.factory/`, but a unix socket path has to fit in
