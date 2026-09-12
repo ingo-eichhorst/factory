@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 
 import { state } from "../js/core.js";
 import {
-  agentViewFromTail,
-  agentViewTail,
+  legacyAgentRoute,
   loadRuntimeConnections,
   runtimeConnectionCard,
   visibleRuntimeConnections,
@@ -26,12 +25,16 @@ const healthy = {
   capabilities: ["live_handoff"],
 };
 
-test("the third Agents view round-trips through the route tail", () => {
-  assert.deepEqual(agentViewTail("occupancy"), []);
-  assert.deepEqual(agentViewTail("roster"), ["roster"]);
-  assert.deepEqual(agentViewTail("agent-runtime"), ["agent-runtime"]);
-  assert.equal(agentViewFromTail("agent-runtime"), "agent-runtime");
-  assert.equal(agentViewFromTail("unknown"), "occupancy");
+test("old Agents routes resolve to the new peer pages", () => {
+  assert.deepEqual(legacyAgentRoute([]), { page: "occupancy", tail: [] });
+  assert.deepEqual(legacyAgentRoute(["roster", "task", "123"]), {
+    page: "roster",
+    tail: ["task", "123"],
+  });
+  assert.deepEqual(legacyAgentRoute(["agent-runtime"]), {
+    page: "agent-runtime",
+    tail: [],
+  });
 });
 
 test("a grouped connection keeps only scopes inside the rail selection", () => {

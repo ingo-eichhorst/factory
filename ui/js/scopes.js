@@ -30,6 +30,7 @@ const ALL = "all";
 /// could be written into the URL and none of the three could be read back.
 let pages = [];
 let tailOf = () => [];
+let redirects = {};
 
 /// True while a route read out of the URL is being applied to the page. The
 /// views write the URL as they change -- a tab lighting up, a task opening --
@@ -38,10 +39,12 @@ let tailOf = () => [];
 let applying = false;
 
 /// What `app.js` has to tell the router before the first hash is read: which
-/// pages exist, and how to ask the one on screen what its tail is.
+/// pages exist, how to ask the one on screen what its tail is, and any old page
+/// names that should resolve to their replacements.
 export function setRouter(r) {
   pages = r.pages;
   if (r.tailOf) tailOf = r.tailOf;
+  redirects = r.redirects || {};
 }
 
 let onSelect = () => {};
@@ -287,29 +290,32 @@ export function writeHash(replace) {
 /// name containing a slash arrives as `%2F` and never splits.
 ///
 /// The level segment is optional, and it is told apart from the page by the
-/// page list rather than by the level map: `pages` is registered by `app.js`
-/// when it loads, before any hash is read, whereas `levelViews` only arrives
-/// with the boot call to `initRail`. So a second segment that names a page is
-/// a hash written before levels existed (`#<scope>/<page>/<tail...>`), and
-/// anything else there is a level. Either way the level is then checked
-/// against the map and replaced if it does not own the page -- a link to a
-/// greyed or renamed level lands on the level that does.
+/// registered page and redirect names rather than by the level map: the route
+/// vocabulary arrives before any hash is read, whereas `levelViews` only
+/// arrives with the boot call to `initRail`. So a second segment that names a
+/// page is a hash written before levels existed (`#<scope>/<page>/<tail...>`),
+/// and anything else there is a level. Either way the level is then checked
+/// against the map and replaced if it does not own the resolved page -- a link
+/// to a greyed or renamed level lands on the level that does.
 export function readHash() {
   const raw = location.hash.replace(/^#/, "");
   if (!raw) return null;
   const parts = raw.split("/");
   if (parts.length < 2) return null;
-  const levelled = !pages.includes(parts[1]);
-  const page = levelled ? parts[2] : parts[1];
-  if (!pages.includes(page)) return null;
+  const routePages = new Set([...pages, ...Object.keys(redirects)]);
+  const levelled = !routePages.has(parts[1]);
+  let page = levelled ? parts[2] : parts[1];
+  if (!routePages.has(page)) return null;
   const levelSeg = levelled ? parts[1] : null;
-  const level = levelSeg && levelViews[levelSeg] && levelViews[levelSeg].includes(page)
-    ? levelSeg
-    : levelForPage(page);
   // A hash can be typed by hand, and a broken escape in one makes
   // decodeURIComponent throw. A route nobody can read is no route.
   try {
-    const tail = parts.slice(levelled ? 3 : 2).map(decodeURIComponent);
+    let tail = parts.slice(levelled ? 3 : 2).map(decodeURIComponent);
+    if (redirects[page]) ({ page, tail } = redirects[page](tail));
+    if (!pages.includes(page)) return null;
+    const level = levelSeg && levelViews[levelSeg] && levelViews[levelSeg].includes(page)
+      ? levelSeg
+      : levelForPage(page);
     const head = parts[0];
     return { scope: head === ALL ? null : decodeURIComponent(head), level, page, tail };
   } catch {

@@ -4,14 +4,13 @@
 import { $, api, esc, since, state } from "./core.js";
 import { inScope } from "./scopes.js";
 
-const VIEWS = new Set(["occupancy", "roster", "agent-runtime"]);
-
-export function agentViewFromTail(value) {
-  return VIEWS.has(value) ? value : "occupancy";
-}
-
-export function agentViewTail(view) {
-  return view === "occupancy" ? [] : [agentViewFromTail(view)];
+/// Turn links from the former Agents wrapper into the peer page that replaced
+/// it. Anything after the old inner-view segment still belongs to that page.
+export function legacyAgentRoute(tail) {
+  const views = new Set(["occupancy", "roster", "agent-runtime"]);
+  return views.has(tail[0])
+    ? { page: tail[0], tail: tail.slice(1) }
+    : { page: "occupancy", tail };
 }
 
 /// Keep one grouped connection card, but narrow the scope names written on it

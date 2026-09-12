@@ -76,7 +76,9 @@
   <button id="tab-activity">Activity</button>
   <button id="tab-inbox">Inbox</button>
   <button id="tab-tasks" hidden>Tasks</button>
-  <button id="tab-agents" hidden>Agents</button>
+  <button id="tab-occupancy" hidden>Occupancy</button>
+  <button id="tab-roster" hidden>Roster</button>
+  <button id="tab-agent-runtime" hidden>Agent-runtime</button>
 </nav>
 </div>
 
@@ -144,9 +146,9 @@
     <div class="site-wrap" id="site-wrap">
       <div class="stage" id="site-stage">
         <canvas id="site-plan-cv" tabindex="0" role="img"
-          aria-label="Isometric site plan. Halls are scopes, sized by their codebase; figures are agents, not bays. The same facts are available as text in the Dashboard and Agents views."></canvas>
+          aria-label="Isometric site plan. Halls are scopes, sized by their codebase; figures are agents, not bays. The same facts are available as text in the Dashboard, Occupancy and Roster views."></canvas>
         <canvas id="site-render-cv" class="off" tabindex="0" role="img"
-          aria-label="Lit three-dimensional render of the same site. A lit window marks a bay an agent is occupying; the amber beacon marks a hall with a run waiting on a human. The same facts are available as text in the Dashboard and Agents views."></canvas>
+          aria-label="Lit three-dimensional render of the same site. A lit window marks a bay an agent is occupying; the amber beacon marks a hall with a run waiting on a human. The same facts are available as text in the Dashboard, Occupancy and Roster views."></canvas>
         <div class="hud tl">
           <div class="seg" id="site-rmode"><button class="on" data-rm="0">Plan</button><button data-rm="1">Render</button></div>
           <button class="hbtn on" data-layer="agents">Agents</button>
@@ -203,9 +205,9 @@
     </section>
   </div>
 
-  <div id="view-agents" hidden>
+  <div id="view-occupancy" hidden>
     <div class="bar">
-      <h2>Agents</h2>
+      <h2>Occupancy</h2>
       <span class="sp"></span>
       <select id="occ-window" title="how far back the chart looks">
         <option value="60">last hour</option>
@@ -214,16 +216,22 @@
         <option value="1440">last 24 hours</option>
         <option value="10080">last 7 days</option>
       </select>
-      <button class="btn" id="runtime-refresh" hidden>Refresh</button>
-      <div class="seg" id="agent-view">
-        <button data-view="occupancy" class="on">Occupancy</button>
-        <button data-view="roster">Roster</button>
-        <button data-view="agent-runtime">Agent-runtime</button>
-      </div>
     </div>
-    <section id="view-occupancy"><div class="occ" id="occ" style="--lab:186px">loading…</div></section>
-    <div class="agents" id="agents" hidden></div>
-    <div class="runtime-connections" id="agent-runtime" hidden></div>
+    <section><div class="occ" id="occ" style="--lab:186px">loading…</div></section>
+  </div>
+
+  <div id="view-roster" hidden>
+    <div class="bar"><h2>Roster</h2></div>
+    <div class="agents" id="agents"></div>
+  </div>
+
+  <div id="view-agent-runtime" hidden>
+    <div class="bar">
+      <h2>Agent-runtime</h2>
+      <span class="sp"></span>
+      <button class="btn" id="runtime-refresh">Refresh</button>
+    </div>
+    <div class="runtime-connections" id="agent-runtime"></div>
   </div>
   </div>
 </main>

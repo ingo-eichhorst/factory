@@ -620,7 +620,7 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
   font: 400 10px/1.5 var(--mono); color: var(--faint); background: var(--panel); border: 1px solid var(--line);
   border-radius: 3px; padding: 4px 7px; text-align: right;
 }
-/* The inspector rail: the same vocabulary as the agents page -- a click on a
+/* The inspector rail: the same vocabulary as the Roster -- a click on a
    hall is a second door into the same facts, not a different data model. */
 .rail { flex: 0 0 300px; max-width: 340px; display: flex; flex-direction: column; gap: 10px; }
 .rail .scope, .rail .agent { font-size: 12px; }
