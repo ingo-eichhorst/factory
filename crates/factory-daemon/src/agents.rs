@@ -50,9 +50,50 @@ impl Engine {
             .unwrap_or_else(|| self.factory.config.daemon.default_runtime.clone())
     }
 
+    /// The session already on file for `(canonical_scope, name)`, migrating
+    /// it onto its canonical id first if it is only on file under the id a
+    /// scope's pre-migration bare name would have given it -- the same
+    /// `<scope>/<name>` scheme, just a shorter `scope`. Without this, a
+    /// standing agent started before a scope's identity became its path
+    /// looks gone the first time this daemon starts under the new scheme,
+    /// and gets started a second time right next to the one already running.
+    /// Self-healing rather than permanent: once this has run for a session,
+    /// `AgentSession::id_for(canonical_scope, name)` is the only id it has,
+    /// and every future lookup finds it on the first try.
+    async fn existing_agent(&self, canonical_scope: &str, name: &str) -> Result<Option<AgentSession>> {
+        let id = AgentSession::id_for(canonical_scope, name);
+        if let Some(found) = self.store.get_agent(&id).await? {
+            return Ok(Some(found));
+        }
+        let Some(legacy_id) = AgentSession::legacy_id_for(canonical_scope, name) else {
+            return Ok(None);
+        };
+        let Some(mut legacy) = self.store.get_agent(&legacy_id).await? else {
+            return Ok(None);
+        };
+        tracing::info!(
+            from = %legacy_id,
+            to = %id,
+            "migrating a standing agent onto its scope's current identity"
+        );
+        legacy.id = id;
+        legacy.scope = canonical_scope.to_string();
+        self.store.put_agent(&legacy).await?;
+        let _ = self.store.delete_agent(&legacy_id).await;
+        Ok(Some(legacy))
+    }
+
     /// Bring a declared standing agent up. Idempotent: an agent already live is
     /// returned as it is rather than started twice.
     pub async fn start_agent(&self, scope: &str, name: &str) -> Result<AgentSession> {
+        // Canonical from here down, whatever the caller typed -- a bare name
+        // from before a scope's identity became its path still resolves
+        // (`Factory::scope`'s fallback), and a session started from it must
+        // land under the same id reconciliation and the occupancy chart both
+        // expect.
+        let scope = self.factory.scope(scope)?.name.clone();
+        let scope = scope.as_str();
+
         let decl = self.declared(scope, name)?;
         if !decl.lifetime.is_standing() {
             return Err(FactoryError::BadRequest(format!(
@@ -60,8 +101,7 @@ impl Engine {
             )));
         }
 
-        let id = AgentSession::id_for(scope, name);
-        let existing = self.store.get_agent(&id).await?;
+        let existing = self.existing_agent(scope, name).await?;
         if let Some(existing) = &existing {
             if existing.state.is_live() && self.agent_alive(existing).await {
                 return Ok(existing.clone());
@@ -306,13 +346,43 @@ impl Engine {
         for scope in &self.factory.config.scopes {
             for decl in scope.standing_agents_with(&self.factory.config.daemon.foreman) {
                 let id = AgentSession::id_for(&scope.name, &decl.name());
+                let legacy_id = AgentSession::legacy_id_for(&scope.name, &decl.name());
                 seen.insert(id.clone());
+                if let Some(lid) = &legacy_id {
+                    seen.insert(lid.clone());
+                }
 
-                match stored.iter().find(|a| a.id == id) {
+                // A session found under its canonical id first; failing
+                // that, under the id its scope's pre-migration bare name
+                // would have given it -- rewritten onto the canonical one
+                // before anything below decides what to do with it, so the
+                // "no longer declared" sweep after this loop never sees the
+                // id it used to have and closes a session that just moved
+                // house. `migrated_from` is only set when the row actually
+                // came from the legacy lookup, so the cleanup below never
+                // deletes a row this scope did not just claim.
+                let mut migrated_from: Option<String> = None;
+                let found = stored.iter().find(|a| a.id == id).cloned().or_else(|| {
+                    legacy_id.as_deref().and_then(|lid| {
+                        stored.iter().find(|a| a.id == lid).map(|a| {
+                            tracing::info!(
+                                from = %lid, to = %id,
+                                "migrating a standing agent onto its scope's current identity"
+                            );
+                            migrated_from = Some(lid.to_string());
+                            let mut a = a.clone();
+                            a.id = id.clone();
+                            a.scope = scope.name.clone();
+                            a
+                        })
+                    })
+                });
+
+                match found {
                     // Still there from before: adopt it rather than opening a
                     // second session beside the one already running.
-                    Some(existing) if existing.state.is_live() && self.agent_alive(existing).await => {
-                        let mut a = existing.clone();
+                    Some(existing) if existing.state.is_live() && self.agent_alive(&existing).await => {
+                        let mut a = existing;
                         a.declared = true;
                         a.lifetime = decl.lifetime;
                         a.role = a.role_with(&decl.role);
@@ -323,7 +393,7 @@ impl Engine {
                     // Known but not running. Start it if it is meant to start
                     // itself; a stopped one stays stopped.
                     Some(existing) => {
-                        let mut a = existing.clone();
+                        let mut a = existing;
                         a.declared = true;
                         a.lifetime = decl.lifetime;
                         a.role = a.role_with(&decl.role);
@@ -352,6 +422,10 @@ impl Engine {
                             self.autostart(&scope.name, &decl.name()).await;
                         }
                     }
+                }
+
+                if let Some(lid) = migrated_from {
+                    let _ = self.store.delete_agent(&lid).await;
                 }
             }
         }

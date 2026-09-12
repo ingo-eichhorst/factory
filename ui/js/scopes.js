@@ -2,12 +2,12 @@
 //! whether a thing belongs to what is selected.
 //!
 //! The tree is derived, never declared. A `ScopeView` carries a `path` and
-//! nothing about nesting, so the shape is whatever the paths say -- and a path
-//! segment can turn up with no scope registered on it (`projects`, on the
-//! instance that builds this repo). Those segments are drawn, or everything
-//! under them would hang off the root as if it were flat; they are not
-//! selectable, because nothing in the daemon can be asked about a segment that
-//! is not a scope.
+//! nothing about nesting, so the shape is whatever the paths say. The daemon
+//! now discovers every directory under the instance root as a scope, so a
+//! path segment with no scope on it is rare -- outside the root altogether,
+//! or past the discovery walk's own depth limit -- but still possible; those
+//! segments are drawn as an unselectable grouping node rather than left out,
+//! or everything under them would hang off the root as if it were flat.
 //!
 //! This file filters nothing and knows about no view. It owns the selection,
 //! the rail and the URL; every view asks `inScope` and draws itself.
@@ -115,11 +115,20 @@ function branch(node, depth) {
 
 function row(node, depth) {
   const on = node.scope && node.scope.name === state.scope ? ` aria-current="true"` : "";
+  // A scope's identity is its path from the instance root now, not a short
+  // name -- `projects/factory/crates` -- so the row draws just the last
+  // segment (`node.label`, already the piece `segments()` isolated to place
+  // this node in the tree) and leaves the full identity for the tooltip and
+  // for `data-scope`, which is what selection actually keys on. The one node
+  // with no `label` of its own is the trie's root, which a scope registered
+  // directly on the instance root attaches to -- there is no path segment to
+  // shorten there, so it falls back to the scope's own name.
+  const text = node.label ?? node.scope?.name;
   // A deep name does not fit the column and is cut short there, so the tooltip
   // carries the whole of it as well as the path it sits on.
   const head = node.scope
-    ? `<button class="rail-row" style="--d:${depth}" data-scope="${esc(node.scope.name)}" title="${esc(node.scope.name)} · ${esc(node.scope.path)}"${on}>${esc(node.scope.name)}</button>`
-    : `<span class="rail-row group" style="--d:${depth}">${esc(node.label)}</span>`;
+    ? `<button class="rail-row" style="--d:${depth}" data-scope="${esc(node.scope.name)}" title="${esc(node.scope.name)} · ${esc(node.scope.path)}"${on}>${esc(text)}</button>`
+    : `<span class="rail-row group" style="--d:${depth}">${esc(text)}</span>`;
   return `<li>${head}${branch(node, depth + 1)}</li>`;
 }
 
@@ -128,13 +137,15 @@ function render() {
   if (!rail) return;
 
   const root = buildTree();
-  // No scopes is a real state -- a fresh install has none -- and an empty tree
-  // drawn around it looks like a page that failed to load. A scope on the
-  // instance root owns the trie's own root, so it becomes the one row everything
-  // else hangs under; with none, whatever is shallowest is a root, and there can
-  // be several.
+  // Every directory under the instance root is a scope now, discovered or
+  // not, so an empty list is no longer a config with nothing declared in it
+  // -- it means `/api/agents` has not answered yet, or could not. An empty
+  // tree drawn around either looks like a page that failed to load, so it
+  // says which. A scope on the instance root owns the trie's own root, so it
+  // becomes the one row everything else hangs under; with none, whatever is
+  // shallowest is a root, and there can be several.
   const html = !state.scopes.length
-    ? `<p class="rail-empty">This instance declares no scopes.</p>`
+    ? `<p class="rail-empty">No scopes yet -- still loading, or the instance root could not be read.</p>`
     : `
     <button class="rail-row rail-all" id="rail-all"${state.scope === null ? ` aria-current="true"` : ""}>All scopes</button>
     ${root.scope ? `<ul>${row(root, 0)}</ul>` : branch(root, 0)}`;

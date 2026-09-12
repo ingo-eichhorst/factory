@@ -3,6 +3,7 @@
 
 mod access;
 mod agents;
+mod discovery;
 mod engine;
 mod interfaces;
 mod occupancy;
@@ -110,6 +111,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
             agents: Vec::new(),
             runtime: None,
             git: None,
+            declared: true,
             // A fresh instance has one engine, so the scope it writes names
             // none of its own and takes the instance default.
             task_store: None,
@@ -132,10 +134,18 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
             )
         })?,
     };
-    let factory = Factory::load(&root)?;
+    let mut factory = Factory::load(&root)?;
+    // Every directory under the root becomes a scope here, once, before
+    // anything else looks at `factory.config.scopes` -- the engine, the
+    // interfaces, the scheduler all read that list as if it always held
+    // every scope there could be, and this is what makes that true.
+    let discovery_started = std::time::Instant::now();
+    discovery::apply(&mut factory);
     tracing::info!(
         instance = %factory.config.instance.name,
         root = %factory.root.display(),
+        scopes = factory.config.scopes.len(),
+        discovery_ms = discovery_started.elapsed().as_millis(),
         "loading instance"
     );
 

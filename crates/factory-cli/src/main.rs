@@ -305,7 +305,7 @@ async fn main() -> Result<()> {
         Command::Agents => {
             let payload = client.send(Request::Agents).await?;
             print(&payload, cli.json, |p| match p {
-                Payload::Scopes { scopes, roles } => {
+                Payload::Scopes { scopes, roles, .. } => {
                     let mut out = String::new();
                     for s in scopes {
                         out.push_str(&format!(

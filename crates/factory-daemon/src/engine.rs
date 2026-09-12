@@ -20,10 +20,16 @@ use factory_core::task::{
 use factory_plugins::registry::Registry;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::schedule;
 use crate::worktree;
+
+/// How long a scope's worktree capability is trusted for. Shorter than
+/// `site::WALK_TTL`: a person who just ran `git init` in a scope to make the
+/// checkbox available should not have to wait five minutes to see it, and the
+/// answer is two `git` calls rather than a directory walk.
+const CAPABILITY_TTL: Duration = Duration::from_secs(60);
 
 pub struct Engine {
     pub factory: Factory,
@@ -46,6 +52,16 @@ pub struct Engine {
     /// `site::WALK_TTL`.
     pub(crate) site_walks:
         std::sync::Mutex<std::collections::HashMap<String, (Instant, crate::site::Measured)>>,
+    /// Whether each scope's directory can host a worktree, with when that was
+    /// asked. `worktree::capability` is one or two `git` subprocesses, and
+    /// `scope_views` asks it per scope -- which, now that every directory is a
+    /// scope, is a hundred-odd of them on a real instance, on an endpoint the
+    /// Agents view refetches on every run and agent event. A directory does
+    /// not become a git repository between two of those. Cached for
+    /// `CAPABILITY_TTL`; the first board after a restart still pays in full,
+    /// the same trade `site::WALK_TTL` already makes.
+    pub(crate) worktree_caps:
+        std::sync::Mutex<std::collections::HashMap<String, (Instant, (bool, Option<String>))>>,
     /// The tier and activity level each hall was last drawn at, which is what
     /// makes both steps sticky instead of flipping whenever a metric sits on a
     /// threshold. Lost on restart, like `seen_status`, and for the same
@@ -87,6 +103,7 @@ impl Engine {
             interfaces,
             seen_status: Default::default(),
             site_walks: Default::default(),
+            worktree_caps: Default::default(),
             site_memory: Default::default(),
         }
     }
@@ -137,10 +154,14 @@ impl Engine {
                 status: self.status().await?,
             }),
             Request::Adapters => Ok(self.registry.list().into()),
-            Request::Agents => Ok(Payload::Scopes {
-                scopes: self.scope_views().await?,
-                roles: self.role_views(),
-            }),
+            Request::Agents => {
+                let (scopes, available) = self.scope_views().await?;
+                Ok(Payload::Scopes {
+                    scopes,
+                    available,
+                    roles: self.role_views(),
+                })
+            }
             Request::Occupancy { minutes } => Ok(Payload::Occupancy {
                 occupancy: self.occupancy(minutes).await?,
             }),
@@ -309,10 +330,28 @@ impl Engine {
     }
 
     /// The agents page: scopes first, then the agents each one declares, then
-    /// what they are doing. One call, because a page that had to join config,
-    /// adapters, standing agents, runs and tasks itself would be showing five
-    /// different moments in time.
-    pub(crate) async fn scope_views(&self) -> Result<Vec<ScopeView>> {
+    /// what they are doing -- and, once, every adapter registered, which
+    /// belongs to the whole answer rather than to any one scope in it. One
+    /// call, because a page that had to join config, adapters, standing
+    /// agents, runs and tasks itself would be showing five different moments
+    /// in time.
+    /// One scope's worktree capability, asked of `git` at most every
+    /// `CAPABILITY_TTL`. See `worktree_caps` for why this is cached at all.
+    async fn worktree_capability(&self, name: &str, dir: &Path) -> (bool, Option<String>) {
+        if let Some((at, answer)) = self.worktree_caps.lock().unwrap().get(name) {
+            if at.elapsed() < CAPABILITY_TTL {
+                return answer.clone();
+            }
+        }
+        let answer = worktree::capability(dir).await;
+        self.worktree_caps
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), (Instant::now(), answer.clone()));
+        answer
+    }
+
+    pub(crate) async fn scope_views(&self) -> Result<(Vec<ScopeView>, Vec<String>)> {
         let adapters = self.registry.list();
         let described: std::collections::BTreeMap<String, (String, String)> = adapters
             .adapters
@@ -338,7 +377,15 @@ impl Engine {
             Default::default();
         for run in &active {
             let task = self.store.get(&run.task_id).await?;
-            let scope = task.as_ref().map(|t| t.scope.clone()).unwrap_or_default();
+            // Canonicalized: a task written before a scope's identity became
+            // its path still carries the bare name it was given, and this is
+            // what lets its active runs land on the same row as everything
+            // else in that scope rather than opening an orphan one next to
+            // it.
+            let scope = task
+                .as_ref()
+                .map(|t| self.factory.canonical_scope_name(&t.scope))
+                .unwrap_or_default();
             work.entry((scope.clone(), run.agent.clone()))
                 .or_default()
                 .push(AgentActivity {
@@ -374,7 +421,7 @@ impl Engine {
                 .factory
                 .scope_path(&scope.name)
                 .unwrap_or_else(|_| scope.path.clone());
-            let (worktree_capable, worktree_reason) = worktree::capability(&scope_dir).await;
+            let (worktree_capable, worktree_reason) = self.worktree_capability(&scope.name, &scope_dir).await;
 
             let mut agents = Vec::new();
             let mut covered = std::collections::BTreeSet::new();
@@ -514,7 +561,11 @@ impl Engine {
                 default_agent,
                 runtime,
                 agents,
-                available: available.clone(),
+                // Nothing today gives one scope a different roster of
+                // adapters than any other, so there is no per-scope override
+                // to carry -- the shared list returned alongside `views` is
+                // the whole answer.
+                available: None,
                 task_store,
                 available_stores: available_stores.clone(),
                 worktree_capable,
@@ -522,7 +573,7 @@ impl Engine {
             });
         }
 
-        Ok(views)
+        Ok((views, available))
     }
 
     /// Every role this instance knows, for a roster and for a picker.
@@ -587,7 +638,12 @@ impl Engine {
 
         let scope = patch.scope.clone().unwrap_or_else(|| current.scope.clone());
         if patch.scope.is_some() {
-            self.factory.scope(&scope)?;
+            // Store the identity the scope actually has, not necessarily the
+            // one the caller typed -- a bare name from before scopes had
+            // paths still resolves (`Factory::scope`'s fallback), but writing
+            // it back down unchanged would keep manufacturing the very
+            // ambiguity that fallback exists to paper over.
+            patch.scope = Some(self.factory.scope(&scope)?.name.clone());
         }
         match &patch.agent {
             Some(agent) => {
@@ -649,7 +705,11 @@ impl Engine {
         let (agent, _adapter) = self.resolve_agent(&scope, &agent)?;
         self.registry.runtime(&runtime)?;
 
-        let mut task = factory_core::adapter::store::task_from_new(new, scope, agent, runtime);
+        // The scope's canonical identity, not necessarily what the caller
+        // typed -- `declared` is already resolved through the bare-name
+        // fallback above, and storing its own name keeps a freshly created
+        // task from starting life needing that fallback itself.
+        let mut task = factory_core::adapter::store::task_from_new(new, declared.name.clone(), agent, runtime);
         if let Some(s) = &task.schedule {
             task.next_run_at = Some(schedule::next_after(s, Utc::now())?);
         }
@@ -1243,6 +1303,7 @@ mod tests {
                 agents: Vec::new(),
                 runtime: None,
                 git: None,
+                declared: true,
                 task_store: None,
             }],
             plugins_dir: None,
@@ -1414,6 +1475,45 @@ mod tests {
         assert_eq!(cwd, scope_dir, "the checkbox is off, so this stays the scope itself");
         assert!(run.worktree_path.is_none());
         assert!(run.worktree_branch.is_none());
+    }
+
+    /// `scope_views` asks `git` per scope, and every directory being a scope
+    /// makes that a hundred-odd subprocesses on an endpoint the Agents view
+    /// refetches on every event. The answer is cached, so the second board
+    /// within `CAPABILITY_TTL` runs no `git` at all -- observed here as the
+    /// cached answer surviving a change on disk that would flip it.
+    #[tokio::test]
+    async fn a_scopes_worktree_capability_is_asked_of_git_once_per_ttl() {
+        let scope_dir = temp_dir("caps");
+        let engine = test_engine(scope_dir.clone());
+
+        // No repository yet, so the first board says so.
+        let (first, _) = engine.scope_views().await.unwrap();
+        assert!(!first[0].worktree_capable);
+
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "factory@example.com"][..],
+            &["config", "user.name", "factory"][..],
+            &["commit", "-q", "--allow-empty", "-m", "base"][..],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&scope_dir)
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        let (second, _) = engine.scope_views().await.unwrap();
+        assert!(
+            !second[0].worktree_capable,
+            "within the TTL the cached answer stands, git is not asked again"
+        );
+
+        engine.worktree_caps.lock().unwrap().clear();
+        let (third, _) = engine.scope_views().await.unwrap();
+        assert!(third[0].worktree_capable, "once stale, git is asked and sees the repository");
     }
 
     #[tokio::test]

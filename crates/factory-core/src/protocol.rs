@@ -171,6 +171,14 @@ pub enum Payload {
     Agent { agent: AgentSession },
     Scopes {
         scopes: Vec<ScopeView>,
+        /// Every registered agent adapter, once -- not copied onto each
+        /// scope in `scopes`. `ScopeView.available` used to carry this same
+        /// list per scope; a handful of scopes made that harmless, but
+        /// discovery can make a scope list a few thousand entries long, at
+        /// which point the repeated copy is the bulk of the payload for
+        /// saying the same thing every time.
+        #[serde(default)]
+        available: Vec<String>,
         /// Every role this instance knows, so a picker can offer them.
         #[serde(default)]
         roles: Vec<RoleView>,
@@ -342,9 +350,14 @@ pub struct ScopeView {
     pub default_agent: String,
     pub runtime: String,
     pub agents: Vec<AgentView>,
-    /// Every registered agent adapter, so a task can be started with any of
-    /// them regardless of what the scope declares.
-    pub available: Vec<String>,
+    /// The adapters a task here can be started with, when that genuinely
+    /// differs from every adapter the instance has registered. Nothing
+    /// produces that today -- every scope can be started with any registered
+    /// adapter -- so this is normally absent; `Payload::Scopes::available`
+    /// carries the shared list instead. See its doc comment for why the
+    /// duplication moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available: Option<Vec<String>>,
     /// Where this scope's tasks are kept. The instance default unless the
     /// scope named something else.
     pub task_store: String,

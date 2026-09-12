@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use factory_core::building::{appearance, Activity, RepoMetrics};
+use factory_core::config::FACTORY_DIR;
 use factory_core::error::Result;
 use factory_core::protocol::{ScopeArea, ScopeFootprint, SiteFootprint};
 use factory_core::run::RunStatus;
@@ -40,8 +41,14 @@ use crate::engine::Engine;
 
 /// Directories that are not the codebase: dependencies, build output, version
 /// control. Walking into them would measure `node_modules`, not the project.
-const SKIP: &[&str] = &[
-    ".factory",
+/// Shared with `discovery.rs`, which walks the same tree for a different
+/// reason and must stay out of the same directories for the same reason --
+/// doubly so for `FACTORY_DIR` there: "nothing Factory owns is written
+/// inside a scope" (`AGENTS.md`) is not just a rule about writes. A scope
+/// discovery could hand out for `.factory` itself would be a place a task
+/// could be given to run an agent against the daemon's own database.
+pub(crate) const SKIP: &[&str] = &[
+    FACTORY_DIR,
     ".git",
     "node_modules",
     "target",
@@ -60,7 +67,9 @@ const SKIP: &[&str] = &[
 /// something enormous still answers in bounded time. What this returns once
 /// the cap is hit is a lower bound, not a measurement -- fine for sizing a
 /// hall relative to its neighbours, which is the only thing it is used for.
-const ENTRY_CAP: usize = 40_000;
+/// `discovery.rs` reuses this rather than inventing its own: the reason a
+/// walk needs a cap does not change with what the walk is for.
+pub(crate) const ENTRY_CAP: usize = 40_000;
 
 /// How long a walk's numbers stand before the directory is counted again. The
 /// page asks for this view every time a run or an agent changes, which is
@@ -287,6 +296,13 @@ impl Engine {
     /// threshold from rebuilding the hall on every poll -- the same shape of
     /// memory as `seen_status`, and lost on restart for the same reason: after
     /// a restart the first answer is genuinely new.
+    ///
+    /// Declared scopes only, deliberately: discovery can turn a real project
+    /// into thousands of scopes nested inside one another, and a footprint
+    /// walk per one of them would mean walking the same tree that many times
+    /// over. A hall for an undeclared scope draws at the default size and
+    /// says its footprint was not recorded -- the same fallback the protocol
+    /// already documents for a directory the daemon simply could not read.
     pub async fn site_footprint(self: &Arc<Self>) -> Result<SiteFootprint> {
         let activity = self.scope_activity().await?;
         let mut scopes = Vec::new();
