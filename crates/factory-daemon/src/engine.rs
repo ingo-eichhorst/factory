@@ -227,6 +227,13 @@ impl Engine {
                 }
                 Ok(Payload::Ok)
             }
+            Request::AgentDelete { scope, name } => {
+                let (scope, removed) = self.delete_agent_declaration(&scope, &name)?;
+                let name = removed.name();
+                self.bus.publish(Event::AgentDeleted { scope, name });
+                self.reconcile_agents().await;
+                Ok(Payload::Deleted { deleted: true })
+            }
             Request::AgentStop { id } => Ok(Payload::Agent {
                 agent: self.stop_agent(&id).await?.redacted(),
             }),
@@ -479,6 +486,11 @@ impl Engine {
 
             let mut agents = Vec::new();
             let mut covered = std::collections::BTreeSet::new();
+            let deletable: std::collections::BTreeSet<String> = scope
+                .declared_agents()
+                .into_iter()
+                .map(|agent| agent.name())
+                .collect();
 
             for decl in scope.agents_with(&factory.config.daemon.foreman) {
                 let name = decl.name();
@@ -530,6 +542,7 @@ impl Engine {
                     // Three agents sharing a harness are not all the default.
                     is_default: name == default_agent,
                     declared: true,
+                    deletable: deletable.contains(&name),
                     attach: live.and_then(|a| a.attach.clone()),
                     session: live
                         .and_then(|a| a.session.as_ref())
@@ -565,6 +578,7 @@ impl Engine {
                         state: "task".into(),
                         is_default: true,
                         declared: false,
+                        deletable: false,
                         attach: None,
                         session: None,
                         started_at: None,
@@ -601,6 +615,7 @@ impl Engine {
                     state: "task".into(),
                     is_default: false,
                     declared: false,
+                    deletable: false,
                     attach: None,
                     session: None,
                     started_at: None,

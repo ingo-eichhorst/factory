@@ -46,6 +46,11 @@ pub enum Event {
         scope: String,
         name: String,
     },
+    /// A declaration was removed from one scope's local configuration.
+    AgentDeleted {
+        scope: String,
+        name: String,
+    },
     /// A push from a runtime, mapped onto whichever standing agent or run's
     /// session it was about. This never moves a task or a run -- only the
     /// agent's own `factory task report` may do that -- so `task_id()` is
@@ -85,7 +90,8 @@ impl Event {
             Event::RunStarted { run } | Event::RunUpdated { run } => Some(&run.task_id),
             Event::AgentUpdated { .. }
             | Event::AgentRemoved { .. }
-            | Event::AgentConfigured { .. } => None,
+            | Event::AgentConfigured { .. }
+            | Event::AgentDeleted { .. } => None,
             Event::AgentActivity { .. } => None,
             Event::DaemonStarted { .. } => None,
         }

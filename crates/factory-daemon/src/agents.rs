@@ -20,14 +20,40 @@ use std::sync::Arc;
 
 use crate::engine::{append_declared_args, Engine};
 
-/// herdr and anything like it want a name without spaces in it.
+/// Herdr names are lowercase identifiers of at most 32 characters. Keep the
+/// readable name when it already fits; otherwise add a stable hash so case,
+/// punctuation, and truncated suffixes cannot make two agents collide.
 fn runtime_name(scope: &str, name: &str) -> String {
-    let clean = |s: &str| {
-        s.chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
-            .collect::<String>()
-    };
-    format!("factory-{}-{}", clean(scope), clean(name))
+    const MAX: usize = 32;
+    const HASH_LEN: usize = 8;
+
+    let original = format!("factory-{scope}-{name}");
+    if original.len() <= MAX
+        && original
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return original;
+    }
+
+    let clean: String = original
+        .chars()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut hash = 0x811c_9dc5u32;
+    for byte in original.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    let prefix_len = MAX - HASH_LEN - 1;
+    format!("{}-{hash:08x}", &clean[..clean.len().min(prefix_len)])
 }
 
 impl Engine {
@@ -593,6 +619,7 @@ mod tests {
     use async_trait::async_trait;
     use factory_core::adapter::runtime::AgentRuntime;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance};
+    use factory_core::protocol::{Payload, Request, Response};
     use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
     use factory_core::task::{NewTask, Task, TaskStatus};
     use factory_plugins::registry::Registry;
@@ -600,6 +627,30 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    fn is_valid_herdr_name(name: &str) -> bool {
+        (1..=32).contains(&name.len())
+            && name.starts_with(|c: char| c.is_ascii_lowercase())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    }
+
+    #[test]
+    fn runtime_names_obey_herdrs_identifier_contract() {
+        let generated = runtime_name("factory", "Codex-Builder");
+        assert!(is_valid_herdr_name(&generated), "{generated}");
+        assert_eq!(generated, runtime_name("factory", "Codex-Builder"));
+    }
+
+    #[test]
+    fn normalized_and_truncated_runtime_names_stay_distinct() {
+        assert_ne!(runtime_name("demo", "Builder"), runtime_name("demo", "builder"));
+        assert_ne!(
+            runtime_name("a-very-long-scope-name", "a-very-long-agent-name-one"),
+            runtime_name("a-very-long-scope-name", "a-very-long-agent-name-two")
+        );
+    }
 
     fn engine() -> Arc<Engine> {
         engine_with(Registry::with_builtins())
@@ -849,6 +900,7 @@ mod tests {
     struct StubRuntime {
         tx: std::sync::Mutex<Option<mpsc::Sender<RuntimeEvent>>>,
         starts: std::sync::Mutex<Vec<StartRequest>>,
+        stops: std::sync::Mutex<Vec<SessionRef>>,
     }
 
     impl StubRuntime {
@@ -856,6 +908,7 @@ mod tests {
             Self {
                 tx: std::sync::Mutex::new(None),
                 starts: std::sync::Mutex::new(Vec::new()),
+                stops: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -888,7 +941,8 @@ mod tests {
         async fn read(&self, _session: &SessionRef, _lines: u32) -> Result<String> {
             Ok(String::new())
         }
-        async fn stop(&self, _session: &SessionRef) -> Result<()> {
+        async fn stop(&self, session: &SessionRef) -> Result<()> {
+            self.stops.lock().unwrap().push(session.clone());
             Ok(())
         }
         async fn watch(&self) -> Result<Option<RuntimeEventStream>> {
@@ -951,6 +1005,39 @@ mod tests {
             ["--model", "sonnet", "--model", "opus"]
         );
         drop(starts);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn deleting_a_standing_declaration_closes_its_session() {
+        let (engine, stub, root) = recording_engine(
+            "id: scope-id\nname: demo\npath: .\nruntime: stub\nagents:\n  - name: Watcher\n    harness: configured\n    lifetime: permanent\n",
+        );
+        std::fs::create_dir_all(root.join(factory_core::config::FACTORY_DIR)).unwrap();
+        std::fs::write(
+            root.join(factory_core::config::FACTORY_DIR)
+                .join(factory_core::config::CONFIG_FILE),
+            "version: 1\nscope:\n  id: scope-id\n  name: demo\n  runtime: stub\n  agents:\n    - name: Watcher\n      harness: configured\n      lifetime: permanent\n",
+        )
+        .unwrap();
+        let standing = engine.start_agent("demo", "Watcher").await.unwrap();
+        let session = standing.session.clone().unwrap();
+
+        let response = engine
+            .handle_request(Request::AgentDelete {
+                scope: "demo".into(),
+                name: "Watcher".into(),
+            })
+            .await;
+
+        assert!(matches!(
+            response,
+            Response::Ok {
+                data: Payload::Deleted { deleted: true }
+            }
+        ));
+        assert_eq!(stub.stops.lock().unwrap().as_slice(), &[session]);
+        assert!(engine.store.get_agent(&standing.id).await.unwrap().is_none());
         std::fs::remove_dir_all(root).ok();
     }
 

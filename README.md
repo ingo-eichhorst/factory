@@ -222,9 +222,14 @@ scope while **All scopes** is selected. The running daemon adopts the saved
 declaration immediately, and a permanent declaration whose autostart box is on
 is brought up in the background. The `agent.configure` grant carries this
 write only to roles with scope reach; it ships with `foreman`, not `worker`.
+Locally declared agents can be deleted from the same selected-scope roster;
+deleting a standing declaration also closes its session. Synthesized foremen
+and undeclared adapter defaults are shown but cannot be deleted there.
 
 CLI arguments are entered one argument per line. A line such as `local model`
 is one argument, not two shell words, and their order is preserved in `args:`.
+Factory normalizes the separate runtime session name to Herdr's lowercase,
+32-character identifier contract without changing the configured agent name.
 
 Each standing agent also carries the command to get into its terminal yourself —
 `herdr --session factory agent attach factory-demo-watcher`. A shell session has

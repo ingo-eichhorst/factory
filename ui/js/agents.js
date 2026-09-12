@@ -7,7 +7,7 @@ import { scrim, closeModal, dropModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
-import { agentConfigurePayload } from "./agent-config.js";
+import { agentConfigurePayload, agentDeletePayload } from "./agent-config.js";
 // The roster and the wiring open each other: the wiring builds the rail at
 // boot, and this is the other place /api/agents is refetched, which is the
 // only thing the rail's tree is made of. A cycle ES modules handle, because
@@ -64,6 +64,8 @@ export function renderAgents() {
         buttons.push(`<button class="btn" data-act="term" data-id="${esc(a.id || "")}" ${live ? "" : "disabled"}>Terminal</button>`);
       }
       buttons.push(`<button class="btn" data-act="task" data-scope="${esc(s.name)}" data-agent="${esc(a.adapter)}">Start task…</button>`);
+      if (a.deletable && state.scope === s.name)
+        buttons.push(`<button class="btn danger" data-act="delete" data-scope="${esc(s.name)}" data-name="${esc(a.name)}">Delete</button>`);
 
       const rolePicker = standing && a.id
         ? `<select class="rolepick" data-act="role" data-id="${esc(a.id)}" title="What this agent is allowed to do">
@@ -146,6 +148,14 @@ export async function agentAction(el) {
       return openCreate({ scope: el.dataset.scope, agent: el.dataset.agent });
     } else if (act === "configure") {
       return openAgentCreate(el.dataset.scope);
+    } else if (act === "delete") {
+      const payload = agentDeletePayload(el.dataset.scope, el.dataset.name);
+      if (!confirm(`Delete ${payload.name} from ${payload.scope}? Any standing session will be stopped.`)) return;
+      el.disabled = true;
+      await api("/api/agents/configure", {
+        method: "DELETE",
+        body: JSON.stringify(payload),
+      });
     } else if (act === "copy") {
       await navigator.clipboard.writeText(el.dataset.copy).catch(() => {});
       const was = el.textContent; el.textContent = "Copied"; setTimeout(() => { el.textContent = was; }, 1200);
