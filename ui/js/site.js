@@ -6,6 +6,17 @@
 //!
 //! What a hall is made of:
 //!   - its footprint comes from `/api/site`, the scope's size on disk;
+//!   - its floor comes from the same call -- `areas`, the scope's top-level
+//!     entries, squarified once here (`computeFloor`) and handed through
+//!     `getScene()` so the plan and the lit render treemap nothing twice and
+//!     place the same directory in the same corner. A scope that could not
+//!     be walked keeps the hatch and "floor not recorded"; one that was
+//!     walked and found empty gets a plain floor and says "floor empty" --
+//!     `size_bytes` already draws that line between "unknown" and "really
+//!     zero", and the floor has to keep it, not flatten the two into one
+//!     drawing. A truncated walk draws its floor and says it is partial,
+//!     because its proportions are a lower bound, not a measurement
+//!     (`site.rs`'s `ENTRY_CAP`);
 //!   - its state and its workers come from `/api/agents` -- an `AgentView`'s
 //!     `active` runs are the only bays Factory has, because Factory has no
 //!     bay: "a row is an agent, not a bay" (`occupancy.rs`). A figure is drawn
@@ -13,11 +24,9 @@
 //!   - the runs queued at its door come from `state.tasks`, filtered to this
 //!     scope's pending tasks -- the same list the Tasks view already holds.
 //!
-//! What this does not draw, and why: no floor treemap (a scope's top-level
-//! directory sizes are not served, so the floor says "not recorded" rather
-//! than guessing); no file a session is editing (`FOCUS` in the prototype --
-//! not anything Factory records, full stop); no cross-scope workflow trace
-//! (Factory has no hand-off graph to draw one from).
+//! What this does not draw, and why: no file a session is editing (`FOCUS` in
+//! the prototype -- not anything Factory records, full stop); no cross-scope
+//! workflow trace (Factory has no hand-off graph to draw one from).
 
 import { $, esc, api, state, since, statusBadge } from "./core.js";
 import { inScope, scopeLabel } from "./scopes.js";
@@ -35,8 +44,24 @@ let ZONE = null;
 let AISLE = [];
 let SPURS = [];
 let footprintByName = {};    // scope name -> bytes, or null when unknown
+let areasByName = {};        // scope name -> { areas: ScopeArea[], truncated }
 let footprintLoaded = false;
 let sel = null;               // selected hall id
+
+/// The floor's inset from the hall's own walls -- the same margin `shellBase`
+/// already clips its hatch to, so the treemap and the fallback hatch occupy
+/// exactly the same rectangle and opening a roof never shifts the floor.
+const FLOOR_INSET = 0.15;
+
+/// Colours the floor treemap cycles through -- a dedicated ramp (`--ly1`
+/// through `--ly6`), read out of CSS the same way `readPalette` reads
+/// everything else. Not the hall's own greys (`wallA`/`roof2`/`paint`/...):
+/// those sit close enough to each other and to the ground around them that a
+/// treemap painted from them reads as one slab. Not the hall-state colours
+/// (`run`/`idle`/`wait`/`fault`) either -- those mean something specific
+/// about a run, and a directory tile borrowing one would read as a claim
+/// about work rather than about size.
+const AREA_KEYS = ["ly1", "ly2", "ly3", "ly4", "ly5", "ly6"];
 
 export const layers = { agents: true, flow: true, zones: true, labels: true };
 
@@ -53,11 +78,81 @@ async function loadFootprint() {
   try {
     const data = (await api("/api/site")).footprint;
     footprintByName = {};
-    for (const s of data.scopes) footprintByName[s.name] = s.size_bytes ?? null;
+    areasByName = {};
+    for (const s of data.scopes) {
+      footprintByName[s.name] = s.size_bytes ?? null;
+      areasByName[s.name] = { areas: s.areas || [], truncated: !!s.truncated };
+    }
   } catch {
     footprintByName = {};
+    areasByName = {};
   }
   footprintLoaded = true;
+}
+
+/// Squarified treemap (Bruls, Huizing & van Wijk): lays `values` -- each
+/// carrying `.a`, an area already scaled so the values sum to `w * h` -- into
+/// the rectangle `(x, y, w, h)`. At every step it grows the row it is
+/// building by one more item only while that keeps the row's worst aspect
+/// ratio the same or better, so tiles stay squarish instead of degrading
+/// into slivers as the sizes get more lopsided; `items` must already be
+/// sorted largest first, which is how `/api/site` already sends `areas`.
+function squarifyRect(values, x, y, w, h) {
+  const tiles = [];
+  let items = values.slice();
+  let rx = x, ry = y, rw = w, rh = h;
+
+  function worst(row, side) {
+    const sum = row.reduce((s, v) => s + v.a, 0);
+    if (sum <= 0 || side <= 0) return Infinity;
+    const maxA = Math.max(...row.map((v) => v.a));
+    const minA = Math.max(1e-9, Math.min(...row.map((v) => v.a)));
+    const s2 = side * side;
+    return Math.max((s2 * maxA) / (sum * sum), (sum * sum) / (s2 * minA));
+  }
+
+  while (items.length) {
+    const side = Math.min(rw, rh);
+    let row = [items[0]];
+    let k = 1;
+    while (k < items.length) {
+      const trial = row.concat(items[k]);
+      if (worst(trial, side) <= worst(row, side)) { row = trial; k++; } else break;
+    }
+    const rowSum = row.reduce((s, v) => s + v.a, 0);
+    const vertical = rw <= rh; // the row fills the short side, laid across it
+    const thickness = vertical ? rowSum / Math.max(rw, 1e-9) : rowSum / Math.max(rh, 1e-9);
+    let cursor = vertical ? rx : ry;
+    row.forEach((v) => {
+      const extent = thickness > 0 ? v.a / thickness : 0;
+      if (vertical) {
+        tiles.push({ name: v.name, size_bytes: v.size_bytes, x: cursor, y: ry, w: extent, h: thickness });
+      } else {
+        tiles.push({ name: v.name, size_bytes: v.size_bytes, x: rx, y: cursor, w: thickness, h: extent });
+      }
+      cursor += extent;
+    });
+    if (vertical) { ry += thickness; rh -= thickness; } else { rx += thickness; rw -= thickness; }
+    items = items.slice(row.length);
+  }
+  return tiles;
+}
+
+/// The floor a hall's `areas` treemap onto, computed once so the plan and the
+/// lit render both read it off `getScene()` rather than laying it out twice.
+/// `[]` for a scope with no areas -- whether that is because it could not be
+/// walked or because the walk found nothing is `size_bytes`'s distinction to
+/// draw, not this function's; the caller reads that separately.
+function computeFloor(areas, w, d) {
+  const fw = w - FLOOR_INSET * 2, fd = d - FLOOR_INSET * 2;
+  if (!areas || !areas.length || fw <= 0 || fd <= 0) return { tiles: [] };
+  const total = areas.reduce((s, a) => s + a.size_bytes, 0);
+  if (total <= 0) return { tiles: [] };
+  const rectArea = fw * fd;
+  const values = areas.map((a) => ({ name: a.name, size_bytes: a.size_bytes, a: (a.size_bytes / total) * rectArea }));
+  const tiles = squarifyRect(values, FLOOR_INSET, FLOOR_INSET, fw, fd);
+  tiles.forEach((t, i) => { t.colorKey = AREA_KEYS[i % AREA_KEYS.length]; });
+  return { tiles };
 }
 
 function hallState(scope) {
@@ -145,14 +240,17 @@ export function buildSite() {
     const k = known ? Math.max(bytes / 1e6, 0.02) : 1;
     const s = side(k);
     const agentCount = Math.max(1, scope.agents.length);
+    const w = Math.round(s * 1.05 * 100) / 100;
+    const d = Math.round(s * 0.9 * 100) / 100;
+    const areaInfo = areasByName[scope.name] || { areas: [], truncated: false };
     return {
       id: scope.name,
       name: scope.name,
       path: scope.path,
       runtime: scope.runtime,
       defaultAgent: scope.default_agent,
-      w: Math.round(s * 1.05 * 100) / 100,
-      d: Math.round(s * 0.9 * 100) / 100,
+      w,
+      d,
       h: Math.min(3.3, 2.1 + 0.3 * Math.sqrt(agentCount)),
       sizeBytes: known ? bytes : null,
       footprintKnown: known,
@@ -160,6 +258,11 @@ export function buildSite() {
       agents: scope.agents,
       workers: workersFor(scope),
       queued: queuedAt(scope.name),
+      // Computed once, here, so the plan and the lit render treemap nothing
+      // twice and place the same directory in the same corner of the floor.
+      areas: areaInfo.areas,
+      areasTruncated: areaInfo.truncated,
+      floor: computeFloor(areaInfo.areas, w, d),
       open: 0,
       openT: 0,
     };
@@ -244,7 +347,8 @@ let renderMod = null, renderFailed = false, renderMode = 0;
 function readPalette() {
   const s = getComputedStyle(document.documentElement);
   ["ground", "ground2", "plate", "paint", "roof", "roof2", "wallA", "wallB", "ink", "muted", "faint",
-   "line", "signal", "run", "idle", "wait", "fault", "panel", "sunk"].forEach((k) => {
+   "line", "signal", "run", "idle", "wait", "fault", "panel", "sunk",
+   "ly1", "ly2", "ly3", "ly4", "ly5", "ly6"].forEach((k) => {
     C[k] = (s.getPropertyValue("--" + k) || "").trim() || "#888888";
   });
 }
@@ -340,6 +444,32 @@ function plinth(b) {
     C.plate, C.line, 1);
 }
 
+/// An area tile's name, drawn only once the tile is large enough on screen to
+/// hold it -- the same "too small, leave it to the tooltip" rule the rest of
+/// this renderer already applies, just measured per tile instead of per hall.
+function floorLabel(t, b, alpha) {
+  const fs = Math.max(8, Math.min(11, 7 * cam.z + 2));
+  ctx.font = '600 ' + fs + 'px "IBM Plex Mono", monospace';
+  const tw = ctx.measureText(t.name).width;
+  // A diamond t.w wide and t.h deep in grid space projects to roughly this
+  // many pixels across -- cheap enough to not need the tile's real corners.
+  const wpx = (t.w + t.h) * (TW / 2) * cam.z;
+  if (tw + 10 > wpx) return;
+  const p = P(b.x + t.x + t.w / 2, b.y + t.y + t.h / 2, 0.09);
+  // The same panel-chip vocabulary `label()` already uses for a hall's own
+  // name -- palette colours, not new ones, so the chip reads the same way
+  // over any tile colour and in either theme.
+  ctx.save(); ctx.globalAlpha = alpha * 0.93;
+  ctx.fillStyle = C.panel;
+  ctx.fillRect(p[0] - tw / 2 - 4, p[1] - fs / 2 - 2, tw + 8, fs + 4);
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1;
+  ctx.strokeRect(p[0] - tw / 2 - 4, p[1] - fs / 2 - 2, tw + 8, fs + 4);
+  ctx.fillStyle = C.ink; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(t.name, p[0], p[1] + 1);
+  ctx.restore();
+}
+
 function shellBase(b) {
   const open = b.open || 0;
   if (open < 0.04) return;
@@ -347,26 +477,77 @@ function shellBase(b) {
   ctx.save(); ctx.globalAlpha = Math.min(1, open * 1.6);
   poly([[x, y, 0.04], [x + w, y, 0.04], [x + w, y + d, 0.04], [x, y + d, 0.04]], C.ground2, null);
   ctx.restore();
-  // The floor itself is not drawn: Factory does not read a scope's directory
-  // tree, so a hatch and a label say "not recorded" rather than an invented
-  // treemap or an empty-looking void.
-  ctx.save(); ctx.globalAlpha = Math.min(1, open * 1.6) * 0.8;
-  ctx.save();
-  const clipPts = [[x + 0.15, y + 0.15, 0.05], [x + w - 0.15, y + 0.15, 0.05], [x + w - 0.15, y + d - 0.15, 0.05], [x + 0.15, y + d - 0.15, 0.05]];
-  ctx.beginPath();
-  clipPts.forEach((p, i) => { const q = P(p[0], p[1], p[2]); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
-  ctx.closePath(); ctx.clip();
-  ctx.globalAlpha = Math.min(1, open * 1.6) * 0.18;
-  const step = 0.5;
-  for (let k = -d; k < w + d; k += step) line([[x + k, y, 0.05], [x + k + d, y + d, 0.05]], C.faint, 1);
-  ctx.restore();
-  poly(clipPts, null, C.faint, 1);
-  ctx.restore();
-  if (open > 0.6 && cam.z > 0.8) {
-    ctx.save(); ctx.globalAlpha = open;
-    text("floor not recorded", x + w / 2, y + d / 2, 0.07,
-      '500 ' + Math.max(9, 7.5 * cam.z + 3).toFixed(0) + 'px "IBM Plex Mono", monospace', C.faint);
+  const clipPts = [[x + FLOOR_INSET, y + FLOOR_INSET, 0.05], [x + w - FLOOR_INSET, y + FLOOR_INSET, 0.05],
+    [x + w - FLOOR_INSET, y + d - FLOOR_INSET, 0.05], [x + FLOOR_INSET, y + d - FLOOR_INSET, 0.05]];
+  const tiles = b.floor.tiles;
+  if (tiles.length) {
+    // The floor is served: treemap the scope's top-level entries onto it,
+    // largest first, in the same corners `site-render.js` draws them --
+    // both read `b.floor`, computed once in `buildSite`, rather than laying
+    // the tiles out twice.
+    const alpha = Math.min(1, open * 1.6);
+    ctx.save(); ctx.globalAlpha = alpha;
+    ctx.save();
+    ctx.beginPath();
+    clipPts.forEach((p, i) => { const q = P(p[0], p[1], p[2]); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+    ctx.closePath(); ctx.clip();
+    tiles.forEach((t) => {
+      const tx = x + t.x, ty = y + t.y;
+      poly([[tx, ty, 0.05], [tx + t.w, ty, 0.05], [tx + t.w, ty + t.h, 0.05], [tx, ty + t.h, 0.05]],
+        C[t.colorKey], C.line, 0.6);
+    });
     ctx.restore();
+    poly(clipPts, null, C.faint, 1);
+    ctx.restore();
+    if (layers.labels && open > 0.6 && cam.z > 1.0) {
+      ctx.save(); ctx.globalAlpha = alpha;
+      tiles.forEach((t) => floorLabel(t, b, alpha));
+      ctx.restore();
+    }
+    // A truncated walk's proportions are a lower bound, not a measurement --
+    // the floor still draws, but says so instead of passing off 40,000
+    // entries of a much larger tree as the whole of it.
+    if (b.areasTruncated && open > 0.6 && cam.z > 0.8) {
+      ctx.save(); ctx.globalAlpha = open;
+      text("floor partial — cap reached", x + w / 2, y + d - FLOOR_INSET - 0.3, 0.07,
+        '500 ' + Math.max(9, 7.5 * cam.z + 3).toFixed(0) + 'px "IBM Plex Mono", monospace', C.faint);
+      ctx.restore();
+    }
+  } else if (b.footprintKnown) {
+    // Walked, and there was nothing there: a real floor, not an unknown one.
+    // `size_bytes` already draws this line between empty and unreadable
+    // (`Some(0)` here, `None` in the branch below) -- the floor has to keep
+    // it too, or the two facts collapse into the same drawing.
+    ctx.save(); ctx.globalAlpha = Math.min(1, open * 1.6);
+    poly(clipPts, C.plate, C.faint, 1);
+    ctx.restore();
+    if (open > 0.6 && cam.z > 0.8) {
+      ctx.save(); ctx.globalAlpha = open;
+      text("floor empty", x + w / 2, y + d / 2, 0.07,
+        '500 ' + Math.max(9, 7.5 * cam.z + 3).toFixed(0) + 'px "IBM Plex Mono", monospace', C.faint);
+      ctx.restore();
+    }
+  } else {
+    // The floor itself is not drawn: Factory could not walk this scope's
+    // directory tree, so a hatch and a label say "not recorded" rather than
+    // an invented treemap or an empty-looking void.
+    ctx.save(); ctx.globalAlpha = Math.min(1, open * 1.6) * 0.8;
+    ctx.save();
+    ctx.beginPath();
+    clipPts.forEach((p, i) => { const q = P(p[0], p[1], p[2]); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+    ctx.closePath(); ctx.clip();
+    ctx.globalAlpha = Math.min(1, open * 1.6) * 0.18;
+    const step = 0.5;
+    for (let k = -d; k < w + d; k += step) line([[x + k, y, 0.05], [x + k + d, y + d, 0.05]], C.faint, 1);
+    ctx.restore();
+    poly(clipPts, null, C.faint, 1);
+    ctx.restore();
+    if (open > 0.6 && cam.z > 0.8) {
+      ctx.save(); ctx.globalAlpha = open;
+      text("floor not recorded", x + w / 2, y + d / 2, 0.07,
+        '500 ' + Math.max(9, 7.5 * cam.z + 3).toFixed(0) + 'px "IBM Plex Mono", monospace', C.faint);
+      ctx.restore();
+    }
   }
 }
 
@@ -565,10 +746,23 @@ function bindInput() {
     }
     const b = pick(e.offsetX, e.offsetY);
     hov = b ? b.id : null;
+    // The floor sits near z=0, close enough that the hall's own pick offset
+    // (which corrects for its roof height) would miss every tile -- reproject
+    // the raw pointer instead, but only once a hall's roof is open enough to
+    // show a floor at all.
+    let tile = null;
+    if (b && b.open > 0.6 && b.floor.tiles.length) {
+      const g2 = unP(e.offsetX, e.offsetY);
+      const lx = g2[0] - b.x, ly = g2[1] - b.y;
+      tile = b.floor.tiles.find((t) => lx >= t.x && lx <= t.x + t.w && ly >= t.y && ly <= t.y + t.h) || null;
+    }
     if (b && tip) {
       const size = b.footprintKnown ? mb(b.sizeBytes) : "size not recorded";
-      const sub = `${b.runtime} · ${b.agents.length} agent${b.agents.length === 1 ? "" : "s"} · ${size} · click to ${b.openT ? "close" : "open"} the roof`;
-      tip.innerHTML = `<b>${esc(b.name)}</b><span class="k">${esc(sub)}</span>`;
+      const lines = [`${b.runtime} · ${b.agents.length} agent${b.agents.length === 1 ? "" : "s"} · ${size} · click to ${b.openT ? "close" : "open"} the roof`];
+      // The hall tooltip already exists; a hovered tile names the directory
+      // and its size on top of it rather than opening a second tooltip.
+      if (tile) lines.unshift(`${tile.name} · ${mb(tile.size_bytes)}${b.areasTruncated ? " · partial" : ""}`);
+      tip.innerHTML = `<b>${esc(b.name)}</b>` + lines.map((l) => `<span class="k">${esc(l)}</span>`).join("");
       tip.style.left = Math.min(e.offsetX + 14, W - 244) + "px";
       tip.style.top = (e.offsetY + 14) + "px";
       tip.style.opacity = 1;
@@ -595,6 +789,13 @@ function renderRail() {
     wait: ["s-blocked", "blocked"], run: ["s-running", "running"],
     fault: ["s-failed", "agent error"], idle: ["s-pending", "idle"],
   }[b.state];
+  // Same facts the floor itself draws: nothing measured, a measurement that
+  // found nothing, a real measurement, or one the walk had to cut short.
+  const floorNote = !b.areas.length
+    ? (b.footprintKnown ? "floor empty" : "floor detail not recorded")
+    : b.areasTruncated
+      ? "floor detail partial — the walk hit its cap before it finished"
+      : `${b.areas.length} area${b.areas.length === 1 ? "" : "s"} on the floor`;
   let h = `<div class="scope"><div class="head">
       <h3>${esc(b.name)}</h3><span class="sub">${esc(b.path)}</span>
     </div>
@@ -602,7 +803,7 @@ function renderRail() {
       <span class="badge ${hallBadge[0]}">${esc(hallBadge[1])}</span>
       <span class="sub">${esc(b.runtime)} · default agent ${esc(b.defaultAgent)}</span>
     </div>
-    <div class="sub">${b.footprintKnown ? mb(b.sizeBytes) : "size not recorded"} on disk · floor detail not recorded</div>
+    <div class="sub">${b.footprintKnown ? mb(b.sizeBytes) : "size not recorded"} on disk · ${esc(floorNote)}</div>
     </div>`;
 
   if (b.queued.length) {

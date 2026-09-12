@@ -504,3 +504,22 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 .inbox-item .it-t .sub { display: block; }
 .inbox-item .it-age { flex: 0 0 auto; color: var(--faint); font: 400 10.5px/1.4 var(--mono); }
 @media (max-width: 980px) { .drow { grid-template-columns: 1fr; } }
+
+/* ===== site plan: hall floor =====
+   A dedicated ramp for the floor treemap's tiles, read by both site
+   renderers the same way they already read `--wallA` and friends. It is
+   separate from `--wallA`/`--roof2`/`--paint` and the rest of the hall's own
+   greys on purpose: those sit close enough in lightness to each other and to
+   the ground around them that a treemap painted from them reads as one slab.
+   It is also separate from `--run`/`--idle`/`--wait`/`--fault`: those four
+   already mean something specific about a run, and a directory tile
+   borrowing one would read as a claim about work rather than about size. */
+:root,
+:root[data-theme="foundry-dark"] {
+  --ly1: #6E7CD8; --ly2: #896ED8; --ly3: #B16ED8;
+  --ly4: #D86ED8; --ly5: #D86EB1; --ly6: #D86E8A;
+}
+:root[data-theme="foundry-light"] {
+  --ly1: #2E3D9E; --ly2: #4A2E9E; --ly3: #752E9E;
+  --ly4: #9E2E9E; --ly5: #9E2E75; --ly6: #9E2E4C;
+}
