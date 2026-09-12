@@ -104,8 +104,17 @@ export function scopeOptions(selected) {
   // Someone looking at one scope is almost certainly making a task for it, so
   // the selection stands in for a prefill the caller did not give.
   const on = selected || state.scope;
-  return `<option value="">(first scope)</option>` + state.scopeNames.map(s =>
-    `<option value="${esc(s)}" ${s === on ? "selected" : ""}>${esc(s)}</option>`).join("");
+  // `state.scopes` -- the `/api/agents` list -- not `state.scopeNames`:
+  // that is `/api/status`'s declared-only handful, kept small on purpose,
+  // while discovery means most of the places a task can actually go were
+  // never declared at all. A container directory with no `scopes:` entry of
+  // its own is exactly the kind of destination #16 exists to make choosable
+  // here, so it has to be offered, not just drawn as a rail row. Each
+  // option's label is the scope's full identity -- its path from the
+  // instance root -- which is what keeps two directories both named `src`
+  // apart.
+  return `<option value="">(first scope)</option>` + state.scopes.map(s =>
+    `<option value="${esc(s.name)}" ${s.name === on ? "selected" : ""}>${esc(s.name)}</option>`).join("");
 }
 
 /// The fields a task carries beyond its title. Shared by create and edit so the
@@ -114,7 +123,7 @@ export function taskFields(v) {
   v = v || {};
   // Which scope the agent list is for has to be the one the scope select shows,
   // selection included, or the form offers agents that scope never declared.
-  const scope = v.scope || state.scope || state.scopeNames[0];
+  const scope = v.scope || state.scope || (state.scopes[0] && state.scopes[0].name);
   return `
     <label for="c-title">Title</label>
     <input id="c-title" placeholder="What should happen" value="${esc(v.title || "")}">
@@ -144,7 +153,7 @@ export function wireScopeAgent() {
   const scope = $("c-scope");
   if (!scope) return;
   scope.onchange = () => {
-    $("c-agent").innerHTML = agentOptions(scope.value || state.scopeNames[0], null);
+    $("c-agent").innerHTML = agentOptions(scope.value || (state.scopes[0] && state.scopes[0].name), null);
   };
 }
 
