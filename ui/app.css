@@ -505,6 +505,70 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 .inbox-item .it-age { flex: 0 0 auto; color: var(--faint); font: 400 10.5px/1.4 var(--mono); }
 @media (max-width: 980px) { .drow { grid-template-columns: 1fr; } }
 
+/* ===== dashboard: history ===== */
+/* Everything below is new for issue #14: the window selector's active state,
+   KPI sparklines, the throughput chart, the on-the-line breakdown and the
+   production-year grid. No rule above this line is touched. */
+
+.kpi .d.up { color: var(--run); }
+.kpi .d.down { color: var(--fault); }
+.kpi .d.flat { color: var(--faint); }
+.kpi svg { margin-top: 2px; width: 100%; height: 26px; display: block; }
+
+.dnote { margin: 10px 0 0; font: 400 10.5px/1.55 var(--sans); color: var(--faint); }
+
+.bigchart { width: 100%; height: auto; display: block; }
+.bc-run { fill: var(--run); }
+.bc-rework { fill: var(--wait); }
+.bc-mean { stroke: var(--faint); stroke-width: 1; stroke-dasharray: 3 3; }
+.bc-partial { opacity: .55; }
+.chleg { display: flex; gap: 14px; margin-top: 8px; font: 400 10px/1 var(--mono); color: var(--muted); }
+.chleg i { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 1px; }
+.chleg .l-run { background: var(--run); }
+.chleg .l-rework { background: var(--wait); }
+
+.stngrp {
+  font: 600 8.5px/1 var(--cond); letter-spacing: .13em; text-transform: uppercase; color: var(--faint);
+  margin: 9px 0 4px; padding-top: 7px; border-top: 1px solid var(--line-soft);
+}
+.stngrp:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+.stn { display: flex; align-items: center; gap: 9px; padding: 4px 0; font-size: 11.5px; }
+.stn .nm { flex: 0 0 92px; color: var(--ink-2); }
+.stn .track { flex: 1; height: 7px; background: var(--sunk); border-radius: 2px; overflow: hidden; min-width: 0; }
+.stn .track i { display: block; height: 100%; border-radius: 2px; }
+.stn .c { font: 500 11px/1 var(--mono); color: var(--ink); width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* The production year: a GitHub-contribution-style grid, one tile per day,
+   53 weeks ending today. A tile before the earliest recorded run is drawn as
+   "no record", not as a zero -- see `dashboard.js`'s `calTile`. */
+.calwrap { overflow-x: auto; padding-bottom: 2px; }
+.calmon { display: flex; gap: 3px; margin: 0 0 4px 34px; min-width: 640px; }
+.calmon span { flex: 0 0 11px; font: 500 8.5px/1 var(--mono); color: var(--faint); white-space: nowrap; overflow: visible; }
+.calbody { display: flex; gap: 5px; min-width: 640px; }
+.caldow { display: flex; flex-direction: column; gap: 3px; flex: 0 0 29px; }
+.caldow span { height: 11px; font: 400 8.5px/11px var(--mono); color: var(--faint); text-align: right; }
+.calgrid { display: flex; gap: 3px; }
+.cw { display: flex; flex-direction: column; gap: 3px; }
+.cw i { width: 11px; height: 11px; border-radius: 2px; display: block; background: var(--sunk); }
+.calwrap i.future { background: transparent; }
+.calwrap i.no-record { background: transparent; box-shadow: inset 0 0 0 1px var(--line-soft); }
+.calwrap i.l0, .calwrap i.s0 { background: var(--sunk); }
+.calwrap i.l1 { background: color-mix(in srgb, var(--run) 28%, var(--sunk)); }
+.calwrap i.l2 { background: color-mix(in srgb, var(--run) 52%, var(--sunk)); }
+.calwrap i.l3 { background: color-mix(in srgb, var(--run) 76%, var(--sunk)); }
+.calwrap i.l4 { background: var(--run); }
+.calwrap i.s1 { background: color-mix(in srgb, var(--fault) 28%, var(--sunk)); }
+.calwrap i.s2 { background: color-mix(in srgb, var(--fault) 52%, var(--sunk)); }
+.calwrap i.s3 { background: color-mix(in srgb, var(--fault) 76%, var(--sunk)); }
+.calwrap i.s4 { background: var(--fault); }
+.calwrap i.bad {
+  box-shadow: inset 0 0 0 1px var(--fault);
+  background-image: repeating-linear-gradient(135deg, color-mix(in srgb, var(--fault) 55%, transparent) 0 2px, transparent 2px 4px);
+}
+.calleg { display: flex; align-items: center; gap: 14px; margin-top: 11px; flex-wrap: wrap; font: 400 10px/1 var(--mono); color: var(--faint); }
+.calleg .k { display: inline-flex; align-items: center; gap: 5px; }
+.calleg i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.calfoot { margin: 12px 0 0; font: 400 11px/1.6 var(--sans); color: var(--ink-2); max-width: 96ch; }
 /* ===== site plan: hall floor =====
    A dedicated ramp for the floor treemap's tiles, read by both site
    renderers the same way they already read `--wallA` and friends. It is

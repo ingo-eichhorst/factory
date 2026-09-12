@@ -43,7 +43,10 @@ function rerender(route) {
   // route over rather than reaching into the view, because which view is showing
   // is the page's business.
   if (route && route.tab !== state.tab) showTab(route.tab);
-  if (state.tab === "dashboard") { renderDashboard(); return; }
+  // Unlike the other views, the dashboard's history cards are scoped on the
+  // server (`/api/production` takes a scope), not just re-drawn narrower --
+  // so a rail change has to refetch, not merely re-render.
+  if (state.tab === "dashboard") { loadDashboard(); return; }
   // The activity log is a tail of events as they arrive, not a table of rows
   // that can be re-drawn narrower, so the selection does not reach it.
   if (state.tab === "activity") return;
@@ -197,6 +200,10 @@ function onEvent(ev) {
     }
     if (state.tab === "site") refreshScopesThenSite();
   }
+  // A run reaching a terminal state is the one event that can change what
+  // `/api/production` answers -- the dashboard's history cards refetch on it
+  // rather than waiting for the window or scope to change.
+  if (ev.type === "run_updated" && state.tab === "dashboard") loadDashboard();
 }
 
 /// The site's halls are built from `state.scopes`, which only the Agents view

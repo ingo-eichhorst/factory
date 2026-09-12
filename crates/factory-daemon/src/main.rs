@@ -6,6 +6,7 @@ mod agents;
 mod engine;
 mod interfaces;
 mod occupancy;
+mod production;
 mod scheduler;
 mod schedule;
 mod site;
