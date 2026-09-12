@@ -11,20 +11,24 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 report() {
-  local env="$1" line state base
+  local env="$1" line state base tail_url
   base="$(http_base "$env")"
+  tail_url="$(tailscale_url "$env" 2>/dev/null || echo unavailable)"
 
   if is_running "$env"; then
-    if curl -fsS -o /dev/null --max-time 2 "$base/api/status" 2>/dev/null; then
-      state="up"
+    if ! curl --noproxy '*' -fsS -o /dev/null --max-time 2 "$base/api/status" 2>/dev/null; then
+      state="wedged"   # the process is alive and its LAN endpoint is not answering
+    elif [ "$tail_url" = unavailable ] \
+      || ! curl --noproxy '*' -fsS -o /dev/null --max-time 2 "$tail_url/api/status" 2>/dev/null; then
+      state="partial"  # LAN is up but the promised Tailscale route is not
     else
-      state="wedged"   # the process is alive and the port is not answering
+      state="up"
     fi
   else
     state="down"
   fi
 
-  line="$(printf '%-12s %-7s %s' "$env" "$state" "$base")"
+  line="$(printf '%-12s %-7s %s  lan %s' "$env" "$state" "$tail_url" "$base")"
   if commit="$(released_field "$env" commit 2>/dev/null)"; then
     line="$line  $(printf '%.9s' "$commit")"
     line="$line $(released_field "$env" ref 2>/dev/null || echo '?')"

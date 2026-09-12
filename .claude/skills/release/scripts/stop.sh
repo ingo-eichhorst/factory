@@ -13,6 +13,10 @@ set -euo pipefail
 [ $# -eq 1 ] || { echo "usage: stop.sh <env>" >&2; exit 2; }
 ENV_NAME="$1"
 
+if [ "$(mode_for "$ENV_NAME")" = company ]; then
+  die "$ENV_NAME is the launchd-managed company instance; stop it explicitly with launchctl bootout if downtime is intended"
+fi
+
 if ! PID="$(pid_of "$ENV_NAME")"; then
   note "$ENV_NAME is not running"
   rm -f "$(env_pid "$ENV_NAME")"
