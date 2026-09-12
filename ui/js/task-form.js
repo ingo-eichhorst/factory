@@ -2,14 +2,14 @@
 //! made in the browser can say everything a task made on the command line can.
 
 import { $, esc, api, state } from "./core.js";
-import { scrim, closeModal } from "./modal.js";
+import { scrim, closeModal, dropModal } from "./modal.js";
 // The form and the task modal open each other: edit comes from the modal, and
 // saving goes back to it. A cycle ES modules handle, because nothing here runs
 // until a button is pressed.
 import { openTask, renderTasks } from "./tasks.js";
 
 export function openCreate(prefill) {
-  closeModal();
+  dropModal();
   prefill = prefill || {};
   scrim(`
     <header><div><h2>New task</h2></div><button class="x" id="c-close">&times;</button></header>
@@ -32,7 +32,7 @@ export function openCreate(prefill) {
 /// rescheduled by the daemon, which is why this is a PATCH rather than a write
 /// straight into the store.
 export function openEdit(task) {
-  closeModal();
+  dropModal();
   scrim(`
     <header><div><h2>Edit task</h2><code class="id">${esc(task.id)}</code></div>
       <button class="x" id="c-close">&times;</button></header>

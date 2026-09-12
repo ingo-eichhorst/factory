@@ -3,7 +3,7 @@
 
 import { $, esc, api, state, since, statusBadge } from "./core.js";
 import { inScope, scopeLabel } from "./scopes.js";
-import { scrim, closeModal } from "./modal.js";
+import { scrim, closeModal, dropModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
@@ -151,7 +151,7 @@ export async function agentAction(el) {
 }
 
 export async function openAgent(id) {
-  closeModal();
+  dropModal();
   const found = findAgent(id);
   scrim(`
     <header>

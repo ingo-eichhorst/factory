@@ -2,8 +2,8 @@
 //! whichever run is selected.
 
 import { $, esc, api, state, since, statusBadge, TERMINAL } from "./core.js";
-import { inScope, scopeLabel } from "./scopes.js";
-import { scrim, closeModal } from "./modal.js";
+import { inScope, scopeLabel, writeHash } from "./scopes.js";
+import { scrim, closeModal, dropModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openEdit, scheduleText } from "./task-form.js";
 
@@ -38,10 +38,15 @@ export function renderTasks() {
   }
 }
 
+/// A task is a place, and it opens over whichever view you were on -- the list,
+/// the dashboard's history, the roster, the occupancy chart, a hall on the site
+/// plan. So the URL is written here rather than at each of those call sites, and
+/// pushed: Back is how you close it.
 export async function openTask(id, runId) {
-  closeModal();
+  dropModal();
   state.open = id;
   state.run = runId || null;
+  writeHash();
   scrim(`
     <header>
       <div><h2 id="m-title">…</h2><code class="id" id="m-id"></code></div>
@@ -71,6 +76,9 @@ export async function openTask(id, runId) {
   wireTerminal();
 
   await loadRuns();
+  // `loadRuns` picks the newest run when the link did not name one, so the URL
+  // only now knows what is on screen. A correction, not a move: replace.
+  writeHash(true);
   renderModal();
   await loadJournal();
   retimeTerminal();
@@ -139,7 +147,11 @@ export function renderModal() {
   }).join("") : `<div class="sub">Not run yet.</div>`;
 
   for (const b of $("m-runs").querySelectorAll("button")) {
-    b.onclick = () => { state.run = b.dataset.run; renderModal(); loadJournal(); retimeTerminal(); };
+    b.onclick = () => {
+      state.run = b.dataset.run;
+      writeHash();
+      renderModal(); loadJournal(); retimeTerminal();
+    };
   }
 }
 
