@@ -115,6 +115,67 @@ function applyModal([taskId, runId]) {
   openTask(taskId, runId);
 }
 
+// -------------------------------------------------------------- decision levels
+//
+// Factory is six decision levels; the header names them L6 (what the factory
+// is for) through L1 (what it runs on). Only two are built, and which of the
+// five views hangs off each was the open question left for whoever picked
+// this up -- this map is the answer. Dashboard and Site plan are
+// cross-cutting and sit under both; change the assignment here and the
+// second tab row, the level row's own switching, and the hash's fallback in
+// `scopes.js` (handed this same map through `initRail`) all follow.
+//
+// `proc` is listed first on purpose: a tab shared by both levels (Dashboard,
+// Site plan) resolves to whichever level's list is checked first when a hash
+// names no level at all, so the order here decides that, not just this row.
+const LEVEL_VIEWS = {
+  proc: ["dashboard", "activity", "site", "tasks"],
+  harn: ["dashboard", "site", "agents"],
+};
+
+/// The live level that claims `tab`, for backfilling `state.level` before any
+/// hash has been read -- `scopes.js` keeps the same lookup for the hash
+/// itself, but it works from a copy of this map handed in through `initRail`,
+/// not from this function.
+function levelForTab(tab) {
+  for (const level of Object.keys(LEVEL_VIEWS)) {
+    if (LEVEL_VIEWS[level].includes(tab)) return level;
+  }
+  return null;
+}
+
+/// Light the selected level button and nothing else.
+function renderLevels() {
+  const row = $("levels");
+  if (!row) return;
+  for (const b of row.querySelectorAll(".lvl")) {
+    b.classList.toggle("on", b.dataset.level === state.level);
+  }
+}
+
+/// Show only the second-row tabs that belong to the selected level. A
+/// disabled level cannot reach this -- its buttons carry `disabled` and never
+/// fire a click -- so `LEVEL_VIEWS` only ever needs the two live levels.
+function renderTabRow() {
+  const views = LEVEL_VIEWS[state.level] || [];
+  for (const k of Object.keys(VIEWS)) {
+    $(`tab-${k}`).hidden = !views.includes(k);
+  }
+}
+
+/// What clicking a level button does: light it, swap the second row to its
+/// views, and land on the first of them if the tab on screen is not one --
+/// the same rule a hash-driven level change follows in `rerender`.
+function setLevel(level) {
+  if (level === state.level || !LEVEL_VIEWS[level]) return;
+  state.level = level;
+  renderLevels();
+  renderTabRow();
+  const views = LEVEL_VIEWS[level];
+  if (!views.includes(state.tab)) showTab(views[0]);
+  else writeHash();
+}
+
 // ------------------------------------------------------------------- scope
 
 /// What the rail does when the selection changes. Nothing is refetched: every
@@ -122,11 +183,22 @@ function applyModal([taskId, runId]) {
 /// is drawn. Re-render, never reload -- `loadAgents` rebuilds the rail, and a
 /// reload here would send it straight round again.
 function rerender(route) {
-  // Back and forward move the page and what is open inside it as well as the
-  // selection. The rail hands the route over rather than reaching into the view,
-  // because which view is showing is the page's business. A null `tail` is the
-  // rail rebuilding itself, not a navigation: the URL already describes what is
-  // on screen, and applying it again would re-open the task just closed.
+  // Back and forward move the level as well as the page and the scope
+  // selection, and the level goes first: the second tab row is filtered by it,
+  // and a page applied into a row that does not list it would be shown and
+  // hidden in the same tick. `route.level` is only ever present when the change
+  // came from the hash (a plain rail click carries none), and re-lighting the
+  // row and re-filtering the second one is cheap enough to do unconditionally
+  // rather than compare against what is already there.
+  if (route && route.level) {
+    state.level = route.level;
+    renderLevels();
+    renderTabRow();
+  }
+  // The rail hands the route over rather than reaching into the view, because
+  // which view is showing is the page's business. A null `tail` is the rail
+  // rebuilding itself, not a navigation: the URL already describes what is on
+  // screen, and applying it again would re-open the task just closed.
   if (route && route.tail) applyTail(route.page, route.tail);
   else if (route && route.page !== state.tab) showTab(route.page);
   // Unlike the other views, the dashboard's history cards are scoped on the
@@ -146,7 +218,7 @@ function rerender(route) {
 /// refetches /api/agents. Exported so that one does not have to know what the
 /// rail has to be rebuilt with.
 export function rebuildRail() {
-  initRail(rerender);
+  initRail(rerender, LEVEL_VIEWS);
 }
 
 // ------------------------------------------------------------------- tabs
@@ -232,6 +304,12 @@ async function boot() {
   for (const k of Object.keys(VIEWS)) {
     $(`tab-${k}`).onclick = () => showTab(k);
   }
+  // Only the two live levels reach here with a working click -- the four
+  // greyed ones carry `disabled` in the markup, and a disabled button never
+  // fires one.
+  for (const b of $("levels").querySelectorAll(".lvl")) {
+    b.onclick = () => setLevel(b.dataset.level);
+  }
   for (const b of $("agent-view").querySelectorAll("button")) {
     b.onclick = () => { showAgentView(b.dataset.view); writeHash(); };
   }
@@ -244,6 +322,14 @@ async function boot() {
   // `showTab` unconditionally, even for the dashboard the page already has on
   // screen, because a view that is never shown is never loaded either.
   const route = readHash();
+  // The level first, and before the route is applied: the second tab row is
+  // filtered by it, so a page shown while the level still says otherwise would
+  // land in a row that hides it. `initRail` has already taken the level off the
+  // hash if it named one; this backfills the case where it did not, which is
+  // every hash written before levels existed.
+  if (!state.level) state.level = levelForTab(route ? route.page : state.tab);
+  renderLevels();
+  renderTabRow();
   const [view, modal] = splitTail(route ? route.tail : []);
   applyRoute(() => {
     showTab(route ? route.page : "dashboard", view);

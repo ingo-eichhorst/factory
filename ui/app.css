@@ -27,6 +27,12 @@
      already on screen instead of needing a reload. */
   --ground: #0A0E11; --ground2: #141B1F; --plate: #1C2429; --paint: #D9A445;
   --roof: #2B363D; --roof2: #3A4750; --wallA: #232D33; --wallB: #1A2227;
+  /* The six decision levels, L1 through L6 -- one colour each, read by the
+     header's level row. `--lvl4`/`--lvl3` are the two Factory has built.
+     Not `--ly1`..`--ly6` -- the site plan's floor treemap already claims
+     those names below, for an unrelated ramp of lightness levels. */
+  --lvl1: #5FA8DC; --lvl2: #57BDBD; --lvl3: #3EB183;
+  --lvl4: #D9A445; --lvl5: #B98AD0; --lvl6: #D97158;
 }
 
 :root[data-theme="foundry-light"] {
@@ -41,6 +47,8 @@
   --shadow: 0 16px 44px rgba(16,22,25,.22);
   --ground: #CBD3D8; --ground2: #D8E0E4; --plate: #E7ECEE; --paint: #9C6806;
   --roof: #B9C3C9; --roof2: #9FACB3; --wallA: #CED8DC; --wallB: #B7C3C8;
+  --lvl1: #12557E; --lvl2: #0E7A7A; --lvl3: #1B7A55;
+  --lvl4: #9C6806; --lvl5: #6B3F94; --lvl6: #9E3A2B;
 }
 
 /* The sixteen ANSI colours, so a terminal frame is coloured by the theme
@@ -74,22 +82,70 @@ body {
 }
 
 /* ------------------------------------------------------------- chrome */
+/* The title bar, the level row and the view-tab row stick as one unit --
+   `position: sticky` lives here rather than on `header` alone, because
+   `header` wraps (`flex-wrap: wrap`) and changes height with the viewport,
+   which would make any hardcoded `top` on the rows below it wrong at some
+   width. One sticky ancestor has no such offset to get right. */
+.chrome {
+  position: sticky; top: 0; z-index: 5;
+}
 header {
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
   padding: 9px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
-  position: sticky; top: 0; z-index: 5;
 }
 header h1 {
   margin: 0; font: 700 15px/1 var(--cond); letter-spacing: .14em; text-transform: uppercase;
 }
 .meta { color: var(--muted); font: 400 11px/1.4 var(--mono); }
-.tabs { display: flex; gap: 2px; }
+/* The second row: the same five view tabs as before, now a full-width row of
+   its own under the level row rather than squeezed in beside the title. */
+.tabs {
+  display: flex; gap: 2px; padding: 6px 18px; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
 .tabs button {
   border: 1px solid transparent; background: none; color: var(--muted);
   padding: 5px 11px; border-radius: 3px; font: 500 12px/1 var(--sans); cursor: pointer;
 }
 .tabs button:hover { color: var(--ink); }
 .tabs button.on { background: var(--panel-2); color: var(--ink); font-weight: 600; }
+
+/* The level row: its own full-width row under the header, not squeezed into
+   it. Six three-line tabs, `flex:1 1 0` so they share the row evenly with a
+   floor on how narrow one gets, a colour per level via `--lvl1`..`--lvl6`,
+   and the four Factory has not built yet shown `disabled` -- which is also
+   what drops them out of the tab order, so tabbing the row only visits the
+   two that work. */
+.levels {
+  display: flex; flex-wrap: wrap; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.lvl {
+  --lv: var(--muted);
+  flex: 1 1 0; min-width: 108px; display: flex; flex-direction: column; gap: 2px;
+  align-items: flex-start; text-align: left; cursor: pointer;
+  border: 0; border-right: 1px solid var(--line-soft); border-top: 3px solid transparent;
+  background: none; padding: 7px 12px 8px;
+}
+.lvl:last-child { border-right: 0; }
+.lvl:hover:not(:disabled) { background: var(--panel-2); }
+.lvl.on { background: var(--panel-2); border-top-color: var(--lv); }
+.lvl:disabled { cursor: default; opacity: .42; }
+.lvl .lv-n {
+  font: 700 10px/1 var(--cond); letter-spacing: .1em; color: var(--lv);
+}
+.lvl .lv-name { font: 600 12.5px/1.2 var(--sans); color: var(--ink); }
+.lvl .lv-sub { font: 400 10.5px/1.3 var(--sans); color: var(--muted); }
+.lvl[data-lv="1"] { --lv: var(--lvl1); }
+.lvl[data-lv="2"] { --lv: var(--lvl2); }
+.lvl[data-lv="3"] { --lv: var(--lvl3); }
+.lvl[data-lv="4"] { --lv: var(--lvl4); }
+.lvl[data-lv="5"] { --lv: var(--lvl5); }
+.lvl[data-lv="6"] { --lv: var(--lvl6); }
+@media (max-width: 860px) {
+  .lvl .lv-sub { display: none; }
+}
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--fault); margin-right: 6px; }
 .dot.live { background: var(--run); }
 .theme-switch {

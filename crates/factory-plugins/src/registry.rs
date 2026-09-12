@@ -132,6 +132,13 @@ impl Registry {
         })
     }
 
+    /// Every runtime currently registered, for something that wants to reach
+    /// all of them rather than one by name -- listening for a push from each,
+    /// in particular.
+    pub fn runtimes(&self) -> Vec<Arc<dyn AgentRuntime>> {
+        self.runtimes.values().cloned().collect()
+    }
+
     pub fn store(&self, name: &str) -> Result<Arc<dyn TaskStore>> {
         self.stores.get(name).cloned().ok_or_else(|| FactoryError::NoSuchAdapter {
             kind: "task",
