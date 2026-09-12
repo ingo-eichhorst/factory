@@ -1037,7 +1037,7 @@ export async function showSite() {
     $("site-empty").hidden = false;
     $("site-empty").textContent = state.scope
       ? `Nothing to place on the apron: ${scopeLabel()} has no scope under it.`
-      : "This instance declares no scopes. The apron is empty because there is nothing to place on it yet -- add a scope to .factory/config.yaml and a hall appears here the next time this view loads.";
+      : "This instance has no configured scopes. Add a scope block to a directory's .factory/config.yaml and a hall appears after the daemon restarts.";
     return;
   }
   if (!footprintLoaded) await loadFootprint();

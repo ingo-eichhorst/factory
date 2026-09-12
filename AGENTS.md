@@ -108,7 +108,9 @@ something impossible.
   and outcomes belong to the run. The task mirrors its newest run so lists stay
   cheap -- if you add a field to that mirror, clear it too, or a successful
   retry will show the previous attempt's error.
-- Nothing Factory owns is written inside a scope. State lives in `.factory/`.
+- A scope owns only its `.factory/config.yaml`. Runtime state stays in the
+  instance root's `.factory/`; never put the database, socket, worktrees, or
+  other daemon-owned state inside a scope.
 - A plugin that fails must never take the daemon down with it.
 - Roles bound what an agent does by accident, not what it could do. Every agent
   runs as the owner and can reach the socket; one that omits its token is the

@@ -107,14 +107,10 @@ export function scopeOptions(selected) {
   // the selection stands in for a prefill the caller did not give.
   const on = selected || state.scope;
   // `state.scopes` -- the `/api/agents` list -- not `state.scopeNames`:
-  // that is `/api/status`'s declared-only handful, kept small on purpose,
-  // while discovery means most of the places a task can actually go were
-  // never declared at all. A container directory with no `scopes:` entry of
-  // its own is exactly the kind of destination #16 exists to make choosable
-  // here, so it has to be offered, not just drawn as a rail row. Each
-  // option's label is the scope's full identity -- its path from the
-  // instance root -- which is what keeps two directories both named `src`
-  // apart.
+  // this is the same locally configured list, but it also carries the agent
+  // and worktree details the rest of this form uses. Ordinary grouping
+  // directories never become options. Configured names are unique, so they
+  // are both the labels and the submitted identities.
   return `<option value="">(first scope)</option>` + state.scopes.map(s =>
     `<option value="${esc(s.name)}" ${s.name === on ? "selected" : ""}>${esc(s.name)}</option>`).join("");
 }

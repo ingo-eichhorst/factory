@@ -112,7 +112,7 @@ export function renderOccupancy() {
   // to the instance line would claim something about the daemon that is false.
   const nothing = state.scope
     ? `No agents in ${esc(scopeLabel())}.`
-    : "This instance declares no scopes.";
+    : "This instance has no configured scopes.";
   const since = occ.liveness_since
     ? `Liveness has been recorded since ${new Date(occ.liveness_since).toLocaleString()}.`
     : `No liveness recorded yet — the strip stays empty until the daemon has seen an agent change state.`;

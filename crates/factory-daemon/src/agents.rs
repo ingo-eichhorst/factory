@@ -608,6 +608,7 @@ mod tests {
                 name: "test".into(),
             },
             daemon: DaemonConfig::default(),
+            scope: None,
             scopes: vec![serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap()],
             roles: Default::default(),
             plugins_dir: None,

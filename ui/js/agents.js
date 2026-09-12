@@ -47,11 +47,11 @@ export function agentTags(a) {
 }
 
 export function renderAgents() {
-  // Filtered down to nothing is a fact about the selection. An instance that
-  // declares no scopes at all is a different thing to say, and says it.
+  // Filtered down to nothing is a fact about the selection. An instance with
+  // no locally configured scopes is a different thing to say, and says it.
   const nothing = state.scope
     ? `No agents in ${esc(scopeLabel())}.`
-    : "This instance declares no scopes.";
+    : "This instance has no configured scopes.";
   $("agents").innerHTML = state.scopes.filter(s => inScope(s.name)).map(s => {
     const rows = s.agents.map(a => {
       const standing = a.lifetime !== "task";
@@ -109,6 +109,7 @@ export function renderAgents() {
       <div class="head">
         <h3>${esc(s.name)}</h3>
         <span class="sub">${esc(s.path)}</span>
+        <code class="id" title="Stable scope ID">${esc(s.id)}</code>
         <span style="margin-left:auto"></span>
         <span class="sub">tasks default to ${esc(s.default_agent)} on ${esc(s.runtime)}, kept in ${esc(s.task_store)}</span>
       </div>

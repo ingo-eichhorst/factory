@@ -54,8 +54,8 @@ pub struct Engine {
         std::sync::Mutex<std::collections::HashMap<String, (Instant, crate::site::Measured)>>,
     /// Whether each scope's directory can host a worktree, with when that was
     /// asked. `worktree::capability` is one or two `git` subprocesses, and
-    /// `scope_views` asks it per scope -- which, now that every directory is a
-    /// scope, is a hundred-odd of them on a real instance, on an endpoint the
+    /// `scope_views` asks it per configured scope, potentially many on a real
+    /// instance, on an endpoint the
     /// Agents view refetches on every run and agent event. A directory does
     /// not become a git repository between two of those. Cached for
     /// `CAPABILITY_TTL`; the first board after a restart still pays in full,
@@ -556,6 +556,7 @@ impl Engine {
             }
 
             views.push(ScopeView {
+                id: scope.id.clone(),
                 name: scope.name.clone(),
                 path: scope_dir.display().to_string(),
                 default_agent,
@@ -1296,14 +1297,15 @@ mod tests {
             },
             daemon: DaemonConfig::default(),
             roles: Default::default(),
+            scope: None,
             scopes: vec![Scope {
+                id: "scope-id".into(),
                 name: "demo".into(),
                 path: scope_path,
                 agent: None,
                 agents: Vec::new(),
                 runtime: None,
                 git: None,
-                declared: true,
                 task_store: None,
             }],
             plugins_dir: None,
@@ -1477,9 +1479,9 @@ mod tests {
         assert!(run.worktree_branch.is_none());
     }
 
-    /// `scope_views` asks `git` per scope, and every directory being a scope
-    /// makes that a hundred-odd subprocesses on an endpoint the Agents view
-    /// refetches on every event. The answer is cached, so the second board
+    /// `scope_views` asks `git` per configured scope, potentially many
+    /// subprocesses on an endpoint the Agents view refetches on every event.
+    /// The answer is cached, so the second board
     /// within `CAPABILITY_TTL` runs no `git` at all -- observed here as the
     /// cached answer surviving a change on disk that would flip it.
     #[tokio::test]
@@ -1489,6 +1491,7 @@ mod tests {
 
         // No repository yet, so the first board says so.
         let (first, _) = engine.scope_views().await.unwrap();
+        assert_eq!(first[0].id, "scope-id", "the scope identity reaches the API view");
         assert!(!first[0].worktree_capable);
 
         for args in [
