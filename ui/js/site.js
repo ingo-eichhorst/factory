@@ -5,7 +5,19 @@
 //! the same thing in both views.
 //!
 //! What a hall is made of:
-//!   - its footprint comes from `/api/site`, the scope's size on disk;
+//!   - its shape comes from `/api/site`: how many files, bytes and directories
+//!     the scope holds, mapped to a tier, a floor count, a footprint and a
+//!     number of window bays by `factory-core/src/building.rs`. Nothing here
+//!     decides it -- the daemon serves the shape already worked out, the way
+//!     it serves the occupancy chart already assembled, and the mapping is
+//!     tested there rather than guessed at here;
+//!   - what is lit on it comes from the same call: runs in flight, tasks
+//!     queued and agents standing up become lit floors, a roof beacon and a
+//!     beat. Size decides the structure and activity decides the light, and
+//!     neither reaches the other -- a cue that could add a floor would cost
+//!     height its meaning, and one that could widen a footprint would shove
+//!     the hall's neighbours across the apron every time a run started;
+//!   - its size on disk comes from `/api/site`, for the label and the floor;
 //!   - its floor comes from the same call -- `areas`, the scope's top-level
 //!     entries, squarified once here (`computeFloor`) and handed through
 //!     `getScene()` so the plan and the lit render treemap nothing twice and
@@ -46,7 +58,46 @@ let AISLE = [];
 let SPURS = [];
 let footprintByName = {};    // scope name -> bytes, or null when unknown
 let areasByName = {};        // scope name -> { areas: ScopeArea[], truncated }
+let hallByName = {};         // scope name -> the whole ScopeFootprint the daemon served
 let footprintLoaded = false;
+
+/// A hall's height, in grid units: one storey each, plus the ground floor's
+/// own headroom. Eight floors is the tallest `building.rs` will ever ask for,
+/// which keeps the tallest hall inside the envelope the site was drawn for --
+/// `pick()` hit-tests against `b.h`, and the camera frames the site from the
+/// footprints.
+const FLOOR_H = 0.42;
+const FLOOR_BASE = 0.5;
+
+/// What a hall is drawn as before `/api/site` has answered, and for a scope
+/// that call did not mention. Deliberately the same shape the daemon serves
+/// for a scope it could not read: a plain building of no particular size,
+/// rather than a small one, which would be a measurement nobody made.
+const UNMEASURED = {
+  shape: { tier: "unknown", score: 0, floors: 2, width_tenths: 40, depth_tenths: 34, bays: 4 },
+  cues: { level: "idle", load_pct: 0, lit_floors: 0, beacon: "off", pulse_ms: 0, glow_pct: 0 },
+  activity: { active_runs: 0, blocked_runs: 0, queued_tasks: 0, live_agents: 0, failed_agents: 0, declared_agents: 0 },
+  metrics: { known: false, files: 0, source_files: 0, bytes: 0, directories: 0, truncated: false },
+};
+
+/// How far a hall has got towards the height and the lighting it was last
+/// served, kept by scope name so a rebuild does not restart the animation.
+/// Held here rather than on the hall objects because `buildSite` replaces
+/// those wholesale every time an event lands.
+const eased = {};
+
+/// What the roof beacon is coloured by. The same four state colours the rest
+/// of the page uses, in the same order of urgency `hallState` has always
+/// applied: a person waited on comes first.
+const BEACON_COLOUR = { blocked: "wait", fault: "fault", working: "run", waiting: "idle", off: "idle" };
+
+/// What a lit window is coloured by, which is a different question -- and the
+/// answer is: nothing. How far up a hall is lit says how *much* of it is
+/// working; which kind of work that is belongs to the beacon, which is the one
+/// thing on a hall that changes colour. A window is warm whether the work is
+/// running or waiting at the door, because a light is on or it is not, and
+/// lighting queued work in `--idle` would be a light nobody could see was on.
+function litKey() { return "lit"; }
 let sel = null;               // selected hall id
 
 /// The floor's inset from the hall's own walls -- the same margin `shellBase`
@@ -66,29 +117,28 @@ const AREA_KEYS = ["ly1", "ly2", "ly3", "ly4", "ly5", "ly6"];
 
 export const layers = { agents: true, flow: true, zones: true, labels: true };
 
-/// `side(k)`, carried over from the prototype: a hall you can see is a hall
-/// you can size. `k` is the scope's codebase in megabytes; a scope whose size
-/// could not be read gets the same default as a 1 MB scope, so it still draws
-/// a plausible hall rather than a point -- `footprintKnown` is what a tooltip
-/// reads to say the number is a guess.
-function side(k) {
-  return Math.min(11, 2.6 + Math.sqrt(k) * 0.85);
-}
-
-async function loadFootprint() {
+/// `/api/site`, which now answers both halves of what a hall shows: the walk
+/// of the scope's directory (cached by the daemon, because this is asked for
+/// on every run and agent event now) and what Factory is doing in it, which is
+/// the reason to ask again. A failure leaves the last answer standing rather
+/// than emptying the site: a hall drawn from a minute-old walk is better than
+/// one that shrinks to nothing because a fetch lost a race with a reload.
+export async function loadFootprint() {
   try {
     const data = (await api("/api/site")).footprint;
     footprintByName = {};
     areasByName = {};
+    hallByName = {};
     for (const s of data.scopes) {
       footprintByName[s.name] = s.size_bytes ?? null;
       areasByName[s.name] = { areas: s.areas || [], truncated: !!s.truncated };
+      hallByName[s.name] = s;
     }
+    footprintLoaded = true;
   } catch {
-    footprintByName = {};
-    areasByName = {};
+    // Keep whatever was already there; only the very first failure leaves the
+    // site unmeasured, and `UNMEASURED` is what that draws.
   }
-  footprintLoaded = true;
 }
 
 /// Squarified treemap (Bruls, Huizing & van Wijk): lays `values` -- each
@@ -238,12 +288,17 @@ export function buildSite() {
   SITE = state.scopes.filter((scope) => inScope(scope.name)).map((scope) => {
     const bytes = footprintByName[scope.name];
     const known = footprintLoaded && bytes != null;
-    const k = known ? Math.max(bytes / 1e6, 0.02) : 1;
-    const s = side(k);
-    const agentCount = Math.max(1, scope.agents.length);
-    const w = Math.round(s * 1.05 * 100) / 100;
-    const d = Math.round(s * 0.9 * 100) / 100;
+    const served = hallByName[scope.name] || UNMEASURED;
+    const shape = served.shape, cues = served.cues;
+    // Tenths of a grid unit on the wire, so two daemons drawing the same
+    // repository cannot disagree in the eighth decimal place.
+    const w = shape.width_tenths / 10;
+    const d = shape.depth_tenths / 10;
+    const hT = FLOOR_BASE + shape.floors * FLOOR_H;
     const areaInfo = areasByName[scope.name] || { areas: [], truncated: false };
+    // Where this hall had got to last time, so a rebuild picks the animation
+    // up rather than starting it again -- `buildSite` runs on every event.
+    const was = eased[scope.name] || { h: hT, lit: cues.lit_floors, glow: cues.glow_pct / 100 };
     return {
       id: scope.name,
       name: scope.name,
@@ -252,7 +307,19 @@ export function buildSite() {
       defaultAgent: scope.default_agent,
       w,
       d,
-      h: Math.min(3.3, 2.1 + 0.3 * Math.sqrt(agentCount)),
+      // `h`, `litF` and `glow` are where the hall is now; the `T` of each is
+      // where it is going. `tickHalls` closes the gap, so a tier change grows
+      // a storey and a run lights a floor instead of either snapping.
+      h: was.h,
+      hT,
+      litF: was.lit,
+      litT: cues.lit_floors,
+      glow: was.glow,
+      glowT: cues.glow_pct / 100,
+      shape,
+      cues,
+      metrics: served.metrics,
+      counted: served.activity,
       sizeBytes: known ? bytes : null,
       footprintKnown: known,
       state: hallState(scope),
@@ -302,6 +369,48 @@ export function buildSite() {
   if (!byId[sel]) sel = SITE[0].id;
 }
 
+/// Close the gap between where each hall is drawn and where the last answer
+/// from the daemon put it. Called once per frame by whichever renderer is on
+/// screen -- both of them draw the same halls, so neither may ease them on its
+/// own or the two views would disagree about a hall mid-change.
+///
+/// Exponential, against real elapsed time rather than frames: the plan runs at
+/// whatever `requestAnimationFrame` gives it and the lit render at the same,
+/// but a tab that was in the background wakes with a large `dt` and must not
+/// take a hundred frames to catch up.
+///
+/// The footprint is deliberately not eased. It is what `layoutHalls` places
+/// the site from, so a hall growing wider would have to push its neighbours
+/// along with it; a re-walk is five minutes apart at the closest, and a
+/// footprint that steps once in that time is not what "flicker" means.
+const EASE_TAU = 0.28;
+
+/// A reader who has asked for less movement gets the same facts without the
+/// travel: every hall is simply where it is going. The cues themselves are not
+/// motion -- a lit floor is lit either way -- so nothing is lost but the
+/// journey.
+export const STILL = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+export function tickHalls(dt) {
+  const k = STILL ? 1 : 1 - Math.exp(-Math.max(0, Math.min(dt, 1)) / EASE_TAU);
+  SITE.forEach((b) => {
+    b.h += (b.hT - b.h) * k;
+    b.litF += (b.litT - b.litF) * k;
+    b.glow += (b.glowT - b.glow) * k;
+    if (Math.abs(b.hT - b.h) < 0.002) b.h = b.hT;
+    if (Math.abs(b.litT - b.litF) < 0.004) b.litF = b.litT;
+    if (Math.abs(b.glowT - b.glow) < 0.004) b.glow = b.glowT;
+    eased[b.id] = { h: b.h, lit: b.litF, glow: b.glow };
+  });
+}
+
+/// How lit floor `i` is, 0..1, counting from the ground. A fraction rather
+/// than a flag: it is what lets the lights come up one storey at a time
+/// instead of the whole facade switching at once.
+export function floorLight(b, i) {
+  return Math.max(0, Math.min(1, b.litF - i));
+}
+
 export function getScene() {
   return { SITE, byId, ZONE, AISLE, SPURS, layers, getSel: () => sel, setRoof, select };
 }
@@ -342,13 +451,13 @@ let W = 0, H = 0, DPR = 1;
 let cam = { x: 0, y: 0, z: 0.6 };
 let C = {};
 let dragging = false, lx = 0, ly = 0, moved = 0, hov = null, tween = null;
-let t0 = 0, raf = null, paused = false;
+let t0 = 0, raf = null, paused = false, last2d = 0;
 let renderMod = null, renderFailed = false, renderMode = 0;
 
 function readPalette() {
   const s = getComputedStyle(document.documentElement);
   ["ground", "ground2", "plate", "paint", "roof", "roof2", "wallA", "wallB", "ink", "muted", "faint",
-   "line", "signal", "run", "idle", "wait", "fault", "panel", "sunk",
+   "line", "signal", "run", "idle", "wait", "fault", "lit", "panel", "sunk",
    "ly1", "ly2", "ly3", "ly4", "ly5", "ly6"].forEach((k) => {
     C[k] = (s.getPropertyValue("--" + k) || "").trim() || "#888888";
   });
@@ -558,12 +667,34 @@ function shellTop(b, hi) {
   poly([[x + w, y, wh], [x + w, y + d, wh], [x + w, y + d, 0], [x + w, y, 0]], C.wallA, C.line, 1);
   poly([[x, y + d, wh], [x + w, y + d, wh], [x + w, y + d, 0], [x, y + d, 0]], C.wallB, C.line, 1);
   if (cam.z > 1.1 && open < 0.35) {
-    const lit = b.state === "run" || b.state === "wait";
-    const n = Math.max(1, Math.round(d * 1.2));
-    for (let i = 0; i < n; i++) {
-      const a = y + 0.35 + i * (d - 0.5) / n, bb = a + (d - 0.5) / n * 0.55;
-      poly([[x + w, a, wh * 0.72], [x + w, bb, wh * 0.72], [x + w, bb, wh * 0.42], [x + w, a, wh * 0.42]],
-        lit ? C[stateCol[b.state]] : C.line, null);
+    // One row of panes per storey, on the two faces the camera can see, lit
+    // from the ground up: how far up the lights go is how much of this scope's
+    // capacity is working, and how many rows there are is how much repository
+    // there is. The two are readable at once precisely because one is the
+    // building and the other is the light on it.
+    const floors = Math.max(1, b.shape.floors), bays = Math.max(2, b.shape.bays);
+    const on = C[litKey(b)];
+    const fh = wh / floors;
+    const paneW = (w - 0.6) / bays, paneD = (d - 0.6) / bays;
+    for (let f = 0; f < floors; f++) {
+      const light = floorLight(b, f);
+      const z0 = f * fh + fh * 0.28, z1 = f * fh + fh * 0.70;
+      for (let i = 0; i < bays; i++) {
+        const a = y + 0.3 + i * paneD, a2 = a + paneD * 0.62;
+        const c = x + 0.3 + i * paneW, c2 = c + paneW * 0.62;
+        const right = [[x + w, a, z1], [x + w, a2, z1], [x + w, a2, z0], [x + w, a, z0]];
+        const front = [[c, y + d, z1], [c2, y + d, z1], [c2, y + d, z0], [c, y + d, z0]];
+        poly(right, C.line, null);
+        poly(front, C.line, null);
+        if (light > 0.02) {
+          // Drawn over the dark pane rather than instead of it, so a floor
+          // coming on fades up through it instead of switching.
+          ctx.save(); ctx.globalAlpha = light * (0.45 + 0.55 * b.glow);
+          poly(right, on, null);
+          poly(front, on, null);
+          ctx.restore();
+        }
+      }
     }
     poly([[x + w / 2 - 0.45, y + d, 0.95], [x + w / 2 + 0.45, y + d, 0.95], [x + w / 2 + 0.45, y + d, 0], [x + w / 2 - 0.45, y + d, 0]],
       C.wallA, C.paint, 1);
@@ -581,11 +712,16 @@ function shellTop(b, hi) {
   // A fault or a blocked run is worth seeing from across the site, the same
   // way the prototype's beacon worked -- just tied to a real `AgentView.error`
   // or a real blocked run instead of one hand-picked hall.
-  if (b.state === "wait" || b.state === "fault") {
-    const pulse = 0.35 + 0.65 * Math.abs(Math.sin(performance.now() / 380));
+  if (b.cues.beacon !== "off" && b.cues.beacon !== "waiting") {
+    // A run that is going makes the beacon beat, and more of them make it beat
+    // faster; a blocked run or a failed agent holds it steady, because neither
+    // is progress. The period is the daemon's, so both views beat together.
+    const period = STILL ? 0 : b.cues.pulse_ms;
+    const pulse = period > 0 ? 0.35 + 0.65 * Math.abs(Math.sin(performance.now() / (period / 2))) : 0.9;
     const p = P(x + 0.4, y + 0.4, rh + 0.5);
     ctx.save(); ctx.globalAlpha = pulse;
-    ctx.beginPath(); ctx.arc(p[0], p[1], 5 * cam.z, 0, 6.283); ctx.fillStyle = C[stateCol[b.state]]; ctx.fill();
+    ctx.beginPath(); ctx.arc(p[0], p[1], 5 * cam.z, 0, 6.283);
+    ctx.fillStyle = C[BEACON_COLOUR[b.cues.beacon] || "idle"]; ctx.fill();
     ctx.restore();
   }
 }
@@ -614,8 +750,7 @@ function worker(wk, gx, gy, t) {
 function label(b) {
   if (!layers.labels || cam.z < 0.5) return;
   const p = P(b.x + b.w / 2, b.y + b.d / 2, b.h + 0.55);
-  const size = b.footprintKnown ? mb(b.sizeBytes) : "size not recorded";
-  const sub = `${b.agents.length} agent${b.agents.length === 1 ? "" : "s"} · ${size}`;
+  const sub = hallSub(b);
   const fs = Math.max(10, Math.min(13, 9 * cam.z + 4));
   ctx.font = '600 ' + fs + 'px "IBM Plex Sans Condensed", sans-serif';
   const w1 = ctx.measureText(b.name).width;
@@ -638,6 +773,15 @@ function label(b) {
 /// under 1 MB rounding to "0" would look exactly like the empty-scope case
 /// `footprintKnown` already exists to tell apart from -- the whole reason
 /// that flag exists is so this function is never the thing doing the lying.
+/// The line under a hall's name, in both views. The tier and the floor count
+/// are the size signal in words, so a reader can check the building against
+/// the number rather than having to trust the drawing.
+export function hallSub(b) {
+  const size = b.footprintKnown ? mb(b.sizeBytes) : "size not recorded";
+  const floors = `${b.shape.floors} floor${b.shape.floors === 1 ? "" : "s"}`;
+  return `${b.shape.tier} · ${floors} · ${size}`;
+}
+
 export function mb(bytes) {
   if (bytes < 1000) return `${bytes} B`;
   const k = bytes / 1e3;
@@ -651,6 +795,8 @@ function draw(now) {
   if (paused || !cv || !cv.clientWidth) return;
   if (Math.abs(cv.clientWidth - W) > 1 || Math.abs(cv.clientHeight - H) > 1) resize();
   const t = (now - t0) / 1000;
+  tickHalls(last2d ? (now - last2d) / 1000 : 0);
+  last2d = now;
   SITE.forEach((b) => {
     b.open += ((b.openT || 0) - b.open) * 0.13;
     if (Math.abs((b.openT || 0) - b.open) < 0.002) b.open = b.openT || 0;
@@ -805,7 +951,8 @@ function renderRail() {
       <span class="sub">${esc(b.runtime)} · default agent ${esc(b.defaultAgent)}</span>
     </div>
     <div class="sub">${b.footprintKnown ? mb(b.sizeBytes) : "size not recorded"} on disk · ${esc(floorNote)}</div>
-    </div>`;
+    </div>
+    ${hallDetail(b)}`;
 
   if (b.queued.length) {
     h += `<div class="agent"><div class="line"><span class="nm">At the door</span>
@@ -839,6 +986,38 @@ function renderRail() {
   for (const job of el.querySelectorAll(".job[data-task]")) {
     job.onclick = () => openTask(job.dataset.task, job.dataset.run);
   }
+}
+
+/// Why this hall is the size it is and why it is lit the way it is, in the
+/// numbers both answers were worked out from. The drawing is a summary; this
+/// is the working, and it is the thing to read when the summary looks wrong.
+function hallDetail(b) {
+  const m = b.metrics, a = b.counted, c = b.cues, sh = b.shape;
+  const count = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`;
+  const sizeRows = m.known
+    ? `<div class="sub">${count(m.files, "file")} · ${count(m.source_files, "source file")} ·
+         ${count(m.directories, "module")} · ${esc(mb(m.bytes))}</div>
+       ${m.truncated ? `<div class="sub">counted to the walk's cap — the numbers are a lower bound</div>` : ""}`
+    : `<div class="sub">this scope's directory could not be read, so the hall is drawn plain rather than small</div>`;
+
+  const lit = c.lit_floors === 0
+    ? (a.live_agents ? "dark" : "dark — nobody is in")
+    : `${count(c.lit_floors, "floor")} of ${sh.floors} lit`;
+  const beacon = {
+    off: "beacon off", waiting: "work at the door", working: "beacon beating — a run is going",
+    fault: "beacon steady — an agent failed to start", blocked: "beacon steady — a run wants a person",
+  }[c.beacon];
+
+  return `<div class="agent">
+    <div class="line"><span class="nm">The building</span><span class="sub">how much repository</span></div>
+    <div class="sub">${esc(sh.tier)} · ${count(sh.floors, "floor")} · ${(sh.width_tenths / 10).toFixed(1)}×${(sh.depth_tenths / 10).toFixed(1)} footprint · size ${sh.score}/1000</div>
+    ${sizeRows}
+    <div class="line" style="margin-top:8px"><span class="nm">The lights</span><span class="sub">what is happening now</span></div>
+    <div class="sub">${esc(c.level)} · ${c.load_pct}% of ${count(a.declared_agents || 1, "agent")} ·
+      ${count(a.active_runs, "run")} running${a.blocked_runs ? `, ${a.blocked_runs} blocked` : ""} ·
+      ${count(a.queued_tasks, "task")} queued</div>
+    <div class="sub">${esc(lit)} · ${esc(beacon)}</div>
+  </div>`;
 }
 
 // ---------------------------------------------------------------- lifecycle
@@ -894,21 +1073,35 @@ export function refreshSite() {
   if (!state.scopes.some((s) => inScope(s.name))) return;
   buildSite();
   renderRail();
-  if (renderMode === 1 && renderMod) renderMod.start(getScene());
+  // `start` tears the whole lit scene down and builds it again -- every hall,
+  // the ground, the labels. That is right when the site itself changed, and
+  // wrong on the far more common case of a run starting, which would restage
+  // the city on every event and undo every transition mid-flight. `update`
+  // says whether it could carry the new facts onto the scene standing.
+  if (renderMode === 1 && renderMod) {
+    if (!renderMod.update(getScene())) renderMod.start(getScene());
+  }
 }
 
+/// Two groups, because a hall carries two signals and a legend that ran them
+/// together would be the same mistake the drawing is trying not to make: what
+/// the building *is*, then what is *lit* on it.
 function renderLegend() {
   const el = $("site-legend");
   if (!el) return;
   el.innerHTML = `
-    <div class="row"><span class="sw" style="background:var(--run)"></span>running</div>
-    <div class="row"><span class="sw" style="background:var(--wait)"></span>blocked &mdash; waiting on a person</div>
-    <div class="row"><span class="sw" style="background:var(--idle)"></span>idle, or up and waiting</div>
-    <div class="row"><span class="sw" style="background:var(--fault)"></span>an agent failed to start</div>`;
+    <div class="grp">the building &mdash; how much repository</div>
+    <div class="row"><span class="sw sz"></span>floors and footprint: files, bytes, modules</div>
+    <div class="row"><span class="sw sz sm"></span>taller and wider is a larger codebase</div>
+    <div class="grp">the lights &mdash; what is happening now</div>
+    <div class="row"><span class="sw lt"></span>lit floors: how much of the scope's agents are spoken for</div>
+    <div class="row"><span class="sw" style="background:var(--run)"></span>beacon beating: a run is going, faster the more of them</div>
+    <div class="row"><span class="sw" style="background:var(--wait)"></span>steady amber: blocked, waiting on a person</div>
+    <div class="row"><span class="sw" style="background:var(--fault)"></span>steady red: an agent failed to start</div>`;
 }
 
 function pause() { paused = true; }
-function resume() { paused = false; t0 = t0 || performance.now(); }
+function resume() { paused = false; t0 = t0 || performance.now(); last2d = 0; }
 
 /// three.js is vendored (`ui/vendor/three.min.js`, served by the daemon) so a
 /// machine with no internet still has this mode; the module that uses it is

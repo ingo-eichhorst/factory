@@ -447,14 +447,29 @@ since it was opened, filterable by kind and by free text. There is a `/ws`
 stream and a journal per task, but no queryable history behind either yet, so
 the banner says plainly that nothing earlier than "now" is shown here.
 
-**Site plan** draws the same scopes as a place: one hall per scope, sized by
-its footprint on disk (`/api/site`), and a figure for every agent actually
-present — never a bay, because Factory has no bay ("a row is an agent, not a
-bay", `occupancy.rs`). A second, lit three.js render of the same facts toggles
-from the same HUD, orbits, and picks the same hall the plan would. Both fall
-back to honesty over invention: a scope's own directory tree is not read, so a
-hall's floor says "not recorded" instead of drawing a treemap from nothing; the
-file a session is editing is not read at all, and is not drawn.
+**Site plan** draws the same scopes as a place: one hall per scope, and a
+figure for every agent actually present — never a bay, because Factory has no
+bay ("a row is an agent, not a bay", `occupancy.rs`). A second, lit three.js
+render of the same facts toggles from the same HUD, orbits, and picks the same
+hall the plan would.
+
+A hall carries two signals, and `factory-core/src/building.rs` is the one place
+that decides either. **Size** — the files, bytes and directories a bounded walk
+of the scope finds (`/api/site`, cached for five minutes) — becomes a tier, a
+floor count, a footprint and a number of window bays. **Activity** — runs in
+flight, tasks queued, agents standing up, all out of the daemon's own records —
+becomes lit floors, a roof beacon and how fast it beats. Neither reaches the
+other: activity may light a hall and never build one, or height would stop
+meaning size and a run starting would shove the hall's neighbours across the
+apron. Both steps are stepped and sticky, so a metric sitting on a threshold
+does not flip the building between two shapes on every poll, and the page eases
+between them rather than cutting.
+
+Both views fall back to honesty over invention. A scope whose directory cannot
+be read is drawn plain rather than small — "could not be read" is not a
+measurement of zero — and its floor says "not recorded" instead of a treemap
+drawn from nothing; a walk that hit its cap says its numbers are a lower bound;
+the file a session is editing is not read at all, and is not drawn.
 
 ## What this prototype does not do yet
 

@@ -11,7 +11,7 @@
 //! a render mode that fails silently would be worse than one that is simply
 //! not offered.
 
-import { mb } from "./site.js";
+import { mb, hallSub, tickHalls, floorLight, STILL } from "./site.js";
 
 let T = null;
 let scene, cam, rr, sun, hemi, amb, ray, mouse;
@@ -19,7 +19,8 @@ let cv, onSelect;
 let W3 = 0, H3 = 0, groundMat = null;
 let halls = {}, pick = [], lamps = [], workers = [], labels = [];
 let zoneG = null;
-let raf = null, running = false, t0 = 0;
+let raf = null, running = false, t0 = 0, lastFrame = 0;
+let groundMesh = null, queueSig = "", hallSig = "";
 let TOD = "dusk";
 let matWall, matWall2, matRoof, matTrim, matFloor, matPaint, ribT;
 let getSceneFn, getPaletteFn;
@@ -143,37 +144,58 @@ function disposeGroup(group) {
 
 let sceneGroup = null;
 
+/// One hall. Built at the height its scope's size asks for, and then scaled
+/// by how far the transition has got -- so a repository that grows a storey
+/// grows it, rather than the building blinking into a new one.
+///
+/// Everything that grows with it goes in `shell`; everything that rides on top
+/// goes in `cap`, which is moved rather than stretched so a roof does not get
+/// thinner as the building gets shorter.
 function hall(b, PAL) {
-  const g = new T.Group(), hw = b.w, hd = b.d, hh = b.h * 1.15;
+  const g = new T.Group(), hw = b.w, hd = b.d, hh = b.hT * 1.15;
   g.position.set(b.x, 0, b.y);
+  const picks = [];
+  const shell = new T.Group(), cap = new T.Group();
+  g.add(shell); g.add(cap);
 
   const wall = new T.Mesh(new T.BoxGeometry(hw, hh, hd), matWall);
   wall.position.set(hw / 2, hh / 2, hd / 2); wall.castShadow = true; wall.receiveShadow = true; wall.userData.bid = b.id;
-  g.add(wall); pick.push(wall);
+  shell.add(wall); picks.push(wall);
 
   const pl = new T.Mesh(new T.BoxGeometry(hw + 0.5, 0.2, hd + 0.5), matTrim);
   pl.position.set(hw / 2, 0.1, hd / 2); pl.receiveShadow = true; pl.userData.bid = b.id;
-  g.add(pl); pick.push(pl);
+  g.add(pl); picks.push(pl);
 
-  const lit = b.state === "run" || b.state === "wait";
-  const wcol = b.state === "wait" ? PAL.wait : (b.state === "fault" ? PAL.fault : "#FFC98A");
+  // One band of windows per storey, on all four faces. How many rows there are
+  // is the size signal; how far up they are lit is the activity one, applied
+  // every frame in `tick` and never baked in here.
+  const floors = Math.max(1, b.shape.floors);
+  const bays = Math.max(2, b.shape.bays);
+  const fh = hh / floors;
   const wt = paneTex();
   const winMat = () => new T.MeshStandardMaterial({
     map: wt.clone(), emissiveMap: wt.clone(), color: new T.Color("#0d0f13"),
-    emissive: new T.Color(lit ? wcol : "#2b3038"), emissiveIntensity: lit ? 1 : 0.12, roughness: 0.3,
+    emissive: new T.Color("#2b3038"), emissiveIntensity: 0.12, roughness: 0.3,
   });
-  const winMeshes = [];
-  function band(px, pz, len, ry) {
-    const m = winMat(); m.map.wrapS = m.map.wrapT = T.RepeatWrapping; m.map.repeat.set(Math.max(2, Math.round(len * 1.25)), 1);
-    m.emissiveMap = m.map;
-    const mesh = new T.Mesh(new T.PlaneGeometry(len, Math.min(0.62, hh * 0.26)), m);
-    mesh.position.set(px, hh * 0.6, pz); mesh.rotation.y = ry; mesh.userData.bid = b.id;
-    g.add(mesh); pick.push(mesh); winMeshes.push(mesh);
+  const rows = [];
+  for (let f = 0; f < floors; f++) {
+    const meshes = [];
+    const y = f * fh + fh * 0.5;
+    const band = (px, pz, len, ry) => {
+      const m = winMat();
+      m.map.wrapS = m.map.wrapT = T.RepeatWrapping;
+      m.map.repeat.set(bays, 1);
+      m.emissiveMap = m.map;
+      const mesh = new T.Mesh(new T.PlaneGeometry(len, Math.min(0.5, fh * 0.46)), m);
+      mesh.position.set(px, y, pz); mesh.rotation.y = ry; mesh.userData.bid = b.id;
+      shell.add(mesh); picks.push(mesh); meshes.push(mesh);
+    };
+    band(hw / 2, -0.02, hw * 0.86, Math.PI);
+    band(hw / 2, hd + 0.02, hw * 0.86, 0);
+    band(-0.02, hd / 2, hd * 0.86, -Math.PI / 2);
+    band(hw + 0.02, hd / 2, hd * 0.86, Math.PI / 2);
+    rows.push(meshes);
   }
-  band(hw / 2, -0.02, hw * 0.86, Math.PI);
-  band(hw / 2, hd + 0.02, hw * 0.86, 0);
-  band(-0.02, hd / 2, hd * 0.86, -Math.PI / 2);
-  band(hw + 0.02, hd / 2, hd * 0.86, Math.PI / 2);
 
   // The shop floor. A hall with areas gets the same tiles `site.js` treemapped
   // once, flat on the floor -- not extruded, which would read as machinery
@@ -186,28 +208,26 @@ function hall(b, PAL) {
       const fmat = new T.MeshStandardMaterial({ color: col(PAL[t.colorKey]), roughness: 0.92 });
       const tile = new T.Mesh(new T.BoxGeometry(Math.max(t.w, 0.02), 0.09, Math.max(t.h, 0.02)), fmat);
       tile.position.set(t.x + t.w / 2, 0.27, t.y + t.h / 2); tile.receiveShadow = true; tile.userData.bid = b.id;
-      g.add(tile); pick.push(tile); floorTiles.push({ mat: fmat, key: t.colorKey });
+      g.add(tile); picks.push(tile); floorTiles.push({ mat: fmat, key: t.colorKey });
     });
   } else {
-    const floor = new T.Mesh(new T.BoxGeometry(hw - 0.6, 0.09, hd - 0.6), matFloor);
+    const floor = new T.Mesh(new T.BoxGeometry(Math.max(0.1, hw - 0.6), 0.09, Math.max(0.1, hd - 0.6)), matFloor);
     floor.position.set(hw / 2, 0.27, hd / 2); floor.receiveShadow = true; floor.userData.bid = b.id;
-    g.add(floor); pick.push(floor);
+    g.add(floor); picks.push(floor);
   }
 
-  const roof = new T.Group();
   const slab = new T.Mesh(new T.BoxGeometry(hw + 0.3, 0.2, hd + 0.3), matRoof);
   slab.position.set(hw / 2, hh + 0.1, hd / 2); slab.castShadow = true; slab.receiveShadow = true; slab.userData.bid = b.id;
-  roof.add(slab); pick.push(slab);
+  cap.add(slab); picks.push(slab);
   const lip = new T.Mesh(new T.BoxGeometry(hw + 0.42, 0.1, hd + 0.42), matTrim);
-  lip.position.set(hw / 2, hh + 0.02, hd / 2); roof.add(lip);
-  g.add(roof);
+  lip.position.set(hw / 2, hh + 0.02, hd / 2); cap.add(lip);
 
-  const c = stateCol(b.state, PAL);
+  const c = beaconCol(b, PAL);
   const mast = new T.Mesh(new T.CylinderGeometry(0.05, 0.05, 1.0, 6), matTrim);
-  mast.position.set(0.28, hh + 0.5, 0.28); mast.castShadow = true; g.add(mast);
+  mast.position.set(0.28, hh + 0.5, 0.28); mast.castShadow = true; cap.add(mast);
   const beacon = new T.Mesh(new T.SphereGeometry(0.16, 12, 10), new T.MeshBasicMaterial({ color: new T.Color(c), toneMapped: false }));
-  beacon.position.set(0.28, hh + 1.05, 0.28); g.add(beacon);
-  const beaconGlow = glowSprite(c, 1.4, 0.85); beaconGlow.position.copy(beacon.position); g.add(beaconGlow);
+  beacon.position.set(0.28, hh + 1.05, 0.28); cap.add(beacon);
+  const beaconGlow = glowSprite(c, 1.4, 0.85); beaconGlow.position.copy(beacon.position); cap.add(beaconGlow);
 
   const ring = new T.Mesh(
     new T.RingGeometry(Math.max(hw, hd) * 0.62, Math.max(hw, hd) * 0.62 + 0.16, 48),
@@ -215,17 +235,39 @@ function hall(b, PAL) {
   );
   ring.rotation.x = -Math.PI / 2; ring.position.set(hw / 2, 0.24, hd / 2); g.add(ring);
 
-  const size = b.footprintKnown ? mb(b.sizeBytes) : "size unknown";
-  const sub = `${size} · ${b.agents.length} agent${b.agents.length === 1 ? "" : "s"}${b.areasTruncated ? " · floor partial" : ""}`;
-  const lt = labelTex(b.name, sub);
+  const lt = labelTex(b.name, hallSub(b));
   const sp = new T.Sprite(new T.SpriteMaterial({ map: lt.tex, depthWrite: false, transparent: true, depthTest: false }));
-  sp.scale.set(2.4 * lt.ar * 0.4, 2.4 * 0.4, 1); sp.position.set(hw / 2, hh + 1.7, hd / 2); g.add(sp); labels.push(sp);
+  sp.scale.set(2.4 * lt.ar * 0.4, 2.4 * 0.4, 1); sp.position.set(hw / 2, hh + 1.7, hd / 2); cap.add(sp); labels.push(sp);
 
   sceneGroup.add(g);
-  halls[b.id] = {
-    b, win: winMeshes, lit, roof, hh, beacon, beaconGlow, label: sp, ring, floorTiles,
-    pulses: b.state === "run" || b.state === "wait" || b.state === "fault",
-  };
+  halls[b.id] = { b, g, shell, cap, rows, hh, beacon, beaconGlow, label: sp, ring, floorTiles, picks };
+}
+
+/// What the roof light is saying, in the palette's own words. The daemon
+/// decided which of the five it is (`building.rs`); this only colours it.
+function beaconCol(b, PAL) {
+  const key = { blocked: "wait", fault: "fault", working: "run", waiting: "idle", off: "idle" }[b.cues.beacon];
+  return PAL[key] || PAL.idle;
+}
+
+/// Every mesh a click can land on, gathered from the halls standing now. Kept
+/// as one flat array because that is what the raycaster wants, and rebuilt
+/// rather than spliced whenever a hall comes or goes.
+function repick() {
+  pick = [];
+  Object.values(halls).forEach((h) => h.picks.forEach((m) => pick.push(m)));
+}
+
+function dropGroup(group) {
+  if (!group) return;
+  group.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach((m) => { if (m.map) m.map.dispose(); m.dispose(); });
+    }
+  });
+  if (group.parent) group.parent.remove(group);
 }
 
 function figure(wk, PAL) {
@@ -335,6 +377,11 @@ export function start(sceneData) {
   }
 
   sceneData.SITE.forEach((b) => hall(b, PAL));
+  repick();
+  Object.values(halls).forEach((h) => applyHallFacts(h, PAL));
+  hallSig = structureOf(sceneData);
+  queueSig = queuesOf(sceneData);
+  groundMesh = gp;
   if (sceneData.AISLE && sceneData.AISLE.length > 1) {
     const [a, b2] = sceneData.AISLE;
     const mid = [(a[0] + b2[0]) / 2, (a[1] + b2[1]) / 2];
@@ -351,6 +398,101 @@ export function start(sceneData) {
   applyTOD();
   resize();
   if (!running) { running = true; t0 = performance.now(); raf = requestAnimationFrame(tick); }
+}
+
+/// What the scene was built around, as one string. Only these move a mesh:
+/// which halls stand, how tall and wide each one is, and how many storeys of
+/// windows it carries. Everything else a refresh brings -- a run starting, a
+/// task queued, an agent coming up -- is light and figures, which `update`
+/// can carry onto the scene that is already standing.
+function structureOf(sceneData) {
+  return sceneData.SITE.map((b) =>
+    `${b.id}:${b.shape.floors}:${b.shape.bays}:${b.w}:${b.d}:${b.hT}:${b.x}:${b.y}:${(b.floor.tiles || []).length}`
+  ).join("|");
+}
+
+function queuesOf(sceneData) {
+  return sceneData.SITE.map((b) => `${b.id}:${b.queued.length}`).join("|");
+}
+
+/// Take the new facts without rebuilding the city. Returns false when the site
+/// itself changed shape -- a hall added, removed, re-tiered or re-measured --
+/// and the caller should `start()` instead.
+///
+/// This is the difference between a site plan that flickers and one that does
+/// not: a run starting fires an event, an event refreshes the scene, and
+/// rebuilding every mesh on each one would restage the whole view several
+/// times a minute and cut every transition off halfway.
+export function update(sceneData) {
+  if (!scene || !sceneGroup || !running) return false;
+  if (structureOf(sceneData) !== hallSig) return false;
+  const PAL = getPaletteFn();
+
+  for (const b of sceneData.SITE) {
+    const h = halls[b.id];
+    if (!h) return false;
+    h.b = b;
+    applyHallFacts(h, PAL);
+  }
+
+  // The figures outside are one per run and per standing agent, so they come
+  // and go with the work; they are cheap, and rebuilt rather than diffed.
+  workers.forEach((w) => dropGroup(w.g));
+  workers = [];
+  sceneData.SITE.forEach((b) => b.workers.forEach((wk) => workers.push(figure(wk, PAL))));
+
+  // The crates at a hall's door are baked into the ground texture, so that one
+  // is only worth redrawing when the queue actually changed.
+  const q = queuesOf(sceneData);
+  if (q !== queueSig && groundMesh) {
+    const bounds = buildBounds(sceneData);
+    if (groundMat.map) groundMat.map.dispose();
+    groundMat.map = groundTex(sceneData, PAL, bounds);
+    groundMat.needsUpdate = true;
+    queueSig = q;
+  }
+  return true;
+}
+
+/// Everything about a hall that can change without moving a mesh: what its
+/// beacon says, and what its label reads.
+function applyHallFacts(h, PAL) {
+  const c = beaconCol(h.b, PAL);
+  h.beacon.material.color.set(c);
+  h.beaconGlow.material.color.set(c);
+  const sub = hallSub(h.b);
+  if (h.sub !== sub) {
+    const lt = labelTex(h.b.name, sub);
+    if (h.label.material.map) h.label.material.map.dispose();
+    h.label.material.map = lt.tex;
+    h.label.material.needsUpdate = true;
+    h.label.scale.set(2.4 * lt.ar * 0.4, 2.4 * 0.4, 1);
+    h.sub = sub;
+  }
+}
+
+/// How far up a hall the lights have got, applied to the storeys themselves.
+/// `floorLight` is fractional, so a floor coming on fades up rather than
+/// switching, and the whole facade never changes at once.
+const WINDOW_DARK = "#2b3038";
+/// The same rule the plan uses (`litKey` in `site.js`): a window is warm, and
+/// nothing about the kind of work changes it -- the beacon is what carries
+/// that. A constant here rather than the theme's `--lit` because this is an
+/// emissive light in a scene with its own hour, not a swatch on a page.
+const WINDOW_WARM = "#FFC98A";
+function litColour() { return WINDOW_WARM; }
+
+function lightHall(h, tod) {
+  const b = h.b, warm = litColour();
+  h.rows.forEach((meshes, f) => {
+    const light = floorLight(b, f) * (0.35 + 0.65 * b.glow);
+    meshes.forEach((m) => {
+      if (Math.abs((m.userData.light || 0) - light) < 0.01 && m.userData.warm === warm) return;
+      m.userData.light = light; m.userData.warm = warm;
+      m.material.emissive.set(light > 0.01 ? warm : WINDOW_DARK);
+      m.material.emissiveIntensity = (0.1 + light * 1.3) * tod.emi;
+    });
+  });
 }
 
 export function stop() { running = false; if (raf) cancelAnimationFrame(raf); raf = null; }
@@ -390,9 +532,11 @@ function applyTOD() {
     l.pool.material.opacity = p.lamp * 0.55;
     l.bulb.material.color.set(p.lamp > 0 ? "#FFE0B0" : "#3A3A3A");
   });
-  Object.keys(halls).forEach((id) => {
-    const h = halls[id];
-    h.win.forEach((m) => { m.material.emissiveIntensity = (h.lit ? 1 : 0.1) * p.emi * 1.25; });
+  // A change of hour changes how hard every lit window burns, so the storeys
+  // are re-lit rather than left at the last hour's intensity.
+  Object.values(halls).forEach((h) => {
+    h.rows.forEach((meshes) => meshes.forEach((m) => { m.userData.light = -1; }));
+    lightHall(h, p);
   });
 }
 
@@ -460,14 +604,39 @@ function tick(now) {
   if (Math.abs(cv.clientWidth - W3) > 1 || Math.abs(cv.clientHeight - H3) > 1) resize();
   const t = Math.max(0, (now - t0) / 1000);
   const s = getSceneFn(), sel = s.getSel();
+  // Both views draw the same halls, so only the one on screen eases them --
+  // and it has to, or a hall would sit half-grown for as long as this mode is
+  // the one being looked at.
+  tickHalls(lastFrame ? (now - lastFrame) / 1000 : 0);
+  lastFrame = now;
+  const tod = TODS[TOD];
 
   Object.keys(halls).forEach((id) => {
-    const h = halls[id];
+    const h = halls[id], b = h.b;
     h.ring.material.opacity = (id === sel ? 0.85 : 0) * (0.7 + 0.3 * Math.sin(t * 3));
-    if (h.pulses) {
-      const k = 0.55 + 0.45 * Math.sin(t * 2.4 + h.b.x + h.b.y);
-      h.beaconGlow.material.opacity = 0.35 + 0.65 * k;
-      const sc = 1.2 + 0.5 * k; h.beaconGlow.scale.set(sc, sc, 1);
+
+    // Where the building has got to between the height it had and the one its
+    // size now asks for. The shell stretches; the roof and its mast ride on
+    // top rather than stretching with it.
+    const k = Math.max(0.04, (b.h * 1.15) / h.hh);
+    h.shell.scale.y = k;
+    h.cap.position.y = h.hh * (k - 1);
+
+    lightHall(h, tod);
+
+    // A run that is going makes the beacon beat, and more of them make it beat
+    // faster -- `pulse_ms` is the daemon's number, so the plan and the render
+    // beat together. A blocked run or a failed agent holds it bright and
+    // still: neither is progress, and a blinking light would say it was.
+    const period = STILL ? 0 : b.cues.pulse_ms;
+    if (period > 0) {
+      const beat = 0.55 + 0.45 * Math.sin((t * 2 * Math.PI * 1000) / period + b.x + b.y);
+      h.beaconGlow.material.opacity = 0.35 + 0.65 * beat;
+      const sc = 1.2 + 0.5 * beat; h.beaconGlow.scale.set(sc, sc, 1);
+    } else {
+      const still = b.cues.beacon === "off" ? 0.15 : b.cues.beacon === "waiting" ? 0.45 : 0.9;
+      h.beaconGlow.material.opacity = still;
+      h.beaconGlow.scale.set(1.3, 1.3, 1);
     }
   });
   workers.forEach((w) => {

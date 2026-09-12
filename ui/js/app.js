@@ -11,7 +11,7 @@ import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { openCreate } from "./task-form.js";
 import { loadDashboard, renderDashboard, wireDashboard } from "./dashboard.js";
 import { initActivity, recordEvent, markWatching, activityFilter, setActivityFilter } from "./activity.js";
-import { showSite, hideSite, refreshSite, siteMode, setSiteMode } from "./site.js";
+import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 
 // ------------------------------------------------------------------ views
 //
@@ -381,13 +381,21 @@ function onEvent(ev) {
       }
       break;
   }
-  // The Agents and Site views are both a read over runs and standing agents;
-  // either can change out from under them without a task event at all.
+  // The Agents view is a read over runs and standing agents; either can change
+  // out from under it without a task event at all.
   if (ev.type.startsWith("run_") || ev.type.startsWith("agent_")) {
     if (state.tab === "agents") {
       if (state.agentView === "occupancy") loadOccupancy(); else loadAgents();
     }
-    if (state.tab === "site") refreshScopesThenSite();
+  }
+  // The site draws queued work too -- the crates at a hall's door, and the
+  // floors its scope's load lights -- so a task arriving, being taken or being
+  // deleted changes what it shows even when no run has started yet. Not
+  // `task_entry`, which is one event per line an agent writes: the journal
+  // says nothing about how full a hall is.
+  if (state.tab === "site" && (ev.type.startsWith("run_") || ev.type.startsWith("agent_")
+      || ev.type === "task_created" || ev.type === "task_updated" || ev.type === "task_deleted")) {
+    refreshScopesThenSite();
   }
   // A run reaching a terminal state is the one event that can change what
   // `/api/production` answers -- the dashboard's history cards refetch on it
@@ -396,12 +404,18 @@ function onEvent(ev) {
 }
 
 /// The site's halls are built from `state.scopes`, which only the Agents view
-/// otherwise keeps current. Pull a fresh copy before redrawing rather than
-/// let the site quietly fall behind whenever nobody has the Agents tab open.
+/// otherwise keeps current, and from `/api/site`, which is the only thing that
+/// knows how big each scope is and how much of it is working. Both, together,
+/// in one wait: the figures outside a hall and the lights on it are the same
+/// fact seen twice, and fetching them a moment apart is how they come to
+/// disagree. The daemon caches the walk behind `/api/site`, so asking again on
+/// every event costs a query rather than a tree walk.
+///
 /// `opening` also runs the first-load path (footprint fetch, camera fit).
 async function refreshScopesThenSite(opening) {
   try {
-    state.scopes = (await api("/api/agents")).scopes;
+    const [agents] = await Promise.all([api("/api/agents"), loadFootprint()]);
+    state.scopes = agents.scopes;
   } catch { /* keep drawing with what we had */ }
   if (opening) showSite(); else refreshSite();
 }

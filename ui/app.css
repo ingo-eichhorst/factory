@@ -21,6 +21,11 @@
   --run-wash: rgba(62,177,131,.14); --wait-wash: rgba(217,164,69,.15); --fault-wash: rgba(217,113,88,.14);
   --term-bg: #0D1316; --term-fg: #B9CAD1; --term-dim: #6C8189; --term-line: #1D272B;
   --on-signal: #08131C;
+  /* A window with its light on. Not one of the three state colours: how far up
+     a hall is lit says how much of it is working, and what kind of work that
+     is belongs to the beacon -- a lit floor drawn in `--idle` would be a light
+     nobody can see is on. */
+  --lit: #FFC98A;
   --shadow: 0 16px 44px rgba(0,0,0,.55);
   /* The site plan's own palette. Both renderers read these through
      `getComputedStyle`, never a literal, so a theme switch repaints a scene
@@ -44,6 +49,9 @@
   --run-wash: rgba(27,122,85,.12); --wait-wash: rgba(156,104,6,.13); --fault-wash: rgba(158,58,43,.11);
   --term-bg: #0D1316; --term-fg: #B9CAD1; --term-dim: #6C8189; --term-line: #1D272B;
   --on-signal: #FFFFFF;
+  /* Warm still, but it has to carry on a pale wall rather than glow on a dark
+     one, so it is the same light two stops down. */
+  --lit: #B5762A;
   --shadow: 0 16px 44px rgba(16,22,25,.22);
   --ground: #CBD3D8; --ground2: #D8E0E4; --plate: #E7ECEE; --paint: #9C6806;
   --roof: #B9C3C9; --roof2: #9FACB3; --wallA: #CED8DC; --wallB: #B7C3C8;
@@ -501,8 +509,20 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
   background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 6px 9px;
   display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--muted);
 }
-.slegend .row { display: flex; align-items: center; gap: 7px; }
-.slegend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.slegend .row { display: flex; align-items: flex-start; gap: 7px; max-width: 38ch; }
+.slegend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto; margin-top: 2px; }
+/* A hall says two things at once -- how much repository it is, and how much
+   work is in it -- so the legend is two groups rather than one list of
+   colours. The size swatches are drawn as a building, not a colour: nothing
+   about a hall's size is carried by hue. */
+.slegend .grp {
+  font: 600 9.5px/1.4 var(--cond); letter-spacing: .1em; text-transform: uppercase;
+  color: var(--faint); margin-top: 4px;
+}
+.slegend .grp:first-child { margin-top: 0; }
+.slegend .sw.sz { background: var(--wallA); border: 1px solid var(--muted); height: 12px; margin-top: 1px; }
+.slegend .sw.lt { background: var(--lit); }
+.slegend .sw.sz.sm { height: 6px; margin-top: 4px; }
 .tod { display: flex; flex-direction: column; gap: 5px; align-items: flex-end; }
 .todr { display: flex; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; background: var(--panel); }
 .todr button { padding: 5px 9px; font: 500 10.5px/1 var(--mono); color: var(--muted); background: transparent; border: 0; cursor: pointer; }
