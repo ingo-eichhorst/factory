@@ -8,6 +8,12 @@ import { closeModal, dropModal } from "./modal.js";
 import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyTasksView, currentTasksView, setTasksView } from "./tasks.js";
 import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
+import {
+  agentViewFromTail,
+  agentViewTail,
+  loadRuntimeConnections,
+  renderRuntimeConnections,
+} from "./agent-runtime.js";
 import { openCreate } from "./task-form.js";
 import { loadDashboard, renderDashboard, renderInbox, wireDashboard } from "./dashboard.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
@@ -49,9 +55,9 @@ const VIEWS = {
     onShow: () => showAgentView(state.agentView),
     onHide: stopAgentPoll,
     tail: {
-      write: () => (state.agentView === "roster" ? ["roster"] : []),
+      write: () => agentViewTail(state.agentView),
       read: ([v], live) => {
-        state.agentView = v === "roster" ? "roster" : "occupancy";
+        state.agentView = agentViewFromTail(v);
         if (live) showAgentView(state.agentView);
       },
     },
@@ -207,7 +213,9 @@ function rerender(route) {
   if (state.tab === "activity") { renderActivity(); return; }
   if (state.tab === "site") { refreshSite(); return; }
   if (state.tab === "tasks") { renderTasks(); return; }
-  if (state.agentView === "occupancy") renderOccupancy(); else renderAgents();
+  if (state.agentView === "occupancy") renderOccupancy();
+  else if (state.agentView === "roster") renderAgents();
+  else renderRuntimeConnections();
 }
 
 /// The rail is a view over `state.scopes`, so it is rebuilt wherever that is
@@ -240,8 +248,8 @@ function showTab(name, tail) {
   writeHash();
 }
 
-// The Agents view keeps its own two-way switch (Occupancy / Roster), each
-// with a poll of its own -- ticking the now-line, or the elapsed times.
+// The Agents view keeps its own three-way switch. Each live read gets its own
+// cadence: the now-line, roster elapsed times, or the runtime connection.
 function stopAgentPoll() {
   if (state.agentPoll) { clearInterval(state.agentPoll); state.agentPoll = null; }
 }
@@ -270,7 +278,9 @@ function showAgentView(view) {
   state.agentView = view;
   $("view-occupancy").hidden = view !== "occupancy";
   $("agents").hidden = view !== "roster";
+  $("agent-runtime").hidden = view !== "agent-runtime";
   $("occ-window").hidden = view !== "occupancy";
+  $("runtime-refresh").hidden = view !== "agent-runtime";
   for (const b of $("agent-view").querySelectorAll("button")) {
     b.classList.toggle("on", b.dataset.view === view);
   }
@@ -278,9 +288,12 @@ function showAgentView(view) {
   if (view === "occupancy") {
     loadOccupancy();
     state.agentPoll = setInterval(loadOccupancy, 10000);
-  } else {
+  } else if (view === "roster") {
     loadAgents();
     state.agentPoll = setInterval(renderAgents, 5000);
+  } else {
+    loadRuntimeConnections();
+    state.agentPoll = setInterval(loadRuntimeConnections, 30000);
   }
 }
 
@@ -341,6 +354,7 @@ async function boot() {
   for (const b of $("agent-view").querySelectorAll("button")) {
     b.onclick = () => { showAgentView(b.dataset.view); writeHash(); };
   }
+  $("runtime-refresh").onclick = () => loadRuntimeConnections();
   $("occ-window").onchange = () => loadOccupancy();
   $("newTask").onclick = () => openCreate();
   wireDashboard();
@@ -420,7 +434,8 @@ function onEvent(ev) {
   // out from under it without a task event at all.
   if (ev.type.startsWith("run_") || ev.type.startsWith("agent_")) {
     if (state.tab === "agents") {
-      if (state.agentView === "occupancy") loadOccupancy(); else loadAgents();
+      if (state.agentView === "occupancy") loadOccupancy();
+      else if (state.agentView === "roster") loadAgents();
     }
   }
   // The site draws queued work too -- the crates at a hall's door, and the

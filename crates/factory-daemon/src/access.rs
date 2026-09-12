@@ -170,6 +170,7 @@ impl Engine {
 
             Request::Status
             | Request::Adapters
+            | Request::RuntimeConnections
             | Request::Agents
             | Request::Occupancy { .. }
             | Request::Production { .. }
@@ -527,6 +528,7 @@ mod tests {
             for request in [
                 Request::Status,
                 Request::Adapters,
+                Request::RuntimeConnections,
                 Request::Agents,
                 Request::Occupancy { minutes: None },
                 Request::Production { minutes: None, bin: None, scope: None },

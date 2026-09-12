@@ -27,8 +27,10 @@ export const state = {
   poll: null,          // terminal poll timer, for a transcript that is not live
   termSocket: null,    // the live terminal's socket, while one is open
   agentPoll: null,
+  runtimeConnections: [], // one diagnostic per effective runtime connection
+  runtimeConnectionError: null,
   sitePoll: null,        // the site view's slow tick, for the half of it no event announces
-  agentView: "occupancy", // the agents page: the chart, or the roster with its controls
+  agentView: "occupancy", // the agents page: occupancy, roster, or the runtime connection
   occ: null,              // the occupancy answer, as the daemon assembled it
 };
 

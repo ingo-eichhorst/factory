@@ -214,13 +214,16 @@
         <option value="1440">last 24 hours</option>
         <option value="10080">last 7 days</option>
       </select>
+      <button class="btn" id="runtime-refresh" hidden>Refresh</button>
       <div class="seg" id="agent-view">
         <button data-view="occupancy" class="on">Occupancy</button>
         <button data-view="roster">Roster</button>
+        <button data-view="agent-runtime">Agent-runtime</button>
       </div>
     </div>
     <section id="view-occupancy"><div class="occ" id="occ" style="--lab:186px">loading…</div></section>
     <div class="agents" id="agents" hidden></div>
+    <div class="runtime-connections" id="agent-runtime" hidden></div>
   </div>
   </div>
 </main>

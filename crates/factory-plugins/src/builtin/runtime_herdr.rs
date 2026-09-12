@@ -19,8 +19,9 @@
 use async_trait::async_trait;
 use factory_core::adapter::agent::LaunchKind;
 use factory_core::adapter::runtime::{
-    AgentRuntime, RuntimeEvent, RuntimeEventKind, RuntimeEventStream, RuntimeStatus, Screen,
-    StartRequest, StatusReport, StatusSource,
+    AgentRuntime, RuntimeConnectionDiagnostic, RuntimeConnectionState, RuntimeEvent,
+    RuntimeEventKind, RuntimeEventStream, RuntimePeer, RuntimeStatus, Screen, StartRequest,
+    StatusReport, StatusSource,
 };
 use factory_core::error::{FactoryError, Result};
 use factory_core::task::SessionRef;
@@ -37,6 +38,9 @@ const ADAPTER: &str = "herdr";
 /// forever if herdr never reports a matching transition -- it is not a poll
 /// interval; the wait still returns the moment a real change happens.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// A diagnostic is polled while its view is open. It must not leave the page
+/// spinning forever if a broken client never answers.
+const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Which herdr states `agent wait` should block for, given the one Factory
 /// currently believes the agent is in. Excludes whatever `current` already
@@ -88,19 +92,17 @@ struct WatchState {
 impl HerdrRuntime {
     pub fn new() -> Self {
         let bin = std::env::var("FACTORY_HERDR_BIN").unwrap_or_else(|_| "herdr".into());
+        Self::with_bin(bin)
+    }
+
+    pub fn with_bin(bin: impl Into<String>) -> Self {
+        let bin = bin.into();
         let herdr_session = detect_session(&bin);
         Self {
             bin,
             start_timeout: Duration::from_secs(60),
             herdr_session,
             watch: Arc::new(Mutex::new(WatchState::default())),
-        }
-    }
-
-    pub fn with_bin(bin: impl Into<String>) -> Self {
-        Self {
-            bin: bin.into(),
-            ..Self::new()
         }
     }
 
@@ -388,6 +390,104 @@ fn detect_session(bin: &str) -> Option<String> {
         .map(|n| n.to_string_lossy().to_string())
 }
 
+fn peer(value: &Value, side: &str) -> Result<RuntimePeer> {
+    let value = value.get(side).and_then(Value::as_object).ok_or_else(|| {
+        FactoryError::adapter(ADAPTER, format!("Herdr status omitted its {side} details"))
+    })?;
+    let version = value
+        .get("version")
+        .and_then(Value::as_str)
+        .filter(|version| !version.is_empty())
+        .ok_or_else(|| {
+            FactoryError::adapter(ADAPTER, format!("Herdr status omitted the {side} version"))
+        })?;
+    let protocol = value
+        .get("protocol")
+        .and_then(Value::as_u64)
+        .and_then(|protocol| u32::try_from(protocol).ok())
+        .ok_or_else(|| {
+            FactoryError::adapter(ADAPTER, format!("Herdr status omitted the {side} protocol"))
+        })?;
+    Ok(RuntimePeer {
+        version: version.to_string(),
+        protocol,
+    })
+}
+
+/// Translate the Herdr CLI's vocabulary at the adapter boundary. Nothing
+/// outside this file should know which object owns `restart_needed`, or that
+/// capabilities are a map of flags rather than a list.
+fn connection_from_status(value: &Value) -> Result<RuntimeConnectionDiagnostic> {
+    let client = peer(value, "client")?;
+    let server_value = value
+        .get("server")
+        .and_then(Value::as_object)
+        .ok_or_else(|| FactoryError::adapter(ADAPTER, "Herdr status omitted its server details"))?;
+    let running = server_value
+        .get("running")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            FactoryError::adapter(
+                ADAPTER,
+                "Herdr status omitted whether its server is running",
+            )
+        })?;
+    let server = if running {
+        Some(peer(value, "server")?)
+    } else {
+        None
+    };
+    let compatible = server_value.get("compatible").and_then(Value::as_bool);
+    let restart_needed = server_value
+        .get("restart_needed")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            value
+                .get("update")
+                .and_then(|update| update.get("restart_needed"))
+                .and_then(Value::as_bool)
+        });
+    let state = if !running {
+        RuntimeConnectionState::Stopped
+    } else if compatible == Some(false) {
+        RuntimeConnectionState::Incompatible
+    } else if restart_needed == Some(true) {
+        RuntimeConnectionState::Degraded
+    } else {
+        RuntimeConnectionState::Healthy
+    };
+    let capabilities = server_value
+        .get("capabilities")
+        .and_then(Value::as_object)
+        .map(|values| {
+            values
+                .iter()
+                .filter(|(_, enabled)| enabled.as_bool() == Some(true))
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(RuntimeConnectionDiagnostic {
+        state,
+        session: server_value
+            .get("session")
+            .and_then(Value::as_str)
+            .or_else(|| value.pointer("/client/session").and_then(Value::as_str))
+            .map(str::to_string),
+        endpoint: server_value
+            .get("socket")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        client: Some(client),
+        server,
+        compatible,
+        restart_needed,
+        capabilities,
+        error: None,
+    })
+}
+
 #[async_trait]
 impl AgentRuntime for HerdrRuntime {
     fn name(&self) -> &str {
@@ -396,6 +496,49 @@ impl AgentRuntime for HerdrRuntime {
 
     fn description(&self) -> String {
         "one herdr workspace per task, agent started in its root pane".into()
+    }
+
+    async fn connection_diagnostic(&self) -> Result<RuntimeConnectionDiagnostic> {
+        let mut command = Command::new(&self.bin);
+        command.args(["status", "--json"]).kill_on_drop(true);
+        let output = match tokio::time::timeout(DIAGNOSTIC_TIMEOUT, command.output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                return Ok(RuntimeConnectionDiagnostic::unreachable(format!(
+                    "could not run the configured Herdr client: {error}"
+                )))
+            }
+            Err(_) => {
+                return Ok(RuntimeConnectionDiagnostic::unreachable(
+                    "the configured Herdr client did not report status within 5 seconds",
+                ))
+            }
+        };
+        if !output.status.success() {
+            let code = output
+                .status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".into());
+            return Ok(RuntimeConnectionDiagnostic::unreachable(format!(
+                "the configured Herdr client could not report status (exit {code})"
+            )));
+        }
+
+        // Do not include stdout in the error: the connection endpoint is an
+        // explicitly modelled field, while arbitrary command output is not a
+        // safe API response.
+        let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            FactoryError::adapter(
+                ADAPTER,
+                format!("could not read Herdr status JSON: {error}"),
+            )
+        })?;
+        let mut diagnostic = connection_from_status(&value)?;
+        if diagnostic.session.is_none() {
+            diagnostic.session.clone_from(&self.herdr_session);
+        }
+        Ok(diagnostic)
     }
 
     async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
@@ -767,5 +910,127 @@ mod tests {
         let until = until_args(RuntimeStatus::Idle);
         assert!(!until.contains(&"idle"));
         assert!(!until.contains(&"done"));
+    }
+
+    fn status(running: bool, compatible: bool, restart_needed: bool) -> Value {
+        serde_json::json!({
+            "client": {
+                "version": "0.8.0",
+                "protocol": 19,
+                "session": "factory"
+            },
+            "server": {
+                "status": if running { "running" } else { "stopped" },
+                "running": running,
+                "version": "0.8.1",
+                "protocol": 19,
+                "compatible": compatible,
+                "socket": "/tmp/herdr/factory/herdr.sock",
+                "session": "factory",
+                "restart_needed": restart_needed,
+                "capabilities": {
+                    "live_handoff": true,
+                    "future_flag": false
+                }
+            },
+            "update": { "restart_needed": restart_needed }
+        })
+    }
+
+    #[test]
+    fn a_running_compatible_herdr_connection_is_translated_without_raw_json() {
+        let got = connection_from_status(&status(true, true, false)).unwrap();
+        assert_eq!(got.state, RuntimeConnectionState::Healthy);
+        assert_eq!(got.session.as_deref(), Some("factory"));
+        assert_eq!(
+            got.endpoint.as_deref(),
+            Some("/tmp/herdr/factory/herdr.sock")
+        );
+        assert_eq!(got.client.unwrap().version, "0.8.0");
+        assert_eq!(got.server.unwrap().protocol, 19);
+        assert_eq!(got.capabilities, vec!["live_handoff"]);
+        assert_eq!(got.compatible, Some(true));
+        assert_eq!(got.restart_needed, Some(false));
+    }
+
+    #[test]
+    fn stopped_incompatible_and_restart_needed_are_distinct_states() {
+        assert_eq!(
+            connection_from_status(&status(false, true, false))
+                .unwrap()
+                .state,
+            RuntimeConnectionState::Stopped
+        );
+        assert_eq!(
+            connection_from_status(&status(true, false, false))
+                .unwrap()
+                .state,
+            RuntimeConnectionState::Incompatible
+        );
+        assert_eq!(
+            connection_from_status(&status(true, true, true))
+                .unwrap()
+                .state,
+            RuntimeConnectionState::Degraded
+        );
+    }
+
+    #[test]
+    fn malformed_status_is_an_error_instead_of_a_healthy_guess() {
+        let error = connection_from_status(&serde_json::json!({
+            "client": { "version": "0.8.0", "protocol": 19 },
+            "server": {}
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("whether its server is running"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_configured_client_is_unreachable_without_failing_the_probe() {
+        let runtime = HerdrRuntime::with_bin("/definitely/no/such/herdr");
+        let got = runtime.connection_diagnostic().await.unwrap();
+        assert_eq!(got.state, RuntimeConnectionState::Unreachable);
+        assert!(got
+            .error
+            .unwrap_or_default()
+            .contains("configured Herdr client"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn diagnostics_use_the_configured_binary_and_its_session() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "factory-herdr-diagnostic-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("chosen-herdr");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+if [ "$1" = status ] && [ "$2" = --json ]; then
+  printf '%s\n' '{"client":{"version":"1.0","protocol":20,"session":"chosen"},"server":{"running":true,"version":"1.0","protocol":20,"compatible":true,"session":"chosen","socket":"/tmp/chosen/herdr.sock","restart_needed":false}}'
+elif [ "$1" = status ]; then
+  printf 'socket: /tmp/chosen/herdr.sock\n'
+else
+  exit 9
+fi
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&bin).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&bin, permissions).unwrap();
+
+        let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        let got = runtime.connection_diagnostic().await.unwrap();
+        assert_eq!(got.state, RuntimeConnectionState::Healthy);
+        assert_eq!(got.session.as_deref(), Some("chosen"));
+        assert_eq!(got.endpoint.as_deref(), Some("/tmp/chosen/herdr.sock"));
+
+        std::fs::remove_dir_all(dir).ok();
     }
 }

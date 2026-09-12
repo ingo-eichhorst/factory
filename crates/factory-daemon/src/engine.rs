@@ -3,13 +3,16 @@
 
 use chrono::Utc;
 use factory_core::adapter::agent::{AgentContext, LaunchSpec, TaskBinding};
-use factory_core::adapter::runtime::{RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource};
+use factory_core::adapter::runtime::{
+    RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
+};
 use factory_core::adapter::TaskStore;
 use factory_core::config::{Factory, ScopeAgent};
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
-    AgentActivity, AgentView, Envelope, Payload, Request, Response, ScopeView, StatusInfo,
+    AgentActivity, AgentView, Envelope, Payload, Request, Response, RuntimeConnectionView,
+    ScopeView, StatusInfo,
 };
 use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
@@ -189,6 +192,9 @@ impl Engine {
                 status: self.status().await?,
             }),
             Request::Adapters => Ok(self.registry.list().into()),
+            Request::RuntimeConnections => Ok(Payload::RuntimeConnections {
+                runtimes: self.runtime_connections().await,
+            }),
             Request::Agents => {
                 let (scopes, available) = self.scope_views().await?;
                 Ok(Payload::Scopes {
@@ -388,6 +394,61 @@ impl Engine {
             interfaces: self.interfaces.clone(),
             scopes: factory.scope_names(),
         })
+    }
+
+    /// One probe per effective runtime connection, not one per scope. A probe
+    /// that fails becomes that connection's error card; it never prevents a
+    /// different runtime from reporting its own state.
+    async fn runtime_connections(&self) -> Vec<RuntimeConnectionView> {
+        let factory = self.factory_snapshot();
+        let mut scopes_by_runtime: std::collections::BTreeMap<String, Vec<String>> =
+            Default::default();
+        for scope in &factory.config.scopes {
+            let runtime = scope
+                .runtime
+                .clone()
+                .unwrap_or_else(|| factory.config.daemon.default_runtime.clone());
+            scopes_by_runtime
+                .entry(runtime)
+                .or_default()
+                .push(scope.name.clone());
+        }
+
+        let metadata: std::collections::BTreeMap<String, (String, String)> = self
+            .registry
+            .list()
+            .adapters
+            .into_iter()
+            .filter(|adapter| adapter.kind == "runtime")
+            .map(|adapter| (adapter.name, (adapter.source, adapter.description)))
+            .collect();
+
+        let mut views = Vec::with_capacity(scopes_by_runtime.len());
+        for (runtime_name, scopes) in scopes_by_runtime {
+            let checked_at = Utc::now();
+            let diagnostic = match self.registry.runtime(&runtime_name) {
+                Ok(runtime) => runtime
+                    .connection_diagnostic()
+                    .await
+                    .unwrap_or_else(|error| RuntimeConnectionDiagnostic::error(error.to_string())),
+                Err(error) => RuntimeConnectionDiagnostic::error(error.to_string()),
+            };
+            let (source, description) = metadata.get(&runtime_name).cloned().unwrap_or_else(|| {
+                (
+                    "missing".into(),
+                    "this configured runtime adapter is not registered".into(),
+                )
+            });
+            views.push(RuntimeConnectionView {
+                runtime: runtime_name,
+                source,
+                description,
+                scopes,
+                checked_at,
+                diagnostic,
+            });
+        }
+        views
     }
 
     /// The agents page: scopes first, then the agents each one declares, then
@@ -1372,6 +1433,7 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use factory_core::adapter::RuntimeConnectionState;
     use factory_core::config::{Config, DaemonConfig, Instance, Scope};
     use factory_core::run::RunStatus;
     use factory_plugins::{Registry, SqliteStore};
@@ -1421,6 +1483,39 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("factory-engine-test-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn runtime_diagnostics_group_scopes_and_isolate_a_missing_adapter_as_data() {
+        let scope_dir = temp_dir("runtime-diagnostic");
+        let engine = test_engine(scope_dir.clone());
+        {
+            let mut factory = engine.factory.write().unwrap();
+            factory.config.scopes[0].runtime = Some("not-registered".into());
+            let mut second = factory.config.scopes[0].clone();
+            second.id = "second-id".into();
+            second.name = "other".into();
+            second.path = scope_dir.join("other");
+            factory.config.scopes.push(second);
+        }
+
+        let views = engine.runtime_connections().await;
+        assert_eq!(views.len(), 1, "one connection is probed once for both scopes");
+        assert_eq!(views[0].runtime, "not-registered");
+        assert_eq!(views[0].scopes, vec!["demo", "other"]);
+        assert_eq!(views[0].source, "missing");
+        assert_eq!(views[0].diagnostic.state, RuntimeConnectionState::Error);
+        assert!(
+            views[0]
+                .diagnostic
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not-registered"),
+            "the card says which configured adapter is absent"
+        );
+
+        std::fs::remove_dir_all(scope_dir).ok();
     }
 
     #[tokio::test]

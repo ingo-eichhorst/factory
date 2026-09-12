@@ -2,7 +2,7 @@
 //! sends it over a unix socket, the HTTP adapter maps REST onto it; adding a
 //! third interface means translating to this, not inventing a new API.
 
-use crate::adapter::Screen;
+use crate::adapter::{RuntimeConnectionDiagnostic, Screen};
 use crate::building::{Activity, Cues, RepoMetrics, Shape};
 use crate::agent::AgentSession;
 use crate::config::ScopeAgent;
@@ -19,6 +19,10 @@ pub enum Request {
     Status,
     #[serde(rename = "adapters")]
     Adapters,
+    /// One connection diagnostic per effective runtime, grouped with every
+    /// scope that uses it.
+    #[serde(rename = "runtime.connections")]
+    RuntimeConnections,
     /// The scopes, the agents each one declares, and what they are doing.
     #[serde(rename = "agents")]
     Agents,
@@ -171,6 +175,7 @@ pub enum Payload {
     Ok,
     Status { status: StatusInfo },
     Adapters { adapters: Vec<AdapterEntry> },
+    RuntimeConnections { runtimes: Vec<RuntimeConnectionView> },
     Task { task: Task },
     Tasks { tasks: Vec<Task> },
     Run { run: Run },
@@ -270,6 +275,20 @@ pub struct AdapterEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdapterList {
     pub adapters: Vec<AdapterEntry>,
+}
+
+/// One runtime adapter connection and every scope whose effective
+/// configuration points at it. The probe result is flattened so the wire
+/// reads as one diagnostic card rather than a wrapper around one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeConnectionView {
+    pub runtime: String,
+    pub source: String,
+    pub description: String,
+    pub scopes: Vec<String>,
+    pub checked_at: chrono::DateTime<chrono::Utc>,
+    #[serde(flatten)]
+    pub diagnostic: RuntimeConnectionDiagnostic,
 }
 
 impl From<AdapterList> for Payload {
@@ -531,6 +550,42 @@ mod tests {
         let env: Envelope = serde_json::from_str(r#"{"op":"status"}"#).expect("no token is fine");
         assert!(env.token.is_none());
         assert!(matches!(env.request, Request::Status));
+    }
+
+    #[test]
+    fn a_runtime_connection_request_is_a_read_without_parameters() {
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"runtime.connections"}"#).expect("request parses");
+        assert!(matches!(env.request, Request::RuntimeConnections));
+    }
+
+    #[test]
+    fn a_runtime_diagnostic_flattens_into_one_wire_card() {
+        let response = Response::ok(Payload::RuntimeConnections {
+            runtimes: vec![RuntimeConnectionView {
+                runtime: "bare".into(),
+                source: "builtin".into(),
+                description: "bare runtime".into(),
+                scopes: vec!["demo".into()],
+                checked_at: chrono::Utc::now(),
+                diagnostic: RuntimeConnectionDiagnostic::unsupported(),
+            }],
+        });
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            json.pointer("/data/kind").and_then(serde_json::Value::as_str),
+            Some("runtime_connections")
+        );
+        assert_eq!(
+            json.pointer("/data/runtimes/0/state")
+                .and_then(serde_json::Value::as_str),
+            Some("unsupported")
+        );
+        assert_eq!(
+            json.pointer("/data/runtimes/0/scopes/0")
+                .and_then(serde_json::Value::as_str),
+            Some("demo")
+        );
     }
 
     #[test]
