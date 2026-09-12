@@ -13,7 +13,7 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use factory_core::adapter::interface::{Interface, InterfaceContext};
 use factory_core::error::{FactoryError, Result};
-use factory_core::protocol::{Envelope, Payload, Request, Response};
+use factory_core::protocol::{Envelope, Payload, ProductionBin, Request, Response};
 use factory_core::task::{NewTask, TaskFilter, TaskPatch, TaskReport};
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use std::sync::Arc;
@@ -113,6 +113,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/adapters", get(adapters))
         .route("/api/agents", get(agents))
         .route("/api/occupancy", get(occupancy))
+        .route("/api/production", get(production))
         .route("/api/site", get(site_footprint))
         // The id of a standing agent is `<scope>/<name>`, which has a slash in
         // it, so these take it in the body rather than the path.
@@ -213,6 +214,28 @@ async fn occupancy(
         &engine,
         Request::Occupancy {
             minutes: window.minutes,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct ProductionQuery {
+    minutes: Option<u32>,
+    bin: Option<ProductionBin>,
+    scope: Option<String>,
+}
+
+async fn production(
+    State(engine): State<Arc<Engine>>,
+    Query(q): Query<ProductionQuery>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::Production {
+            minutes: q.minutes,
+            bin: q.bin,
+            scope: q.scope,
         },
     )
     .await

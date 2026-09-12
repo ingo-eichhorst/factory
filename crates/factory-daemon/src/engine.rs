@@ -122,6 +122,9 @@ impl Engine {
             Request::Occupancy { minutes } => Ok(Payload::Occupancy {
                 occupancy: self.occupancy(minutes).await?,
             }),
+            Request::Production { minutes, bin, scope } => Ok(Payload::Production {
+                production: self.production(minutes, bin, scope).await?,
+            }),
             Request::SiteFootprint => Ok(Payload::SiteFootprint {
                 footprint: self.site_footprint().await?,
             }),

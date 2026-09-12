@@ -170,6 +170,7 @@ impl Engine {
             | Request::Adapters
             | Request::Agents
             | Request::Occupancy { .. }
+            | Request::Production { .. }
             | Request::SiteFootprint
             | Request::TaskGet { .. }
             | Request::TaskList(_)
@@ -508,6 +509,7 @@ mod tests {
                 Request::Adapters,
                 Request::Agents,
                 Request::Occupancy { minutes: None },
+                Request::Production { minutes: None, bin: None, scope: None },
                 Request::TaskGet { id: "t".into() },
                 Request::TaskList(Default::default()),
                 Request::TaskEntries {
