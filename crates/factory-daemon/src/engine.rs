@@ -884,6 +884,16 @@ impl Engine {
                     status: Some(status),
                     clear_session: true,
                     clear_token: true,
+                    // A run that has ended is not waiting on anybody, so the
+                    // block's own clock and the runtime's standing guess both
+                    // go with the session -- `blocked_since` is documented to
+                    // be `None` whenever the status is not `Blocked`, and a
+                    // finished run is the one path that could otherwise leave
+                    // it set. Forced here rather than left to `patch`: every
+                    // terminal status comes through this function, and only
+                    // the agent's own report remembered to clear it.
+                    clear_blocked: true,
+                    clear_block_suspicion: true,
                     ended_at: Some(Utc::now()),
                     ..patch
                 },
@@ -1231,6 +1241,68 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    // `blocked_since` promises to be `None` whenever the status is not
+    // `Blocked`. The agent's own report honoured that; the daemon giving up on
+    // a run did not, so a failed run kept saying it was still waiting for
+    // somebody.
+    #[tokio::test]
+    async fn a_run_the_daemon_fails_out_of_a_block_stops_claiming_to_be_waiting() {
+        let scope_dir = temp_dir("scope");
+        let engine = test_engine(scope_dir.clone());
+
+        let task = engine
+            .create(NewTask {
+                title: "asks a question and is given up on".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let run = engine
+            .store
+            .create_run(&factory_core::run::NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: task.runtime.clone(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+
+        let blocked = engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Blocked),
+                    blocked_since: Some(Utc::now()),
+                    blocked_source: Some(BlockSource::Agent),
+                    block_suspected_since: Some(Utc::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(blocked.blocked_since.is_some(), "the block is on before we fail it");
+
+        engine.fail_run(&run.id, "nobody ever answered").await;
+
+        let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, RunStatus::Failed);
+        assert!(failed.blocked_since.is_none(), "a finished run is not still waiting");
+        assert!(failed.blocked_source.is_none(), "and nobody is holding it");
+        assert!(
+            failed.block_suspected_since.is_none(),
+            "a guess about a session that is gone is not worth keeping either"
+        );
     }
 
     #[tokio::test]
