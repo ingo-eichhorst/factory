@@ -14,6 +14,8 @@ ENVS_CONF="$SKILL_DIR/envs.conf"
 # removed, so the running instance owns its own copy of the binary and its own
 # data directory and never reaches back into a checkout.
 ENVS_HOME="${FACTORY_ENVS:-$HOME/factory-envs}"
+COMPANY_ROOT="${FACTORY_RELEASE_ROOT:-$HOME/business-factory}"
+COMPANY_LABEL="${FACTORY_LAUNCHD_LABEL:-com.business-factory.daemon}"
 # One warm cargo cache shared by every release build, so a throwaway build
 # worktree does not mean a cold compile every time.
 BUILD_CACHE="$ENVS_HOME/.cargo-target"
@@ -27,9 +29,34 @@ repo_root() {
 }
 
 env_home() { printf '%s/%s\n' "$ENVS_HOME" "$1"; }
-env_root() { printf '%s/root\n' "$(env_home "$1")"; }
-env_bin()  { printf '%s/bin/factory-daemon\n' "$(env_home "$1")"; }
-env_log()  { printf '%s/daemon.log\n' "$(env_home "$1")"; }
+mode_for() {
+  local mode
+  mode="$(conf_field "$1" 4)"
+  printf '%s\n' "${mode:-isolated}"
+}
+
+env_root() {
+  if [ "$(mode_for "$1")" = company ]; then
+    printf '%s\n' "$COMPANY_ROOT"
+  else
+    printf '%s/root\n' "$(env_home "$1")"
+  fi
+}
+env_bin() {
+  if [ "$(mode_for "$1")" = company ]; then
+    printf '%s/.local/bin/factory-daemon\n' "$HOME"
+  else
+    printf '%s/bin/factory-daemon\n' "$(env_home "$1")"
+  fi
+}
+env_cli_bin() { printf '%s/.local/bin/factory\n' "$HOME"; }
+env_log() {
+  if [ "$(mode_for "$1")" = company ]; then
+    printf '%s/.factory/logs/daemon.log\n' "$COMPANY_ROOT"
+  else
+    printf '%s/daemon.log\n' "$(env_home "$1")"
+  fi
+}
 env_pid()  { printf '%s/daemon.pid\n' "$(env_home "$1")"; }
 env_released() { printf '%s/RELEASED\n' "$(env_home "$1")"; }
 
@@ -67,10 +94,14 @@ known_envs() {
 }
 
 env_bind() {
-  # What this environment last bound to, defaulting to loopback. Written by
-  # release.sh; read by ensure.sh so a restart does not silently narrow or
-  # widen who can reach it.
-  released_field "$1" bind || true
+  # The company service follows the machine's current LAN address. Isolated
+  # environments keep the address they were released with so ensure.sh never
+  # silently widens or narrows their reach.
+  if [ "$(mode_for "$1")" = company ]; then
+    lan_ipv4 || true
+  else
+    released_field "$1" bind || true
+  fi
 }
 
 released_field() {
@@ -95,17 +126,91 @@ pid_of() {
   printf '%s\n' "$pid"
 }
 
-is_running() { pid_of "$1" >/dev/null 2>&1; }
+is_running() {
+  if [ "$(mode_for "$1")" = company ]; then
+    launchctl print "gui/$(id -u)/$COMPANY_LABEL" 2>/dev/null \
+      | grep -q 'state = running'
+  else
+    pid_of "$1" >/dev/null 2>&1
+  fi
+}
+
+lan_ipv4() {
+  local iface addr
+  if command -v route >/dev/null 2>&1 && command -v ipconfig >/dev/null 2>&1; then
+    iface="$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')"
+    if [ -n "$iface" ]; then
+      addr="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+      if [ -n "$addr" ]; then printf '%s\n' "$addr"; return 0; fi
+    fi
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    iface="$(ip route show default 2>/dev/null | awk 'NR == 1 { print $5 }')"
+    if [ -n "$iface" ]; then
+      addr="$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk 'NR == 1 { split($4, a, "/"); print a[1] }')"
+      if [ -n "$addr" ]; then printf '%s\n' "$addr"; return 0; fi
+    fi
+  fi
+  return 1
+}
 
 http_base() {
-  local bind port
-  bind="$(env_bind "$1")"; bind="${bind:-127.0.0.1}"
-  port="$(port_for "$1")"
-  printf 'http://%s:%s\n' "$bind" "$port"
+  local bind
+  bind="$(env_bind "$1")"
+  bind="${bind:-$(lan_ipv4)}"
+  printf 'http://%s:%s\n' "$bind" "$(port_for "$1")"
+}
+
+tailscale_bin() {
+  if command -v tailscale >/dev/null 2>&1; then
+    command -v tailscale
+  elif [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
+    printf '%s\n' /Applications/Tailscale.app/Contents/MacOS/Tailscale
+  else
+    return 1
+  fi
+}
+
+tailscale_dns_name() {
+  local bin
+  bin="$(tailscale_bin)" || return 1
+  "$bin" status --json 2>/dev/null | python3 -c '
+import json, sys
+name = json.load(sys.stdin).get("Self", {}).get("DNSName", "").rstrip(".")
+if not name:
+    raise SystemExit(1)
+print(name)
+'
+}
+
+tailscale_url() {
+  local name
+  name="$(tailscale_dns_name)" || return 1
+  printf 'https://%s:%s\n' "$name" "$(port_for "$1")"
+}
+
+configure_tailscale_serve() {
+  local env="$1" target="${2:-}" bin port
+  bin="$(tailscale_bin)" || { note "Tailscale CLI is unavailable"; return 1; }
+  port="$(port_for "$env")"
+  target="${target:-$(http_base "$env")}"
+  "$bin" serve --bg --yes --https="$port" "$target" >/dev/null
+}
+
+verify_network_access() {
+  local env="$1" local_url="${2:-}" tail_url
+  local_url="${local_url:-$(http_base "$env")}"
+  configure_tailscale_serve "$env" "$local_url" || return 1
+  tail_url="$(tailscale_url "$env")" \
+    || { note "$env: cannot determine its Tailscale URL"; return 1; }
+  wait_for_http "$tail_url" \
+    || { note "$env: Tailscale URL did not answer: $tail_url"; return 1; }
+  wait_for_http "$local_url" \
+    || { note "$env: local-network URL did not answer: $local_url"; return 1; }
 }
 
 port_is_free() {
-  ! lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+  ! lsof -nP -iTCP@"$1":"$2" -sTCP:LISTEN >/dev/null 2>&1
 }
 
 # Poll rather than sleep a fixed amount: a daemon that is up in 200ms should
@@ -115,7 +220,7 @@ wait_for_http() {
   local url="$1" tries="${2:-100}"
   local i=0
   while [ "$i" -lt "$tries" ]; do
-    if curl -fsS -o /dev/null --max-time 2 "$url/api/status" 2>/dev/null; then return 0; fi
+    if curl --noproxy '*' -fsS -o /dev/null --max-time 2 "$url/api/status" 2>/dev/null; then return 0; fi
     i=$((i + 1))
     sleep 0.1 2>/dev/null || sleep 1
   done

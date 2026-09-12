@@ -5,10 +5,10 @@ description: Release a commit, branch or worktree of this repo to an environment
 
 # Release
 
-Factory is one binary with the UI compiled into it, so an environment is a
-port, a directory of its own, and a daemon. Releasing is: build the commit,
-copy the binary into the environment's directory, restart it there, and check
-that `/api/status` answers before claiming any of it worked.
+Factory's UI is compiled into the daemon. Releasing is: build the commit,
+install the binaries by atomic rename, restart the target, publish its port
+through Tailscale Serve, and check `/api/status` through both Tailscale HTTPS
+and the local network before claiming any of it worked.
 
 The scripts do all of that. Run them; do not re-derive the steps.
 
@@ -19,16 +19,24 @@ The scripts do all of that. Run them; do not re-derive the steps.
     scripts/logs.sh    <env> [n|-f]
 
 `envs.conf` declares the standing environments -- **production** on 8790 and
-**staging** on 8791 -- and both are meant to be up at all times. Any other name
-is ad-hoc: it gets a port derived from its name and a fresh instance, and it is
-there to be thrown away. Pointing one at a worktree is how a branch gets looked
-at before it is merged:
+**staging** on 8791 -- and both are meant to be up at all times. Staging is the
+self-hosted company instance: its root is `~/business-factory`, its binaries
+are installed in `~/.local/bin`, and launchd keeps it alive. Production keeps
+an isolated instance root. Any other name is an isolated ad-hoc environment:
+it gets a port derived from its name and a fresh instance, and it is there to
+be thrown away. Pointing one at a worktree is how a branch gets looked at
+before it is merged:
 
     scripts/release.sh review-13 ../worktrees/hall-floor
 
-Environments live under `~/factory-envs/<env>/` -- binary, instance root, log,
-and a `RELEASED` file naming the commit. Nothing lives in the repository, so a
-release survives a branch switch and a removed worktree.
+Release metadata lives under `~/factory-envs/<env>/`. Isolated environments
+also keep their binary, root and log there. Staging deliberately uses the live
+`~/business-factory/.factory/` database and config so the UI shows the real
+company scopes and tasks; a release never replaces that state.
+
+Every successful release prints two URLs. Give the Tailscale HTTPS URL to the
+requester (for example `https://factory.taile2330c.ts.net:8791/`) and also
+report the LAN URL. Never hand off `127.0.0.1`, `0.0.0.0`, or an unverified URL.
 
 ## What the scripts will not do for you
 
@@ -39,17 +47,20 @@ release survives a branch switch and a removed worktree.
 - **An environment's data is not build output.** A release swaps the binary.
   The instance root, its config and its database stay. `--scope` is read on the
   first release of an environment and ignored afterwards, because by then that
-  file is somebody's environment.
-- **Never point an environment at the company's live `.factory/`.** It holds a
-  real database and real secrets. Every environment gets its own root under
-  `~/factory-envs/`, which is what the scripts do on their own.
-- **The default bind is loopback.** `--bind` puts a daemon that runs shell
-  commands on the network with no authentication in front of it. It is a
-  deliberate act, not a convenience.
+  file is somebody's environment. Staging's existing company config and
+  database are preserved; `--scope` only applies to a fresh isolated instance.
+- **Every release is available through Tailscale and LAN.** The daemon binds
+  the machine's current LAN address and Tailscale Serve terminates HTTPS on the
+  tailnet DNS name. Do not bind `0.0.0.0`: Tailscale owns the same port on its
+  virtual address, so a wildcard conflicts with the HTTPS listener.
+- **These are trusted-network services.** The daemon can run shell commands and
+  has no application-level authentication. Tailscale ACLs and the LAN boundary
+  are the access controls. Never enable Tailscale Funnel or a public port
+  forward as part of a release.
 
 ## Keeping the two up
 
-`ensure.sh` restarts what was last released -- it never builds, so a machine
+`ensure.sh` restarts what was last released and repairs its Tailscale route -- it never builds, so a machine
 that rebooted comes back on the commit it was already on rather than silently
 moving forward. It exits non-zero when something that should be running is not,
 so it works on a timer (`/loop`, `cron`, a launch agent); wiring that up is a
@@ -58,8 +69,8 @@ it behind their back.
 
 ## When something is wrong
 
-`status.sh` reports `wedged` for a process that is alive while its port does
-not answer -- that is the state worth looking at, and `logs.sh <env>` is the
-next command. A release that fails its health check stops the daemon it just
-started and exits non-zero, leaving the previous binary in place but not
-running: fix forward, or re-release the commit named in `RELEASED`.
+`status.sh` reports `wedged` for a process that is alive while its LAN endpoint
+does not answer, and `partial` when LAN works but Tailscale does not. Either is
+worth inspecting with `logs.sh <env>`. A failed isolated release stops the
+daemon it started. Staging is launchd-managed and may be retried by launchd;
+inspect its log, fix forward, or re-release the commit named in `RELEASED`.

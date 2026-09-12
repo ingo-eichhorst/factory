@@ -22,9 +22,9 @@ usage: release.sh <env> <ref|worktree-path> [options]
                       before it is merged
 
 options:
-  --bind ADDR         address to listen on (default 127.0.0.1). Anything else
-                      puts an unauthenticated daemon that runs shell commands
-                      on the network; pass it deliberately.
+  --bind ADDR         LAN address to listen on (default: this machine's current
+                      default-route IPv4 address). Do not use a wildcard: it
+                      conflicts with Tailscale Serve on the same port.
   --scope NAME=PATH   declare a scope on first release of this environment.
                       Repeatable. Later releases leave the config alone.
   --debug             build without optimisation -- faster, for ad-hoc looks
@@ -36,7 +36,7 @@ USAGE
 [ $# -ge 2 ] || usage
 ENV_NAME="$1"; SOURCE="$2"; shift 2
 
-BIND="127.0.0.1"
+BIND=""
 PROFILE="release"
 FORCE=0
 SCOPES=()
@@ -51,12 +51,19 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+BIND="${BIND:-$(lan_ipv4 || true)}"
+[ -n "$BIND" ] || die "cannot determine the local-network IPv4 address; pass --bind ADDR"
+case "$BIND" in
+  0.0.0.0|127.*|localhost|::1) die "--bind must be a LAN address, not $BIND" ;;
+esac
+
 case "$ENV_NAME" in
   ''|*[!a-zA-Z0-9_-]*) die "environment name must be letters, digits, - or _" ;;
 esac
 
 PORT="$(port_for "$ENV_NAME")"
 POLICY="$(policy_for "$ENV_NAME")"
+MODE="$(mode_for "$ENV_NAME")"
 HOME_DIR="$(env_home "$ENV_NAME")"
 REPO="$(repo_root)"
 
@@ -117,17 +124,22 @@ note "building ($PROFILE) in $BUILD_DIR"
 if [ "$PROFILE" = "release" ]; then
   ( cd "$BUILD_DIR" && CARGO_TARGET_DIR="$BUILD_CACHE" cargo build --workspace --release --quiet )
   BUILT="$BUILD_CACHE/release/factory-daemon"
+  BUILT_CLI="$BUILD_CACHE/release/factory"
 else
   ( cd "$BUILD_DIR" && CARGO_TARGET_DIR="$BUILD_CACHE" cargo build --workspace --quiet )
   BUILT="$BUILD_CACHE/debug/factory-daemon"
+  BUILT_CLI="$BUILD_CACHE/debug/factory"
 fi
 [ -x "$BUILT" ] || die "the build produced no factory-daemon at $BUILT"
+[ -x "$BUILT_CLI" ] || die "the build produced no factory CLI at $BUILT_CLI"
 
 # -------------------------------------------------------------- the instance
 
 ROOT="$(env_root "$ENV_NAME")"
 CONFIG="$ROOT/.factory/config.yaml"
 if [ ! -f "$CONFIG" ]; then
+  [ "$MODE" != company ] \
+    || die "the company instance has no config at $CONFIG; initialise it deliberately before releasing"
   note "first release of $ENV_NAME -- writing a new instance root at $ROOT"
   "$BUILT" --root "$ROOT" init >/dev/null
   FRESH=yes
@@ -140,6 +152,7 @@ fi
 # a codebase to dispatch work into. On a fresh instance the scopes are replaced
 # by whatever `--scope` said, or by none at all. An instance that already
 # exists keeps its config: that is somebody's environment, not build output.
+# The company instance is never fresh here; only its HTTP bind is changed.
 python3 - "$CONFIG" "$BIND" "$PORT" "$FRESH" "$ENV_NAME" "${SCOPES[@]+"${SCOPES[@]}"}" <<'PY'
 import sys, pathlib
 
@@ -154,7 +167,8 @@ for line in lines:
     if stripped == "- kind: http":
         in_http = True
         out.append(line)
-        out.append("    bind: %s:%s" % (bind, port))
+        indent = line[:len(line) - len(line.lstrip())]
+        out.append("%s  bind: %s:%s" % (indent, bind, port))
         continue
     if in_http:
         if stripped.startswith("bind:"):
@@ -204,24 +218,52 @@ PY
 
 # ----------------------------------------------------------------- the swap
 
-"$(dirname "${BASH_SOURCE[0]}")/stop.sh" "$ENV_NAME" >/dev/null 2>&1 || true
-port_is_free "$PORT" || die "port $PORT is still held by something that is not this environment"
-
-cp "$BUILT" "$(env_bin "$ENV_NAME").new"
-chmod +x "$(env_bin "$ENV_NAME").new"
-mv "$(env_bin "$ENV_NAME").new" "$(env_bin "$ENV_NAME")"
+if [ "$MODE" = company ]; then
+  # This is the self-hosted company daemon. It runs from ~/.local/bin under
+  # launchd; rename both binaries before kickstart so an agent callback and the
+  # daemon always speak the same wire protocol.
+  mkdir -p "$(dirname "$(env_bin "$ENV_NAME")")"
+  cp "$BUILT" "$(env_bin "$ENV_NAME").new"
+  chmod +x "$(env_bin "$ENV_NAME").new"
+  mv "$(env_bin "$ENV_NAME").new" "$(env_bin "$ENV_NAME")"
+  cp "$BUILT_CLI" "$(env_cli_bin).new"
+  chmod +x "$(env_cli_bin).new"
+  mv "$(env_cli_bin).new" "$(env_cli_bin)"
+else
+  "$(dirname "${BASH_SOURCE[0]}")/stop.sh" "$ENV_NAME" >/dev/null 2>&1 || true
+  port_is_free "$BIND" "$PORT" \
+    || die "$BIND:$PORT is still held by something that is not this environment"
+  cp "$BUILT" "$(env_bin "$ENV_NAME").new"
+  chmod +x "$(env_bin "$ENV_NAME").new"
+  mv "$(env_bin "$ENV_NAME").new" "$(env_bin "$ENV_NAME")"
+fi
 
 LOG="$(env_log "$ENV_NAME")"
-nohup "$(env_bin "$ENV_NAME")" --root "$ROOT" run >>"$LOG" 2>&1 &
-echo $! > "$(env_pid "$ENV_NAME")"
+if [ "$MODE" = company ]; then
+  launchctl kickstart -k "gui/$(id -u)/$COMPANY_LABEL"
+else
+  nohup "$(env_bin "$ENV_NAME")" --root "$ROOT" run >>"$LOG" 2>&1 &
+  echo $! > "$(env_pid "$ENV_NAME")"
+fi
 
 BASE="http://$BIND:$PORT"
 if ! wait_for_http "$BASE"; then
   note "--- last 20 lines of $LOG ---"
   tail -20 "$LOG" >&2 || true
-  "$(dirname "${BASH_SOURCE[0]}")/stop.sh" "$ENV_NAME" >/dev/null 2>&1 || true
+  if [ "$MODE" != company ]; then
+    "$(dirname "${BASH_SOURCE[0]}")/stop.sh" "$ENV_NAME" >/dev/null 2>&1 || true
+  fi
   die "$ENV_NAME did not come up on $BASE"
 fi
+
+if ! verify_network_access "$ENV_NAME" "$BASE"; then
+  if [ "$MODE" != company ]; then
+    "$(dirname "${BASH_SOURCE[0]}")/stop.sh" "$ENV_NAME" >/dev/null 2>&1 || true
+  fi
+  die "$ENV_NAME is not reachable through both Tailscale and the local network"
+fi
+
+TAILSCALE_URL="$(tailscale_url "$ENV_NAME")"
 
 cat > "$(env_released "$ENV_NAME")" <<EOF
 env: $ENV_NAME
@@ -231,13 +273,18 @@ describe: $DESCRIBE
 dirty: $DIRTY
 source: $SOURCE_DESC
 profile: $PROFILE
+mode: $MODE
 bind: $BIND
 port: $PORT
+root: $ROOT
+tailscale_url: $TAILSCALE_URL
+lan_url: $BASE
 released_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
 note ""
-note "$ENV_NAME is up at $BASE"
+note "$ENV_NAME is up at $TAILSCALE_URL/"
+note "  local    $BASE/"
 note "  commit   $(git -C "$REPO" rev-parse --short "$SHA") ($DESCRIBE) from $SOURCE_DESC"
 note "  root     $ROOT"
 note "  log      $LOG"
