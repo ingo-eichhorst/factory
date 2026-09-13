@@ -132,11 +132,15 @@ export function agentChoices(configurations, scopes) {
 }
 
 /// The "From tasks" picker's own filter: recorded tasks narrowed by scope and
-/// status, both optional. Pure so the picker's matching logic can be tested
-/// without a fetch or a DOM.
+/// status, both optional, and always excluding a task a bench run itself
+/// spawned (`bench_origin` set) -- generating a case from a benchmark
+/// attempt's own task is circular, and every such task already has a more
+/// direct route into a dataset (a case's `origin`, from Add case or Import).
+/// Pure so the picker's matching logic can be tested without a fetch or a
+/// DOM.
 export function filterTasksForPicker(tasks, scope, status) {
   return (tasks || []).filter(
-    (t) => (!scope || t.scope === scope) && (!status || t.status === status),
+    (t) => !t.bench_origin && (!scope || t.scope === scope) && (!status || t.status === status),
   );
 }
 

@@ -18,8 +18,9 @@ import { benchmarksTail, readBenchmarksTail } from "./bench-model.js";
 
 const NOTE =
   "A score without its configuration is not a measurement -- the same model scores differently under a " +
-  "different harness, tool surface or retry budget. Factory records no score yet. Every configuration below " +
-  "is unpinned, which means recorded and excluded, never averaged.";
+  "different harness, tool surface or retry budget. A configuration is the disclosure a score needs. Every " +
+  "configuration below is still unpinned: harness version, tool surface, context policy and retry budget are " +
+  "not recorded, so a bench run's results group by configuration hash and are never averaged across configurations.";
 
 /// The seven-field tuple a result would have to carry to be comparable. The
 /// labels are exactly the strings the daemon writes into a configuration's

@@ -201,6 +201,18 @@ test("filterTasksForPicker narrows by scope and status, both optional", () => {
   assert.deepEqual(filterTasksForPicker(tasks, null, null).map((t) => t.id), ["1", "2", "3"]);
 });
 
+test("filterTasksForPicker always excludes a task a bench run itself spawned", () => {
+  // Generating a case from a benchmark attempt's own task is circular -- and
+  // every attempt task already has a more direct way into a dataset (a
+  // case's `origin`, from Add case or Import).
+  const tasks = [
+    { id: "1", scope: "demo", status: "done" },
+    { id: "2", scope: "demo", status: "done", bench_origin: { bench_run_id: "r1", case_id: "c1" } },
+  ];
+  assert.deepEqual(filterTasksForPicker(tasks, null, null).map((t) => t.id), ["1"]);
+  assert.deepEqual(filterTasksForPicker(tasks, "demo", "done").map((t) => t.id), ["1"]);
+});
+
 // ---------------------------------------------------------------- bench runs
 
 test("progress counts settled attempts the same way the CLI's bench_run_line does", () => {
