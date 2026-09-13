@@ -961,11 +961,20 @@ impl Engine {
         // complaint, rather than quietly falling back to the scope.
         let (cwd, run) = self.place_run(&task, run, &scope_path).await?;
 
+        // Resolved the same way `caller_for` resolves it for every other
+        // request, off the agent this run actually landed on rather than
+        // whatever the task's own record says -- `resolve_agent` may have
+        // fallen back to a bare adapter name the task did not ask for.
+        let role = self.effective_role(&task.scope, &agent_name).await;
+        let role = self.roles.get(&role).cloned();
+
         let ctx = AgentContext {
             scope: task.scope.clone(),
+            agent_name: agent_name.clone(),
             cwd: cwd.clone(),
             factory_bin: self.factory_bin.clone(),
             socket: factory.socket_path(),
+            guides_dir: factory.guides_dir(),
             task: Some(TaskBinding {
                 task: task.clone(),
                 run_id: run.id.clone(),
@@ -974,6 +983,7 @@ impl Engine {
                 worktree_branch: run.worktree_branch.clone(),
             }),
             identity_token: None,
+            role,
         };
 
         let mut launch = agent.launch_spec(&ctx).await?;
@@ -1002,6 +1012,13 @@ impl Engine {
 
         let prompt = agent.prompt(&ctx).await?;
         runtime.submit(&session, &prompt).await?;
+
+        // Whatever wrote the guide file already had it read at startup by
+        // whichever harness this is; keeping it around after that would just
+        // be one more file under `.factory/` for every run this instance
+        // ever dispatches. A harness that used inline text or none at all
+        // (codex, shell) never created one, so this is a harmless no-op then.
+        let _ = std::fs::remove_file(ctx.guide_path());
 
         self.entry(
             task_id,
@@ -1762,6 +1779,79 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&scope_dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -- args land in the order the daemon promises -------------------------
+
+    #[test]
+    fn declared_args_land_after_whatever_the_guide_already_injected() {
+        // `launch_spec` puts the adapter's own defaults first and then the
+        // guide's flag; this pins the half `append_declared_args` owns -- a
+        // scope's own `args:` still lands after both, last word wins.
+        let mut launch = LaunchSpec {
+            kind: factory_core::adapter::agent::LaunchKind::Named("pi".into()),
+            args: vec!["--append-system-prompt".into(), "/tmp/guide.md".into()],
+            env: Default::default(),
+        };
+        let declared: ScopeAgent = serde_yaml_ng::from_str(
+            "name: watcher\nharness: pi\nlifetime: permanent\nargs: [--model, opus]\n",
+        )
+        .unwrap();
+
+        append_declared_args(&mut launch, Some(&declared));
+
+        assert_eq!(
+            launch.args,
+            vec!["--append-system-prompt", "/tmp/guide.md", "--model", "opus"],
+            "the declared override comes after the injected flag, not before it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dispatched_runs_declared_args_follow_the_guide_launch_spec_injects() {
+        // The same guarantee, exercised through the real adapter rather than
+        // a hand-built `LaunchSpec`: `HarnessAgent::launch_spec` still puts
+        // its own defaults first and the guide's flag after them, so
+        // `append_declared_args` has something correctly ordered to append to.
+        use factory_core::role::Role;
+        use factory_core::Agent as _;
+        use factory_plugins::HarnessAgent;
+
+        let root = std::env::temp_dir().join(format!("factory-args-order-test-{}", uuid::Uuid::new_v4()));
+        let ctx = AgentContext {
+            scope: "demo".into(),
+            agent_name: "watcher".into(),
+            cwd: root.join("cwd"),
+            factory_bin: PathBuf::from("factory"),
+            socket: root.join("factory.sock"),
+            guides_dir: root.join("guides"),
+            task: None,
+            identity_token: Some("identity".into()),
+            role: Some(
+                factory_core::role::Roles::presets()
+                    .get(&Role::worker())
+                    .unwrap()
+                    .clone(),
+            ),
+        };
+        let agent = HarnessAgent::pi().with_args(vec!["--model".into(), "sonnet".into()]);
+        let mut launch = agent.launch_spec(&ctx).await.unwrap();
+        let declared: ScopeAgent = serde_yaml_ng::from_str(
+            "name: watcher\nharness: pi\nlifetime: permanent\nargs: [--model, opus]\n",
+        )
+        .unwrap();
+
+        append_declared_args(&mut launch, Some(&declared));
+
+        assert_eq!(&launch.args[0..2], ["--model", "sonnet"], "the adapter's own defaults come first");
+        assert_eq!(launch.args[2], "--append-system-prompt", "then the guide's flag");
+        assert_eq!(
+            &launch.args[launch.args.len() - 2..],
+            ["--model", "opus"],
+            "the scope's declared override lands last of all"
+        );
+
         std::fs::remove_dir_all(&root).ok();
     }
 }

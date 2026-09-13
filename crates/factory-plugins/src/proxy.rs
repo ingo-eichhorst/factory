@@ -44,6 +44,11 @@ struct WireContext {
     /// The same contract the built-in agents put in their prompts, so a plugin
     /// can paste it instead of reconstructing the commands.
     reporting_contract: String,
+    /// The same guide to Factory itself the built-in agents inject into a
+    /// system prompt, so a plugin can paste it there too instead of writing
+    /// its own. Adapter-neutral text -- it already accounts for this agent's
+    /// scope, name, and role, so a plugin need not know any of those to use it.
+    factory_guide: String,
     env: std::collections::BTreeMap<String, String>,
 }
 
@@ -60,6 +65,7 @@ impl From<&AgentContext> for WireContext {
             token: ctx.task.as_ref().map(|b| b.token.clone()),
             worktree_branch: ctx.task.as_ref().and_then(|b| b.worktree_branch.clone()),
             reporting_contract: ctx.reporting_contract(),
+            factory_guide: ctx.factory_guide(),
             env: ctx.env(),
         }
     }
@@ -254,5 +260,29 @@ impl TaskStore for PluginStore {
         self.proc
             .call("task.due", json!({ "now": now.to_rfc3339() }))
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use factory_core::adapter::agent::AgentContext;
+
+    #[test]
+    fn a_plugin_agent_gets_the_guide_on_the_wire() {
+        let ctx = AgentContext {
+            scope: "demo".into(),
+            agent_name: "watcher".into(),
+            cwd: "/tmp/somewhere".into(),
+            factory_bin: "/usr/local/bin/factory".into(),
+            socket: "/tmp/factory.sock".into(),
+            guides_dir: "/tmp/factory-guides".into(),
+            task: None,
+            identity_token: Some("identity".into()),
+            role: None,
+        };
+        let wire = WireContext::from(&ctx);
+        assert_eq!(wire.factory_guide, ctx.factory_guide());
+        assert!(!wire.factory_guide.is_empty(), "a plugin gets real text, not a placeholder");
     }
 }

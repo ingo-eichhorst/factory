@@ -171,14 +171,25 @@ impl Engine {
             agent: agent.clone(),
         });
 
-        // No task: a standing agent is started to be there, and is told nothing.
+        // Resolved the same way `caller_for` resolves it for every other
+        // request, and only after the row above is written, so this reads
+        // back the role the access check will actually apply rather than
+        // whatever the agent was wearing before this start.
+        let role = self.effective_role(scope, name).await;
+        let role = self.roles.get(&role).cloned();
+
+        // No task: a standing agent is started to be there, and is told
+        // nothing about one -- but it still gets the guide to Factory itself.
         let ctx = AgentContext {
             scope: scope.to_string(),
+            agent_name: name.to_string(),
             cwd: cwd.clone(),
             factory_bin: self.factory_bin.clone(),
             socket: factory.socket_path(),
+            guides_dir: factory.guides_dir(),
             task: None,
             identity_token: Some(identity),
+            role,
         };
 
         let mut launch = match adapter.launch_spec(&ctx).await {
@@ -1000,10 +1011,14 @@ mod tests {
         engine.start_agent("demo", "watcher").await.unwrap();
 
         let starts = stub.starts.lock().unwrap();
-        assert_eq!(
-            starts[0].launch.args,
-            ["--model", "sonnet", "--model", "opus"]
-        );
+        let args = &starts[0].launch.args;
+        // The adapter's own default first, then the guide `pi` gets injected
+        // as its own flag, then the scope's declared `args:` last of all --
+        // so a declaration can still override or add to what the adapter and
+        // the guide put there.
+        assert_eq!(&args[0..2], ["--model", "sonnet"]);
+        assert_eq!(args[2], "--append-system-prompt");
+        assert_eq!(&args[args.len() - 2..], ["--model", "opus"]);
         drop(starts);
         std::fs::remove_dir_all(root).ok();
     }
@@ -1061,10 +1076,10 @@ mod tests {
         engine.start_run(&task.id, Trigger::Manual).await;
 
         let starts = stub.starts.lock().unwrap();
-        assert_eq!(
-            starts[0].launch.args,
-            ["--model", "sonnet", "--model", "opus"]
-        );
+        let args = &starts[0].launch.args;
+        assert_eq!(&args[0..2], ["--model", "sonnet"], "the adapter's own defaults come first");
+        assert_eq!(args[2], "--append-system-prompt", "then the guide's flag");
+        assert_eq!(&args[args.len() - 2..], ["--model", "opus"], "the declared override lands last");
         drop(starts);
         std::fs::remove_dir_all(root).ok();
     }
@@ -1089,7 +1104,11 @@ mod tests {
         engine.start_run(&task.id, Trigger::Manual).await;
 
         let starts = stub.starts.lock().unwrap();
-        assert_eq!(starts[0].launch.args, ["--model", "sonnet"]);
+        // No declaration named "configured" itself, so nothing to append --
+        // just the adapter's own default and, after it, the guide's flag.
+        let args = &starts[0].launch.args;
+        assert_eq!(args.len(), 4, "{args:?}");
+        assert_eq!(&args[0..3], ["--model", "sonnet", "--append-system-prompt"]);
         drop(starts);
         std::fs::remove_dir_all(root).ok();
     }
