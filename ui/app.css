@@ -362,6 +362,70 @@ select.rolepick:disabled { opacity: .38; cursor: default; }
 .runtime-checked { margin-top: 11px; text-align: right; font-family: var(--mono); }
 .runtime-load-error { padding: 14px; margin: 0; background: var(--panel); border: 1px solid var(--fault); border-radius: 4px; }
 
+/* ------------------------------------------------------------ L3 roles
+   One card per role. What sets a card apart is where it was written: a role
+   defined in the scope on screen carries the signal edge, an inherited one
+   is set back, and what ships is plain. The marks spell out what a role may
+   not do as well as what it may, so a missing grant is read, not inferred. */
+.roles { display: grid; gap: 12px; }
+.role-read { margin: 0; color: var(--ink-2); font-size: 12.5px; }
+.role-cards { display: grid; gap: 10px; }
+.role-card {
+  background: var(--panel); border: 1px solid var(--line); border-left-width: 3px;
+  border-radius: 4px; padding: 12px 14px;
+}
+.role-card.here { border-left-color: var(--signal); }
+.role-card.inherited { background: var(--panel-2); border-style: dashed; border-left-style: solid; }
+.role-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.role-head h3 { margin: 0; font: 600 14px/1.3 var(--cond); }
+.role-head .sp { flex: 1; }
+.role-origin {
+  display: inline-block; padding: 4px 7px; border-radius: 2px; text-decoration: none;
+  font: 600 8.5px/1 var(--cond); letter-spacing: .11em; text-transform: uppercase;
+  color: var(--muted); background: var(--sunk); border: 1px solid var(--line);
+}
+.role-origin.ro-here { color: var(--signal-ink); border-color: var(--signal); background: var(--signal-wash); }
+.role-origin.ro-inherited, .role-origin.ro-instance { color: var(--ink-2); border-style: dashed; }
+a.role-origin:hover { color: var(--signal); border-color: var(--signal); }
+.role-describe { margin: 6px 0 8px; color: var(--ink-2); font-size: 12.5px; }
+.role-grants { display: flex; align-items: baseline; gap: 10px; margin-top: 5px; flex-wrap: wrap; font-size: 12px; }
+.role-group {
+  flex: 0 0 76px; color: var(--faint); font: 600 8.5px/1 var(--cond);
+  letter-spacing: .12em; text-transform: uppercase;
+}
+.role-marks { display: flex; gap: 4px 12px; flex-wrap: wrap; flex: 1 1 300px; }
+.grant.yes { color: var(--ink); }
+.grant.yes span[aria-hidden] { color: var(--run); }
+.grant.no { color: var(--faint); }
+.grant.no span[aria-hidden] { color: var(--fault); }
+.role-holders { display: flex; gap: 10px; flex-wrap: wrap; }
+.role-holder { font-weight: 500; }
+.vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.role-below a, .role-layer a { color: var(--signal-ink); }
+.role-section { margin: 14px 0 0; font: 600 10px/1 var(--cond); letter-spacing: .13em; text-transform: uppercase; color: var(--faint); }
+.role-layer {
+  margin-left: calc(var(--d, 0) * 18px); background: var(--panel); border: 1px solid var(--line);
+  border-left: 3px solid var(--signal); border-radius: 4px; padding: 10px 14px;
+}
+.role-layer h3 { margin: 0 0 6px; font: 600 13px/1.3 var(--cond); }
+.role-layer ul { margin: 0; padding-left: 16px; display: grid; gap: 4px; font-size: 12.5px; }
+.role-verb { color: var(--faint); font: 600 9px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; }
+.role-matrix { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+.role-matrix table { border-collapse: collapse; font-size: 11.5px; }
+.role-matrix th, .role-matrix td { padding: 5px 7px; border-bottom: 1px solid var(--line-soft); text-align: center; }
+.role-matrix thead th { vertical-align: bottom; height: 96px; }
+.role-matrix thead th span { writing-mode: vertical-rl; transform: rotate(180deg); font: 400 10.5px/1 var(--mono); color: var(--muted); }
+.role-matrix tbody th { text-align: left; font-weight: 600; white-space: nowrap; }
+.role-matrix td.yes { color: var(--run); }
+.role-matrix td.no { color: var(--faint); }
+.role-matrix td.reach { font-family: var(--mono); color: var(--ink-2); }
+.role-picks { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
+.role-pick { margin: 0; border: 1px solid var(--line-soft); border-radius: 3px; padding: 6px 10px 8px; }
+.role-pick legend { padding: 0 4px; color: var(--faint); font: 600 9px/1 var(--cond); letter-spacing: .12em; text-transform: uppercase; }
+.role-pick label.checkrow, label.checkrow { margin: 4px 0; text-transform: none; letter-spacing: 0; font: 400 12px/1.4 var(--sans); }
+.role-pick label.checkrow input, label.checkrow input[type="radio"] { width: auto; }
+.role-form-note { margin: 12px 0 0; }
+
 /* --------------------------------------------- L2 environment: sandboxes,
    secrets. A note that has to be read, not a card that can be skipped --
    a plain block above the table it explains, in the panel colours rather

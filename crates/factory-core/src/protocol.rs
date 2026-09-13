@@ -10,6 +10,7 @@ use crate::config::ScopeAgent;
 use crate::event::Event;
 use crate::knowledge::{Finding, Gap, Note};
 use crate::occupancy::Occupancy;
+use crate::role::{RoleOrigin, RoleSpec};
 use crate::run::Run;
 use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport};
 use crate::workflow::{WorkflowDefinition, WorkflowDraft, WorkflowRun};
@@ -41,6 +42,33 @@ pub enum Request {
     /// Take one down and leave it down.
     #[serde(rename = "agent.stop")]
     AgentStop { id: String },
+    /// Every role in effect in one scope -- where each was defined, what it
+    /// may do in the vocabulary the check uses, and who holds it -- plus where
+    /// roles are written across the whole tree. With no scope, only the
+    /// latter, and the roles that hold everywhere.
+    #[serde(rename = "role.list")]
+    RoleList {
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    /// Write one role into a scope's own config: its `scope.roles`, or the
+    /// top-level `roles:` for the instance root. `replace` says the role is
+    /// already defined in that file and this replaces it; without it, a name
+    /// the file already defines is refused rather than silently overwritten.
+    /// The owner's alone: an agent that could rewrite a role definition would
+    /// not be bounded by the one it has.
+    #[serde(rename = "role.define")]
+    RoleDefine {
+        scope: String,
+        name: String,
+        role: RoleSpec,
+        #[serde(default)]
+        replace: bool,
+    },
+    /// Remove one role from a scope's own config. Refused while an agent still
+    /// depends on that definition. The owner's alone, like `RoleDefine`.
+    #[serde(rename = "role.delete")]
+    RoleDelete { scope: String, name: String },
     /// Give a standing agent a role, or take the given one away and let the
     /// config decide again. The owner's to do, and nobody else's.
     #[serde(rename = "agent.role")]
@@ -244,10 +272,18 @@ pub enum Payload {
         /// saying the same thing every time.
         #[serde(default)]
         available: Vec<String>,
-        /// Every role this instance knows, so a picker can offer them.
+        /// The roles that hold in every scope -- built-in and instance --
+        /// so a picker can offer them.
         #[serde(default)]
         roles: Vec<RoleView>,
+        /// The roles in effect in each scope whose set differs from `roles`,
+        /// because it or a scope above it defines roles of its own. Keyed by
+        /// scope name, and absent for every scope that simply inherits the
+        /// instance's, for the same reason `available` is served once.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        scope_roles: std::collections::BTreeMap<String, Vec<RoleView>>,
     },
+    Roles { board: RoleBoard },
     Entries { entries: Vec<TaskEntry> },
     Text { text: String },
     Deleted { deleted: bool },
@@ -439,7 +475,7 @@ pub struct AgentView {
     pub active: Vec<AgentActivity>,
 }
 
-/// One role, as the roster and the pickers show it.
+/// One role, as the roster, the pickers and the Roles view show it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleView {
     pub name: String,
@@ -448,6 +484,74 @@ pub struct RoleView {
     pub grants: Vec<String>,
     /// `own` or `scope`.
     pub reach: String,
+    /// Where this definition was written.
+    #[serde(default)]
+    pub origin: RoleOrigin,
+    /// The inherited definition this one replaces, when it replaces one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrides: Option<RoleOrigin>,
+    /// The agents in the scope asked about that hold this role. Only filled in
+    /// when the answer is about one scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_by: Vec<RoleHolder>,
+}
+
+/// An agent holding a role, and how it came to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleHolder {
+    pub name: String,
+    /// Given with `factory agent role` rather than declared in the config.
+    #[serde(default)]
+    pub given: bool,
+}
+
+/// One grant in the words a person reads, so no view keeps its own copy of
+/// the vocabulary `role.rs` exists to keep in one place.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantView {
+    /// As the config writes it: `task.create`.
+    pub name: String,
+    /// As `Grant::describe` says it: `create tasks`.
+    pub describe: String,
+    /// `Tasks`, `Agents`, `Runs` or `Workflows`.
+    pub group: String,
+}
+
+/// One place roles are written: Factory's own, the instance root's, or a
+/// scope's `scope.roles`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleLayer {
+    pub origin: RoleOrigin,
+    /// The scope's path, for a scope layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The nearest scope above this one that also writes roles. `None` sits
+    /// the layer directly under the instance's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// The definitions written here, each saying which one it replaces.
+    pub roles: Vec<RoleView>,
+}
+
+/// The L3 Roles view in one answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleBoard {
+    /// Every grant there is, in `Grant::ALL` order.
+    pub grants: Vec<GrantView>,
+    /// The scope `roles` is about, by its canonical name. `None` for all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// The layer that scope writes when a role is defined there: the instance
+    /// root's `roles:` for the root scope, its own `scope.roles` otherwise.
+    /// A role whose origin is this one is "defined here".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writes: Option<RoleOrigin>,
+    /// Every role in effect in `scope`, with who holds each -- or, with no
+    /// scope, the roles that hold everywhere.
+    pub roles: Vec<RoleView>,
+    /// Every layer that writes roles: Factory's, the instance root's, then
+    /// each scope that defines roles of its own, in path order.
+    pub layers: Vec<RoleLayer>,
 }
 
 /// A scope and everything that runs in it.

@@ -205,6 +205,77 @@ What a grant cannot say is written out in `access.rs`, in the arm it belongs
 to: handing a task to somebody else is not editing it, so a role that reaches
 only its own work may change what its task says and never whose it is.
 
+### Roles down the scope tree
+
+The instance root's `roles:` hold in every scope. A nested scope can add roles
+of its own under `scope.roles` in its own `.factory/config.yaml`, and every
+scope below it inherits them:
+
+```yaml
+# .factory/config.yaml                  (instance root)
+roles:
+  runner:
+    describe: starts the work that is already on the board, and nothing else
+    grants: [task.run, task.cancel]
+    reach: scope
+
+# projects/.factory/config.yaml
+scope:
+  id: 3c0f…
+  name: projects
+  roles:
+    reviewer:
+      describe: works its own tasks and says what it found
+      grants: [task.edit, task.report]
+      reach: own
+
+# projects/demo/.factory/config.yaml
+scope:
+  id: 8fc8…
+  name: demo
+  roles:
+    reviewer:                 # replaces the inherited reviewer, here and below
+      describe: reviews, and may also open follow-up tasks
+      grants: [task.create, task.edit, task.report]
+      reach: own
+  agents:
+    - name: critic
+      harness: pi
+      role: reviewer
+```
+
+A scope's roles are, in order: the two built in, the instance root's `roles:`,
+then each scope's `scope.roles` from the top of the tree down to the scope
+itself. The nearest definition wins. A scope's parent is the nearest configured
+scope above it **by path**, never by name: names may contain `/` and are
+matched loosely on purpose, so a scope named `projects/other` whose directory
+is somewhere else is not below `projects`.
+
+- **An override replaces the whole definition** — description, grants and
+  reach. Grants are never merged: a merge could only widen, and nobody reading
+  either file could tell what the result was.
+- **`worker` and `foreman` cannot be redefined at any level**, for the same
+  reason they cannot be redefined at the root.
+- **Roles never flow up or sideways.** A role defined in `projects/a` does not
+  exist in `projects/b` or at the root. An agent given one there is refused,
+  and the message lists the roles that scope does have.
+- **Inheriting a definition does not inherit authority.** `reach: scope` still
+  means the agent's own scope and nothing past it. A foreman in `projects`
+  cannot touch a task in `projects/demo`, and a `reach: scope` role inherited
+  from `projects` cannot touch a task in `projects`, in a sibling, or in a
+  scope below the agent's own. Inheritance decides which roles exist where,
+  never how far one reaches.
+
+The instance root writes its roles only in its top-level `roles:`; a
+`scope.roles` block in the root's config is refused at startup, because one
+file with two role layers would leave a person guessing which one wins. A
+`roles:` block written beside a nested scope's `scope:` block, where that file
+never reads it, is refused with the file named rather than silently dropped: a
+role that quietly does not exist is only noticed once an agent is refused.
+A role that disappears from a chain — somebody edited a parent's file — is
+refused at load for every agent declared with it, and `authorize` refuses an
+agent still holding it, naming the scope.
+
 > **This is not a security boundary.** Every agent runs as the owner of the
 > instance and can reach the same socket, so an agent that simply leaves the
 > token out is indistinguishable from a person. Roles keep an agent that
@@ -629,12 +700,11 @@ envelope, not inventing a second API.
 
 ## The web UI
 
-Thirteen views, grouped by level in the header: **Dashboard** is the landing
-view, then **Activity**, **Site plan**, **Inbox**, **Tasks**, **Workflows**,
-**Occupancy**, **Roster**, and **Agent-runtime** — plus L2's **Sandboxes** and
-**Secrets** tabs and L5's **Benchmarks** and **Knowledge** tabs, each covered
-in its own section below. Switching between them is a small registry — one
-container shown, one button lit,
+The views are grouped by level in the header: **Dashboard** is the landing view,
+then **Activity**, **Site plan**, **Inbox**, **Tasks**, **Workflows**,
+**Occupancy**, **Roster**, **Agent-runtime**, **Roles**, **Sandboxes**,
+**Secrets**, **Benchmarks** and **Knowledge**. Switching between them is a small
+registry — one container shown, one button lit,
 and whatever that view needs to start or stop doing while it is not the one on
 screen.
 
@@ -700,6 +770,35 @@ read-only diagnostic. For Herdr that includes its session and socket, client
 and server versions and protocols, compatibility, restart-needed state and
 capabilities. An unsupported adapter or failed probe remains a card with an
 honest state; it does not take the daemon or the other runtime cards down.
+
+**Roles** (`#<scope>/harn/roles`) says, for every role in effect in the
+selected scope, what it is for; what it may *and may not* do, in the phrases
+the daemon checks with, grouped into tasks, agents, runs and workflows; how far
+it reaches, in words; where it was defined — `built-in`, `instance`,
+`inherited from projects`, `defined here`, or `defined here · overrides
+projects`, linking to the scope that defines it; and which agents in the scope
+hold it, with a role given by `factory agent role` marked apart from a declared
+one. A compact matrix above the cards compares them at a glance, and scopes
+below the selected one that add or override roles are listed as links, so one
+scope's view is not mistaken for the whole tree. With **All scopes** it shows
+the inheritance itself: the built-in and instance roles once, then each scope
+that defines roles, nested by path, with what it adds and what it replaces.
+
+**New role…**, **Edit**, **Delete** and **Override here** act on the selected
+scope and write its own `.factory/config.yaml` — `scope.roles`, or the top-level
+`roles:` for the instance root — leaving every other line of the file where it
+was. **Override here** copies an inherited role into this scope for editing; a
+child never edits its parent's file. Grants are picked from the daemon's own
+list and reach from own or scope, never typed. Changing a role definition is
+the owner's alone (`role.define` and `role.delete` need the owner, not
+`agent.configure`): an agent that could rewrite a role would not be bounded by
+the one it holds. Redefining `worker` or `foreman` is refused, and so is
+deleting a definition any agent still resolves to — declared or given, in that
+scope or below — with every holder named; so is any save that would leave an
+agent on a role nothing defines. A changed role holds from each agent's next
+request; a guide already in a running session is not rewritten. The page says
+in its own markup, not in anything it fetches, that roles are guard-rails and
+not a security boundary.
 
 **Dashboard** is five KPI tiles, a by-scope table and an inbox, all read from
 the same `state.tasks` and `state.scopes` every other view already holds —

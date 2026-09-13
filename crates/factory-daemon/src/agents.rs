@@ -241,7 +241,7 @@ impl Engine {
         // back the role the access check will actually apply rather than
         // whatever the agent was wearing before this start.
         let role = self.effective_role(scope, name).await;
-        let role = self.roles.get(&role).cloned();
+        let role = self.roles_for(scope).get(&role).cloned();
 
         // No task: a standing agent is started to be there, and is told
         // nothing about one -- but it still gets the guide to Factory itself.
@@ -341,11 +341,15 @@ impl Engine {
     pub async fn set_agent_role(&self, id: &str, role: Option<Role>) -> Result<AgentSession> {
         let mut agent = self.require_agent(id).await?;
         if let Some(role) = &role {
-            if !self.roles.contains(role) {
+            // The agent's own scope's roles: one defined in `projects/a` is
+            // valid there and does not exist for an agent in `projects/b`.
+            let roles = self.roles_for(&agent.scope);
+            if !roles.contains(role) {
                 return Err(FactoryError::BadRequest(format!(
-                    "no role named {:?}. This instance has: {}",
+                    "no role named {:?} in {}. The roles available there are: {}",
                     role.as_str(),
-                    self.roles.names().join(", ")
+                    agent.scope,
+                    roles.names().join(", ")
                 )));
             }
         }

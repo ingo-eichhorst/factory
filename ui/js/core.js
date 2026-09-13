@@ -7,7 +7,10 @@ export const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({'&':'&amp;',
 export const TERMINAL = ["done", "failed", "cancelled"];
 
 export const state = {
-  roles: [],
+  roles: [],           // the roles that hold in every scope
+  scopeRoles: {},      // scope name -> its roles, where they differ from `roles`
+  roleBoard: null,     // the last /api/roles answer, for the Roles view
+  roleBoardError: null,
   tab: "dashboard",
   tasks: new Map(),
   scopes: [],          // configured scopes, each with its agents
