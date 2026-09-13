@@ -77,7 +77,12 @@ export function validate(workflow) {
     }
     seen.add(node.id);
     if (!node.task.title || !node.task.title.trim()) {
-      errors.push({ nodeId: node.id, message: `${nodeLabel(node)} needs a task title` });
+      // R8: `nodeLabel` itself is not useful here -- the one fact it would
+      // report is the very thing missing. The node is already highlighted
+      // on the canvas (`renderProblems` keys off `nodeId`), so the message
+      // only needs to say what is wrong, not repeat which node by a label
+      // it does not have.
+      errors.push({ nodeId: node.id, message: "A task node has no title (highlighted on the canvas)." });
     }
     for (const [value, label] of [
       [node.task.estimate_seconds, "estimate"],
@@ -109,7 +114,8 @@ export function validate(workflow) {
 }
 
 function nodeLabel(node) {
-  return `${JSON.stringify(node.task.title || "")} (${node.id})`;
+  const title = node.task.title && node.task.title.trim();
+  return title ? `"${title}"` : "a task node";
 }
 
 /// What Save/Run/Cancel should look like from state alone (U12: "explicit

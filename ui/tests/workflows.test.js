@@ -244,9 +244,14 @@ test("an empty workflow needs at least one node", () => {
   assert.ok(errors.some(e => /at least one/.test(e.message)));
 });
 
-test("an empty title is refused, naming the node", () => {
+test("R8: an empty title is refused with a human message, keyed to the highlighted node", () => {
   const errors = validate(workflow([node("a", 0, 0, "")]));
-  assert.ok(errors.some(e => e.nodeId === "a" && /task title/.test(e.message)));
+  const error = errors.find(e => e.nodeId === "a");
+  assert.ok(error, "the offending node is named by id, for renderProblems to highlight");
+  assert.match(error.message, /no title/i);
+  // Not the opaque `"" (node-...)` shape an empty-title node label would
+  // otherwise have produced -- there is nothing useful to quote.
+  assert.doesNotMatch(error.message, /""/);
 });
 
 test("a non-positive duration is refused, naming which one", () => {
@@ -254,6 +259,13 @@ test("a non-positive duration is refused, naming which one", () => {
   n.task.timeout_seconds = 0;
   const errors = validate(workflow([n]));
   assert.ok(errors.some(e => /run timeout/.test(e.message) && /"Deploy"/.test(e.message)));
+});
+
+test("R8: the same duration message on an untitled node reads as a node, not an empty quote", () => {
+  const n = node("a", 0, 0, "");
+  n.task.timeout_seconds = 0;
+  const errors = validate(workflow([n]));
+  assert.ok(errors.some(e => /run timeout/.test(e.message) && /^a task node/.test(e.message)));
 });
 
 test("an edge to a node that does not exist is refused", () => {

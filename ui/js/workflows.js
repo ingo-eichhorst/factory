@@ -60,6 +60,7 @@ let selectedEdge = null;
 let connectFrom = null;
 let view = { x: 40, y: 40, zoom: 1 };
 let saving = false;
+let pendingLoads = 0; // R12: how many overlapping setBusy(true) calls have not yet matched setBusy(false)
 let clientErrors = [];
 let serverError = null;
 let pendingDiscard = null; // a () => void to run if a dirty-switch is confirmed
@@ -426,6 +427,7 @@ function wireEdge(group) {
     connectFrom = null;
     paintStatuses();
     $("workflow-hint").textContent = edgeHint();
+    renderButtons(); // R6: the toolbar's "Delete link" tracks selectedEdge too
   };
 }
 
@@ -655,8 +657,17 @@ function renderProblems() {
 
 function showServerError(error) { serverError = error?.message || String(error); renderProblems(); }
 
+/// R12: `loadWorkflows` can legitimately overlap itself -- `showTab` calls
+/// both the router's `tail.read` and the view's plain `onShow` on the same
+/// navigation, and both call `loadWorkflows`. A plain boolean here let
+/// whichever of the two finished first re-enable Save/Run while the other
+/// was still in flight (confirmed: instrumenting `disabled` across a fresh
+/// reload showed it flip false then true again within about a
+/// millisecond). Counting keeps `saving` true until every overlapping call
+/// has finished, not just the fastest one.
 function setBusy(busy) {
-  saving = busy;
+  pendingLoads += busy ? 1 : -1;
+  saving = pendingLoads > 0;
   renderButtons();
 }
 
@@ -697,11 +708,34 @@ function renderRunStatusChip() {
     : "not run yet";
 }
 
+/// R9: a task's workflow provenance, for the task modal. Best-effort from
+/// the workflow definitions this view has already cached -- exactly the
+/// "falling back to the ids if the definition has been deleted" case, since
+/// a workflow this cache has never heard of (the Workflows tab has never
+/// been opened this session, not only a delete) reads the same way. Kept
+/// synchronous and small, in the modal's own style, rather than adding a
+/// fetch to its render path for a definition most sessions already have.
+export function describeWorkflowOrigin(origin) {
+  const workflow = workflows.find(item => item.id === origin.workflow_id);
+  const node = workflow?.nodes.find(item => item.id === origin.node_id);
+  const workflowLabel = workflow ? workflow.name : origin.workflow_id;
+  const nodeLabel = node ? (node.task.title || origin.node_id) : origin.node_id;
+  const scope = workflow ? workflow.scope : "all";
+  const href = `#${encodeURIComponent(scope)}/proc/workflows/` +
+    `${encodeURIComponent(origin.workflow_id)}/run/${encodeURIComponent(origin.workflow_run_id)}`;
+  return { label: `${workflowLabel} › ${nodeLabel} · run ${origin.workflow_run_id.slice(0, 8)}`, href };
+}
+
 // ---------------------------------------------------------------- actions
 
 async function save() {
   readEditor();
+  // R7: trimmed once, here, on save -- never while typing (U2), and this
+  // was missing for node titles (only the workflow's own name was trimmed),
+  // which is how a trailing space in a title survived into the saved draft.
   current.name = current.name.trim();
+  current.description = current.description.trim();
+  for (const node of current.nodes) node.task.title = node.task.title.trim();
   const errors = validate(current);
   clientErrors = errors; serverError = null;
   if (errors.length) { renderCanvas(); renderProblems(); return; }
@@ -896,7 +930,7 @@ export function wireWorkflows() {
   }
   const canvas = $("workflow-canvas");
   canvas.onkeydown = event => {
-    if (event.key === "Escape") { cancelConnect(); if (selectedEdge) { selectedEdge = null; paintStatuses(); } }
+    if (event.key === "Escape") { cancelConnect(); if (selectedEdge) { selectedEdge = null; paintStatuses(); renderButtons(); } }
     if ((event.key === "Delete" || event.key === "Backspace") && selectedEdge) { event.preventDefault(); deleteEdge(selectedEdge); }
   };
   canvas.onwheel = event => {
@@ -917,7 +951,7 @@ export function wireWorkflows() {
     };
     canvas.onpointerup = () => {
       canvas.onpointermove = null;
-      if (!dragging) { selectedEdge = null; paintStatuses(); $("workflow-hint").textContent = edgeHint(); }
+      if (!dragging) { selectedEdge = null; paintStatuses(); $("workflow-hint").textContent = edgeHint(); renderButtons(); }
     };
   };
 }
