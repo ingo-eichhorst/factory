@@ -225,7 +225,7 @@ pub fn index(root: &Path) -> Index {
                 findings.push(Finding {
                     kind: FindingKind::MissingSource,
                     note: draft.id.clone(),
-                    detail: format!("source not found: {path}"),
+                    detail: format!("source not found: {}", truncate_for_detail(path)),
                 });
             }
         }
@@ -277,10 +277,11 @@ pub fn index(root: &Path) -> Index {
                     findings.push(Finding {
                         kind: FindingKind::AmbiguousLink,
                         note: draft.id.clone(),
-                        detail: format!(
+                        detail: truncate_for_detail(&format!(
                             "[[{target}]] matches more than one note: {}",
                             candidates.join(", ")
-                        ),
+                        ))
+                        .into_owned(),
                     });
                     gaps.insert(target.clone());
                     gaps_acc.entry(target).or_default().insert(draft.id.clone());
@@ -360,6 +361,11 @@ pub fn index(root: &Path) -> Index {
             .then_with(|| a.note.cmp(&b.note))
             .then_with(|| a.detail.cmp(&b.detail))
     });
+    // Two identical findings (e.g. two `sources[]` entries under
+    // `data/secrets/` in the same note) carry no more information than one --
+    // the sort above already puts every `(kind, note, detail)` duplicate
+    // adjacent, so a single dedup pass is enough.
+    findings.dedup_by(|a, b| a.kind == b.kind && a.note == b.note && a.detail == b.detail);
 
     Index {
         root: root_display,
@@ -457,8 +463,11 @@ fn scalar_to_string(v: &serde_yaml_ng::Value) -> Option<String> {
 /// Split a file into its frontmatter YAML and its body. `None` when the file
 /// does not start with a `---` line, or that line's block never closes --
 /// either way, the file has no frontmatter this module can use, and it is
-/// filed as a page rather than guessed at.
+/// filed as a page rather than guessed at. A leading UTF-8 BOM (`\u{feff}`)
+/// is stripped first: some editors write one, and it would otherwise sit in
+/// front of the `---` and make every such file look frontmatter-less.
 fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let mut lines = content.split_inclusive('\n');
     let first = lines.next()?;
     if first.trim_end_matches(['\n', '\r']) != "---" {
@@ -475,9 +484,41 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// A link target longer than this is not a link -- it is prose that happened
+/// to sit between two `[[`/`]]` pairs (or never closed until some distant,
+/// unrelated `]]`). No real note id or bare file name comes close to this;
+/// the cap exists purely so an unbounded span of body text can never reach
+/// `gaps[].target`, `notes[].gaps` or a finding's `detail`.
+const MAX_LINK_TARGET_LEN: usize = 200;
+
+/// Whether `target` (already stripped of a `|label`/`#heading` suffix and
+/// trimmed) is shaped like something a person actually wrote as a wiki link,
+/// as opposed to text that merely landed between two `[[`/`]]` delimiters --
+/// a 5,000-character paragraph, or a bash `[[ -f x ]]` test caught by the
+/// same bracket pair. A real target (`some-page`, `partners/acme`, `person`)
+/// never contains whitespace: every documented and observed resolution rule
+/// works on `/`-separated path segments, none of which has room for a space.
+/// Rejecting whitespace is a generalisation of the `\n`/`\r` rule below, not
+/// a departure from it -- and it is the only rule that also catches short,
+/// space-containing prose (`[[ see the pricing page ]]`) that a length cap
+/// alone would let through.
+fn is_link_target_shape(target: &str) -> bool {
+    if target.is_empty() || target.ends_with('/') {
+        return false;
+    }
+    if target.chars().count() > MAX_LINK_TARGET_LEN {
+        return false;
+    }
+    !target.chars().any(|c| c == '[' || c == ']' || c.is_whitespace())
+}
+
 /// Every `[[...]]` in `body`, stripped of a `|label` or `#heading` suffix and
-/// trimmed. Empty targets and directory-shaped ones (ending in `/`) are
-/// dropped here, before resolution ever sees them.
+/// trimmed. A span that is not shaped like a real link target -- see
+/// `is_link_target_shape` -- is not a link at all: it is skipped and never
+/// reported anywhere, rather than resolved or listed as a gap. Scanning
+/// always resumes from just past the `]]` that closed the span under
+/// consideration, whether or not that span turned out to be a link, so a
+/// rejected `[[...]]` never swallows a valid one later on the same line.
 fn extract_links(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cursor = 0usize;
@@ -488,14 +529,21 @@ fn extract_links(body: &str) -> Vec<String> {
         };
         let end = start + rel_end;
         let raw = &body[start..end];
+        // Resume from here regardless of what the validity checks below
+        // decide -- a rejected span must not carry the cursor backwards or
+        // leave it stuck, or a later valid link on the same line would never
+        // be found.
         cursor = end + 2;
+        if raw.contains(['\n', '\r']) {
+            continue;
+        }
         let cut = raw.find(['|', '#']);
         let target = match cut {
             Some(p) => &raw[..p],
             None => raw,
         };
         let target = target.trim();
-        if target.is_empty() || target.ends_with('/') {
+        if !is_link_target_shape(target) {
             continue;
         }
         out.push(target.to_string());
@@ -568,6 +616,23 @@ fn resolve(
     Resolution::Unresolved
 }
 
+/// Bound how much of a user-controlled string (a link target that already
+/// passed `is_link_target_shape`, but also a `sources[].path` that has no
+/// such cap at all) a finding's `detail` may embed. A rejected link target
+/// never reaches here, but nothing stops a `sources:` entry in frontmatter
+/// from being an arbitrarily long string, and `detail` is serialized
+/// verbatim -- so this is the backstop for that path, not a duplicate of
+/// `MAX_LINK_TARGET_LEN`.
+const MAX_DETAIL_EMBED_LEN: usize = 200;
+
+fn truncate_for_detail(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.chars().count() <= MAX_DETAIL_EMBED_LEN {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let head: String = s.chars().take(MAX_DETAIL_EMBED_LEN).collect();
+    std::borrow::Cow::Owned(format!("{head}…"))
+}
+
 /// Whether `path` (a `sources[].path` exactly as written in frontmatter) lies
 /// under `data/secrets/`, compared case-insensitively with `.` components
 /// dropped. **This is a string comparison and nothing else** -- it runs
@@ -602,10 +667,12 @@ fn eligible_for_stat(path: &str) -> bool {
 
 /// Every `.md` file under `wiki_root`, recursively, skipping dotfiles and
 /// dot-directories and never following a symlink. Stops at `MAX_FILES` and
-/// says so in the returned bool, rather than reading an unbounded tree.
+/// says so in the returned bool, rather than reading an unbounded tree. The
+/// stop is immediate: hitting the cap returns right away rather than letting
+/// the outer walk keep popping and `read_dir`-ing queued directories it will
+/// never use the contents of.
 fn discover(wiki_root: &Path) -> (Vec<(String, PathBuf)>, bool) {
     let mut out = Vec::new();
-    let mut truncated = false;
     let mut stack = vec![(wiki_root.to_path_buf(), String::new())];
     while let Some((dir, rel_dir)) = stack.pop() {
         let Ok(read) = fs::read_dir(&dir) else {
@@ -617,9 +684,6 @@ fn discover(wiki_root: &Path) -> (Vec<(String, PathBuf)>, bool) {
         let mut entries: Vec<_> = read.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
-            if truncated {
-                break;
-            }
             let name = entry.file_name();
             let name_str = name.to_string_lossy().to_string();
             if name_str.starts_with('.') {
@@ -640,14 +704,13 @@ fn discover(wiki_root: &Path) -> (Vec<(String, PathBuf)>, bool) {
                 stack.push((entry.path(), rel));
             } else if file_type.is_file() && name_str.to_ascii_lowercase().ends_with(".md") {
                 if out.len() >= MAX_FILES {
-                    truncated = true;
-                    break;
+                    return (out, true);
                 }
                 out.push((rel, entry.path()));
             }
         }
     }
-    (out, truncated)
+    (out, false)
 }
 
 #[cfg(test)]
@@ -991,15 +1054,89 @@ mod tests {
     #[test]
     fn no_note_body_text_ever_reaches_the_payload() {
         let root = temp_wiki("no-body-leak");
+        // The sentinel sits inside a `[[...]]` span, with a newline in the
+        // middle of it -- exactly the shape `extract_links` must reject
+        // (finding 1), so this proves the rejection, not just that ordinary
+        // prose outside any `[[...]]` was never a link candidate to begin
+        // with.
         write(
             &root,
             "quiet.md",
-            "---\ntitle: Quiet\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: quiet-note.md\n---\nSENTINEL-BODY-TEXT-f8a2c1 should never be serialized.\n",
+            "---\ntitle: Quiet\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: quiet-note.md\n---\nSee [[SENTINEL-BODY-TEXT-f8a2c1\nshould never be serialized]].\n",
         );
 
         let idx = index(&root);
         let json = serde_json::to_string(&idx).unwrap();
         assert!(!json.contains("SENTINEL-BODY-TEXT-f8a2c1"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_five_thousand_char_span_between_double_brackets_never_appears_in_the_index() {
+        let root = temp_wiki("huge-link-span");
+        let prose = "x".repeat(5_000);
+        write(
+            &root,
+            "a.md",
+            &format!("---\ntitle: A\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: a-note.md\n---\nSee [[{prose}]] for more.\n"),
+        );
+
+        let idx = index(&root);
+        let json = serde_json::to_string(&idx).unwrap();
+        assert!(!json.contains(&prose), "the 5,000-char span must never be serialized");
+        assert!(
+            idx.gaps.iter().all(|g| g.target.len() < 5_000),
+            "the oversized span must not become a gap target: {:?}",
+            idx.gaps
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bash_double_bracket_test_syntax_is_not_treated_as_a_link() {
+        let root = temp_wiki("bash-brackets");
+        write(
+            &root,
+            "a.md",
+            "---\ntitle: A\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: a-note.md\n---\n```bash\nif [[ -f x ]]; then\n  echo hi\nfi\n```\n",
+        );
+
+        let idx = index(&root);
+        assert!(
+            idx.gaps.iter().all(|g| !g.target.contains("-f")),
+            "a bash [[ -f x ]] test must never become a gap: {:?}",
+            idx.gaps
+        );
+        let a = note_by_id(&idx, "a");
+        assert!(a.gaps.is_empty(), "{:?}", a.gaps);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_valid_link_after_a_rejected_one_on_the_same_line_still_resolves() {
+        let root = temp_wiki("resume-after-reject");
+        write(
+            &root,
+            "real-note.md",
+            "---\ntitle: Real Note\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: real-note-source.md\n---\nNo links out.\n",
+        );
+        write(
+            &root,
+            "linker.md",
+            "---\ntitle: Linker\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: linker-note.md\n---\nx [[ -f y ]] and [[real-note]]\n",
+        );
+
+        let idx = index(&root);
+        let linker = note_by_id(&idx, "linker");
+        assert_eq!(
+            linker.links,
+            vec!["real-note".to_string()],
+            "the rejected [[ -f y ]] must not block the valid link after it: {linker:?}"
+        );
+        assert!(linker.gaps.is_empty(), "{:?}", linker.gaps);
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -1016,6 +1153,95 @@ mod tests {
         assert!(!idx.present);
         assert!(idx.notes.is_empty());
         assert!(idx.root.ends_with("knowledge/wiki") || idx.root.ends_with("knowledge\\wiki"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_leading_utf8_bom_does_not_defeat_frontmatter_detection() {
+        let root = temp_wiki("bom");
+        write(
+            &root,
+            "bommed.md",
+            "\u{feff}---\ntitle: Bommed\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: bommed-note.md\n---\nNo links.\n",
+        );
+
+        let idx = index(&root);
+        assert_eq!(idx.notes.len(), 1, "a BOM must not turn a note into a page");
+        assert!(idx.pages.is_empty(), "{:?}", idx.pages);
+        let n = note_by_id(&idx, "bommed");
+        assert_eq!(n.title, "Bommed");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discover_stops_immediately_once_the_file_cap_is_hit() {
+        let root = temp_wiki("discover-cap");
+        // Well over MAX_FILES, spread across two sibling directories so the
+        // walk has more than one directory queued when the cap is hit.
+        for i in 0..(MAX_FILES + 50) {
+            let dir = if i % 2 == 0 { "a" } else { "b" };
+            write(&root, &format!("{dir}/n{i:05}.md"), "no frontmatter\n");
+        }
+
+        let (files, truncated) = discover(&root.join("knowledge/wiki"));
+        assert!(truncated, "hitting the cap must still report truncation");
+        assert_eq!(
+            files.len(),
+            MAX_FILES,
+            "the walk must stop exactly at the cap rather than collecting more"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn duplicate_findings_with_the_same_kind_note_and_detail_are_collapsed_to_one() {
+        let root = temp_wiki("dedup-findings");
+        write(
+            &root,
+            "citer.md",
+            "---\ntitle: Citer\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: data/secrets/a.md\n  - path: data/secrets/b.md\n---\nNo links.\n",
+        );
+
+        let idx = index(&root);
+        let secret_findings: Vec<_> = idx
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::SecretSource && f.note == "citer")
+            .collect();
+        assert_eq!(
+            secret_findings.len(),
+            1,
+            "two data/secrets/ citations in one note must collapse to one identical finding: {:?}",
+            idx.findings
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_missing_source_detail_embeds_a_bounded_length_path() {
+        let root = temp_wiki("long-source-path");
+        let long_path = format!("nowhere/{}.md", "y".repeat(1_000));
+        write(
+            &root,
+            "a.md",
+            &format!("---\ntitle: A\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: {long_path}\n---\nNo links.\n"),
+        );
+
+        let idx = index(&root);
+        let finding = idx
+            .findings
+            .iter()
+            .find(|f| f.kind == FindingKind::MissingSource && f.note == "a")
+            .expect("missing_source finding");
+        assert!(
+            finding.detail.len() < long_path.len(),
+            "the embedded path must be bounded: {} chars",
+            finding.detail.len()
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
