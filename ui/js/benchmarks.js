@@ -1,13 +1,20 @@
-//! L5 Improvement, tab 1: what Factory would need before a score means
-//! anything. v1 declares and displays configurations -- it runs nothing and
-//! shows no score, following the precedent of Secrets v1 (#49): the honest
-//! inventory of what is missing, before the code that fills it in exists.
+//! L5 Improvement, tab 1: the Benchmarks shell -- the segmented control that
+//! switches between Datasets, Runs and Configurations -- plus Configurations
+//! itself, v1's cards, unchanged. `datasets.js` and `bench-runs.js` are the
+//! other two segments; this file never imports either of them; app.js is the
+//! one place that knows all three, the same way it already knows every other
+//! view (see its own header comment).
+//!
 //! `loadBenchmarks` fetches `/api/benchmarks` into `state.benchmarks` (or
 //! `state.benchmarksError`, never both) on every show, the one-answer shape
-//! `sandboxes.js` uses for L2's fetch.
+//! `sandboxes.js` uses for L2's fetch. `renderBenchmarks` also owns the
+//! segmented control's own chrome -- which pane is visible, which button is
+//! lit -- since that only ever touches `state.benchSegment` and the DOM, no
+//! import of the other two segments required.
 
 import { $, api, esc, state } from "./core.js";
-import { inScope } from "./scopes.js";
+import { inScope, writeHash } from "./scopes.js";
+import { benchmarksTail, readBenchmarksTail } from "./bench-model.js";
 
 const NOTE =
   "A score without its configuration is not a measurement -- the same model scores differently under a " +
@@ -113,7 +120,70 @@ export function configCard(config) {
   </div>`;
 }
 
+// ------------------------------------------------------------------ segments
+
+/// The tail this view writes, for `app.js`'s router -- which segment is
+/// showing, and the selection within it.
+export function benchTail() {
+  return benchmarksTail(state.benchSegment, state.benchDatasetName, state.benchRunId);
+}
+
+/// The inverse, applied from a hash on boot, reload or back/forward. Sets
+/// state only; `app.js`'s `startBenchmarks` (the view's `onShow`) is what
+/// actually fetches whatever the selection now names, the same order
+/// `workflows.js`'s `readWorkflowTail` and `knowledge.js`'s
+/// `readKnowledgeTail` already run in.
+export function readBenchTail(tail) {
+  const { segment, dataset, run } = readBenchmarksTail(tail);
+  state.benchSegment = segment;
+  state.benchDatasetName = dataset;
+  state.benchRunId = run;
+}
+
+/// Show only the one segment's pane, and light its button. Cheap and
+/// idempotent -- called on every render, including ones that changed no
+/// segment at all, since it never touches anything outside this module.
+function renderSegmentChrome() {
+  const seg = state.benchSegment || "datasets";
+  const bar = $("bench-seg");
+  if (bar) {
+    for (const b of bar.querySelectorAll("button")) b.classList.toggle("on", b.dataset.seg === seg);
+  }
+  const panes = { datasets: "bench-pane-datasets", runs: "bench-pane-runs", configurations: "bench-pane-configurations" };
+  for (const [key, id] of Object.entries(panes)) {
+    const el = $(id);
+    if (el) el.hidden = key !== seg;
+  }
+}
+
+/// Switches the visible segment: updates state, repaints the chrome, and
+/// writes the hash. It never fetches -- a segment's own data is loaded
+/// eagerly by `startBenchmarks` on show and lazily by `app.js`'s
+/// `selectBenchSegment` the first time a segment is switched to, since this
+/// file must not import `datasets.js`/`bench-runs.js` to do that itself (see
+/// this file's header comment).
+export function setBenchSegment(seg) {
+  if (!["datasets", "runs", "configurations"].includes(seg) || seg === state.benchSegment) return false;
+  state.benchSegment = seg;
+  renderSegmentChrome();
+  writeHash();
+  return true;
+}
+
+export function wireBenchmarkSegments(onSwitch) {
+  const bar = $("bench-seg");
+  if (!bar) return;
+  for (const b of bar.querySelectorAll("button")) {
+    b.onclick = () => {
+      const changed = setBenchSegment(b.dataset.seg);
+      if (changed && onSwitch) onSwitch(b.dataset.seg);
+    };
+  }
+}
+
 export function renderBenchmarks() {
+  renderSegmentChrome();
+
   const note = $("benchmarks-note");
   if (note) note.textContent = NOTE;
 
