@@ -285,7 +285,10 @@ other node waits until all incoming predecessors have reported `done`.
 Fan-out starts every newly eligible node and fan-in waits for every parent.
 A failed or cancelled task stops the attempt and leaves downstream nodes
 `skipped`; a blocked task simply pauses it. The task remains authoritative for
-all of these states.
+all of these states, including after the run itself has an outcome: a sibling
+still running when the run fails keeps moving to its own `done`/`failed`/
+`cancelled` rather than freezing, and a task deleted out from under an active
+node fails that node truthfully instead of leaving it pending forever.
 
 Workflow definitions and runs are daemon orchestration state. They are stored
 in additive tables in the instance root's `.factory/factory.db`, never in a
@@ -293,11 +296,30 @@ scope config or browser storage, even when that scope uses a plugin task store.
 Each spawned task carries `workflow_origin` with the definition, run, and node
 IDs. The run persists its chosen task ID before task creation, so restart
 reconciliation recreates that exact decision instead of spawning a duplicate.
+A row neither table can decode is skipped (and named in a warning) rather than
+failing the whole list or recovery pass; fetching it directly is still an
+error, but only for that one id.
+
+**A `workflow.run` grant is not a way to launder the caller into the owner's
+authority over tasks.** A run remembers who started it (the owner, or a scoped
+agent) and re-checks that actor's *current* role -- not a snapshot of what it
+could do at the moment it clicked Run -- against the same `task.create` and
+`task.run` authority a hand-typed request would need, every time a node
+spawns: the first preflight before anything is persisted, and again at every
+later spawn a downstream fan-out or a restart recovery makes. A role that has
+since lost the grant fails just that node (recorded as its error) rather than
+the run silently keeping the authority it started with.
 
 The web UI exposes **Workflows** beside **Tasks**. Its canvas supports moving,
-connecting, duplicating and deleting task nodes, with pan/zoom and a properties
-inspector. The ordered textual summary and keyboard node controls carry the
-same graph for people who do not use the canvas.
+connecting, duplicating and deleting task nodes, with pan/zoom, zoom/fit
+controls, and a properties inspector. A Design/Run toggle switches between
+editing the live definition and viewing one specific run: Run mode renders
+that run's own immutable `definition` snapshot with live status overlays,
+read-only, so a canvas edited since a run started is never what the run
+appears to be doing. A "Recent runs" list beside the definitions picks which
+run Run mode shows; starting a run switches to it. The ordered textual
+summary and keyboard node/edge controls carry the same graph for people who
+do not use the canvas, including a link to any node's spawned task.
 
 ## How a task actually runs
 
