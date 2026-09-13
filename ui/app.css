@@ -33,9 +33,10 @@
   --ground: #0A0E11; --ground2: #141B1F; --plate: #1C2429; --paint: #D9A445;
   --roof: #2B363D; --roof2: #3A4750; --wallA: #232D33; --wallB: #1A2227;
   /* The six decision levels, L1 through L6 -- one colour each, read by the
-     header's level row. `--lvl4`/`--lvl3` are the two Factory has built.
-     Not `--ly1`..`--ly6` -- the site plan's floor treemap already claims
-     those names below, for an unrelated ramp of lightness levels. */
+     header's level row. `--lvl4`/`--lvl3`/`--lvl2`/`--lvl5` are the four
+     Factory has built; L6 and L1 stay disabled and their colours unused so
+     far. Not `--ly1`..`--ly6` -- the site plan's floor treemap already
+     claims those names below, for an unrelated ramp of lightness levels. */
   --lvl1: #5FA8DC; --lvl2: #57BDBD; --lvl3: #3EB183;
   --lvl4: #D9A445; --lvl5: #B98AD0; --lvl6: #D97158;
 }
@@ -124,9 +125,9 @@ header h1 {
    into it. Dashboard plus six three-line level tabs, `flex:1 1 0` so they
    share the row evenly with a floor on how narrow one gets, a colour per
    level via `--lvl1`..`--lvl6`,
-   and the four Factory has not built yet shown `disabled` -- which is also
-   what drops them out of the tab order, so tabbing the row only visits the
-   two that work. */
+   and the two Factory has not built yet (Direction, Infrastructure) shown
+   `disabled` -- which is also what drops them out of the tab order, so
+   tabbing the row only visits Dashboard and the four that work. */
 .levels {
   display: flex; flex-wrap: wrap; background: var(--panel);
   border-bottom: 1px solid var(--line);
@@ -899,4 +900,101 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 :root[data-theme="foundry-light"] {
   --ly1: #2E3D9E; --ly2: #4A2E9E; --ly3: #752E9E;
   --ly4: #9E2E9E; --ly5: #9E2E75; --ly6: #9E2E4C;
+}
+
+/* ============================================================ L5 improvement:
+   benchmarks, knowledge. A `<section>` heading gets no padding of its own
+   elsewhere in the sheet -- every other `<section>` wraps a table straight
+   to its border -- so this view is the first to put an `h3` inside one. */
+section > h3 {
+  margin: 0; padding: 10px 14px; font: 600 9.5px/1 var(--cond); letter-spacing: .13em;
+  text-transform: uppercase; color: var(--faint); border-bottom: 1px solid var(--line);
+}
+section > .empty { margin: 0; }
+
+/* ---------------------------------------------------------------- benchmarks */
+.bench-need { margin-bottom: 14px; }
+.bench-need ul { margin: 0; padding: 10px 14px 12px 30px; }
+.bench-need li { margin: 5px 0; font-size: 12px; color: var(--ink-2); }
+.bench-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; margin-top: 14px; }
+.bench-card { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px 14px; }
+.bench-card-head { display: flex; align-items: baseline; gap: 8px; }
+.bench-card-head h3 {
+  margin: 0; font: 600 13.5px/1.3 var(--cond); letter-spacing: .02em; color: var(--ink); text-transform: none;
+}
+.bench-card-summary { display: flex; flex-direction: column; gap: 5px; margin: 10px 0; font-size: 12px; color: var(--ink-2); }
+.bench-flags { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.bench-flags code {
+  background: var(--sunk); border: 1px solid var(--line-soft); padding: 2px 6px; border-radius: 3px;
+  font: 400 10.5px/1.4 var(--mono); color: var(--ink-2);
+}
+.bench-details { margin-top: 10px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
+.bench-details summary {
+  font: 600 9px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); cursor: pointer;
+}
+.bench-fields {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; margin: 9px 0 0;
+  background: var(--line-soft); border: 1px solid var(--line-soft); border-radius: 3px; overflow: hidden;
+}
+.bench-field { min-width: 0; background: var(--sunk); padding: 7px 9px; }
+.bench-field dt {
+  margin-bottom: 3px; color: var(--faint); font: 600 8.5px/1 var(--cond); letter-spacing: .11em; text-transform: uppercase;
+}
+.bench-field dd { margin: 0; color: var(--ink-2); font-size: 11.5px; }
+.not-recorded { color: var(--faint); font-style: italic; }
+.bench-agents { margin-top: 10px; }
+.bench-agents h4 {
+  margin: 0 0 5px; font: 600 8.5px/1 var(--cond); letter-spacing: .11em; text-transform: uppercase; color: var(--faint);
+}
+.bench-agents ul { margin: 0; padding-left: 18px; }
+.bench-agents li { font-size: 12px; color: var(--ink-2); margin: 3px 0; }
+
+/* ----------------------------------------------------------------- knowledge */
+.know-shell { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 12px; margin-bottom: 14px; }
+.know-graph-wrap {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; min-width: 0;
+}
+#knowledge-graph { display: block; width: 100%; height: auto; min-height: 260px; }
+.know-node circle {
+  fill: var(--panel-2); stroke: var(--line); stroke-width: 1.5; cursor: pointer; transition: fill .1s, stroke .1s;
+}
+.know-node text { fill: var(--muted); font: 400 9px/1 var(--sans); pointer-events: none; }
+.know-node:hover circle { stroke: var(--signal-ink); }
+.know-node.gap circle { fill: var(--sunk); stroke: var(--faint); stroke-dasharray: 4 3; }
+.know-node.selected circle { fill: var(--signal-wash); stroke: var(--signal); stroke-width: 2.5; }
+.know-node.selected text { fill: var(--ink); font-weight: 500; }
+.know-node:focus { outline: none; }
+.know-node:focus-visible circle { stroke: var(--signal); stroke-width: 3; }
+.know-edge { stroke: var(--line); stroke-width: 1.2; }
+.know-edge.gap { stroke-dasharray: 3 3; stroke: var(--faint); }
+.know-edge.selected { stroke: var(--signal); stroke-width: 2; }
+.know-inspector {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px 14px;
+  min-width: 0; overflow-wrap: anywhere;
+}
+.know-inspector h3 { margin: 0 0 8px; font: 600 14px/1.3 var(--cond); color: var(--ink); }
+.know-inspector h4 {
+  margin: 12px 0 5px; font: 600 8.5px/1 var(--cond); letter-spacing: .11em; text-transform: uppercase; color: var(--faint);
+}
+.know-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin: 0; }
+.know-facts dt { color: var(--faint); font: 600 8.5px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; }
+.know-facts dd { margin: 2px 0 0; color: var(--ink-2); font-size: 12px; }
+.know-linklist { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.know-linklist li { font-size: 12px; }
+button.linklike {
+  background: none; border: 0; padding: 0; color: var(--signal-ink); text-decoration: underline;
+  font: inherit; cursor: pointer; text-align: left;
+}
+button.linklike:hover { color: var(--signal); }
+.know-finding-group { padding: 9px 14px; border-bottom: 1px solid var(--line-soft); }
+.know-finding-group:last-child { border-bottom: 0; }
+.know-finding-group h4 {
+  margin: 0 0 5px; font: 600 8.5px/1 var(--cond); letter-spacing: .11em; text-transform: uppercase; color: var(--faint);
+}
+.know-finding-group ul { margin: 0; padding-left: 18px; }
+.know-finding-group li { font-size: 12px; color: var(--ink-2); margin: 3px 0; }
+
+@media (max-width: 860px) {
+  .know-shell { grid-template-columns: 1fr; }
+  .know-inspector { order: -1; }
 }
