@@ -20,40 +20,105 @@ use std::sync::Arc;
 
 use crate::engine::{append_declared_args, Engine};
 
-/// Herdr names are lowercase identifiers of at most 32 characters. Keep the
-/// readable name when it already fits; otherwise add a stable hash so case,
-/// punctuation, and truncated suffixes cannot make two agents collide.
-fn runtime_name(scope: &str, name: &str) -> String {
+/// Herdr names are lowercase identifiers of at most 32 characters, starting
+/// with a lowercase letter. `factory-` stays the outer namespace: herdr agent
+/// names are global and `start()` adopts any existing agent carrying the name
+/// it is about to ask for (see `adopt_named`), so nothing generated here may
+/// collide with a name a person gave their own hand-made agent just because
+/// the scope prefix was dropped.
+///
+/// `readable` is returned verbatim when it already fits in 32 characters and
+/// is already clean (lowercase letters, digits, `-`, `_` -- nothing to clean
+/// up). Otherwise it is normalized -- lowercased, any run of characters
+/// outside `[a-z0-9_-]` collapsed to a single `-`, no leading, trailing or
+/// doubled `-` -- and its readable part is cut at a `-` boundary rather than
+/// mid-word, then a suffix is appended so two different inputs that would
+/// otherwise collide once truncated still don't:
+///
+/// - `required_suffix` given (a task run's own id fragment): that literal
+///   suffix, verbatim and never itself truncated. It is already the
+///   discriminator -- two runs of the same scope and agent always carry
+///   different ids -- so no further hash is needed, and stacking one on top
+///   would only eat into the budget for the readable part.
+/// - `required_suffix` absent (a standing agent): a stable hash of the whole
+///   *un-normalized* `readable` string, so case and punctuation variants that
+///   would otherwise normalize to identical text still produce different
+///   names.
+pub(crate) fn herdr_name(readable: &str, required_suffix: Option<&str>) -> String {
     const MAX: usize = 32;
-    const HASH_LEN: usize = 8;
 
-    let original = format!("factory-{scope}-{name}");
-    if original.len() <= MAX
-        && original
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-    {
-        return original;
+    if required_suffix.is_none() && is_clean_herdr_name(readable) && readable.len() <= MAX {
+        return readable.to_string();
     }
 
-    let clean: String = original
-        .chars()
-        .map(|c| {
-            let c = c.to_ascii_lowercase();
-            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
+    let suffix = match required_suffix {
+        Some(s) => s.to_string(),
+        None => {
+            let mut hash = 0x811c_9dc5u32;
+            for byte in readable.as_bytes() {
+                hash ^= u32::from(*byte);
+                hash = hash.wrapping_mul(0x0100_0193);
             }
-        })
-        .collect();
-    let mut hash = 0x811c_9dc5u32;
-    for byte in original.as_bytes() {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x0100_0193);
+            format!("{hash:08x}")
+        }
+    };
+
+    let clean = normalize_herdr_name(readable);
+    let budget = MAX.saturating_sub(suffix.len() + 1);
+    let cut = cut_herdr_name_at_boundary(&clean, budget);
+    format!("{cut}-{suffix}")
+}
+
+fn is_clean_herdr_name(s: &str) -> bool {
+    s.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// Lowercase; collapse any run of characters outside `[a-z0-9_-]` -- `-`
+/// itself included, so a source that already has doubled dashes comes out
+/// clean too -- to a single `-`; never emit a leading or trailing `-`.
+fn normalize_herdr_name(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_dash = false;
+    for c in s.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
+            }
+            pending_dash = false;
+            out.push(c);
+        } else if !out.is_empty() {
+            // A `-` in the source and any other disallowed character are
+            // treated the same way here: both just mark a boundary. Pushed
+            // lazily, so a run of several never yields more than one `-`.
+            pending_dash = true;
+        }
     }
-    let prefix_len = MAX - HASH_LEN - 1;
-    format!("{}-{hash:08x}", &clean[..clean.len().min(prefix_len)])
+    out
+}
+
+/// Cut `clean` down to `budget` characters, preferring the last `-` boundary
+/// so a truncated name reads as a shortened word list rather than a word cut
+/// in half. A boundary too close to the start would throw away almost all of
+/// the readable signal, so it is only honoured when it leaves a reasonable
+/// amount behind; otherwise this hard-cuts at `budget` instead.
+fn cut_herdr_name_at_boundary(clean: &str, budget: usize) -> String {
+    const MIN_READABLE: usize = 8;
+    if clean.len() <= budget {
+        return clean.to_string();
+    }
+    let slice = &clean[..budget];
+    match slice.rfind('-') {
+        Some(pos) if pos >= MIN_READABLE => slice[..pos].to_string(),
+        _ => slice.trim_end_matches('-').to_string(),
+    }
+}
+
+/// A standing agent's herdr name: `factory-{scope}-{name}`, cleaned up and
+/// truncated as `herdr_name` describes.
+fn runtime_name(scope: &str, name: &str) -> String {
+    herdr_name(&format!("factory-{scope}-{name}"), None)
 }
 
 impl Engine {
@@ -171,14 +236,25 @@ impl Engine {
             agent: agent.clone(),
         });
 
-        // No task: a standing agent is started to be there, and is told nothing.
+        // Resolved the same way `caller_for` resolves it for every other
+        // request, and only after the row above is written, so this reads
+        // back the role the access check will actually apply rather than
+        // whatever the agent was wearing before this start.
+        let role = self.effective_role(scope, name).await;
+        let role = self.roles.get(&role).cloned();
+
+        // No task: a standing agent is started to be there, and is told
+        // nothing about one -- but it still gets the guide to Factory itself.
         let ctx = AgentContext {
             scope: scope.to_string(),
+            agent_name: name.to_string(),
             cwd: cwd.clone(),
             factory_bin: self.factory_bin.clone(),
             socket: factory.socket_path(),
+            guides_dir: factory.guides_dir(),
             task: None,
             identity_token: Some(identity),
+            role,
         };
 
         let mut launch = match adapter.launch_spec(&ctx).await {
@@ -190,8 +266,9 @@ impl Engine {
         let session = match runtime
             .start(&StartRequest {
                 id: agent.id.clone(),
+                scope: scope.to_string(),
                 name: runtime_name(scope, name),
-                label: format!("factory: {scope}/{name}"),
+                label: name.to_string(),
                 cwd,
                 launch,
             })
@@ -621,7 +698,7 @@ mod tests {
     use factory_core::config::{Config, DaemonConfig, Factory, Instance};
     use factory_core::protocol::{Payload, Request, Response};
     use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
-    use factory_core::task::{NewTask, Task, TaskStatus};
+    use factory_core::task::{NewTask, Task, TaskReport, TaskStatus};
     use factory_plugins::registry::Registry;
     use factory_plugins::{HarnessAgent, SqliteStore};
     use std::path::PathBuf;
@@ -649,6 +726,58 @@ mod tests {
         assert_ne!(
             runtime_name("a-very-long-scope-name", "a-very-long-agent-name-one"),
             runtime_name("a-very-long-scope-name", "a-very-long-agent-name-two")
+        );
+    }
+
+    #[test]
+    fn a_clean_name_that_already_fits_is_returned_verbatim() {
+        // Unchanged behaviour for the common case -- `factory-demo-watcher`,
+        // the exact form the README's attach-command example still uses.
+        assert_eq!(runtime_name("demo", "watcher"), "factory-demo-watcher");
+    }
+
+    #[test]
+    fn truncated_names_cut_at_a_word_boundary_not_mid_word() {
+        // The exact defect the issue named: `factory-factory-codex-b-e63be92f`
+        // cut `builder` mid-word. The hash is unchanged (it still hashes the
+        // un-normalized original), so this pins the boundary cut without
+        // pinning the hash algorithm to a second, redundant assertion.
+        let generated = runtime_name("factory", "Codex Builder");
+        assert!(is_valid_herdr_name(&generated), "{generated}");
+        assert_eq!(generated, "factory-factory-codex-e63be92f");
+        assert!(
+            !generated.contains("-b-"),
+            "must not cut mid-word: {generated}"
+        );
+    }
+
+    #[test]
+    fn run_names_obey_herdrs_identifier_contract() {
+        let generated = herdr_name(&format!("factory-{}-{}", "demo", "shell"), Some("a1b2c3d4"));
+        assert!(is_valid_herdr_name(&generated), "{generated}");
+        assert_eq!(generated, "factory-demo-shell-a1b2c3d4");
+    }
+
+    #[test]
+    fn two_runs_of_the_same_scope_and_agent_differ() {
+        let a = herdr_name(&format!("factory-{}-{}", "demo", "shell"), Some("aaaaaaaa"));
+        let b = herdr_name(&format!("factory-{}-{}", "demo", "shell"), Some("bbbbbbbb"));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn the_run_id_fragment_survives_even_long_scope_and_agent_names() {
+        let generated = herdr_name(
+            &format!(
+                "factory-{}-{}",
+                "a-very-long-scope-name-indeed", "a-very-long-agent-name-here-too"
+            ),
+            Some("deadbeef"),
+        );
+        assert!(is_valid_herdr_name(&generated), "{generated}");
+        assert!(
+            generated.ends_with("-deadbeef"),
+            "the run's own discriminator must never be truncated away: {generated}"
         );
     }
 
@@ -1001,10 +1130,19 @@ mod tests {
         engine.start_agent("demo", "watcher").await.unwrap();
 
         let starts = stub.starts.lock().unwrap();
-        assert_eq!(
-            starts[0].launch.args,
-            ["--model", "sonnet", "--model", "opus"]
-        );
+        let args = &starts[0].launch.args;
+        // The adapter's own default first, then the guide `pi` gets injected
+        // as its own flag, then the scope's declared `args:` last of all --
+        // so a declaration can still override or add to what the adapter and
+        // the guide put there.
+        assert_eq!(&args[0..2], ["--model", "sonnet"]);
+        assert_eq!(args[2], "--append-system-prompt");
+        assert_eq!(&args[args.len() - 2..], ["--model", "opus"]);
+        // The scope names the workspace a runtime like herdr should group
+        // this session into; the label is now the bare agent name, since
+        // `factory: scope/name` used to carry both jobs at once.
+        assert_eq!(starts[0].scope, "demo");
+        assert_eq!(starts[0].label, "watcher");
         drop(starts);
         std::fs::remove_dir_all(root).ok();
     }
@@ -1062,9 +1200,71 @@ mod tests {
         engine.start_run(&task.id, Trigger::Manual).await;
 
         let starts = stub.starts.lock().unwrap();
+        let args = &starts[0].launch.args;
+        assert_eq!(&args[0..2], ["--model", "sonnet"], "the adapter's own defaults come first");
+        assert_eq!(args[2], "--append-system-prompt", "then the guide's flag");
+        assert_eq!(&args[args.len() - 2..], ["--model", "opus"], "the declared override lands last");
+        // A run's scope is its task's canonical scope, its label the task's
+        // title (truncated), and its name carries the scope, the agent, and
+        // the run's own discriminator -- never `factory-run-<hex>` alone.
+        assert_eq!(starts[0].scope, "demo");
+        assert_eq!(starts[0].label, "exercise configured args");
+        assert!(starts[0].name.starts_with("factory-demo-builder-"), "{}", starts[0].name);
+        drop(starts);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_legacy_named_tasks_run_lands_in_the_scopes_canonical_workspace() {
+        // `engine.create()` already canonicalizes a task's scope on the way
+        // in (see its own comment), so a legacy-named row can only exist the
+        // way an old one on disk would: written directly, bypassing it.
+        //
+        // Scope and agent names are kept short enough that neither is a
+        // truncation casualty -- this test is about which scope name wins,
+        // not about the truncation behaviour covered elsewhere.
+        let (engine, stub, root) = recording_engine(
+            "name: proj/demo\npath: .\nruntime: stub\nagents:\n  - name: shell\n    harness: configured\n    args: [--model, opus]\n",
+        );
+        let now = Utc::now();
+        let task = Task {
+            id: "legacy-task".into(),
+            title: "legacy run".into(),
+            instructions: "true".into(),
+            scope: "demo".into(), // the scope's pre-migration bare name
+            agent: "shell".into(),
+            runtime: "stub".into(),
+            status: TaskStatus::Pending,
+            schedule: None,
+            estimate_seconds: None,
+            result: None,
+            error: None,
+            runs: 0,
+            ack_timeout_seconds: None,
+            timeout_seconds: None,
+            blocked_timeout_seconds: None,
+            worktree: false,
+            labels: Default::default(),
+            created_at: now,
+            updated_at: now,
+            last_run_at: None,
+            next_run_at: None,
+            workflow_origin: None,
+        };
+        engine.store.create(&task).await.unwrap();
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+
+        let starts = stub.starts.lock().unwrap();
         assert_eq!(
-            starts[0].launch.args,
-            ["--model", "sonnet", "--model", "opus"]
+            starts[0].scope, "proj/demo",
+            "a legacy-named task's run must resolve to the scope's canonical name, \
+             the same workspace its standing agents use"
+        );
+        assert!(
+            starts[0].name.starts_with("factory-proj-demo-shell-"),
+            "{}",
+            starts[0].name
         );
         drop(starts);
         std::fs::remove_dir_all(root).ok();
@@ -1090,8 +1290,93 @@ mod tests {
         engine.start_run(&task.id, Trigger::Manual).await;
 
         let starts = stub.starts.lock().unwrap();
-        assert_eq!(starts[0].launch.args, ["--model", "sonnet"]);
+        // No declaration named "configured" itself, so nothing to append --
+        // just the adapter's own default and, after it, the guide's flag.
+        let args = &starts[0].launch.args;
+        assert_eq!(args.len(), 4, "{args:?}");
+        assert_eq!(&args[0..3], ["--model", "sonnet", "--append-system-prompt"]);
         drop(starts);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_runs_guide_file_outlives_dispatch_and_is_gone_once_the_run_ends() {
+        // Pins the fix for the bug this replaced: the guide was deleted right
+        // after the prompt was submitted, on the assumption every harness had
+        // already read it by then. That is false for `opencode`, which
+        // re-resolves its configured instruction paths on every request
+        // rather than once at startup -- an early delete made the guide
+        // silently vanish partway through the run. The file must survive
+        // dispatch and disappear only once the run actually ends, through
+        // whichever path closes it.
+        let (engine, _stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n",
+        );
+        let task = engine
+            .create(NewTask {
+                title: "exercise guide cleanup".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("builder".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+
+        let guide = factory_core::adapter::agent::run_guide_path(&engine.factory_snapshot().guides_dir(), &task.id);
+        assert!(guide.exists(), "still there once the harness is up and running");
+
+        let run = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some("ok".into()),
+                    error: None,
+                    token: run.token.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(!guide.exists(), "gone once the agent's own terminal report closes the run");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_runs_guide_file_is_also_cleaned_up_when_the_watchdog_gives_up_on_it() {
+        // The same cleanup, reached through `fail_run` instead of a report --
+        // `close_session` is the one place both paths (and a cancel, and a
+        // task deleted out from under an active run) go through.
+        let (engine, _stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n",
+        );
+        let task = engine
+            .create(NewTask {
+                title: "exercise watchdog cleanup".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("builder".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+
+        let guide = factory_core::adapter::agent::run_guide_path(&engine.factory_snapshot().guides_dir(), &task.id);
+        assert!(guide.exists());
+
+        let run = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        engine.fail_run(&run.id, "gave up waiting").await;
+
+        assert!(!guide.exists(), "gone once the watchdog closes the run too");
         std::fs::remove_dir_all(root).ok();
     }
 

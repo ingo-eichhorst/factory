@@ -195,6 +195,7 @@ impl Engine {
             | Request::Occupancy { .. }
             | Request::Production { .. }
             | Request::SiteFootprint
+            | Request::Environment
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }

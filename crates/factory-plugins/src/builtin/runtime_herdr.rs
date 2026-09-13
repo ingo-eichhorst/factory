@@ -1,8 +1,21 @@
 //! The only runtime there is for now: herdr, driven through its CLI. The CLI
 //! answers in JSON on stdout, so nothing here has to speak the socket protocol.
 //!
-//! One workspace per task. It is the unit herdr can close cleanly, and it makes
-//! a running task something a person can find and watch.
+//! One herdr workspace per Factory scope, not per session: `start()` resolves
+//! the scope's workspace by matching `label == scope` in `workspace list`
+//! (stateless, so it survives a daemon restart, and if a person already made
+//! a workspace by hand with that label, Factory joins it on purpose) and
+//! creates one if none exists yet. Each session -- a standing agent or a task
+//! run -- gets its own tab inside that workspace, opened with `herdr tab
+//! create --workspace <id>` and closed on `stop()` with `herdr tab close`,
+//! never `workspace close`: the workspace is shared by the whole scope, so
+//! closing it out from under a sibling agent would take it down too. Closing
+//! a scope's *last* tab makes herdr drop the now-empty workspace on its own,
+//! though, so a tab close races the same resolve-or-create step a `start()`
+//! elsewhere might be mid-way through -- both are serialized behind
+//! `workspace_lock`, re-reading `workspace list` after acquiring it, so two
+//! workspaces for one scope are never created and a `tab create` never lands
+//! on a workspace id that closing just made stale.
 //!
 //! `watch()` pushes the same way: `herdr agent wait <pane> --until idle
 //! --until working --until blocked --until done`, blocked on in a loop, one
@@ -78,6 +91,19 @@ pub struct HerdrRuntime {
     /// sender once; a session noted afterward through any of the calls below
     /// gets a wait loop of its own, fed into that same channel.
     watch: Arc<Mutex<WatchState>>,
+    /// Serializes the resolve-or-create-workspace step in `start()` against
+    /// each other, and against `close_tab_or_pane` -- closing a scope's last
+    /// tab drops its workspace, so a `start()` mid-resolve elsewhere must
+    /// never see that workspace as still there right before `tab create`
+    /// fails against it. Held only across `workspace list` and whichever of
+    /// `workspace create`/`tab create`/`tab close`/`pane close` follows it --
+    /// never across `agent start`, which can block for up to `start_timeout`
+    /// -- so concurrent `start()`s in one scope (the normal case when
+    /// reconcile autostarts every agent in it back to back) never race into
+    /// creating the scope's workspace twice. `close_tab_or_pane` is never
+    /// called while a caller already holds this lock -- `resolve_pane`
+    /// itself never calls it -- so this can never deadlock; keep it that way.
+    workspace_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -103,6 +129,7 @@ impl HerdrRuntime {
             start_timeout: Duration::from_secs(60),
             herdr_session,
             watch: Arc::new(Mutex::new(WatchState::default())),
+            workspace_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -325,11 +352,17 @@ impl HerdrRuntime {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let tab = agent
+            .get("tab_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         Some(SessionRef {
             runtime: ADAPTER.into(),
             handle: pane.clone(),
             meta: BTreeMap::from([
                 ("workspace_id".to_string(), workspace),
+                ("tab_id".to_string(), tab),
                 ("pane_id".to_string(), pane),
                 ("mode".to_string(), "agent".to_string()),
                 ("agent_name".to_string(), name.to_string()),
@@ -340,6 +373,155 @@ impl HerdrRuntime {
 
     fn pane_of(session: &SessionRef) -> &str {
         &session.handle
+    }
+
+    /// Resolve or create this session's pane inside its scope's workspace,
+    /// returning `(pane_id, workspace_id, tab_id)`. Locked so two `start()`s
+    /// racing in the same scope -- the normal shape of a reconcile autostart
+    /// -- never both decide the workspace is missing and each create one.
+    ///
+    /// `req.scope` empty means an old caller or plugin that predates a
+    /// scope's workspace: fall back to a workspace of this session's own,
+    /// labelled by `req.label`, which is exactly what every session used to
+    /// get.
+    async fn resolve_pane(&self, req: &StartRequest) -> Result<(String, String, String)> {
+        let _guard = self.workspace_lock.lock().await;
+
+        if req.scope.is_empty() {
+            return self.create_workspace(&req.label, req).await;
+        }
+
+        if let Some(workspace) = self.find_workspace(&req.scope).await? {
+            return self.create_tab(&workspace, req).await;
+        }
+
+        let (pane, workspace, tab) = self.create_workspace(&req.scope, req).await?;
+        // `workspace create` always names the root tab "1"; give it this
+        // session's own label instead, same as any other tab in the scope.
+        // Best-effort: the workspace and pane are already live and every
+        // lookup resolves by *workspace* label, never a tab's, so a failed
+        // rename is a cosmetic defect, not a reason to fail the whole start
+        // and leak what was just created.
+        let _ = self
+            .run(&[s("tab"), s("rename"), tab.clone(), req.label.clone()])
+            .await;
+        Ok((pane, workspace, tab))
+    }
+
+    /// The scope's workspace, if `workspace list` already has one labelled
+    /// with it. More than one match is possible -- two people racing to
+    /// create a workspace by hand, say -- so the lowest `number` wins,
+    /// deterministically, rather than whichever `workspace list` happened to
+    /// return first.
+    async fn find_workspace(&self, scope: &str) -> Result<Option<String>> {
+        let listed = self.run(&[s("workspace"), s("list")]).await?;
+        let workspaces = listed
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut matches: Vec<(u64, String)> = workspaces
+            .iter()
+            .filter(|w| w.get("label").and_then(Value::as_str) == Some(scope))
+            .filter_map(|w| {
+                let id = w.get("workspace_id").and_then(Value::as_str)?.to_string();
+                let number = w.get("number").and_then(Value::as_u64).unwrap_or(u64::MAX);
+                Some((number, id))
+            })
+            .collect();
+        matches.sort_by_key(|(number, _)| *number);
+        Ok(matches.into_iter().next().map(|(_, id)| id))
+    }
+
+    /// `herdr workspace create`, returning `(pane_id, workspace_id, tab_id)`.
+    async fn create_workspace(&self, label: &str, req: &StartRequest) -> Result<(String, String, String)> {
+        let mut args = vec![
+            s("workspace"),
+            s("create"),
+            s("--cwd"),
+            req.cwd.display().to_string(),
+            s("--label"),
+            label.to_string(),
+            s("--no-focus"),
+        ];
+        for (k, v) in &req.launch.env {
+            args.push(s("--env"));
+            args.push(format!("{k}={v}"));
+        }
+        let created = self.run(&args).await?;
+        let pane = created
+            .pointer("/root_pane/pane_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                FactoryError::adapter(ADAPTER, "workspace create returned no root pane id")
+            })?
+            .to_string();
+        let workspace = created
+            .pointer("/workspace/workspace_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let tab = created
+            .pointer("/root_pane/tab_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Ok((pane, workspace, tab))
+    }
+
+    /// `herdr tab create` inside an already-resolved workspace, returning
+    /// `(pane_id, workspace_id, tab_id)`.
+    async fn create_tab(&self, workspace: &str, req: &StartRequest) -> Result<(String, String, String)> {
+        let mut args = vec![
+            s("tab"),
+            s("create"),
+            s("--workspace"),
+            workspace.to_string(),
+            s("--cwd"),
+            req.cwd.display().to_string(),
+            s("--label"),
+            req.label.clone(),
+            s("--no-focus"),
+        ];
+        for (k, v) in &req.launch.env {
+            args.push(s("--env"));
+            args.push(format!("{k}={v}"));
+        }
+        let created = self.run(&args).await?;
+        let pane = created
+            .pointer("/root_pane/pane_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| FactoryError::adapter(ADAPTER, "tab create returned no root pane id"))?
+            .to_string();
+        let tab = created
+            .pointer("/root_pane/tab_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Ok((pane, workspace.to_string(), tab))
+    }
+
+    /// Close this session's tab, or -- for a row persisted before tabs were
+    /// tracked, which has no `tab_id` -- its pane directly. That cascade also
+    /// closes a legacy one-pane-per-workspace session's now-empty workspace
+    /// by itself, herdr's own doing, not a `workspace close` call here. Never
+    /// closes the workspace directly: it is shared by the rest of the scope.
+    ///
+    /// Guarded by `workspace_lock`: closing a scope's last tab is exactly the
+    /// same herdr-side event as a `start()` elsewhere finding no workspace to
+    /// resolve, so the two must never interleave -- otherwise a `start()`
+    /// that just read the workspace as present could `tab create` against an
+    /// id this call made stale a moment later. Never call this while already
+    /// holding `workspace_lock` (nothing here does; `resolve_pane` never
+    /// calls this method), or the lock would deadlock against itself.
+    async fn close_tab_or_pane(&self, tab: &str, pane: &str) -> Result<()> {
+        let _guard = self.workspace_lock.lock().await;
+        if !tab.is_empty() {
+            self.run(&[s("tab"), s("close"), tab.to_string()]).await?;
+        } else {
+            self.run(&[s("pane"), s("close"), pane.to_string()]).await?;
+        }
+        Ok(())
     }
 }
 
@@ -495,7 +677,7 @@ impl AgentRuntime for HerdrRuntime {
     }
 
     fn description(&self) -> String {
-        "one herdr workspace per task, agent started in its root pane".into()
+        "one herdr workspace per scope, one tab per agent or run".into()
     }
 
     async fn connection_diagnostic(&self) -> Result<RuntimeConnectionDiagnostic> {
@@ -554,36 +736,11 @@ impl AgentRuntime for HerdrRuntime {
             }
         }
 
-        let mut args = vec![
-            s("workspace"),
-            s("create"),
-            s("--cwd"),
-            req.cwd.display().to_string(),
-            s("--label"),
-            req.label.clone(),
-            s("--no-focus"),
-        ];
-        for (k, v) in &req.launch.env {
-            args.push(s("--env"));
-            args.push(format!("{k}={v}"));
-        }
-
-        let created = self.run(&args).await?;
-        let pane = created
-            .pointer("/root_pane/pane_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                FactoryError::adapter(ADAPTER, "workspace create returned no root pane id")
-            })?
-            .to_string();
-        let workspace = created
-            .pointer("/workspace/workspace_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+        let (pane, workspace, tab) = self.resolve_pane(req).await?;
 
         let mut meta = BTreeMap::from([
             ("workspace_id".to_string(), workspace.clone()),
+            ("tab_id".to_string(), tab.clone()),
             ("pane_id".to_string(), pane.clone()),
         ]);
 
@@ -611,9 +768,11 @@ impl AgentRuntime for HerdrRuntime {
                 // or two. It answers `agent_pane_busy` until then, so wait for
                 // it rather than treating the race as a failure.
                 if let Err(e) = self.start_agent_when_ready(&start).await {
-                    // If the agent will not come up, close the workspace rather
-                    // than leaving an orphan pane behind for someone to find.
-                    let _ = self.run(&[s("workspace"), s("close"), workspace]).await;
+                    // If the agent will not come up, close this session's tab
+                    // rather than leaving an orphan pane behind -- never the
+                    // workspace, which the rest of the scope may already be
+                    // using.
+                    let _ = self.close_tab_or_pane(&tab, &pane).await;
                     return Err(e);
                 }
                 meta.insert("mode".into(), "agent".into());
@@ -625,7 +784,7 @@ impl AgentRuntime for HerdrRuntime {
                     run.extend(cmd.iter().cloned());
                     run.extend(req.launch.args.iter().cloned());
                     if let Err(e) = self.run(&run).await {
-                        let _ = self.run(&[s("workspace"), s("close"), workspace]).await;
+                        let _ = self.close_tab_or_pane(&tab, &pane).await;
                         return Err(e);
                     }
                 }
@@ -859,13 +1018,8 @@ impl AgentRuntime for HerdrRuntime {
 
     async fn stop(&self, session: &SessionRef) -> Result<()> {
         self.forget_session(Self::pane_of(session));
-        if let Some(ws) = session.meta.get("workspace_id").filter(|w| !w.is_empty()) {
-            self.run(&[s("workspace"), s("close"), ws.clone()]).await?;
-        } else {
-            self.run(&[s("pane"), s("close"), s(Self::pane_of(session))])
-                .await?;
-        }
-        Ok(())
+        let tab = session.meta.get("tab_id").cloned().unwrap_or_default();
+        self.close_tab_or_pane(&tab, Self::pane_of(session)).await
     }
 }
 

@@ -15,6 +15,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/app.js               the wiring: which page shows, what an event means
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
     ui/js/{dashboard,activity,site,site-render}.js               the new views
+    ui/js/{sandboxes,secrets}.js                                 L2's two tabs
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
 
@@ -121,3 +122,7 @@ something impossible.
 - A permanent agent is quiet by design. It is checked for whether its session is
   still there and nothing else -- never for whether it has said anything. The
   run timeouts must not reach it.
+- The guide (`AgentContext::factory_guide`) and the reporting contract
+  (`AgentContext::reporting_contract`) are the only two places Factory tells
+  an agent how to use it. Anything else an agent needs to know belongs in one
+  of those two, not in a third place invented for the occasion.

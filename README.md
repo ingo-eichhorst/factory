@@ -86,6 +86,7 @@ scope:
     - name: reviewer
       harness: claude-code
       lifetime: task          # not standing: offered for tasks in this scope
+      sandbox: docker         # declared, not yet enforced -- see below
 ```
 
 A permanent agent is **never failed for being quiet** — being quiet is what it
@@ -102,12 +103,42 @@ longer declares is **closed** rather than left for somebody to find next week.
 `lifetime` may also sit inside the singular `agent:` block, which is how
 instances written before standing agents existed already spell it.
 
+`sandbox` says where an agent's runs should execute: `none` (the default),
+`docker`, or `srt`. **Nothing enforces it yet.** It is read, stored, and shown
+on the L2 Environment page, and an agent declaring `docker` starts exactly the
+way one declaring `none` does. The field exists ahead of the machinery so the
+gap between what a run needs to reach and what it can reach is written down
+somewhere rather than assumed, and so the UI has something true to display.
+Enforcing it means solving three host-shaped things a container breaks — the
+control socket, the `factory` callback binary, and the run's git worktree,
+whose `.git` is a pointer file into the scope's repository — which is why
+`srt` ([anthropic-experimental/sandbox-runtime][srt]), which wraps the same
+process on the same host, is the likelier one to arrive first.
+
+[srt]: https://github.com/anthropic-experimental/sandbox-runtime
+
 `args` works in both the singular `agent:` block and entries in `agents:`. The
 daemon appends these arguments after any defaults supplied by the adapter, so a
 declaration can override a repeated flag for one scope without changing the
 shared adapter. A task that names a bare adapter with no matching declaration
 still uses only that adapter's defaults. The `shell` agent does not accept
 `args`: it runs the task instructions as the command itself.
+
+A standing agent never gets a task prompt — `prompt()` is only called for a
+task run — so it is told about Factory itself through `launch_spec` instead,
+the one call every agent gets. `claude`, `pi`, and `opencode` each get the
+guide through their own system-prompt mechanism (a file for `claude` and
+`pi`, an env var for `opencode`); a task run on those harnesses gets the same
+guide the same way, so the prompt itself stays narrower. `codex`'s own
+`developer_instructions` config key takes text, not a path, and a
+multi-paragraph argument does not survive `herdr agent start` — verified
+live, herdr refuses it outright rather than mistyping it — so `codex` takes
+the documented fallback: a task run gets the guide above the task in its
+prompt, and a standing `codex` agent gets nothing at all. `shell` is not a
+model and gets no guide either way. A standing agent's session that outlived
+the daemon is *adopted* rather than restarted, so it keeps whatever guide it
+started with; a role given to it afterward with `factory agent role` is not
+reflected in a guide already sitting in a launched session.
 
 Every agent has a **role**, and a task names a **concrete agent**, not a
 harness. `assistant` and `scratch` are different agents even when both are pi.
@@ -232,10 +263,40 @@ is one argument, not two shell words, and their order is preserved in `args:`.
 Factory normalizes the separate runtime session name to Herdr's lowercase,
 32-character identifier contract without changing the configured agent name.
 
-Each standing agent also carries the command to get into its terminal yourself —
-`herdr --session factory agent attach factory-demo-watcher`. A shell session has
-no named agent to attach to, so Factory says so instead of printing a command
-that would fail.
+A Factory scope is a herdr workspace: every standing agent and task run that
+belongs to `demo` lands as its own tab inside a workspace labelled `demo`,
+resolved by that label if it already exists (a hand-made workspace someone
+named `demo` is joined on purpose, not collided with) and created the first
+time a `demo` agent starts. The herdr agent name still carries `factory-` as
+an outer namespace ahead of the scope, because herdr agent names are global
+and Factory adopts any agent already carrying the name it is about to start —
+dropping the prefix could make it adopt a person's own hand-made agent by
+accident. Each standing agent also carries the command to get into its
+terminal yourself — `herdr --session factory agent attach
+factory-demo-watcher`. A shell session has no named agent to attach to, so
+Factory says so instead of printing a command that would fail.
+
+Stopping a standing agent or ending a task run closes only its own tab, never
+the scope's workspace — the workspace is shared by everything else running in
+that scope. Workspaces made by earlier versions of Factory (labelled
+`factory: …`, one per session) are not migrated; close them by hand.
+
+## Secrets
+
+Factory injects no credentials. The whole of what it adds to a session is six
+`FACTORY_*` variables — the scope, the socket, the callback binary, the token,
+and a run's task id and attempt.
+
+That is **not** the same as an agent having no credentials. An agent is a shell
+running as the daemon's owner, so it reads whatever that user can read:
+`~/.claude/.credentials.json`, `~/.config/gh/hosts.yml`, `~/.netrc`, ssh keys,
+a scope's own `.env`, the system keychain. The runtime is a terminal
+multiplexer, not a boundary.
+
+The L2 Environment page's **Secrets** tab reports exactly that and nothing
+more: for each known location, whether a file is there. No value is ever
+opened, held, logged, or returned — `present` is the entire result of each
+check, and there is no write path, in the UI or over the socket.
 
 ## Tasks and runs
 
@@ -328,10 +389,14 @@ do not use the canvas, including a link to any node's spawned task.
    if any of them names an adapter that does not exist.
 2. `task.run` opens a run, mints a callback token for it, and asks the runtime
    for a session in the scope's directory.
-3. The agent adapter produces the prompt. It carries the task, the working
-   directory, and the reporting contract — the exact commands the agent is to
-   run. The same values are in the session's environment as `FACTORY_TASK_ID`,
-   `FACTORY_TASK_TOKEN`, `FACTORY_SOCKET`, and `FACTORY_BIN`.
+3. The agent adapter produces the prompt and, through the harness's own
+   system-prompt mechanism, injects a short guide to Factory itself — what it
+   is, who this agent is, and which commands its role allows. The prompt
+   itself stays narrower: the task, the working directory, and the reporting
+   contract — the exact commands the agent is to run. The guide never repeats
+   those; it just says where to find them. The same values are in the
+   session's environment as `FACTORY_TASK_ID`, `FACTORY_TASK_TOKEN`,
+   `FACTORY_SOCKET`, and `FACTORY_BIN`.
 4. The agent runs `factory task report <id> --status running …`, then finishes
    with `done`, `failed`, or `blocked`. The report lands on whichever run of
    that task is in progress; the token says it is that run's agent speaking.
@@ -483,8 +548,11 @@ runtime should bring the agent up — either a harness the runtime knows by name
 (`{"kind": {"named": "gemini"}}`) or a command to run in the session
 (`{"kind": {"command": ["my-agent", "--headless"]}}`). `agent.prompt` returns
 the text to submit. Both are given the task, the working directory, the path to
-the `factory` binary, the callback token, and `reporting_contract` — the exact
-wording the built-in agents use. Paste it rather than rewriting it.
+the `factory` binary, the callback token, `reporting_contract` — the exact
+wording the built-in agents use to say how to report back — and
+`factory_guide` — the same wording they use to say what Factory is, who this
+agent is, and which commands its role allows. Paste both rather than
+rewriting them.
 
 A **task** plugin answers `task.create`, `task.get`, `task.list`, `task.update`,
 `task.delete`, `task.append_entry`, `task.entries`, `task.due`, and the run
@@ -675,7 +743,9 @@ the file a session is editing is not read at all, and is not drawn.
   silence, and is governed by `blocked_timeout_seconds` instead of the run
   timeout. For every other harness it is still exactly what it always was: the
   task times out and tells you where to look.
-- **One workspace per task, closed on completion.** A task that never reaches a
+- **One herdr workspace per scope, one tab per session, closed on completion.**
+  Ending a run or stopping a standing agent closes only its own tab; the
+  workspace stays for the rest of the scope. A task that never reaches a
   terminal state leaves its session open on purpose, so it can be looked at.
 
 ## Layout
