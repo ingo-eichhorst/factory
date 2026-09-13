@@ -246,8 +246,8 @@ Factory says so instead of printing a command that would fail.
 
 Stopping a standing agent or ending a task run closes only its own tab, never
 the scope's workspace — the workspace is shared by everything else running in
-that scope. Workspaces a pre-#47 Factory made (labelled `factory: scope/name`)
-are not migrated by this; they can be closed by hand.
+that scope. Workspaces made by earlier versions of Factory (labelled
+`factory: …`, one per session) are not migrated; close them by hand.
 
 ## Tasks and runs
 

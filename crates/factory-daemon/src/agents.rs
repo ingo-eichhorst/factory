@@ -1199,6 +1199,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_legacy_named_tasks_run_lands_in_the_scopes_canonical_workspace() {
+        // `engine.create()` already canonicalizes a task's scope on the way
+        // in (see its own comment), so a legacy-named row can only exist the
+        // way an old one on disk would: written directly, bypassing it.
+        //
+        // Scope and agent names are kept short enough that neither is a
+        // truncation casualty -- this test is about which scope name wins,
+        // not about the truncation behaviour covered elsewhere.
+        let (engine, stub, root) = recording_engine(
+            "name: proj/demo\npath: .\nruntime: stub\nagents:\n  - name: shell\n    harness: configured\n    args: [--model, opus]\n",
+        );
+        let now = Utc::now();
+        let task = Task {
+            id: "legacy-task".into(),
+            title: "legacy run".into(),
+            instructions: "true".into(),
+            scope: "demo".into(), // the scope's pre-migration bare name
+            agent: "shell".into(),
+            runtime: "stub".into(),
+            status: TaskStatus::Pending,
+            schedule: None,
+            estimate_seconds: None,
+            result: None,
+            error: None,
+            runs: 0,
+            ack_timeout_seconds: None,
+            timeout_seconds: None,
+            blocked_timeout_seconds: None,
+            worktree: false,
+            labels: Default::default(),
+            created_at: now,
+            updated_at: now,
+            last_run_at: None,
+            next_run_at: None,
+        };
+        engine.store.create(&task).await.unwrap();
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+
+        let starts = stub.starts.lock().unwrap();
+        assert_eq!(
+            starts[0].scope, "proj/demo",
+            "a legacy-named task's run must resolve to the scope's canonical name, \
+             the same workspace its standing agents use"
+        );
+        assert!(
+            starts[0].name.starts_with("factory-proj-demo-shell-"),
+            "{}",
+            starts[0].name
+        );
+        drop(starts);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
     async fn a_bare_adapter_does_not_borrow_arguments_from_another_declaration() {
         let (engine, stub, root) = recording_engine(
             "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n    args: [--model, opus]\n",

@@ -9,11 +9,13 @@
 //! run -- gets its own tab inside that workspace, opened with `herdr tab
 //! create --workspace <id>` and closed on `stop()` with `herdr tab close`,
 //! never `workspace close`: the workspace is shared by the whole scope, so
-//! closing it out from under a sibling agent would take it down too. A
-//! concurrent `start()` in the same scope is ordinary -- reconcile autostarts
-//! every agent in a scope back to back -- so the resolve-or-create step is
-//! serialized behind `workspace_lock`, re-reading `workspace list` after
-//! acquiring it, so two workspaces for one scope are never created.
+//! closing it out from under a sibling agent would take it down too. Closing
+//! a scope's *last* tab makes herdr drop the now-empty workspace on its own,
+//! though, so a tab close races the same resolve-or-create step a `start()`
+//! elsewhere might be mid-way through -- both are serialized behind
+//! `workspace_lock`, re-reading `workspace list` after acquiring it, so two
+//! workspaces for one scope are never created and a `tab create` never lands
+//! on a workspace id that closing just made stale.
 //!
 //! `watch()` pushes the same way: `herdr agent wait <pane> --until idle
 //! --until working --until blocked --until done`, blocked on in a loop, one
@@ -89,12 +91,18 @@ pub struct HerdrRuntime {
     /// sender once; a session noted afterward through any of the calls below
     /// gets a wait loop of its own, fed into that same channel.
     watch: Arc<Mutex<WatchState>>,
-    /// Serializes the resolve-or-create-workspace step in `start()`. Held
-    /// only across `workspace list` and the `workspace create`/`tab create`
-    /// that may follow it -- never across `agent start`, which can block for
-    /// up to `start_timeout` -- so concurrent `start()`s in one scope (the
-    /// normal case when reconcile autostarts every agent in it back to back)
-    /// never race into creating the scope's workspace twice.
+    /// Serializes the resolve-or-create-workspace step in `start()` against
+    /// each other, and against `close_tab_or_pane` -- closing a scope's last
+    /// tab drops its workspace, so a `start()` mid-resolve elsewhere must
+    /// never see that workspace as still there right before `tab create`
+    /// fails against it. Held only across `workspace list` and whichever of
+    /// `workspace create`/`tab create`/`tab close`/`pane close` follows it --
+    /// never across `agent start`, which can block for up to `start_timeout`
+    /// -- so concurrent `start()`s in one scope (the normal case when
+    /// reconcile autostarts every agent in it back to back) never race into
+    /// creating the scope's workspace twice. `close_tab_or_pane` is never
+    /// called while a caller already holds this lock -- `resolve_pane`
+    /// itself never calls it -- so this can never deadlock; keep it that way.
     workspace_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -498,7 +506,16 @@ impl HerdrRuntime {
     /// closes a legacy one-pane-per-workspace session's now-empty workspace
     /// by itself, herdr's own doing, not a `workspace close` call here. Never
     /// closes the workspace directly: it is shared by the rest of the scope.
+    ///
+    /// Guarded by `workspace_lock`: closing a scope's last tab is exactly the
+    /// same herdr-side event as a `start()` elsewhere finding no workspace to
+    /// resolve, so the two must never interleave -- otherwise a `start()`
+    /// that just read the workspace as present could `tab create` against an
+    /// id this call made stale a moment later. Never call this while already
+    /// holding `workspace_lock` (nothing here does; `resolve_pane` never
+    /// calls this method), or the lock would deadlock against itself.
     async fn close_tab_or_pane(&self, tab: &str, pane: &str) -> Result<()> {
+        let _guard = self.workspace_lock.lock().await;
         if !tab.is_empty() {
             self.run(&[s("tab"), s("close"), tab.to_string()]).await?;
         } else {
