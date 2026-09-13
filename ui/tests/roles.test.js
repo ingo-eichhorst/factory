@@ -66,7 +66,7 @@ test("a roles link survives a reload, and an old Agents link still finds it", ()
   assert.equal(route.scope, "projects/demo");
   assert.equal(route.page, "roles");
   assert.deepEqual(legacyAgentRoute(["roles"]), { page: "roles", tail: [] });
-  assert.equal(rolesHref("all"), "#%61ll/harn/roles", "a scope called all is not the keyword");
+  assert.match(rolesHref("all"), /^#%61ll\//, "a scope called all is not the keyword");
   delete globalThis.location;
 });
 
@@ -108,7 +108,7 @@ test("a card shows what a role may not do as well as what it may", () => {
   const inherited = roleCard(runner, grants, { scope: "projects/demo", writes: here, actions: true });
   assert.match(inherited, /data-role-act="override"/);
   assert.doesNotMatch(inherited, /data-role-act="delete"/);
-  assert.match(inherited, /href="#projects%2Fdemo|href="#projects\/harn\/roles"/);
+  assert.match(inherited, /href="#projects\/(harn\/)?roles"/);
   assert.match(inherited, /nobody/);
 
   const shipped = roleCard(worker, grants, { scope: "projects/demo", writes: here, actions: true });

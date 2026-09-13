@@ -1148,6 +1148,12 @@ impl Engine {
         candidate.config.validate()?;
         for (id, role) in given {
             let Some((scope, agent)) = id.rsplit_once('/') else { continue };
+            // A row whose scope has gone is swept by the next reconcile. No edit
+            // here can change what it may do, and it must not refuse every role
+            // write in the instance until then.
+            if candidate.scope(scope).is_err() {
+                continue;
+            }
             if !candidate.roles_for(scope)?.contains(role) {
                 return Err(bad(format!(
                     "{agent} in {scope} was given the role {:?}, which nothing in {scope} would define after this change. \
@@ -1766,6 +1772,22 @@ mod tests {
         let entry = roles.entry(&Role::new("reviewer")).unwrap();
         assert_eq!(entry.origin, RoleOrigin::Scope { scope: "demo".into() });
         assert_eq!(entry.overrides, None, "nothing above it to replace any more");
+    }
+
+    #[tokio::test]
+    async fn an_agent_row_left_behind_by_a_gone_scope_does_not_block_role_writes() {
+        let instance = Instance::new("stale", ROOT, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
+        let engine = instance.engine();
+        let mut stale = factory_core::agent::AgentSession::new(
+            "vanished", "ghost", "pi", "herdr", Lifetime::Permanent, Role::worker(),
+        );
+        stale.assigned_role = Some(Role::new("reviewer"));
+        engine.store.put_agent(&stale).await.unwrap();
+
+        engine
+            .define_role("projects", "lead", spec("runs the board", &["task.run"], "scope"), false)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

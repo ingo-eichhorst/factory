@@ -314,7 +314,12 @@ async fn main() -> Result<()> {
         Command::Agents => {
             let payload = client.send(Request::Agents).await?;
             print(&payload, cli.json, |p| match p {
-                Payload::Scopes { scopes, roles, .. } => {
+                Payload::Scopes {
+                    scopes,
+                    roles,
+                    scope_roles,
+                    ..
+                } => {
                     let mut out = String::new();
                     for s in scopes {
                         out.push_str(&format!(
@@ -360,12 +365,28 @@ async fn main() -> Result<()> {
                         out.push('\n');
                     }
                     // What there is to give an agent, so nobody has to guess a
-                    // name and be told no.
+                    // name and be told no: the roles every scope has, then the
+                    // ones a scope has only because it, or a scope above it,
+                    // defines them.
                     for r in roles {
                         out.push_str(&format!(
                             "role {:<14} {:<6} {}\n",
                             r.name, r.reach, r.describe
                         ));
+                    }
+                    for (scope, scoped) in scope_roles {
+                        for r in scoped.iter().filter(|r| {
+                            matches!(r.origin, factory_core::role::RoleOrigin::Scope { .. })
+                        }) {
+                            let from = match &r.origin {
+                                factory_core::role::RoleOrigin::Scope { scope: from } => from.as_str(),
+                                _ => "",
+                            };
+                            out.push_str(&format!(
+                                "role {:<14} {:<6} {}  (in {scope}, from {from})\n",
+                                r.name, r.reach, r.describe
+                            ));
+                        }
                     }
                     Some(out.trim_end().to_string())
                 }

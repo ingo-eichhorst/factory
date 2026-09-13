@@ -1290,7 +1290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_guide_and_the_check_read_the_same_scoped_roles() {
+    async fn roles_for_resolves_down_the_path_tree_and_never_up_or_sideways() {
         let e = engine_tree();
         assert!(e.roles_for("demo-app/inner").contains(&Role::new("lead")));
         assert!(!e.roles_for("engineering/outsider").contains(&Role::new("lead")));

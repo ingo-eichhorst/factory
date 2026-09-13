@@ -11,6 +11,7 @@
 
 import { $, api, esc, state } from "./core.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
+import { routeHref } from "./scopes.js";
 
 /// Answers can arrive out of order when the rail moves quickly; only the
 /// newest request is allowed to draw.
@@ -18,11 +19,9 @@ let asked = 0;
 
 // ------------------------------------------------------------ pure helpers
 
-/// The rail's hash for a scope's Roles view, written the way `scopes.js`
-/// writes one, so a badge or a layer header can link straight to it.
+/// A scope's Roles view, so a badge or a layer header can link straight to it.
 export function rolesHref(scope) {
-  const head = scope === "all" ? "%61ll" : encodeURIComponent(scope);
-  return `#${head}/harn/roles`;
+  return routeHref(scope, "roles");
 }
 
 function sameOrigin(a, b) {
