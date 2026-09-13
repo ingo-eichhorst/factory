@@ -12,7 +12,7 @@ use factory_core::run::{Run, RunStatus};
 use factory_core::task::{
     NewTask, Schedule, Task, TaskFilter, TaskPatch, TaskReport, TaskStatus,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use client::Client;
 
@@ -241,6 +241,19 @@ enum TaskCmd {
         message: Option<String>,
         #[arg(long)]
         result: Option<String>,
+        /// Read the result's body from a file instead of (or alongside)
+        /// --result -- the `shell` agent's own report line uses this to
+        /// carry a command's captured stdout, which can hold quotes, `$`,
+        /// backticks and newlines that would not survive being typed inline.
+        /// Combines with --result rather than conflicting with it:
+        /// --result becomes a header, this file's content becomes the body,
+        /// joined by a blank line -- unless the file is empty, in which case
+        /// the header alone is the result. Tail-truncated to the last 64 KiB
+        /// on a UTF-8 boundary, with non-UTF-8 bytes decoded lossily and a
+        /// truncation marker prepended, so a noisy command cannot blow up
+        /// the task record.
+        #[arg(long = "result-file")]
+        result_file: Option<PathBuf>,
         #[arg(long)]
         error: Option<String>,
         /// Defaults to FACTORY_TASK_TOKEN, which the daemon sets in the
@@ -863,14 +876,21 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             status,
             message,
             result,
+            result_file,
             error,
             token,
         } => {
-            if status.is_none() && message.is_none() && result.is_none() && error.is_none() {
+            if status.is_none()
+                && message.is_none()
+                && result.is_none()
+                && result_file.is_none()
+                && error.is_none()
+            {
                 return Err(anyhow!(
-                    "nothing to report; pass --status, --message, --result, or --error"
+                    "nothing to report; pass --status, --message, --result, --result-file, or --error"
                 ));
             }
+            let result = combine_result(result, result_file.as_deref())?;
             let payload = client
                 .send(Request::TaskReport {
                     id: need_id(id)?,
@@ -899,6 +919,52 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
 fn need_id(id: Option<String>) -> Result<String> {
     id.or_else(|| std::env::var("FACTORY_TASK_ID").ok().filter(|s| !s.is_empty()))
         .ok_or_else(|| anyhow!("no task id given and FACTORY_TASK_ID is not set"))
+}
+
+/// The most `--result-file` will contribute to a report -- the tail, since
+/// the end of a command's output is usually the part that matters, kept
+/// small enough that a runaway command cannot bloat a task record.
+const RESULT_FILE_BYTE_CAP: usize = 64 * 1024;
+
+/// `--result` and `--result-file` combine rather than conflict: `--result`
+/// is a short header, `--result-file`'s content is the body, joined by a
+/// blank line -- except when the file is empty, where the header alone is
+/// the result and there is no trailing blank line. A caller that passes only
+/// one of the two behaves exactly as if the other did not exist.
+fn combine_result(header: Option<String>, path: Option<&Path>) -> Result<Option<String>> {
+    let Some(path) = path else { return Ok(header) };
+    let body = read_result_file(path)?;
+    Ok(Some(match (header, body.is_empty()) {
+        (Some(header), false) => format!("{header}\n\n{body}"),
+        (Some(header), true) => header,
+        (None, _) => body,
+    }))
+}
+
+/// Read `--result-file`'s content as the report's body. The file is
+/// arbitrary command output, not guaranteed to be valid UTF-8, so it is
+/// decoded lossily rather than rejected outright.
+fn read_result_file(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path).map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
+    Ok(tail_lossy(&bytes, RESULT_FILE_BYTE_CAP))
+}
+
+/// Keep at most `max_bytes` of `bytes`' tail and decode it lossily, marking
+/// the cut when there is one. `start` is walked forward past any UTF-8
+/// continuation bytes so a valid multi-byte character at the front of the
+/// kept slice survives intact; `from_utf8_lossy` replaces anything actually
+/// invalid with U+FFFD regardless.
+fn tail_lossy(bytes: &[u8], max_bytes: usize) -> String {
+    if bytes.len() <= max_bytes {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let marker = format!("[... truncated to the last {max_bytes} bytes ...]\n");
+    let keep = max_bytes.saturating_sub(marker.len());
+    let mut start = bytes.len().saturating_sub(keep);
+    while start < bytes.len() && bytes[start] & 0xC0 == 0x80 {
+        start += 1;
+    }
+    format!("{marker}{}", String::from_utf8_lossy(&bytes[start..]))
 }
 
 fn parse_labels(pairs: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
@@ -1149,5 +1215,86 @@ where
                 Ok(())
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_temp(bytes: &[u8]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("factory-cli-test-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn result_file_alone_becomes_the_result() {
+        let path = write_temp(b"hello from the command\n");
+        let result = combine_result(None, Some(&path)).unwrap();
+        assert_eq!(result, Some("hello from the command\n".to_string()));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn result_and_result_file_combine_with_a_header_and_a_blank_line() {
+        let path = write_temp(b"the stdout");
+        let result = combine_result(Some("command exited 0".into()), Some(&path)).unwrap();
+        assert_eq!(result, Some("command exited 0\n\nthe stdout".to_string()));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn an_empty_result_file_leaves_the_header_alone_with_no_trailing_blank_line() {
+        let path = write_temp(b"");
+        let result = combine_result(Some("command exited 0".into()), Some(&path)).unwrap();
+        assert_eq!(result, Some("command exited 0".to_string()));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn neither_result_nor_result_file_reports_nothing() {
+        assert_eq!(combine_result(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn a_missing_result_file_is_a_readable_error() {
+        let path = std::env::temp_dir().join(format!("factory-cli-test-missing-{}", uuid::Uuid::new_v4()));
+        let err = combine_result(None, Some(&path)).unwrap_err();
+        assert!(err.to_string().contains("reading"), "{err}");
+    }
+
+    #[test]
+    fn result_file_content_under_the_cap_is_untouched() {
+        let body = "short and sweet";
+        assert_eq!(tail_lossy(body.as_bytes(), RESULT_FILE_BYTE_CAP), body);
+    }
+
+    #[test]
+    fn result_file_content_over_the_cap_keeps_the_tail_and_marks_the_cut() {
+        let body = "0123456789".repeat(1000); // 10,000 bytes
+        let kept = tail_lossy(body.as_bytes(), 100);
+        assert!(kept.len() <= 100, "{} bytes, over the cap", kept.len());
+        assert!(kept.ends_with('9'), "the tail survives, not the head: {kept:?}");
+        assert!(kept.contains("truncated"), "the cut is marked: {kept}");
+    }
+
+    #[test]
+    fn non_utf8_result_file_content_is_decoded_lossily() {
+        // A lone continuation byte (0x80) is not valid UTF-8 on its own.
+        let mut bytes = b"before ".to_vec();
+        bytes.push(0x80);
+        bytes.extend_from_slice(b" after");
+        let text = tail_lossy(&bytes, RESULT_FILE_BYTE_CAP);
+        assert!(text.contains("before"));
+        assert!(text.contains("after"));
+        assert!(text.contains('\u{FFFD}'), "the invalid byte becomes a replacement character: {text:?}");
+    }
+
+    #[test]
+    fn a_truncation_cut_never_splits_a_multibyte_character() {
+        let body = "é".repeat(100); // each 'é' is 2 bytes in UTF-8
+        let kept = tail_lossy(body.as_bytes(), 51); // an odd cap forces the issue
+        assert!(!kept.contains('\u{FFFD}'), "a clean cut needs no replacement character: {kept:?}");
     }
 }
