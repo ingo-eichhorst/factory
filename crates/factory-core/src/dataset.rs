@@ -243,6 +243,32 @@ pub fn findings(dataset: &Dataset, known_scopes: &BTreeSet<String>) -> Vec<Datas
     out
 }
 
+/// One row of `GET /api/datasets`: enough to list every dataset without
+/// shipping every case of every one of them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatasetSummary {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub revision: u64,
+    pub cases: usize,
+    /// How many of `cases` set a `gate`. The rest run `unverified` until one
+    /// is added.
+    pub gated: usize,
+    pub findings: Vec<DatasetFinding>,
+}
+
+pub fn summarize(dataset: &Dataset, known_scopes: &BTreeSet<String>) -> DatasetSummary {
+    DatasetSummary {
+        name: dataset.name.clone(),
+        description: dataset.description.clone(),
+        revision: dataset.revision,
+        cases: dataset.cases.len(),
+        gated: dataset.cases.iter().filter(|c| c.gate.is_some()).count(),
+        findings: findings(dataset, known_scopes),
+    }
+}
+
 // -- bulk import ---------------------------------------------------------
 
 /// One thing wrong with an imported file: the line or row it was on (1-based;
@@ -685,6 +711,20 @@ mod tests {
 
         let known: BTreeSet<String> = ["demo".to_string()].into_iter().collect();
         assert!(findings(&ds, &known).is_empty());
+    }
+
+    #[test]
+    fn summarize_counts_cases_gated_cases_and_findings() {
+        let mut ds = Dataset::new("demo", Some("d".into()));
+        let mut gated = case("a");
+        gated.gate = Some("./check.sh".into());
+        ds.cases.push(gated);
+        ds.cases.push(case("b"));
+        let known: BTreeSet<String> = BTreeSet::new();
+        let summary = summarize(&ds, &known);
+        assert_eq!(summary.cases, 2);
+        assert_eq!(summary.gated, 1);
+        assert_eq!(summary.findings.len(), 2, "both cases name an unknown scope");
     }
 
     #[test]

@@ -54,6 +54,21 @@ pub struct Engine {
     pub store: Arc<dyn TaskStore>,
     pub(crate) workflows: crate::workflows::WorkflowStore,
     pub(crate) workflow_edit: tokio::sync::Mutex<()>,
+    pub(crate) bench: crate::bench::BenchStore,
+    /// Serializes a bench run's own read-modify-write: choosing which
+    /// pending attempts to start, and recomputing the run's own status once
+    /// every attempt has settled. Coarse -- one lock for every run, the same
+    /// trade `workflow_edit` already makes -- rather than one per run.
+    pub(crate) bench_edit: tokio::sync::Mutex<()>,
+    /// Task ids currently being judged: the guard that keeps a report and a
+    /// cancel racing each other (or a live judgement racing recovery's own
+    /// sweep) from running the same case's gate command twice. Deliberately
+    /// not `bench_edit`: a gate can run for the case's own timeout or ten
+    /// minutes, and holding the one lock every bench run's dispatch decision
+    /// needs for that long would serialize every run in the instance behind
+    /// whichever gate happened to be slowest.
+    pub(crate) bench_judging: std::sync::Mutex<std::collections::HashSet<String>>,
+    pub(crate) dataset_locks: crate::datasets::DatasetLocks,
     pub bus: EventBus,
     pub factory_bin: PathBuf,
     started: Instant,
@@ -109,6 +124,11 @@ impl Engine {
             workflows: crate::workflows::WorkflowStore::in_memory()
                 .expect("an in-memory workflow store should open"),
             workflow_edit: tokio::sync::Mutex::new(()),
+            bench: crate::bench::BenchStore::in_memory()
+                .expect("an in-memory bench store should open"),
+            bench_edit: tokio::sync::Mutex::new(()),
+            bench_judging: Default::default(),
+            dataset_locks: Default::default(),
             bus: EventBus::default(),
             factory_bin,
             started: Instant::now(),
@@ -125,6 +145,12 @@ impl Engine {
     /// which task-store adapter a scope selects.
     pub fn with_workflow_store(mut self, workflows: crate::workflows::WorkflowStore) -> Self {
         self.workflows = workflows;
+        self
+    }
+
+    /// The same, for bench runs.
+    pub fn with_bench_store(mut self, bench: crate::bench::BenchStore) -> Self {
+        self.bench = bench;
         self
     }
 
@@ -409,11 +435,13 @@ impl Engine {
             Request::TaskCancel { id } => {
                 let run = self.cancel_task_run(&id).await?;
                 self.sync_workflow_for_task(&id).await;
+                self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
             }
             Request::TaskReport { id, report } => {
                 let run = self.report(&id, report).await?;
                 self.sync_workflow_for_task(&id).await;
+                self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
             }
             Request::TaskEntries { id, limit } => Ok(Payload::Entries {
@@ -1020,7 +1048,7 @@ impl Engine {
     // -- creating ----------------------------------------------------------
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {
-        self.create_task(new, None, None).await
+        self.create_task(new, None, None, None).await
     }
 
     pub(crate) async fn create_workflow_task(
@@ -1029,13 +1057,23 @@ impl Engine {
         origin: WorkflowOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, Some(origin), Some(id)).await
+        self.create_task(new, Some(origin), None, Some(id)).await
+    }
+
+    pub(crate) async fn create_bench_task(
+        &self,
+        new: NewTask,
+        origin: factory_core::bench::BenchOrigin,
+        id: String,
+    ) -> Result<Task> {
+        self.create_task(new, None, Some(origin), Some(id)).await
     }
 
     async fn create_task(
         &self,
         new: NewTask,
-        origin: Option<WorkflowOrigin>,
+        workflow_origin: Option<WorkflowOrigin>,
+        bench_origin: Option<factory_core::bench::BenchOrigin>,
         id: Option<String>,
     ) -> Result<Task> {
         let factory = self.factory_snapshot();
@@ -1083,7 +1121,8 @@ impl Engine {
         // task from starting life needing that fallback itself.
         let mut task = factory_core::adapter::store::task_from_new(new, declared.name.clone(), agent, runtime);
         if let Some(id) = id { task.id = id; }
-        task.workflow_origin = origin;
+        task.workflow_origin = workflow_origin;
+        task.bench_origin = bench_origin;
         if let Some(s) = &task.schedule {
             task.next_run_at = Some(schedule::next_after(s, Utc::now())?);
         }
@@ -1128,11 +1167,13 @@ impl Engine {
                         .await;
                 }
                 self.record_workflow_task_state(task_id).await;
+                self.record_bench_task_state(task_id).await;
                 return;
             }
         };
         tracing::info!(task = task_id, run = %run.id, attempt = run.attempt, "dispatched");
         self.record_workflow_task_state(task_id).await;
+        self.record_bench_task_state(task_id).await;
     }
 
     async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger) -> Result<Run> {
@@ -1282,7 +1323,11 @@ impl Engine {
         }
         let branch = worktree::branch_name(&task.id, &task.title, run.attempt);
         let dir = self.factory_snapshot().worktrees_dir().join(&run.id);
-        worktree::create(scope_path, &dir, &branch)
+        let base = match &task.bench_origin {
+            Some(origin) => self.bench_case_base(origin).await,
+            None => None,
+        };
+        worktree::create(scope_path, &dir, &branch, base.as_deref())
             .await
             .map_err(|e| FactoryError::adapter("git", e))?;
         let run = self
@@ -1307,6 +1352,21 @@ impl Engine {
             .in_run(&run.id),
         )
         .await;
+
+        // A bench case is never run dirty: its reset command, when it has
+        // one, runs in the fresh worktree before the agent is handed
+        // anything. A non-zero exit ends the run here -- `fail_run` gives it
+        // the daemon's usual terminal handling, and `sync_bench_for_task`
+        // reads this exact "reset failed" prefix back off `run.error` to
+        // settle the attempt `skipped` rather than `error`, without ever
+        // dispatching the agent.
+        if let Some(origin) = &task.bench_origin {
+            if let Some(reset) = self.bench_case_reset(origin).await {
+                if let Err(detail) = self.run_bench_reset(&dir, &reset).await {
+                    return Err(FactoryError::BadRequest(format!("reset failed: {detail}")));
+                }
+            }
+        }
         Ok((dir, run))
     }
 
@@ -1508,7 +1568,7 @@ impl Engine {
     }
 
     /// A run that will never report back.
-    pub async fn fail_run(&self, run_id: &str, why: &str) {
+    pub async fn fail_run(self: &Arc<Self>, run_id: &str, why: &str) {
         let Ok(run) = self.require_run(run_id).await else {
             return;
         };
@@ -1530,6 +1590,7 @@ impl Engine {
             )
             .await;
         self.record_workflow_task_state(&run.task_id).await;
+        self.record_bench_task_state(&run.task_id).await;
     }
 
     /// Keep the last of what the agent saw, then let the session go. Every

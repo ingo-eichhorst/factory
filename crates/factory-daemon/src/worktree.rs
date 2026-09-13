@@ -95,17 +95,26 @@ async fn run_git_ok(scope_path: &Path, args: &[&str]) -> bool {
 /// leaves nothing for a caller to clean up on the way out, and this is the
 /// only place that ever runs `git worktree add` -- there is no fallback path
 /// that writes into `scope_path` instead.
-pub async fn create(scope_path: &Path, dir: &Path, branch: &str) -> Result<(), String> {
+///
+/// `base` pins the commit a bench case names; `None` is today's behaviour --
+/// branch from whatever the scope's HEAD happens to be -- which is what
+/// every caller but a bench attempt still wants.
+pub async fn create(scope_path: &Path, dir: &Path, branch: &str, base: Option<&str>) -> Result<(), String> {
     if let Some(parent) = dir.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(scope_path)
         .args(["worktree", "add", "-b", branch])
-        .arg(dir)
+        .arg(dir);
+    if let Some(base) = base {
+        command.arg(base);
+    }
+    let output = command
         .output()
         .await
         .map_err(|e| format!("running git: {e}"))?;
@@ -118,6 +127,52 @@ pub async fn create(scope_path: &Path, dir: &Path, branch: &str) -> Result<(), S
     } else {
         stderr
     })
+}
+
+/// Remove a worktree and the branch it was on, best-effort: a bench run's
+/// evidence is kept until a person explicitly asks to clean it, and cleaning
+/// one worktree that is already gone must not stop the rest of a run's from
+/// being removed. `git worktree remove --force` first (a bench worktree may
+/// hold uncommitted changes -- the whole point of keeping it as evidence --
+/// so a plain `remove` would refuse it), then the branch, and a "there is
+/// nothing there" from either is not itself an error.
+pub async fn remove(scope_path: &Path, dir: &Path, branch: &str) -> Result<(), String> {
+    if dir.exists() {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(scope_path)
+            .args(["worktree", "remove", "--force"])
+            .arg(dir)
+            .output()
+            .await
+            .map_err(|e| format!("running git: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() {
+                "git worktree remove failed with no message on stderr".to_string()
+            } else {
+                stderr
+            });
+        }
+    }
+    // Best effort: the worktree is gone either way, and a branch that never
+    // existed (or was removed by another `clean` racing this one) is not a
+    // failure worth reporting -- only a genuine git error is.
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(scope_path)
+        .args(["branch", "-D", branch])
+        .output()
+        .await
+        .map_err(|e| format!("running git: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.contains("not found") {
+        return Ok(());
+    }
+    Err(stderr)
 }
 
 #[cfg(test)]
@@ -212,7 +267,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap(); // not a git repository at all
         let target = dir.join("wt");
-        let err = create(&dir, &target, "factory/x").await.unwrap_err();
+        let err = create(&dir, &target, "factory/x", None).await.unwrap_err();
         assert!(!err.is_empty(), "git's stderr, not an empty complaint");
         assert!(!target.exists(), "nothing partial is left behind");
         std::fs::remove_dir_all(&dir).ok();
@@ -227,12 +282,98 @@ mod tests {
             .join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()))
             .join("worktrees")
             .join("run-1");
-        create(&dir, &target, "factory/deadbeef-do-the-thing")
+        create(&dir, &target, "factory/deadbeef-do-the-thing", None)
             .await
             .expect("a capable scope should not refuse this");
         assert!(target.join(".git").exists());
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(target.parent().unwrap().parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn a_worktree_with_a_base_branches_from_exactly_that_commit() {
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        // A second commit on top, so HEAD and the pinned base genuinely
+        // differ -- the case this test exists to prove.
+        std::fs::write(dir.join("second.txt"), "second").unwrap();
+        run_git(&dir, &["add", "second.txt"]).await;
+        run_git(&dir, &["commit", "-q", "-m", "second"]).await;
+        let head = git_output(&dir, &["rev-parse", "HEAD"]).await;
+        let base = git_output(&dir, &["rev-parse", "HEAD~1"]).await;
+        assert_ne!(head, base, "the two commits must genuinely differ");
+
+        let target = std::env::temp_dir()
+            .join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()))
+            .join("worktrees")
+            .join("run-2");
+        create(&dir, &target, "factory/pinned-base", Some(&base))
+            .await
+            .expect("a capable scope should not refuse a pinned base");
+        let wt_head = git_output(&target, &["rev-parse", "HEAD"]).await;
+        assert_eq!(wt_head, base, "the worktree must branch from the pinned base, not HEAD");
+        assert_ne!(wt_head, head);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(target.parent().unwrap().parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn remove_takes_the_worktree_and_its_branch_with_it() {
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        let target = std::env::temp_dir()
+            .join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()))
+            .join("worktrees")
+            .join("run-3");
+        let branch = "factory/to-be-removed";
+        create(&dir, &target, branch, None).await.unwrap();
+        assert!(target.exists());
+
+        remove(&dir, &target, branch).await.expect("removal should succeed");
+        assert!(!target.exists(), "the worktree directory is gone");
+        let branches = git_output(&dir, &["branch", "--list", branch]).await;
+        assert!(branches.trim().is_empty(), "the branch is gone too: {branches:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(target.parent().unwrap().parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn remove_is_tolerant_of_a_worktree_already_gone() {
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        let target = dir.join("never-made");
+        // Never created at all -- a second `clean` racing the first, or a
+        // person who already deleted it by hand.
+        remove(&dir, &target, "factory/never-existed")
+            .await
+            .expect("nothing there is not an error");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    async fn run_git(dir: &Path, args: &[&str]) {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .await
+            .unwrap()
+            .success());
+    }
+
+    async fn git_output(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
     async fn init_repo_with_a_commit(dir: &Path) {

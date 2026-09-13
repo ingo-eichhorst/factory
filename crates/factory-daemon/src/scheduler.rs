@@ -48,6 +48,23 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
             Err(e) => tracing::warn!("could not look for due tasks: {e}"),
         }
 
+        // -- bench runs ----------------------------------------------------
+        // A periodic sweep, not just a reaction to a settle: it is what
+        // actually moves a run past the one dispatch failure
+        // `advance_bench_run` cannot safely re-trigger itself for (see
+        // `bench/engine.rs::mark_bench_attempt_uncreated`), and a harmless,
+        // idempotent no-op for every run that is already moving on its own.
+        match engine.bench.active_runs().await {
+            Ok(runs) => {
+                for run in runs {
+                    if let Err(e) = engine.advance_bench_run(&run.id).await {
+                        tracing::warn!(bench_run = run.id, "could not advance bench run: {e}");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("could not list active bench runs: {e}"),
+        }
+
         // -- standing agents ---------------------------------------------
         // Their own rule: only ever checked for whether the session is still
         // there. A permanent agent that has said nothing all day is working
