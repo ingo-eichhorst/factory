@@ -1105,8 +1105,12 @@ pub struct WriteResult {
 /// Whether `target` (a vault-relative path some write is about to create) is
 /// refused outright, decided from the string alone: empty, absolute, or
 /// climbing out with a `..` component all fail to name anywhere inside the
-/// vault. A symlinked parent directory is a filesystem fact rather than a
-/// string one, and is checked only once a write is actually attempted.
+/// vault, and so does any component that starts with `.` -- the vault skips
+/// dotfiles and dot-directories on every read (so `.obsidian/` can sit in it
+/// undisturbed), and a write that landed inside one would create content
+/// nothing ever indexes. A symlinked ancestor directory is a filesystem fact
+/// rather than a string one, and is checked only once a write is actually
+/// attempted.
 pub fn refuse_target(target: &str) -> Option<String> {
     if target.trim().is_empty() {
         return Some("no target path given".into());
@@ -1117,6 +1121,9 @@ pub fn refuse_target(target: &str) -> Option<String> {
     }
     if p.components().any(|c| matches!(c, Component::ParentDir)) {
         return Some("target escapes the vault: a `..` component".into());
+    }
+    if p.components().any(|c| matches!(c, Component::Normal(name) if name.to_string_lossy().starts_with('.'))) {
+        return Some("target escapes the vault: a dotfile or dot-directory is never written".into());
     }
     None
 }
@@ -1183,21 +1190,39 @@ enum WriteOutcome {
     SkippedExisting,
 }
 
-/// The one place that actually touches the vault: refuse a target that
-/// escapes it or sits behind a symlinked parent, refuse a file over the size
-/// cap, skip one that already exists unless `overwrite`, then copy. Every
-/// check above the copy itself is a filesystem fact -- the string-only
-/// checks already ran in the caller, before this was ever reached.
-fn copy_into_vault(dest_base: &Path, rel: &str, source: &Path, overwrite: bool) -> Result<WriteOutcome, String> {
-    if let Some(reason) = refuse_target(rel) {
-        return Err(reason);
-    }
-    let target = dest_base.join(rel);
-    if let Some(parent) = target.parent() {
-        if fs::symlink_metadata(parent).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-            return Err("target escapes the vault: a parent directory is a symlink".into());
+/// Whether an existing symlink sits anywhere between `vault_root` and the
+/// write's target, walking `rel` one component at a time rather than
+/// checking only the immediate parent. `<vault>/evil -> /tmp/outside` must
+/// be caught before `evil/sub/` is ever created under it, not only when the
+/// symlink happens to be the last directory before the file -- and the
+/// final component is checked too, since `fs::copy`/`fs::write` follow a
+/// symlink left in place from an earlier write just as readily as a
+/// directory does.
+fn ancestor_or_target_is_symlink(vault_root: &Path, rel: &str) -> Option<String> {
+    let mut cur = vault_root.to_path_buf();
+    for comp in Path::new(rel).components() {
+        cur.push(comp.as_os_str());
+        if fs::symlink_metadata(&cur).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            return Some("target escapes the vault: a symlinked path component".into());
         }
     }
+    None
+}
+
+/// The one place that actually touches the vault: refuse a target that
+/// escapes it, sits behind a symlink at any depth, or is over the size cap,
+/// skip one that already exists unless `overwrite`, then copy. `full_rel` is
+/// relative to `vault_root` itself (already folding in any `--into`), so the
+/// symlink walk below covers the whole path a write would create, not just
+/// the piece a caller happened to add last.
+fn copy_into_vault(vault_root: &Path, full_rel: &str, source: &Path, overwrite: bool) -> Result<WriteOutcome, String> {
+    if let Some(reason) = refuse_target(full_rel) {
+        return Err(reason);
+    }
+    if let Some(reason) = ancestor_or_target_is_symlink(vault_root, full_rel) {
+        return Err(reason);
+    }
+    let target = vault_root.join(full_rel);
     let meta = fs::metadata(source).map_err(|e| format!("could not read the source: {e}"))?;
     if meta.len() > MAX_WRITE_FILE_BYTES {
         return Err(format!("file exceeds the {}MiB cap", MAX_WRITE_FILE_BYTES / (1024 * 1024)));
@@ -1212,12 +1237,31 @@ fn copy_into_vault(dest_base: &Path, rel: &str, source: &Path, overwrite: bool) 
     Ok(WriteOutcome::Copied)
 }
 
+/// `path`'s canonical form, or `path` itself when it does not exist to
+/// canonicalize (`fs::read_dir`/`fs::metadata` downstream then reports the
+/// real problem in the ordinary way). Resolving a path this way is a `stat`
+/// of each component, never a directory listing or a file read -- so it is
+/// safe to call even on a path this module must never open the contents of.
+fn canonical_or_self(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// `factory knowledge import <source_dir> [--into] [--overwrite]`: copy every
 /// file under `source_dir` into the vault, preserving relative paths so a
 /// page's `[[area/page]]` links still resolve afterwards. Pages and
 /// documents travel together; nothing already in the vault is ever edited,
 /// and nothing is ever deleted. Runs in `spawn_blocking` -- this walks and
 /// copies for real.
+///
+/// The secrets/`.factory` refusal is applied three times over, not once:
+/// against the literal argument (cheap, and correct even when nothing
+/// exists yet to canonicalize), against its canonical form (catches a
+/// symlinked argument, or the root itself sitting under a symlinked
+/// ancestor), and again for every entry the walk finds below it (catches a
+/// `secrets` directory nested under an otherwise unremarkable source, which
+/// neither of the first two checks sees). The per-entry check runs before a
+/// refused directory is ever descended into, so `read_dir` never sees inside
+/// it.
 pub fn import(root: &Path, source_dir: &Path, into: Option<&str>, overwrite: bool) -> Result<WriteResult, String> {
     if let Some(reason) = refuse_source(root, source_dir) {
         return Err(reason.to_string());
@@ -1226,7 +1270,15 @@ pub fn import(root: &Path, source_dir: &Path, into: Option<&str>, overwrite: boo
     if let Some(reason) = refuse_target_or_root(into_rel) {
         return Err(reason);
     }
-    let dest_base = vault_root(root).join(into_rel);
+    // Canonical forms of the root and the source: used only to see through a
+    // symlinked argument or ancestor, never to open anything under
+    // `data/secrets`.
+    let canon_root = canonical_or_self(root);
+    let canon_source = canonical_or_self(source_dir);
+    if let Some(reason) = refuse_source(&canon_root, &canon_source) {
+        return Err(reason.to_string());
+    }
+    let vault = vault_root(root);
 
     let mut result = WriteResult::default();
     let mut count = 0usize;
@@ -1247,6 +1299,20 @@ pub fn import(root: &Path, source_dir: &Path, into: Option<&str>, overwrite: boo
             if file_type.is_symlink() {
                 continue;
             }
+            // The entry's real location, built from the canonical source and
+            // the names seen on the way down -- never through a symlink,
+            // since one would have been skipped just above. Refusing here
+            // catches a `secrets` (or `.factory`) directory found partway
+            // through the walk, which the two checks above this loop never
+            // see because the argument passed to `import` was neither.
+            let real = canon_source.join(&rel);
+            if let Some(reason) = refuse_source(&canon_root, &real) {
+                if file_type.is_dir() {
+                    continue; // never descend into a refused directory
+                }
+                result.refused.push(Refusal { path: None, reason: reason.to_string() });
+                continue;
+            }
             if file_type.is_dir() {
                 stack.push(rel);
                 continue;
@@ -1259,10 +1325,11 @@ pub fn import(root: &Path, source_dir: &Path, into: Option<&str>, overwrite: boo
                 return Ok(result);
             }
             count += 1;
-            match copy_into_vault(&dest_base, &rel, &entry.path(), overwrite) {
-                Ok(WriteOutcome::Copied) => result.copied.push(join_into(into_rel, &rel)),
-                Ok(WriteOutcome::SkippedExisting) => result.skipped_existing.push(join_into(into_rel, &rel)),
-                Err(reason) => result.refused.push(Refusal { path: Some(join_into(into_rel, &rel)), reason }),
+            let full_rel = join_into(into_rel, &rel);
+            match copy_into_vault(&vault, &full_rel, &entry.path(), overwrite) {
+                Ok(WriteOutcome::Copied) => result.copied.push(full_rel),
+                Ok(WriteOutcome::SkippedExisting) => result.skipped_existing.push(full_rel),
+                Err(reason) => result.refused.push(Refusal { path: Some(full_rel), reason }),
             }
         }
     }
@@ -1274,8 +1341,19 @@ pub fn import(root: &Path, source_dir: &Path, into: Option<&str>, overwrite: boo
 /// vault root for a `.md` file, `documents/` for anything else -- the way
 /// Obsidian's own attachments folder works; `--into` overrides that default
 /// for every file in the call alike.
+///
+/// A source that is itself a symlink is refused outright, never resolved and
+/// copied -- `import` already skips a symlinked entry the same way, so a
+/// symlinked file offered directly to `add` gets no more trust than one
+/// found by a walk would. The secrets/`.factory` refusal runs twice, exactly
+/// as it does for `import`: against the literal argument, then again
+/// against its canonical form, so a real file that is only reachable by
+/// symlink -- an ancestor directory, say -- cannot be added by spelling its
+/// path through that ancestor instead of through the root.
 pub fn add(root: &Path, sources: &[PathBuf], into: Option<&str>, overwrite: bool) -> WriteResult {
     let mut result = WriteResult::default();
+    let canon_root = canonical_or_self(root);
+    let vault = vault_root(root);
     for source in sources {
         let Some(name) = source.file_name().map(|n| n.to_string_lossy().to_string()) else {
             result.refused.push(Refusal { path: None, reason: "not a file name".into() });
@@ -1285,7 +1363,16 @@ pub fn add(root: &Path, sources: &[PathBuf], into: Option<&str>, overwrite: bool
             result.skipped_hidden.push(name);
             continue;
         }
+        if fs::symlink_metadata(source).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            result.refused.push(Refusal { path: None, reason: "a symlinked source is never read".into() });
+            continue;
+        }
         if let Some(reason) = refuse_source(root, source) {
+            result.refused.push(Refusal { path: None, reason: reason.to_string() });
+            continue;
+        }
+        let canon_source = canonical_or_self(source);
+        if let Some(reason) = refuse_source(&canon_root, &canon_source) {
             result.refused.push(Refusal { path: None, reason: reason.to_string() });
             continue;
         }
@@ -1295,11 +1382,11 @@ pub fn add(root: &Path, sources: &[PathBuf], into: Option<&str>, overwrite: bool
             result.refused.push(Refusal { path: Some(name.clone()), reason });
             continue;
         }
-        let dest_base = vault_root(root).join(into_rel);
-        match copy_into_vault(&dest_base, &name, source, overwrite) {
-            Ok(WriteOutcome::Copied) => result.copied.push(join_into(into_rel, &name)),
-            Ok(WriteOutcome::SkippedExisting) => result.skipped_existing.push(join_into(into_rel, &name)),
-            Err(reason) => result.refused.push(Refusal { path: Some(join_into(into_rel, &name)), reason }),
+        let full_rel = join_into(into_rel, &name);
+        match copy_into_vault(&vault, &full_rel, source, overwrite) {
+            Ok(WriteOutcome::Copied) => result.copied.push(full_rel),
+            Ok(WriteOutcome::SkippedExisting) => result.skipped_existing.push(full_rel),
+            Err(reason) => result.refused.push(Refusal { path: Some(full_rel), reason }),
         }
     }
     result
@@ -1314,19 +1401,14 @@ pub fn write_bytes(root: &Path, path: &str, overwrite: bool, bytes: &[u8]) -> Re
     if let Some(reason) = refuse_target(path) {
         return Err(reason);
     }
-    let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    if name.starts_with('.') {
-        return Err("refused: a dotfile is never written".into());
-    }
     if bytes.len() as u64 > MAX_WRITE_FILE_BYTES {
         return Err(format!("file exceeds the {}MiB cap", MAX_WRITE_FILE_BYTES / (1024 * 1024)));
     }
-    let target = vault_root(root).join(path);
-    if let Some(parent) = target.parent() {
-        if fs::symlink_metadata(parent).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-            return Err("target escapes the vault: a parent directory is a symlink".into());
-        }
+    let vault = vault_root(root);
+    if let Some(reason) = ancestor_or_target_is_symlink(&vault, path) {
+        return Err(reason);
     }
+    let target = vault.join(path);
     if target.exists() && !overwrite {
         return Err("already exists; pass overwrite to replace it".into());
     }
@@ -1780,6 +1862,8 @@ mod tests {
         assert!(refuse_target("../outside.md").is_some());
         assert!(refuse_target("/absolute.md").is_some());
         assert!(refuse_target("fine/relative.md").is_none());
+        assert!(refuse_target(".obsidian/workspace.json").is_some(), "a dot-directory component must be refused");
+        assert!(refuse_target("area/.hidden.md").is_some(), "a dotfile component must be refused, not just a dot-directory");
     }
 
     #[test]
@@ -1877,6 +1961,196 @@ mod tests {
 
         let err = import(&root, &secret_source, None, false).unwrap_err();
         assert!(!err.contains("secrets/x"), "{err}");
+    }
+
+    // -- security review round 1: the secrets refusal, bypassed four ways
+
+    #[test]
+    fn import_refuses_a_secrets_directory_nested_inside_an_ordinary_source_subtree() {
+        // The exploit: the *argument* passed to import is `<root>/data`, not
+        // `<root>/data/secrets` -- so the top-level check (which only ever
+        // saw `data`, not `data/secrets`) waved it through, and the walk
+        // copied straight through the nested secrets directory it found.
+        let root = temp_root("import-nested-secrets");
+        let source = root.join("data");
+        std::fs::create_dir_all(source.join("secrets")).unwrap();
+        std::fs::write(source.join("secrets/key.txt"), "nope").unwrap();
+        std::fs::write(source.join("public.md"), "---\ntitle: Public\n---\nFine.\n").unwrap();
+
+        let result = import(&root, &source, Some("probe1"), false).unwrap();
+        assert!(result.copied.contains(&"probe1/public.md".to_string()), "{:?}", result.copied);
+        assert!(
+            !result.copied.iter().any(|p| p.contains("secrets")),
+            "a nested secrets directory must never be copied: {:?}",
+            result.copied
+        );
+        assert!(!vault_root(&root).join("probe1/secrets").exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn importing_the_root_itself_still_refuses_its_own_secrets_subtree() {
+        let root = temp_root("import-root-itself");
+        let secret_source = root.join("data/secrets");
+        std::fs::create_dir_all(&secret_source).unwrap();
+        std::fs::write(secret_source.join("key.txt"), "nope").unwrap();
+
+        let result = import(&root, &root, None, false).unwrap();
+        assert!(!result.copied.iter().any(|p| p.contains("secrets")), "{:?}", result.copied);
+        assert!(!vault_root(&root).join("data/secrets").exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_refuses_a_symlinked_source_directory_pointing_at_secrets() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root("import-symlinked-source");
+        let secret_source = root.join("data/secrets");
+        std::fs::create_dir_all(&secret_source).unwrap();
+        std::fs::write(secret_source.join("key.txt"), "nope").unwrap();
+        let link = std::env::temp_dir().join(format!("factory-import-link-{}", uuid::Uuid::new_v4()));
+        symlink(&secret_source, &link).unwrap();
+
+        let err = import(&root, &link, None, false).unwrap_err();
+        assert!(!err.contains("key.txt"), "{err}");
+
+        std::fs::remove_file(&link).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_refuses_a_source_reached_through_a_symlinked_ancestor_of_the_root() {
+        use std::os::unix::fs::symlink;
+        // Reach the very same `data/secrets` two ways: directly, and through
+        // a symlinked alias of the root's own parent directory -- which is
+        // exactly what macOS's `/tmp -> /private/tmp` does to every
+        // temp-rooted path, whether or not a given test happens to notice.
+        // A lexical comparison against the literal root sees two unrelated
+        // strings; only comparing canonical forms sees they name one place.
+        let real_root = temp_root("import-real-root");
+        let alias_parent = std::env::temp_dir().join(format!("factory-alias-parent-{}", uuid::Uuid::new_v4()));
+        symlink(real_root.parent().unwrap(), &alias_parent).unwrap();
+        let aliased_root = alias_parent.join(real_root.file_name().unwrap());
+
+        let secret_source = aliased_root.join("data/secrets");
+        std::fs::create_dir_all(&secret_source).unwrap();
+        std::fs::write(secret_source.join("key.txt"), "nope").unwrap();
+
+        let err = import(&real_root, &secret_source, None, false).unwrap_err();
+        assert!(!err.contains("key.txt"), "{err}");
+
+        std::fs::remove_file(&alias_parent).ok();
+        std::fs::remove_dir_all(&real_root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_refuses_a_symlinked_source_file_outright() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root("add-symlinked-source");
+        let secret_source = root.join("data/secrets");
+        std::fs::create_dir_all(&secret_source).unwrap();
+        std::fs::write(secret_source.join("key.txt"), "nope").unwrap();
+        let link = std::env::temp_dir().join(format!("factory-add-link-{}.txt", uuid::Uuid::new_v4()));
+        symlink(secret_source.join("key.txt"), &link).unwrap();
+
+        let result = add(&root, std::slice::from_ref(&link), None, false);
+        assert!(result.copied.is_empty(), "{:?}", result.copied);
+        assert!(!result.refused.is_empty());
+        assert!(result.refused.iter().all(|r| r.path.is_none()), "{:?}", result.refused);
+        assert!(!vault_root(&root).join("documents").join(link.file_name().unwrap()).exists());
+
+        std::fs::remove_file(&link).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -- security review round 1: writes escaping through a symlinked ancestor
+
+    #[cfg(unix)]
+    #[test]
+    fn add_refuses_a_write_that_would_land_behind_a_symlinked_ancestor_two_levels_deep() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root("add-symlink-ancestor");
+        let outside = std::env::temp_dir().join(format!("factory-outside-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, vault_root(&root).join("evil")).unwrap();
+
+        let source_dir = std::env::temp_dir().join(format!("factory-add-source-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("plain.txt"), "hello").unwrap();
+
+        let result = add(&root, &[source_dir.join("plain.txt")], Some("evil/sub"), false);
+        assert!(result.copied.is_empty(), "{:?}", result.copied);
+        assert!(!outside.join("sub/plain.txt").exists(), "must never escape through the symlinked ancestor");
+
+        std::fs::remove_dir_all(&outside).ok();
+        std::fs::remove_dir_all(&source_dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bytes_refuses_a_write_that_would_land_behind_a_symlinked_ancestor_two_levels_deep() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root("write-bytes-symlink-ancestor");
+        let outside = std::env::temp_dir().join(format!("factory-outside-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, vault_root(&root).join("evil")).unwrap();
+
+        let err = write_bytes(&root, "evil/sub2/x.txt", false, b"hello").unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(!outside.join("sub2/x.txt").exists());
+
+        std::fs::remove_dir_all(&outside).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bytes_refuses_overwriting_a_target_that_is_itself_a_symlink() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root("write-bytes-target-symlink");
+        let outside = std::env::temp_dir().join(format!("factory-outside-file-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&outside, "original").unwrap();
+        std::fs::create_dir_all(vault_root(&root).join("documents")).unwrap();
+        symlink(&outside, vault_root(&root).join("documents/link.txt")).unwrap();
+
+        let err = write_bytes(&root, "documents/link.txt", true, b"clobbered").unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "original", "the symlink target must never be written through");
+
+        std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_bytes_refuses_a_path_with_a_dot_directory_component() {
+        let root = temp_root("write-bytes-dotdir");
+        let err = write_bytes(&root, ".obsidian/workspace.json", false, b"{}").unwrap_err();
+        assert!(err.contains("dotfile") || err.contains("dot-directory"), "{err}");
+        assert!(!vault_root(&root).join(".obsidian/workspace.json").exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn add_into_refuses_a_dot_directory_target() {
+        let root = temp_root("add-into-dotdir");
+        let source_dir = std::env::temp_dir().join(format!("factory-add-source-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("note.md"), "---\ntitle: Note\n---\nBody.\n").unwrap();
+
+        let result = add(&root, &[source_dir.join("note.md")], Some(".obsidian"), false);
+        assert!(result.copied.is_empty(), "{:?}", result.copied);
+        assert!(!result.refused.is_empty());
+        assert!(!vault_root(&root).join(".obsidian/note.md").exists());
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&source_dir).ok();
     }
 
     #[test]
