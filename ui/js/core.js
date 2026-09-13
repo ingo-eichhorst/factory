@@ -40,6 +40,24 @@ export const state = {
   benchmarksError: null,
   knowledge: null,        // last /api/knowledge answer: { root, present, notes, gaps, pages, findings }
   knowledgeError: null,
+
+  // L5 Improvement, Benchmarks tab -- three segments over one shared state
+  // object, the same pattern `sandboxes.js`/`secrets.js` already share for
+  // L2's two tabs. `benchSegment` is which of the three is showing;
+  // `benchDatasetName`/`benchRunId` are the selection within it, kept here
+  // rather than module-private so datasets.js and bench-runs.js can read and
+  // write the selection without importing one another.
+  benchSegment: "datasets",   // "datasets" | "runs" | "configurations"
+  benchDatasetName: null,     // selected dataset, when benchSegment === "datasets"
+  benchRunId: null,           // selected bench run id, when benchSegment === "runs"
+  datasets: null,             // last /api/datasets answer: { root, datasets }
+  datasetsError: null,
+  dataset: null,              // last /api/datasets/{name} answer: { dataset, findings }
+  datasetError: null,
+  benchRuns: null,            // last /api/bench/runs answer: { runs }
+  benchRunsError: null,
+  benchRun: null,             // last /api/bench/runs/{id} answer: { run, results }
+  benchRunError: null,
 };
 
 
