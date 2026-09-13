@@ -187,6 +187,9 @@ impl Engine {
             Request::WorkflowDelete { .. } => Grant::WorkflowDelete,
             Request::WorkflowStart { .. } => Grant::WorkflowRun,
             Request::WorkflowRunCancel { .. } => Grant::WorkflowCancel,
+            Request::KnowledgeImport { .. }
+            | Request::KnowledgeAdd { .. }
+            | Request::KnowledgeWriteFile { .. } => Grant::KnowledgeWrite,
 
             Request::Status
             | Request::Adapters
@@ -389,10 +392,37 @@ impl Engine {
                 Reach::Own => Err(deny("manage workflows; that requires scope reach")),
             },
 
+            // The knowledge base is company-wide, not per-scope, so there is
+            // no scope on the request to check `def.reach` against -- the
+            // subject is fixed: the instance root. Holding the grant is not
+            // enough on its own, whatever `reach` the role declares; the
+            // caller's *own* scope has to be the root itself, the same way a
+            // root-scope foreman is the only one this bypasses.
+            Request::KnowledgeImport { .. }
+            | Request::KnowledgeAdd { .. }
+            | Request::KnowledgeWriteFile { .. } => {
+                if self.scope_is_root(scope) {
+                    Ok(())
+                } else {
+                    Err(deny("write to the knowledge base; that is the root scope's alone"))
+                }
+            }
+
             // Reads returned above, and anything needing a grant nobody holds
             // was refused above. Nothing should arrive here.
             _ => Err(deny("do that")),
         }
+    }
+
+    /// Whether the scope named `name` is the instance root -- the one scope
+    /// whose `path` is `.`, distinct from every scope nested under it. Used
+    /// only for `Grant::KnowledgeWrite`'s fixed subject: an unresolvable name
+    /// is not the root either, so this denies rather than defaulting open.
+    fn scope_is_root(&self, name: &str) -> bool {
+        self.factory_snapshot()
+            .scope(name)
+            .map(|s| s.path == std::path::Path::new("."))
+            .unwrap_or(false)
     }
 
     /// Re-derive who a persisted `WorkflowActor` is right now, honouring a
