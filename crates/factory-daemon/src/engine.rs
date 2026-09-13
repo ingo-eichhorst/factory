@@ -988,11 +988,26 @@ impl Engine {
 
         let mut launch = agent.launch_spec(&ctx).await?;
         append_declared_args(&mut launch, declaration.as_ref());
+        // A task's stored `scope` can still be a scope's legacy bare name --
+        // canonicalize it the same way `start_agent` does, so a legacy-named
+        // task's run lands in the same workspace as that scope's standing
+        // agents rather than a second one keyed on the old name.
+        let canonical_scope = factory.canonical_scope_name(&task.scope);
+        // A run's own id fragment is its discriminator: `start()` adopts any
+        // agent already carrying the name it asks for, and reconcile can
+        // dispatch this scope/agent pair again while an earlier run is still
+        // live, so two concurrent runs must never resolve to the same herdr
+        // agent.
+        let run_id_fragment = &run.id[..8.min(run.id.len())];
         let session = runtime
             .start(&StartRequest {
                 id: run.id.clone(),
-                name: format!("factory-run-{}", &run.id[..8.min(run.id.len())]),
-                label: format!("factory: {}", truncate(&task.title, 40)),
+                scope: canonical_scope.clone(),
+                name: crate::agents::herdr_name(
+                    &format!("factory-{}-{}", canonical_scope, agent_name),
+                    Some(run_id_fragment),
+                ),
+                label: truncate(&task.title, 40),
                 cwd,
                 launch,
             })

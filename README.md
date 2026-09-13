@@ -247,10 +247,23 @@ is one argument, not two shell words, and their order is preserved in `args:`.
 Factory normalizes the separate runtime session name to Herdr's lowercase,
 32-character identifier contract without changing the configured agent name.
 
-Each standing agent also carries the command to get into its terminal yourself —
-`herdr --session factory agent attach factory-demo-watcher`. A shell session has
-no named agent to attach to, so Factory says so instead of printing a command
-that would fail.
+A Factory scope is a herdr workspace: every standing agent and task run that
+belongs to `demo` lands as its own tab inside a workspace labelled `demo`,
+resolved by that label if it already exists (a hand-made workspace someone
+named `demo` is joined on purpose, not collided with) and created the first
+time a `demo` agent starts. The herdr agent name still carries `factory-` as
+an outer namespace ahead of the scope, because herdr agent names are global
+and Factory adopts any agent already carrying the name it is about to start —
+dropping the prefix could make it adopt a person's own hand-made agent by
+accident. Each standing agent also carries the command to get into its
+terminal yourself — `herdr --session factory agent attach
+factory-demo-watcher`. A shell session has no named agent to attach to, so
+Factory says so instead of printing a command that would fail.
+
+Stopping a standing agent or ending a task run closes only its own tab, never
+the scope's workspace — the workspace is shared by everything else running in
+that scope. Workspaces made by earlier versions of Factory (labelled
+`factory: …`, one per session) are not migrated; close them by hand.
 
 ## Tasks and runs
 
@@ -650,7 +663,9 @@ the file a session is editing is not read at all, and is not drawn.
   silence, and is governed by `blocked_timeout_seconds` instead of the run
   timeout. For every other harness it is still exactly what it always was: the
   task times out and tells you where to look.
-- **One workspace per task, closed on completion.** A task that never reaches a
+- **One herdr workspace per scope, one tab per session, closed on completion.**
+  Ending a run or stopping a standing agent closes only its own tab; the
+  workspace stays for the rest of the scope. A task that never reaches a
   terminal state leaves its session open on purpose, so it can be looked at.
 
 ## Layout

@@ -12,7 +12,7 @@ import {
 const healthy = {
   runtime: "herdr",
   source: "builtin",
-  description: "one workspace per task",
+  description: "one herdr workspace per scope, one tab per agent or run",
   scopes: ["factory", "model-lab"],
   checked_at: new Date().toISOString(),
   state: "healthy",
