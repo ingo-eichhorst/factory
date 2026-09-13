@@ -2,7 +2,7 @@
 //! and leaves as a `Response`; the interfaces themselves hold no logic.
 
 use chrono::Utc;
-use factory_core::adapter::agent::{AgentContext, LaunchSpec, TaskBinding};
+use factory_core::adapter::agent::{run_guide_path, AgentContext, LaunchSpec, TaskBinding};
 use factory_core::adapter::runtime::{
     RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
 };
@@ -1287,16 +1287,16 @@ impl Engine {
     async fn close_session(&self, run: &Run) {
         // The guide file, if this run's harness wrote one, is named after the
         // task rather than the run and nothing else removes it. It cannot be
-        // deleted right after launch: `opencode` re-resolves its configured
-        // instruction paths on every request rather than reading them once at
-        // startup, so an early delete would make the guide silently vanish
-        // partway through the run instead of lasting it. Here, once the run
-        // is actually over, is safe for every harness. One that carried the
-        // guide as inline text or not at all (`codex`, `shell`) never wrote a
-        // file, so this is a harmless no-op for those, and a run whose
-        // session never even came up still gets whatever `launch_spec`
-        // managed to write before it failed cleaned up.
-        let guide = self.factory_snapshot().guides_dir().join(format!("run-{}.md", run.task_id));
+        // deleted right after launch: a harness may read its configured
+        // instruction file after launch, not only at startup (opencode
+        // resolves instruction paths from config, and claude may read the
+        // file after `herdr agent start` returns), so the file has to outlive
+        // the launch and is removed only once the run is over. One that
+        // carried the guide as inline text or not at all (`codex`, `shell`)
+        // never wrote a file, so this is a harmless no-op for those, and a
+        // run whose session never even came up still gets whatever
+        // `launch_spec` managed to write before it failed cleaned up.
+        let guide = run_guide_path(&self.factory_snapshot().guides_dir(), &run.task_id);
         let _ = std::fs::remove_file(guide);
 
         let Some(session) = &run.session else { return };

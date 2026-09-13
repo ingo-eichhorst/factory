@@ -3,7 +3,7 @@ use crate::role::{Grant, Reach, RoleDef};
 use crate::task::Task;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// How a runtime is to bring this agent up.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +74,17 @@ pub struct AgentContext {
     /// role the agent was given -- `access.rs` then refuses every grant, so
     /// the guide says so too rather than describing one that would be denied.
     pub role: Option<RoleDef>,
+}
+
+/// Where a task run's guide file lives, given only its task id and the
+/// instance's guides directory. A free function rather than only a method on
+/// `AgentContext` so a caller that has neither -- `close_session`, ending a
+/// run after the launch that built the context is long gone -- can name the
+/// exact same path without rebuilding the naming scheme by hand and risking
+/// the two drifting apart. `AgentContext::guide_path` delegates here for the
+/// task case; keep it that way rather than duplicating the format string.
+pub fn run_guide_path(guides_dir: &Path, task_id: &str) -> PathBuf {
+    guides_dir.join(format!("run-{task_id}.md"))
 }
 
 impl AgentContext {
@@ -268,7 +279,7 @@ impl AgentContext {
     /// the same file instead of piling up a new one.
     pub fn guide_path(&self) -> PathBuf {
         match &self.task {
-            Some(binding) => self.guides_dir.join(format!("run-{}.md", binding.task.id)),
+            Some(binding) => run_guide_path(&self.guides_dir, &binding.task.id),
             None => self
                 .guides_dir
                 .join(format!("agent-{}-{}.md", self.scope, self.agent_name)),
@@ -505,5 +516,20 @@ mod tests {
 
         let running = with_task(base(None));
         assert_eq!(running.guide_path(), PathBuf::from("/tmp/factory-guides/run-t1.md"));
+    }
+
+    #[test]
+    fn a_task_runs_guide_path_agrees_with_the_free_function_a_caller_with_no_context_would_use() {
+        // `close_session`, ending a run well after the `AgentContext` that
+        // launched it is gone, has only a task id and the guides directory
+        // to work with. It must land on exactly the path `guide_path` built,
+        // or it deletes nothing and a run leaks a file. Delegation to
+        // `run_guide_path`, pinned here, is what keeps that true by
+        // construction rather than by two format strings staying in sync.
+        let running = with_task(base(None));
+        assert_eq!(
+            running.guide_path(),
+            run_guide_path(&PathBuf::from("/tmp/factory-guides"), "t1")
+        );
     }
 }

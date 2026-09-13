@@ -1140,7 +1140,7 @@ mod tests {
 
         engine.start_run(&task.id, Trigger::Manual).await;
 
-        let guide = engine.factory_snapshot().guides_dir().join(format!("run-{}.md", task.id));
+        let guide = factory_core::adapter::agent::run_guide_path(&engine.factory_snapshot().guides_dir(), &task.id);
         assert!(guide.exists(), "still there once the harness is up and running");
 
         let run = engine.store.active_run(&task.id).await.unwrap().unwrap();
@@ -1184,7 +1184,7 @@ mod tests {
 
         engine.start_run(&task.id, Trigger::Manual).await;
 
-        let guide = engine.factory_snapshot().guides_dir().join(format!("run-{}.md", task.id));
+        let guide = factory_core::adapter::agent::run_guide_path(&engine.factory_snapshot().guides_dir(), &task.id);
         assert!(guide.exists());
 
         let run = engine.store.active_run(&task.id).await.unwrap().unwrap();
