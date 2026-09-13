@@ -12,6 +12,7 @@
 //! `bench-runs.js` itself.
 
 import { inScope } from "./scopes.js";
+import { TERMINAL } from "./core.js";
 
 // ------------------------------------------------------------------ routing
 //
@@ -102,6 +103,19 @@ export function isSlug(s) {
   return /^[a-z0-9][a-z0-9-]*$/.test(String(s || ""));
 }
 
+/// A conservative shape for a case's `base`, mirrored from
+/// `factory_core::dataset::is_git_revish`: letters, digits, `.` `_` `/` `-`,
+/// no leading `-` (which git would parse as a flag) and no `..` (a range,
+/// where a single commit is meant). The daemon checks this again itself --
+/// both when a case is written and, a second time, right before it ever
+/// builds a `git` command line from it -- so this is client-side feedback
+/// only, never the whole of the refusal.
+export function isGitRevish(s) {
+  const str = String(s || "");
+  if (!str || str.includes("..")) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(str);
+}
+
 /// Every agent name the Run… modal can offer, from the configurations tab's
 /// own inventory and the roster -- the issue asks for both. `bench.run` only
 /// ever keeps the trailing agent name (it is resolved fresh in each case's
@@ -137,14 +151,26 @@ export function progress(attempts) {
 }
 
 /// pass/fail/unverified/skipped/cancelled/error come straight off the
-/// verdict; an attempt with no verdict yet is `running` once it has a task
-/// and `pending` before it does. `bench/engine.rs` writes `verdict` and
-/// `ended_at` in the same step (`judge_bench_attempt`), so there is no
-/// separate "settled but not yet judged" state to read apart from `running`
-/// today -- see the issue's note on asynchronous judging landing later.
-export function attemptState(attempt) {
+/// verdict. Short of a verdict, an attempt with no task yet is `pending`;
+/// one with a task is `running` or `judging` depending on whether that
+/// task's own run has already settled.
+///
+/// Judging is asynchronous: `bench/engine.rs` queues a settled attempt for a
+/// single background worker to run its gate (up to ten minutes), so
+/// `BenchAttempt` itself carries nothing that distinguishes "still running"
+/// from "settled, gate not back yet" -- `run_id`, `started_at` and the
+/// verdict are all written together, once, when the worker finishes. The
+/// one place that distinction is visible at all is the attempt's own task,
+/// which the WebSocket snapshot already keeps current in `state.tasks`: a
+/// terminal task (`core.js`'s `TERMINAL`) with no verdict yet is judging: its
+/// run is over and Factory is waiting on the gate, not the agent.
+/// `taskStatus` is the caller's lookup (`state.tasks.get(attempt.task_id)`),
+/// passed in rather than read here so this stays a pure function of its
+/// arguments.
+export function attemptState(attempt, taskStatus) {
   if (attempt && attempt.verdict) return attempt.verdict;
-  return attempt && attempt.task_id ? "running" : "pending";
+  if (!attempt || !attempt.task_id) return "pending";
+  return TERMINAL.includes(taskStatus) ? "judging" : "running";
 }
 
 /// One column per result row, in the order the daemon already sorted them

@@ -25,6 +25,7 @@ import {
   agentChoices,
   filterTasksForPicker,
   importFormat,
+  isGitRevish,
   isSlug,
   splitImportErrors,
   ungated,
@@ -261,22 +262,23 @@ function openAddCaseForm(datasetName) {
       $("ac-err").textContent = `id ${JSON.stringify(id)} must match [a-z0-9][a-z0-9-]*`;
       return;
     }
+    const base = $("ac-base").value.trim() || null;
+    if (base && !isGitRevish(base)) {
+      $("ac-err").textContent =
+        `base ${JSON.stringify(base)} is not a safe git revision (letters, digits, . _ / -, no leading -, no ..)`;
+      return;
+    }
     const c = {
       id,
       title: $("ac-title").value.trim(),
       scope: $("ac-scope").value,
       instructions: $("ac-instructions").value,
-      base: $("ac-base").value.trim() || null,
+      base,
       reset: $("ac-reset").value.trim() || null,
       gate: $("ac-gate").value.trim() || null,
       timeout_seconds: $("ac-timeout").value.trim() ? parseInt($("ac-timeout").value, 10) : null,
     };
     try {
-      // The daemon's route still takes a bare array
-      // (`POST /api/datasets/{name}/cases`, `interfaces/http.rs`); the
-      // issue's own wire table names `{"cases":[…]}` as the shape landing on
-      // `issue-59-bench`, so that is what is sent here. See the final report
-      // for the exact failing request until that lands.
       await api(`/api/datasets/${encodeURIComponent(datasetName)}/cases`, {
         method: "POST",
         body: JSON.stringify({ cases: [c] }),

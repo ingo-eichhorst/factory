@@ -9,6 +9,7 @@ import {
   benchmarksTail,
   filterTasksForPicker,
   importFormat,
+  isGitRevish,
   isSlug,
   matrixColumns,
   progress,
@@ -172,11 +173,35 @@ test("progress counts settled attempts the same way the CLI's bench_run_line doe
   assert.deepEqual(progress(undefined), { settled: 0, total: 0 });
 });
 
-test("attemptState reads the verdict when there is one, else running or pending", () => {
+test("attemptState reads the verdict when there is one, else running, judging or pending", () => {
   assert.equal(attemptState({ verdict: "pass" }), "pass");
   assert.equal(attemptState({ verdict: "unverified" }), "unverified");
   assert.equal(attemptState({ verdict: null, task_id: "t1" }), "running");
+  assert.equal(attemptState({ verdict: null, task_id: "t1" }, "running"), "running");
   assert.equal(attemptState({ verdict: null, task_id: null }), "pending");
+});
+
+test("attemptState reads judging off the task's own status, since BenchAttempt has no signal of its own for it", () => {
+  // Judging happens on a background worker after the task's run has
+  // settled (bench/engine.rs), so `verdict`/`run_id` arrive together, once,
+  // only when the gate finishes -- the task's own terminal status is the
+  // one thing that says "settled, gate not back yet" in the meantime.
+  for (const status of ["done", "failed", "cancelled"]) {
+    assert.equal(attemptState({ verdict: null, task_id: "t1" }, status), "judging");
+  }
+  for (const status of ["pending", "dispatching", "running", "blocked", undefined]) {
+    assert.equal(attemptState({ verdict: null, task_id: "t1" }, status), "running");
+  }
+});
+
+test("isGitRevish matches the daemon's own conservative base shape", () => {
+  assert.ok(isGitRevish("3f9c2e1"));
+  assert.ok(isGitRevish("origin/main"));
+  assert.ok(isGitRevish("feature/x-1"));
+  assert.ok(!isGitRevish("--detach"));
+  assert.ok(!isGitRevish("a..b"));
+  assert.ok(!isGitRevish(""));
+  assert.ok(!isGitRevish(null));
 });
 
 test("matrixColumns mirrors the results order verbatim, so the table and the matrix never disagree", () => {

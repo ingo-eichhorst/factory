@@ -1030,14 +1030,19 @@ section > .empty { margin: 0; }
 
 /* A verdict chip. `.badge` already sets the shape (padding, border, the
    condensed uppercase type); these only add colour, one per
-   `bench::Verdict` plus the two states an attempt with no verdict yet can be
-   in (`running`, `pending`) -- see `attemptState` in bench-model.js. A chip
-   over a settled attempt is a `<button>` (it opens the attempt's task), so
-   `cursor` and a hover brightening apply to that case only. */
+   `bench::Verdict` plus the three states an attempt with no verdict yet can
+   be in (`running`, `judging`, `pending`) -- see `attemptState` in
+   bench-model.js. A chip over a settled attempt is a `<button>` (it opens
+   the attempt's task), so `cursor` and a hover brightening apply to that
+   case only. */
 .v-pass { color: var(--run); border-color: transparent; background: var(--run-wash); }
 .v-fail, .v-error { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
 .v-unverified { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
 .v-running { color: var(--wait); border-color: transparent; background: var(--wait-wash); font-weight: 700; }
+/* Judging: the run is over and Factory is waiting on the gate, not the
+   agent -- same colour family as running, italic so it reads as "nearly
+   there" rather than "still working". */
+.v-judging { color: var(--wait); border-color: transparent; background: var(--wait-wash); font-style: italic; }
 .v-cancelled { color: var(--fault); border-color: transparent; background: var(--fault-wash); opacity: .7; }
 .v-skipped, .v-pending { color: var(--muted); }
 button.badge { cursor: pointer; }

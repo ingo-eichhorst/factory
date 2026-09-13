@@ -114,16 +114,22 @@ function resultRow(r) {
 }
 
 /// A verdict chip: a plain `<span>` for an attempt with no task yet
-/// (`pending`), a clickable `<button>` -- the app's own task deep link,
+/// (`pending`, or `skipped` before ever dispatching -- an unresolved base or
+/// a missing agent), a clickable `<button>` -- the app's own task deep link,
 /// `openTask` -- for every other state, since every attempt past `pending`
-/// has a task behind it.
+/// has a task behind it. `attemptState` needs the task's own status to tell
+/// `running` and `judging` apart, read from `state.tasks` -- the same map
+/// the WebSocket snapshot already keeps current for every task, bench
+/// attempts included.
 function chip(attempt) {
-  const v = attemptState(attempt);
+  const taskStatus = attempt.task_id ? state.tasks.get(attempt.task_id)?.status : undefined;
+  const v = attemptState(attempt, taskStatus);
+  const why = attempt.reason ? ` -- ${attempt.reason}` : "";
   if (!attempt.task_id) {
-    return `<span class="badge v-${esc(v)}" title="attempt ${esc(attempt.attempt)}">${esc(v)}</span>`;
+    return `<span class="badge v-${esc(v)}" title="attempt ${esc(attempt.attempt)}${esc(why)}">${esc(v)}</span>`;
   }
   return `<button type="button" class="badge v-${esc(v)}" data-open-task="${esc(attempt.task_id)}"
-    title="attempt ${esc(attempt.attempt)} -- open its task">${esc(v)}</button>`;
+    title="attempt ${esc(attempt.attempt)} -- open its task${esc(why)}">${esc(v)}</button>`;
 }
 
 function renderScatter(results) {
