@@ -33,6 +33,10 @@ export const state = {
   occ: null,              // the occupancy answer, as the daemon assembled it
   environment: null,      // last /api/environment answer: { sandboxes, credentials }
   environmentError: null,
+  benchmarks: null,       // last /api/benchmarks answer: { configurations }
+  benchmarksError: null,
+  knowledge: null,        // last /api/knowledge answer: { root, present, notes, gaps, pages, findings }
+  knowledgeError: null,
 };
 
 
