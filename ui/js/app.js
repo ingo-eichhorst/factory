@@ -22,7 +22,7 @@ import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from
 
 // ------------------------------------------------------------------ views
 //
-// Thirteen entries, not two: `showTab` used to toggle exactly two `hidden`
+// Fourteen entries, not two: `showTab` used to toggle exactly two `hidden`
 // containers and two button classes. It is a small registry now, but the
 // rule is the same -- one view visible, one button lit, and whatever that
 // view needs to start or stop doing while it is not the one on screen.
