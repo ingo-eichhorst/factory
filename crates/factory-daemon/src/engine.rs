@@ -978,11 +978,21 @@ impl Engine {
 
         let mut launch = agent.launch_spec(&ctx).await?;
         append_declared_args(&mut launch, declaration.as_ref());
+        // A run's own id fragment is its discriminator: `start()` adopts any
+        // agent already carrying the name it asks for, and reconcile can
+        // dispatch this scope/agent pair again while an earlier run is still
+        // live, so two concurrent runs must never resolve to the same herdr
+        // agent.
+        let run_id_fragment = &run.id[..8.min(run.id.len())];
         let session = runtime
             .start(&StartRequest {
                 id: run.id.clone(),
-                name: format!("factory-run-{}", &run.id[..8.min(run.id.len())]),
-                label: format!("factory: {}", truncate(&task.title, 40)),
+                scope: task.scope.clone(),
+                name: crate::agents::herdr_name(
+                    &format!("factory-{}-{}", task.scope, agent_name),
+                    Some(run_id_fragment),
+                ),
+                label: truncate(&task.title, 40),
                 cwd,
                 launch,
             })

@@ -9,11 +9,20 @@ pub struct StartRequest {
     /// What this session is for -- a run id or a standing agent's id. Used in
     /// logs, not by the runtime.
     pub id: String,
+    /// The Factory scope this session belongs to -- the grouping a runtime
+    /// that wants one place per scope (one herdr workspace, for instance)
+    /// should resolve or create. `#[serde(default)]` because `StartRequest`
+    /// crosses the out-of-process plugin protocol: an older caller or plugin
+    /// that never set this must still deserialize, and a runtime seeing it
+    /// empty should fall back to something sensible rather than panic.
+    #[serde(default)]
+    pub scope: String,
     /// The name the runtime should give the agent, if it names agents. This is
     /// what `attach_command` will point at, so it wants to be readable.
     pub name: String,
-    /// Human-readable label for the session, so a person looking at the runtime
-    /// can tell what it is.
+    /// Human-readable label for this session's place within its scope's
+    /// grouping -- a herdr tab, for instance. An agent's name, or a task's
+    /// title.
     pub label: String,
     pub cwd: PathBuf,
     pub launch: LaunchSpec,
