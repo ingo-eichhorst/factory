@@ -565,3 +565,62 @@ fn a_downstream_shell_node_reads_its_parents_stdout_from_the_upstream_file() {
         "b read a's parent output back out of $FACTORY_UPSTREAM_FILE: {b_result:?}"
     );
 }
+
+/// The real proof against the pty: a command over 1100 bytes -- comfortably
+/// past the 1024-byte canonical-mode limit (`MAX_CANON`) that a typed line
+/// this long would have been silently cut off by -- still reaches `done`,
+/// because `ShellAgent::prompt` only ever types a short `. '<script path>'`
+/// regardless of how long the instructions are.
+#[test]
+fn a_shell_instruction_over_eleven_hundred_bytes_still_reaches_done() {
+    if missing_prerequisites() {
+        return;
+    }
+
+    let daemon = provision();
+    let base = daemon.base_url();
+
+    let payload = "y".repeat(1150);
+    let instructions = format!("printf '%s\\n' '{payload}'");
+    assert!(instructions.len() > 1100, "the instruction really is the long case: {}", instructions.len());
+
+    let draft = json!({
+        "name": "long-instruction",
+        "scope": "demo",
+        "nodes": [task_node("solo", &instructions)],
+        "edges": [],
+    });
+    let created = expect_ok(
+        &format!("{base}/api/workflows"),
+        &post(&format!("{base}/api/workflows"), &draft),
+    );
+    let workflow_id = created["workflow"]["id"].as_str().unwrap().to_string();
+
+    let started = expect_ok(
+        &format!("{base}/api/workflows/{workflow_id}/run"),
+        &post(&format!("{base}/api/workflows/{workflow_id}/run"), &json!({})),
+    );
+    let run_id = started["run"]["id"].as_str().unwrap().to_string();
+
+    let finished = wait_for("the long-instruction run to finish", Duration::from_secs(30), || {
+        let run = run_status(&base, &run_id);
+        matches!(run["status"].as_str(), Some("done") | Some("failed") | Some("cancelled"))
+            .then_some(run)
+    });
+    assert_eq!(
+        finished["status"], "done",
+        "an instruction over 1100 bytes must still reach done via a real pty: {finished}"
+    );
+
+    let all_tasks = tasks(&base);
+    let task = all_tasks
+        .iter()
+        .find(|t| t["workflow_origin"]["workflow_run_id"].as_str() == Some(run_id.as_str()))
+        .unwrap();
+    let result = task["result"].as_str().unwrap_or_default();
+    assert!(
+        result.contains(&payload),
+        "the long stdout should have made it through whole (result is {} bytes)",
+        result.len()
+    );
+}
