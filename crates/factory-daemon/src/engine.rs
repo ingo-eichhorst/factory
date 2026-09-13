@@ -7,12 +7,12 @@ use factory_core::adapter::runtime::{
     RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
 };
 use factory_core::adapter::TaskStore;
-use factory_core::config::{Factory, ScopeAgent};
+use factory_core::config::{Factory, Sandbox, ScopeAgent};
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
-    AgentActivity, AgentView, Envelope, Payload, Request, Response, RuntimeConnectionView,
-    ScopeView, StatusInfo,
+    AgentActivity, AgentView, CredentialRow, Envelope, Payload, Request, Response,
+    RuntimeConnectionView, SandboxRow, ScopeView, StatusInfo,
 };
 use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
@@ -33,6 +33,14 @@ use crate::worktree;
 /// checkbox available should not have to wait five minutes to see it, and the
 /// answer is two `git` calls rather than a directory walk.
 const CAPABILITY_TTL: Duration = Duration::from_secs(60);
+
+/// The one sentence the Secrets tab has to say plainly rather than leave
+/// implicit in a table of `present: true` rows: reachability does not depend
+/// on scope, role, or anything Factory declares -- it is a fact about the
+/// process, not about the config.
+const REACHABILITY_NOTE: &str = "Every agent runs as the daemon's owner, in the owner's home, \
+    so every credential below that is present is already reachable by every agent on this \
+    machine -- Factory injects none of them, and nothing here narrows what an agent can reach.";
 
 /// Put declaration-specific arguments after the adapter's defaults. Harnesses
 /// generally let the last occurrence of a flag win, so this ordering lets one
@@ -212,6 +220,14 @@ impl Engine {
             Request::SiteFootprint => Ok(Payload::SiteFootprint {
                 footprint: self.site_footprint().await?,
             }),
+            Request::Environment => {
+                let (sandboxes, credentials) = self.environment().await?;
+                Ok(Payload::Environment {
+                    sandboxes,
+                    credentials,
+                    reachability_note: REACHABILITY_NOTE.into(),
+                })
+            }
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),
             }),
@@ -451,6 +467,104 @@ impl Engine {
         views
     }
 
+    /// The L2 Environment page's whole answer: one sandbox row per
+    /// scope/agent, built from the same `ScopeView`/`AgentView` the roster
+    /// already computes, plus the credential inventory. Two payloads out of
+    /// one call, the same reason `Agents` returns scopes and roles together --
+    /// they are never useful apart, and a page that fetched them separately
+    /// could show one refreshed and the other stale.
+    async fn environment(&self) -> Result<(Vec<SandboxRow>, Vec<CredentialRow>)> {
+        let (scopes, _) = self.scope_views().await?;
+        let mut sandboxes = Vec::new();
+        for sv in &scopes {
+            for av in &sv.agents {
+                sandboxes.push(SandboxRow {
+                    scope: sv.name.clone(),
+                    scope_path: sv.path.clone(),
+                    runtime: sv.runtime.clone(),
+                    agent: av.name.clone(),
+                    harness: av.adapter.clone(),
+                    lifetime: av.lifetime.clone(),
+                    sandbox: av.sandbox.clone(),
+                    worktree_capable: sv.worktree_capable,
+                });
+            }
+        }
+        Ok((sandboxes, self.credential_inventory().await))
+    }
+
+    /// The honest v1 answer to "what can an agent already reach": a fixed
+    /// list of places a credential commonly sits, checked for existence and
+    /// nothing else. No value is ever opened, held, or logged -- `present` is
+    /// the entire result of each check.
+    async fn credential_inventory(&self) -> Vec<CredentialRow> {
+        let mut rows = Vec::new();
+
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let fixed = [
+                (
+                    "Claude Code credentials",
+                    home.join(".claude/.credentials.json"),
+                    "anthropic",
+                ),
+                (
+                    "GitHub CLI hosts",
+                    home.join(".config/gh/hosts.yml"),
+                    "github",
+                ),
+                ("AWS credentials", home.join(".aws/credentials"), "aws"),
+                ("netrc", home.join(".netrc"), "netrc"),
+            ];
+            for (label, path, integration) in fixed {
+                let present = tokio::fs::try_exists(&path).await.unwrap_or(false);
+                rows.push(CredentialRow {
+                    label: label.into(),
+                    path: path.display().to_string(),
+                    integration: integration.into(),
+                    present,
+                });
+            }
+
+            // Presence only: an id_* file that is not a `.pub` is treated as
+            // a private key without ever being opened to check.
+            let ssh_dir = home.join(".ssh");
+            let mut ssh_present = false;
+            if let Ok(mut entries) = tokio::fs::read_dir(&ssh_dir).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("id_") && !name.ends_with(".pub") {
+                        ssh_present = true;
+                        break;
+                    }
+                }
+            }
+            rows.push(CredentialRow {
+                label: "SSH private keys".into(),
+                path: ssh_dir.join("id_*").display().to_string(),
+                integration: "ssh".into(),
+                present: ssh_present,
+            });
+        }
+
+        let factory = self.factory_snapshot();
+        for scope in &factory.config.scopes {
+            let scope_dir = factory
+                .scope_path(&scope.name)
+                .unwrap_or_else(|_| scope.path.clone());
+            let env_path = scope_dir.join(".env");
+            let present = tokio::fs::try_exists(&env_path).await.unwrap_or(false);
+            rows.push(CredentialRow {
+                label: format!("{} .env", scope.name),
+                path: env_path.display().to_string(),
+                integration: "scope env".into(),
+                present,
+            });
+        }
+
+        rows
+    }
+
     /// The agents page: scopes first, then the agents each one declares, then
     /// what they are doing -- and, once, every adapter registered, which
     /// belongs to the whole answer rather than to any one scope in it. One
@@ -585,6 +699,7 @@ impl Engine {
                         .unwrap_or_else(|| decl.role.clone())
                         .as_str()
                         .to_string(),
+                    sandbox: decl.sandbox.as_str().to_string(),
                     assigned_role: live
                         .and_then(|a| a.assigned_role.clone())
                         .map(|r| r.as_str().to_string()),
@@ -634,6 +749,9 @@ impl Engine {
                         source,
                         lifetime: "task".into(),
                         role: Role::default().as_str().to_string(),
+                        // Nothing declared this agent, so there is no
+                        // `sandbox:` to read -- today's default, unstated.
+                        sandbox: Sandbox::None.as_str().to_string(),
                         assigned_role: None,
                         autostart: false,
                         state: "task".into(),
@@ -671,6 +789,7 @@ impl Engine {
                     source,
                     lifetime: "task".into(),
                     role: Role::default().as_str().to_string(),
+                    sandbox: Sandbox::None.as_str().to_string(),
                     assigned_role: None,
                     autostart: false,
                     state: "task".into(),
@@ -1434,6 +1553,7 @@ fn truncate(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
     use factory_core::adapter::RuntimeConnectionState;
+    use factory_core::agent::Lifetime;
     use factory_core::config::{Config, DaemonConfig, Instance, Scope};
     use factory_core::run::RunStatus;
     use factory_plugins::{Registry, SqliteStore};
@@ -1513,6 +1633,53 @@ mod tests {
                 .unwrap_or_default()
                 .contains("not-registered"),
             "the card says which configured adapter is absent"
+        );
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// `environment()` backs the L2 page: one sandbox row per scope/agent,
+    /// reusing `scope_views()` rather than recomputing it, and one credential
+    /// row per scope's `.env`. The ambient rows (`~/.claude/...` and friends)
+    /// depend on `$HOME` and are not asserted here -- see the doc comment on
+    /// `credential_inventory` -- only the scope's own `.env`, which this test
+    /// fully controls, and the shape of the sandbox row.
+    #[tokio::test]
+    async fn environment_carries_a_declared_sandbox_and_the_scopes_env_presence() {
+        let scope_dir = temp_dir("environment");
+        let engine = test_engine(scope_dir.clone());
+        {
+            let mut factory = engine.factory.write().unwrap();
+            factory.config.scopes[0].agents.push(ScopeAgent {
+                name: Some("boxed".into()),
+                harness: "shell".into(),
+                lifetime: Lifetime::Task,
+                role: Role::default(),
+                autostart: None,
+                args: Vec::new(),
+                sandbox: Sandbox::Docker,
+            });
+        }
+
+        let (sandboxes, credentials) = engine.environment().await.unwrap();
+
+        let row = sandboxes
+            .iter()
+            .find(|r| r.agent == "boxed")
+            .expect("the declared agent has a sandbox row");
+        assert_eq!(row.scope, "demo");
+        assert_eq!(row.harness, "shell");
+        assert_eq!(row.sandbox, "docker");
+        assert!(!row.worktree_capable, "not a git repository");
+
+        let env_row = credentials
+            .iter()
+            .find(|c| c.integration == "scope env")
+            .expect("every configured scope gets a .env row");
+        assert_eq!(env_row.label, "demo .env");
+        assert!(
+            !env_row.present,
+            "nothing wrote one into this scratch scope"
         );
 
         std::fs::remove_dir_all(scope_dir).ok();

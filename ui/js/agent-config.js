@@ -21,6 +21,10 @@ export function agentConfigurePayload(scope, values) {
   }
   const role = String(values.role ?? "worker").trim();
   if (!role) throw new Error("Choose a role.");
+  const sandbox = String(values.sandbox ?? "none");
+  if (!["none", "docker", "srt"].includes(sandbox)) {
+    throw new Error("Choose a valid sandbox.");
+  }
 
   const agent = {
     name: name || null,
@@ -28,6 +32,7 @@ export function agentConfigurePayload(scope, values) {
     lifetime,
     role,
     args: argumentsFromLines(values.arguments),
+    sandbox,
   };
   if (lifetime !== "task") agent.autostart = Boolean(values.autostart);
   return { scope: target, agent };

@@ -292,6 +292,9 @@ code.id { font: 400 11px/1.4 var(--mono); color: var(--faint); }
 .tag.perm { color: var(--run); border-color: var(--run); }
 .tag.foreman { color: var(--wait); border-color: var(--wait); }
 .tag.role { color: var(--signal-ink); border-color: var(--signal); }
+/* A declaration with nothing behind it enforcing it, or a credential file
+   that is actually there -- both are "worth a second look", not "wrong". */
+.tag.warn { color: var(--wait); border-color: var(--wait); }
 
 /* The role an agent is working under, changed in place. */
 select.rolepick {
@@ -357,6 +360,18 @@ select.rolepick:disabled { opacity: .38; cursor: default; }
 .runtime-tags { display: flex; gap: 5px; flex-wrap: wrap; }
 .runtime-checked { margin-top: 11px; text-align: right; font-family: var(--mono); }
 .runtime-load-error { padding: 14px; margin: 0; background: var(--panel); border: 1px solid var(--fault); border-radius: 4px; }
+
+/* --------------------------------------------- L2 environment: sandboxes,
+   secrets. A note that has to be read, not a card that can be skipped --
+   a plain block above the table it explains, in the panel colours rather
+   than the canvas, so it reads as this page's own voice. `.warn` is for
+   the one that corrects an assumption rather than merely describing the
+   table under it. */
+.env-note {
+  margin: 0 0 12px; padding: 10px 13px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 4px; font-size: 12.5px; line-height: 1.55; color: var(--ink-2); max-width: 86ch;
+}
+.env-note.warn { border-color: var(--wait); background: var(--wait-wash); color: var(--ink); }
 
 /* -------------------------------------------------------------- modal */
 .scrim {

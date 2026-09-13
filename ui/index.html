@@ -58,8 +58,8 @@
   <button id="lv-harn" class="lvl" data-level="harn" data-lv="3">
     <span class="lv-n">L3</span><span class="lv-name">Agent</span><span class="lv-sub">Who may work</span>
   </button>
-  <button id="lv-env" class="lvl" data-level="env" data-lv="2" disabled title="Not built yet">
-    <span class="lv-n">L2</span><span class="lv-name">Environment</span><span class="lv-sub">Directory and lease</span>
+  <button id="lv-env" class="lvl" data-level="env" data-lv="2">
+    <span class="lv-n">L2</span><span class="lv-name">Environment</span><span class="lv-sub">Sandboxes and secrets</span>
   </button>
   <button id="lv-infra" class="lvl" data-level="infra" data-lv="1" disabled title="Not built yet">
     <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Daemon and store</span>
@@ -79,6 +79,8 @@
   <button id="tab-occupancy" hidden>Occupancy</button>
   <button id="tab-roster" hidden>Roster</button>
   <button id="tab-agent-runtime" hidden>Agent-runtime</button>
+  <button id="tab-sandboxes" hidden>Sandboxes</button>
+  <button id="tab-secrets" hidden>Secrets</button>
 </nav>
 </div>
 
@@ -232,6 +234,42 @@
       <button class="btn" id="runtime-refresh">Refresh</button>
     </div>
     <div class="runtime-connections" id="agent-runtime"></div>
+  </div>
+
+  <div id="view-sandboxes" hidden>
+    <div class="bar">
+      <h2>Sandboxes</h2>
+      <span class="sp"></span>
+      <button class="btn" id="environment-refresh">Refresh</button>
+    </div>
+    <p class="env-note" id="sandboxes-note"></p>
+    <section>
+      <table>
+        <thead><tr>
+          <th>Scope</th><th>Runtime</th><th>Agent</th><th>Harness</th>
+          <th>Lifetime</th><th>Sandbox</th><th>Worktree</th>
+        </tr></thead>
+        <tbody id="sandboxes"></tbody>
+      </table>
+      <div class="empty" id="noSandboxes" hidden>No agents declared yet.</div>
+    </section>
+  </div>
+
+  <div id="view-secrets" hidden>
+    <div class="bar">
+      <h2>Secrets</h2>
+      <span class="sp"></span>
+      <button class="btn" id="secrets-refresh">Refresh</button>
+    </div>
+    <p class="env-note warn" id="secrets-correction"></p>
+    <section>
+      <table>
+        <thead><tr><th>Integration</th><th>Label</th><th>Path</th><th>Present</th></tr></thead>
+        <tbody id="secrets"></tbody>
+      </table>
+    </section>
+    <p class="env-note" id="secrets-reach"></p>
+    <p class="env-note" id="secrets-boundary"></p>
   </div>
   </div>
 </main>

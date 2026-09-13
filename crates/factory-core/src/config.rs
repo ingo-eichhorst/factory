@@ -257,6 +257,39 @@ impl InterfaceConfig {
     }
 }
 
+/// Where a run declared with this agent executes.
+///
+/// **Nothing reads this yet.** It is declared here and shown on the L2
+/// Environment page's Sandboxes tab, and that is the whole of what it does
+/// today: choosing `docker` or `srt` changes nothing about how the agent
+/// actually starts. `none` is the default -- today's behaviour, unchanged --
+/// and stays that way until a later increment teaches the runtime to act on
+/// this field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sandbox {
+    #[default]
+    None,
+    Docker,
+    Srt,
+}
+
+impl Sandbox {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Docker => "docker",
+            Self::Srt => "srt",
+        }
+    }
+
+    /// So a config file nobody asked to change never grows a `sandbox: none`
+    /// line: see `skip_serializing_if` on every field that carries this.
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 /// How a scope names its agent.
 ///
 /// `agent: pi` is what this daemon writes. Instances configured before the
@@ -283,6 +316,9 @@ pub enum AgentRef {
         /// Arguments added after the adapter's own defaults for this agent.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         args: Vec<String>,
+        /// See `Sandbox`'s doc comment: nothing reads this yet.
+        #[serde(default, skip_serializing_if = "Sandbox::is_none")]
+        sandbox: Sandbox,
     },
 }
 
@@ -305,6 +341,8 @@ impl<'de> Deserialize<'de> for AgentRef {
             role: Option<Role>,
             #[serde(default)]
             args: Vec<String>,
+            #[serde(default)]
+            sandbox: Sandbox,
             // Older Factory configs wrote this in the singular declaration.
             // It has no effect now, but those files must continue to load.
             #[serde(default, rename = "max_sessions")]
@@ -324,6 +362,7 @@ impl<'de> Deserialize<'de> for AgentRef {
                     autostart: declaration.autostart,
                     role: declaration.role,
                     args: declaration.args,
+                    sandbox: declaration.sandbox,
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -371,6 +410,9 @@ pub struct ScopeAgent {
     /// Arguments added after the adapter's own defaults for this agent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// See `Sandbox`'s doc comment: nothing reads this yet.
+    #[serde(default, skip_serializing_if = "Sandbox::is_none")]
+    pub sandbox: Sandbox,
 }
 
 impl ScopeAgent {
@@ -457,6 +499,9 @@ impl Scope {
             role: Role::foreman(),
             autostart: Some(true),
             args: Vec::new(),
+            // Synthesized, not declared: nothing names a sandbox for a
+            // foreman nobody wrote, so it gets today's default forever.
+            sandbox: Sandbox::None,
         });
         out
     }
@@ -479,6 +524,7 @@ impl Scope {
             autostart,
             role,
             args,
+            sandbox,
         }) = &self.agent
         {
             out.push(ScopeAgent {
@@ -488,6 +534,7 @@ impl Scope {
                 role: role.clone().unwrap_or_default(),
                 autostart: *autostart,
                 args: args.clone(),
+                sandbox: *sandbox,
             });
         }
         for a in &self.agents {
@@ -948,6 +995,33 @@ mod tests {
         assert_eq!(declared[1].args, ["--model", "haiku"]);
         let standing: Vec<String> = s.standing_agents().iter().map(|a| a.name()).collect();
         assert_eq!(standing, vec!["pi", "watcher"], "codex is a task agent, not standing");
+    }
+
+    /// `sandbox` has to be added in three places -- `ScopeAgent`, the
+    /// hand-written `Declaration` inside `AgentRef`'s `Deserialize`, and the
+    /// `AgentRef::Declared` variant it builds -- or one of the two spellings
+    /// below fails to load, or silently drops the field it was given. Prove
+    /// both, from both spellings, rather than assume the third site was
+    /// enough.
+    #[test]
+    fn a_declared_sandbox_loads_from_both_spellings_and_the_default_is_none() {
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\nagent:\n  harness: pi\n  sandbox: docker\n\
+             agents:\n  - name: watcher\n    harness: claude-code\n    sandbox: srt\n\
+             \x20 - name: bare\n    harness: codex\n",
+        )
+        .unwrap();
+        let declared = s.declared_agents();
+        assert_eq!(declared[0].name(), "pi");
+        assert_eq!(declared[0].sandbox, Sandbox::Docker, "the singular block");
+        assert_eq!(declared[1].name(), "watcher");
+        assert_eq!(declared[1].sandbox, Sandbox::Srt, "the agents: list");
+        assert_eq!(declared[2].name(), "bare");
+        assert_eq!(
+            declared[2].sandbox,
+            Sandbox::None,
+            "an agent that never mentions it stays at today's default"
+        );
     }
 
     #[test]

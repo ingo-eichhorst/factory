@@ -194,6 +194,12 @@ export function openAgentCreate(scope) {
         <div><label for="na-role">Role</label>
           <select id="na-role">${roles}</select></div>
       </div>
+      <label for="na-sandbox">Sandbox <span class="sub" style="text-transform:none">(declared only -- nothing enforces this yet)</span></label>
+      <select id="na-sandbox">
+        <option value="none" selected>none</option>
+        <option value="docker">docker</option>
+        <option value="srt">srt</option>
+      </select>
       <label for="na-autostart">Autostart</label>
       <div class="checkrow">
         <input type="checkbox" id="na-autostart" disabled>
@@ -235,6 +241,7 @@ async function createAgent(scope) {
       harness: $("na-harness").value,
       lifetime: $("na-lifetime").value,
       role: $("na-role").value,
+      sandbox: $("na-sandbox").value,
       autostart: $("na-autostart").checked,
       arguments: $("na-args").value,
     });

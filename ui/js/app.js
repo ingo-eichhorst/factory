@@ -13,6 +13,8 @@ import { openCreate } from "./task-form.js";
 import { loadDashboard, renderDashboard, renderInbox, wireDashboard } from "./dashboard.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
+import { loadEnvironment, renderSandboxes } from "./sandboxes.js";
+import { renderSecrets } from "./secrets.js";
 
 // ------------------------------------------------------------------ views
 //
@@ -47,6 +49,8 @@ const VIEWS = {
   },
   roster: { onShow: startRoster, onHide: stopAgentPoll },
   "agent-runtime": { onShow: startAgentRuntime, onHide: stopAgentPoll },
+  sandboxes: { onShow: startEnvironment, onHide: stopAgentPoll },
+  secrets: { onShow: startEnvironment, onHide: stopAgentPoll },
 };
 
 // ------------------------------------------------------------------- the URL
@@ -123,6 +127,7 @@ const LEVEL_VIEWS = {
   dash: ["dashboard", "site", "activity", "inbox"],
   proc: ["tasks"],
   harn: ["occupancy", "roster", "agent-runtime"],
+  env: ["sandboxes", "secrets"],
 };
 
 /// The live level that claims `tab`, for backfilling `state.level` before any
@@ -207,6 +212,11 @@ function rerender(route) {
   if (state.tab === "occupancy") renderOccupancy();
   else if (state.tab === "roster") renderAgents();
   else if (state.tab === "agent-runtime") renderRuntimeConnections();
+  // Secrets is unfiltered by scope -- reachability is machine-wide, not a
+  // property of what is selected in the rail -- but re-rendering it here too
+  // is cheap and keeps both tabs' handling identical.
+  else if (state.tab === "sandboxes") renderSandboxes();
+  else if (state.tab === "secrets") renderSecrets();
 }
 
 /// The rail is a view over `state.scopes`, so it is rebuilt wherever that is
@@ -283,6 +293,22 @@ function startAgentRuntime() {
   state.agentPoll = setInterval(loadRuntimeConnections, 30000);
 }
 
+/// Both L2 tabs read one answer, so both `onShow` handlers point here rather
+/// than each fetching their own: `loadEnvironment` only sets state, and this
+/// is the one place -- app.js, which already knows every view -- that renders
+/// both of them from it.
+async function refreshEnvironment() {
+  await loadEnvironment();
+  renderSandboxes();
+  renderSecrets();
+}
+
+function startEnvironment() {
+  stopAgentPoll();
+  refreshEnvironment();
+  state.agentPoll = setInterval(refreshEnvironment, 30000);
+}
+
 // ---------------------------------------------------------------------- boot
 
 async function boot() {
@@ -338,6 +364,8 @@ async function boot() {
     b.onclick = () => setTasksView(b.dataset.view);
   }
   $("runtime-refresh").onclick = () => loadRuntimeConnections();
+  $("environment-refresh").onclick = () => refreshEnvironment();
+  $("secrets-refresh").onclick = () => refreshEnvironment();
   $("occ-window").onchange = () => loadOccupancy();
   $("newTask").onclick = () => openCreate();
   wireDashboard();
