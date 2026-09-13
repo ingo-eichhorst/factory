@@ -196,6 +196,8 @@ impl Engine {
             | Request::Production { .. }
             | Request::SiteFootprint
             | Request::Environment
+            | Request::Knowledge
+            | Request::Benchmarks
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
