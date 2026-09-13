@@ -1054,6 +1054,14 @@ section > .empty { margin: 0; }
 .know-node.selected circle, .know-node.selected polygon, .know-node.selected rect {
   fill: var(--signal-wash); stroke: var(--signal); stroke-width: 2.5;
 }
+/* A ring around the selected node, on top of the fill/stroke recolour above
+   -- a recolour alone reads clearly on a page (it usually replaces an area
+   colour with the signal one) but is a subtler change on a tag/document/gap
+   node's plain fill, especially now that the rest of the graph is never
+   dimmed just because something is selected (see `isNodeDimmed` in
+   knowledge-graph.js). Invisible until `.know-node.selected` is present. */
+.know-select-ring { fill: none; stroke: none; }
+.know-node.selected .know-select-ring { stroke: var(--signal); stroke-width: 2; stroke-dasharray: 3 2; }
 .know-node.dim circle, .know-node.dim polygon, .know-node.dim rect { opacity: .3; }
 .know-node:focus { outline: none; }
 .know-node:focus-visible circle, .know-node:focus-visible polygon, .know-node:focus-visible rect {

@@ -19,7 +19,13 @@ import {
   layoutGraph,
   nodeRadius,
   neighborhood,
-  matchesSearch,
+  connectedNodeIds,
+  isNodeDimmed,
+  areaColorTokens,
+  shouldShowAllLabels,
+  unitsPerPixel,
+  zoomAt,
+  panBy,
   nodeTail,
   readNodeTail,
   encodeToolbarFlags,
@@ -105,39 +111,23 @@ function areaOf(pageId) {
   return i < 0 ? "" : pageId.slice(0, i);
 }
 
-/// The six-colour cycle already defined for the site plan's directory tiles
-/// (`--ly1`..`--ly6` in app.css) doubles as this graph's area palette --
-/// "colour by the first path segment" is the same idea in both places, and
-/// both are theme tokens with light and dark values already. An area hashes
-/// to the same colour on every load; a page with no area (one at the vault
-/// root) gets no override and falls back to the plain node fill.
-const AREA_TOKENS = ["--ly1", "--ly2", "--ly3", "--ly4", "--ly5", "--ly6"];
-function areaColorToken(area) {
-  if (!area) return null;
-  let h = 0;
-  for (let i = 0; i < area.length; i++) h = (h * 31 + area.charCodeAt(i)) >>> 0;
-  return AREA_TOKENS[h % AREA_TOKENS.length];
-}
-
-function orphanPageIds(data) {
-  return new Set((data.findings || []).filter((f) => f.kind === "orphan").map((f) => f.note));
-}
-
-/// Every node the payload could draw, before the toolbar's toggles or local
-/// graph narrow it -- a page for every page, a tag/document/gap node only
-/// when its toggle is on, and an orphan page dropped when the Orphans toggle
-/// is off.
+/// Every node the payload could draw, before the toolbar's toggles narrow
+/// it -- a page for every page, and a tag/document/gap node only when its
+/// toggle is on. The Orphans toggle is not applied here: it is decided by
+/// `activeGraph` below, from the edges actually drawn, not from a node's
+/// kind or its own fields (see `connectedNodeIds` in knowledge-graph.js).
 function buildNodes(data) {
-  const orphans = orphanPageIds(data);
+  const areaTokens = areaColorTokens((data.pages || []).map((p) => areaOf(p.id)));
   const nodes = [];
   for (const p of data.pages || []) {
-    if (orphans.has(p.id) && !toolbar.orphans) continue;
+    const area = areaOf(p.id);
     nodes.push({
       id: p.id,
       kind: "page",
       label: p.title,
       r: nodeRadius((p.backlinks || []).length),
-      area: areaOf(p.id),
+      area,
+      areaToken: areaTokens.get(area) || null,
     });
   }
   if (toolbar.tags) {
@@ -171,11 +161,20 @@ function buildEdges(data) {
 }
 
 /// The node and edge lists actually eligible to draw right now: every node
-/// the toggles keep, further narrowed to the selected node's neighbourhood
-/// when local-graph mode is on.
+/// the kind toggles keep, then narrowed by Orphans (a node left with no
+/// neighbour once the kind toggles already ran is what that toggle hides --
+/// see `connectedNodeIds`), then further narrowed to the selected node's
+/// neighbourhood when local-graph mode is on.
 function activeGraph(data) {
-  const nodes = buildNodes(data);
+  let nodes = buildNodes(data);
   const edges = buildEdges(data);
+  if (!toolbar.orphans) {
+    const connected = connectedNodeIds(
+      nodes.map((n) => n.id),
+      edges.map(([a, b]) => [a, b]),
+    );
+    nodes = nodes.filter((n) => connected.has(n.id));
+  }
   if (!toolbar.local || !selected) return { nodes, edges };
   const scope = neighborhood(
     selected,
@@ -202,11 +201,22 @@ function truncateLabel(s, max = 20) {
   return str.length > max ? `${str.slice(0, max - 1)}…` : str;
 }
 
+/// A ring drawn behind every node's own shape, invisible until `.know-node`
+/// carries `.selected` (see app.css) -- a fill/stroke recolour alone is not
+/// reliably distinct on a tag/document/gap node (`.know-node.selected`'s
+/// colours apply to any shape, but with dimming no longer marking everything
+/// *else* around the selection, that recolour is the only cue left, and it
+/// has to work regardless of the node's own kind or area colour).
+function selectionRing(r) {
+  return `<circle class="know-select-ring" r="${r + 5}"></circle>`;
+}
+
 function shapeFor(n) {
   const r = n.r;
-  if (n.kind === "tag") return `<polygon points="0,${-r} ${r},0 0,${r} ${-r},0"></polygon>`;
-  if (n.kind === "document") return `<rect x="${-r}" y="${-r}" width="${2 * r}" height="${2 * r}" rx="2"></rect>`;
-  return `<circle r="${r}"></circle>`; // page and gap are both circles
+  const ring = selectionRing(r);
+  if (n.kind === "tag") return `${ring}<polygon points="0,${-r} ${r},0 0,${r} ${-r},0"></polygon>`;
+  if (n.kind === "document") return `${ring}<rect x="${-r}" y="${-r}" width="${2 * r}" height="${2 * r}" rx="2"></rect>`;
+  return `${ring}<circle r="${r}"></circle>`; // page and gap are both circles
 }
 
 function ariaLabelFor(n) {
@@ -223,9 +233,8 @@ function ariaLabelFor(n) {
 }
 
 function styleFor(n) {
-  if (n.kind !== "page") return "";
-  const token = areaColorToken(n.area);
-  return token ? ` style="--node-fill: var(${token}); --node-stroke: var(${token});"` : "";
+  if (n.kind !== "page" || !n.areaToken) return "";
+  return ` style="--node-fill: var(${n.areaToken}); --node-stroke: var(${n.areaToken});"`;
 }
 
 function buildGraphSvg(data) {
@@ -303,29 +312,27 @@ function setHovered(id) {
   updateGraphHighlight();
 }
 
-/// How far the graph has to be zoomed in before every label shows, not just
-/// the selected/hovered node and its neighbours -- past this, a large vault
-/// is not yet a smear of text.
-const LABEL_ZOOM_THRESHOLD = 1.6;
-
-/// Selection, hover-neighbour highlighting and the search dim, all in one
-/// pass over the graph that is already on screen -- called after every
-/// rebuild, and on its own whenever only one of those three changed.
+/// Selection, hover-neighbour highlighting, label visibility and the
+/// search dim, all in one pass over the graph that is already on screen --
+/// called after every rebuild, and on its own whenever only one of those
+/// changed. Neighbour highlighting and dimming both follow hover/keyboard
+/// focus alone, never the persistent selection -- see `isNodeDimmed` in
+/// knowledge-graph.js for why. The selection is still marked (`.selected`,
+/// styled in app.css to stand out on its own) and its edges/label lit, just
+/// never by dimming everything else around it.
 function updateGraphHighlight() {
   const svg = $("knowledge-graph");
   if (!svg) return;
-  const focus = hovered || selected;
+  const focus = hovered;
   const neighbours = focus ? neighborhood(focus, currentEdges.map(([a, b]) => [a, b]), 1) : new Set();
   const query = search;
-  const showAllLabels = view.scale >= LABEL_ZOOM_THRESHOLD;
+  const showAllLabels = shouldShowAllLabels(currentNodes.size, view.scale);
 
   for (const g of svg.querySelectorAll(".know-node")) {
     const id = g.dataset.id;
     const node = currentNodes.get(id);
-    const searchDim = !!query && node && !matchesSearch(node, query);
-    const focusDim = !!focus && id !== focus && !neighbours.has(id);
     g.classList.toggle("selected", id === selected);
-    g.classList.toggle("dim", searchDim || focusDim);
+    g.classList.toggle("dim", !!node && isNodeDimmed(node, query, focus, neighbours));
   }
   for (const t of svg.querySelectorAll(".know-label")) {
     const id = t.dataset.id;
@@ -341,14 +348,27 @@ function updateGraphHighlight() {
   }
 }
 
+/// The fixed viewBox `buildGraphSvg` draws into -- fixed regardless of the
+/// SVG element's actual rendered size, which is what makes "the viewport
+/// centre" a constant point in this space rather than something to look up
+/// from the DOM on every zoom.
+const VIEW_BOX = { width: 640, height: 420 };
+
 function applyViewTransform() {
   const svg = $("knowledge-graph");
   const g = svg && svg.querySelector(".know-view");
   if (g) g.setAttribute("transform", `translate(${view.tx},${view.ty}) scale(${view.scale})`);
 }
 
-function zoomBy(factor) {
-  view.scale = Math.min(4, Math.max(0.5, view.scale * factor));
+/// Zooms around `anchor` (viewBox-space; defaults to the viewport centre,
+/// what the toolbar's +/- buttons use) so the content under it stays put --
+/// see `zoomAt` in knowledge-graph.js for the math and why it replaced a
+/// version that always zoomed around the origin instead.
+function zoomBy(factor, anchor) {
+  const next = zoomAt(view, factor, anchor || { x: VIEW_BOX.width / 2, y: VIEW_BOX.height / 2 });
+  view.scale = next.scale;
+  view.tx = next.tx;
+  view.ty = next.ty;
   applyViewTransform();
   updateGraphHighlight(); // the label-by-zoom threshold may have just crossed
 }
@@ -368,7 +388,10 @@ function wireGraphInteraction() {
     "wheel",
     (e) => {
       e.preventDefault();
-      zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15);
+      const rect = svg.getBoundingClientRect();
+      const ppu = unitsPerPixel(VIEW_BOX, rect);
+      const anchor = { x: (e.clientX - rect.left) * ppu, y: (e.clientY - rect.top) * ppu };
+      zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15, anchor);
     },
     { passive: false },
   );
@@ -382,10 +405,10 @@ function wireGraphInteraction() {
     if (!dragging) return;
     const rect = svg.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
-    const scaleX = 640 / rect.width / view.scale;
-    const scaleY = 420 / rect.height / view.scale;
-    view.tx = dragging.tx + (e.clientX - dragging.x) * scaleX;
-    view.ty = dragging.ty + (e.clientY - dragging.y) * scaleY;
+    const ppu = unitsPerPixel(VIEW_BOX, rect);
+    const next = panBy({ tx: dragging.tx, ty: dragging.ty }, e.clientX - dragging.x, e.clientY - dragging.y, ppu);
+    view.tx = next.tx;
+    view.ty = next.ty;
     applyViewTransform();
   });
   window.addEventListener("mouseup", () => {

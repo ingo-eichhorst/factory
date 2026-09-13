@@ -268,34 +268,32 @@ export function neighborhood(centerId, edges, depth) {
 
 // ------------------------------------------------------------------ filtering
 //
-// The toolbar's four toggles decide which *kinds* of node are eligible to
-// draw at all; search only ever dims what toggles already kept. Both are
-// pure so the same rules can be pinned in a Node test without a graph on
-// screen at all.
+// The toolbar's tag/document/gap toggles decide which *kinds* of node are
+// eligible to draw at all, applied by `knowledge.js`'s own `buildNodes`
+// before any of the below ever runs. The Orphans toggle is different: it
+// is not about a node's kind at all, but about whether it ends up with a
+// neighbour once the other toggles have already been applied -- see
+// `connectedNodeIds`.
 
-/// Whether a node of this kind survives the toggle state. A page always
-/// does -- there is no way to hide the vault's own pages, only the
-/// decoration around them.
-export function nodeKindVisible(kind, toggles) {
-  switch (kind) {
-    case "tag":
-      return !!(toggles && toggles.tags);
-    case "document":
-      return !!(toggles && toggles.documents);
-    case "gap":
-      return !!(toggles && toggles.gaps);
-    default:
-      return true;
+/// The ids, among `nodeIds`, with at least one edge to another id in
+/// `nodeIds` -- i.e. "has a neighbour in the graph as currently drawn."
+/// This is what the Orphans toggle actually means (Obsidian's own
+/// reading): a node whose only edge points at something the *other*
+/// toggles have hidden is exactly as isolated on screen as one with no
+/// edge recorded anywhere, so the check has to run after those toggles,
+/// against the node list they already narrowed -- never against the
+/// `orphan` finding, which answers a different question (nothing *points
+/// at* this page) and stays exactly as it is for the findings table.
+export function connectedNodeIds(nodeIds, edges) {
+  const ids = new Set(nodeIds);
+  const connected = new Set();
+  for (const [a, b] of edges || []) {
+    if (ids.has(a) && ids.has(b)) {
+      connected.add(a);
+      connected.add(b);
+    }
   }
-}
-
-/// Whether a page-kind node, specifically, should be hidden by the Orphans
-/// toggle -- the one toggle that reads a fact about the node rather than
-/// its kind. `isOrphan` is the caller's own orphan test (`knowledge.js` knows
-/// the finding list); kept as a parameter so this stays a pure function of
-/// its inputs rather than reaching into a payload shape of its own.
-export function orphanHidden(kind, isOrphan, toggles) {
-  return kind === "page" && isOrphan && toggles && toggles.orphans === false;
+  return connected;
 }
 
 /// Whether `query` (already lowercased and trimmed by the caller) matches a
@@ -308,6 +306,98 @@ export function matchesSearch(node, query) {
     .join(" ")
     .toLowerCase();
   return hay.includes(query);
+}
+
+/// Whether `node` should be dimmed right now. While `query` is non-empty,
+/// dimming is decided purely by whether the node matches it -- the
+/// neighbour-highlight below does not also apply on top, so a match that
+/// happens not to sit next to whatever is focused still stays lit. With no
+/// query, dimming follows hover/keyboard focus alone: a node is dimmed only
+/// once something is focused, and only when it is neither the focus itself
+/// nor one of its immediate neighbours. Deliberately never driven by a
+/// *selection* -- `knowledge.js` marks that with its own `.selected` class
+/// instead of dimming the rest of the graph, since a default first-load
+/// selection (or a page found by search) should not make most of a small
+/// vault look greyed out.
+export function isNodeDimmed(node, query, focus, neighbours) {
+  if (query) return !matchesSearch(node, query);
+  if (!focus) return false;
+  return node.id !== focus && !(neighbours && neighbours.has(node.id));
+}
+
+/// Six colour tokens (the same `--ly1`..`--ly6` cycle the site plan's
+/// directory tiles use), assigned to `areas` by each area's position in the
+/// *sorted list of distinct areas actually present* -- not a hash of its
+/// name mod 6, which collides often enough in a real vault that two or
+/// three areas land on the same colour. Sorting first makes the assignment
+/// depend only on which areas exist, never on what order pages happened to
+/// list them in, so the same vault still draws the same picture on every
+/// load. Past six distinct areas the cycle repeats; a blank/`null` area
+/// (a page at the vault root) never gets an entry.
+const AREA_TOKENS = ["--ly1", "--ly2", "--ly3", "--ly4", "--ly5", "--ly6"];
+export function areaColorTokens(areas) {
+  const order = [...new Set(areas)].filter(Boolean).sort();
+  const map = new Map();
+  order.forEach((area, i) => map.set(area, AREA_TOKENS[i % AREA_TOKENS.length]));
+  return map;
+}
+
+/// How far the graph has to be zoomed in before every label shows, not just
+/// the focused/selected node and its neighbours -- past this, a large vault
+/// is not yet a smear of text. Below it, a *small* graph (at most
+/// `LABEL_ALWAYS_SHOW_NODE_COUNT` nodes) still shows every label regardless
+/// of zoom: the threshold exists to keep a big vault legible, not to hide
+/// the handful of labels an ordinary small one would otherwise draw with
+/// none at all.
+const LABEL_ZOOM_THRESHOLD = 1.6;
+const LABEL_ALWAYS_SHOW_NODE_COUNT = 60;
+export function shouldShowAllLabels(nodeCount, scale) {
+  return nodeCount <= LABEL_ALWAYS_SHOW_NODE_COUNT || scale >= LABEL_ZOOM_THRESHOLD;
+}
+
+// -------------------------------------------------------------- pan & zoom
+//
+// `knowledge.js` draws into a fixed 640x420 viewBox and applies its own
+// `translate(tx,ty) scale(s)` on top of that for panning and zooming. SVG's
+// transform-list order scales a point first and translates it second, so
+// `tx`/`ty` already live in the *output* (viewBox) space rather than
+// needing a further division by `s` anywhere below -- that division is
+// exactly what used to make panning drift and zooming creep toward the
+// origin the more zoomed in the graph already was.
+
+/// The viewBox-units-per-screen-pixel ratio for an SVG using
+/// `preserveAspectRatio="xMidYMid meet"`: the smaller of the two axis
+/// scale-up factors is the one that "meets" the box edge to edge and
+/// applies to *both* axes alike (the other one only looks larger because it
+/// letterboxes), so `viewBox.width / rect.width` alone is only right when
+/// the rendered box happens to share the viewBox's own aspect ratio.
+export function unitsPerPixel(viewBox, rect) {
+  if (!rect || !rect.width || !rect.height) return 1;
+  return Math.max(viewBox.width / rect.width, viewBox.height / rect.height);
+}
+
+/// `view` (`{scale, tx, ty}`) after zooming by `factor` around `anchor`
+/// (`{x, y}`, in the same fixed viewBox space `tx`/`ty` live in) -- the
+/// local point currently drawn under `anchor` stays under it once the new
+/// scale is applied, which is what keeps `+`/`-`/wheel from drifting the
+/// picture toward the top-left corner. `min`/`max` clamp the resulting
+/// scale; the caller passes the viewport's centre for the toolbar buttons
+/// and the cursor's own position for the wheel.
+export function zoomAt(view, factor, anchor, { min = 0.5, max = 4 } = {}) {
+  const nextScale = Math.min(max, Math.max(min, view.scale * factor));
+  const localX = (anchor.x - view.tx) / view.scale;
+  const localY = (anchor.y - view.ty) / view.scale;
+  return { scale: nextScale, tx: anchor.x - localX * nextScale, ty: anchor.y - localY * nextScale };
+}
+
+/// `{tx, ty}` after dragging the pointer by `(dxScreen, dyScreen)` screen
+/// pixels, given the view's `tx`/`ty` before the drag and `ppu` (from
+/// `unitsPerPixel`) to convert screen pixels to viewBox units. Deliberately
+/// not divided by `view.scale` anywhere: `tx`/`ty` are already in
+/// scaled-output space, so a second division would make the picture pan
+/// faster than the pointer the more zoomed in it already was.
+export function panBy(view, dxScreen, dyScreen, ppu) {
+  return { tx: view.tx + dxScreen * ppu, ty: view.ty + dyScreen * ppu };
 }
 
 // ----------------------------------------------------------------- hash tail

@@ -9,7 +9,14 @@ import {
   layoutGraph,
   nodeRadius,
   neighborhood,
+  connectedNodeIds,
   matchesSearch,
+  isNodeDimmed,
+  areaColorTokens,
+  shouldShowAllLabels,
+  unitsPerPixel,
+  zoomAt,
+  panBy,
   nodeTail,
   readNodeTail,
   encodeToolbarFlags,
@@ -202,6 +209,150 @@ test("matchesSearch matches a page's label, its id, or a tag's bare name", () =>
   assert.ok(matchesSearch({ id: "tag:pricing", label: "#pricing", kind: "tag" }, "pricing"));
   assert.ok(!matchesSearch({ id: "partners/acme", label: "Acme Co", kind: "page" }, "gadgets"));
   assert.ok(matchesSearch({ id: "x", label: "X", kind: "page" }, ""), "an empty query matches everything");
+});
+
+// ------------------------------------------------------------------- dimming
+
+test("isNodeDimmed: with no query and no focus, nothing is dimmed -- a bare selection never dims the graph", () => {
+  const node = { id: "a", label: "A", kind: "page" };
+  assert.equal(isNodeDimmed(node, "", null, new Set()), false);
+});
+
+test("isNodeDimmed: with a query, dimming follows the search match alone, regardless of focus/neighbours", () => {
+  const match = { id: "brochure.pdf", label: "Brochure", kind: "document" };
+  const noMatch = { id: "tag:pricing", label: "#pricing", kind: "tag" };
+  // Neither is the focus nor a neighbour of it -- under the old rule both
+  // would have been dimmed by the focus/neighbour check; a search query
+  // must override that entirely.
+  assert.equal(isNodeDimmed(match, "brochure", "unrelated", new Set()), false);
+  assert.equal(isNodeDimmed(noMatch, "brochure", "unrelated", new Set()), true);
+});
+
+test("isNodeDimmed: with no query, dimming follows hover/keyboard focus and its neighbours only", () => {
+  const focusNode = { id: "hovered", label: "Hovered", kind: "page" };
+  const neighbourNode = { id: "next-door", label: "Next door", kind: "page" };
+  const farNode = { id: "far", label: "Far", kind: "page" };
+  const neighbours = new Set(["hovered", "next-door"]);
+  assert.equal(isNodeDimmed(focusNode, "", "hovered", neighbours), false, "the focus itself is never dimmed");
+  assert.equal(isNodeDimmed(neighbourNode, "", "hovered", neighbours), false, "a neighbour of the focus is not dimmed");
+  assert.equal(isNodeDimmed(farNode, "", "hovered", neighbours), true, "anything else is dimmed once something is focused");
+});
+
+// -------------------------------------------------------------------- area colours
+
+test("areaColorTokens assigns distinct tokens by sorted order, not a name hash", () => {
+  const tokens = areaColorTokens(["company", "partners", "operations", "company"]);
+  const assigned = new Set(tokens.values());
+  assert.equal(assigned.size, 3, "three distinct areas must get three distinct tokens");
+  // Sorted: company, operations, partners -- so assignment is order-based
+  // and does not depend on the order areas happened to arrive in.
+  assert.deepEqual(
+    [...tokens.entries()].sort(),
+    [
+      ["company", "--ly1"],
+      ["operations", "--ly2"],
+      ["partners", "--ly3"],
+    ].sort(),
+  );
+});
+
+test("areaColorTokens ignores blank areas and cycles past six distinct ones", () => {
+  const areas = ["a", "b", "c", "d", "e", "f", "g", "", null, undefined];
+  const tokens = areaColorTokens(areas);
+  assert.equal(tokens.has(""), false);
+  assert.equal(tokens.get("a"), "--ly1");
+  assert.equal(tokens.get("g"), "--ly1", "a seventh distinct area cycles back to the first token");
+});
+
+// -------------------------------------------------------------------- labels
+
+test("shouldShowAllLabels: a small graph shows every label regardless of zoom", () => {
+  assert.equal(shouldShowAllLabels(40, 1), true);
+  assert.equal(shouldShowAllLabels(60, 1), true);
+});
+
+test("shouldShowAllLabels: a large graph needs the zoom threshold", () => {
+  assert.equal(shouldShowAllLabels(600, 1), false);
+  assert.equal(shouldShowAllLabels(600, 1.6), true);
+});
+
+// --------------------------------------------------------------- pan & zoom
+
+test("unitsPerPixel matches either axis when the rect shares the viewBox's aspect ratio", () => {
+  const viewBox = { width: 640, height: 420 };
+  const ppu = unitsPerPixel(viewBox, { width: 1280, height: 840 });
+  assert.ok(Math.abs(ppu - 0.5) < 1e-9);
+});
+
+test("unitsPerPixel uses the constrained (meet) axis when the rect's aspect ratio differs", () => {
+  const viewBox = { width: 640, height: 420 };
+  // Much wider than the viewBox's own aspect ratio: height is the
+  // constrained axis under xMidYMid meet, so its ratio (1) wins, not
+  // width's (0.5).
+  assert.equal(unitsPerPixel(viewBox, { width: 1280, height: 420 }), 1);
+});
+
+test("unitsPerPixel returns 1 for a rect with no measurable size", () => {
+  assert.equal(unitsPerPixel({ width: 640, height: 420 }, { width: 0, height: 0 }), 1);
+});
+
+test("zoomAt keeps the anchor's underlying content fixed on screen", () => {
+  const view = { scale: 1, tx: 0, ty: 0 };
+  const anchor = { x: 100, y: 50 };
+  const next = zoomAt(view, 2, anchor);
+  assert.equal(next.scale, 2);
+  // The local point that was drawn at `anchor` before the zoom must still
+  // land on `anchor` after it.
+  const localX = (anchor.x - view.tx) / view.scale;
+  const localY = (anchor.y - view.ty) / view.scale;
+  assert.ok(Math.abs(localX * next.scale + next.tx - anchor.x) < 1e-9);
+  assert.ok(Math.abs(localY * next.scale + next.ty - anchor.y) < 1e-9);
+});
+
+test("zoomAt does not always zoom around the origin -- a non-origin anchor moves tx/ty away from zero", () => {
+  const view = { scale: 1, tx: 0, ty: 0 };
+  const next = zoomAt(view, 2, { x: 300, y: 200 });
+  assert.notEqual(next.tx, 0);
+  assert.notEqual(next.ty, 0);
+});
+
+test("zoomAt clamps the resulting scale to min/max", () => {
+  const view = { scale: 1, tx: 0, ty: 0 };
+  assert.equal(zoomAt(view, 100, { x: 0, y: 0 }, { min: 0.5, max: 4 }).scale, 4);
+  assert.equal(zoomAt(view, 0.001, { x: 0, y: 0 }, { min: 0.5, max: 4 }).scale, 0.5);
+});
+
+test("panBy is not divided by the view's scale -- the same screen delta pans by the same amount at any zoom", () => {
+  // `scale` is passed alongside `tx`/`ty` here (as the real `view` object
+  // always carries one) specifically to prove `panBy` never reads it: two
+  // otherwise-identical views at very different zoom levels must produce
+  // the exact same tx/ty delta for the same screen drag and the same ppu.
+  const zoomedIn = panBy({ tx: 10, ty: 20, scale: 4 }, 30, -10, 0.5);
+  const zoomedOut = panBy({ tx: 10, ty: 20, scale: 0.5 }, 30, -10, 0.5);
+  assert.deepEqual(zoomedIn, zoomedOut, "panBy must not scale its result by view.scale");
+  assert.equal(zoomedIn.tx, 10 + 30 * 0.5);
+  assert.equal(zoomedIn.ty, 20 + -10 * 0.5);
+});
+
+// ------------------------------------------------------------- orphans toggle
+
+test("connectedNodeIds keeps only nodes with a neighbour among the given ids", () => {
+  const ids = ["a", "b", "c"]; // c has no edge to another id in this set
+  const edges = [
+    ["a", "b"],
+    ["c", "elsewhere-not-in-set"],
+  ];
+  assert.deepEqual([...connectedNodeIds(ids, edges)].sort(), ["a", "b"]);
+});
+
+test("connectedNodeIds treats a node whose only neighbour was filtered out by another toggle as isolated too", () => {
+  // "b" has an edge to "tag:x" in the full data, but the tags toggle has
+  // already dropped "tag:x" from the eligible id list -- "b" must count as
+  // unconnected in the graph as currently drawn, not as connected because
+  // the edge exists somewhere in the payload.
+  const ids = ["a", "b"];
+  const edges = [["b", "tag:x"]];
+  assert.deepEqual([...connectedNodeIds(ids, edges)], []);
 });
 
 // -------------------------------------------------------------------- knowledge tail
