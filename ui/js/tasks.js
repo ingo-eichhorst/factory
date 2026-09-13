@@ -6,6 +6,7 @@ import { inScope, scopeLabel, writeHash } from "./scopes.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openEdit, scheduleText } from "./task-form.js";
+import { describeWorkflowOrigin } from "./workflows.js";
 
 export function scheduleLabel(s) {
   if (!s) return "manual";
@@ -217,6 +218,14 @@ export function renderModal() {
   if (t.timeout_seconds) meta += ` · timeout ${t.timeout_seconds}s`;
   if (t.worktree) meta += ` · own worktree`;
   meta += `</div>`;
+  if (t.workflow_origin) {
+    // R9: this task's provenance, when a workflow spawned it -- linking
+    // back to the run that did, falling back to bare ids if that
+    // definition is not one this view has ever cached (deleted, or the
+    // Workflows tab simply has not been opened this session).
+    const origin = describeWorkflowOrigin(t.workflow_origin);
+    meta += `<div class="sub">Workflow: <a href="${esc(origin.href)}">${esc(origin.label)}</a></div>`;
+  }
   const labels = Object.entries(t.labels || {});
   if (labels.length) {
     meta += `<div class="sub">${labels.map(([k, v]) => `<span class="tag">${esc(k)}=${esc(v)}</span>`).join(" ")}</div>`;
