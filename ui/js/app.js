@@ -212,9 +212,9 @@ function rerender(route) {
   if (state.tab === "occupancy") renderOccupancy();
   else if (state.tab === "roster") renderAgents();
   else if (state.tab === "agent-runtime") renderRuntimeConnections();
-  // Secrets is unfiltered by scope -- reachability is machine-wide, not a
-  // property of what is selected in the rail -- but re-rendering it here too
-  // is cheap and keeps both tabs' handling identical.
+  // Both L2 tabs answer to the rail. Secrets narrows only the rows that
+  // belong to a scope: a credential in the owner's home belongs to none of
+  // them and is reachable from all of them, so it survives every selection.
   else if (state.tab === "sandboxes") renderSandboxes();
   else if (state.tab === "secrets") renderSecrets();
 }

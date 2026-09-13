@@ -243,6 +243,7 @@
       <button class="btn" id="environment-refresh">Refresh</button>
     </div>
     <p class="env-note" id="sandboxes-note"></p>
+    <p class="env-note bad" id="sandboxes-error" hidden></p>
     <section>
       <table>
         <thead><tr>
@@ -261,15 +262,21 @@
       <span class="sp"></span>
       <button class="btn" id="secrets-refresh">Refresh</button>
     </div>
+    <!-- All three notes speak about the rows "below", so all three sit above
+         the table. The error is an element of its own rather than text that
+         takes a note's place: a page that cannot say what is reachable is
+         exactly the page that must keep the sentence saying everything is. -->
     <p class="env-note warn" id="secrets-correction"></p>
+    <p class="env-note" id="secrets-reach"></p>
+    <p class="env-note" id="secrets-boundary"></p>
+    <p class="env-note bad" id="secrets-error" hidden></p>
     <section>
       <table>
         <thead><tr><th>Integration</th><th>Label</th><th>Path</th><th>Present</th></tr></thead>
         <tbody id="secrets"></tbody>
       </table>
+      <div class="empty" id="noSecrets" hidden>No credential locations to report.</div>
     </section>
-    <p class="env-note" id="secrets-reach"></p>
-    <p class="env-note" id="secrets-boundary"></p>
   </div>
   </div>
 </main>

@@ -29,9 +29,16 @@ function sandboxRow(row) {
 export function renderSandboxes() {
   const note = $("sandboxes-note");
   if (note) {
-    note.textContent = state.environmentError ||
+    // True whether or not the fetch worked, so an error goes in an element of
+    // its own beside it rather than over the top of it.
+    note.textContent =
       "Today every row is this Mac, this folder, no limits. A sandbox value below says what an agent's declaration " +
       "claims -- none of it is enforced yet, so “docker” and “srt” change nothing about how the agent actually starts.";
+  }
+  const failed = $("sandboxes-error");
+  if (failed) {
+    failed.textContent = state.environmentError || "";
+    failed.hidden = !state.environmentError;
   }
   const body = $("sandboxes");
   if (!body) return;

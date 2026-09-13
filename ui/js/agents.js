@@ -42,6 +42,11 @@ export function agentTags(a) {
   if (a.lifetime === "permanent") tags.push(`<span class="tag perm">permanent</span>`);
   else if (a.lifetime === "temporary") tags.push(`<span class="tag">temporary</span>`);
   if (a.is_default) tags.push(`<span class="tag">default</span>`);
+  // The form on this page sets a sandbox, so this page has to show it, or an
+  // agent declaring one is indistinguishable from an agent declaring none.
+  // `warn`, because a declaration nothing enforces yet is worth a second look
+  // -- L2's Sandboxes tab says the same thing at greater length.
+  if (a.sandbox && a.sandbox !== "none") tags.push(`<span class="tag warn">${esc(a.sandbox)}</span>`);
   if (a.source && a.source !== "builtin" && a.source !== "missing") tags.push(`<span class="tag plug">plugin</span>`);
   if (!a.declared) tags.push(`<span class="tag">undeclared</span>`);
   return tags.join(" ");

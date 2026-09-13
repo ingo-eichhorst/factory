@@ -31,7 +31,7 @@ export const state = {
   runtimeConnectionError: null,
   sitePoll: null,        // the site view's slow tick, for the half of it no event announces
   occ: null,              // the occupancy answer, as the daemon assembled it
-  environment: null,      // last /api/environment answer: { sandboxes, credentials, reachability_note }
+  environment: null,      // last /api/environment answer: { sandboxes, credentials }
   environmentError: null,
 };
 

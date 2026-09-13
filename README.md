@@ -86,6 +86,7 @@ scope:
     - name: reviewer
       harness: claude-code
       lifetime: task          # not standing: offered for tasks in this scope
+      sandbox: docker         # declared, not yet enforced -- see below
 ```
 
 A permanent agent is **never failed for being quiet** — being quiet is what it
@@ -101,6 +102,20 @@ longer declares is **closed** rather than left for somebody to find next week.
 
 `lifetime` may also sit inside the singular `agent:` block, which is how
 instances written before standing agents existed already spell it.
+
+`sandbox` says where an agent's runs should execute: `none` (the default),
+`docker`, or `srt`. **Nothing enforces it yet.** It is read, stored, and shown
+on the L2 Environment page, and an agent declaring `docker` starts exactly the
+way one declaring `none` does. The field exists ahead of the machinery so the
+gap between what a run needs to reach and what it can reach is written down
+somewhere rather than assumed, and so the UI has something true to display.
+Enforcing it means solving three host-shaped things a container breaks — the
+control socket, the `factory` callback binary, and the run's git worktree,
+whose `.git` is a pointer file into the scope's repository — which is why
+`srt` ([anthropic-experimental/sandbox-runtime][srt]), which wraps the same
+process on the same host, is the likelier one to arrive first.
+
+[srt]: https://github.com/anthropic-experimental/sandbox-runtime
 
 `args` works in both the singular `agent:` block and entries in `agents:`. The
 daemon appends these arguments after any defaults supplied by the adapter, so a
@@ -235,6 +250,23 @@ Each standing agent also carries the command to get into its terminal yourself �
 `herdr --session factory agent attach factory-demo-watcher`. A shell session has
 no named agent to attach to, so Factory says so instead of printing a command
 that would fail.
+
+## Secrets
+
+Factory injects no credentials. The whole of what it adds to a session is six
+`FACTORY_*` variables — the scope, the socket, the callback binary, the token,
+and a run's task id and attempt.
+
+That is **not** the same as an agent having no credentials. An agent is a shell
+running as the daemon's owner, so it reads whatever that user can read:
+`~/.claude/.credentials.json`, `~/.config/gh/hosts.yml`, `~/.netrc`, ssh keys,
+a scope's own `.env`, the system keychain. The runtime is a terminal
+multiplexer, not a boundary.
+
+The L2 Environment page's **Secrets** tab reports exactly that and nothing
+more: for each known location, whether a file is there. No value is ever
+opened, held, logged, or returned — `present` is the entire result of each
+check, and there is no write path, in the UI or over the socket.
 
 ## Tasks and runs
 

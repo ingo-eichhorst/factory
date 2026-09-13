@@ -210,12 +210,14 @@ pub enum Payload {
     Production { production: Production },
     Screen { screen: Screen },
     SiteFootprint { footprint: SiteFootprint },
+    /// The L2 Environment page. There is deliberately no "everything here is
+    /// reachable by every agent" sentence in this payload: it is a fact about
+    /// how the daemon runs its agents, true whether or not this request
+    /// succeeded, so the page states it from its own markup and goes on
+    /// stating it when the fetch fails.
     Environment {
         sandboxes: Vec<SandboxRow>,
         credentials: Vec<CredentialRow>,
-        /// Stated once, plainly, rather than left for the reader to infer
-        /// from a table of `present: true` rows.
-        reachability_note: String,
     },
 }
 
@@ -449,6 +451,12 @@ pub struct CredentialRow {
     pub path: String,
     pub integration: String,
     pub present: bool,
+    /// The scope this row belongs to, for the rows that belong to one at all.
+    /// `None` is the honest answer for a credential in the owner's home: it
+    /// sits outside every scope and is reachable from all of them, so the
+    /// page goes on showing it whichever scope the rail has selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// How big a scope is on disk, for the site plan's hall footprint. The

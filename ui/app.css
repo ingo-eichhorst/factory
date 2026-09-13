@@ -372,6 +372,9 @@ select.rolepick:disabled { opacity: .38; cursor: default; }
   border-radius: 4px; font-size: 12.5px; line-height: 1.55; color: var(--ink-2); max-width: 86ch;
 }
 .env-note.warn { border-color: var(--wait); background: var(--wait-wash); color: var(--ink); }
+/* The fetch failed. Its own element rather than text put over a note, so the
+   notes that hold whether or not it worked go on saying so beside it. */
+.env-note.bad { border-color: var(--fault); background: var(--fault-wash); color: var(--ink); }
 
 /* -------------------------------------------------------------- modal */
 .scrim {

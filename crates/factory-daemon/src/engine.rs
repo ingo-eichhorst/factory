@@ -34,14 +34,6 @@ use crate::worktree;
 /// answer is two `git` calls rather than a directory walk.
 const CAPABILITY_TTL: Duration = Duration::from_secs(60);
 
-/// The one sentence the Secrets tab has to say plainly rather than leave
-/// implicit in a table of `present: true` rows: reachability does not depend
-/// on scope, role, or anything Factory declares -- it is a fact about the
-/// process, not about the config.
-const REACHABILITY_NOTE: &str = "Every agent runs as the daemon's owner, in the owner's home, \
-    so every credential below that is present is already reachable by every agent on this \
-    machine -- Factory injects none of them, and nothing here narrows what an agent can reach.";
-
 /// Put declaration-specific arguments after the adapter's defaults. Harnesses
 /// generally let the last occurrence of a flag win, so this ordering lets one
 /// scope override an adapter default as well as add to it.
@@ -225,7 +217,6 @@ impl Engine {
                 Ok(Payload::Environment {
                     sandboxes,
                     credentials,
-                    reachability_note: REACHABILITY_NOTE.into(),
                 })
             }
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
@@ -522,6 +513,7 @@ impl Engine {
                     path: path.display().to_string(),
                     integration: integration.into(),
                     present,
+                    scope: None,
                 });
             }
 
@@ -544,6 +536,7 @@ impl Engine {
                 path: ssh_dir.join("id_*").display().to_string(),
                 integration: "ssh".into(),
                 present: ssh_present,
+                scope: None,
             });
         }
 
@@ -552,13 +545,18 @@ impl Engine {
             let scope_dir = factory
                 .scope_path(&scope.name)
                 .unwrap_or_else(|_| scope.path.clone());
-            let env_path = scope_dir.join(".env");
+            // A scope registered on the instance root has the path `<root>/.`,
+            // so joining onto it raw would print `<root>/./.env` on the page.
+            // Collecting the components drops the `.` without touching what
+            // the path means.
+            let env_path = scope_dir.components().collect::<PathBuf>().join(".env");
             let present = tokio::fs::try_exists(&env_path).await.unwrap_or(false);
             rows.push(CredentialRow {
                 label: format!("{} .env", scope.name),
                 path: env_path.display().to_string(),
                 integration: "scope env".into(),
                 present,
+                scope: Some(scope.name.clone()),
             });
         }
 
@@ -1680,6 +1678,46 @@ mod tests {
         assert!(
             !env_row.present,
             "nothing wrote one into this scratch scope"
+        );
+        // A `.env` belongs to the scope it sits in, so the page can narrow to
+        // the rail's selection. The ambient rows deliberately carry no scope:
+        // they sit outside every one and are reachable from all of them.
+        assert_eq!(env_row.scope.as_deref(), Some("demo"));
+        assert!(
+            credentials
+                .iter()
+                .filter(|c| c.integration != "scope env")
+                .all(|c| c.scope.is_none()),
+            "a credential in the owner's home belongs to no scope"
+        );
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// A scope registered on the instance root itself stores its path as `.`,
+    /// so `scope_path` hands back `<root>/.` and the naive join prints
+    /// `<root>/./.env` on the page. The path shown has to be the path a
+    /// person would type.
+    #[tokio::test]
+    async fn a_scope_on_the_instance_root_gets_a_tidy_env_path() {
+        let scope_dir = temp_dir("root-scope");
+        let engine = test_engine(scope_dir.clone());
+        {
+            let mut factory = engine.factory.write().unwrap();
+            factory.root.clone_from(&scope_dir);
+            factory.config.scopes[0].path = PathBuf::from(".");
+        }
+
+        let (_, credentials) = engine.environment().await.unwrap();
+
+        let env_row = credentials
+            .iter()
+            .find(|c| c.integration == "scope env")
+            .expect("the root scope still gets a .env row");
+        assert_eq!(
+            env_row.path,
+            scope_dir.join(".env").display().to_string(),
+            "the `.` component must not survive into what the page prints"
         );
 
         std::fs::remove_dir_all(scope_dir).ok();
