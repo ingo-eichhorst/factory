@@ -17,6 +17,7 @@ fn missing(kind: &str, id: &str) -> FactoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use factory_core::adapter::agent::UpstreamOutput;
     use factory_core::adapter::{AgentRuntime, StartRequest};
     use factory_core::agent::{AgentSession, Lifetime};
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
@@ -43,6 +44,63 @@ mod tests {
             })
         }
         async fn submit(&self, _: &SessionRef, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn status(&self, _: &SessionRef) -> Result<factory_core::adapter::RuntimeStatus> {
+            Ok(factory_core::adapter::RuntimeStatus::Working)
+        }
+        async fn send_text(&self, _: &SessionRef, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_keys(&self, _: &SessionRef, _: &[String]) -> Result<()> {
+            Ok(())
+        }
+        async fn read(&self, _: &SessionRef, _: u32) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn stop(&self, _: &SessionRef) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Like `QuietRuntime`, but remembers every prompt handed to `submit`,
+    /// keyed by the session handle -- `start` sets that to the run id, which
+    /// is the only way a test can pull back the exact text dispatch built for
+    /// one particular run, upstream section (or, for `shell`, the
+    /// `FACTORY_UPSTREAM_FILE` export) included.
+    struct RecordingRuntime {
+        prompts: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingRuntime {
+        fn new() -> Self {
+            Self { prompts: std::sync::Mutex::new(Vec::new()) }
+        }
+
+        fn prompt_for(&self, session_handle: &str) -> Option<String> {
+            self.prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(handle, _)| handle == session_handle)
+                .map(|(_, text)| text.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentRuntime for RecordingRuntime {
+        fn name(&self) -> &str {
+            "quiet"
+        }
+        async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
+            Ok(SessionRef {
+                runtime: "quiet".into(),
+                handle: req.id.clone(),
+                meta: Default::default(),
+            })
+        }
+        async fn submit(&self, session: &SessionRef, text: &str) -> Result<()> {
+            self.prompts.lock().unwrap().push((session.handle.clone(), text.to_string()));
             Ok(())
         }
         async fn status(&self, _: &SessionRef) -> Result<factory_core::adapter::RuntimeStatus> {
@@ -119,6 +177,49 @@ mod tests {
         ))
     }
 
+    /// Like `engine()`, but its "quiet" runtime is a `RecordingRuntime` --
+    /// for tests that need to read back the exact prompt (or, for `shell`,
+    /// the exact typed line) a dispatch built, not merely that dispatch
+    /// happened.
+    fn engine_with_recorder() -> (Arc<Engine>, Arc<RecordingRuntime>) {
+        let root =
+            std::env::temp_dir().join(format!("factory-workflow-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig::default(),
+            roles: Default::default(),
+            scope: None,
+            scopes: vec![Scope {
+                id: "demo-id".into(),
+                name: "demo".into(),
+                path: PathBuf::new(),
+                agent: None,
+                agents: Vec::new(),
+                runtime: Some("quiet".into()),
+                git: None,
+                task_store: None,
+                roles: Default::default(),
+            }],
+            plugins_dir: None,
+        };
+        let recorder = Arc::new(RecordingRuntime::new());
+        let mut registry = Registry::with_builtins();
+        registry.add_runtime(recorder.clone(), "test");
+        let engine = Arc::new(Engine::new(
+            Factory { root, config },
+            registry,
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+        (engine, recorder)
+    }
+
     /// A caller wearing `role` in the "demo" scope, constructed directly the
     /// way `access.rs`'s own tests do -- `authorize` and
     /// `authorize_workflow_spawn` take whatever `Caller` they are handed, so
@@ -143,6 +244,28 @@ mod tests {
                 instructions: "true".into(),
                 scope: Some("demo".into()),
                 agent: Some("shell".into()),
+                runtime: Some("quiet".into()),
+                worktree: Some(false),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Like `node`, but names a bare adapter (`claude-code`) rather than
+    /// `shell` -- `resolve_agent`'s fallback to any adapter that exists
+    /// (no declaration required) is what makes this work with only the
+    /// "quiet" runtime configured, and it is what lets a test read the
+    /// *rendered* upstream section rather than the file `shell` points at.
+    fn harness_node(id: &str) -> WorkflowNode {
+        WorkflowNode {
+            id: id.into(),
+            position: CanvasPoint::default(),
+            kind: WorkflowNodeKind::Task,
+            task: NewTask {
+                title: id.into(),
+                instructions: "do the thing".into(),
+                scope: Some("demo".into()),
+                agent: Some("claude-code".into()),
                 runtime: Some("quiet".into()),
                 worktree: Some(false),
                 ..Default::default()
@@ -211,6 +334,166 @@ mod tests {
             .await
             .unwrap();
         engine.sync_workflow_for_task(task_id).await;
+    }
+
+    /// Like `finish`, but reports `Done` with a real result -- what the
+    /// upstream-outputs tests need in hand for a downstream node to inherit.
+    async fn finish_with_result(engine: &Arc<Engine>, task_id: &str, result: &str) {
+        let run = loop {
+            if let Some(run) = engine.store.active_run(task_id).await.unwrap() {
+                break run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        engine
+            .report(
+                task_id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    message: Some("reported by test".into()),
+                    result: Some(result.into()),
+                    error: None,
+                    token: run.token,
+                },
+            )
+            .await
+            .unwrap();
+        engine.sync_workflow_for_task(task_id).await;
+    }
+
+    /// Poll until `recorder` has captured a prompt for `task_id`'s active
+    /// run -- dispatch happens on a spawned task, so there is no other signal
+    /// to wait on.
+    async fn wait_for_prompt(engine: &Arc<Engine>, recorder: &RecordingRuntime, task_id: &str) -> String {
+        for _ in 0..200 {
+            if let Some(run) = engine.store.active_run(task_id).await.unwrap() {
+                if let Some(prompt) = recorder.prompt_for(&run.id) {
+                    return prompt;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("no prompt captured for task {task_id}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_carries_direct_parent_outputs_for_a_fan_in_node() {
+        let (engine, recorder) = engine_with_recorder();
+        let definition = create(
+            &engine,
+            vec![node("a"), node("b"), node("c")],
+            vec![edge("a", "c"), edge("b", "c")],
+        )
+        .await;
+        engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        let roots = wait_for_tasks(&engine, 2).await;
+        let a = roots
+            .iter()
+            .find(|t| t.workflow_origin.as_ref().unwrap().node_id == "a")
+            .unwrap()
+            .clone();
+        let b = roots
+            .iter()
+            .find(|t| t.workflow_origin.as_ref().unwrap().node_id == "b")
+            .unwrap()
+            .clone();
+
+        finish_with_result(&engine, &a.id, "output from a").await;
+        finish_with_result(&engine, &b.id, "output from b").await;
+
+        let all = wait_for_tasks(&engine, 3).await;
+        let c = all
+            .iter()
+            .find(|t| t.workflow_origin.as_ref().unwrap().node_id == "c")
+            .unwrap()
+            .clone();
+
+        // `node()` makes every node a `shell` task, so the captured prompt is
+        // the typed report line, not a harness prompt -- it names the
+        // upstream file rather than rendering the section inline. Reading
+        // that file back is what actually exercises the daemon's own
+        // computation of `upstream`, edge order and all, rather than a
+        // rendering of it.
+        let prompt = wait_for_prompt(&engine, &recorder, &c.id).await;
+        let path = prompt
+            .split("FACTORY_UPSTREAM_FILE='")
+            .nth(1)
+            .and_then(|rest| rest.split('\'').next())
+            .unwrap_or_else(|| panic!("the shell line exports the upstream file when there is one: {prompt}"));
+        let json = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("reading the upstream file the line points at ({path}): {e}"));
+        let entries: Vec<UpstreamOutput> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(entries.len(), 2, "both direct parents, no more: {entries:#?}");
+        assert_eq!(entries[0].node_id, "a", "definition edge order is a, then b: {entries:#?}");
+        assert_eq!(entries[0].task_id, a.id);
+        assert_eq!(entries[0].title, "a");
+        assert_eq!(entries[0].result.as_deref(), Some("output from a"));
+        assert_eq!(entries[1].node_id, "b");
+        assert_eq!(entries[1].task_id, b.id);
+        assert_eq!(entries[1].result.as_deref(), Some("output from b"));
+    }
+
+    /// The other half of the same acceptance criterion: a harness agent's
+    /// task gets a *prompt* that contains each parent's result, not just a
+    /// file a shell command could go read. `harness_node` runs the same fan-in
+    /// shape as the test above through `claude-code` instead of `shell`, so
+    /// this reads `HarnessAgent::prompt`'s own rendering rather than a
+    /// second look at `ShellAgent`'s.
+    #[tokio::test]
+    async fn dispatch_carries_direct_parent_outputs_into_a_harness_agents_prompt() {
+        let (engine, recorder) = engine_with_recorder();
+        let definition = create(
+            &engine,
+            vec![harness_node("a"), harness_node("b"), harness_node("c")],
+            vec![edge("a", "c"), edge("b", "c")],
+        )
+        .await;
+        engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        let roots = wait_for_tasks(&engine, 2).await;
+        let a = roots
+            .iter()
+            .find(|t| t.workflow_origin.as_ref().unwrap().node_id == "a")
+            .unwrap()
+            .clone();
+        let b = roots
+            .iter()
+            .find(|t| t.workflow_origin.as_ref().unwrap().node_id == "b")
+            .unwrap()
+            .clone();
+
+        finish_with_result(&engine, &a.id, "build succeeded").await;
+        finish_with_result(&engine, &b.id, "lint succeeded").await;
+
+        let all = wait_for_tasks(&engine, 3).await;
+        let c = all
+            .iter()
+            .find(|t| t.workflow_origin.as_ref().unwrap().node_id == "c")
+            .unwrap()
+            .clone();
+
+        let prompt = wait_for_prompt(&engine, &recorder, &c.id).await;
+        assert!(
+            prompt.contains("Output from the workflow steps this task follows"),
+            "the labelled section is there: {prompt}"
+        );
+        assert!(prompt.contains("node a"), "{prompt}");
+        assert!(prompt.contains("build succeeded"), "{prompt}");
+        assert!(prompt.contains("node b"), "{prompt}");
+        assert!(prompt.contains("lint succeeded"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn a_root_nodes_dispatch_carries_no_upstream_outputs() {
+        let (engine, recorder) = engine_with_recorder();
+        let definition = create(&engine, vec![node("a")], vec![]).await;
+        engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        let a = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        let prompt = wait_for_prompt(&engine, &recorder, &a.id).await;
+        assert!(
+            !prompt.contains("FACTORY_UPSTREAM_FILE"),
+            "a root node has no parents to report: {prompt}"
+        );
     }
 
     #[tokio::test]
