@@ -220,6 +220,14 @@ impl BenchRunStatus {
     pub fn is_terminal(self) -> bool {
         !matches!(self, Self::Running)
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Cancelled => "cancelled",
+        }
+    }
 }
 
 /// A bench run: an immutable snapshot of the dataset's cases at the moment it
