@@ -4,10 +4,12 @@
 
 pub mod adapter;
 pub mod agent;
+pub mod benchmark;
 pub mod building;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod knowledge;
 pub mod occupancy;
 pub mod protocol;
 pub mod role;
