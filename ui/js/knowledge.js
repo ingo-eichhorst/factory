@@ -165,6 +165,57 @@ export function layoutGraph(notes, gaps, { width = 640, height = 420 } = {}) {
     }
   }
 
+  // The force iterations settle into whatever cluster the springs and
+  // repulsion happen to agree on, which is usually much smaller than the
+  // viewBox -- left as-is, a small wiki draws as a tight knot in the middle
+  // of a mostly empty box. Scale-and-translate the settled bounding box up
+  // to fill the viewBox instead, leaving room on every side for a label
+  // (~60px so a wide title never clips at the edge, less on top/bottom where
+  // labels sit only below a node). This runs before the per-node radius
+  // clamp below, so whatever this step produces still gets pulled back
+  // inside the frame -- scaling first and clamping after, never the other
+  // order, or a scaled-up node could land outside the viewBox the clamp is
+  // meant to guarantee.
+  const PAD_X = 60;
+  const PAD_TOP = 24;
+  const PAD_BOTTOM = 36;
+  const MAX_SCALE = 2.5;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const id of ids) {
+    minX = Math.min(minX, pos[id].x);
+    maxX = Math.max(maxX, pos[id].x);
+    minY = Math.min(minY, pos[id].y);
+    maxY = Math.max(maxY, pos[id].y);
+  }
+  const spreadX = maxX - minX;
+  const spreadY = maxY - minY;
+  const usableW = Math.max(1, width - 2 * PAD_X);
+  const usableH = Math.max(1, height - PAD_TOP - PAD_BOTTOM);
+  // Each axis is guarded on its own: two nodes stacked exactly vertically
+  // give `spreadX === 0` without the graph being a single point, and scaling
+  // by the other axis alone (rather than falling back to no scale at all)
+  // is what actually fills the box in that case.
+  let scale = 1;
+  if (spreadX > 0 && spreadY > 0) {
+    scale = Math.min(usableW / spreadX, usableH / spreadY);
+  } else if (spreadX > 0) {
+    scale = usableW / spreadX;
+  } else if (spreadY > 0) {
+    scale = usableH / spreadY;
+  } // else every node coincides (typically just one node) -- no scale, only centring below.
+  scale = Math.min(MAX_SCALE, scale);
+  const midX = (minX + maxX) / 2;
+  const midY = (minY + maxY) / 2;
+  const targetCx = width / 2;
+  const targetCy = PAD_TOP + usableH / 2;
+  for (const id of ids) {
+    pos[id].x = targetCx + (pos[id].x - midX) * scale;
+    pos[id].y = targetCy + (pos[id].y - midY) * scale;
+  }
+
   // The bounds every acceptance test checks: no circle may draw outside the
   // viewBox, clamped by the same radius the renderer uses.
   for (const id of ids) {
@@ -309,7 +360,8 @@ function buildGraphSvg(data) {
     })
     .join("");
 
-  const nodeSvg = Object.keys(pos)
+  const ids = Object.keys(pos);
+  const nodeSvg = ids
     .map((id) => {
       const isGap = !backlinksOf.has(id);
       const r = nodeRadius(backlinksOf.get(id) || 0);
@@ -319,12 +371,28 @@ function buildGraphSvg(data) {
       return `<g class="know-node${isGap ? " gap" : ""}" data-id="${esc(id)}" tabindex="0" role="button"
           aria-label="${esc(ariaLabel)}" transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})">
         <circle r="${r}"></circle>
-        <text y="${r + 12}" text-anchor="middle">${esc(truncateLabel(label))}</text>
       </g>`;
     })
     .join("");
 
-  svg.innerHTML = `<g class="know-edges">${edgeSvg}</g><g class="know-nodes">${nodeSvg}</g>`;
+  // Labels are their own layer, drawn last so a dashed edge crossing a node
+  // or a neighbouring node's circle can never paint over a label -- see the
+  // QA finding on this. Each also carries a halo (`.know-label` in
+  // app.css) for the same reason where a label still crosses an edge that
+  // runs behind it. `nodeRadius` plus a 12px clearance keeps a label below
+  // its own node's circle regardless of layer order.
+  const labelSvg = ids
+    .map((id) => {
+      const isGap = !backlinksOf.has(id);
+      const r = nodeRadius(backlinksOf.get(id) || 0);
+      const p = pos[id];
+      const label = isGap ? id : titleOf.get(id) || id;
+      return `<text class="know-label${isGap ? " gap" : ""}" data-id="${esc(id)}"
+          x="${p.x.toFixed(1)}" y="${(p.y + r + 12).toFixed(1)}" text-anchor="middle">${esc(truncateLabel(label))}</text>`;
+    })
+    .join("");
+
+  svg.innerHTML = `<g class="know-edges">${edgeSvg}</g><g class="know-nodes">${nodeSvg}</g><g class="know-labels">${labelSvg}</g>`;
   for (const g of svg.querySelectorAll(".know-node")) {
     g.onclick = () => selectNote(g.dataset.id);
     g.onkeydown = (e) => {
@@ -342,6 +410,9 @@ function updateGraphSelection() {
   if (!svg) return;
   for (const g of svg.querySelectorAll(".know-node")) {
     g.classList.toggle("selected", g.dataset.id === selected);
+  }
+  for (const t of svg.querySelectorAll(".know-label")) {
+    t.classList.toggle("selected", t.dataset.id === selected);
   }
   for (const line of svg.querySelectorAll(".know-edge")) {
     line.classList.toggle("selected", line.dataset.from === selected || line.dataset.to === selected);
@@ -431,6 +502,26 @@ function findingsByKind(findings) {
   return groups;
 }
 
+/// The daemon's wire `kind` strings are `snake_case` identifiers meant for
+/// code, not a heading -- shown raw they read as `SECRET_SOURCE`,
+/// `MISSING_SOURCE`. This is the one place that translates each of the
+/// seven kinds `knowledge.rs` can emit into the label the issue names for
+/// it; a kind this map has never heard of (a future eighth finding) falls
+/// back to the raw string rather than hiding it.
+const FINDING_LABELS = {
+  unsourced: "Unsourced notes",
+  secret_source: "Sources under data/secrets/",
+  missing_source: "Sources not found",
+  incomplete_frontmatter: "Incomplete frontmatter",
+  orphan: "Orphans — nothing links here",
+  ambiguous_link: "Ambiguous links",
+  truncated: "Walk truncated",
+};
+
+export function findingLabel(kind) {
+  return FINDING_LABELS[kind] || kind;
+}
+
 function renderFindings(findings) {
   const el = $("knowledge-findings");
   if (!el) return;
@@ -439,7 +530,7 @@ function renderFindings(findings) {
     .map(
       ([kind, rows]) => `
     <div class="know-finding-group">
-      <h4>${esc(kind)}</h4>
+      <h4>${esc(findingLabel(kind))}</h4>
       <ul>${rows.map((r) => `<li><code>${esc(r.note)}</code> — ${esc(r.detail)}</li>`).join("")}</ul>
     </div>`,
     )
@@ -540,6 +631,10 @@ export function renderKnowledge() {
     pagesNote.textContent = present
       ? `${pages.length} page${pages.length === 1 ? "" : "s"} without frontmatter ${pages.length === 1 ? "is" : "are"} not in the graph.`
       : "";
+    // Otherwise this renders as an empty bordered box whenever the fetch
+    // fails, or on any other render with no text -- `hidden` whenever there
+    // is nothing to show, not just whenever the fetch specifically failed.
+    pagesNote.hidden = !pagesNote.textContent;
   }
 }
 

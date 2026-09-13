@@ -954,17 +954,25 @@ section > .empty { margin: 0; }
 .know-graph-wrap {
   background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; min-width: 0;
 }
-#knowledge-graph { display: block; width: 100%; height: auto; min-height: 260px; }
+#knowledge-graph { display: block; width: 100%; height: auto; min-height: 260px; max-height: 520px; }
 .know-node circle {
   fill: var(--panel-2); stroke: var(--line); stroke-width: 1.5; cursor: pointer; transition: fill .1s, stroke .1s;
 }
-.know-node text { fill: var(--muted); font: 400 9px/1 var(--sans); pointer-events: none; }
 .know-node:hover circle { stroke: var(--signal-ink); }
 .know-node.gap circle { fill: var(--sunk); stroke: var(--faint); stroke-dasharray: 4 3; }
 .know-node.selected circle { fill: var(--signal-wash); stroke: var(--signal); stroke-width: 2.5; }
-.know-node.selected text { fill: var(--ink); font-weight: 500; }
 .know-node:focus { outline: none; }
 .know-node:focus-visible circle { stroke: var(--signal); stroke-width: 3; }
+/* Labels are their own layer, drawn after every node and edge (see
+   `buildGraphSvg` in knowledge.js) so neither can paint over one. The halo
+   (`paint-order: stroke`, using the graph panel's own background token in
+   both themes) covers the remaining case: an edge that runs behind, rather
+   than under a sibling drawn later, a label it crosses. */
+.know-label {
+  fill: var(--muted); font: 400 9px/1 var(--sans); pointer-events: none;
+  paint-order: stroke; stroke: var(--panel); stroke-width: 3px; stroke-linejoin: round;
+}
+.know-label.selected { fill: var(--ink); font-weight: 500; }
 .know-edge { stroke: var(--line); stroke-width: 1.2; }
 .know-edge.gap { stroke-dasharray: 3 3; stroke: var(--faint); }
 .know-edge.selected { stroke: var(--signal); stroke-width: 2; }

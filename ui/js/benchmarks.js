@@ -81,7 +81,7 @@ function agentRow(a) {
   return `<li>${esc(a.scope)} / ${esc(a.agent)} <span class="sub">${esc(a.lifetime)}${a.declared === false ? " · synthesized" : ""}</span></li>`;
 }
 
-function configCard(config) {
+export function configCard(config) {
   const badge = config.pinned
     ? `<span class="tag">pinned</span>`
     : `<span class="tag warn">unpinned — recorded, excluded</span>`;
@@ -102,7 +102,7 @@ function configCard(config) {
       <div class="bench-flags">${flagsLine}</div>
       <div>sandbox <strong>${esc(config.sandbox)}</strong> <span class="tag warn">declared, not enforced</span></div>
     </div>
-    <details class="bench-details">
+    <details class="bench-details" open>
       <summary>Every field, recorded or not</summary>
       <dl class="bench-fields">${TUPLE_LABELS.map((l) => fieldRow(config, l)).join("")}</dl>
     </details>
