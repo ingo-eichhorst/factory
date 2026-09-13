@@ -2,7 +2,10 @@
 //! and leaves as a `Response`; the interfaces themselves hold no logic.
 
 use chrono::Utc;
-use factory_core::adapter::agent::{run_guide_path, AgentContext, LaunchSpec, TaskBinding};
+use factory_core::adapter::agent::{
+    run_guide_path, run_shell_script_path, truncate_tail, upstream_output_path, AgentContext,
+    LaunchSpec, TaskBinding, UpstreamOutput, UPSTREAM_RESULT_BYTE_CAP,
+};
 use factory_core::adapter::runtime::{
     RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
 };
@@ -1193,6 +1196,12 @@ impl Engine {
         let role = self.effective_role(&task.scope, &agent_name).await;
         let role = self.roles_for(&task.scope).get(&role).cloned();
 
+        // Direct parents only, computed now rather than when the node's task
+        // was created (`create_workflow_task`) -- so a restart's recovery
+        // pass, which dispatches through this same function, needs no
+        // change of its own to pick this up.
+        let upstream = self.upstream_outputs(&task).await;
+
         let ctx = AgentContext {
             scope: task.scope.clone(),
             agent_name: agent_name.clone(),
@@ -1206,6 +1215,7 @@ impl Engine {
                 attempt: run.attempt,
                 token,
                 worktree_branch: run.worktree_branch.clone(),
+                upstream,
             }),
             identity_token: None,
             role,
@@ -1308,6 +1318,73 @@ impl Engine {
         )
         .await;
         Ok((dir, run))
+    }
+
+    /// This task's direct parents in a workflow, in the definition's own edge
+    /// order (deterministic run to run), with the result each finished with.
+    /// Empty for a root node or a task outside any workflow at all. A store
+    /// or workflow-run read failure is logged and treated as "nothing found"
+    /// rather than failing the dispatch -- the task still runs, just without
+    /// the section or file it would otherwise have carried.
+    async fn upstream_outputs(&self, task: &Task) -> Vec<UpstreamOutput> {
+        let Some(origin) = &task.workflow_origin else {
+            return Vec::new();
+        };
+        let run = match self.workflows.get_run(&origin.workflow_run_id).await {
+            Ok(Some(run)) => run,
+            Ok(None) => {
+                tracing::warn!(
+                    task = task.id,
+                    workflow_run = origin.workflow_run_id,
+                    "workflow run not found; dispatching without upstream outputs"
+                );
+                return Vec::new();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    task = task.id,
+                    workflow_run = origin.workflow_run_id,
+                    "reading workflow run for upstream outputs: {error}"
+                );
+                return Vec::new();
+            }
+        };
+
+        let mut outputs = Vec::new();
+        for edge in run.definition.edges.iter().filter(|edge| edge.to == origin.node_id) {
+            let Some(parent_task_id) = run
+                .nodes
+                .iter()
+                .find(|node| node.node_id == edge.from)
+                .and_then(|node| node.task_id.clone())
+            else {
+                // The parent node never got a task (denied, or the run
+                // failed before it was its turn) -- nothing to report.
+                continue;
+            };
+            match self.store.get(&parent_task_id).await {
+                Ok(Some(parent)) => outputs.push(UpstreamOutput {
+                    node_id: edge.from.clone(),
+                    task_id: parent.id.clone(),
+                    title: parent.title.clone(),
+                    result: parent
+                        .result
+                        .as_deref()
+                        .map(|r| truncate_tail(r, UPSTREAM_RESULT_BYTE_CAP).into_owned()),
+                }),
+                Ok(None) => tracing::warn!(
+                    task = task.id,
+                    parent_task = parent_task_id,
+                    "parent task for upstream output no longer exists"
+                ),
+                Err(error) => tracing::warn!(
+                    task = task.id,
+                    parent_task = parent_task_id,
+                    "reading parent task for upstream output: {error}"
+                ),
+            }
+        }
+        outputs
     }
 
     /// What an agent says about its own run. The token is what makes this a
@@ -1552,6 +1629,24 @@ impl Engine {
         // `launch_spec` managed to write before it failed cleaned up.
         let guide = run_guide_path(&self.factory_snapshot().guides_dir(), &run.task_id);
         let _ = std::fs::remove_file(guide);
+        // Same story for the upstream-outputs file (`ShellAgent` writes it
+        // and exports its path as `FACTORY_UPSTREAM_FILE`; a harness agent
+        // never writes one at all, since it renders the same data inline
+        // instead): named after the task, nothing else removes it, harmless
+        // to remove when this run never wrote one.
+        let upstream = upstream_output_path(&self.factory_snapshot().guides_dir(), &run.task_id);
+        let _ = std::fs::remove_file(upstream);
+        // The shell agent's generated wrapper script, keyed by *run* id
+        // rather than task id (see `run_shell_script_path`'s own comment) --
+        // a retry's fresh run must never lose its script to this cleanup of
+        // an earlier attempt's. Unlinking a file the pane's shell is still
+        // sourcing is safe on Unix: the shell holds the file open, so
+        // removing the directory entry does not disturb it, and a shell
+        // reads a sourced file's content in rather than re-opening it line
+        // by line, so there is no window where this could cut a run off
+        // mid-script.
+        let script = run_shell_script_path(&self.factory_snapshot().guides_dir(), &run.id);
+        let _ = std::fs::remove_file(script);
 
         let Some(session) = &run.session else { return };
         if let Ok(runtime) = self.registry.runtime(&session.runtime) {

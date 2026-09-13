@@ -7,7 +7,7 @@ pub mod interface;
 pub mod runtime;
 pub mod store;
 
-pub use agent::{Agent, AgentContext, LaunchKind, LaunchSpec, TaskBinding};
+pub use agent::{Agent, AgentContext, LaunchKind, LaunchSpec, TaskBinding, UpstreamOutput};
 pub use interface::{Interface, InterfaceContext};
 pub use runtime::{
     AgentRuntime, RuntimeConnectionDiagnostic, RuntimeConnectionState, RuntimeEvent,
