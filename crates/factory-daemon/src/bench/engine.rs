@@ -591,6 +591,17 @@ impl Engine {
             if self.store.active_run(task_id).await.ok().flatten().is_some() {
                 let _ = self.cancel_task_run(task_id).await;
             }
+            // `cancel_task_run` closes the run but, unlike the request-level
+            // `TaskCancel` path, never itself judges the attempt behind it --
+            // so without this, the attempt would reach the settle-whatever's-
+            // left pass below with no `run_id`, no `started_at`, and no
+            // `wall_clock_seconds`, and its worktree would never be
+            // reachable by `clean_bench_run` again. Safe to call
+            // unconditionally: a no-op cycle (E0391) is not a risk here --
+            // `cancel_bench_run` is never on `advance_bench_run`'s own spawn
+            // tree -- and a no-op read of what already happened is fine when
+            // there was nothing to cancel.
+            self.record_bench_task_state(task_id).await;
         }
 
         // Settle whatever the cancellation above did not already -- a task
@@ -963,6 +974,119 @@ mod tests {
             "the gate exited 0, so the verdict must be Pass even though the agent itself \
              reported failure -- proving was_reported_by_agent took the gate branch \
              rather than reading this as a daemon give-up: {attempt:?}"
+        );
+    }
+
+    /// Found by the shell-agent e2e run, not by inspection: cancelling a
+    /// bench run whose attempt was genuinely in flight (dispatched, with a
+    /// real `Run` row and a real worktree) left that attempt's `run_id`
+    /// unset, because `cancel_task_run` -- called directly here rather than
+    /// through the `TaskCancel` request path -- never itself judges the
+    /// attempt behind it. `clean_bench_run` needs exactly that `run_id` to
+    /// find the worktree at all, so a run cancelled this way could never
+    /// have its worktrees removed by `bench clean`, forever. This is the
+    /// regression test for the fix: `cancel_bench_run` now calls
+    /// `record_bench_task_state` itself right after cancelling.
+    #[tokio::test]
+    async fn cancelling_an_in_flight_attempt_still_leaves_its_run_id_reachable() {
+        let scope_dir = temp_dir("cancel-run-id");
+        let engine = test_engine(scope_dir.clone());
+
+        let case = Case {
+            id: "slow-case".into(),
+            title: "a case that takes a while".into(),
+            scope: "demo".into(),
+            instructions: "sleep 100".into(),
+            gate: None,
+            reset: None,
+            base: None,
+            timeout_seconds: None,
+            origin: None,
+        };
+        let origin = BenchOrigin {
+            bench_run_id: "run-cancel".into(),
+            case_id: case.id.clone(),
+            agent: "shell".into(),
+            attempt: 1,
+        };
+
+        let task = engine
+            .create_bench_task(
+                NewTask {
+                    title: "bench slow-case".into(),
+                    scope: Some("demo".into()),
+                    worktree: Some(false),
+                    ..Default::default()
+                },
+                origin.clone(),
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Already dispatched, in flight -- exactly what a running attempt
+        // looks like the moment somebody asks to cancel the run.
+        let mut attempt = BenchAttempt::pending(uuid::Uuid::new_v4().to_string(), case.id.clone(), "shell".into(), 1);
+        attempt.task_id = Some(task.id.clone());
+        attempt.started_at = Some(Utc::now());
+
+        let run = BenchRun {
+            id: origin.bench_run_id.clone(),
+            dataset: "demo-set".into(),
+            dataset_revision: 1,
+            cases: vec![case],
+            case_bases: Default::default(),
+            agents: vec!["shell".into()],
+            attempts_per_case: 1,
+            concurrency: 1,
+            status: BenchRunStatus::Running,
+            attempts: vec![attempt],
+            started_at: Utc::now(),
+            ended_at: None,
+        };
+        engine.bench.put_run(&run).await.unwrap();
+        for a in &run.attempts {
+            engine.bench.put_attempt(&run.id, a).await.unwrap();
+        }
+
+        // A real, still-running `Run` row -- what `cancel_task_run` needs in
+        // order to find anything to cancel, and what carries the worktree
+        // this attempt would otherwise orphan.
+        let task_run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Bench,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "local".into(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &task_run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Running),
+                    worktree_path: Some(scope_dir.to_string_lossy().to_string()),
+                    worktree_branch: Some("factory/slow-case".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let settled = engine.cancel_bench_run(&origin.bench_run_id).await.unwrap();
+        assert_eq!(settled.status, BenchRunStatus::Cancelled);
+        let attempt = &settled.attempts[0];
+        assert_eq!(attempt.verdict, Some(Verdict::Cancelled), "{attempt:?}");
+        assert_eq!(
+            attempt.run_id,
+            Some(task_run.id.clone()),
+            "a cancelled in-flight attempt must still carry the run id `clean_bench_run` \
+             needs to find its worktree: {attempt:?}"
         );
     }
 }
