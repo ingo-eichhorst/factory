@@ -121,3 +121,7 @@ something impossible.
 - A permanent agent is quiet by design. It is checked for whether its session is
   still there and nothing else -- never for whether it has said anything. The
   run timeouts must not reach it.
+- The guide (`AgentContext::factory_guide`) and the reporting contract
+  (`AgentContext::reporting_contract`) are the only two places Factory tells
+  an agent how to use it. Anything else an agent needs to know belongs in one
+  of those two, not in a third place invented for the occasion.

@@ -109,6 +109,22 @@ shared adapter. A task that names a bare adapter with no matching declaration
 still uses only that adapter's defaults. The `shell` agent does not accept
 `args`: it runs the task instructions as the command itself.
 
+A standing agent never gets a task prompt — `prompt()` is only called for a
+task run — so it is told about Factory itself through `launch_spec` instead,
+the one call every agent gets. `claude`, `pi`, and `opencode` each get the
+guide through their own system-prompt mechanism (a file for `claude` and
+`pi`, an env var for `opencode`); a task run on those harnesses gets the same
+guide the same way, so the prompt itself stays narrower. `codex`'s own
+`developer_instructions` config key takes text, not a path, and a
+multi-paragraph argument does not survive `herdr agent start` — verified
+live, herdr refuses it outright rather than mistyping it — so `codex` takes
+the documented fallback: a task run gets the guide above the task in its
+prompt, and a standing `codex` agent gets nothing at all. `shell` is not a
+model and gets no guide either way. A standing agent's session that outlived
+the daemon is *adopted* rather than restarted, so it keeps whatever guide it
+started with; a role given to it afterward with `factory agent role` is not
+reflected in a guide already sitting in a launched session.
+
 Every agent has a **role**, and a task names a **concrete agent**, not a
 harness. `assistant` and `scratch` are different agents even when both are pi.
 
@@ -282,10 +298,14 @@ until the first ends or is cancelled.
    if any of them names an adapter that does not exist.
 2. `task.run` opens a run, mints a callback token for it, and asks the runtime
    for a session in the scope's directory.
-3. The agent adapter produces the prompt. It carries the task, the working
-   directory, and the reporting contract — the exact commands the agent is to
-   run. The same values are in the session's environment as `FACTORY_TASK_ID`,
-   `FACTORY_TASK_TOKEN`, `FACTORY_SOCKET`, and `FACTORY_BIN`.
+3. The agent adapter produces the prompt and, through the harness's own
+   system-prompt mechanism, injects a short guide to Factory itself — what it
+   is, who this agent is, and which commands its role allows. The prompt
+   itself stays narrower: the task, the working directory, and the reporting
+   contract — the exact commands the agent is to run. The guide never repeats
+   those; it just says where to find them. The same values are in the
+   session's environment as `FACTORY_TASK_ID`, `FACTORY_TASK_TOKEN`,
+   `FACTORY_SOCKET`, and `FACTORY_BIN`.
 4. The agent runs `factory task report <id> --status running …`, then finishes
    with `done`, `failed`, or `blocked`. The report lands on whichever run of
    that task is in progress; the token says it is that run's agent speaking.
@@ -437,8 +457,11 @@ runtime should bring the agent up — either a harness the runtime knows by name
 (`{"kind": {"named": "gemini"}}`) or a command to run in the session
 (`{"kind": {"command": ["my-agent", "--headless"]}}`). `agent.prompt` returns
 the text to submit. Both are given the task, the working directory, the path to
-the `factory` binary, the callback token, and `reporting_contract` — the exact
-wording the built-in agents use. Paste it rather than rewriting it.
+the `factory` binary, the callback token, `reporting_contract` — the exact
+wording the built-in agents use to say how to report back — and
+`factory_guide` — the same wording they use to say what Factory is, who this
+agent is, and which commands its role allows. Paste both rather than
+rewriting them.
 
 A **task** plugin answers `task.create`, `task.get`, `task.list`, `task.update`,
 `task.delete`, `task.append_entry`, `task.entries`, `task.due`, and the run

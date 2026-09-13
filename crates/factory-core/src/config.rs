@@ -593,6 +593,14 @@ impl Factory {
         self.factory_dir().join("worktrees")
     }
 
+    /// Where the guide to Factory itself lives, for a harness whose
+    /// system-prompt mechanism wants a file rather than inline text. Under
+    /// `.factory/`, never inside a scope -- a scope owns only its own
+    /// `config.yaml`, and this is daemon state like everything else here.
+    pub fn guides_dir(&self) -> PathBuf {
+        self.factory_dir().join("guides")
+    }
+
     /// The control socket.
     ///
     /// It belongs in `.factory/`, but a unix socket path has to fit in

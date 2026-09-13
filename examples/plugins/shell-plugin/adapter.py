@@ -21,9 +21,11 @@ An agent adapter answers two methods:
   agent.prompt      -- what to say to it once it is up
 
 Both agent methods are given the whole context: the task, the working
-directory, the path to the `factory` binary, the task's callback token, and
-`reporting_contract`, which is the exact wording the built-in agents use to
-tell an agent how to report back. Paste it rather than rewriting it.
+directory, the path to the `factory` binary, the task's callback token,
+`reporting_contract` (the exact wording the built-in agents use to tell an
+agent how to report back), and `factory_guide` (the exact wording they use to
+tell it what Factory is, who it is, and what its role lets it do). Paste both
+rather than rewriting them.
 """
 
 import json

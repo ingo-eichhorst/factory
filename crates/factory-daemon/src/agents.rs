@@ -171,14 +171,25 @@ impl Engine {
             agent: agent.clone(),
         });
 
-        // No task: a standing agent is started to be there, and is told nothing.
+        // Resolved the same way `caller_for` resolves it for every other
+        // request, and only after the row above is written, so this reads
+        // back the role the access check will actually apply rather than
+        // whatever the agent was wearing before this start.
+        let role = self.effective_role(scope, name).await;
+        let role = self.roles.get(&role).cloned();
+
+        // No task: a standing agent is started to be there, and is told
+        // nothing about one -- but it still gets the guide to Factory itself.
         let ctx = AgentContext {
             scope: scope.to_string(),
+            agent_name: name.to_string(),
             cwd: cwd.clone(),
             factory_bin: self.factory_bin.clone(),
             socket: factory.socket_path(),
+            guides_dir: factory.guides_dir(),
             task: None,
             identity_token: Some(identity),
+            role,
         };
 
         let mut launch = match adapter.launch_spec(&ctx).await {
@@ -621,7 +632,7 @@ mod tests {
     use factory_core::config::{Config, DaemonConfig, Factory, Instance};
     use factory_core::protocol::{Payload, Request, Response};
     use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
-    use factory_core::task::{NewTask, Task, TaskStatus};
+    use factory_core::task::{NewTask, Task, TaskReport, TaskStatus};
     use factory_plugins::registry::Registry;
     use factory_plugins::{HarnessAgent, SqliteStore};
     use std::path::PathBuf;
@@ -1000,10 +1011,14 @@ mod tests {
         engine.start_agent("demo", "watcher").await.unwrap();
 
         let starts = stub.starts.lock().unwrap();
-        assert_eq!(
-            starts[0].launch.args,
-            ["--model", "sonnet", "--model", "opus"]
-        );
+        let args = &starts[0].launch.args;
+        // The adapter's own default first, then the guide `pi` gets injected
+        // as its own flag, then the scope's declared `args:` last of all --
+        // so a declaration can still override or add to what the adapter and
+        // the guide put there.
+        assert_eq!(&args[0..2], ["--model", "sonnet"]);
+        assert_eq!(args[2], "--append-system-prompt");
+        assert_eq!(&args[args.len() - 2..], ["--model", "opus"]);
         drop(starts);
         std::fs::remove_dir_all(root).ok();
     }
@@ -1061,10 +1076,10 @@ mod tests {
         engine.start_run(&task.id, Trigger::Manual).await;
 
         let starts = stub.starts.lock().unwrap();
-        assert_eq!(
-            starts[0].launch.args,
-            ["--model", "sonnet", "--model", "opus"]
-        );
+        let args = &starts[0].launch.args;
+        assert_eq!(&args[0..2], ["--model", "sonnet"], "the adapter's own defaults come first");
+        assert_eq!(args[2], "--append-system-prompt", "then the guide's flag");
+        assert_eq!(&args[args.len() - 2..], ["--model", "opus"], "the declared override lands last");
         drop(starts);
         std::fs::remove_dir_all(root).ok();
     }
@@ -1089,8 +1104,93 @@ mod tests {
         engine.start_run(&task.id, Trigger::Manual).await;
 
         let starts = stub.starts.lock().unwrap();
-        assert_eq!(starts[0].launch.args, ["--model", "sonnet"]);
+        // No declaration named "configured" itself, so nothing to append --
+        // just the adapter's own default and, after it, the guide's flag.
+        let args = &starts[0].launch.args;
+        assert_eq!(args.len(), 4, "{args:?}");
+        assert_eq!(&args[0..3], ["--model", "sonnet", "--append-system-prompt"]);
         drop(starts);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_runs_guide_file_outlives_dispatch_and_is_gone_once_the_run_ends() {
+        // Pins the fix for the bug this replaced: the guide was deleted right
+        // after the prompt was submitted, on the assumption every harness had
+        // already read it by then. That is false for `opencode`, which
+        // re-resolves its configured instruction paths on every request
+        // rather than once at startup -- an early delete made the guide
+        // silently vanish partway through the run. The file must survive
+        // dispatch and disappear only once the run actually ends, through
+        // whichever path closes it.
+        let (engine, _stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n",
+        );
+        let task = engine
+            .create(NewTask {
+                title: "exercise guide cleanup".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("builder".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+
+        let guide = factory_core::adapter::agent::run_guide_path(&engine.factory_snapshot().guides_dir(), &task.id);
+        assert!(guide.exists(), "still there once the harness is up and running");
+
+        let run = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some("ok".into()),
+                    error: None,
+                    token: run.token.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(!guide.exists(), "gone once the agent's own terminal report closes the run");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_runs_guide_file_is_also_cleaned_up_when_the_watchdog_gives_up_on_it() {
+        // The same cleanup, reached through `fail_run` instead of a report --
+        // `close_session` is the one place both paths (and a cancel, and a
+        // task deleted out from under an active run) go through.
+        let (engine, _stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n",
+        );
+        let task = engine
+            .create(NewTask {
+                title: "exercise watchdog cleanup".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("builder".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+
+        let guide = factory_core::adapter::agent::run_guide_path(&engine.factory_snapshot().guides_dir(), &task.id);
+        assert!(guide.exists());
+
+        let run = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        engine.fail_run(&run.id, "gave up waiting").await;
+
+        assert!(!guide.exists(), "gone once the watchdog closes the run too");
         std::fs::remove_dir_all(root).ok();
     }
 
