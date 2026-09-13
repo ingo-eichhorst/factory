@@ -17,6 +17,7 @@ import {
   connectionError,
   edgeStatusClass,
   fitView,
+  freePosition,
   nodeStatusClass,
   rootIds,
   topologicalSummary,
@@ -91,12 +92,22 @@ export function workflowTail() {
   return current?.id ? workflowRouteTail(current.id, mode === "run" ? currentRun?.id : null) : [];
 }
 
-export function readWorkflowTail(tail) {
+/// The router calls this without awaiting it (its `read` contract is
+/// fire-and-forget everywhere else in the app too), but the tail it reads
+/// only becomes true once `open`'s own `loadRuns` resolves. `showTab` writes
+/// the hash again right after calling this, while `current` is still
+/// whatever it was before -- for a fresh link that's `null`, so that write
+/// would otherwise replace the very tail this function was just asked to
+/// apply with an empty one. Settling here and correcting the hash
+/// afterward (a correction, not a new navigation: `replace`) is what
+/// `tasks.js`'s `openTask` already does for the same reason.
+export async function readWorkflowTail(tail) {
   const { id, runId } = readWorkflowRouteTail(tail);
   if (!id) return;
   const found = workflows.find(workflow => workflow.id === id);
-  if (found) open(found, false, runId);
-  else loadWorkflows(id, runId);
+  if (found) await open(found, false, runId);
+  else await loadWorkflows(id, runId);
+  writeHash(true);
 }
 
 export async function loadWorkflows(wanted, wantedRun) {
@@ -105,7 +116,7 @@ export async function loadWorkflows(wanted, wantedRun) {
     workflows = (await api("/api/workflows")).workflows;
     if (wanted) {
       const found = workflows.find(workflow => workflow.id === wanted);
-      if (found) open(found, false, wantedRun);
+      if (found) await open(found, false, wantedRun);
     } else if (current?.id && !dirty) {
       const fresh = workflows.find(workflow => workflow.id === current.id);
       if (fresh) current = structuredClone(fresh);
@@ -145,7 +156,7 @@ function guardDirty(proceed) {
   renderProblems();
 }
 
-function open(workflow, navigate = true, runId) {
+async function open(workflow, navigate = true, runId) {
   current = structuredClone(workflow);
   currentRun = null;
   selectedNode = null; selectedEdge = null; connectFrom = null;
@@ -154,7 +165,7 @@ function open(workflow, navigate = true, runId) {
   const canvas = $("workflow-canvas");
   view = fitView(current.nodes, canvas?.clientWidth || 800, canvas?.clientHeight || 500);
   renderWorkflows();
-  loadRuns(runId);
+  await loadRuns(runId);
   if (navigate) writeHash();
 }
 
@@ -365,8 +376,15 @@ function wireEdge(group) {
 }
 
 function select(id) {
-  selectedNode = id; selectedEdge = null;
+  // A click while connecting is an attempt to link, not a plain selection --
+  // `completeConnect` alone decides whether that moves the selection. A
+  // refused link must leave `selectedNode` exactly as it was: setting it
+  // here first (even on a rejection) would leave the inspector's fields
+  // showing the *previous* node while `selectedNode` already pointed at the
+  // new one, and the next `readEditor()` -- typing, or Save -- would write
+  // that stale text onto the wrong node.
   if (connectFrom) { completeConnect(id); return; }
+  selectedNode = id; selectedEdge = null;
   renderEditor();
   $("workflow-nodes").querySelector(`[data-node="${CSS.escape(id)}"]`)?.focus();
 }
@@ -376,7 +394,7 @@ function completeConnect(toId) {
   connectFrom = null;
   if (!fromId) return;
   const error = connectionError(current.nodes, current.edges, fromId, toId);
-  if (error) { clientErrors = [{ message: error }]; renderProblems(); renderCanvas(); return; }
+  if (error) { clientErrors = [{ message: error }]; renderCanvas(); renderProblems(); return; }
   current.edges = addEdge(current.edges, uid("edge"), fromId, toId);
   clientErrors = [];
   markDirty();
@@ -608,7 +626,7 @@ async function save() {
   current.name = current.name.trim();
   const errors = validate(current);
   clientErrors = errors; serverError = null;
-  if (errors.length) { renderProblems(); renderCanvas(); return; }
+  if (errors.length) { renderCanvas(); renderProblems(); return; }
   setBusy(true);
   const draft = { name: current.name, description: current.description, scope: current.scope, nodes: current.nodes, edges: current.edges };
   try {
@@ -655,7 +673,8 @@ async function removeWorkflow() {
 
 function addNode() {
   if (mode === "run") return;
-  const at = current.nodes.length ? { x: 80 + current.nodes.length * 36, y: 80 + current.nodes.length * 28 } : { x: 80, y: 80 };
+  const near = selectedNode && current.nodes.find(item => item.id === selectedNode);
+  const at = freePosition(current.nodes, near ? near.position.x + 40 : 80, near ? near.position.y + 40 : 80);
   const node = newTaskNode(current.scope, at.x, at.y);
   current.nodes.push(node);
   selectedNode = node.id; selectedEdge = null;
