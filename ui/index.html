@@ -412,17 +412,67 @@
     <div class="empty" id="knowledge-empty" hidden></div>
     <div class="know-shell" id="knowledge-shell">
       <section class="know-graph-wrap">
+        <div class="know-toolbar" id="knowledge-toolbar">
+          <input type="search" id="knowledge-search" placeholder="Search…" aria-label="Search the knowledge graph">
+          <label class="know-toggle"><input type="checkbox" id="knowledge-toggle-tags">Tags</label>
+          <label class="know-toggle"><input type="checkbox" id="knowledge-toggle-documents">Documents</label>
+          <label class="know-toggle"><input type="checkbox" id="knowledge-toggle-orphans">Orphans</label>
+          <label class="know-toggle"><input type="checkbox" id="knowledge-toggle-gaps">Gaps</label>
+          <label class="know-toggle"><input type="checkbox" id="knowledge-local">Local graph</label>
+          <select id="knowledge-depth" aria-label="Local graph depth">
+            <option value="1">depth 1</option>
+            <option value="2" selected>depth 2</option>
+            <option value="3">depth 3</option>
+          </select>
+          <span class="sp"></span>
+          <button class="btn icon" type="button" id="knowledge-zoom-out" aria-label="Zoom out">−</button>
+          <button class="btn icon" type="button" id="knowledge-zoom-in" aria-label="Zoom in">+</button>
+          <button class="btn" type="button" id="knowledge-zoom-fit">Fit</button>
+        </div>
         <!-- No `role="img"` here: that role would flatten the SVG to a single
              opaque picture and strip every focusable node below out of the
              accessibility tree, which is exactly backwards for a diagram
              whose nodes are each their own tab stop (`role="button"` on the
-             `<g>` `buildGraphSvg` draws in knowledge.js). The notes table
-             below is the accessible, tabular fallback to this picture. -->
+             `<g>` `buildGraphSvg` draws in knowledge.js). The tables below
+             are the accessible, tabular fallback to this picture. -->
         <svg id="knowledge-graph" viewBox="0 0 640 420" preserveAspectRatio="xMidYMid meet"
-          aria-label="Knowledge graph. Notes are solid nodes sized by backlink count; gaps -- links to pages never written -- are dashed. Select a node to see it in the inspector."></svg>
+          aria-label="Knowledge graph. Pages are circles sized by backlink count and coloured by area; tags are diamonds; documents are squares; gaps -- links to something never written -- are dashed. Select a node to see it in the inspector."></svg>
       </section>
-      <aside class="know-inspector" id="knowledge-inspector" aria-label="Selected note"></aside>
+      <aside class="know-inspector" id="knowledge-inspector" aria-label="Selected item"></aside>
     </div>
+    <section class="know-add">
+      <h3>Add documents</h3>
+      <p class="sub">Files you choose here are copied into the vault; nothing on this page edits or deletes one.</p>
+      <input type="file" id="knowledge-upload" multiple aria-label="Add documents to the knowledge vault">
+      <div class="err" id="knowledge-upload-errors" hidden></div>
+    </section>
+    <section>
+      <h3>Pages</h3>
+      <table>
+        <thead><tr>
+          <th>Title</th><th>Id</th><th>Area</th><th>Status</th>
+          <th>Backlinks</th><th>Links</th><th>Tags</th><th>Documents</th><th>Sources</th>
+        </tr></thead>
+        <tbody id="knowledge-pages"></tbody>
+      </table>
+      <div class="empty" id="knowledge-no-pages" hidden>No pages indexed.</div>
+    </section>
+    <section>
+      <h3>Tags</h3>
+      <table>
+        <thead><tr><th>Tag</th><th>Pages</th></tr></thead>
+        <tbody id="knowledge-tags"></tbody>
+      </table>
+      <div class="empty" id="knowledge-no-tags" hidden>No tags.</div>
+    </section>
+    <section>
+      <h3>Documents</h3>
+      <table>
+        <thead><tr><th>Path</th><th>Type</th><th>Size</th><th>Referenced by</th></tr></thead>
+        <tbody id="knowledge-documents"></tbody>
+      </table>
+      <div class="empty" id="knowledge-no-documents" hidden>No documents.</div>
+    </section>
     <section>
       <h3>Gaps</h3>
       <table>
@@ -436,18 +486,6 @@
       <div id="knowledge-findings"></div>
       <div class="empty" id="knowledge-no-findings" hidden>No findings.</div>
     </section>
-    <section>
-      <h3>Notes</h3>
-      <table>
-        <thead><tr>
-          <th>Title</th><th>Id</th><th>Area</th><th>Status</th>
-          <th>Backlinks</th><th>Links</th><th>Sources</th>
-        </tr></thead>
-        <tbody id="knowledge-notes"></tbody>
-      </table>
-      <div class="empty" id="knowledge-no-notes" hidden>No notes indexed.</div>
-    </section>
-    <p class="env-note" id="knowledge-pages-note"></p>
   </div>
   </div>
 </main>
