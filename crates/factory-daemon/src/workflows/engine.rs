@@ -409,19 +409,21 @@ mod tests {
             .clone();
 
         // `node()` makes every node a `shell` task, so the captured prompt is
-        // the typed report line, not a harness prompt -- it names the
-        // upstream file rather than rendering the section inline. Reading
-        // that file back is what actually exercises the daemon's own
-        // computation of `upstream`, edge order and all, rather than a
-        // rendering of it.
+        // just `. '<script path>'` -- the report wrapper (and the upstream
+        // export, when there is one) lives in that file, not the prompt
+        // text. Reading the script back, and then the upstream file it
+        // names, is what actually exercises the daemon's own computation of
+        // `upstream`, edge order and all, rather than a rendering of it.
         let prompt = wait_for_prompt(&engine, &recorder, &c.id).await;
-        let path = prompt
+        let script = std::fs::read_to_string(script_path_from_prompt(&prompt))
+            .unwrap_or_else(|e| panic!("reading the shell agent's script ({prompt}): {e}"));
+        let path = script
             .split("FACTORY_UPSTREAM_FILE='")
             .nth(1)
             .and_then(|rest| rest.split('\'').next())
-            .unwrap_or_else(|| panic!("the shell line exports the upstream file when there is one: {prompt}"));
+            .unwrap_or_else(|| panic!("the script exports the upstream file when there is one: {script}"));
         let json = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("reading the upstream file the line points at ({path}): {e}"));
+            .unwrap_or_else(|e| panic!("reading the upstream file the script points at ({path}): {e}"));
         let entries: Vec<UpstreamOutput> = serde_json::from_str(&json).unwrap();
 
         assert_eq!(entries.len(), 2, "both direct parents, no more: {entries:#?}");
@@ -490,10 +492,24 @@ mod tests {
         engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
         let a = wait_for_tasks(&engine, 1).await.pop().unwrap();
         let prompt = wait_for_prompt(&engine, &recorder, &a.id).await;
+        let script = std::fs::read_to_string(script_path_from_prompt(&prompt))
+            .unwrap_or_else(|e| panic!("reading the shell agent's script ({prompt}): {e}"));
         assert!(
-            !prompt.contains("FACTORY_UPSTREAM_FILE"),
-            "a root node has no parents to report: {prompt}"
+            !script.contains("FACTORY_UPSTREAM_FILE"),
+            "a root node has no parents to report: {script}"
         );
+    }
+
+    /// `ShellAgent::prompt` (see `crates/factory-plugins/src/builtin/agents.rs`)
+    /// returns exactly `. '<script path>'` -- the whole report wrapper lives
+    /// in that file rather than the typed line itself. Pulled out once so
+    /// every test reading a shell node's dispatched prompt agrees on how to
+    /// get from it back to the script.
+    fn script_path_from_prompt(prompt: &str) -> &str {
+        prompt
+            .strip_prefix(". '")
+            .and_then(|rest| rest.strip_suffix('\''))
+            .unwrap_or_else(|| panic!("expected `. '<script path>'`, got {prompt:?}"))
     }
 
     #[tokio::test]

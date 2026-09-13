@@ -238,22 +238,19 @@ impl Agent for ShellAgent {
 
     async fn prompt(&self, ctx: &AgentContext) -> Result<String> {
         let binding = ctx.binding()?;
-        let bin = ctx.factory_bin.display();
+        let bin = ctx.factory_bin.display().to_string();
         let id = &binding.task.id;
         let command = binding.task.instructions.trim();
         let command = if command.is_empty() { "true" } else { command };
 
         // A downstream node reads its parents' outputs from a file rather
-        // than having them spliced into this typed line -- quotes, `$`,
+        // than having them spliced into the script below -- quotes, `$`,
         // backticks and newlines in a parent's stdout would otherwise have
-        // to survive being embedded in the line that reports *this* task.
-        // Written again here rather than trusted from `launch_spec` (herdr
-        // does carry `LaunchSpec.env` through, but this is the same value
-        // computed the same way, not a dependency on call order). The path
-        // is daemon-generated -- guides_dir joined with a task id -- so it
-        // never contains a quote or a newline in practice, but this runs in
-        // the daemon process, where a stray one is skipped rather than
-        // asserted into a panic (a plugin -- and this is one of the
+        // to survive being embedded in the text that reports *this* task.
+        // The path is daemon-generated -- guides_dir joined with a task id
+        // -- so it never contains a quote or a newline in practice, but this
+        // runs in the daemon process, where a stray one is skipped rather
+        // than asserted into a panic (a plugin -- and this is one of the
         // built-in ones -- must never take the daemon down with it).
         let export_upstream = ctx
             .write_upstream_file()?
@@ -261,78 +258,80 @@ impl Agent for ShellAgent {
             .map(|quoted| format!("export FACTORY_UPSTREAM_FILE={quoted}; "))
             .unwrap_or_default();
 
-        // One line, because it is typed into a shell prompt, and it has to
-        // work in both bash and zsh: no `PIPESTATUS`/`pipestatus`, no process
-        // substitution. Stdout stays visible in the pane (`tee`) and is also
-        // captured to a temp file, so it can travel -- with the command's
-        // real exit code -- into `--result-file` instead of being
-        // interpolated into the typed line. `echo $? > "$_o.rc"` runs before
-        // the pipe to `tee` can replace `$?` with `tee`'s own status, which
-        // is what makes the captured code the command's rather than the
-        // pipe's. `mktemp` takes an explicit template because the BSD
-        // `mktemp` on macOS (unlike GNU's) refuses a bare invocation; `"$_o.rc"`
-        // reuses that one temp name rather than calling `mktemp` a second
-        // time. The outer `( … )` subshell is unchanged from before this
-        // feature: it is what stops an instruction ending in `exit` from
-        // taking the pane's own shell down with it, and it is also where
-        // `FACTORY_UPSTREAM_FILE` is exported, so it never leaks into the
-        // pane once the command finishes. Cleanup runs once, after both
-        // branches, so a failure does not skip it.
+        // Everything the report needs -- the running/done/failed calls, the
+        // stdout capture, and cleanup -- lives in a script file rather than
+        // in the line typed into the pane. A pty's line discipline in
+        // canonical mode caps how much it buffers before a newline (1024
+        // bytes, MAX_CANON, on both Linux and macOS) and silently drops
+        // anything past that with no error anywhere: a real workflow run
+        // hung exactly this way against an earlier, inline draft of this
+        // feature, cut off mid-line at byte 1023. Writing the wrapper to a
+        // file instead means the typed line is just `. '<path>'`, whose
+        // length never depends on the command's own, and the instructions
+        // go into the file verbatim, so a multi-line instruction now works
+        // too (the `( … )` subshell below spans lines exactly as well as it
+        // spans one, which is what makes that safe).
         //
-        // Kept as short as the feature allows, deliberately: this line is
-        // *typed into a real pty*, not passed as a subprocess argument, and
-        // a pty's line discipline in canonical mode has its own limit on
-        // how much it will buffer before a newline -- 1024 bytes on both
-        // Linux and macOS (`MAX_CANON`). Past that, bytes are silently
-        // dropped rather than reported anywhere, and the agent hangs
-        // forever having never actually sent the command. `bin` and `id` are
-        // each bound to a short variable once instead of repeated three
-        // times, which is the single biggest saving available here; a very
-        // long task or a very deep instance root can still approach the
-        // limit, and there is no way to make an arbitrarily long instruction
-        // fit in one typed line, so `MAX_LINE_BYTES` below turns "too long"
-        // into a reported failure instead of a silent hang.
-        //
-        // Unlike the upstream path above, there is no sensible fallback if
-        // `bin` somehow held a newline -- skipping it would leave `$_f`
-        // undefined and every report call broken -- so this always quotes
-        // rather than bailing out. `id` is a daemon-generated task id (a
-        // uuid), never anything a shell would treat specially, so it is
-        // bound unquoted.
-        let bin_quoted = format!("'{}'", bin.to_string().replace('\'', r"'\''"));
-        let line = format!(
-            "_f={bin_quoted}; _t={id}; _o=$(mktemp \"${{TMPDIR:-/tmp}}/fXXXXXX\"); \
-             $_f task report $_t --status running --message 'shell agent started' >/dev/null; \
-             {{ ( {export_upstream}{command} ); echo $? > \"$_o.rc\"; }} | tee \"$_o\"; \
-             _c=$(cat \"$_o.rc\"); \
-             if [ \"$_c\" = 0 ]; then $_f task report $_t --status done --result 'command exited 0' --result-file \"$_o\"; \
-             else $_f task report $_t --status failed --result \"command exited $_c\" --error \"command exited $_c\" --result-file \"$_o\"; fi; \
-             rm -f \"$_o\" \"$_o.rc\""
+        // `echo $? > "$_factory_rc"` runs before the pipe to `tee` can
+        // replace `$?` with `tee`'s own status, which is what makes the
+        // captured code the command's rather than the pipe's. `mktemp`
+        // takes an explicit template because the BSD `mktemp` on macOS
+        // (unlike GNU's) refuses a bare invocation. No `PIPESTATUS`/
+        // `pipestatus` and no process substitution: the script has to run
+        // in both bash and zsh, the same as the old one-liner did.
+        let bin_quoted = shell_quote_always(&bin);
+        let script = format!(
+            "# Generated by Factory's shell agent for run {run_id}; sourced\n\
+             # into the pane's own shell (see ShellAgent::prompt), not run as\n\
+             # a subprocess, so it behaves exactly as if typed there.\n\
+             _factory_bin={bin_quoted}\n\
+             _factory_id={id}\n\
+             _factory_out=$(mktemp \"${{TMPDIR:-/tmp}}/factory-out-XXXXXX\")\n\
+             _factory_rc=$(mktemp \"${{TMPDIR:-/tmp}}/factory-rc-XXXXXX\")\n\
+             \"$_factory_bin\" task report \"$_factory_id\" --status running --message 'shell agent started' >/dev/null\n\
+             {{ ( {export_upstream}{command} ); echo $? > \"$_factory_rc\"; }} | tee \"$_factory_out\"\n\
+             _factory_code=$(cat \"$_factory_rc\")\n\
+             if [ \"$_factory_code\" = 0 ]; then\n\
+             \"$_factory_bin\" task report \"$_factory_id\" --status done --result 'command exited 0' --result-file \"$_factory_out\"\n\
+             else\n\
+             \"$_factory_bin\" task report \"$_factory_id\" --status failed --result \"command exited $_factory_code\" --error \"command exited $_factory_code\" --result-file \"$_factory_out\"\n\
+             fi\n\
+             rm -f \"$_factory_out\" \"$_factory_rc\"\n",
+            run_id = binding.run_id,
         );
-        // A silent hang with no error anywhere is a much worse failure mode
-        // than a task ending `failed` with a message that names the actual
-        // problem -- see the comment above. 1000 rather than 1024 itself
-        // leaves room for the newline that submits the line and a small
-        // margin, without pretending to know the exact number every runtime
-        // and terminal agrees on.
-        const MAX_LINE_BYTES: usize = 1000;
-        if line.len() > MAX_LINE_BYTES {
+        let path = ctx.write_shell_script(&script)?;
+
+        // The path is daemon-generated (guides_dir, a fixed "shell-" prefix,
+        // a run id, ".sh") and could only ever approach this by way of an
+        // absurdly deep instance root; the check exists so that stays true
+        // by construction rather than by assumption.
+        const MAX_TYPED_LINE_BYTES: usize = 1000;
+        let line = format!(". {}", shell_quote_always(&path.display().to_string()));
+        if line.len() > MAX_TYPED_LINE_BYTES {
             return Err(FactoryError::BadRequest(format!(
-                "this task's shell report line is {} bytes, over the {MAX_LINE_BYTES} a \
-                 terminal's canonical-mode input queue can be trusted to hold -- shorten the \
-                 instructions (or what is upstream of this node)",
+                "the shell agent's script path is {} bytes, too long to type into a pane safely: {}",
                 line.len(),
+                path.display(),
             )));
         }
         Ok(line)
     }
 }
 
-/// Escape `s` for embedding inside single quotes in the one-line shell
-/// command above. Every caller here only ever passes a daemon-generated
-/// path, which never contains a quote (handled anyway, cheaply) or a
-/// newline -- a newline cannot be escaped inside a *single* line, so a path
-/// that somehow had one is left un-exported rather than breaking the line.
+/// Escape `s` for embedding inside single quotes in shell text, with no
+/// fallback: used for the shell agent's own generated paths (its script
+/// path in the typed line, its binary path inside the script), where there
+/// is nothing sensible to skip to -- an unquoted or unescaped path there
+/// breaks every report call outright, not just the one feature riding along.
+fn shell_quote_always(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Escape `s` for embedding inside single quotes in the shell script above,
+/// for the one case where skipping is the better fallback: the upstream
+/// file's `export` line is optional, so a path that somehow held a newline
+/// (which cannot be escaped inside a single quoted word) is left un-exported
+/// rather than breaking the script.
 fn shell_single_quote(s: &str) -> Option<String> {
     if s.contains('\n') {
         return None;
@@ -637,41 +636,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_shell_agents_prompt_reports_stdout_via_a_result_file() {
+    async fn the_shell_agents_prompt_is_just_the_script_path() {
         let context = ctx(None);
         let prompt = ShellAgent.prompt(&context).await.unwrap();
-        let bin = context.factory_bin.display();
-        assert_eq!(
-            prompt,
-            format!(
-                "_f='{bin}'; _t=t1; _o=$(mktemp \"${{TMPDIR:-/tmp}}/fXXXXXX\"); \
-                 $_f task report $_t --status running --message 'shell agent started' >/dev/null; \
-                 {{ ( make it stop flaking ); echo $? > \"$_o.rc\"; }} | tee \"$_o\"; \
-                 _c=$(cat \"$_o.rc\"); \
-                 if [ \"$_c\" = 0 ]; then $_f task report $_t --status done --result 'command exited 0' --result-file \"$_o\"; \
-                 else $_f task report $_t --status failed --result \"command exited $_c\" --error \"command exited $_c\" --result-file \"$_o\"; fi; \
-                 rm -f \"$_o\" \"$_o.rc\""
-            )
-        );
-        assert!(!prompt.contains("FACTORY_UPSTREAM_FILE"), "nothing upstream, nothing exported: {prompt}");
+        let script_path = context.shell_script_path().expect("a task run always gets one");
+        assert_eq!(prompt, format!(". '{}'", script_path.display()));
         assert!(
-            prompt.len() < 512,
-            "kept well under a pty's canonical-mode line limit (1024 bytes) with headroom for a real \
-             instruction and bin path: {} bytes",
+            prompt.len() < 300,
+            "the typed line no longer scales with the instance root or the instruction: {} bytes",
             prompt.len()
         );
+        std::fs::remove_dir_all(&context.guides_dir).ok();
     }
 
     #[tokio::test]
-    async fn an_absurdly_long_instruction_fails_loudly_instead_of_hanging_a_pane_forever() {
-        // The line this would produce could not be typed into a pty intact
-        // (see the byte-budget comment on `prompt`); reporting that plainly
-        // beats a task that sits `dispatching` forever with no error at all,
-        // which is what actually happens on the pty this guards against.
+    async fn the_shell_agents_script_carries_the_whole_report_wrapper() {
+        let context = ctx(None);
+        ShellAgent.prompt(&context).await.unwrap();
+        let script_path = context.shell_script_path().unwrap();
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        let bin = context.factory_bin.display();
+
+        assert!(script.contains(&format!("_factory_bin='{bin}'")), "{script}");
+        assert!(script.contains("_factory_id=t1"), "{script}");
+        assert!(
+            script.contains("--status running --message 'shell agent started' >/dev/null"),
+            "{script}"
+        );
+        assert!(script.contains("make it stop flaking"), "the instruction, verbatim: {script}");
+        assert!(
+            script.contains("--status done --result 'command exited 0' --result-file \"$_factory_out\""),
+            "{script}"
+        );
+        assert!(
+            script.contains(
+                "--status failed --result \"command exited $_factory_code\" \
+                 --error \"command exited $_factory_code\" --result-file \"$_factory_out\""
+            ),
+            "{script}"
+        );
+        assert!(script.contains("rm -f \"$_factory_out\" \"$_factory_rc\""), "{script}");
+        assert!(!script.contains("FACTORY_UPSTREAM_FILE"), "nothing upstream, nothing exported: {script}");
+        std::fs::remove_dir_all(&context.guides_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_huge_instruction_produces_a_short_typed_line_via_a_script_file() {
         let mut context = ctx(None);
-        context.task.as_mut().unwrap().task.instructions = "x".repeat(2000);
-        let error = ShellAgent.prompt(&context).await.unwrap_err();
-        assert!(error.to_string().contains("bytes"), "{error}");
+        let long_command = format!("printf '%s' '{}'", "x".repeat(2000));
+        context.task.as_mut().unwrap().task.instructions = long_command.clone();
+
+        let prompt = ShellAgent.prompt(&context).await.unwrap();
+        assert!(
+            prompt.len() < 300,
+            "the typed line must not scale with the instruction's length: {} bytes",
+            prompt.len()
+        );
+        assert!(prompt.starts_with(". '"), "{prompt}");
+
+        let script_path = context.shell_script_path().unwrap();
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        assert!(script.contains(&long_command), "the instruction goes into the file verbatim");
+        std::fs::remove_dir_all(&context.guides_dir).ok();
     }
 
     #[tokio::test]
@@ -693,11 +719,15 @@ mod tests {
         );
 
         let prompt = ShellAgent.prompt(&context).await.unwrap();
+        assert!(prompt.starts_with(". '"), "the typed line is still just the script path: {prompt}");
+
+        let script_path = context.shell_script_path().unwrap();
+        let script = std::fs::read_to_string(&script_path).unwrap();
         assert!(
-            prompt.contains(&format!("export FACTORY_UPSTREAM_FILE='{}'", expected_path.display())),
-            "the typed line exports it as well, for robustness: {prompt}"
+            script.contains(&format!("export FACTORY_UPSTREAM_FILE='{}'", expected_path.display())),
+            "the script exports it too, for robustness: {script}"
         );
-        assert!(prompt.contains("--result-file"), "stdout still goes through a file: {prompt}");
+        assert!(script.contains("--result-file"), "stdout still goes through a file: {script}");
 
         let written: Vec<UpstreamOutput> =
             serde_json::from_str(&std::fs::read_to_string(&expected_path).unwrap()).unwrap();
@@ -774,6 +804,10 @@ exit 0
         result_header: String,
         result_body: String,
         pane_stdout: String,
+        /// What `ShellAgent::prompt` actually returned -- `. '<script path>'`
+        /// today -- so a caller can assert on its shape or length without
+        /// recomputing it.
+        line: String,
     }
 
     async fn run_shell_line(shell: &str, command: &str) -> StubReport {
@@ -783,6 +817,10 @@ exit 0
 
         let mut context = ctx(None);
         context.factory_bin = stub;
+        // The script file lands under the same directory this function
+        // cleans up at the end, rather than the `ctx(None)` default, so one
+        // `remove_dir_all` gets both the stub's recorded files and it.
+        context.guides_dir = dir.join("guides");
         context.task.as_mut().unwrap().task.instructions = command.to_string();
         let line = ShellAgent.prompt(&context).await.unwrap();
 
@@ -799,6 +837,7 @@ exit 0
             result_header: std::fs::read_to_string(dir.join("last_result_header")).unwrap_or_default(),
             result_body: std::fs::read_to_string(dir.join("last_result_body")).unwrap_or_default(),
             pane_stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            line,
         };
         std::fs::remove_dir_all(&dir).ok();
         report
@@ -836,6 +875,45 @@ exit 0
             assert_eq!(failure.error.trim(), "command exited 3", "{shell}: {failure:?}");
             assert_eq!(failure.result_header, "command exited 3", "{shell}: {failure:?}");
             assert_eq!(failure.result_body, "out\n", "{shell}: {failure:?}");
+
+            // A real newline in the instructions themselves, not just `\n`
+            // inside a printf format string -- only possible now that the
+            // instruction goes into a script file verbatim rather than a
+            // typed line, where an embedded newline would have submitted
+            // the command early.
+            let multiline = run_shell_line(shell, "printf 'one\\n'\nprintf 'two\\n'").await;
+            assert_eq!(multiline.status, "done", "{shell}: {multiline:?}");
+            assert_eq!(multiline.result_body, "one\ntwo\n", "{shell}: {multiline:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_huge_instruction_produces_a_short_typed_line_and_still_runs() {
+        // The real proof that moving the wrapper into a file actually fixes
+        // the pty problem this feature ran into: an instruction this long
+        // would never have survived being typed whole (see `prompt`'s own
+        // comment on `MAX_CANON`), but the typed line itself no longer
+        // scales with it, so it runs exactly as any other command would.
+        for shell in ["bash", "zsh"] {
+            if find_on_path(shell).is_none() {
+                eprintln!("skipping {shell}: not on PATH");
+                continue;
+            }
+            let payload = "x".repeat(2000);
+            let command = format!("printf '%s\\n' '{payload}'");
+            assert!(command.len() > 2000, "the instruction really is the ~2000-byte case: {}", command.len());
+
+            let report = run_shell_line(shell, &command).await;
+            assert!(
+                report.line.len() < 300,
+                "the typed line must not scale with the instruction's length ({shell}): {} bytes",
+                report.line.len()
+            );
+            assert_eq!(report.status, "done", "{shell}: {report:?}");
+            assert!(
+                report.result_body.contains(&payload),
+                "{shell}: the ~2000-byte stdout should have survived intact"
+            );
         }
     }
 }

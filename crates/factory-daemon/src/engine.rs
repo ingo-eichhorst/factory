@@ -3,8 +3,8 @@
 
 use chrono::Utc;
 use factory_core::adapter::agent::{
-    run_guide_path, truncate_tail, upstream_output_path, AgentContext, LaunchSpec, TaskBinding,
-    UpstreamOutput, UPSTREAM_RESULT_BYTE_CAP,
+    run_guide_path, run_shell_script_path, truncate_tail, upstream_output_path, AgentContext,
+    LaunchSpec, TaskBinding, UpstreamOutput, UPSTREAM_RESULT_BYTE_CAP,
 };
 use factory_core::adapter::runtime::{
     RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
@@ -1636,6 +1636,17 @@ impl Engine {
         // to remove when this run never wrote one.
         let upstream = upstream_output_path(&self.factory_snapshot().guides_dir(), &run.task_id);
         let _ = std::fs::remove_file(upstream);
+        // The shell agent's generated wrapper script, keyed by *run* id
+        // rather than task id (see `run_shell_script_path`'s own comment) --
+        // a retry's fresh run must never lose its script to this cleanup of
+        // an earlier attempt's. Unlinking a file the pane's shell is still
+        // sourcing is safe on Unix: the shell holds the file open, so
+        // removing the directory entry does not disturb it, and a shell
+        // reads a sourced file's content in rather than re-opening it line
+        // by line, so there is no window where this could cut a run off
+        // mid-script.
+        let script = run_shell_script_path(&self.factory_snapshot().guides_dir(), &run.id);
+        let _ = std::fs::remove_file(script);
 
         let Some(session) = &run.session else { return };
         if let Ok(runtime) = self.registry.runtime(&session.runtime) {

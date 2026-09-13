@@ -119,6 +119,20 @@ pub fn upstream_output_path(guides_dir: &Path, task_id: &str) -> PathBuf {
     guides_dir.join(format!("upstream-{task_id}.json"))
 }
 
+/// Where a run's generated shell-agent script lives, given only its run id
+/// and the instance's guides directory -- the free-function twin of
+/// `run_guide_path`/`upstream_output_path`, kept for the same reason:
+/// `close_session` needs to name this file for cleanup long after the
+/// `AgentContext` that wrote it is gone. Keyed by run id, not task id: a
+/// retry's fresh run and a previous attempt's still-closing session must
+/// never share -- or delete out from under each other -- the same file.
+/// That is a sharper risk here than for the guide or upstream files: this
+/// one is *sourced* by the pane's shell for the run's whole duration,
+/// rather than read once near the start of it.
+pub fn run_shell_script_path(guides_dir: &Path, run_id: &str) -> PathBuf {
+    guides_dir.join(format!("shell-{run_id}.sh"))
+}
+
 /// Everything an agent adapter needs to phrase a prompt and a launch.
 #[derive(Debug, Clone)]
 pub struct AgentContext {
@@ -425,6 +439,34 @@ impl AgentContext {
         Ok(Some(path))
     }
 
+    /// Where this run's shell-agent script would live. `None` only for a
+    /// standing agent, which has no run to key a script by.
+    pub fn shell_script_path(&self) -> Option<PathBuf> {
+        self.task
+            .as_ref()
+            .map(|b| run_shell_script_path(&self.guides_dir, &b.run_id))
+    }
+
+    /// Write the shell agent's whole command wrapper -- the running/done/
+    /// failed report calls, the stdout capture, and cleanup -- to its file,
+    /// so the line actually typed into the pane can be a short `. '<path>'`
+    /// instead of carrying all of that itself. See `ShellAgent::prompt`'s
+    /// own comment for why that matters.
+    pub fn write_shell_script(&self, contents: &str) -> Result<PathBuf> {
+        let path = self.shell_script_path().ok_or_else(|| {
+            FactoryError::BadRequest(
+                "this agent was started without a task, so there is no run to script for".into(),
+            )
+        })?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| FactoryError::Other(anyhow::anyhow!("making {}: {e}", parent.display())))?;
+        }
+        std::fs::write(&path, contents)
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("writing {}: {e}", path.display())))?;
+        Ok(path)
+    }
+
     /// The same contract as environment, for adapters that would rather read it.
     pub fn env(&self) -> BTreeMap<String, String> {
         let mut env = BTreeMap::from([
@@ -726,6 +768,50 @@ mod tests {
         let second = ctx.write_upstream_file().unwrap().unwrap();
         assert_eq!(first, second);
         std::fs::remove_dir_all(&ctx.guides_dir).ok();
+    }
+
+    // -- the shell agent's generated script ------------------------------
+
+    fn with_fresh_guides_dir() -> AgentContext {
+        let mut ctx = with_task(base(None));
+        ctx.guides_dir = fresh_guides_dir();
+        ctx
+    }
+
+    #[test]
+    fn a_standing_agent_has_no_shell_script_path() {
+        let ctx = base(None);
+        assert_eq!(ctx.shell_script_path(), None);
+        assert!(ctx.write_shell_script("echo hi").is_err());
+    }
+
+    #[test]
+    fn a_shell_script_is_named_by_run_id_not_task_id() {
+        let ctx = with_fresh_guides_dir();
+        let expected = run_shell_script_path(&ctx.guides_dir, "r1");
+        assert_eq!(ctx.shell_script_path(), Some(expected.clone()));
+        let path = ctx.write_shell_script("echo hi").unwrap();
+        assert_eq!(path, expected);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo hi");
+        std::fs::remove_dir_all(&ctx.guides_dir).ok();
+    }
+
+    #[test]
+    fn two_runs_of_the_same_task_get_two_different_script_files() {
+        // The whole point of keying by run id: a retry must never collide
+        // with -- or have its script deleted by a late cleanup of -- an
+        // earlier attempt's file.
+        let mut first = with_fresh_guides_dir();
+        first.guides_dir = fresh_guides_dir();
+        let mut second = first.clone();
+        second.task.as_mut().unwrap().run_id = "r2".into();
+
+        let first_path = first.write_shell_script("attempt one").unwrap();
+        let second_path = second.write_shell_script("attempt two").unwrap();
+        assert_ne!(first_path, second_path);
+        assert_eq!(std::fs::read_to_string(&first_path).unwrap(), "attempt one");
+        assert_eq!(std::fs::read_to_string(&second_path).unwrap(), "attempt two");
+        std::fs::remove_dir_all(&first.guides_dir).ok();
     }
 
     #[test]
