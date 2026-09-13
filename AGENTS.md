@@ -18,6 +18,8 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/{sandboxes,secrets}.js                                 L2's two tabs
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
+    ui/js/{datasets,bench-runs}.js                               Benchmarks' Datasets and Runs segments
+    ui/js/bench-model.js                                         pure helpers for the Benchmarks tab's three segments
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
 

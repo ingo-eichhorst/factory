@@ -387,16 +387,109 @@
       <h2>Benchmarks</h2>
       <span class="sub" id="benchmarks-count"></span>
       <span class="sp"></span>
+      <div class="seg" id="bench-seg" role="group" aria-label="Datasets, runs or configurations">
+        <button type="button" data-seg="datasets" class="on">Datasets</button>
+        <button type="button" data-seg="runs">Runs</button>
+        <button type="button" data-seg="configurations">Configurations</button>
+      </div>
       <button class="btn" id="benchmarks-refresh">Refresh</button>
     </div>
-    <p class="env-note" id="benchmarks-note"></p>
-    <p class="env-note bad" id="benchmarks-error" hidden></p>
-    <div class="bench-cards" id="benchmarks-cards"></div>
-    <div class="empty" id="noBenchmarks" hidden>No agents declared yet.</div>
-    <section class="bench-need">
-      <h3>What a score would need</h3>
-      <ul id="benchmarks-needs"></ul>
-    </section>
+
+    <!-- ------------------------------------------------------- datasets -->
+    <div id="bench-pane-datasets">
+      <p class="env-note" id="datasets-note"></p>
+      <p class="env-note bad" id="datasets-error" hidden></p>
+      <div class="bar" style="margin:0 14px 10px">
+        <span class="sp"></span>
+        <button class="btn primary" id="dataset-new">New dataset</button>
+      </div>
+      <section>
+        <table>
+          <thead><tr><th>Name</th><th>Cases</th><th>Gated</th><th>Ungated</th><th>Revision</th></tr></thead>
+          <tbody id="dataset-rows"></tbody>
+        </table>
+        <div class="empty" id="no-datasets" hidden>No datasets yet.</div>
+      </section>
+
+      <section id="dataset-detail" hidden style="margin-top:12px">
+        <div class="bar">
+          <h3 id="dataset-detail-name" style="margin:0"></h3>
+          <span class="sub" id="dataset-detail-revision"></span>
+          <span class="sp"></span>
+          <button class="btn" id="dataset-add-case">Add case</button>
+          <button class="btn" id="dataset-from-tasks">From tasks…</button>
+          <button class="btn" id="dataset-import">Import…</button>
+          <button class="btn primary" id="dataset-run">Run…</button>
+          <button class="btn danger" id="dataset-delete">Delete dataset</button>
+        </div>
+        <p class="env-note" id="dataset-description" style="margin:10px 14px 0"></p>
+        <div id="dataset-findings"></div>
+        <table>
+          <thead><tr>
+            <th>Id</th><th>Title</th><th>Scope</th><th>Base</th><th>Gate</th><th>Reset</th><th>Origin</th><th></th>
+          </tr></thead>
+          <tbody id="dataset-cases"></tbody>
+        </table>
+        <div class="empty" id="no-cases" hidden>No cases yet.</div>
+      </section>
+    </div>
+
+    <!-- ----------------------------------------------------------- runs -->
+    <div id="bench-pane-runs" hidden>
+      <p class="env-note" id="bench-runs-note"></p>
+      <p class="env-note bad" id="bench-runs-error" hidden></p>
+      <section>
+        <table>
+          <thead><tr><th>Dataset@revision</th><th>Agents</th><th>Started</th><th>Status</th><th>Progress</th></tr></thead>
+          <tbody id="bench-run-rows"></tbody>
+        </table>
+        <div class="empty" id="no-bench-runs" hidden>No bench runs yet.</div>
+      </section>
+
+      <section id="bench-run-detail" hidden style="margin-top:12px">
+        <div class="bar">
+          <h3 id="bench-run-title" style="margin:0"></h3>
+          <span class="sub" id="bench-run-status"></span>
+          <span class="sp"></span>
+          <button class="btn" id="bench-run-cancel">Cancel</button>
+          <button class="btn danger" id="bench-run-clean">Remove worktrees</button>
+        </div>
+        <p class="env-note" id="bench-run-scope-note" style="margin:10px 14px 0"></p>
+
+        <h4 style="margin:14px 14px 4px">Results</h4>
+        <table>
+          <thead><tr>
+            <th>Configuration</th><th>Resolve rate</th><th>Pass</th><th>Fail</th>
+            <th>Unverified</th><th>Skipped</th><th>Mean wall-clock</th><th>Cost</th>
+          </tr></thead>
+          <tbody id="bench-results"></tbody>
+        </table>
+
+        <h4 style="margin:14px 14px 4px">Attempts</h4>
+        <table>
+          <thead><tr id="bench-matrix-head"><th>Case</th></tr></thead>
+          <tbody id="bench-matrix-body"></tbody>
+        </table>
+        <div class="empty" id="no-bench-attempts" hidden>No attempts in this run.</div>
+
+        <h4 style="margin:14px 14px 4px">Resolve rate vs. mean wall-clock</h4>
+        <svg id="bench-scatter" viewBox="0 0 420 220" preserveAspectRatio="xMidYMid meet"
+          aria-label="Scatter of resolve rate against mean wall-clock, one point per configuration. Cost is not recorded and cannot be plotted."></svg>
+        <p class="sub" id="bench-scatter-caption" style="margin:0 14px 12px"></p>
+      </section>
+    </div>
+
+    <!-- --------------------------------------------------- configurations -->
+    <div id="bench-pane-configurations" hidden>
+      <p class="env-note" id="benchmarks-note"></p>
+      <p class="env-note bad" id="benchmarks-error" hidden></p>
+      <div class="bench-cards" id="benchmarks-cards"></div>
+      <div class="empty" id="noBenchmarks" hidden>No agents declared yet.</div>
+      <section class="bench-need">
+        <h3>What a score would need</h3>
+        <ul id="benchmarks-needs"></ul>
+      </section>
+    </div>
   </div>
 
   <div id="view-knowledge" hidden>

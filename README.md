@@ -947,6 +947,23 @@ measurement of zero — and its floor says "not recorded" instead of a treemap
 drawn from nothing; a walk that hit its cap says its numbers are a lower bound;
 the file a session is editing is not read at all, and is not drawn.
 
+**Benchmarks** gets a segmented control — **Datasets**, **Runs** and
+**Configurations** — each with its own hash route
+(`#<scope>/imp/benchmarks/datasets/<name>`, `.../runs/<id>`,
+`.../configurations`) that boots directly and survives reload and
+back/forward. **Datasets** lists every dataset, company-wide; selecting one
+shows its cases, findings, and *New dataset*, *Add case*, *From tasks…*,
+*Import…* and *Run…* — the last starts a bench run and switches to **Runs**.
+**Runs** lists every bench run and, for the selected one, a results table per
+configuration, an attempts matrix of case × configuration whose verdict chips
+link to each attempt's task, and a small scatter of resolve rate against mean
+wall-clock; it updates live on `bench_run_updated` and offers *Cancel* and,
+once a run has finished, *Remove worktrees*. The rail narrows a selected
+dataset's own cases and a selected run's attempts matrix; it never narrows the
+company-wide dataset list or the aggregated results table, which stays the
+daemon's own numbers for the whole run. **Configurations** is v1's cards,
+unchanged.
+
 ## What this prototype does not do yet
 
 - **Runtime and interface plugins.** The manifest accepts `kind: runtime` and
