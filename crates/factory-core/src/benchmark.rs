@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// One agent that declares a `Configuration`, as the Benchmarks tab lists it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// `Ord` (by `scope`, then `agent`, then `lifetime`, then `declared`) exists
+/// only so `configurations`'s own sort can use a configuration's full agent
+/// list as its last tiebreaker -- see the comment there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ConfiguredAgent {
     pub scope: String,
     pub agent: String,
@@ -65,8 +68,9 @@ pub struct Configuration {
 /// Every configuration Factory can dispatch, one per distinct
 /// harness + full `args` + sandbox, including the foreman `daemon.foreman`
 /// synthesizes for a scope that has none of its own. Sorted by harness, then
-/// model, then flags; each configuration's agents are sorted by scope, then
-/// name.
+/// model, then flags, then sandbox, then the full agent list (see the sort
+/// call below for why the last two are there); each configuration's agents
+/// are sorted by scope, then name.
 pub fn configurations(scopes: &[Scope], foreman: &ForemanConfig) -> Vec<Configuration> {
     struct Group {
         harness: String,
@@ -133,17 +137,114 @@ pub fn configurations(scopes: &[Scope], foreman: &ForemanConfig) -> Vec<Configur
         })
         .collect();
 
+    // `groups` is a `HashMap`, so its iteration order is not the same from
+    // one process to the next -- two configurations that tie on harness,
+    // model and flags but differ only in `sandbox` (grouping is keyed on
+    // `sandbox` too, so they are genuinely two groups) would otherwise sort
+    // however the map happened to hand them back. `sandbox` breaks that tie;
+    // `agents` is the tiebreaker of last resort, since no two distinct
+    // configurations can ever share the exact same sorted agent list, which
+    // makes this comparator total rather than merely "usually enough".
     out.sort_by(|a, b| {
         a.harness
             .cmp(&b.harness)
             .then_with(|| a.model.cmp(&b.model))
             .then_with(|| a.flags.cmp(&b.flags))
+            .then_with(|| a.sandbox.cmp(&b.sandbox))
+            .then_with(|| a.agents.cmp(&b.agents))
     });
     out
 }
 
 fn lifetime_str(lifetime: Lifetime) -> String {
     lifetime.as_str().to_string()
+}
+
+/// The shape a token must have before this module will show any part of it.
+/// Deliberately an allow-list rather than the `starts_with('-')` test this
+/// replaced: that test decided a token was "a flag" by how it *started*,
+/// which is exactly backwards when the thing that follows a flag can be an
+/// arbitrary value that itself happens to start with `-`
+/// (`--api-key -s3cretDASHvalue`). Under an allow-list, a token that fails
+/// every recognised shape is never partially trusted -- the whole token is
+/// elided, never just the part after its `=`.
+enum FlagShape<'a> {
+    /// `--name`, matching `^--[a-z][a-z0-9-]{0,39}$`. Safe to show as-is.
+    LongBare(&'a str),
+    /// `--name=value`, the name matching the same pattern. The name is safe
+    /// to show; the value never is.
+    LongWithValue(&'a str),
+    /// `-x`, matching `^-[A-Za-z]$`. Safe to show as-is.
+    Short,
+    /// Everything else: prose, a secret, a malformed flag, a bare
+    /// positional. Never shown, whole.
+    Other,
+}
+
+/// `^[a-z][a-z0-9-]{0,39}$` -- the name portion of a long flag, with or
+/// without an attached value. At most 40 characters so a single absurdly
+/// long token cannot be shown just because its first 40-or-fewer characters
+/// happen to look plausible.
+fn is_safe_flag_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    name.len() <= 40 && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// `^-[A-Za-z]$` -- a short flag, either case, and nothing else attached.
+fn is_safe_short_flag(token: &str) -> bool {
+    let b = token.as_bytes();
+    b.len() == 2 && b[0] == b'-' && b[1].is_ascii_alphabetic()
+}
+
+fn classify_flag(token: &str) -> FlagShape<'_> {
+    if let Some(rest) = token.strip_prefix("--") {
+        return match rest.find('=') {
+            Some(eq) if is_safe_flag_name(&rest[..eq]) => FlagShape::LongWithValue(&rest[..eq]),
+            Some(_) => FlagShape::Other,
+            None if is_safe_flag_name(rest) => FlagShape::LongBare(rest),
+            None => FlagShape::Other,
+        };
+    }
+    if is_safe_short_flag(token) {
+        FlagShape::Short
+    } else {
+        FlagShape::Other
+    }
+}
+
+/// An extracted model value that turned out to be empty (`--model=` or
+/// `--model ""`) is the same as no model at all: there is nothing to show,
+/// and nothing for a later increment to pin.
+fn non_empty(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// Pushes `shown` -- a flag already known safe to display -- onto `flags`,
+/// either bare or with a trailing elided value depending on whether the
+/// token that follows it looks like a flag of its own (see `classify_flag`).
+/// A flag with no attached `=` cannot tell, from its own text alone, whether
+/// the next token is its value or an unrelated switch; not-a-recognised-flag
+/// is the signal that it was consumed as this flag's value. Returns how many
+/// argument slots were consumed (1 or 2) for the caller to advance by.
+fn consume_flag(flags: &mut Vec<String>, shown: String, next: Option<&String>) -> usize {
+    match next {
+        Some(n) if matches!(classify_flag(n), FlagShape::Other) => {
+            flags.push(format!("{shown} …"));
+            2
+        }
+        _ => {
+            flags.push(shown);
+            1
+        }
+    }
 }
 
 /// One pass over a declaration's `args`: pull out the model (`--model <v>`,
@@ -159,13 +260,13 @@ fn analyze_args(args: &[String]) -> (Option<String>, Vec<String>) {
         let a = &args[i];
 
         if let Some(v) = a.strip_prefix("--model=") {
-            model = Some(v.to_string());
+            model = non_empty(v);
             i += 1;
             continue;
         }
         if a == "--model" || a == "-m" {
             if let Some(next) = args.get(i + 1).filter(|n| !n.starts_with('-')) {
-                model = Some(next.clone());
+                model = non_empty(next);
                 i += 2;
             } else {
                 // A model flag with nothing usable after it says less than
@@ -177,28 +278,22 @@ fn analyze_args(args: &[String]) -> (Option<String>, Vec<String>) {
             continue;
         }
 
-        if let Some(eq) = a.find('=') {
-            if a.starts_with('-') {
-                flags.push(format!("{}=…", &a[..eq]));
-                i += 1;
-                continue;
+        i += match classify_flag(a) {
+            FlagShape::LongWithValue(name) => {
+                flags.push(format!("--{name}=…"));
+                1
             }
-        }
-        if a.starts_with('-') && a.len() > 1 {
-            if args.get(i + 1).filter(|n| !n.starts_with('-')).is_some() {
-                flags.push(format!("{a} …"));
-                i += 2;
-            } else {
-                flags.push(a.clone()); // a bare switch, e.g. --yolo
-                i += 1;
+            FlagShape::LongBare(name) => consume_flag(&mut flags, format!("--{name}"), args.get(i + 1)),
+            FlagShape::Short => consume_flag(&mut flags, a.clone(), args.get(i + 1)),
+            FlagShape::Other => {
+                // Neither a flag nor (having reached here) a value already
+                // claimed by one before it -- a bare positional, a
+                // malformed flag, or a value with nowhere to attach. Never
+                // repeated back verbatim.
+                flags.push("…".to_string());
+                1
             }
-            continue;
-        }
-        // A positional that belongs to no flag before it -- rare, and not
-        // named in any format this module otherwise expects, but still not
-        // a value this module may repeat back verbatim.
-        flags.push("…".to_string());
-        i += 1;
+        };
     }
     (model, flags)
 }
@@ -264,6 +359,71 @@ mod tests {
     fn a_stray_positional_is_elided_too() {
         let (_, flags) = analyze_args(&["s3cret-standalone-value".into()]);
         assert_eq!(flags, vec!["…".to_string()]);
+    }
+
+    #[test]
+    fn a_value_starting_with_a_dash_is_never_shown_as_a_flag_of_its_own() {
+        // The bug this module existed to prevent, and the one the old
+        // `starts_with('-')` test let through: a value that itself begins
+        // with `-` is not a recognised flag shape, so it is elided and
+        // folded into the flag before it rather than shown bare.
+        let (_, flags) = analyze_args(&["--api-key".into(), "-s3cretDASHvalue".into()]);
+        assert_eq!(flags, vec!["--api-key …".to_string()]);
+        for f in &flags {
+            assert!(!f.contains("s3cret"), "{f}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_short_flag_between_two_real_flags_is_folded_into_the_one_before_it() {
+        let (_, flags) = analyze_args(&["--api-key".into(), "-tok".into(), "--yolo".into()]);
+        assert_eq!(flags, vec!["--api-key …".to_string(), "--yolo".to_string()]);
+        for f in &flags {
+            assert!(!f.contains("tok"), "{f}");
+        }
+    }
+
+    #[test]
+    fn a_mixed_case_flag_is_elided_whole_rather_than_partially_shown() {
+        let (_, flags) = analyze_args(&["--Token=AbC".into()]);
+        assert_eq!(flags, vec!["…".to_string()]);
+        for f in &flags {
+            assert!(!f.contains("Token") && !f.contains("AbC"), "{f}");
+        }
+    }
+
+    #[test]
+    fn a_short_flag_shaped_wrong_is_elided_not_shown() {
+        let (_, flags) = analyze_args(&["-xyz".into()]);
+        assert_eq!(flags, vec!["…".to_string()]);
+    }
+
+    #[test]
+    fn a_sixty_character_flag_name_is_too_long_to_be_shown() {
+        let long = format!("--{}", "a".repeat(58));
+        assert_eq!(long.len(), 60);
+        let (_, flags) = analyze_args(std::slice::from_ref(&long));
+        assert_eq!(flags, vec!["…".to_string()]);
+        for f in &flags {
+            assert!(!f.contains(&"a".repeat(58)), "{f}");
+        }
+    }
+
+    #[test]
+    fn an_empty_model_value_is_treated_as_absent() {
+        let (model, flags) = analyze_args(&["--model=".into()]);
+        assert_eq!(model, None);
+        assert!(flags.is_empty());
+
+        let (model, flags) = analyze_args(&["--model".into(), "".into()]);
+        assert_eq!(model, None);
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn a_valid_long_flag_with_value_and_a_bare_switch_still_render_normally() {
+        let (_, flags) = analyze_args(&["--permission-mode=plan".into(), "--yolo".into()]);
+        assert_eq!(flags, vec!["--permission-mode=…".to_string(), "--yolo".to_string()]);
     }
 
     #[test]
@@ -366,6 +526,31 @@ mod tests {
             .iter()
             .any(|c| c.sandbox == Sandbox::Docker.as_str()));
         assert!(configs.iter().any(|c| c.sandbox == Sandbox::None.as_str()));
+    }
+
+    #[test]
+    fn a_sandbox_only_tie_sorts_the_same_way_across_many_calls() {
+        // `builder` and `runner` share harness, model and (therefore)
+        // rendered `flags`, and differ only in `sandbox` -- two distinct
+        // `HashMap` groups that the old comparator could not order between
+        // itself, leaving it to whatever order the map happened to iterate
+        // in. Calling `configurations` repeatedly on the same input, rather
+        // than once, is the point: a `HashMap`'s iteration order is fixed
+        // for the lifetime of one process, so a single call would not have
+        // caught a comparator that silently depended on it.
+        let a = scope(
+            "name: demo\npath: .\nagents:\n  - name: builder\n    harness: claude-code\n    sandbox: docker\n    args: [--model, opus]\n  - name: runner\n    harness: claude-code\n    sandbox: none\n    args: [--model, opus]\n",
+        );
+        let foreman = ForemanConfig::default();
+        let first = configurations(std::slice::from_ref(&a), &foreman);
+        assert_eq!(first.len(), 2);
+        let expected: Vec<String> = first.iter().map(|c| c.sandbox.clone()).collect();
+        assert_eq!(expected, vec!["docker".to_string(), "none".to_string()]);
+        for _ in 0..50 {
+            let configs = configurations(std::slice::from_ref(&a), &foreman);
+            let sandboxes: Vec<String> = configs.iter().map(|c| c.sandbox.clone()).collect();
+            assert_eq!(sandboxes, expected, "sort order must be stable across calls");
+        }
     }
 
     #[test]
