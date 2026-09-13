@@ -255,7 +255,7 @@ impl Agent for ShellAgent {
         let export_upstream = ctx
             .write_upstream_file()?
             .and_then(|path| shell_single_quote(&path.display().to_string()))
-            .map(|quoted| format!("export FACTORY_UPSTREAM_FILE={quoted}; "))
+            .map(|quoted| format!("export FACTORY_UPSTREAM_FILE={quoted}\n"))
             .unwrap_or_default();
 
         // Everything the report needs -- the running/done/failed calls, the
@@ -270,7 +270,11 @@ impl Agent for ShellAgent {
         // length never depends on the command's own, and the instructions
         // go into the file verbatim, so a multi-line instruction now works
         // too (the `( … )` subshell below spans lines exactly as well as it
-        // spans one, which is what makes that safe).
+        // spans one, which is what makes that safe). The instructions sit on
+        // lines of their own inside it, never beside the closing `)`: a
+        // trailing `# comment` would otherwise swallow the `)`, and a heredoc
+        // terminator would never match, and either one leaves a script that
+        // does not parse and a run that never reports.
         //
         // `echo $? > "$_factory_rc"` runs before the pipe to `tee` can
         // replace `$?` with `tee`'s own status, which is what makes the
@@ -289,7 +293,9 @@ impl Agent for ShellAgent {
              _factory_out=$(mktemp \"${{TMPDIR:-/tmp}}/factory-out-XXXXXX\")\n\
              _factory_rc=$(mktemp \"${{TMPDIR:-/tmp}}/factory-rc-XXXXXX\")\n\
              \"$_factory_bin\" task report \"$_factory_id\" --status running --message 'shell agent started' >/dev/null\n\
-             {{ ( {export_upstream}{command} ); echo $? > \"$_factory_rc\"; }} | tee \"$_factory_out\"\n\
+             {{ (\n\
+             {export_upstream}{command}\n\
+             ); echo $? > \"$_factory_rc\"; }} | tee \"$_factory_out\"\n\
              _factory_code=$(cat \"$_factory_rc\")\n\
              if [ \"$_factory_code\" = 0 ]; then\n\
              \"$_factory_bin\" task report \"$_factory_id\" --status done --result 'command exited 0' --result-file \"$_factory_out\"\n\
@@ -884,6 +890,13 @@ exit 0
             let multiline = run_shell_line(shell, "printf 'one\\n'\nprintf 'two\\n'").await;
             assert_eq!(multiline.status, "done", "{shell}: {multiline:?}");
             assert_eq!(multiline.result_body, "one\ntwo\n", "{shell}: {multiline:?}");
+
+            // The two shapes that break if the instruction shares a line
+            // with the subshell's closing `)`: a trailing comment, and a
+            // heredoc whose terminator has to stand alone on its line.
+            let heredoc = run_shell_line(shell, "cat <<EOF\nfrom a heredoc\nEOF\necho done # trailing comment").await;
+            assert_eq!(heredoc.status, "done", "{shell}: {heredoc:?}");
+            assert_eq!(heredoc.result_body, "from a heredoc\ndone\n", "{shell}: {heredoc:?}");
         }
     }
 
