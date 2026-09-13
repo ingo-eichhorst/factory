@@ -690,7 +690,8 @@ HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`,
 `GET /api/runs/{id}/entries`, `GET /api/runs/{id}/output`, `GET /api/agents`,
 `GET /api/agent-runtime`, `GET /api/environment`, `GET /api/knowledge`,
-`GET /api/benchmarks`, workflow CRUD under `/api/workflows`, workflow-run
+`PUT /api/knowledge/files?path=&overwrite=` (raw bytes, its own 50 MiB body
+limit), `GET /api/benchmarks`, workflow CRUD under `/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
 `POST /api/rpc` for the raw envelope. `GET /ws`
 is the event stream: a snapshot of every task first, then one message per event.

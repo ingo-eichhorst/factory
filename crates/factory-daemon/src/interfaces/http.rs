@@ -6,10 +6,10 @@
 
 use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response as AxumResponse};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use factory_core::adapter::interface::{Interface, InterfaceContext};
 use factory_core::config::ScopeAgent;
@@ -121,6 +121,15 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
         .route("/api/knowledge", get(knowledge))
+        // Its own body limit, scoped to this one route with a nested router:
+        // the browser's "Add documents" upload sends raw bytes, up to 50 MiB,
+        // and every other route here still gets axum's ordinary default.
+        .merge(
+            Router::new()
+                .route("/api/knowledge/files", put(knowledge_write_file))
+                .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
+                .with_state(engine.clone()),
+        )
         .route("/api/benchmarks", get(benchmarks))
         // A role is written into one scope's config, so like a declaration it
         // is addressed by scope and name in the body rather than the path.
@@ -283,6 +292,34 @@ async fn environment(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn knowledge(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Knowledge).await
+}
+
+#[derive(serde::Deserialize)]
+struct KnowledgeFileQuery {
+    path: String,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+/// `PUT /api/knowledge/files?path=&overwrite=`, the UI's "Add documents"
+/// upload -- the raw body is the file's bytes, since a browser cannot name a
+/// path on the daemon's own disk the way a CLI invocation can. This route
+/// carries its own 50 MiB `DefaultBodyLimit`, applied in `router` rather than
+/// here.
+async fn knowledge_write_file(
+    State(engine): State<Arc<Engine>>,
+    Query(q): Query<KnowledgeFileQuery>,
+    body: axum::body::Bytes,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::KnowledgeWriteFile {
+            path: q.path,
+            overwrite: q.overwrite,
+            bytes: body.to_vec(),
+        },
+    )
+    .await
 }
 
 async fn benchmarks(State(engine): State<Arc<Engine>>) -> AxumResponse {
