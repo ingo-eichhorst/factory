@@ -632,7 +632,7 @@ mod tests {
     use factory_core::config::{Config, DaemonConfig, Factory, Instance};
     use factory_core::protocol::{Payload, Request, Response};
     use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
-    use factory_core::task::{NewTask, Task, TaskStatus};
+    use factory_core::task::{NewTask, Task, TaskReport, TaskStatus};
     use factory_plugins::registry::Registry;
     use factory_plugins::{HarnessAgent, SqliteStore};
     use std::path::PathBuf;
@@ -1110,6 +1110,87 @@ mod tests {
         assert_eq!(args.len(), 4, "{args:?}");
         assert_eq!(&args[0..3], ["--model", "sonnet", "--append-system-prompt"]);
         drop(starts);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_runs_guide_file_outlives_dispatch_and_is_gone_once_the_run_ends() {
+        // Pins the fix for the bug this replaced: the guide was deleted right
+        // after the prompt was submitted, on the assumption every harness had
+        // already read it by then. That is false for `opencode`, which
+        // re-resolves its configured instruction paths on every request
+        // rather than once at startup -- an early delete made the guide
+        // silently vanish partway through the run. The file must survive
+        // dispatch and disappear only once the run actually ends, through
+        // whichever path closes it.
+        let (engine, _stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n",
+        );
+        let task = engine
+            .create(NewTask {
+                title: "exercise guide cleanup".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("builder".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+
+        let guide = engine.factory_snapshot().guides_dir().join(format!("run-{}.md", task.id));
+        assert!(guide.exists(), "still there once the harness is up and running");
+
+        let run = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some("ok".into()),
+                    error: None,
+                    token: run.token.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(!guide.exists(), "gone once the agent's own terminal report closes the run");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_runs_guide_file_is_also_cleaned_up_when_the_watchdog_gives_up_on_it() {
+        // The same cleanup, reached through `fail_run` instead of a report --
+        // `close_session` is the one place both paths (and a cancel, and a
+        // task deleted out from under an active run) go through.
+        let (engine, _stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n",
+        );
+        let task = engine
+            .create(NewTask {
+                title: "exercise watchdog cleanup".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("builder".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+
+        let guide = engine.factory_snapshot().guides_dir().join(format!("run-{}.md", task.id));
+        assert!(guide.exists());
+
+        let run = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        engine.fail_run(&run.id, "gave up waiting").await;
+
+        assert!(!guide.exists(), "gone once the watchdog closes the run too");
         std::fs::remove_dir_all(root).ok();
     }
 
