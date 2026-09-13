@@ -495,13 +495,11 @@ const MAX_LINK_TARGET_LEN: usize = 200;
 /// trimmed) is shaped like something a person actually wrote as a wiki link,
 /// as opposed to text that merely landed between two `[[`/`]]` delimiters --
 /// a 5,000-character paragraph, or a bash `[[ -f x ]]` test caught by the
-/// same bracket pair. A real target (`some-page`, `partners/acme`, `person`)
-/// never contains whitespace: every documented and observed resolution rule
-/// works on `/`-separated path segments, none of which has room for a space.
-/// Rejecting whitespace is a generalisation of the `\n`/`\r` rule below, not
-/// a departure from it -- and it is the only rule that also catches short,
-/// space-containing prose (`[[ see the pricing page ]]`) that a length cap
-/// alone would let through.
+/// same bracket pair. A real target (`some-page`, `partners/acme`, a file
+/// name with a space in it) may contain a plain space, but never a bracket, a
+/// tab or a line break. The bash case is caught one step earlier, in
+/// `extract_links`: a person writes `[[page]]`, never `[[ page ]]`, so a span
+/// that opens or closes on whitespace is not a link.
 fn is_link_target_shape(target: &str) -> bool {
     if target.is_empty() || target.ends_with('/') {
         return false;
@@ -509,7 +507,9 @@ fn is_link_target_shape(target: &str) -> bool {
     if target.chars().count() > MAX_LINK_TARGET_LEN {
         return false;
     }
-    !target.chars().any(|c| c == '[' || c == ']' || c.is_whitespace())
+    !target
+        .chars()
+        .any(|c| c == '[' || c == ']' || (c.is_whitespace() && c != ' '))
 }
 
 /// Every `[[...]]` in `body`, stripped of a `|label` or `#heading` suffix and
@@ -534,7 +534,10 @@ fn extract_links(body: &str) -> Vec<String> {
         // leave it stuck, or a later valid link on the same line would never
         // be found.
         cursor = end + 2;
-        if raw.contains(['\n', '\r']) {
+        if raw.contains(['\n', '\r'])
+            || raw.starts_with(char::is_whitespace)
+            || raw.ends_with(char::is_whitespace)
+        {
             continue;
         }
         let cut = raw.find(['|', '#']);
@@ -1137,6 +1140,28 @@ mod tests {
             "the rejected [[ -f y ]] must not block the valid link after it: {linker:?}"
         );
         assert!(linker.gaps.is_empty(), "{:?}", linker.gaps);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_link_with_a_space_inside_it_is_still_a_link() {
+        let root = temp_wiki("space-in-link");
+        write(
+            &root,
+            "company/Pricing Model.md",
+            "---\ntitle: Pricing Model\narea: company\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: pricing-source.md\n---\nNo links out.\n",
+        );
+        write(
+            &root,
+            "linker.md",
+            "---\ntitle: Linker\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: linker-note.md\n---\nSee [[Pricing Model|pricing]] and [[Discount Policy]], not [[ Pricing Model ]].\n",
+        );
+
+        let idx = index(&root);
+        let linker = note_by_id(&idx, "linker");
+        assert_eq!(linker.links, vec!["company/Pricing Model".to_string()], "{linker:?}");
+        assert_eq!(linker.gaps, vec!["Discount Policy".to_string()], "{linker:?}");
 
         std::fs::remove_dir_all(&root).ok();
     }
