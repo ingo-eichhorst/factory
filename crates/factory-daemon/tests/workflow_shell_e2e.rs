@@ -18,6 +18,7 @@
 //! built, the fix is `cargo build --workspace` (or `--bin factory`) first.
 
 use serde_json::{json, Value};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -81,12 +82,11 @@ impl Daemon {
     }
 
     fn wait_for_http(&self) {
+        let url = format!("{}/api/status", self.base_url());
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            if let Ok(response) = ureq::get(format!("{}/api/status", self.base_url())).call() {
-                if response.status().as_u16() == 200 {
-                    return;
-                }
+            if let Some((200, _)) = raw_request("GET", &url, None) {
+                return;
             }
             if Instant::now() > deadline {
                 let log = std::fs::read_to_string(self.root.join("daemon.log")).unwrap_or_default();
@@ -133,13 +133,53 @@ fn free_port() -> u16 {
 }
 
 // ------------------------------------------------------------- http helpers
+//
+// A hand-rolled HTTP/1.1 client rather than a crate: this test's only need
+// for one was GET/POST with a small JSON body, and pulling in a real client
+// for that outweighs the dozen lines below. `Connection: close` is the
+// whole trick -- the daemon closes its end once the response is fully
+// written, so reading the socket to EOF *is* reading the whole response,
+// with no need to parse `Content-Length` or chunked framing at all.
+
+/// One request, or `None` for any connection/IO failure -- used by
+/// `wait_for_http`, which needs to retry a daemon that is not listening
+/// yet, not panic the first time it is not.
+fn raw_request(method: &str, url: &str, body: Option<&Value>) -> Option<(u16, String)> {
+    let rest = url.strip_prefix("http://")?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let payload = body.map(|value| serde_json::to_vec(value).expect("serialize request body"));
+
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n");
+    if let Some(payload) = &payload {
+        request.push_str("Content-Type: application/json\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", payload.len()));
+    }
+    request.push_str("\r\n");
+
+    let mut stream = std::net::TcpStream::connect(authority).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok()?;
+    stream.set_write_timeout(Some(Duration::from_secs(10))).ok()?;
+    stream.write_all(request.as_bytes()).ok()?;
+    if let Some(payload) = &payload {
+        stream.write_all(payload).ok()?;
+    }
+
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).ok()?;
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, response_body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let status: u16 = head.lines().next()?.split_whitespace().nth(1)?.parse().ok()?;
+    Some((status, response_body.to_string()))
+}
 
 fn get(url: &str) -> Value {
-    let mut response = ureq::get(url).call().unwrap_or_else(|e| panic!("GET {url}: {e}"));
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .unwrap_or_else(|e| panic!("GET {url} body: {e}"));
+    let (status, body) = raw_request("GET", url, None).unwrap_or_else(|| panic!("GET {url}: no response"));
+    if status != 200 {
+        panic!("GET {url} -> HTTP {status}: {body}");
+    }
     serde_json::from_str(&body).unwrap_or_else(|e| panic!("GET {url} json ({e}): {body}"))
 }
 
@@ -151,13 +191,11 @@ fn expect_ok(url: &str, value: &Value) -> Value {
 }
 
 fn post(url: &str, body: &Value) -> Value {
-    let mut response = ureq::post(url)
-        .send_json(body.clone())
-        .unwrap_or_else(|e| panic!("POST {url}: {e}"));
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .unwrap_or_else(|e| panic!("POST {url} body: {e}"));
+    let (status, text) =
+        raw_request("POST", url, Some(body)).unwrap_or_else(|| panic!("POST {url}: no response"));
+    if status != 200 {
+        panic!("POST {url} -> HTTP {status}: {text}");
+    }
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("POST {url} json ({e}): {text}"))
 }
 
