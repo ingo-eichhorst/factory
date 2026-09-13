@@ -116,10 +116,18 @@ pub enum Grant {
     WorkflowRun,
     #[serde(rename = "workflow.cancel")]
     WorkflowCancel,
+    /// Create, edit, and delete datasets and their cases. The root scope is
+    /// the subject: datasets are company-wide, not one project's.
+    #[serde(rename = "dataset.edit")]
+    DatasetEdit,
+    /// Start, cancel, and clean bench runs. The root scope is the subject,
+    /// for the same reason as `dataset.edit`.
+    #[serde(rename = "bench.run")]
+    BenchRun,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 16] = [
+    pub const ALL: [Grant; 18] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -136,6 +144,8 @@ impl Grant {
         Grant::WorkflowDelete,
         Grant::WorkflowRun,
         Grant::WorkflowCancel,
+        Grant::DatasetEdit,
+        Grant::BenchRun,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -156,6 +166,8 @@ impl Grant {
             Self::WorkflowDelete => "workflow.delete",
             Self::WorkflowRun => "workflow.run",
             Self::WorkflowCancel => "workflow.cancel",
+            Self::DatasetEdit => "dataset.edit",
+            Self::BenchRun => "bench.run",
         }
     }
 
@@ -178,6 +190,8 @@ impl Grant {
             Self::WorkflowDelete => "delete workflows",
             Self::WorkflowRun => "start workflows",
             Self::WorkflowCancel => "cancel workflows",
+            Self::DatasetEdit => "create, edit, and delete datasets and their cases",
+            Self::BenchRun => "start, cancel, and clean bench runs",
         }
     }
 
@@ -201,6 +215,8 @@ impl Grant {
             | Self::WorkflowDelete
             | Self::WorkflowRun
             | Self::WorkflowCancel => "Workflows",
+            Self::DatasetEdit => "Datasets",
+            Self::BenchRun => "Bench",
         }
     }
 
@@ -561,13 +577,28 @@ mod tests {
     fn every_grant_belongs_to_a_group_a_person_reads() {
         for grant in Grant::ALL {
             assert!(
-                ["Tasks", "Agents", "Runs", "Workflows"].contains(&grant.group()),
+                ["Tasks", "Agents", "Runs", "Workflows", "Datasets", "Bench"]
+                    .contains(&grant.group()),
                 "{} has no group",
                 grant.as_str()
             );
         }
         assert_eq!(Grant::RunInput.group(), "Runs");
         assert_eq!(Grant::AgentInput.group(), "Agents");
+        assert_eq!(Grant::DatasetEdit.group(), "Datasets");
+        assert_eq!(Grant::BenchRun.group(), "Bench");
+    }
+
+    #[test]
+    fn dataset_edit_and_bench_run_are_appended_at_the_end_and_a_wildcard_still_catches_them() {
+        // The task's own instructions: these two land at the end of the
+        // enum and of `Grant::ALL`, so a parallel track appending
+        // `knowledge.write` there too merges without a real conflict.
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::DatasetEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::BenchRun);
+        let all = Grant::expand("*").unwrap();
+        assert!(all.contains(&Grant::DatasetEdit));
+        assert!(all.contains(&Grant::BenchRun));
     }
 
     #[test]

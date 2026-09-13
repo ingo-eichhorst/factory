@@ -1098,6 +1098,13 @@ fn describe_event(e: &Event) -> String {
         Event::WorkflowUpdated { workflow } => format!("workflow updated  {} r{}", workflow.name, workflow.revision),
         Event::WorkflowDeleted { id } => format!("workflow deleted  {id}"),
         Event::WorkflowRunUpdated { run } => format!("workflow run  {}  {:?}", run.id, run.status),
+        Event::BenchRunUpdated { run } => format!(
+            "bench run  {}  {}  {}/{} settled",
+            run.id,
+            run.dataset,
+            run.attempts.iter().filter(|a| a.verdict.is_some()).count(),
+            run.attempts.len(),
+        ),
         Event::TaskEntry { id, entry } => format!(
             "entry    {}  {:<8} {}",
             &id[..8.min(id.len())],

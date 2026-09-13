@@ -857,6 +857,7 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             workflow_origin: None,
+            bench_origin: None,
         };
         let task = engine.store.create(&task).await.unwrap();
         let run = engine
@@ -1254,6 +1255,7 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             workflow_origin: None,
+            bench_origin: None,
         };
         engine.store.create(&task).await.unwrap();
 

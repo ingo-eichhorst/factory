@@ -240,6 +240,7 @@ mod tests {
             next_run_at: None,
             worktree: true,
             workflow_origin: None,
+            bench_origin: None,
         }
     }
 
