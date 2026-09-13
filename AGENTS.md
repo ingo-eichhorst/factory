@@ -17,6 +17,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/{dashboard,activity,site,site-render}.js               the new views
     ui/js/{sandboxes,secrets}.js                                 L2's two tabs
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
+    ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
 
@@ -112,7 +113,12 @@ something impossible.
   retry will show the previous attempt's error.
 - A scope owns only its `.factory/config.yaml`. Runtime state stays in the
   instance root's `.factory/`; never put the database, socket, worktrees, or
-  other daemon-owned state inside a scope.
+  other daemon-owned state inside a scope. `.factory/knowledge/` and
+  `.factory/datasets/` are the one exception: authored content -- pages,
+  documents and dataset YAML a person or an agent wrote by hand -- that
+  nothing in Factory ever deletes or regenerates, and that is worth backing
+  up like a scope's own files, even though it sits under the instance root's
+  `.factory/` alongside everything the daemon does own.
 - A plugin that fails must never take the daemon down with it.
 - Roles bound what an agent does by accident, not what it could do. Every agent
   runs as the owner and can reach the socket; one that omits its token is the

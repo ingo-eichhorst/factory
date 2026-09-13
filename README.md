@@ -371,25 +371,49 @@ check, and there is no write path, in the UI or over the socket.
 
 ## Knowledge
 
-The instance root's `knowledge/wiki/` is a wiki people and agents write by
-hand — `SCHEMA.md` sets the rules, pages carry YAML frontmatter and
-`[[links]]`. The L5 **Knowledge** tab reads it. Nothing else does yet, and
-nothing writes to it.
+`<root>/.factory/knowledge/` is a vault Factory keeps — one Obsidian-compatible
+directory of Markdown pages and any other document, holding authored content
+nothing in Factory regenerates (see the `.factory/` rule above). The L5
+**Knowledge** tab draws it as a graph. The old `<root>/knowledge/wiki/` (v1's
+fixed path) comes in only through an explicit import; nothing moves on its
+own, and there is no fallback read of it.
 
 `factory knowledge` and `GET /api/knowledge` rebuild the index from the files
-on every call: no link table to keep in step, and nothing is ever written. A
-`.md` file whose frontmatter parses and names a `title` is a note; every
-other one is a page, listed but not a graph node. A `[[link]]` resolves
-page-relative, then root-relative, then by a unique file name; more than one
+on every call: no link table to keep in step, and an index request never
+writes anything. Every `.md` file is a page and a graph node — frontmatter is
+optional, and a page's title falls back to its file name when there is none
+or it names no `title`. Every other regular file is a document, stat-ed and
+never opened. A page carries tags from frontmatter `tags:`/`keywords:` and
+inline `#tag` (Obsidian's rules: not purely numeric, not in code or a
+heading, not glued to a URL), and can reference a document through
+`![[f.ext]]`, `[[f.ext]]` or `[text](rel/f.ext)`; `[text](page.md)` is a page
+edge too. A link resolves page-relative, then root-relative, then by a
+unique file name in its own namespace (pages or documents); more than one
 match is reported rather than guessed at, and an unresolved or ambiguous
-target is a gap, not an error.
+target is a gap, not an error. `present: false` names `legacy` when the old
+wiki still exists, and the empty state shows the exact import command.
 
-**v1 indexes; it does not read.** No note's body ever reaches the browser or
-the CLI — only titles, frontmatter fields, links, and findings. A `sources[]`
-entry under `data/secrets/` is reported as a finding and nothing under it is
-ever opened or even stat-ed; that call is decided from the string alone,
-before any filesystem access. The knowledge base is company-wide: the scope
-rail does not filter this tab.
+**The index reads; it does not write.** No page's text and no document's
+bytes ever reach the browser or the CLI — only titles, tags, links, and file
+metadata. A `sources[]` entry under `data/secrets/` is reported as a finding
+and nothing under it is ever opened or even stat-ed; that call is decided
+from the string alone, before any filesystem access. The knowledge base is
+company-wide: the scope rail does not filter this tab.
+
+**Writing only ever adds a file.** `factory knowledge import <dir>
+[--into <subdir>] [--overwrite]` copies a directory tree into the vault,
+preserving relative paths; `factory knowledge add <file>... [--into]
+[--overwrite]` adds one or more files, defaulting a `.md` file to the vault
+root and everything else to `documents/`. The UI's "Add documents" uploads
+through `PUT /api/knowledge/files?path=&overwrite=`, the one write path a
+browser can reach, since it cannot name a path on the daemon's own disk.
+Nothing here edits or deletes an existing file except an explicit
+`--overwrite` replacement. A target that would escape the vault, or a source
+under `data/secrets/` or elsewhere under `.factory/`, is refused before a
+byte is touched — the latter two refusals never echo the path back. This is
+the one place `Grant::KnowledgeWrite` gates: the knowledge base is
+company-wide, so only the owner or a foreman whose own scope *is* the
+instance root may hold it.
 
 ## Benchmarks
 
@@ -904,5 +928,6 @@ the file a session is editing is not read at all, and is not drawn.
     ui/js/{dashboard,activity,site,site-render}.js               the new views
     ui/js/{sandboxes,secrets}.js                                 L2's two tabs
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
+    ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
