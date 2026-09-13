@@ -181,7 +181,14 @@ function renderBenchRunDetail() {
   }
   el.hidden = false;
 
-  const data = state.benchRunError ? null : state.benchRun;
+  // Guard against a stale answer even if one somehow survives the clear in
+  // `readBenchTail` (an overlapping fetch from before the selection changed)
+  // -- `detailSeq` only keeps the newest *call* winning, not the newest
+  // *selection*, so a cached run is only ever trusted for the id it actually
+  // answers.
+  const data = state.benchRunError || !state.benchRun || state.benchRun.run.id !== state.benchRunId
+    ? null
+    : state.benchRun;
   if (!data) {
     $("bench-run-title").textContent = state.benchRunId;
     $("bench-run-status").textContent = state.benchRunError || "loading…";

@@ -19,6 +19,8 @@ import {
   ungated,
   visibleCases,
 } from "../js/bench-model.js";
+import { readBenchTail } from "../js/benchmarks.js";
+import { state } from "../js/core.js";
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
@@ -82,6 +84,41 @@ test("a dataset legally named 'task' survives the tail round trip and the MODAL 
     assert.ok(!tail.includes("task"), `tail for ${JSON.stringify(name)} must not contain a bare "task" segment`);
     assert.deepEqual(readBenchmarksTail(tail), { segment: "datasets", dataset: name, run: null });
   }
+});
+
+test("readBenchTail drops a cached dataset answer whose name no longer matches the tail", () => {
+  // Back/forward is hash-driven, in-tab navigation -- the one path that
+  // never runs `selectDataset` (that only fires from a click, and clears
+  // the cached answer itself). Without this, `renderDatasetDetail` would
+  // paint the *previous* selection's payload under the new name's header
+  // until the new fetch resolves.
+  state.benchDatasetName = "alpha";
+  state.dataset = { dataset: { name: "alpha", revision: 1, cases: [] } };
+  state.datasetError = null;
+
+  readBenchTail(benchmarksTail("datasets", "beta", null));
+  assert.equal(state.benchDatasetName, "beta");
+  assert.equal(state.dataset, null, "the stale dataset answer for alpha must not survive a switch to beta");
+
+  // Re-reading the same tail (a reload, or a same-name hash write) must not
+  // discard a still-valid cached answer.
+  state.dataset = { dataset: { name: "beta", revision: 1, cases: [] } };
+  readBenchTail(benchmarksTail("datasets", "beta", null));
+  assert.notEqual(state.dataset, null, "re-reading the same dataset name must keep the cached answer");
+});
+
+test("readBenchTail drops a cached run answer whose id no longer matches the tail", () => {
+  state.benchRunId = "run-1";
+  state.benchRun = { run: { id: "run-1" }, results: [] };
+  state.benchRunError = null;
+
+  readBenchTail(benchmarksTail("runs", null, "run-2"));
+  assert.equal(state.benchRunId, "run-2");
+  assert.equal(state.benchRun, null, "the stale run answer for run-1 must not survive a switch to run-2");
+
+  state.benchRun = { run: { id: "run-2" }, results: [] };
+  readBenchTail(benchmarksTail("runs", null, "run-2"));
+  assert.notEqual(state.benchRun, null, "re-reading the same run id must keep the cached answer");
 });
 
 test("a note id containing 'task' survives app.js's own task-modal split unharmed", () => {

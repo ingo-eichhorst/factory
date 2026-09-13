@@ -131,7 +131,13 @@ function renderDatasetDetail() {
   el.hidden = false;
   $("dataset-detail-name").textContent = state.benchDatasetName;
 
-  const data = state.datasetError ? null : state.dataset;
+  // Guard against a stale answer even if one somehow survives the clear in
+  // `readBenchTail` (an overlapping `loadDataset` from before the selection
+  // changed, say) -- a cached dataset is only ever trusted for the name it
+  // actually names.
+  const data = state.datasetError || !state.dataset || state.dataset.dataset.name !== state.benchDatasetName
+    ? null
+    : state.dataset;
   if (!data) {
     $("dataset-detail-revision").textContent = state.datasetError || "loading…";
     $("dataset-description").textContent = "";

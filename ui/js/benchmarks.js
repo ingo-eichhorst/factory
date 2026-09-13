@@ -133,9 +133,26 @@ export function benchTail() {
 /// actually fetches whatever the selection now names, the same order
 /// `workflows.js`'s `readWorkflowTail` and `knowledge.js`'s
 /// `readKnowledgeTail` already run in.
+///
+/// A hash change is the one path that never runs `selectDataset`/
+/// `selectBenchRun` (those fire only from a click), so it is also the one
+/// path that can leave `state.dataset`/`state.benchRun` holding a *previous*
+/// selection's payload while a new id is already live in `state` -- back and
+/// forward between `datasets/<name>` and `runs/<id>` in one tab hits this
+/// every time. Drop the stale cached answer whenever the id actually
+/// changes, the same guard `renderDatasetDetail`/`renderBenchRunDetail` also
+/// check before trusting it.
 export function readBenchTail(tail) {
   const { segment, dataset, run } = readBenchmarksTail(tail);
   state.benchSegment = segment;
+  if (dataset !== state.benchDatasetName) {
+    state.dataset = null;
+    state.datasetError = null;
+  }
+  if (run !== state.benchRunId) {
+    state.benchRun = null;
+    state.benchRunError = null;
+  }
   state.benchDatasetName = dataset;
   state.benchRunId = run;
 }
