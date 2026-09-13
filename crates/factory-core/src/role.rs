@@ -116,11 +116,8 @@ pub enum Grant {
     WorkflowRun,
     #[serde(rename = "workflow.cancel")]
     WorkflowCancel,
-    /// Add files to the knowledge base. The subject is always the root
-    /// scope -- the knowledge base is company-wide, so only the owner or a
-    /// foreman whose own scope *is* the instance root may hold this,
-    /// regardless of what `reach` the role otherwise declares. See
-    /// `access::authorize`'s arm for the three knowledge-write requests.
+    /// Add files to the knowledge base. The root scope is the subject: the
+    /// knowledge base is company-wide, not one project's.
     #[serde(rename = "knowledge.write")]
     KnowledgeWrite,
     /// Create, edit, and delete datasets and their cases. The root scope is

@@ -293,8 +293,9 @@ impl Engine {
             }
         };
 
-        // The subject `dataset.edit` and `bench.run` are checked against:
-        // datasets and bench runs are company-wide, not one project's, so
+        // The subject `knowledge.write`, `dataset.edit` and `bench.run` are
+        // checked against: the knowledge base, datasets and bench runs are
+        // company-wide, not one project's, so
         // only a caller whose own scope *is* the instance's configured root
         // scope may hold either -- resolved from the live config, never from
         // a literal name like "root", which is only ever a convention for
@@ -304,13 +305,14 @@ impl Engine {
             match &self.factory_snapshot().config.scope {
                 Some(root) if root.name == *scope => Ok(()),
                 Some(root) => Err(FactoryError::Denied(format!(
-                    "{} works in {scope}; datasets and bench runs are company-wide and belong to \
-                     the root scope ({:?}) alone",
+                    "{} works in {scope}; the knowledge base, datasets and bench runs are \
+                     company-wide and belong to the root scope ({:?}) alone",
                     caller.describe(),
                     root.name
                 ))),
                 None => Err(FactoryError::Denied(format!(
-                    "{} may not manage datasets or bench runs; this instance declares no root scope",
+                    "{} may not write knowledge, manage datasets or run benchmarks; this instance \
+                     declares no root scope",
                     caller.describe()
                 ))),
             }
@@ -432,21 +434,14 @@ impl Engine {
                 Reach::Own => Err(deny("manage workflows; that requires scope reach")),
             },
 
-            // The knowledge base is company-wide, not per-scope, so there is
-            // no scope on the request to check `def.reach` against -- the
-            // subject is fixed: the instance root. Holding the grant is not
-            // enough on its own, whatever `reach` the role declares; the
-            // caller's *own* scope has to be the root itself, the same way a
-            // root-scope foreman is the only one this bypasses.
+            // The knowledge base is company-wide, like datasets and bench
+            // runs, so its subject is the same fixed one: the root scope.
             Request::KnowledgeImport { .. }
             | Request::KnowledgeAdd { .. }
-            | Request::KnowledgeWriteFile { .. } => {
-                if self.scope_is_root(scope) {
-                    Ok(())
-                } else {
-                    Err(deny("write to the knowledge base; that is the root scope's alone"))
-                }
-            }
+            | Request::KnowledgeWriteFile { .. } => match def.reach {
+                Reach::Scope => in_root_scope(),
+                Reach::Own => Err(deny("write to the knowledge base; that requires scope reach")),
+            },
             Request::DatasetCreate { .. }
             | Request::DatasetAddCases { .. }
             | Request::DatasetImport { .. }
@@ -465,17 +460,6 @@ impl Engine {
             // was refused above. Nothing should arrive here.
             _ => Err(deny("do that")),
         }
-    }
-
-    /// Whether the scope named `name` is the instance root -- the one scope
-    /// whose `path` is `.`, distinct from every scope nested under it. Used
-    /// only for `Grant::KnowledgeWrite`'s fixed subject: an unresolvable name
-    /// is not the root either, so this denies rather than defaulting open.
-    fn scope_is_root(&self, name: &str) -> bool {
-        self.factory_snapshot()
-            .scope(name)
-            .map(|s| s.path == std::path::Path::new("."))
-            .unwrap_or(false)
     }
 
     /// Re-derive who a persisted `WorkflowActor` is right now, honouring a

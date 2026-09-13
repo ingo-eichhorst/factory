@@ -2232,6 +2232,7 @@ mod tests {
         {
             let mut factory = engine.factory.write().unwrap();
             factory.config.scopes[0].path = PathBuf::from(".");
+            factory.config.scope = Some(factory.config.scopes[0].clone());
         }
         let root_scope_name = engine.factory_snapshot().config.scopes[0].name.clone();
 
