@@ -65,7 +65,22 @@ const VIEWS = {
   benchmarks: {
     onShow: startBenchmarks,
     onHide: stopAgentPoll,
-    tail: { write: () => benchTail(), read: (tail) => readBenchTail(tail) },
+    tail: {
+      write: () => benchTail(),
+      // `showTab` only calls `onShow` (`startBenchmarks`) when the page
+      // itself changes; a tail change while Benchmarks is already showing
+      // -- a typed hash, a rewritten link, a segment switched by app.js
+      // itself -- lands here alone (`applyTail`'s else branch). Calling
+      // `startBenchmarks` again is exactly what a fresh show would have
+      // done, and every one of its loads already settles its own selection
+      // and self-renders, so repeating it once more here is a correction,
+      // never wasted work of a kind this app does not already tolerate
+      // (see workflows.js's own note on `onShow` and `tail.read` overlapping).
+      read: (tail) => {
+        readBenchTail(tail);
+        startBenchmarks();
+      },
+    },
   },
   knowledge: {
     onShow: startKnowledge,
@@ -512,6 +527,14 @@ function onEvent(ev) {
       if (state.open === ev.task.id) renderModal();
       if (state.tab === "dashboard") renderDashboard();
       if (state.tab === "inbox") renderInbox([...state.tasks.values()]);
+      // Judging is asynchronous: a bench attempt's task settles (this
+      // event) well before its gate finishes and `bench_run_updated`
+      // delivers the verdict. Without this, the selected run's matrix would
+      // sit on "running" the whole time the gate is out, rather than
+      // showing "judging" the moment the task itself is actually done.
+      if (state.tab === "benchmarks" && ev.task.bench_origin && ev.task.bench_origin.bench_run_id === state.benchRunId) {
+        renderBenchRunsSegment();
+      }
       break;
     case "task_deleted":
       state.tasks.delete(ev.id);
