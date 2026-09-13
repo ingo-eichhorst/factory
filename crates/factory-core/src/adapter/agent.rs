@@ -44,6 +44,79 @@ pub struct TaskBinding {
     /// run that used the scope directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// This task's direct parents in a workflow, each with the output it
+    /// finished with -- empty for a root node or a task outside any
+    /// workflow. Computed once, at dispatch (`Engine::dispatch`), from that
+    /// moment's workflow-run state; a task not spawned by a workflow never
+    /// has one to compute. `TaskBinding` crosses the out-of-process plugin
+    /// protocol, so an older plugin build must still decode a binding that
+    /// carries this key (`default`), and the common case -- nothing
+    /// upstream -- should not put an empty array on the wire on every
+    /// dispatch either (`skip_serializing_if`). See `Task::worktree` for the
+    /// same reasoning applied to another field added after the wire shape
+    /// already existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upstream: Vec<UpstreamOutput>,
+}
+
+/// One direct parent's contribution to a downstream workflow node's dispatch:
+/// which node and task it came from, its title (so a prompt can name it
+/// without a second lookup), and the result it finished with. `result` is
+/// `None` when the parent task carries none -- reached today only if a task
+/// somehow finished `Done` without ever calling `--result`, since a workflow
+/// node only ever becomes a parent once its task is `Done`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamOutput {
+    pub node_id: String,
+    pub task_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+}
+
+/// How much of a workflow parent's result a downstream dispatch keeps.
+/// Applied once where `upstream` is computed (`Engine::dispatch`) and again,
+/// defensively, wherever it is rendered (`HarnessAgent::prompt`), so a huge
+/// result can never blow up a prompt or a task record even if some future
+/// caller skips the first truncation.
+pub const UPSTREAM_RESULT_BYTE_CAP: usize = 16 * 1024;
+
+/// Keep at most `max_bytes` of `s`'s tail, marking the cut so truncated text
+/// reads as a cut rather than as the whole thing. The marker is budgeted
+/// inside `max_bytes` rather than added on top of it, which is what makes
+/// this idempotent: truncating an already-truncated string with the same cap
+/// is a no-op instead of stacking a second marker in front of a shorter and
+/// shorter tail.
+pub fn truncate_tail(s: &str, max_bytes: usize) -> std::borrow::Cow<'_, str> {
+    if s.len() <= max_bytes {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let marker = format!("[... truncated to the last {max_bytes} bytes ...]\n");
+    if marker.len() >= max_bytes {
+        // A pathologically small cap: not even the marker fits. Neither
+        // caller in this codebase asks for one anywhere near this small
+        // (both are tens of kilobytes), but truncating the marker itself
+        // keeps "never longer than max_bytes" true regardless of that.
+        let mut end = max_bytes.min(marker.len());
+        while end > 0 && !marker.is_char_boundary(end) {
+            end -= 1;
+        }
+        return std::borrow::Cow::Owned(marker[..end].to_string());
+    }
+    let keep = max_bytes - marker.len();
+    let mut start = s.len().saturating_sub(keep);
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    std::borrow::Cow::Owned(format!("{marker}{}", &s[start..]))
+}
+
+/// Where a task run's upstream-outputs file lives, given only its task id and
+/// the instance's guides directory -- the free-function twin of
+/// `run_guide_path`, kept for the same reason: `close_session` needs to name
+/// this file for cleanup long after the `AgentContext` that wrote it is gone.
+pub fn upstream_output_path(guides_dir: &Path, task_id: &str) -> PathBuf {
+    guides_dir.join(format!("upstream-{task_id}.json"))
 }
 
 /// Everything an agent adapter needs to phrase a prompt and a launch.
@@ -315,6 +388,43 @@ impl AgentContext {
         Ok(path)
     }
 
+    /// Where this run's upstream-outputs file would live, if it has anything
+    /// to write -- `None` for a root node or a task outside any workflow,
+    /// same check `write_upstream_file` makes, so a caller can name the path
+    /// without writing anything first.
+    pub fn upstream_path(&self) -> Option<PathBuf> {
+        let binding = self.task.as_ref()?;
+        if binding.upstream.is_empty() {
+            return None;
+        }
+        Some(upstream_output_path(&self.guides_dir, &binding.task.id))
+    }
+
+    /// Write this run's upstream outputs to their file, for an agent (the
+    /// shell agent, today) that would rather point a command at a path than
+    /// have a parent's stdout -- quotes, `$`, backticks, newlines and all --
+    /// spliced into a typed line. `None` when there is nothing to write
+    /// rather than an empty file, so a caller can tell "no parents" from
+    /// "write failed". Idempotent: called from both `launch_spec` (so the
+    /// path is real before `FACTORY_UPSTREAM_FILE` is exported) and `prompt`
+    /// (so the inline `export` in the typed line does not depend on that
+    /// order), and overwriting the same content twice is harmless.
+    pub fn write_upstream_file(&self) -> Result<Option<PathBuf>> {
+        let Some(path) = self.upstream_path() else {
+            return Ok(None);
+        };
+        let upstream = &self.binding()?.upstream;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| FactoryError::Other(anyhow::anyhow!("making {}: {e}", parent.display())))?;
+        }
+        let json = serde_json::to_string_pretty(upstream)
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("encoding upstream outputs: {e}")))?;
+        std::fs::write(&path, json)
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("writing {}: {e}", path.display())))?;
+        Ok(Some(path))
+    }
+
     /// The same contract as environment, for adapters that would rather read it.
     pub fn env(&self) -> BTreeMap<String, String> {
         let mut env = BTreeMap::from([
@@ -418,6 +528,7 @@ mod tests {
             attempt: 1,
             token: "tok".into(),
             worktree_branch: None,
+            upstream: Vec::new(),
         });
         ctx.identity_token = None;
         ctx
@@ -547,5 +658,119 @@ mod tests {
             running.guide_path(),
             run_guide_path(&PathBuf::from("/tmp/factory-guides"), "t1")
         );
+    }
+
+    // -- upstream outputs -----------------------------------------------
+
+    /// A fresh, real directory every call. `base()`'s guides_dir is a fixed
+    /// path shared by every test in this module that doesn't touch the
+    /// filesystem; a test that actually writes and reads a file back needs
+    /// one of its own, or it races another test using the very same path.
+    fn fresh_guides_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("factory-core-agent-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn upstream(entries: Vec<UpstreamOutput>) -> AgentContext {
+        let mut ctx = with_task(base(None));
+        ctx.guides_dir = fresh_guides_dir();
+        ctx.task.as_mut().unwrap().upstream = entries;
+        ctx
+    }
+
+    fn one_output() -> UpstreamOutput {
+        UpstreamOutput {
+            node_id: "a".into(),
+            task_id: "ta".into(),
+            title: "build it".into(),
+            result: Some("ok".into()),
+        }
+    }
+
+    #[test]
+    fn a_task_with_no_upstream_gets_no_file_and_no_path() {
+        let ctx = with_task(base(None));
+        assert_eq!(ctx.upstream_path(), None);
+        assert_eq!(ctx.write_upstream_file().unwrap(), None);
+        assert!(!ctx.guides_dir.exists(), "nothing at all was written");
+    }
+
+    #[test]
+    fn a_standing_agent_has_no_upstream_path_either() {
+        // No task at all means no binding to read `upstream` off of.
+        let ctx = base(None);
+        assert_eq!(ctx.upstream_path(), None);
+        assert_eq!(ctx.write_upstream_file().unwrap(), None);
+    }
+
+    #[test]
+    fn a_task_with_upstream_writes_a_json_file_named_by_task_id() {
+        let ctx = upstream(vec![one_output()]);
+        let expected = upstream_output_path(&ctx.guides_dir, "t1");
+        assert_eq!(ctx.upstream_path(), Some(expected.clone()));
+        let path = ctx.write_upstream_file().unwrap().expect("something to write");
+        assert_eq!(path, expected);
+        let written: Vec<UpstreamOutput> = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].node_id, "a");
+        assert_eq!(written[0].result.as_deref(), Some("ok"));
+        std::fs::remove_dir_all(&ctx.guides_dir).ok();
+    }
+
+    #[test]
+    fn writing_the_upstream_file_twice_is_harmless() {
+        // `launch_spec` and `prompt` each call this independently rather than
+        // relying on one having already run; the second write must not fail
+        // or change the outcome.
+        let ctx = upstream(vec![one_output()]);
+        let first = ctx.write_upstream_file().unwrap().unwrap();
+        let second = ctx.write_upstream_file().unwrap().unwrap();
+        assert_eq!(first, second);
+        std::fs::remove_dir_all(&ctx.guides_dir).ok();
+    }
+
+    #[test]
+    fn truncate_tail_keeps_the_end_and_marks_the_cut() {
+        let long = "a".repeat(100);
+        let kept = truncate_tail(&long, 80);
+        assert!(kept.len() <= 80, "never longer than the cap: {} bytes", kept.len());
+        assert!(kept.ends_with('a'), "the tail, not the head, survives: {kept}");
+        assert!(kept.contains("truncated"), "the cut is marked: {kept}");
+    }
+
+    #[test]
+    fn truncate_tail_never_exceeds_the_cap_even_when_the_marker_alone_would_not_fit() {
+        // Neither real caller asks for anything near this small, but the
+        // invariant -- never longer than `max_bytes` -- has to hold even
+        // when the marker text itself does not fit in the budget.
+        let long = "a".repeat(100);
+        let kept = truncate_tail(&long, 10);
+        assert!(kept.len() <= 10, "never longer than the cap: {} bytes", kept.len());
+    }
+
+    #[test]
+    fn truncate_tail_is_a_no_op_under_the_cap() {
+        let short = "hello";
+        assert_eq!(truncate_tail(short, 40), std::borrow::Cow::Borrowed(short));
+    }
+
+    #[test]
+    fn truncate_tail_never_splits_a_multibyte_character() {
+        let s = "é".repeat(30); // each 'é' is 2 bytes in UTF-8
+        // The byte budget alone lands mid-character; slicing there would
+        // have panicked outright if the boundary walk were missing.
+        let kept = truncate_tail(&s, 60);
+        assert!(kept.ends_with('é'), "the kept tail is whole characters, not a stray byte: {kept:?}");
+    }
+
+    #[test]
+    fn truncate_tail_is_idempotent() {
+        // The marker is budgeted inside the cap rather than added on top of
+        // it, precisely so a second pass (the defensive one in a harness
+        // prompt's rendering, after the first at dispatch) is a no-op rather
+        // than stacking a second marker in front of an ever-shorter tail.
+        let long = "the quick brown fox jumps over the lazy dog ".repeat(50);
+        let once = truncate_tail(&long, 200).into_owned();
+        let twice = truncate_tail(&once, 200);
+        assert_eq!(once, twice.into_owned());
     }
 }
