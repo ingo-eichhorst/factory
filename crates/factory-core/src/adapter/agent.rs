@@ -368,6 +368,9 @@ impl AgentContext {
                 Grant::WorkflowCancel => {
                     "workflow.cancel -> cancel a workflow run in your scope; today that is the web UI or POST /api/workflow-runs/<id>/cancel, not this CLI".to_string()
                 }
+                Grant::KnowledgeWrite => format!(
+                    "knowledge.write -> {bin} knowledge import <dir> or {bin} knowledge add <file>...; the knowledge base is company-wide, not scoped to {scope}"
+                ),
             });
         }
         lines

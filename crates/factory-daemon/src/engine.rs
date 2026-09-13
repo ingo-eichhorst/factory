@@ -292,11 +292,47 @@ impl Engine {
                 Ok(Payload::Knowledge {
                     root: index.root,
                     present: index.present,
-                    notes: index.notes,
-                    gaps: index.gaps,
+                    legacy: index.legacy,
                     pages: index.pages,
+                    tags: index.tags,
+                    documents: index.documents,
+                    gaps: index.gaps,
                     findings: index.findings,
                 })
+            }
+            Request::KnowledgeImport { source, into, overwrite } => {
+                let root = self.factory_snapshot().root;
+                let source = PathBuf::from(source);
+                let result = tokio::task::spawn_blocking(move || {
+                    factory_core::knowledge::import(&root, &source, into.as_deref(), overwrite)
+                })
+                .await
+                .map_err(|e| FactoryError::Other(anyhow::anyhow!("knowledge import: {e}")))?
+                .map_err(FactoryError::BadRequest)?;
+                Ok(knowledge_write_payload(result))
+            }
+            Request::KnowledgeAdd { sources, into, overwrite } => {
+                let root = self.factory_snapshot().root;
+                let sources: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+                let result = tokio::task::spawn_blocking(move || {
+                    factory_core::knowledge::add(&root, &sources, into.as_deref(), overwrite)
+                })
+                .await
+                .map_err(|e| FactoryError::Other(anyhow::anyhow!("knowledge add: {e}")))?;
+                Ok(knowledge_write_payload(result))
+            }
+            Request::KnowledgeWriteFile { path, overwrite, bytes } => {
+                let root = self.factory_snapshot().root;
+                let written = tokio::task::spawn_blocking(move || {
+                    factory_core::knowledge::write_bytes(&root, &path, overwrite, &bytes)
+                })
+                .await
+                .map_err(|e| FactoryError::Other(anyhow::anyhow!("knowledge write: {e}")))?
+                .map_err(FactoryError::BadRequest)?;
+                Ok(knowledge_write_payload(factory_core::knowledge::WriteResult {
+                    copied: vec![written],
+                    ..Default::default()
+                }))
             }
             Request::Benchmarks => {
                 let factory = self.factory_snapshot();
@@ -1808,6 +1844,18 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// `knowledge::WriteResult` to the wire shape `Request::KnowledgeImport`,
+/// `KnowledgeAdd` and `KnowledgeWriteFile` all answer with.
+fn knowledge_write_payload(result: factory_core::knowledge::WriteResult) -> Payload {
+    Payload::KnowledgeWrite {
+        copied: result.copied,
+        skipped_existing: result.skipped_existing,
+        skipped_hidden: result.skipped_hidden,
+        refused: result.refused,
+        truncated: result.truncated,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1985,11 +2033,11 @@ mod tests {
         std::fs::remove_dir_all(scope_dir).ok();
     }
 
-    /// `Request::Knowledge` reads `<factory root>/knowledge/wiki`, not the
-    /// scope directory -- the wiki is company-wide, not per-scope -- and runs
-    /// the walk in `spawn_blocking` rather than inline.
+    /// `Request::Knowledge` reads `<factory root>/.factory/knowledge`, not
+    /// the scope directory -- the vault is company-wide, not per-scope --
+    /// and runs the walk in `spawn_blocking` rather than inline.
     #[tokio::test]
-    async fn a_knowledge_request_indexes_the_factory_roots_wiki() {
+    async fn a_knowledge_request_indexes_the_factory_roots_vault() {
         let scope_dir = temp_dir("knowledge-request");
         let engine = test_engine(scope_dir.clone());
         let root = temp_dir("knowledge-request-root");
@@ -1997,25 +2045,77 @@ mod tests {
             let mut factory = engine.factory.write().unwrap();
             factory.root.clone_from(&root);
         }
-        std::fs::create_dir_all(root.join("knowledge/wiki")).unwrap();
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
         std::fs::write(
-            root.join("knowledge/wiki/note.md"),
-            "---\ntitle: A Note\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: note-source.md\n---\nNo links.\n",
+            root.join(".factory/knowledge/page.md"),
+            "---\ntitle: A Page\n---\nNo links.\n",
         )
         .unwrap();
 
         let response = engine.handle_request(Request::Knowledge).await;
         match response {
-            Response::Ok { data: Payload::Knowledge { present, notes, .. } } => {
+            Response::Ok { data: Payload::Knowledge { present, pages, .. } } => {
                 assert!(present);
-                assert_eq!(notes.len(), 1);
-                assert_eq!(notes[0].id, "note");
+                assert_eq!(pages.len(), 1);
+                assert_eq!(pages[0].id, "page");
             }
             other => panic!("expected a knowledge payload: {other:?}"),
         }
 
         std::fs::remove_dir_all(scope_dir).ok();
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// The write requests need `Grant::KnowledgeWrite`, and even holding it
+    /// is refused unless the caller's own scope *is* the instance root -- the
+    /// knowledge base has no per-scope subject to check `reach` against.
+    #[tokio::test]
+    async fn knowledge_writes_need_the_grant_and_the_root_scope_both() {
+        let scope_dir = temp_dir("knowledge-write-access");
+        let engine = test_engine(scope_dir.clone());
+        {
+            let mut factory = engine.factory.write().unwrap();
+            factory.config.scopes[0].path = PathBuf::from(".");
+        }
+        let root_scope_name = engine.factory_snapshot().config.scopes[0].name.clone();
+
+        let request = Request::KnowledgeAdd {
+            sources: vec!["/tmp/does-not-matter.md".into()],
+            into: None,
+            overwrite: false,
+        };
+
+        // A foreman (holds every grant, `Grant::ALL`) whose own scope is the
+        // root may write.
+        let root_foreman = crate::access::Caller::Agent {
+            scope: root_scope_name.clone(),
+            name: "boss".into(),
+            role: factory_core::role::Role::foreman(),
+            run_id: None,
+        };
+        assert!(engine.authorize(&root_foreman, &request).await.is_ok());
+
+        // A foreman of a nested scope holds the same grant, but is not the
+        // root -- and is refused for exactly that, not for lacking the grant.
+        let nested_foreman = crate::access::Caller::Agent {
+            scope: "nested".into(),
+            name: "boss".into(),
+            role: factory_core::role::Role::foreman(),
+            run_id: None,
+        };
+        let err = engine.authorize(&nested_foreman, &request).await.unwrap_err().to_string();
+        assert!(err.contains("root scope"), "{err}");
+
+        // A worker in the root scope holds no write grant at all.
+        let root_worker = crate::access::Caller::Agent {
+            scope: root_scope_name,
+            name: "w".into(),
+            role: factory_core::role::Role::worker(),
+            run_id: None,
+        };
+        assert!(engine.authorize(&root_worker, &request).await.is_err());
+
+        std::fs::remove_dir_all(scope_dir).ok();
     }
 
     /// `Request::Benchmarks` derives configurations from the current config's

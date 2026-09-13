@@ -59,9 +59,14 @@ enum Command {
     /// Create, run, and report on tasks.
     #[command(subcommand)]
     Task(TaskCmd),
-    /// The L5 Knowledge tab: an index of the instance's wiki, rebuilt from
-    /// the files on every call. Read-only -- nothing here writes a note.
-    Knowledge,
+    /// The L5 Knowledge tab: an index of the instance's knowledge vault,
+    /// rebuilt from the files on every call. With no subcommand, prints the
+    /// index; `import`/`add` are the only way anything is ever written --
+    /// files are copied in, never edited or deleted.
+    Knowledge {
+        #[command(subcommand)]
+        command: Option<KnowledgeCmd>,
+    },
     /// The L5 Benchmarks tab: one configuration per distinct harness, full
     /// arguments and sandbox a task could be dispatched with today, and what
     /// each one is still missing to be a comparable score. Declares and
@@ -95,6 +100,32 @@ enum AgentCmd {
         /// Repeatable: `--key enter`, `--key esc`, `--key ctrl-c`.
         #[arg(long = "key")]
         keys: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum KnowledgeCmd {
+    /// Copy a directory tree into the vault, preserving relative paths so
+    /// `[[area/page]]` still resolves afterwards. Pages and documents travel
+    /// together; nothing already there is ever edited or deleted.
+    Import {
+        source: PathBuf,
+        /// Where under the vault the tree lands. Defaults to the vault root.
+        #[arg(long)]
+        into: Option<String>,
+        /// Replace a target that already exists, instead of skipping it.
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Add one or more files to the vault. Without `--into`, each file finds
+    /// its own default: the vault root for a `.md` file, `documents/` for
+    /// anything else.
+    Add {
+        files: Vec<PathBuf>,
+        #[arg(long)]
+        into: Option<String>,
+        #[arg(long)]
+        overwrite: bool,
     },
 }
 
@@ -420,32 +451,58 @@ async fn main() -> Result<()> {
         Command::Run(cmd) => run_cmd(cli.json, &client, cmd).await,
         Command::Task(cmd) => task(cli.json, &client, cmd).await,
 
-        Command::Knowledge => {
+        Command::Knowledge { command: None } => {
             let payload = client.send(Request::Knowledge).await?;
             print(&payload, cli.json, |p| match p {
-                Payload::Knowledge { root, present, notes, gaps, pages, findings } => {
+                Payload::Knowledge { root, present, legacy, pages, tags, documents, gaps, findings } => {
                     if !*present {
-                        return Some(format!("no wiki at {root}"));
+                        return Some(match legacy {
+                            Some(old) => format!(
+                                "no vault at {root}\n\nfound the old wiki at {old} -- bring it in with:\n  factory knowledge import {old}"
+                            ),
+                            None => format!("no vault at {root}\n\nstart one with:\n  factory knowledge import <dir>"),
+                        });
                     }
-                    let total_links: usize = notes.iter().map(|n| n.links.len()).sum();
+                    let total_links: usize = pages.iter().map(|p| p.links.len()).sum();
                     let mut out = format!(
-                        "{root}  ({} notes, {total_links} links, {} gaps, {} pages)\n",
-                        notes.len(),
-                        gaps.len(),
+                        "{root}  ({} pages, {total_links} links, {} tags, {} documents, {} gaps)\n",
                         pages.len(),
+                        tags.len(),
+                        documents.len(),
+                        gaps.len(),
                     );
-                    if !notes.is_empty() {
-                        out.push_str("\nNOTES\n");
-                        for n in notes {
+                    if !pages.is_empty() {
+                        out.push_str("\nPAGES\n");
+                        for p in pages {
                             out.push_str(&format!(
-                                "  {:<28} {:<28} area={:<12} status={:<10} sources={:<3} links={:<3} backlinks={}\n",
-                                n.id,
-                                n.title,
-                                n.area.as_deref().unwrap_or("-"),
-                                n.status.as_deref().unwrap_or("-"),
-                                n.sources,
-                                n.links.len(),
-                                n.backlinks.len(),
+                                "  {:<28} {:<28} area={:<12} status={:<10} sources={:<3} links={:<3} backlinks={:<3} tags={:<3} documents={}\n",
+                                p.id,
+                                p.title,
+                                p.area.as_deref().unwrap_or("-"),
+                                p.status.as_deref().unwrap_or("-"),
+                                p.sources,
+                                p.links.len(),
+                                p.backlinks.len(),
+                                p.tags.len(),
+                                p.documents.len(),
+                            ));
+                        }
+                    }
+                    if !tags.is_empty() {
+                        out.push_str("\nTAGS\n");
+                        for t in tags {
+                            out.push_str(&format!("  #{:<24} {} page(s)\n", t.name, t.pages.len()));
+                        }
+                    }
+                    if !documents.is_empty() {
+                        out.push_str("\nDOCUMENTS\n");
+                        for d in documents {
+                            out.push_str(&format!(
+                                "  {:<40} {:<6} {:>10} bytes  referenced by {}\n",
+                                d.id,
+                                d.ext,
+                                d.bytes,
+                                d.referenced_by.len()
                             ));
                         }
                     }
@@ -458,12 +515,6 @@ async fn main() -> Result<()> {
                                 g.from.len(),
                                 g.from.join(", ")
                             ));
-                        }
-                    }
-                    if !pages.is_empty() {
-                        out.push_str("\nPAGES\n");
-                        for page in pages {
-                            out.push_str(&format!("  {page}\n"));
                         }
                     }
                     if !findings.is_empty() {
@@ -482,6 +533,8 @@ async fn main() -> Result<()> {
                 _ => None,
             })
         }
+
+        Command::Knowledge { command: Some(cmd) } => knowledge_cmd(cli.json, &client, cmd).await,
 
         Command::Bench => {
             let payload = client.send(Request::Benchmarks).await?;
@@ -534,6 +587,72 @@ fn finding_kind_str(kind: &FindingKind) -> &'static str {
         FindingKind::Orphan => "orphan",
         FindingKind::AmbiguousLink => "ambiguous_link",
         FindingKind::Truncated => "truncated",
+    }
+}
+
+/// A source path, made absolute against the current directory when it is
+/// not already -- the daemon's refusals compare a source against the
+/// instance root purely as strings, never by asking the filesystem, so a
+/// relative path has to be resolved here rather than there.
+fn absolute(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir().map(|cwd| cwd.join(p)).unwrap_or_else(|_| p.to_path_buf())
+    }
+}
+
+async fn knowledge_cmd(json: bool, client: &Client, cmd: KnowledgeCmd) -> Result<()> {
+    match cmd {
+        KnowledgeCmd::Import { source, into, overwrite } => {
+            let payload = client
+                .send(Request::KnowledgeImport {
+                    source: absolute(&source).display().to_string(),
+                    into,
+                    overwrite,
+                })
+                .await?;
+            print(&payload, json, knowledge_write_text)
+        }
+        KnowledgeCmd::Add { files, into, overwrite } => {
+            let sources = files.iter().map(|f| absolute(f).display().to_string()).collect();
+            let payload = client
+                .send(Request::KnowledgeAdd { sources, into, overwrite })
+                .await?;
+            print(&payload, json, knowledge_write_text)
+        }
+    }
+}
+
+fn knowledge_write_text(p: &Payload) -> Option<String> {
+    match p {
+        Payload::KnowledgeWrite { copied, skipped_existing, skipped_hidden, refused, truncated } => {
+            let mut out = format!(
+                "{} copied, {} skipped (existing), {} skipped (hidden), {} refused",
+                copied.len(),
+                skipped_existing.len(),
+                skipped_hidden.len(),
+                refused.len(),
+            );
+            if *truncated {
+                out.push_str(" -- truncated: stopped past the 10,000-file cap");
+            }
+            out.push('\n');
+            for path in copied {
+                out.push_str(&format!("  copied    {path}\n"));
+            }
+            for path in skipped_existing {
+                out.push_str(&format!("  existing  {path}\n"));
+            }
+            for r in refused {
+                match &r.path {
+                    Some(path) => out.push_str(&format!("  refused   {path} -- {}\n", r.reason)),
+                    None => out.push_str(&format!("  refused   {}\n", r.reason)),
+                }
+            }
+            Some(out.trim_end().to_string())
+        }
+        _ => None,
     }
 }
 

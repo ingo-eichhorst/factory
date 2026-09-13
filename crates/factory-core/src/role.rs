@@ -116,10 +116,17 @@ pub enum Grant {
     WorkflowRun,
     #[serde(rename = "workflow.cancel")]
     WorkflowCancel,
+    /// Add files to the knowledge base. The subject is always the root
+    /// scope -- the knowledge base is company-wide, so only the owner or a
+    /// foreman whose own scope *is* the instance root may hold this,
+    /// regardless of what `reach` the role otherwise declares. See
+    /// `access::authorize`'s arm for the three knowledge-write requests.
+    #[serde(rename = "knowledge.write")]
+    KnowledgeWrite,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 16] = [
+    pub const ALL: [Grant; 17] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -136,6 +143,7 @@ impl Grant {
         Grant::WorkflowDelete,
         Grant::WorkflowRun,
         Grant::WorkflowCancel,
+        Grant::KnowledgeWrite,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -156,6 +164,7 @@ impl Grant {
             Self::WorkflowDelete => "workflow.delete",
             Self::WorkflowRun => "workflow.run",
             Self::WorkflowCancel => "workflow.cancel",
+            Self::KnowledgeWrite => "knowledge.write",
         }
     }
 
@@ -178,6 +187,7 @@ impl Grant {
             Self::WorkflowDelete => "delete workflows",
             Self::WorkflowRun => "start workflows",
             Self::WorkflowCancel => "cancel workflows",
+            Self::KnowledgeWrite => "add files to the knowledge base",
         }
     }
 
@@ -201,6 +211,7 @@ impl Grant {
             | Self::WorkflowDelete
             | Self::WorkflowRun
             | Self::WorkflowCancel => "Workflows",
+            Self::KnowledgeWrite => "Knowledge",
         }
     }
 
@@ -561,13 +572,14 @@ mod tests {
     fn every_grant_belongs_to_a_group_a_person_reads() {
         for grant in Grant::ALL {
             assert!(
-                ["Tasks", "Agents", "Runs", "Workflows"].contains(&grant.group()),
+                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge"].contains(&grant.group()),
                 "{} has no group",
                 grant.as_str()
             );
         }
         assert_eq!(Grant::RunInput.group(), "Runs");
         assert_eq!(Grant::AgentInput.group(), "Agents");
+        assert_eq!(Grant::KnowledgeWrite.group(), "Knowledge");
     }
 
     #[test]

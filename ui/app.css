@@ -1018,15 +1018,66 @@ section > .empty { margin: 0; }
 .know-graph-wrap {
   background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; min-width: 0;
 }
-#knowledge-graph { display: block; width: 100%; height: auto; min-height: 260px; max-height: 520px; }
-.know-node circle {
-  fill: var(--panel-2); stroke: var(--line); stroke-width: 1.5; cursor: pointer; transition: fill .1s, stroke .1s;
+.know-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
 }
-.know-node:hover circle { stroke: var(--signal-ink); }
-.know-node.gap circle { fill: var(--sunk); stroke: var(--faint); stroke-dasharray: 4 3; }
-.know-node.selected circle { fill: var(--signal-wash); stroke: var(--signal); stroke-width: 2.5; }
+.know-toolbar input[type="search"] { width: auto; flex: 1 1 130px; min-width: 90px; }
+.know-toolbar select { width: auto; }
+.know-toggle {
+  display: inline-flex; align-items: center; gap: 4px; margin: 0; cursor: pointer;
+  font: 400 11.5px/1 var(--sans); letter-spacing: 0; text-transform: none; color: var(--ink-2);
+}
+.know-toggle input { width: auto; }
+#knowledge-graph { display: block; width: 100%; height: auto; min-height: 260px; max-height: 520px; cursor: grab; }
+#knowledge-graph.panning { cursor: grabbing; }
+/* Page, tag, document and gap are four distinct shapes, per the issue --
+   a circle, a diamond, a square and a dashed circle -- rather than one
+   shape in four colours, so the kind is legible even to someone who cannot
+   tell the fill colours apart. `--node-fill`/`--node-stroke` are set inline,
+   per node, only on a page (see `areaColor` in knowledge.js): the six-colour
+   cycle already defined for the site plan's directory tiles (`--ly1..--ly6`)
+   doubles as this graph's area palette, since "colour by the first path
+   segment" is the same idea in both places. */
+/* `:not(.know-select-ring)` on every one of these -- a page and a gap are
+   both drawn as a plain `circle`, exactly the element the selection ring
+   below is too, and without the exclusion these element-plus-two-class
+   rules (specificity 0,2,1) would beat the ring's own single-class rule
+   (0,1,0) and paint it as a solid disc instead of leaving it invisible.
+   Tags and documents never needed this: their own shape is a `polygon`/
+   `rect`, which the ring (always a `circle`) never matches. */
+.know-node.page circle:not(.know-select-ring) {
+  fill: var(--node-fill, var(--panel-2)); stroke: var(--node-stroke, var(--line));
+  stroke-width: 1.5; cursor: pointer; transition: fill .1s, stroke .1s;
+}
+.know-node.tag polygon {
+  fill: var(--panel-2); stroke: var(--line); stroke-width: 1.5; cursor: pointer;
+}
+.know-node.document rect {
+  fill: var(--panel-2); stroke: var(--line); stroke-width: 1.5; cursor: pointer;
+}
+.know-node.gap circle:not(.know-select-ring) { fill: var(--sunk); stroke: var(--faint); stroke-dasharray: 4 3; cursor: pointer; }
+.know-node:hover circle:not(.know-select-ring), .know-node:hover polygon, .know-node:hover rect { stroke: var(--signal-ink); }
+.know-node.selected circle, .know-node.selected polygon, .know-node.selected rect {
+  fill: var(--signal-wash); stroke: var(--signal); stroke-width: 2.5;
+}
+/* A ring around the selected node, on top of the fill/stroke recolour above
+   -- a recolour alone reads clearly on a page (it usually replaces an area
+   colour with the signal one) but is a subtler change on a tag/document/gap
+   node's plain fill, especially now that the rest of the graph is never
+   dimmed just because something is selected (see `isNodeDimmed` in
+   knowledge-graph.js). Invisible until `.know-node.selected` is present --
+   deliberately left matching `.know-node.selected circle` above (so the
+   selected fill still applies to it too) and `.know-node.dim` below (so a
+   dimmed-but-still-selected node's ring dims along with everything else on
+   it, rather than staying falsely bright). */
+.know-select-ring { fill: none; stroke: none; }
+.know-node.selected .know-select-ring { stroke: var(--signal); stroke-width: 2; stroke-dasharray: 3 2; }
+.know-node.dim circle, .know-node.dim polygon, .know-node.dim rect { opacity: .3; }
 .know-node:focus { outline: none; }
-.know-node:focus-visible circle { stroke: var(--signal); stroke-width: 3; }
+.know-node:focus-visible circle:not(.know-select-ring), .know-node:focus-visible polygon, .know-node:focus-visible rect {
+  stroke: var(--signal); stroke-width: 3;
+}
 /* Labels are their own layer, drawn after every node and edge (see
    `buildGraphSvg` in knowledge.js) so neither can paint over one. The halo
    (`paint-order: stroke`, using the graph panel's own background token in
@@ -1037,9 +1088,14 @@ section > .empty { margin: 0; }
   paint-order: stroke; stroke: var(--panel); stroke-width: 3px; stroke-linejoin: round;
 }
 .know-label.selected { fill: var(--ink); font-weight: 500; }
+.know-label.dim { opacity: .35; }
 .know-edge { stroke: var(--line); stroke-width: 1.2; }
 .know-edge.gap { stroke-dasharray: 3 3; stroke: var(--faint); }
 .know-edge.selected { stroke: var(--signal); stroke-width: 2; }
+.know-edge.dim { opacity: .25; }
+.know-add { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px 14px; margin-bottom: 14px; }
+.know-add h3 { margin: 0 0 4px; font: 600 13.5px/1.3 var(--cond); color: var(--ink); text-transform: none; }
+.know-add input[type="file"] { width: auto; margin-top: 6px; }
 .know-inspector {
   background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px 14px;
   min-width: 0; overflow-wrap: anywhere;
