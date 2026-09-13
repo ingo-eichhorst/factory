@@ -949,6 +949,10 @@ fn describe_event(e: &Event) -> String {
         Event::TaskCreated { task } => format!("created  {}", one_line(task)),
         Event::TaskUpdated { task } => format!("updated  {}", one_line(task)),
         Event::TaskDeleted { id } => format!("deleted  {id}"),
+        Event::WorkflowCreated { workflow } => format!("workflow created  {}", workflow.name),
+        Event::WorkflowUpdated { workflow } => format!("workflow updated  {} r{}", workflow.name, workflow.revision),
+        Event::WorkflowDeleted { id } => format!("workflow deleted  {id}"),
+        Event::WorkflowRunUpdated { run } => format!("workflow run  {}  {:?}", run.id, run.status),
         Event::TaskEntry { id, entry } => format!(
             "entry    {}  {:<8} {}",
             &id[..8.min(id.len())],

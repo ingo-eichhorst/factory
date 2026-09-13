@@ -239,6 +239,7 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             worktree: true,
+            workflow_origin: None,
         }
     }
 

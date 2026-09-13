@@ -18,7 +18,7 @@ use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
 use factory_core::run::{BlockSource, NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
-    NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
+    NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus, WorkflowOrigin,
 };
 use factory_plugins::registry::Registry;
 use std::path::{Path, PathBuf};
@@ -55,6 +55,8 @@ pub struct Engine {
     /// again: two answers to "what may this agent do" is how they drift.
     pub roles: Roles,
     pub store: Arc<dyn TaskStore>,
+    pub(crate) workflows: crate::workflows::WorkflowStore,
+    pub(crate) workflow_edit: tokio::sync::Mutex<()>,
     pub bus: EventBus,
     pub factory_bin: PathBuf,
     started: Instant,
@@ -115,6 +117,9 @@ impl Engine {
             registry,
             roles,
             store,
+            workflows: crate::workflows::WorkflowStore::in_memory()
+                .expect("an in-memory workflow store should open"),
+            workflow_edit: tokio::sync::Mutex::new(()),
             bus: EventBus::default(),
             factory_bin,
             started: Instant::now(),
@@ -124,6 +129,14 @@ impl Engine {
             worktree_caps: Default::default(),
             site_memory: Default::default(),
         }
+    }
+
+    /// Production replaces the in-memory test repository with the instance
+    /// database. Workflow state belongs to the daemon ledger, regardless of
+    /// which task-store adapter a scope selects.
+    pub fn with_workflow_store(mut self, workflows: crate::workflows::WorkflowStore) -> Self {
+        self.workflows = workflows;
+        self
     }
 
     /// A coherent configuration snapshot for one operation. A poisoned lock
@@ -158,7 +171,7 @@ impl Engine {
         if let Err(e) = self.authorize(&caller, &request).await {
             return Response::error(e.code(), e.to_string());
         }
-        match self.dispatch_request(request).await {
+        match self.dispatch_request(&caller, request).await {
             Ok(payload) => Response::ok(payload),
             Err(e) => Response::error(e.code(), e.to_string()),
         }
@@ -177,6 +190,10 @@ impl Engine {
                 }
                 Request::TaskCreate(new)
             }
+            Request::WorkflowCreate(mut draft) => {
+                if draft.scope.trim().is_empty() { draft.scope = scope.to_string(); }
+                Request::WorkflowCreate(draft)
+            }
             other => other,
         }
     }
@@ -186,7 +203,11 @@ impl Engine {
         self.handle(Envelope::from(request)).await
     }
 
-    async fn dispatch_request(self: &Arc<Self>, req: Request) -> Result<Payload> {
+    async fn dispatch_request(
+        self: &Arc<Self>,
+        caller: &crate::access::Caller,
+        req: Request,
+    ) -> Result<Payload> {
         match req {
             Request::Status => Ok(Payload::Status {
                 status: self.status().await?,
@@ -325,26 +346,15 @@ impl Engine {
                 Ok(Payload::Ok)
             }
             Request::TaskCancel { id } => {
-                let run = self.store.active_run(&id).await?.ok_or_else(|| {
-                    FactoryError::BadRequest(format!("task {id} has no run to cancel"))
-                })?;
-                self.close_session(&run).await;
-                let run = self
-                    .finish_run(
-                        &run.id,
-                        RunStatus::Cancelled,
-                        RunPatch {
-                            status: Some(RunStatus::Cancelled),
-                            ..Default::default()
-                        },
-                        "cancelled by request",
-                    )
-                    .await?;
+                let run = self.cancel_task_run(&id).await?;
+                self.sync_workflow_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
             }
-            Request::TaskReport { id, report } => Ok(Payload::Run {
-                run: self.report(&id, report).await?.redacted(),
-            }),
+            Request::TaskReport { id, report } => {
+                let run = self.report(&id, report).await?;
+                self.sync_workflow_for_task(&id).await;
+                Ok(Payload::Run { run: run.redacted() })
+            }
             Request::TaskEntries { id, limit } => Ok(Payload::Entries {
                 entries: self.store.entries(&id, limit.unwrap_or(200)).await?,
             }),
@@ -357,6 +367,34 @@ impl Engine {
                     },
                 })
             }
+
+            Request::WorkflowCreate(draft) => Ok(Payload::Workflow {
+                workflow: self.create_workflow(draft).await?,
+            }),
+            Request::WorkflowGet { id } => Ok(Payload::Workflow {
+                workflow: self.workflow_definition(&id).await?,
+            }),
+            Request::WorkflowList { scope } => Ok(Payload::Workflows {
+                workflows: self.workflows.definitions(scope.as_deref()).await?,
+            }),
+            Request::WorkflowUpdate { id, workflow } => Ok(Payload::Workflow {
+                workflow: self.update_workflow(&id, workflow).await?,
+            }),
+            Request::WorkflowDelete { id } => Ok(Payload::Deleted {
+                deleted: self.delete_workflow(&id).await?,
+            }),
+            Request::WorkflowStart { id } => Ok(Payload::WorkflowRun {
+                run: self.start_workflow(&id, caller).await?,
+            }),
+            Request::WorkflowRunGet { id } => Ok(Payload::WorkflowRun {
+                run: self.workflow_run(&id).await?,
+            }),
+            Request::WorkflowRunList { workflow_id, scope, limit } => Ok(Payload::WorkflowRuns {
+                runs: self.workflows.runs(workflow_id.as_deref(), scope.as_deref(), limit.unwrap_or(50)).await?,
+            }),
+            Request::WorkflowRunCancel { id } => Ok(Payload::WorkflowRun {
+                run: self.cancel_workflow(&id).await?,
+            }),
 
             Request::RunList { task_id, limit } => Ok(Payload::Runs {
                 runs: self
@@ -934,6 +972,24 @@ impl Engine {
     // -- creating ----------------------------------------------------------
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {
+        self.create_task(new, None, None).await
+    }
+
+    pub(crate) async fn create_workflow_task(
+        &self,
+        new: NewTask,
+        origin: WorkflowOrigin,
+        id: String,
+    ) -> Result<Task> {
+        self.create_task(new, Some(origin), Some(id)).await
+    }
+
+    async fn create_task(
+        &self,
+        new: NewTask,
+        origin: Option<WorkflowOrigin>,
+        id: Option<String>,
+    ) -> Result<Task> {
         let factory = self.factory_snapshot();
         if new.title.trim().is_empty() {
             return Err(FactoryError::BadRequest("a task needs a title".into()));
@@ -978,6 +1034,8 @@ impl Engine {
         // fallback above, and storing its own name keeps a freshly created
         // task from starting life needing that fallback itself.
         let mut task = factory_core::adapter::store::task_from_new(new, declared.name.clone(), agent, runtime);
+        if let Some(id) = id { task.id = id; }
+        task.workflow_origin = origin;
         if let Some(s) = &task.schedule {
             task.next_run_at = Some(schedule::next_after(s, Utc::now())?);
         }
@@ -1021,10 +1079,12 @@ impl Engine {
                         )
                         .await;
                 }
+                self.record_workflow_task_state(task_id).await;
                 return;
             }
         };
         tracing::info!(task = task_id, run = %run.id, attempt = run.attempt, "dispatched");
+        self.record_workflow_task_state(task_id).await;
     }
 
     async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger) -> Result<Run> {
@@ -1290,6 +1350,19 @@ impl Engine {
         }
     }
 
+    pub(crate) async fn cancel_task_run(&self, task_id: &str) -> Result<Run> {
+        let run = self.store.active_run(task_id).await?.ok_or_else(|| {
+            FactoryError::BadRequest(format!("task {task_id} has no run to cancel"))
+        })?;
+        self.close_session(&run).await;
+        self.finish_run(
+            &run.id,
+            RunStatus::Cancelled,
+            RunPatch { status: Some(RunStatus::Cancelled), ..Default::default() },
+            "cancelled by request",
+        ).await
+    }
+
     /// End a run and settle the task behind it. A task with a schedule goes
     /// back to `pending` so the scheduler will pick it up again; one without
     /// keeps the run's own outcome.
@@ -1408,6 +1481,7 @@ impl Engine {
                 why,
             )
             .await;
+        self.record_workflow_task_state(&run.task_id).await;
     }
 
     /// Keep the last of what the agent saw, then let the session go. Every

@@ -16,6 +16,7 @@ use factory_core::config::ScopeAgent;
 use factory_core::error::{FactoryError, Result};
 use factory_core::protocol::{Envelope, Payload, ProductionBin, Request, Response};
 use factory_core::task::{NewTask, TaskFilter, TaskPatch, TaskReport};
+use factory_core::workflow::WorkflowDraft;
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use std::sync::Arc;
 
@@ -48,9 +49,9 @@ impl Interface<Engine> for HttpInterface {
 
         let app = router(engine);
 
-        let listener = tokio::net::TcpListener::bind(&bind).await.map_err(|e| {
-            FactoryError::Other(anyhow::anyhow!("binding {bind}: {e}"))
-        })?;
+        let listener = tokio::net::TcpListener::bind(&bind)
+            .await
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("binding {bind}: {e}")))?;
         let addr = listener
             .local_addr()
             .map_err(|e| FactoryError::Other(anyhow::anyhow!("reading bound address: {e}")))?;
@@ -140,6 +141,17 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/tasks/{id}/entries", get(task_entries))
         .route("/api/tasks/{id}/output", get(task_output))
         .route("/api/tasks/{id}/runs", get(task_runs))
+        .route("/api/workflows", get(list_workflows).post(create_workflow))
+        .route(
+            "/api/workflows/{id}",
+            get(get_workflow)
+                .patch(update_workflow)
+                .delete(delete_workflow),
+        )
+        .route("/api/workflows/{id}/run", post(start_workflow))
+        .route("/api/workflows/{id}/runs", get(workflow_runs))
+        .route("/api/workflow-runs/{id}", get(get_workflow_run))
+        .route("/api/workflow-runs/{id}/cancel", post(cancel_workflow_run))
         .route("/api/runs/{id}", get(get_run))
         .route("/api/runs/{id}/entries", get(run_entries))
         .route("/api/runs/{id}/output", get(run_output))
@@ -338,6 +350,79 @@ async fn task_runs(
         },
     )
     .await
+}
+
+#[derive(serde::Deserialize)]
+struct WorkflowQuery {
+    scope: Option<String>,
+    limit: Option<u32>,
+}
+
+async fn list_workflows(
+    State(engine): State<Arc<Engine>>,
+    Query(q): Query<WorkflowQuery>,
+) -> AxumResponse {
+    run(&engine, Request::WorkflowList { scope: q.scope }).await
+}
+
+async fn create_workflow(
+    State(engine): State<Arc<Engine>>,
+    Json(workflow): Json<WorkflowDraft>,
+) -> AxumResponse {
+    run(&engine, Request::WorkflowCreate(workflow)).await
+}
+
+async fn get_workflow(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::WorkflowGet { id }).await
+}
+
+async fn update_workflow(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(workflow): Json<WorkflowDraft>,
+) -> AxumResponse {
+    run(&engine, Request::WorkflowUpdate { id, workflow }).await
+}
+
+async fn delete_workflow(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+) -> AxumResponse {
+    run(&engine, Request::WorkflowDelete { id }).await
+}
+
+async fn start_workflow(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::WorkflowStart { id }).await
+}
+
+async fn workflow_runs(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Query(q): Query<WorkflowQuery>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::WorkflowRunList {
+            workflow_id: Some(id),
+            scope: None,
+            limit: q.limit,
+        },
+    )
+    .await
+}
+
+async fn get_workflow_run(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+) -> AxumResponse {
+    run(&engine, Request::WorkflowRunGet { id }).await
+}
+
+async fn cancel_workflow_run(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+) -> AxumResponse {
+    run(&engine, Request::WorkflowRunCancel { id }).await
 }
 
 async fn get_run(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {

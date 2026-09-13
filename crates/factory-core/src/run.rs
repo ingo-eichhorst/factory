@@ -78,6 +78,7 @@ pub enum Trigger {
     Manual,
     Schedule,
     Agent,
+    Workflow,
 }
 
 impl Trigger {
@@ -86,6 +87,7 @@ impl Trigger {
             Self::Manual => "manual",
             Self::Schedule => "schedule",
             Self::Agent => "agent",
+            Self::Workflow => "workflow",
         }
     }
 }

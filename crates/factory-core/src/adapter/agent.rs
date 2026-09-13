@@ -266,6 +266,21 @@ impl AgentContext {
                 Grant::RunInput => {
                     "run.input -> type into a run's own terminal; today that is the web UI, not this CLI".to_string()
                 }
+                Grant::WorkflowCreate => {
+                    "workflow.create -> create a workflow in your scope; today that is the web UI's Process > Workflows view or POST /api/workflows, not this CLI".to_string()
+                }
+                Grant::WorkflowEdit => {
+                    "workflow.edit -> change a workflow in your scope; today that is the web UI's Process > Workflows view or PATCH /api/workflows/<id>, not this CLI".to_string()
+                }
+                Grant::WorkflowDelete => {
+                    "workflow.delete -> delete a workflow in your scope; today that is the web UI's Process > Workflows view or DELETE /api/workflows/<id>, not this CLI".to_string()
+                }
+                Grant::WorkflowRun => {
+                    "workflow.run -> start a workflow in your scope, which also needs task.create and task.run for every node it spawns; today that is the web UI or POST /api/workflows/<id>/run, not this CLI".to_string()
+                }
+                Grant::WorkflowCancel => {
+                    "workflow.cancel -> cancel a workflow run in your scope; today that is the web UI or POST /api/workflow-runs/<id>/cancel, not this CLI".to_string()
+                }
             });
         }
         lines
@@ -378,6 +393,7 @@ mod tests {
             updated_at: now,
             last_run_at: None,
             next_run_at: None,
+            workflow_origin: None,
         }
     }
 

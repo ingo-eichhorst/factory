@@ -440,6 +440,7 @@ dependencies = [
  "factory-core",
  "factory-plugins",
  "futures-util",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml_ng",

@@ -10,6 +10,7 @@ use crate::event::Event;
 use crate::occupancy::Occupancy;
 use crate::run::Run;
 use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport};
+use crate::workflow::{WorkflowDefinition, WorkflowDraft, WorkflowRun};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +108,34 @@ pub enum Request {
         #[serde(default)]
         lines: Option<u32>,
     },
+    #[serde(rename = "workflow.create")]
+    WorkflowCreate(WorkflowDraft),
+    #[serde(rename = "workflow.get")]
+    WorkflowGet { id: String },
+    #[serde(rename = "workflow.list")]
+    WorkflowList {
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    #[serde(rename = "workflow.update")]
+    WorkflowUpdate { id: String, workflow: WorkflowDraft },
+    #[serde(rename = "workflow.delete")]
+    WorkflowDelete { id: String },
+    #[serde(rename = "workflow.run")]
+    WorkflowStart { id: String },
+    #[serde(rename = "workflow_run.get")]
+    WorkflowRunGet { id: String },
+    #[serde(rename = "workflow_run.list")]
+    WorkflowRunList {
+        #[serde(default)]
+        workflow_id: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    #[serde(rename = "workflow_run.cancel")]
+    WorkflowRunCancel { id: String },
     #[serde(rename = "run.list")]
     RunList {
         task_id: String,
@@ -185,6 +214,10 @@ pub enum Payload {
     RuntimeConnections { runtimes: Vec<RuntimeConnectionView> },
     Task { task: Task },
     Tasks { tasks: Vec<Task> },
+    Workflow { workflow: WorkflowDefinition },
+    Workflows { workflows: Vec<WorkflowDefinition> },
+    WorkflowRun { run: WorkflowRun },
+    WorkflowRuns { runs: Vec<WorkflowRun> },
     Run { run: Run },
     Runs { runs: Vec<Run> },
     Agent { agent: AgentSession },

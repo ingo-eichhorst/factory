@@ -10,6 +10,7 @@ import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { legacyAgentRoute, loadRuntimeConnections, renderRuntimeConnections } from "./agent-runtime.js";
 import { openCreate } from "./task-form.js";
+import { acceptWorkflowEvent, loadWorkflows, readWorkflowTail, renderWorkflows, wireWorkflows, workflowTail } from "./workflows.js";
 import { loadDashboard, renderDashboard, renderInbox, wireDashboard } from "./dashboard.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
@@ -43,6 +44,10 @@ const VIEWS = {
     tail: { write: siteMode, read: ([m]) => setSiteMode(m) },
   },
   tasks: { onShow: () => {} }, // state.tasks is already current; nothing to fetch
+  workflows: {
+    onShow: loadWorkflows,
+    tail: { write: workflowTail, read: readWorkflowTail },
+  },
   occupancy: {
     onShow: startOccupancy,
     onHide: stopAgentPoll,
@@ -125,7 +130,7 @@ function applyModal([taskId, runId]) {
 // switching and the hash fallback in `scopes.js`.
 const LEVEL_VIEWS = {
   dash: ["dashboard", "site", "activity", "inbox"],
-  proc: ["tasks"],
+  proc: ["tasks", "workflows"],
   harn: ["occupancy", "roster", "agent-runtime"],
   env: ["sandboxes", "secrets"],
 };
@@ -209,6 +214,7 @@ function rerender(route) {
   if (state.tab === "activity") { renderActivity(); return; }
   if (state.tab === "site") { refreshSite(); return; }
   if (state.tab === "tasks") { renderTasks(); return; }
+  if (state.tab === "workflows") { renderWorkflows(); return; }
   if (state.tab === "occupancy") renderOccupancy();
   else if (state.tab === "roster") renderAgents();
   else if (state.tab === "agent-runtime") renderRuntimeConnections();
@@ -369,6 +375,7 @@ async function boot() {
   $("occ-window").onchange = () => loadOccupancy();
   $("newTask").onclick = () => openCreate();
   wireDashboard();
+  wireWorkflows();
 
   // The hash is the boot route. Read here rather than in `initRail`, which runs
   // before any of the wiring above: a view cannot be shown until it can work.
@@ -409,6 +416,7 @@ boot();
 /// every view, which is why it lives in the wiring and not in the transport.
 function onEvent(ev) {
   recordEvent(ev);
+  if (ev.type.startsWith("workflow_")) acceptWorkflowEvent(ev);
 
   switch (ev.type) {
     case "task_created":

@@ -753,6 +753,135 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 .calleg .k { display: inline-flex; align-items: center; gap: 5px; }
 .calleg i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 .calfoot { margin: 12px 0 0; font: 400 11px/1.6 var(--sans); color: var(--ink-2); max-width: 96ch; }
+
+/* ===== workflow canvas ==================================================
+   Node cards, ports and edges follow the mockup's shape (a kind label, a
+   title, a "scope · agent" line, an input dot and a "+" output port, curved
+   arrowed edges) redrawn in this app's own tokens rather than the mockup's
+   CSS. Status is carried by a separate `wf-s-*`/`wf-badge` vocabulary, not
+   the shared task `.badge.s-*` one -- the two mean different things (a
+   workflow node can be `unstarted` or `skipped`, which no task ever is) and
+   must not drift together by accident. */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+.seg button { border: 0; border-right: 1px solid var(--line); background: var(--panel); color: var(--muted); font: 600 10px/1 var(--cond); letter-spacing: .08em; text-transform: uppercase; padding: 6px 10px; cursor: pointer; }
+.seg button:last-child { border-right: 0; }
+.seg button.on { background: var(--signal-wash); color: var(--ink); }
+.sub.warn { color: var(--wait); font-weight: 600; }
+.sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 2px; }
+.btn.icon { width: 26px; padding: 0; text-align: center; }
+
+.workflow-shell { display: grid; grid-template-columns: 210px minmax(420px, 1fr) 260px; min-height: calc(100vh - 148px); border-top: 1px solid var(--line); }
+.workflow-list, .workflow-inspector { background: var(--panel); padding: 12px; overflow: auto; }
+.workflow-list { border-right: 1px solid var(--line); }
+.workflow-list h3 { margin: 16px 0 8px; font: 700 10px/1 var(--cond); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.workflow-inspector { border-left: 1px solid var(--line); }
+.workflow-list-item { width: 100%; display: flex; flex-direction: column; gap: 4px; padding: 10px; margin-bottom: 6px; text-align: left; color: var(--ink); background: transparent; border: 1px solid var(--line-soft); border-radius: 3px; }
+.workflow-list-item:hover, .workflow-list-item.on { border-color: var(--run); background: color-mix(in srgb, var(--run) 8%, transparent); }
+.workflow-list-item strong { font: 600 12px/1.2 var(--sans); }
+.workflow-list-item span { font: 400 9px/1.2 var(--mono); color: var(--faint); }
+.wf-run-item { width: 100%; display: block; text-align: left; padding: 7px 8px; margin-bottom: 4px; color: var(--ink); background: transparent; border: 1px solid var(--line-soft); border-radius: 3px; font: 400 10px/1.5 var(--mono); }
+.wf-run-item:hover, .wf-run-item.on { border-color: var(--signal); background: var(--signal-wash); }
+.wf-run-item .sub { display: block; color: var(--faint); }
+
+.workflow-editor { min-width: 0; display: flex; flex-direction: column; background: var(--sunk); }
+.workflow-toolbar { display: flex; gap: 6px; align-items: center; padding: 8px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+.workflow-canvas { position: relative; flex: 1 1 480px; min-height: 440px; overflow: hidden; cursor: grab; outline: none; background-color: var(--sunk); background-image: radial-gradient(var(--line) 1px, transparent 1px); background-size: 20px 20px; }
+.workflow-canvas:focus-visible { box-shadow: inset 0 0 0 2px var(--run); }
+.workflow-canvas.wf-run-mode { cursor: default; }
+.workflow-world { position: absolute; width: 2400px; height: 1600px; transform-origin: 0 0; }
+#workflow-edges { position: absolute; inset: 0; width: 2400px; height: 1600px; overflow: visible; }
+#workflow-edges marker path { fill: var(--muted); }
+#workflow-edges marker.wf-edge-done path { fill: var(--run); }
+.workflow-edge-hit { fill: none; stroke: transparent; stroke-width: 18; cursor: pointer; }
+.workflow-edge { fill: none; stroke: var(--muted); stroke-width: 2; pointer-events: none; }
+.workflow-edge.wf-edge-done { stroke: var(--run); stroke-width: 2.5; }
+.workflow-edge.wf-selected { stroke: var(--signal); stroke-width: 3; }
+.workflow-hint { padding: 6px 12px; font: 400 11px/1.4 var(--sans); color: var(--faint); border-bottom: 1px solid var(--line); background: var(--panel); min-height: 15px; }
+
+.workflow-node {
+  position: absolute; width: 184px; min-height: 84px; padding: 12px 12px 10px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 5px; text-align: left;
+  color: var(--ink); background: var(--panel); border: 1.5px solid var(--line); border-radius: 6px;
+  box-shadow: 0 5px 16px rgba(0,0,0,.18); cursor: move;
+}
+.workflow-node:focus-visible, .workflow-node.selected { outline: 2px solid var(--signal); outline-offset: 2px; }
+.workflow-node.wf-connecting { box-shadow: 0 0 0 4px color-mix(in srgb, var(--wait) 30%, transparent); }
+.workflow-canvas.wf-run-mode .workflow-node { cursor: default; }
+.wf-port-in { position: absolute; top: -4px; left: 50%; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--faint); border: 1.5px solid var(--panel); }
+.wf-port-out {
+  position: absolute; right: -11px; top: 50%; margin-top: -11px; width: 22px; height: 22px; border-radius: 50%;
+  border: 1.5px solid var(--line); background: var(--panel-2); color: var(--muted); font: 700 13px/1 var(--sans);
+  cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0;
+}
+.wf-port-out:hover { border-color: var(--signal); color: var(--signal); }
+.workflow-canvas.wf-run-mode .wf-port-out { display: none; }
+.wf-start { position: absolute; top: -9px; left: 10px; padding: 1px 5px; font: 700 8px/1.3 var(--cond); letter-spacing: .12em; background: var(--signal); color: var(--on-signal); border-radius: 2px; }
+.workflow-node-kind { font: 700 8px/1 var(--cond); letter-spacing: .14em; color: var(--faint); }
+.workflow-node strong { font: 600 12px/1.2 var(--sans); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-node .wf-line { font: 400 9px/1.3 var(--mono); color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-open-task {
+  align-self: flex-start; margin-top: 2px; border: 0; background: none; padding: 0;
+  font: 500 9px/1 var(--mono); color: var(--run); cursor: pointer; text-decoration: underline;
+}
+
+/* -- the 8 visual categories the issue asks for (9 statuses: pending and
+   dispatching share one). Each combines a left accent with a background
+   treatment so the difference reads even to someone who cannot tell two
+   hues apart -- solid vs dashed vs hatched vs faint, not colour alone. */
+.workflow-node.wf-s-unstarted { border-left: 3px solid var(--faint); }
+.workflow-node.wf-s-pending, .workflow-node.wf-s-dispatching {
+  border-left: 3px dashed var(--signal); background: var(--signal-wash);
+}
+.workflow-node.wf-s-running {
+  border-left: 4px solid var(--run); background: var(--run-wash);
+  box-shadow: 0 0 0 1px var(--run), 0 5px 16px rgba(0,0,0,.18);
+}
+.workflow-node.wf-s-blocked { border-left: 3px solid var(--wait); background: var(--wait-wash); }
+.workflow-node.wf-s-done { border-left: 4px solid var(--run); background: var(--run-wash); }
+.workflow-node.wf-s-failed {
+  border-left: 3px solid var(--fault); background:
+    repeating-linear-gradient(135deg, var(--fault-wash) 0 6px, transparent 6px 12px);
+}
+.workflow-node.wf-s-cancelled { border-left: 3px solid var(--fault); background: var(--fault-wash); opacity: .75; }
+.workflow-node.wf-s-skipped { border-left: 3px solid var(--faint); opacity: .55; }
+.workflow-node.wf-invalid { box-shadow: 0 0 0 2px var(--fault); }
+
+.wf-badge-row { display: flex; }
+.wf-badge {
+  display: inline-block; padding: 2px 6px; border-radius: 2px; border: 1px solid var(--line);
+  font: 600 8px/1.4 var(--cond); letter-spacing: .09em; text-transform: uppercase; color: var(--muted);
+}
+.wf-badge.wf-s-unstarted { color: var(--faint); }
+.wf-badge.wf-s-pending, .wf-badge.wf-s-dispatching { color: var(--signal); border-color: transparent; background: var(--signal-wash); }
+.wf-badge.wf-s-running { color: var(--run); border-color: transparent; background: var(--run-wash); font-weight: 700; }
+.wf-badge.wf-s-blocked { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
+.wf-badge.wf-s-done { color: var(--run); border-color: transparent; background: var(--run-wash); }
+.wf-badge.wf-s-failed { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+.wf-badge.wf-s-cancelled { color: var(--fault); border-color: transparent; background: var(--fault-wash); opacity: .7; }
+.wf-badge.wf-s-skipped { color: var(--faint); opacity: .7; }
+
+.workflow-inspector h3 { margin: 5px 0 10px; font: 700 10px/1 var(--cond); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.workflow-inspector label { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; font: 600 9px/1 var(--cond); letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.workflow-inspector input, .workflow-inspector textarea, .workflow-inspector select { width: 100%; box-sizing: border-box; text-transform: none; letter-spacing: normal; }
+.workflow-inspector input:disabled, .workflow-inspector textarea:disabled, .workflow-inspector select:disabled { opacity: .6; }
+.workflow-inspector .check { flex-direction: row; align-items: center; }
+.workflow-inspector .check input { width: auto; }
+#workflow-run-meta dl { margin: 0; }
+#workflow-run-meta dt { font: 600 9px/1 var(--cond); letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin-top: 8px; }
+#workflow-run-meta dd { margin: 2px 0 0; font: 400 11px/1.4 var(--mono); color: var(--ink-2); word-break: break-word; }
+
+.workflow-summary { border-top: 1px solid var(--line); padding: 9px 12px; background: var(--panel); }
+.workflow-summary summary { font: 600 10px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); cursor: pointer; }
+.workflow-summary ol { margin: 6px 0 10px; padding-left: 24px; }
+.workflow-summary li { margin: 4px 0; font: 400 10px/1.4 var(--mono); color: var(--muted); }
+.workflow-summary li button { color: var(--ink); border: 0; background: none; padding: 0; font: inherit; text-decoration: underline; cursor: pointer; }
+.workflow-summary li span:last-child { color: var(--faint); }
+.workflow-summary li .wf-edge-remove { margin-left: 8px; color: var(--fault); text-decoration: underline; border: 0; background: none; padding: 0; font: inherit; cursor: pointer; }
+.loading { opacity: .55; pointer-events: none; }
+@media (max-width: 1000px) {
+  .workflow-shell { grid-template-columns: 170px minmax(360px, 1fr); }
+  .workflow-inspector { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }
+}
 /* ===== site plan: hall floor =====
    A dedicated ramp for the floor treemap's tiles, read by both site
    renderers the same way they already read `--wallA` and friends. It is

@@ -15,6 +15,7 @@ mod site;
 mod stores;
 mod ui;
 mod worktree;
+mod workflows;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -242,13 +243,14 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
         .map(|i| i.kind.clone())
         .collect();
 
+    let workflow_store = workflows::WorkflowStore::open(&factory.database_path())?;
     let engine = Arc::new(Engine::new(
         factory.clone(),
         registry,
         store,
         factory_bin(),
         interface_names,
-    ));
+    ).with_workflow_store(workflow_store));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut mounted = Vec::new();
@@ -303,6 +305,10 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // Listen for whatever a runtime pushes on its own, before falling back to
     // the poll below as the floor underneath it.
     engine.watch_runtimes().await;
+
+    // Reconcile persisted workflow decisions only after runtimes and standing
+    // agents are available. Recovery reuses task ids recorded before a crash.
+    engine.recover_workflows().await;
 
     let sched = tokio::spawn(scheduler::run(engine.clone(), shutdown_rx.clone()));
 
