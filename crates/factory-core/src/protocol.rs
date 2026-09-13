@@ -3,10 +3,12 @@
 //! third interface means translating to this, not inventing a new API.
 
 use crate::adapter::{RuntimeConnectionDiagnostic, Screen};
+use crate::benchmark::Configuration;
 use crate::building::{Activity, Cues, RepoMetrics, Shape};
 use crate::agent::AgentSession;
 use crate::config::ScopeAgent;
 use crate::event::Event;
+use crate::knowledge::{Finding, Gap, Note};
 use crate::occupancy::Occupancy;
 use crate::run::Run;
 use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport};
@@ -196,6 +198,17 @@ pub enum Request {
     /// changing anything.
     #[serde(rename = "environment")]
     Environment,
+    /// The L5 Knowledge tab: an index of `<root>/knowledge/wiki`, rebuilt
+    /// from the files on every request. Read-only, like `Environment` -- see
+    /// `knowledge::index`, which does the actual walk.
+    #[serde(rename = "knowledge")]
+    Knowledge,
+    /// The L5 Benchmarks tab: one configuration per distinct harness, full
+    /// `args`, and sandbox that a task could be dispatched with today,
+    /// including the foreman `daemon.foreman` would synthesize. Nothing is
+    /// run and nothing is scored -- see `benchmark::configurations`.
+    #[serde(rename = "benchmarks")]
+    Benchmarks,
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -252,6 +265,21 @@ pub enum Payload {
         sandboxes: Vec<SandboxRow>,
         credentials: Vec<CredentialRow>,
     },
+    /// The L5 Knowledge tab. `present: false` when `<root>/knowledge/wiki`
+    /// does not exist -- an empty state, not an error -- with `root` still
+    /// naming the path that was looked in. No note body text is ever in
+    /// here; see `knowledge::index`.
+    Knowledge {
+        root: String,
+        present: bool,
+        notes: Vec<Note>,
+        gaps: Vec<Gap>,
+        pages: Vec<String>,
+        findings: Vec<Finding>,
+    },
+    /// The L5 Benchmarks tab. Every configuration is `pinned: false` today --
+    /// see `benchmark::Configuration`.
+    Benchmarks { configurations: Vec<Configuration> },
 }
 
 /// A request plus who is making it.
@@ -650,6 +678,111 @@ mod tests {
         let env: Envelope =
             serde_json::from_str(r#"{"op":"environment"}"#).expect("request parses");
         assert!(matches!(env.request, Request::Environment));
+    }
+
+    #[test]
+    fn a_knowledge_request_is_a_read_without_parameters() {
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"knowledge"}"#).expect("request parses");
+        assert!(matches!(env.request, Request::Knowledge));
+    }
+
+    #[test]
+    fn a_benchmarks_request_is_a_read_without_parameters() {
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"benchmarks"}"#).expect("request parses");
+        assert!(matches!(env.request, Request::Benchmarks));
+    }
+
+    #[test]
+    fn a_knowledge_payload_carries_the_wire_fields_the_issue_names() {
+        let response = Response::ok(Payload::Knowledge {
+            root: "/inst/knowledge/wiki".into(),
+            present: true,
+            notes: vec![crate::knowledge::Note {
+                id: "partners/acme".into(),
+                title: "Acme GmbH".into(),
+                area: Some("partners".into()),
+                status: Some("current".into()),
+                updated: Some("2026-09-01".into()),
+                sources: 2,
+                links: vec!["partners/jane-doe".into()],
+                gaps: vec!["example.club".into()],
+                backlinks: vec!["company/pricing".into()],
+            }],
+            gaps: vec![crate::knowledge::Gap {
+                target: "example.club".into(),
+                from: vec!["partners/acme".into(), "partners/jane-doe".into()],
+            }],
+            pages: vec!["index.md".into()],
+            findings: vec![crate::knowledge::Finding {
+                kind: crate::knowledge::FindingKind::Unsourced,
+                note: "partners/jane-doe".into(),
+                detail: "no sources in frontmatter".into(),
+            }],
+        });
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            json.pointer("/data/kind").and_then(serde_json::Value::as_str),
+            Some("knowledge")
+        );
+        assert_eq!(
+            json.pointer("/data/notes/0/id").and_then(serde_json::Value::as_str),
+            Some("partners/acme")
+        );
+        assert_eq!(
+            json.pointer("/data/gaps/0/target").and_then(serde_json::Value::as_str),
+            Some("example.club")
+        );
+        assert_eq!(
+            json.pointer("/data/findings/0/kind").and_then(serde_json::Value::as_str),
+            Some("unsourced")
+        );
+    }
+
+    #[test]
+    fn a_benchmarks_payload_carries_the_wire_fields_the_issue_names() {
+        let response = Response::ok(Payload::Benchmarks {
+            configurations: vec![Configuration {
+                harness: "claude-code".into(),
+                model: Some("opus".into()),
+                model_source: Some("args".into()),
+                flags: vec!["--permission-mode …".into(), "--yolo".into()],
+                sandbox: "none".into(),
+                agents: vec![crate::benchmark::ConfiguredAgent {
+                    scope: "projects/demo".into(),
+                    agent: "builder".into(),
+                    lifetime: "temporary".into(),
+                    declared: true,
+                }],
+                missing: vec![
+                    "harness version".into(),
+                    "tool surface".into(),
+                    "context policy".into(),
+                    "retry budget".into(),
+                ],
+                pinned: false,
+            }],
+        });
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            json.pointer("/data/kind").and_then(serde_json::Value::as_str),
+            Some("benchmarks")
+        );
+        assert_eq!(
+            json.pointer("/data/configurations/0/harness")
+                .and_then(serde_json::Value::as_str),
+            Some("claude-code")
+        );
+        assert_eq!(
+            json.pointer("/data/configurations/0/agents/0/scope")
+                .and_then(serde_json::Value::as_str),
+            Some("projects/demo")
+        );
+        assert_eq!(
+            json.pointer("/data/configurations/0/pinned").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
     }
 
     #[test]
