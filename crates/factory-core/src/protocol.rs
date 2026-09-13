@@ -160,6 +160,13 @@ pub enum Request {
     /// every `agents` call would have to pay for.
     #[serde(rename = "site.footprint")]
     SiteFootprint,
+    /// The L2 Environment page: where every declared agent's runs execute
+    /// (Sandboxes), and the honest inventory of what an agent can already
+    /// reach because it runs as the daemon's owner (Secrets). Read-only, like
+    /// `RuntimeConnections` -- it reports on what is already true rather than
+    /// changing anything.
+    #[serde(rename = "environment")]
+    Environment,
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -203,6 +210,15 @@ pub enum Payload {
     Production { production: Production },
     Screen { screen: Screen },
     SiteFootprint { footprint: SiteFootprint },
+    /// The L2 Environment page. There is deliberately no "everything here is
+    /// reachable by every agent" sentence in this payload: it is a fact about
+    /// how the daemon runs its agents, true whether or not this request
+    /// succeeded, so the page states it from its own markup and goes on
+    /// stating it when the fetch fails.
+    Environment {
+        sandboxes: Vec<SandboxRow>,
+        credentials: Vec<CredentialRow>,
+    },
 }
 
 /// A request plus who is making it.
@@ -332,6 +348,9 @@ pub struct AgentView {
     /// The role it is working under -- the config's, unless somebody gave it
     /// another.
     pub role: String,
+    /// `none`, `docker`, or `srt` -- what the declaration says, unread by
+    /// anything else today. See `Sandbox`'s doc comment.
+    pub sandbox: String,
     /// Set when a person gave it this role, so the roster can say that the
     /// config says something else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -404,6 +423,40 @@ pub struct ScopeView {
     /// `None` exactly when `worktree_capable` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_reason: Option<String>,
+}
+
+/// Where one declared agent's runs execute, for the Sandboxes tab. Built
+/// directly from `ScopeView`/`AgentView` rather than recomputed, so it can
+/// never disagree with the roster the same fields already appear on there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxRow {
+    pub scope: String,
+    pub scope_path: String,
+    pub runtime: String,
+    pub agent: String,
+    pub harness: String,
+    /// `permanent`, `temporary`, or `task`.
+    pub lifetime: String,
+    /// `none`, `docker`, or `srt`.
+    pub sandbox: String,
+    pub worktree_capable: bool,
+}
+
+/// One place on disk a credential might already sit, checked for existence
+/// only -- see `Payload::Environment`. The value itself is never read, held,
+/// or returned; `present` is the whole of what this says.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRow {
+    pub label: String,
+    pub path: String,
+    pub integration: String,
+    pub present: bool,
+    /// The scope this row belongs to, for the rows that belong to one at all.
+    /// `None` is the honest answer for a credential in the owner's home: it
+    /// sits outside every scope and is reachable from all of them, so the
+    /// page goes on showing it whichever scope the rail has selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// How big a scope is on disk, for the site plan's hall footprint. The
@@ -560,6 +613,13 @@ mod tests {
     }
 
     #[test]
+    fn an_environment_request_is_a_read_without_parameters() {
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"environment"}"#).expect("request parses");
+        assert!(matches!(env.request, Request::Environment));
+    }
+
+    #[test]
     fn a_runtime_diagnostic_flattens_into_one_wire_card() {
         let response = Response::ok(Payload::RuntimeConnections {
             runtimes: vec![RuntimeConnectionView {
@@ -600,7 +660,7 @@ mod tests {
 
     #[test]
     fn an_agent_configuration_request_round_trips_every_declaration_field() {
-        let json = r#"{"op":"agent.configure","params":{"scope":"demo","agent":{"name":"reviewer","harness":"pi","lifetime":"permanent","role":"foreman","autostart":false,"args":["--model","local model"]}}}"#;
+        let json = r#"{"op":"agent.configure","params":{"scope":"demo","agent":{"name":"reviewer","harness":"pi","lifetime":"permanent","role":"foreman","autostart":false,"args":["--model","local model"],"sandbox":"docker"}}}"#;
         let env: Envelope = serde_json::from_str(json).unwrap();
         match &env.request {
             Request::AgentConfigure { scope, agent } => {
@@ -609,6 +669,7 @@ mod tests {
                 assert_eq!(agent.harness, "pi");
                 assert_eq!(agent.args, vec!["--model", "local model"]);
                 assert!(!agent.autostart());
+                assert_eq!(agent.sandbox, crate::config::Sandbox::Docker);
             }
             other => panic!("wrong request: {other:?}"),
         }

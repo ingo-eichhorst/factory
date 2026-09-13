@@ -17,6 +17,7 @@ test("a standing declaration targets exactly one scope and carries every field",
     harness: " pi ",
     lifetime: "permanent",
     role: "foreman",
+    sandbox: "docker",
     autostart: true,
     arguments: "--model\nlocal",
   }), {
@@ -26,13 +27,14 @@ test("a standing declaration targets exactly one scope and carries every field",
       harness: "pi",
       lifetime: "permanent",
       role: "foreman",
-      autostart: true,
       args: ["--model", "local"],
+      sandbox: "docker",
+      autostart: true,
     },
   });
 });
 
-test("a task declaration omits inapplicable autostart and may use the harness as its name", () => {
+test("a task declaration omits inapplicable autostart, defaults its sandbox to none, and may use the harness as its name", () => {
   const payload = agentConfigurePayload("demo", {
     name: "",
     harness: "codex",
@@ -41,7 +43,15 @@ test("a task declaration omits inapplicable autostart and may use the harness as
     autostart: true,
   });
   assert.equal(payload.agent.name, null);
+  assert.equal(payload.agent.sandbox, "none");
   assert.equal("autostart" in payload.agent, false);
+});
+
+test("an unrecognised sandbox is rejected", () => {
+  assert.throws(() => agentConfigurePayload("demo", {
+    harness: "pi",
+    sandbox: "vm",
+  }), /valid sandbox/);
 });
 
 test("an all-scopes target and names containing a path separator are rejected", () => {

@@ -702,7 +702,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance};
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance, Sandbox};
     use factory_core::role::Role;
     use factory_plugins::registry::Registry;
     use factory_plugins::SqliteStore;
@@ -738,6 +738,7 @@ mod tests {
             role: Role::worker(),
             autostart: Some(false),
             args: vec!["--model".into(), "local model".into()],
+            sandbox: Sandbox::None,
         }
     }
 
@@ -793,6 +794,50 @@ mod tests {
             engine.resolve_agent("demo", "reviewer").unwrap().1,
             "pi",
             "the running daemon uses the saved declaration"
+        );
+    }
+
+    /// `configure_agent` hands the whole `ScopeAgent` to `serde_yaml_ng`
+    /// (`append_agent`/`rendered_item`), so a new field needs nothing named
+    /// here to be written -- but the default has to stay invisible, per
+    /// `Sandbox::is_none`, or every agent added from now on grows a
+    /// `sandbox: none` line nobody asked for.
+    #[test]
+    fn a_default_sandbox_is_never_written_into_the_file() {
+        let scratch = Scratch::new(
+            "sandbox-default",
+            "version: 1\nscope:\n  id: scope-id\n  name: demo\n",
+        );
+        let engine = engine(&scratch);
+
+        engine.configure_agent("demo", agent("reviewer")).unwrap();
+
+        let text = fs::read_to_string(scratch.0.join(FACTORY_DIR).join(CONFIG_FILE)).unwrap();
+        assert!(
+            !text.contains("sandbox"),
+            "the default sandbox never appears in the file: {text}"
+        );
+    }
+
+    #[test]
+    fn a_declared_sandbox_is_written_and_reloaded() {
+        let scratch = Scratch::new(
+            "sandbox-declared",
+            "version: 1\nscope:\n  id: scope-id\n  name: demo\n",
+        );
+        let engine = engine(&scratch);
+        let mut boxed = agent("boxed");
+        boxed.sandbox = Sandbox::Docker;
+
+        engine.configure_agent("demo", boxed).unwrap();
+
+        let text = fs::read_to_string(scratch.0.join(FACTORY_DIR).join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("sandbox: docker"), "{text}");
+        let reloaded: ScopeFile = serde_yaml_ng::from_str(&text).unwrap();
+        assert_eq!(
+            reloaded.scope.declared_agents()[0].sandbox,
+            Sandbox::Docker,
+            "the file round-trips back into the same value"
         );
     }
 

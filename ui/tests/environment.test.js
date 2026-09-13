@@ -1,0 +1,62 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+import { state } from "../js/core.js";
+import { visibleSandboxes } from "../js/sandboxes.js";
+import { visibleCredentials } from "../js/secrets.js";
+
+const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+
+const CREDENTIALS = [
+  { label: "Claude Code credentials", path: "/home/me/.claude/.credentials.json", integration: "anthropic", present: true },
+  { label: "SSH private keys", path: "/home/me/.ssh/id_*", integration: "ssh", present: true },
+  { label: "alpha .env", path: "/root/projects/alpha/.env", integration: "scope env", present: false, scope: "alpha" },
+  { label: "beta .env", path: "/root/projects/beta/.env", integration: "scope env", present: true, scope: "beta" },
+];
+
+test("a scope selection narrows the scope-bound rows and keeps the ambient ones", () => {
+  const onlyAlpha = name => name === "alpha";
+  const rows = visibleCredentials(CREDENTIALS, onlyAlpha);
+
+  // The home rows have no scope to be filtered by, and they are the whole
+  // point of the tab: every agent reaches them from every scope.
+  assert.deepEqual(rows.map(r => r.label), [
+    "Claude Code credentials",
+    "SSH private keys",
+    "alpha .env",
+  ]);
+});
+
+test("no selection shows the whole inventory", () => {
+  assert.equal(visibleCredentials(CREDENTIALS, () => true).length, 4);
+  assert.deepEqual(visibleCredentials(undefined, () => true), []);
+});
+
+test("the sandbox rows narrow to the selection the same way", () => {
+  const rows = [{ scope: "alpha" }, { scope: "beta" }, { scope: "alpha" }];
+  assert.equal(visibleSandboxes(rows, name => name === "alpha").length, 2);
+});
+
+test("both notes sit above the table they speak about", () => {
+  const view = page.slice(page.indexOf('id="view-secrets"'));
+  const body = view.indexOf('id="secrets"');
+  for (const id of ["secrets-correction", "secrets-reach", "secrets-boundary"]) {
+    assert.ok(
+      view.indexOf(id) < body,
+      `${id} must render above the table -- its text says "below"`,
+    );
+  }
+});
+
+test("a failed fetch gets its own element and never takes the reachability note's place", () => {
+  assert.match(page, /id="secrets-error"[^>]*hidden/);
+  assert.match(page, /id="sandboxes-error"[^>]*hidden/);
+
+  state.environment = null;
+  state.environmentError = "Failed to fetch";
+  // With no answer there is nothing to filter. The reachability sentence is a
+  // constant in the view, not a field of the payload, so it is unaffected.
+  assert.deepEqual(visibleCredentials(state.environment && state.environment.credentials), []);
+  state.environmentError = null;
+});
