@@ -327,6 +327,82 @@ impl Engine {
                     factory_core::benchmark::configurations(&factory.config.scopes, &factory.config.daemon.foreman);
                 Ok(Payload::Benchmarks { configurations })
             }
+            Request::Datasets => Ok(Payload::Datasets {
+                root: self.factory_snapshot().datasets_dir().display().to_string(),
+                datasets: self.dataset_summaries()?,
+            }),
+            Request::Dataset { name } => {
+                let (dataset, findings) = self.dataset_view(&name)?;
+                Ok(Payload::Dataset { dataset, findings })
+            }
+            Request::DatasetCreate { name, description } => {
+                let dataset = self.dataset_create(&name, description).await?;
+                let findings = factory_core::dataset::findings(&dataset, &self.known_scope_names());
+                Ok(Payload::Dataset { dataset, findings })
+            }
+            Request::DatasetAddCases { name, cases } => {
+                let dataset = self.dataset_add_cases(&name, cases).await?;
+                let findings = factory_core::dataset::findings(&dataset, &self.known_scope_names());
+                Ok(Payload::Dataset { dataset, findings })
+            }
+            Request::DatasetImport { name, format, content, replace } => {
+                let dataset = self.dataset_import(&name, &format, &content, replace).await?;
+                let findings = factory_core::dataset::findings(&dataset, &self.known_scope_names());
+                Ok(Payload::Dataset { dataset, findings })
+            }
+            Request::DatasetFromTasks { name, task_ids } => {
+                let dataset = self.dataset_from_tasks(&name, task_ids).await?;
+                let findings = factory_core::dataset::findings(&dataset, &self.known_scope_names());
+                Ok(Payload::Dataset { dataset, findings })
+            }
+            Request::DatasetDeleteCase { name, id } => {
+                let dataset = self.dataset_delete_case(&name, &id).await?;
+                let findings = factory_core::dataset::findings(&dataset, &self.known_scope_names());
+                Ok(Payload::Dataset { dataset, findings })
+            }
+            Request::DatasetDelete { name } => Ok(Payload::Deleted {
+                deleted: self.dataset_delete(&name).await?,
+            }),
+            Request::BenchRunStart {
+                dataset,
+                agents,
+                attempts,
+                concurrency,
+                cases,
+            } => {
+                // Only the trailing name matters: the agent that actually
+                // resolves in each case's own scope, not the scope a person
+                // happened to find it under in the Configurations roster.
+                let agents: Vec<String> = agents
+                    .iter()
+                    .map(|a| a.rsplit('/').next().unwrap_or(a).to_string())
+                    .collect();
+                let run = self
+                    .start_bench_run(&dataset, agents, attempts.unwrap_or(1), concurrency.unwrap_or(1), cases)
+                    .await?;
+                let results = factory_core::bench::aggregate(&run.attempts);
+                Ok(Payload::BenchRun { run, results })
+            }
+            Request::BenchRuns { dataset } => Ok(Payload::BenchRuns {
+                runs: self.bench.runs(dataset.as_deref(), 200).await?,
+            }),
+            Request::BenchRunGet { id } => {
+                let run = self.bench.get_run(&id).await?.ok_or_else(|| {
+                    FactoryError::BadRequest(format!("no such bench run: {id:?}"))
+                })?;
+                let results = factory_core::bench::aggregate(&run.attempts);
+                Ok(Payload::BenchRun { run, results })
+            }
+            Request::BenchRunCancel { id } => {
+                let run = self.cancel_bench_run(&id).await?;
+                let results = factory_core::bench::aggregate(&run.attempts);
+                Ok(Payload::BenchRun { run, results })
+            }
+            Request::BenchRunClean { id } => {
+                let run = self.clean_bench_run(&id).await?;
+                let results = factory_core::bench::aggregate(&run.attempts);
+                Ok(Payload::BenchRun { run, results })
+            }
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),
             }),

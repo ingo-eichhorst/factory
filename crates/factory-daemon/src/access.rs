@@ -187,6 +187,16 @@ impl Engine {
             Request::WorkflowDelete { .. } => Grant::WorkflowDelete,
             Request::WorkflowStart { .. } => Grant::WorkflowRun,
             Request::WorkflowRunCancel { .. } => Grant::WorkflowCancel,
+            // The subject of both is the root scope: datasets and bench
+            // runs are company-wide, not one project's -- see `in_root_scope`
+            // in `authorize` below.
+            Request::DatasetCreate { .. }
+            | Request::DatasetAddCases { .. }
+            | Request::DatasetImport { .. }
+            | Request::DatasetFromTasks { .. }
+            | Request::DatasetDeleteCase { .. }
+            | Request::DatasetDelete { .. } => Grant::DatasetEdit,
+            Request::BenchRunStart { .. } | Request::BenchRunCancel { .. } => Grant::BenchRun,
 
             Request::Status
             | Request::Adapters
@@ -198,6 +208,10 @@ impl Engine {
             | Request::Environment
             | Request::Knowledge
             | Request::Benchmarks
+            | Request::Datasets
+            | Request::Dataset { .. }
+            | Request::BenchRuns { .. }
+            | Request::BenchRunGet { .. }
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
@@ -222,6 +236,9 @@ impl Engine {
             // For the same reason, and not `agent.configure`: an agent that can
             // rewrite what a role allows can widen the one it holds.
             Request::RoleDefine { .. } | Request::RoleDelete { .. } => return Needs::Owner,
+            // Explicit, destructive, and rare: only the owner cleans a bench
+            // run's worktrees and branches away.
+            Request::BenchRunClean { .. } => return Needs::Owner,
         })
     }
 
@@ -270,6 +287,29 @@ impl Engine {
                     "{} works in {scope}, not in {s}",
                     caller.describe()
                 )))
+            }
+        };
+
+        // The subject `dataset.edit` and `bench.run` are checked against:
+        // datasets and bench runs are company-wide, not one project's, so
+        // only a caller whose own scope *is* the instance's configured root
+        // scope may hold either -- resolved from the live config, never from
+        // a literal name like "root", which is only ever a convention for
+        // what somebody chose to call theirs. An instance that declares no
+        // root scope at all grants neither to any agent, however it is named.
+        let in_root_scope = || -> Result<()> {
+            match &self.factory_snapshot().config.scope {
+                Some(root) if root.name == *scope => Ok(()),
+                Some(root) => Err(FactoryError::Denied(format!(
+                    "{} works in {scope}; datasets and bench runs are company-wide and belong to \
+                     the root scope ({:?}) alone",
+                    caller.describe(),
+                    root.name
+                ))),
+                None => Err(FactoryError::Denied(format!(
+                    "{} may not manage datasets or bench runs; this instance declares no root scope",
+                    caller.describe()
+                ))),
             }
         };
 
@@ -387,6 +427,20 @@ impl Engine {
                     None => Ok(()),
                 },
                 Reach::Own => Err(deny("manage workflows; that requires scope reach")),
+            },
+
+            Request::DatasetCreate { .. }
+            | Request::DatasetAddCases { .. }
+            | Request::DatasetImport { .. }
+            | Request::DatasetFromTasks { .. }
+            | Request::DatasetDeleteCase { .. }
+            | Request::DatasetDelete { .. } => match def.reach {
+                Reach::Scope => in_root_scope(),
+                Reach::Own => Err(deny("manage datasets; that requires scope reach")),
+            },
+            Request::BenchRunStart { .. } | Request::BenchRunCancel { .. } => match def.reach {
+                Reach::Scope => in_root_scope(),
+                Reach::Own => Err(deny("run benchmarks; that requires scope reach")),
             },
 
             // Reads returned above, and anything needing a grant nobody holds

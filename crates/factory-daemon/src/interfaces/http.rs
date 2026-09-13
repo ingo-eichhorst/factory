@@ -122,6 +122,16 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/environment", get(environment))
         .route("/api/knowledge", get(knowledge))
         .route("/api/benchmarks", get(benchmarks))
+        .route("/api/datasets", get(list_datasets).post(create_dataset))
+        .route("/api/datasets/{name}", get(get_dataset).delete(delete_dataset))
+        .route("/api/datasets/{name}/cases", post(add_dataset_cases))
+        .route("/api/datasets/{name}/import", post(import_dataset))
+        .route("/api/datasets/{name}/from-tasks", post(dataset_from_tasks))
+        .route("/api/datasets/{name}/cases/{id}", delete(delete_dataset_case))
+        .route("/api/bench/runs", get(list_bench_runs).post(start_bench_run))
+        .route("/api/bench/runs/{id}", get(get_bench_run))
+        .route("/api/bench/runs/{id}/cancel", post(cancel_bench_run))
+        .route("/api/bench/runs/{id}/clean", post(clean_bench_run))
         // A role is written into one scope's config, so like a declaration it
         // is addressed by scope and name in the body rather than the path.
         .route(
@@ -287,6 +297,146 @@ async fn knowledge(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn benchmarks(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Benchmarks).await
+}
+
+async fn list_datasets(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Datasets).await
+}
+
+async fn get_dataset(State(engine): State<Arc<Engine>>, Path(name): Path<String>) -> AxumResponse {
+    run(&engine, Request::Dataset { name }).await
+}
+
+#[derive(serde::Deserialize)]
+struct CreateDataset {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+async fn create_dataset(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<CreateDataset>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::DatasetCreate {
+            name: body.name,
+            description: body.description,
+        },
+    )
+    .await
+}
+
+async fn add_dataset_cases(
+    State(engine): State<Arc<Engine>>,
+    Path(name): Path<String>,
+    Json(cases): Json<Vec<factory_core::dataset::Case>>,
+) -> AxumResponse {
+    run(&engine, Request::DatasetAddCases { name, cases }).await
+}
+
+#[derive(serde::Deserialize)]
+struct ImportDataset {
+    format: String,
+    content: String,
+    #[serde(default)]
+    replace: bool,
+}
+
+async fn import_dataset(
+    State(engine): State<Arc<Engine>>,
+    Path(name): Path<String>,
+    Json(body): Json<ImportDataset>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::DatasetImport {
+            name,
+            format: body.format,
+            content: body.content,
+            replace: body.replace,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct FromTasks {
+    task_ids: Vec<String>,
+}
+
+async fn dataset_from_tasks(
+    State(engine): State<Arc<Engine>>,
+    Path(name): Path<String>,
+    Json(body): Json<FromTasks>,
+) -> AxumResponse {
+    run(&engine, Request::DatasetFromTasks { name, task_ids: body.task_ids }).await
+}
+
+async fn delete_dataset_case(
+    State(engine): State<Arc<Engine>>,
+    Path((name, id)): Path<(String, String)>,
+) -> AxumResponse {
+    run(&engine, Request::DatasetDeleteCase { name, id }).await
+}
+
+async fn delete_dataset(State(engine): State<Arc<Engine>>, Path(name): Path<String>) -> AxumResponse {
+    run(&engine, Request::DatasetDelete { name }).await
+}
+
+#[derive(serde::Deserialize)]
+struct StartBenchRun {
+    dataset: String,
+    agents: Vec<String>,
+    #[serde(default)]
+    attempts: Option<u32>,
+    #[serde(default)]
+    concurrency: Option<u32>,
+    #[serde(default)]
+    cases: Option<Vec<String>>,
+}
+
+async fn start_bench_run(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<StartBenchRun>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::BenchRunStart {
+            dataset: body.dataset,
+            agents: body.agents,
+            attempts: body.attempts,
+            concurrency: body.concurrency,
+            cases: body.cases,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct BenchRunsQuery {
+    #[serde(default)]
+    dataset: Option<String>,
+}
+
+async fn list_bench_runs(
+    State(engine): State<Arc<Engine>>,
+    Query(q): Query<BenchRunsQuery>,
+) -> AxumResponse {
+    run(&engine, Request::BenchRuns { dataset: q.dataset }).await
+}
+
+async fn get_bench_run(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::BenchRunGet { id }).await
+}
+
+async fn cancel_bench_run(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::BenchRunCancel { id }).await
+}
+
+async fn clean_bench_run(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::BenchRunClean { id }).await
 }
 
 async fn list_tasks(

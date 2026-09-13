@@ -45,7 +45,7 @@ fn refuse_bad_name(name: &str) -> Result<()> {
 }
 
 impl Engine {
-    fn known_scope_names(&self) -> BTreeSet<String> {
+    pub(crate) fn known_scope_names(&self) -> BTreeSet<String> {
         self.factory_snapshot()
             .config
             .scopes
