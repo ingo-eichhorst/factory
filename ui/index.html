@@ -38,8 +38,8 @@
 </header>
 
 <!-- Dashboard and the six decision levels Factory runs at, L6 (what it is for)
-     through L1 (what it runs on). Only L4 and L3 are built; the
-     other four carry `disabled` -- not just a dimming class -- so tabbing the
+     through L1 (what it runs on). L5 through L2 are built; L6 and L1
+     still carry `disabled` -- not just a dimming class -- so tabbing the
      row skips straight over them, and a `title` says why. Which view tabs
      belong to each live primary entry is `LEVEL_VIEWS` in app.js. -->
 <nav class="levels" id="levels" aria-label="Primary menu">
@@ -49,8 +49,8 @@
   <button id="lv-dir" class="lvl" data-level="dir" data-lv="6" disabled title="Not built yet">
     <span class="lv-n">L6</span><span class="lv-name">Direction</span><span class="lv-sub">Goals, budget, unit cost</span>
   </button>
-  <button id="lv-imp" class="lvl" data-level="imp" data-lv="5" disabled title="Not built yet">
-    <span class="lv-n">L5</span><span class="lv-name">Improvement</span><span class="lv-sub">History and decisions</span>
+  <button id="lv-imp" class="lvl" data-level="imp" data-lv="5">
+    <span class="lv-n">L5</span><span class="lv-name">Improvement</span><span class="lv-sub">Benchmarks and knowledge</span>
   </button>
   <button id="lv-proc" class="lvl" data-level="proc" data-lv="4">
     <span class="lv-n">L4</span><span class="lv-name">Process</span><span class="lv-sub">Rules and runs</span>
@@ -83,6 +83,8 @@
   <button id="tab-roles" hidden>Roles</button>
   <button id="tab-sandboxes" hidden>Sandboxes</button>
   <button id="tab-secrets" hidden>Secrets</button>
+  <button id="tab-benchmarks" hidden>Benchmarks</button>
+  <button id="tab-knowledge" hidden>Knowledge</button>
 </nav>
 </div>
 
@@ -378,6 +380,74 @@
       </table>
       <div class="empty" id="noSecrets" hidden>No credential locations to report.</div>
     </section>
+  </div>
+
+  <div id="view-benchmarks" hidden>
+    <div class="bar">
+      <h2>Benchmarks</h2>
+      <span class="sub" id="benchmarks-count"></span>
+      <span class="sp"></span>
+      <button class="btn" id="benchmarks-refresh">Refresh</button>
+    </div>
+    <p class="env-note" id="benchmarks-note"></p>
+    <p class="env-note bad" id="benchmarks-error" hidden></p>
+    <div class="bench-cards" id="benchmarks-cards"></div>
+    <div class="empty" id="noBenchmarks" hidden>No agents declared yet.</div>
+    <section class="bench-need">
+      <h3>What a score would need</h3>
+      <ul id="benchmarks-needs"></ul>
+    </section>
+  </div>
+
+  <div id="view-knowledge" hidden>
+    <div class="bar">
+      <h2>Knowledge</h2>
+      <span class="sub" id="knowledge-count"></span>
+      <span class="sp"></span>
+      <button class="btn" id="knowledge-refresh">Refresh</button>
+    </div>
+    <p class="env-note" id="knowledge-note"></p>
+    <p class="env-note" id="knowledge-scope-note"></p>
+    <p class="env-note bad" id="knowledge-error" hidden></p>
+    <div class="empty" id="knowledge-empty" hidden></div>
+    <div class="know-shell" id="knowledge-shell">
+      <section class="know-graph-wrap">
+        <!-- No `role="img"` here: that role would flatten the SVG to a single
+             opaque picture and strip every focusable node below out of the
+             accessibility tree, which is exactly backwards for a diagram
+             whose nodes are each their own tab stop (`role="button"` on the
+             `<g>` `buildGraphSvg` draws in knowledge.js). The notes table
+             below is the accessible, tabular fallback to this picture. -->
+        <svg id="knowledge-graph" viewBox="0 0 640 420" preserveAspectRatio="xMidYMid meet"
+          aria-label="Knowledge graph. Notes are solid nodes sized by backlink count; gaps -- links to pages never written -- are dashed. Select a node to see it in the inspector."></svg>
+      </section>
+      <aside class="know-inspector" id="knowledge-inspector" aria-label="Selected note"></aside>
+    </div>
+    <section>
+      <h3>Gaps</h3>
+      <table>
+        <thead><tr><th>Target</th><th>Pointed at by</th></tr></thead>
+        <tbody id="knowledge-gaps"></tbody>
+      </table>
+      <div class="empty" id="knowledge-no-gaps" hidden>No gaps -- every link resolves.</div>
+    </section>
+    <section>
+      <h3>Findings</h3>
+      <div id="knowledge-findings"></div>
+      <div class="empty" id="knowledge-no-findings" hidden>No findings.</div>
+    </section>
+    <section>
+      <h3>Notes</h3>
+      <table>
+        <thead><tr>
+          <th>Title</th><th>Id</th><th>Area</th><th>Status</th>
+          <th>Backlinks</th><th>Links</th><th>Sources</th>
+        </tr></thead>
+        <tbody id="knowledge-notes"></tbody>
+      </table>
+      <div class="empty" id="knowledge-no-notes" hidden>No notes indexed.</div>
+    </section>
+    <p class="env-note" id="knowledge-pages-note"></p>
   </div>
   </div>
 </main>

@@ -6,6 +6,7 @@ mod client;
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use factory_core::event::Event;
+use factory_core::knowledge::FindingKind;
 use factory_core::protocol::{Payload, Request, Response};
 use factory_core::run::{Run, RunStatus};
 use factory_core::task::{
@@ -58,6 +59,14 @@ enum Command {
     /// Create, run, and report on tasks.
     #[command(subcommand)]
     Task(TaskCmd),
+    /// The L5 Knowledge tab: an index of the instance's wiki, rebuilt from
+    /// the files on every call. Read-only -- nothing here writes a note.
+    Knowledge,
+    /// The L5 Benchmarks tab: one configuration per distinct harness, full
+    /// arguments and sandbox a task could be dispatched with today, and what
+    /// each one is still missing to be a comparable score. Declares and
+    /// displays; nothing here runs or scores anything.
+    Bench,
 }
 
 #[derive(Subcommand)]
@@ -397,6 +406,121 @@ async fn main() -> Result<()> {
         Command::Agent(cmd) => agent_cmd(cli.json, &client, cmd).await,
         Command::Run(cmd) => run_cmd(cli.json, &client, cmd).await,
         Command::Task(cmd) => task(cli.json, &client, cmd).await,
+
+        Command::Knowledge => {
+            let payload = client.send(Request::Knowledge).await?;
+            print(&payload, cli.json, |p| match p {
+                Payload::Knowledge { root, present, notes, gaps, pages, findings } => {
+                    if !*present {
+                        return Some(format!("no wiki at {root}"));
+                    }
+                    let total_links: usize = notes.iter().map(|n| n.links.len()).sum();
+                    let mut out = format!(
+                        "{root}  ({} notes, {total_links} links, {} gaps, {} pages)\n",
+                        notes.len(),
+                        gaps.len(),
+                        pages.len(),
+                    );
+                    if !notes.is_empty() {
+                        out.push_str("\nNOTES\n");
+                        for n in notes {
+                            out.push_str(&format!(
+                                "  {:<28} {:<28} area={:<12} status={:<10} sources={:<3} links={:<3} backlinks={}\n",
+                                n.id,
+                                n.title,
+                                n.area.as_deref().unwrap_or("-"),
+                                n.status.as_deref().unwrap_or("-"),
+                                n.sources,
+                                n.links.len(),
+                                n.backlinks.len(),
+                            ));
+                        }
+                    }
+                    if !gaps.is_empty() {
+                        out.push_str("\nGAPS\n");
+                        for g in gaps {
+                            out.push_str(&format!(
+                                "  {:<28} {} pointer(s): {}\n",
+                                g.target,
+                                g.from.len(),
+                                g.from.join(", ")
+                            ));
+                        }
+                    }
+                    if !pages.is_empty() {
+                        out.push_str("\nPAGES\n");
+                        for page in pages {
+                            out.push_str(&format!("  {page}\n"));
+                        }
+                    }
+                    if !findings.is_empty() {
+                        out.push_str("\nFINDINGS\n");
+                        for f in findings {
+                            out.push_str(&format!(
+                                "  {:<22} {:<28} {}\n",
+                                finding_kind_str(&f.kind),
+                                f.note,
+                                f.detail
+                            ));
+                        }
+                    }
+                    Some(out.trim_end().to_string())
+                }
+                _ => None,
+            })
+        }
+
+        Command::Bench => {
+            let payload = client.send(Request::Benchmarks).await?;
+            print(&payload, cli.json, |p| match p {
+                Payload::Benchmarks { configurations } => {
+                    let pinned = configurations.iter().filter(|c| c.pinned).count();
+                    let mut out =
+                        format!("{} configuration(s), {pinned} pinned\n", configurations.len());
+                    for c in configurations {
+                        out.push_str(&format!(
+                            "\n{}  model={}{}  sandbox={}  [{}]\n",
+                            c.harness,
+                            c.model.as_deref().unwrap_or("harness default, not recorded"),
+                            c.model_source
+                                .as_deref()
+                                .map(|s| format!(" ({s})"))
+                                .unwrap_or_default(),
+                            c.sandbox,
+                            if c.pinned { "pinned" } else { "unpinned" },
+                        ));
+                        if !c.flags.is_empty() {
+                            out.push_str(&format!("  flags: {}\n", c.flags.join(", ")));
+                        }
+                        for a in &c.agents {
+                            out.push_str(&format!(
+                                "  agent: {}/{}  ({}{})\n",
+                                a.scope,
+                                a.agent,
+                                a.lifetime,
+                                if a.declared { "" } else { ", synthesized" },
+                            ));
+                        }
+                        out.push_str(&format!("  missing: {}\n", c.missing.join(", ")));
+                    }
+                    Some(out.trim_end().to_string())
+                }
+                _ => None,
+            })
+        }
+    }
+}
+
+/// The exact strings `Payload::Knowledge`'s findings carry on the wire.
+fn finding_kind_str(kind: &FindingKind) -> &'static str {
+    match kind {
+        FindingKind::Unsourced => "unsourced",
+        FindingKind::SecretSource => "secret_source",
+        FindingKind::MissingSource => "missing_source",
+        FindingKind::IncompleteFrontmatter => "incomplete_frontmatter",
+        FindingKind::Orphan => "orphan",
+        FindingKind::AmbiguousLink => "ambiguous_link",
+        FindingKind::Truncated => "truncated",
     }
 }
 

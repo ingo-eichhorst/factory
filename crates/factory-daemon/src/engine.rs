@@ -281,6 +281,26 @@ impl Engine {
                     credentials,
                 })
             }
+            Request::Knowledge => {
+                let root = self.factory_snapshot().root;
+                let index = tokio::task::spawn_blocking(move || factory_core::knowledge::index(&root))
+                    .await
+                    .map_err(|e| FactoryError::Other(anyhow::anyhow!("knowledge walk: {e}")))?;
+                Ok(Payload::Knowledge {
+                    root: index.root,
+                    present: index.present,
+                    notes: index.notes,
+                    gaps: index.gaps,
+                    pages: index.pages,
+                    findings: index.findings,
+                })
+            }
+            Request::Benchmarks => {
+                let factory = self.factory_snapshot();
+                let configurations =
+                    factory_core::benchmark::configurations(&factory.config.scopes, &factory.config.daemon.foreman);
+                Ok(Payload::Benchmarks { configurations })
+            }
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),
             }),
@@ -1866,6 +1886,82 @@ mod tests {
             scope_dir.join(".env").display().to_string(),
             "the `.` component must not survive into what the page prints"
         );
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// `Request::Knowledge` reads `<factory root>/knowledge/wiki`, not the
+    /// scope directory -- the wiki is company-wide, not per-scope -- and runs
+    /// the walk in `spawn_blocking` rather than inline.
+    #[tokio::test]
+    async fn a_knowledge_request_indexes_the_factory_roots_wiki() {
+        let scope_dir = temp_dir("knowledge-request");
+        let engine = test_engine(scope_dir.clone());
+        let root = temp_dir("knowledge-request-root");
+        {
+            let mut factory = engine.factory.write().unwrap();
+            factory.root.clone_from(&root);
+        }
+        std::fs::create_dir_all(root.join("knowledge/wiki")).unwrap();
+        std::fs::write(
+            root.join("knowledge/wiki/note.md"),
+            "---\ntitle: A Note\narea: x\nstatus: current\nupdated: 2026-01-01\nsources:\n  - path: note-source.md\n---\nNo links.\n",
+        )
+        .unwrap();
+
+        let response = engine.handle_request(Request::Knowledge).await;
+        match response {
+            Response::Ok { data: Payload::Knowledge { present, notes, .. } } => {
+                assert!(present);
+                assert_eq!(notes.len(), 1);
+                assert_eq!(notes[0].id, "note");
+            }
+            other => panic!("expected a knowledge payload: {other:?}"),
+        }
+
+        std::fs::remove_dir_all(scope_dir).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// `Request::Benchmarks` derives configurations from the current config's
+    /// scopes and its foreman settings, including a synthesized foreman.
+    #[tokio::test]
+    async fn a_benchmarks_request_lists_a_configuration_per_declared_agent() {
+        let scope_dir = temp_dir("benchmarks-request");
+        let engine = test_engine(scope_dir.clone());
+        {
+            let mut factory = engine.factory.write().unwrap();
+            factory.config.scopes[0].agents.push(ScopeAgent {
+                name: Some("builder".into()),
+                harness: "claude-code".into(),
+                lifetime: Lifetime::Task,
+                role: Role::default(),
+                autostart: None,
+                args: vec!["--model".into(), "opus".into(), "--api-key".into(), "s3cret".into()],
+                sandbox: Sandbox::None,
+            });
+            factory.config.daemon.foreman.enabled = true;
+        }
+
+        let response = engine.handle_request(Request::Benchmarks).await;
+        match response {
+            Response::Ok { data: Payload::Benchmarks { configurations } } => {
+                let builder = configurations
+                    .iter()
+                    .find(|c| c.agents.iter().any(|a| a.agent == "builder"))
+                    .expect("the declared agent gets a configuration");
+                assert_eq!(builder.model.as_deref(), Some("opus"));
+                assert!(!builder.pinned);
+                let json = serde_json::to_string(&configurations).unwrap();
+                assert!(!json.contains("s3cret"));
+
+                assert!(
+                    configurations.iter().any(|c| c.agents.iter().any(|a| a.agent == "foreman" && !a.declared)),
+                    "the synthesized foreman is included: {configurations:?}"
+                );
+            }
+            other => panic!("expected a benchmarks payload: {other:?}"),
+        }
 
         std::fs::remove_dir_all(scope_dir).ok();
     }

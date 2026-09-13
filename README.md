@@ -369,6 +369,44 @@ more: for each known location, whether a file is there. No value is ever
 opened, held, logged, or returned — `present` is the entire result of each
 check, and there is no write path, in the UI or over the socket.
 
+## Knowledge
+
+The instance root's `knowledge/wiki/` is a wiki people and agents write by
+hand — `SCHEMA.md` sets the rules, pages carry YAML frontmatter and
+`[[links]]`. The L5 **Knowledge** tab reads it. Nothing else does yet, and
+nothing writes to it.
+
+`factory knowledge` and `GET /api/knowledge` rebuild the index from the files
+on every call: no link table to keep in step, and nothing is ever written. A
+`.md` file whose frontmatter parses and names a `title` is a note; every
+other one is a page, listed but not a graph node. A `[[link]]` resolves
+page-relative, then root-relative, then by a unique file name; more than one
+match is reported rather than guessed at, and an unresolved or ambiguous
+target is a gap, not an error.
+
+**v1 indexes; it does not read.** No note's body ever reaches the browser or
+the CLI — only titles, frontmatter fields, links, and findings. A `sources[]`
+entry under `data/secrets/` is reported as a finding and nothing under it is
+ever opened or even stat-ed; that call is decided from the string alone,
+before any filesystem access. The knowledge base is company-wide: the scope
+rail does not filter this tab.
+
+## Benchmarks
+
+**v1 declares and displays; it runs nothing and records no score.**
+`factory bench` and `GET /api/benchmarks` group every agent Factory can
+dispatch — every declared agent, plus the foreman `daemon.foreman` would
+synthesize — into one configuration per distinct harness, full arguments, and
+sandbox, and say which of what a real score would need is recorded today.
+
+Today that is: the harness itself, and a model when a declaration's `args`
+spells out `--model`, `--model=`, or `-m`. Harness version, tool surface,
+context policy, and retry budget are recorded nowhere yet, so every
+configuration comes back `pinned: false`. No argument value but the extracted
+model ever reaches the payload — an `args` entry can be a secret, the same
+rule the Secrets tab already lives by, so everything else is reduced to its
+flag with the value elided.
+
 ## Tasks and runs
 
 A **task** is the standing intent: what to do, where, with which agent, and on
@@ -651,7 +689,8 @@ echo '{"op":"task.list","params":{}}' | nc -U .factory/factory.sock
 HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`,
 `GET /api/runs/{id}/entries`, `GET /api/runs/{id}/output`, `GET /api/agents`,
-`GET /api/agent-runtime`, workflow CRUD under `/api/workflows`, workflow-run
+`GET /api/agent-runtime`, `GET /api/environment`, `GET /api/knowledge`,
+`GET /api/benchmarks`, workflow CRUD under `/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
 `POST /api/rpc` for the raw envelope. `GET /ws`
 is the event stream: a snapshot of every task first, then one message per event.
@@ -663,9 +702,9 @@ envelope, not inventing a second API.
 
 The views are grouped by level in the header: **Dashboard** is the landing view,
 then **Activity**, **Site plan**, **Inbox**, **Tasks**, **Workflows**,
-**Occupancy**, **Roster**, **Agent-runtime**, **Roles**, **Sandboxes** and
-**Secrets**. Switching between them is a small registry — one
-container shown, one button lit,
+**Occupancy**, **Roster**, **Agent-runtime**, **Roles**, **Sandboxes**,
+**Secrets**, **Benchmarks** and **Knowledge**. Switching between them is a small
+registry — one container shown, one button lit,
 and whatever that view needs to start or stop doing while it is not the one on
 screen.
 
@@ -862,5 +901,7 @@ the file a session is editing is not read at all, and is not drawn.
     ui/js/app.js               the wiring: which page shows, what an event means
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
     ui/js/{dashboard,activity,site,site-render}.js               the new views
+    ui/js/{sandboxes,secrets}.js                                 L2's two tabs
+    ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter

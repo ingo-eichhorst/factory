@@ -16,6 +16,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
     ui/js/{dashboard,activity,site,site-render}.js               the new views
     ui/js/{sandboxes,secrets}.js                                 L2's two tabs
+    ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
 

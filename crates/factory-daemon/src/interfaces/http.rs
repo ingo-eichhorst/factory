@@ -120,6 +120,8 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/production", get(production))
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
+        .route("/api/knowledge", get(knowledge))
+        .route("/api/benchmarks", get(benchmarks))
         // A role is written into one scope's config, so like a declaration it
         // is addressed by scope and name in the body rather than the path.
         .route(
@@ -277,6 +279,14 @@ async fn site_footprint(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn environment(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Environment).await
+}
+
+async fn knowledge(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Knowledge).await
+}
+
+async fn benchmarks(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Benchmarks).await
 }
 
 async fn list_tasks(
