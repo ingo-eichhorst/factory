@@ -6,7 +6,8 @@ use factory_core::event::Event;
 use factory_core::run::Trigger;
 use factory_core::task::{TaskStatus, WorkflowOrigin};
 use factory_core::workflow::{
-    WorkflowDefinition, WorkflowDraft, WorkflowNodeStatus, WorkflowRun, WorkflowRunStatus,
+    WorkflowActor, WorkflowDefinition, WorkflowDraft, WorkflowNodeStatus, WorkflowRun,
+    WorkflowRunStatus,
 };
 use std::sync::Arc;
 
@@ -18,7 +19,9 @@ fn missing(kind: &str, id: &str) -> FactoryError {
 mod tests {
     use super::*;
     use factory_core::adapter::{AgentRuntime, StartRequest};
+    use factory_core::agent::{AgentSession, Lifetime};
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
+    use factory_core::role::Role;
     use factory_core::run::RunStatus;
     use factory_core::task::{NewTask, SessionRef, TaskFilter, TaskReport};
     use factory_core::workflow::{CanvasPoint, WorkflowEdge, WorkflowNode, WorkflowNodeKind};
@@ -92,6 +95,40 @@ mod tests {
             PathBuf::from("factory"),
             Vec::new(),
         ))
+    }
+
+    /// Like `engine()`, but the instance names its own roles and scope
+    /// agents -- for the authorization tests, where the built-in presets
+    /// grant more than the scenario wants to hold constant.
+    fn engine_with_roles(yaml: &str) -> Arc<Engine> {
+        let root =
+            std::env::temp_dir().join(format!("factory-workflow-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        let mut registry = Registry::with_builtins();
+        registry.add_runtime(Arc::new(QuietRuntime), "test");
+        Arc::new(Engine::new(
+            Factory { root, config },
+            registry,
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
+    }
+
+    /// A caller wearing `role` in the "demo" scope, constructed directly the
+    /// way `access.rs`'s own tests do -- `authorize` and
+    /// `authorize_workflow_spawn` take whatever `Caller` they are handed, so
+    /// this is the same shortcut past `caller_for`/`effective_role` that a
+    /// real request would have already taken before reaching either.
+    fn wearing(role: &str) -> Caller {
+        Caller::Agent {
+            scope: "demo".into(),
+            name: "w".into(),
+            role: Role::new(role),
+            run_id: None,
+        }
     }
 
     fn node(id: &str) -> WorkflowNode {
@@ -326,6 +363,386 @@ mod tests {
         let original = engine.workflow_run(&run.id).await.unwrap();
         assert_eq!(original.revision, 1);
         assert_eq!(original.definition.nodes[0].task.title, "a");
+    }
+
+    // -- B1: spawn authorization --------------------------------------------
+
+    #[tokio::test]
+    async fn starting_a_workflow_needs_the_same_authority_a_manual_spawn_would() {
+        let engine = engine_with_roles(
+            "instance:\n  id: test\n  name: test\nscopes:\n  - id: demo-id\n    name: demo\n    runtime: quiet\nroles:\n  starter:\n    grants: [workflow.create, workflow.edit, workflow.run]\n    reach: scope\n",
+        );
+        let definition = create(&engine, vec![node("a")], vec![]).await;
+        let error = engine
+            .start_workflow(&definition.id, &wearing("starter"))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("create tasks"),
+            "a role without task.create is refused: {error}"
+        );
+        assert!(
+            engine.workflows.active_runs().await.unwrap().is_empty(),
+            "a denial at start persists no run at all"
+        );
+        assert!(tasks(&engine).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_owner_may_start_a_workflow_under_any_role_configuration() {
+        let engine = engine_with_roles(
+            "instance:\n  id: test\n  name: test\nscopes:\n  - id: demo-id\n    name: demo\n    runtime: quiet\nroles:\n  starter:\n    grants: [workflow.create, workflow.edit, workflow.run]\n    reach: scope\n",
+        );
+        let definition = create(&engine, vec![node("a")], vec![]).await;
+        engine
+            .start_workflow(&definition.id, &Caller::Owner)
+            .await
+            .unwrap();
+        wait_for_tasks(&engine, 1).await;
+    }
+
+    #[tokio::test]
+    async fn a_role_that_loses_task_create_before_a_downstream_spawn_fails_just_that_node() {
+        let engine = engine_with_roles(
+            "instance:\n  id: test\n  name: test\nscopes:\n  - id: demo-id\n    name: demo\n    runtime: quiet\n    agents:\n      - name: w\n        harness: shell\n        role: starter\nroles:\n  starter:\n    grants: [workflow.create, workflow.edit, workflow.run, task.create, task.run]\n    reach: scope\n  weak:\n    grants: [workflow.create, workflow.edit, workflow.run]\n    reach: scope\n",
+        );
+        // A store record is needed before `set_agent_role` can find one to
+        // change; the record's own `role` field is cosmetic here --
+        // `role_with` reads only `assigned_role`, so the config's declared
+        // role still wins until something assigns one.
+        let agent = AgentSession::new("demo", "w", "shell", "quiet", Lifetime::Task, Role::worker());
+        engine.store.put_agent(&agent).await.unwrap();
+
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let caller = Caller::Agent {
+            scope: "demo".into(),
+            name: "w".into(),
+            role: engine.effective_role("demo", "w").await,
+            run_id: None,
+        };
+        let run = engine.start_workflow(&definition.id, &caller).await.unwrap();
+        let root = wait_for_tasks(&engine, 1).await.pop().unwrap();
+
+        // The role changes while "a" is still in flight -- well after the
+        // run started, well before "b" is ever considered.
+        engine
+            .set_agent_role("demo/w", Some(Role::new("weak")))
+            .await
+            .unwrap();
+
+        finish(&engine, &root.id, RunStatus::Done).await;
+
+        let run = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Failed);
+        assert_eq!(run.failure_node_id.as_deref(), Some("b"));
+        let b = run.nodes.iter().find(|n| n.node_id == "b").unwrap();
+        assert_eq!(b.status, WorkflowNodeStatus::Failed);
+        assert!(b.task_id.is_none(), "a denial never mints a task id");
+        assert!(
+            b.error.as_deref().unwrap_or("").contains("create tasks"),
+            "{:?}",
+            b.error
+        );
+        assert_eq!(
+            tasks(&engine).await.len(),
+            1,
+            "no task is created for the denied node"
+        );
+    }
+
+    // -- B2: overlays keep moving after the run is terminal ------------------
+
+    #[tokio::test]
+    async fn a_sibling_still_running_when_the_run_fails_still_settles_once_it_finishes() {
+        let engine = engine();
+        let definition = create(
+            &engine,
+            vec![node("a"), node("b"), node("c")],
+            vec![edge("a", "c")],
+        )
+        .await;
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        let roots = wait_for_tasks(&engine, 2).await;
+        let a = roots
+            .iter()
+            .find(|t| t.workflow_origin.as_ref().unwrap().node_id == "a")
+            .unwrap()
+            .clone();
+        let b = roots
+            .iter()
+            .find(|t| t.workflow_origin.as_ref().unwrap().node_id == "b")
+            .unwrap()
+            .clone();
+
+        finish(&engine, &a.id, RunStatus::Failed).await;
+        let mid = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(mid.status, WorkflowRunStatus::Failed);
+        assert_eq!(mid.failure_node_id.as_deref(), Some("a"));
+        assert_eq!(
+            mid.nodes.iter().find(|n| n.node_id == "c").unwrap().status,
+            WorkflowNodeStatus::Skipped
+        );
+        assert_ne!(
+            mid.nodes.iter().find(|n| n.node_id == "b").unwrap().status,
+            WorkflowNodeStatus::Skipped,
+            "b was already spawned before the run failed; the sweep must not touch it"
+        );
+
+        finish(&engine, &b.id, RunStatus::Done).await;
+        let done = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(
+            done.status,
+            WorkflowRunStatus::Failed,
+            "the run keeps its truthful outcome"
+        );
+        assert_eq!(done.failure_node_id.as_deref(), Some("a"));
+        assert_eq!(
+            done.nodes.iter().find(|n| n.node_id == "b").unwrap().status,
+            WorkflowNodeStatus::Done,
+            "b's own overlay still moves with its task even though the run is settled"
+        );
+    }
+
+    // -- B3: a task deleted out from under an active node ---------------------
+
+    #[tokio::test]
+    async fn a_task_deleted_out_from_under_a_node_fails_it_and_settles_the_run() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        let root = wait_for_tasks(&engine, 1).await.pop().unwrap();
+
+        engine.store.delete(&root.id).await.unwrap();
+        engine.advance_workflow(&run.id).await.unwrap();
+
+        let run = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Failed);
+        assert_eq!(run.failure_node_id.as_deref(), Some("a"));
+        let a = run.nodes.iter().find(|n| n.node_id == "a").unwrap();
+        assert_eq!(a.status, WorkflowNodeStatus::Failed);
+        assert!(
+            a.error.as_deref().unwrap_or("").contains("no longer exists"),
+            "{:?}",
+            a.error
+        );
+        assert_eq!(
+            run.nodes.iter().find(|n| n.node_id == "b").unwrap().status,
+            WorkflowNodeStatus::Skipped
+        );
+        assert_eq!(tasks(&engine).await.len(), 0);
+    }
+
+    // -- B6: further execution coverage the issue asks for --------------------
+
+    #[tokio::test]
+    async fn every_spawned_task_carries_provenance_and_a_plain_task_carries_none() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a")], vec![]).await;
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        let spawned = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        let origin = spawned.workflow_origin.as_ref().unwrap();
+        assert_eq!(origin.workflow_id, definition.id);
+        assert_eq!(origin.workflow_run_id, run.id);
+        assert_eq!(origin.node_id, "a");
+
+        let plain = engine
+            .create(NewTask {
+                title: "ordinary".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                runtime: Some("quiet".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(plain.workflow_origin.is_none());
+    }
+
+    #[tokio::test]
+    async fn replaying_advance_after_done_never_creates_a_child_twice() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        let root = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        finish(&engine, &root.id, RunStatus::Done).await;
+        wait_for_tasks(&engine, 2).await;
+
+        for _ in 0..5 {
+            engine.advance_workflow(&run.id).await.unwrap();
+            engine.sync_workflow_for_task(&root.id).await;
+        }
+        assert_eq!(
+            tasks(&engine).await.len(),
+            2,
+            "replayed advances never duplicate a child"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_actively_running_task_uses_the_cancellation_path_and_keeps_history() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        let root = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        let active = loop {
+            if let Some(r) = engine.store.active_run(&root.id).await.unwrap() {
+                break r;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        engine
+            .report(
+                &root.id,
+                TaskReport {
+                    status: Some(RunStatus::Running),
+                    message: Some("working".into()),
+                    result: None,
+                    error: None,
+                    token: active.token.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        engine.sync_workflow_for_task(&root.id).await;
+
+        let cancelled = engine.cancel_workflow(&run.id).await.unwrap();
+        assert_eq!(cancelled.status, WorkflowRunStatus::Cancelled);
+        assert_eq!(
+            cancelled.nodes.iter().find(|n| n.node_id == "a").unwrap().status,
+            WorkflowNodeStatus::Cancelled
+        );
+        assert_eq!(
+            cancelled.nodes.iter().find(|n| n.node_id == "b").unwrap().status,
+            WorkflowNodeStatus::Skipped
+        );
+
+        let task = engine.store.get(&root.id).await.unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Cancelled, "task history is kept, not deleted");
+        assert!(
+            !engine.store.runs(&root.id, 10).await.unwrap().is_empty(),
+            "run history is kept, not deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_node_naming_an_unknown_agent_fails_that_node_and_the_run() {
+        let engine = engine();
+        let mut bad = node("a");
+        bad.task.agent = Some("does-not-exist".into());
+        let definition = create(&engine, vec![bad], vec![]).await;
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Failed);
+        assert_eq!(run.failure_node_id.as_deref(), Some("a"));
+        let a = run.nodes.iter().find(|n| n.node_id == "a").unwrap();
+        assert!(a.task_id.is_none());
+        assert!(a.error.as_deref().unwrap_or("").contains("no agent named"));
+        assert_eq!(tasks(&engine).await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn restart_recovery_against_real_files_never_duplicates_a_task() {
+        let root =
+            std::env::temp_dir().join(format!("factory-workflow-restart-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("factory.db");
+
+        fn build(root: &std::path::Path, db_path: &std::path::Path) -> Arc<Engine> {
+            let config = Config {
+                version: 1,
+                instance: Instance {
+                    id: "test".into(),
+                    name: "test".into(),
+                },
+                daemon: DaemonConfig::default(),
+                roles: Default::default(),
+                scope: None,
+                scopes: vec![Scope {
+                    id: "demo-id".into(),
+                    name: "demo".into(),
+                    path: PathBuf::new(),
+                    agent: None,
+                    agents: Vec::new(),
+                    runtime: Some("quiet".into()),
+                    git: None,
+                    task_store: None,
+                }],
+                plugins_dir: None,
+            };
+            let mut registry = Registry::with_builtins();
+            registry.add_runtime(Arc::new(QuietRuntime), "test");
+            Arc::new(
+                Engine::new(
+                    Factory {
+                        root: root.to_path_buf(),
+                        config,
+                    },
+                    registry,
+                    Arc::new(SqliteStore::open(db_path).unwrap()),
+                    PathBuf::from("factory"),
+                    Vec::new(),
+                )
+                .with_workflow_store(crate::workflows::WorkflowStore::open(db_path).unwrap()),
+            )
+        }
+
+        let engine1 = build(&root, &db_path);
+        let definition = create(&engine1, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let run = engine1
+            .start_workflow(&definition.id, &Caller::Owner)
+            .await
+            .unwrap();
+        let root_task = wait_for_tasks(&engine1, 1).await.pop().unwrap();
+        // Let the spawned dispatch actually land before pulling the rug out,
+        // so the "crash" is a clean restart rather than a torn write.
+        loop {
+            if engine1.store.active_run(&root_task.id).await.unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        drop(engine1);
+
+        let engine2 = build(&root, &db_path);
+        engine2.recover_workflows().await;
+        engine2.recover_workflows().await;
+        assert_eq!(
+            tasks(&engine2).await.len(),
+            1,
+            "recovery never recreates the root"
+        );
+
+        finish(&engine2, &root_task.id, RunStatus::Done).await;
+        let all = wait_for_tasks(&engine2, 2).await;
+        let b = all
+            .iter()
+            .find(|t| t.workflow_origin.as_ref().unwrap().node_id == "b")
+            .unwrap()
+            .clone();
+        finish(&engine2, &b.id, RunStatus::Done).await;
+
+        let finished = engine2.workflow_run(&run.id).await.unwrap();
+        assert_eq!(finished.status, WorkflowRunStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn a_decision_persisted_with_no_task_yet_is_recreated_with_that_exact_id_once() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a")], vec![]).await;
+
+        // Simulate the crash window directly: the node's decision (a task id)
+        // is persisted, but the task itself was never created.
+        let phantom_id = uuid::Uuid::new_v4().to_string();
+        let mut run = WorkflowRun::new(definition.clone(), WorkflowActor::Owner);
+        run.nodes[0].task_id = Some(phantom_id.clone());
+        run.nodes[0].status = WorkflowNodeStatus::Pending;
+        engine.workflows.put_run(&run).await.unwrap();
+
+        engine.recover_workflows().await;
+        let created = wait_for_tasks(&engine, 1).await;
+        assert_eq!(created[0].id, phantom_id, "recovery fills in exactly the persisted id");
+
+        engine.recover_workflows().await;
+        assert_eq!(tasks(&engine).await.len(), 1, "a second recovery does not duplicate it");
     }
 }
 

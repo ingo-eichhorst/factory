@@ -542,6 +542,20 @@ mod tests {
                 name: "flow".into(), scope: "demo".into(), ..Default::default()
             })
         ).await, "workflow mutation is deliberately a scope-level ability");
+
+        // `WorkflowStart` is refused the same way `WorkflowCreate` is: `own`
+        // reach is not enough to run one at all, regardless of which id it
+        // names. This is unmodified by B1's spawn-time authorization -- the
+        // request-level grant check below it stays the gate it always was.
+        assert!(
+            !allowed(
+                &own_reach,
+                &wearing("workflow-author"),
+                Request::WorkflowStart { id: "missing".into() }
+            )
+            .await,
+            "starting a workflow is refused for reach alone, before any id is even looked up"
+        );
     }
 
     async fn task_in(engine: &Engine, id: &str, scope: &str, agent: &str) -> Task {

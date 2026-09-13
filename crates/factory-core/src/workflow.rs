@@ -187,12 +187,24 @@ impl WorkflowDefinition {
             }
         }
         if ordered.len() != ids.len() {
+            // Named by title as well as id: "node-80e3b710-..." means nothing
+            // to a person looking at the canvas, but the title on the card
+            // does.
             let cyclic = indegree
                 .into_iter()
                 .filter_map(|(id, degree)| (degree > 0).then_some(id))
+                .map(|id| {
+                    let title = self
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == id)
+                        .map(|node| node.task.title.as_str())
+                        .unwrap_or("");
+                    format!("{title:?} ({id})")
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(format!("workflow contains a cycle involving: {cyclic}"));
+            return Err(format!("workflow contains a cycle involving {cyclic}"));
         }
         Ok(ordered)
     }
@@ -393,5 +405,104 @@ mod tests {
         assert!(error.contains("cycle"));
         assert!(error.contains("a"));
         assert!(error.contains("b"));
+    }
+
+    /// The cycle message names a node by its title as well as its opaque id
+    /// -- "node-80e3b710-..." means nothing on its own; the card's title does.
+    #[test]
+    fn the_cycle_message_names_titles_not_just_ids() {
+        let mut left = node("left");
+        left.task.title = "Left review".into();
+        let mut right = node("right");
+        right.task.title = "Right review".into();
+        let def = definition(
+            vec![left, right],
+            vec![
+                WorkflowEdge {
+                    id: "lr".into(),
+                    from: "left".into(),
+                    to: "right".into(),
+                },
+                WorkflowEdge {
+                    id: "rl".into(),
+                    from: "right".into(),
+                    to: "left".into(),
+                },
+            ],
+        );
+        let error = def.validate().unwrap_err();
+        assert!(error.contains("\"Left review\" (left)"), "{error}");
+        assert!(error.contains("\"Right review\" (right)"), "{error}");
+    }
+
+    #[test]
+    fn duplicate_node_ids_are_refused_with_the_id_named() {
+        let error = definition(vec![node("a"), node("a")], vec![]).validate().unwrap_err();
+        assert!(error.contains("duplicate"), "{error}");
+        assert!(error.contains("\"a\""), "{error}");
+    }
+
+    #[test]
+    fn an_edge_to_a_missing_node_names_the_edge_and_the_missing_endpoint() {
+        let error = definition(
+            vec![node("a")],
+            vec![WorkflowEdge {
+                id: "a-ghost".into(),
+                from: "a".into(),
+                to: "ghost".into(),
+            }],
+        )
+        .validate()
+        .unwrap_err();
+        assert!(error.contains("a-ghost"), "{error}");
+        assert!(error.contains("ghost"), "{error}");
+    }
+
+    #[test]
+    fn a_self_edge_is_refused_as_depending_on_itself() {
+        let error = definition(
+            vec![node("a")],
+            vec![WorkflowEdge {
+                id: "a-a".into(),
+                from: "a".into(),
+                to: "a".into(),
+            }],
+        )
+        .validate()
+        .unwrap_err();
+        assert!(error.contains("depend on itself"), "{error}");
+        assert!(error.contains("a-a"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_workflow_needs_at_least_one_node() {
+        let error = definition(vec![], vec![]).validate().unwrap_err();
+        assert!(error.contains("at least one"), "{error}");
+    }
+
+    #[test]
+    fn a_zero_timeout_is_refused_and_names_which_one() {
+        let mut a = node("a");
+        a.task.timeout_seconds = Some(0);
+        let error = definition(vec![a], vec![]).validate().unwrap_err();
+        assert!(error.contains("run timeout"), "{error}");
+        assert!(error.contains("zero"), "{error}");
+    }
+
+    #[test]
+    fn a_node_targeting_another_scope_is_refused() {
+        let mut a = node("a");
+        a.task.scope = Some("other-scope".into());
+        let error = definition(vec![a], vec![]).validate().unwrap_err();
+        assert!(error.contains("other-scope"), "{error}");
+        assert!(error.contains("demo"), "{error}");
+    }
+
+    #[test]
+    fn a_schedule_on_a_node_is_refused() {
+        let mut a = node("a");
+        a.task.schedule = Some(crate::task::Schedule::Cron("* * * * *".into()));
+        let error = definition(vec![a], vec![]).validate().unwrap_err();
+        assert!(error.contains("schedule"), "{error}");
     }
 }
