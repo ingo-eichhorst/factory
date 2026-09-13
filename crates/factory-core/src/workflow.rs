@@ -246,6 +246,22 @@ pub struct WorkflowNodeRun {
     pub error: Option<String>,
 }
 
+/// Who started a workflow run, recorded well enough to re-derive their
+/// current authority later rather than trusting a snapshot of what they
+/// could do the moment they clicked Run. A role can change between a run's
+/// start and a node it spawns hours afterward -- `factory-daemon` re-resolves
+/// this through `effective_role` at every spawn, including one recovery
+/// repairs after a restart, so a role a caller has since lost stops it there
+/// too. `#[serde(default)]` reads a run written before this field existed as
+/// `Owner`, which is what every one of them in fact was.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowActor {
+    #[default]
+    Owner,
+    Agent { scope: String, name: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRun {
     pub id: String,
@@ -260,12 +276,17 @@ pub struct WorkflowRun {
     pub failure_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Whoever asked for this attempt. Every node it spawns must never carry
+    /// more authority than a fresh request from this same actor would have,
+    /// even long after the click that started it.
+    #[serde(default)]
+    pub started_by: WorkflowActor,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl WorkflowRun {
-    pub fn new(definition: WorkflowDefinition) -> Self {
+    pub fn new(definition: WorkflowDefinition, started_by: WorkflowActor) -> Self {
         let now = Utc::now();
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -286,6 +307,7 @@ impl WorkflowRun {
             status: WorkflowRunStatus::Running,
             failure_node_id: None,
             error: None,
+            started_by,
             created_at: now,
             updated_at: now,
         }

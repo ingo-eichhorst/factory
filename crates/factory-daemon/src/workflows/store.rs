@@ -32,6 +32,22 @@ fn decode<T: serde::de::DeserializeOwned>(json: String) -> Result<T> {
     serde_json::from_str(&json).map_err(error)
 }
 
+/// Decode every row, skipping (and naming) whichever ones do not. One
+/// corrupted row is data, not an outage: a list that failed outright over it
+/// would take the whole board down with it, and recovery would never reach
+/// the runs sitting next to it in the same table.
+fn decode_all<T: serde::de::DeserializeOwned>(rows: Vec<(String, String)>, table: &str) -> Vec<T> {
+    rows.into_iter()
+        .filter_map(|(id, json)| match decode::<T>(json) {
+            Ok(value) => Some(value),
+            Err(err) => {
+                tracing::warn!(id, table, "skipping malformed row: {err}");
+                None
+            }
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct WorkflowStore {
     conn: Arc<Mutex<Connection>>,
@@ -106,28 +122,31 @@ impl WorkflowStore {
         self.with_conn(move |conn| {
             let (sql, arg): (&str, Option<&str>) = match scope.as_deref() {
                 Some(scope) => (
-                    "SELECT data FROM workflow_definitions WHERE scope=?1 ORDER BY updated_at DESC",
+                    "SELECT id, data FROM workflow_definitions WHERE scope=?1 ORDER BY updated_at DESC",
                     Some(scope),
                 ),
                 None => (
-                    "SELECT data FROM workflow_definitions ORDER BY updated_at DESC",
+                    "SELECT id, data FROM workflow_definitions ORDER BY updated_at DESC",
                     None,
                 ),
             };
             let mut stmt = conn.prepare(sql).map_err(error)?;
+            let row = |row: &rusqlite::Row| -> rusqlite::Result<(String, String)> {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            };
             let rows = match arg {
                 Some(value) => stmt
-                    .query_map([value], |row| row.get::<_, String>(0))
+                    .query_map([value], row)
                     .map_err(error)?
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(error)?,
                 None => stmt
-                    .query_map([], |row| row.get::<_, String>(0))
+                    .query_map([], row)
                     .map_err(error)?
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(error)?,
             };
-            rows.into_iter().map(decode).collect()
+            Ok(decode_all(rows, "workflow_definitions"))
         })
         .await
     }
@@ -187,19 +206,19 @@ impl WorkflowStore {
         self.with_conn(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT data FROM workflow_runs
+                    "SELECT id, data FROM workflow_runs
                  WHERE (?1 IS NULL OR workflow_id=?1) AND (?2 IS NULL OR scope=?2)
                  ORDER BY updated_at DESC LIMIT ?3",
                 )
                 .map_err(error)?;
             let rows = stmt
                 .query_map(params![workflow_id, scope, limit], |row| {
-                    row.get::<_, String>(0)
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
                 .map_err(error)?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(error)?;
-            rows.into_iter().map(decode).collect()
+            Ok(decode_all(rows, "workflow_runs"))
         })
         .await
     }
@@ -208,15 +227,15 @@ impl WorkflowStore {
         self.with_conn(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT data FROM workflow_runs WHERE status='running' ORDER BY updated_at",
+                    "SELECT id, data FROM workflow_runs WHERE status='running' ORDER BY updated_at",
                 )
                 .map_err(error)?;
             let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
                 .map_err(error)?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(error)?;
-            rows.into_iter().map(decode).collect()
+            Ok(decode_all(rows, "workflow_runs"))
         })
         .await
     }
@@ -244,8 +263,62 @@ mod tests {
                 .name,
             "deploy"
         );
-        let run = WorkflowRun::new(definition);
+        let run = WorkflowRun::new(definition, factory_core::workflow::WorkflowActor::Owner);
         store.put_run(&run).await.unwrap();
         assert_eq!(store.active_runs().await.unwrap()[0].id, run.id);
+    }
+
+    /// One undecodable row is data, not an outage: `definitions`/`active_runs`
+    /// skip it and keep serving everything else; only fetching that exact id
+    /// directly is an error, and only for it.
+    #[tokio::test]
+    async fn a_malformed_definition_row_is_skipped_in_lists_and_errors_alone_when_fetched() {
+        let store = WorkflowStore::in_memory().unwrap();
+        let mut draft = WorkflowDraft::default();
+        draft.name = "deploy".into();
+        draft.scope = "demo".into();
+        let good = WorkflowDefinition::from_draft(draft);
+        store.put_definition(&good).await.unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO workflow_definitions (id, scope, updated_at, data) VALUES ('bad-id', 'demo', '2024-01-01T00:00:00Z', 'not json')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let listed = store.definitions(None).await.unwrap();
+        assert_eq!(listed.len(), 1, "the malformed row is skipped, not fatal");
+        assert_eq!(listed[0].id, good.id);
+        assert_eq!(store.definitions(Some("demo")).await.unwrap().len(), 1);
+        assert!(store.get_definition("bad-id").await.is_err());
+        assert!(store.get_definition(&good.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_run_row_is_skipped_in_lists_and_errors_alone_when_fetched() {
+        let store = WorkflowStore::in_memory().unwrap();
+        let mut draft = WorkflowDraft::default();
+        draft.name = "deploy".into();
+        draft.scope = "demo".into();
+        let definition = WorkflowDefinition::from_draft(draft);
+        let good = WorkflowRun::new(definition, factory_core::workflow::WorkflowActor::Owner);
+        store.put_run(&good).await.unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, scope, status, updated_at, data) VALUES ('bad-run', 'wf', 'demo', 'running', '2024-01-01T00:00:00Z', 'not json')",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(store.active_runs().await.unwrap().len(), 1);
+        let listed = store.runs(None, None, 50).await.unwrap();
+        assert_eq!(listed.len(), 1, "the malformed row is skipped, not fatal");
+        assert_eq!(listed[0].id, good.id);
+        assert!(store.get_run("bad-run").await.is_err());
+        assert!(store.get_run(&good.id).await.unwrap().is_some());
     }
 }

@@ -171,7 +171,7 @@ impl Engine {
         if let Err(e) = self.authorize(&caller, &request).await {
             return Response::error(e.code(), e.to_string());
         }
-        match self.dispatch_request(request).await {
+        match self.dispatch_request(&caller, request).await {
             Ok(payload) => Response::ok(payload),
             Err(e) => Response::error(e.code(), e.to_string()),
         }
@@ -203,7 +203,11 @@ impl Engine {
         self.handle(Envelope::from(request)).await
     }
 
-    async fn dispatch_request(self: &Arc<Self>, req: Request) -> Result<Payload> {
+    async fn dispatch_request(
+        self: &Arc<Self>,
+        caller: &crate::access::Caller,
+        req: Request,
+    ) -> Result<Payload> {
         match req {
             Request::Status => Ok(Payload::Status {
                 status: self.status().await?,
@@ -373,7 +377,7 @@ impl Engine {
                 deleted: self.delete_workflow(&id).await?,
             }),
             Request::WorkflowStart { id } => Ok(Payload::WorkflowRun {
-                run: self.start_workflow(&id).await?,
+                run: self.start_workflow(&id, caller).await?,
             }),
             Request::WorkflowRunGet { id } => Ok(Payload::WorkflowRun {
                 run: self.workflow_run(&id).await?,

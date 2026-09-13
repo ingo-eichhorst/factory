@@ -21,7 +21,8 @@ use factory_core::agent::AgentSession;
 use factory_core::error::{FactoryError, Result};
 use factory_core::protocol::Request;
 use factory_core::role::{Grant, Reach, Role, RoleDef};
-use factory_core::task::Task;
+use factory_core::task::{NewTask, Task};
+use factory_core::workflow::WorkflowActor;
 
 use crate::engine::Engine;
 
@@ -62,6 +63,20 @@ impl Caller {
         match self {
             Caller::Owner => None,
             Caller::Agent { scope, .. } => Some(scope),
+        }
+    }
+
+    /// The durable form a workflow run remembers. Only who, never what they
+    /// were allowed to do at the time -- see `WorkflowActor` and
+    /// `Engine::caller_for_actor`, which re-derives the latter every time it
+    /// matters instead of trusting a stale copy of it.
+    pub fn as_workflow_actor(&self) -> WorkflowActor {
+        match self {
+            Caller::Owner => WorkflowActor::Owner,
+            Caller::Agent { scope, name, .. } => WorkflowActor::Agent {
+                scope: scope.clone(),
+                name: name.clone(),
+            },
         }
     }
 }
@@ -367,6 +382,44 @@ impl Engine {
             // was refused above. Nothing should arrive here.
             _ => Err(deny("do that")),
         }
+    }
+
+    /// Re-derive who a persisted `WorkflowActor` is right now, honouring a
+    /// role change since the run started -- a workflow run remembers who
+    /// asked, not a frozen copy of what they were allowed to do that moment.
+    pub(crate) async fn caller_for_actor(&self, actor: &WorkflowActor) -> Caller {
+        match actor {
+            WorkflowActor::Owner => Caller::Owner,
+            WorkflowActor::Agent { scope, name } => Caller::Agent {
+                scope: scope.clone(),
+                name: name.clone(),
+                role: self.effective_role(scope, name).await,
+                run_id: None,
+            },
+        }
+    }
+
+    /// The authority a hand-typed `task.create` immediately followed by
+    /// `task.run` would need from `caller` -- exactly what a workflow node's
+    /// spawn must never exceed. The task does not exist yet when a node
+    /// becomes eligible, so `TaskRun` is checked against an id nothing has
+    /// created: `authorize` already treats an unknown id as "let the engine
+    /// report `no such task`" rather than as anybody's, which is task.run's
+    /// grant-and-scope shape with no task-specific reach left to weigh in.
+    pub(crate) async fn authorize_workflow_spawn(
+        &self,
+        caller: &Caller,
+        template: &NewTask,
+    ) -> Result<()> {
+        self.authorize(caller, &Request::TaskCreate(template.clone()))
+            .await?;
+        self.authorize(
+            caller,
+            &Request::TaskRun {
+                id: uuid::Uuid::new_v4().to_string(),
+            },
+        )
+        .await
     }
 }
 #[cfg(test)]

@@ -1,3 +1,4 @@
+use crate::access::Caller;
 use crate::engine::Engine;
 use chrono::Utc;
 use factory_core::error::{FactoryError, Result};
@@ -177,7 +178,7 @@ mod tests {
     async fn linear_nodes_spawn_once_and_keep_provenance() {
         let engine = engine();
         let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
-        let run = engine.start_workflow(&definition.id).await.unwrap();
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
         let first = wait_for_tasks(&engine, 1).await.pop().unwrap();
         assert_eq!(
             first.workflow_origin.as_ref().unwrap().workflow_run_id,
@@ -210,7 +211,7 @@ mod tests {
             ],
         )
         .await;
-        let run = engine.start_workflow(&definition.id).await.unwrap();
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
         let root = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &root.id, RunStatus::Done).await;
         let branch = wait_for_tasks(&engine, 3).await;
@@ -240,7 +241,7 @@ mod tests {
     async fn failure_stops_downstream_nodes_truthfully() {
         let engine = engine();
         let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
-        let run = engine.start_workflow(&definition.id).await.unwrap();
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
         let root = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &root.id, RunStatus::Failed).await;
         let run = engine.workflow_run(&run.id).await.unwrap();
@@ -261,7 +262,7 @@ mod tests {
     async fn blocked_pauses_and_cancelling_settles_active_and_unstarted_nodes() {
         let engine = engine();
         let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
-        let run = engine.start_workflow(&definition.id).await.unwrap();
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
         let root = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &root.id, RunStatus::Blocked).await;
         let paused = engine.workflow_run(&run.id).await.unwrap();
@@ -299,7 +300,7 @@ mod tests {
     async fn recovery_is_idempotent_and_definition_edits_do_not_change_a_run_snapshot() {
         let engine = engine();
         let definition = create(&engine, vec![node("a")], vec![]).await;
-        let run = engine.start_workflow(&definition.id).await.unwrap();
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
         wait_for_tasks(&engine, 1).await;
         engine.recover_workflows().await;
         engine.recover_workflows().await;
@@ -409,10 +410,22 @@ impl Engine {
         Ok(deleted)
     }
 
-    pub(crate) async fn start_workflow(self: &Arc<Self>, id: &str) -> Result<WorkflowRun> {
+    pub(crate) async fn start_workflow(
+        self: &Arc<Self>,
+        id: &str,
+        caller: &Caller,
+    ) -> Result<WorkflowRun> {
         let definition = self.workflow_definition(id).await?;
         definition.validate().map_err(FactoryError::BadRequest)?;
-        let run = WorkflowRun::new(definition);
+        // Every node must be something this caller could `task.create` and
+        // `task.run` by hand, checked before anything is persisted -- a
+        // `workflow.run` grant is not a way to launder a caller into
+        // authority over tasks it could not otherwise touch. See
+        // `Engine::authorize_workflow_spawn`.
+        for node in &definition.nodes {
+            self.authorize_workflow_spawn(caller, &node.task).await?;
+        }
+        let run = WorkflowRun::new(definition, caller.as_workflow_actor());
         self.workflows.put_run(&run).await?;
         self.bus
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
@@ -467,21 +480,62 @@ impl Engine {
 
     /// Reconcile persisted node decisions with authoritative task state, then
     /// make every newly eligible decision. The mutex serializes reports,
-    /// cancellation and restart recovery so one node can never be chosen twice.
+    /// cancellation and restart recovery so one node can never be chosen
+    /// twice, and so `recover_workflows`'s repair of a node never races this.
     pub(crate) async fn advance_workflow(self: &Arc<Self>, id: &str) -> Result<()> {
         let _guard = self.workflow_edit.lock().await;
         let mut run = self.workflow_run(id).await?;
-        if run.status != WorkflowRunStatus::Running {
-            return Ok(());
-        }
 
+        // Mirror authoritative task state into every node that has one, even
+        // once the run itself is terminal. A sibling still running when its
+        // neighbour failed does not freeze mid-flight forever just because
+        // the workflow gave up on the run as a whole -- see issue #45's node
+        // overlay requirement and the README.
         for node in &mut run.nodes {
-            if let Some(task_id) = &node.task_id {
-                if let Some(task) = self.store.get(task_id).await? {
+            let Some(task_id) = node.task_id.clone() else {
+                continue;
+            };
+            match self.store.get(&task_id).await {
+                Ok(Some(task)) => {
                     node.status = node_status(task.status);
                     node.error = task.error;
                 }
+                Ok(None) if !node.status.is_terminal() => {
+                    // The decision was made (or a task once existed) and now
+                    // there is nothing at that id. Outside the crash window
+                    // `recover_workflows` repairs -- which never overlaps
+                    // this, since both hold `workflow_edit` across the
+                    // persist-then-create pair and recovery's own repair
+                    // runs before its `advance_workflow` call -- that is a
+                    // fact about the task (deleted out from under the node),
+                    // not a race to paper over.
+                    node.status = WorkflowNodeStatus::Failed;
+                    node.error = Some(format!(
+                        "the task spawned for this node ({task_id}) no longer exists"
+                    ));
+                }
+                Ok(None) => {} // already terminal; a vanished task changes nothing more
+                Err(error) => {
+                    // A store hiccup is not evidence the task is gone; do not
+                    // let a transient read failure fail the node.
+                    tracing::warn!(
+                        workflow_run = id,
+                        node = node.node_id,
+                        task = task_id,
+                        "could not read spawned task: {error}"
+                    );
+                }
             }
+        }
+
+        if run.status.is_terminal() {
+            // A terminal run never spawns again, and nothing above may
+            // rewrite its own status or failure node -- only the per-node
+            // mirror does, and that alone is worth persisting and publishing.
+            run.updated_at = Utc::now();
+            self.workflows.put_run(&run).await?;
+            self.bus.publish(Event::WorkflowRunUpdated { run });
+            return Ok(());
         }
 
         if let Some(failed) = run
@@ -502,6 +556,12 @@ impl Engine {
         {
             run.status = WorkflowRunStatus::Cancelled;
             run.failure_node_id = Some(cancelled.node_id.clone());
+        } else if run
+            .nodes
+            .iter()
+            .all(|node| node.status == WorkflowNodeStatus::Done)
+        {
+            run.status = WorkflowRunStatus::Done;
         }
         if run.status.is_terminal() {
             for node in &mut run.nodes {
@@ -509,18 +569,6 @@ impl Engine {
                     node.status = WorkflowNodeStatus::Skipped;
                 }
             }
-            run.updated_at = Utc::now();
-            self.workflows.put_run(&run).await?;
-            self.bus.publish(Event::WorkflowRunUpdated { run });
-            return Ok(());
-        }
-
-        if run
-            .nodes
-            .iter()
-            .all(|node| node.status == WorkflowNodeStatus::Done)
-        {
-            run.status = WorkflowRunStatus::Done;
             run.updated_at = Utc::now();
             self.workflows.put_run(&run).await?;
             self.bus.publish(Event::WorkflowRunUpdated { run });
@@ -549,6 +597,41 @@ impl Engine {
 
         let mut to_start = Vec::new();
         for node_id in eligible {
+            // A denial or creation failure earlier in this very pass already
+            // ended the run; nothing else in this fan-out batch gets to
+            // start. The rest keep reading `unstarted` until the sweep below.
+            if run.status.is_terminal() {
+                break;
+            }
+
+            let template = run
+                .definition
+                .nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .expect("run nodes come from the snapshot")
+                .task
+                .clone();
+
+            // Re-resolve who this run runs for, every time: a role can
+            // change between the click that started it and a node it spawns
+            // long afterward, and the owner's authority never needs this at
+            // all. See `WorkflowActor` and `authorize_workflow_spawn`.
+            let caller = self.caller_for_actor(&run.started_by).await;
+            if let Err(denial) = self.authorize_workflow_spawn(&caller, &template).await {
+                let node = run
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.node_id == node_id)
+                    .expect("snapshot node");
+                node.status = WorkflowNodeStatus::Failed;
+                node.error = Some(denial.to_string());
+                run.status = WorkflowRunStatus::Failed;
+                run.failure_node_id = Some(node_id);
+                run.error = Some(denial.to_string());
+                continue;
+            }
+
             let task_id = uuid::Uuid::new_v4().to_string();
             let node_run = run
                 .nodes
@@ -564,14 +647,6 @@ impl Engine {
             self.bus
                 .publish(Event::WorkflowRunUpdated { run: run.clone() });
 
-            let template = run
-                .definition
-                .nodes
-                .iter()
-                .find(|node| node.id == node_id)
-                .expect("run nodes come from the snapshot")
-                .task
-                .clone();
             let origin = WorkflowOrigin {
                 workflow_id: run.workflow_id.clone(),
                 workflow_run_id: run.id.clone(),
@@ -588,11 +663,27 @@ impl Engine {
                         .iter_mut()
                         .find(|node| node.node_id == node_id)
                         .unwrap();
+                    // No task exists at this id and none ever will: leaving
+                    // it set would make `recover_workflows` try to create it
+                    // again after every future restart.
+                    node.task_id = None;
                     node.status = WorkflowNodeStatus::Failed;
                     node.error = Some(error.to_string());
                     run.status = WorkflowRunStatus::Failed;
                     run.failure_node_id = Some(node_id);
                     run.error = Some(error.to_string());
+                }
+            }
+        }
+        // A denial or creation failure inside the loop above is a fresh
+        // transition to terminal within this same pass; give it the same
+        // skip-sweep the early-return branches give theirs, so a fan-out
+        // sibling that never got its turn this pass reads `skipped` rather
+        // than lingering `unstarted`.
+        if run.status.is_terminal() {
+            for node in &mut run.nodes {
+                if node.status == WorkflowNodeStatus::Unstarted {
+                    node.status = WorkflowNodeStatus::Skipped;
                 }
             }
         }
@@ -629,6 +720,13 @@ impl Engine {
     /// Mirror dispatch progress without recursively advancing the graph. The
     /// report/cancel paths perform advancement; this hook exists so a launch
     /// failure still settles the workflow even though no agent can report it.
+    ///
+    /// Runs even once the run is terminal, for the same reason
+    /// `advance_workflow`'s mirror does: the node's own status still moves
+    /// with its task. Only the settle step below -- promoting a freshly
+    /// failed node into the run's own failure -- is skipped once the run
+    /// already has an outcome, so a terminal run's status and failure node
+    /// are never rewritten here either.
     pub(crate) async fn record_workflow_task_state(&self, task_id: &str) {
         let Ok(Some(task)) = self.store.get(task_id).await else {
             return;
@@ -640,9 +738,6 @@ impl Engine {
         let Ok(mut run) = self.workflow_run(&origin.workflow_run_id).await else {
             return;
         };
-        if run.status != WorkflowRunStatus::Running {
-            return;
-        }
         let Some(node) = run
             .nodes
             .iter_mut()
@@ -652,7 +747,7 @@ impl Engine {
         };
         node.status = node_status(task.status);
         node.error = task.error;
-        if node.status == WorkflowNodeStatus::Failed {
+        if !run.status.is_terminal() && node.status == WorkflowNodeStatus::Failed {
             run.status = WorkflowRunStatus::Failed;
             run.failure_node_id = Some(node.node_id.clone());
             run.error = node
@@ -682,37 +777,98 @@ impl Engine {
                 return;
             }
         };
-        for run in runs {
-            // Repair a decision persisted just before task creation.
-            for node in &run.nodes {
+        for mut run in runs {
+            // Repair a decision persisted just before task creation. This
+            // walks the run outside `workflow_edit` -- recovery runs once,
+            // sequentially, before anything else can be dispatching a report
+            // for a run it has not reached yet -- but always before this
+            // same run's own `advance_workflow` call below takes that lock,
+            // so nothing here can race the mirror it performs.
+            let mut repaired = false;
+            for node in run.nodes.clone() {
                 let Some(task_id) = &node.task_id else {
                     continue;
                 };
-                if self.store.get(task_id).await.ok().flatten().is_none() {
-                    let Some(template) = run
-                        .definition
-                        .nodes
-                        .iter()
-                        .find(|item| item.id == node.node_id)
-                        .map(|item| item.task.clone())
-                    else {
-                        continue;
-                    };
-                    let origin = WorkflowOrigin {
-                        workflow_id: run.workflow_id.clone(),
-                        workflow_run_id: run.id.clone(),
-                        node_id: node.node_id.clone(),
-                    };
-                    if let Err(error) = self
-                        .create_workflow_task(template, origin, task_id.clone())
-                        .await
-                    {
+                match self.store.get(task_id).await {
+                    Ok(Some(_)) => continue, // already exists; nothing to repair
+                    Ok(None) => {}
+                    Err(error) => {
+                        // Not evidence the task is gone -- a transient read
+                        // failure must never spawn a duplicate (see B4/B3).
                         tracing::warn!(
                             workflow_run = run.id,
                             node = node.node_id,
-                            "could not recover workflow task: {error}"
+                            task = task_id,
+                            "could not check for a recovered workflow task: {error}"
                         );
+                        continue;
                     }
+                }
+                let Some(template) = run
+                    .definition
+                    .nodes
+                    .iter()
+                    .find(|item| item.id == node.node_id)
+                    .map(|item| item.task.clone())
+                else {
+                    continue;
+                };
+                // Re-authorize exactly as a live spawn would: the actor
+                // recorded on the run may have lost the grant it started
+                // with while the daemon was down.
+                let caller = self.caller_for_actor(&run.started_by).await;
+                if let Err(denial) = self.authorize_workflow_spawn(&caller, &template).await {
+                    tracing::warn!(
+                        workflow_run = run.id,
+                        node = node.node_id,
+                        "denying recovered workflow spawn: {denial}"
+                    );
+                    if let Some(current) =
+                        run.nodes.iter_mut().find(|item| item.node_id == node.node_id)
+                    {
+                        // No task will ever exist at this id; leaving it set
+                        // would have this same repair retry forever.
+                        current.task_id = None;
+                        current.status = WorkflowNodeStatus::Failed;
+                        current.error = Some(denial.to_string());
+                    }
+                    repaired = true;
+                    continue;
+                }
+                let origin = WorkflowOrigin {
+                    workflow_id: run.workflow_id.clone(),
+                    workflow_run_id: run.id.clone(),
+                    node_id: node.node_id.clone(),
+                };
+                if let Err(error) = self
+                    .create_workflow_task(template, origin, task_id.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        workflow_run = run.id,
+                        node = node.node_id,
+                        "could not recover workflow task: {error}"
+                    );
+                    if let Some(current) =
+                        run.nodes.iter_mut().find(|item| item.node_id == node.node_id)
+                    {
+                        current.task_id = None;
+                        current.status = WorkflowNodeStatus::Failed;
+                        current.error = Some(error.to_string());
+                    }
+                    repaired = true;
+                }
+            }
+            if repaired {
+                run.updated_at = Utc::now();
+                if let Err(error) = self.workflows.put_run(&run).await {
+                    tracing::warn!(
+                        workflow_run = run.id,
+                        "could not persist a recovered workflow denial: {error}"
+                    );
+                } else {
+                    self.bus
+                        .publish(Event::WorkflowRunUpdated { run: run.clone() });
                 }
             }
             if let Err(error) = self.advance_workflow(&run.id).await {
