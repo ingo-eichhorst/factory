@@ -198,7 +198,7 @@ pub fn index(root: &Path) -> Index {
     // -- first pass: read every page, without resolving anything yet -------
     let mut pages: Vec<PageDraft> = Vec::new();
     for (rel, abs) in &walk.pages {
-        pages.push(read_page(root, rel, abs, &mut findings));
+        pages.push(read_page(rel, abs, &mut findings));
     }
     if walk.pages_truncated {
         findings.push(Finding {
@@ -492,7 +492,7 @@ struct DocumentDraft {
 /// frontmatter block or unparseable YAML all fall back to the file name as
 /// the title and the whole file as the body -- the file is still a page and
 /// a graph node either way.
-fn read_page(root: &Path, rel: &str, abs: &Path, findings: &mut Vec<Finding>) -> PageDraft {
+fn read_page(rel: &str, abs: &Path, findings: &mut Vec<Finding>) -> PageDraft {
     let id = rel[..rel.len() - 3].to_string();
     let file_name_title = id.rsplit('/').next().unwrap_or(&id).to_string();
     let fallback = |body: String| PageDraft {
@@ -550,18 +550,6 @@ fn read_page(root: &Path, rel: &str, abs: &Path, findings: &mut Vec<Finding>) ->
         source_paths: fm.sources.iter().map(|s| s.path().to_string()).collect(),
         tags,
         body: body.to_string(),
-    }
-    .also_root(root)
-}
-
-/// A no-op that exists only so `read_page` can end in one expression; `root`
-/// is not needed by anything above yet, but every other read in this module
-/// takes it, and a future frontmatter field resolved against the instance
-/// root (a relative `sources[].path`, say) should not have to thread it back
-/// in through a second parameter list.
-impl PageDraft {
-    fn also_root(self, _root: &Path) -> Self {
-        self
     }
 }
 
@@ -1519,6 +1507,30 @@ mod tests {
     }
 
     #[test]
+    fn an_ambiguous_document_name_is_reported_and_left_unresolved() {
+        let root = temp_root("ambiguous-document");
+        write(&root, "east/contract.pdf", "east bytes");
+        write(&root, "west/contract.pdf", "west bytes");
+        write(&root, "general/other.md", "---\ntitle: Other\n---\nSee ![[contract.pdf]].\n");
+
+        let idx = index(&root);
+        let other = page_by_id(&idx, "general/other");
+        assert!(other.documents.is_empty(), "{:?}", other.documents);
+        assert!(other.gaps.contains(&"contract.pdf".to_string()));
+        assert!(
+            idx.findings
+                .iter()
+                .any(|f| f.kind == FindingKind::AmbiguousLink
+                    && f.note == "general/other"
+                    && f.detail.contains("matches more than one document")),
+            "{:?}",
+            idx.findings
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn an_unresolved_document_reference_is_a_gap() {
         let root = temp_root("document-gap");
         write(&root, "a.md", "---\ntitle: A\n---\nSee ![[missing.pdf]].\n");
@@ -1810,6 +1822,27 @@ mod tests {
 
         let idx = index(&root);
         assert!(idx.pages.iter().any(|p| p.id == "area/page"), "the imported page resolves through the same walk");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&source).ok();
+    }
+
+    #[test]
+    fn import_skips_a_dotfile_nested_below_the_top_level_too() {
+        let root = temp_root("import-nested-dotfile");
+        let source = std::env::temp_dir().join(format!("factory-import-source-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(source.join("partners")).unwrap();
+        std::fs::write(source.join("partners/acme.md"), "---\ntitle: Acme\n---\nBody.\n").unwrap();
+        std::fs::write(source.join("partners/.DS_Store"), "skip me too").unwrap();
+
+        let result = import(&root, &source, None, false).unwrap();
+        assert!(result.copied.contains(&"partners/acme.md".to_string()), "{:?}", result.copied);
+        assert!(
+            result.skipped_hidden.contains(&"partners/.DS_Store".to_string()),
+            "a dotfile below the top level must be skipped too, with its full relative path reported: {:?}",
+            result.skipped_hidden
+        );
+        assert!(!vault_root(&root).join("partners/.DS_Store").exists());
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&source).ok();
