@@ -314,6 +314,9 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // Reconcile persisted workflow decisions only after runtimes and standing
     // agents are available. Recovery reuses task ids recorded before a crash.
     engine.recover_workflows().await;
+    // The one place a bench attempt's gate actually runs -- started before
+    // recovery below, so anything it enqueues has a consumer immediately.
+    engine.spawn_bench_judge();
     // The same, for bench runs still `running` when the daemon last stopped.
     engine.recover_bench_runs().await;
 

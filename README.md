@@ -428,25 +428,37 @@ that is wrong).
 A **bench run** is `dataset@revision × agents × attempts`: a snapshot of the
 dataset's cases taken the moment it starts, so a later edit to the dataset
 never changes a run already going. Each case's `base` — its own pinned
-commit, or the scope's HEAD resolved once when the run starts — is likewise
-fixed, so every agent's every attempt at a case branches from the same
-commit. Each attempt is one ordinary Factory task with its own worktree, so
-`--attempts N` means N independent tries, never "retry until it passes," and
-`--concurrency N` (default 1) bounds how many attempts are in flight at once.
+commit, or the scope's HEAD when the run starts — is resolved once, to the
+full commit SHA it names in that scope, so every agent's every attempt at a
+case branches from exactly the same commit and `git` itself only ever sees a
+SHA, never a case-authored string. A `base` that does not resolve to a
+commit there — a bad revision, or one that has since been rewritten away —
+never dispatches: every attempt at that case is `skipped`, with a reason
+naming the base, the same as an agent that does not resolve. Each attempt is
+one ordinary Factory task with its own worktree, so `--attempts N` means N
+independent tries, never "retry until it passes," and `--concurrency N`
+(default 1) bounds how many attempts are in flight at once.
 
 **The verdict.** A case's verdict is the exit status of its gate command,
 recorded with the exit code, the last 4 KiB of its combined output, and the
 attempt's wall-clock time — even when the agent itself reported `failed`, the
-gate still runs and is still the judge. A case with no gate still runs, and
+gate still runs and is still the judge. Judging a settled attempt — which
+means running its gate — never happens on a caller's own path: a report, a
+cancel, the scheduler's own watchdog, and restart recovery all merely queue
+it, so a slow gate (up to the case's own timeout, ten minutes by default)
+never makes `factory task report` itself hang, and never stalls anything
+else the scheduler is doing meanwhile. A case with no gate still runs, and
 its result is `unverified`: the agent's own report of `done` or `failed`,
 shown but never counted in a resolve rate (`pass / (pass + fail)`; `null`
 when nothing was gated at all). A case whose reset command fails is
 `skipped` before the agent is ever dispatched — a case is never run dirty.
 An agent that does not resolve in a case's own scope is `skipped` with the
 reason, and the run continues past it. A run cancelled mid-flight settles
-every remaining attempt `cancelled`; one lost, timed out, or that never got
-as far as a report before its run ended is `error`. Cost and tokens are still
-not recorded, and the payload says so rather than showing a `0`.
+every remaining attempt `cancelled`, even one whose judgement was already
+queued or under way — that verdict, once written, is never overwritten by a
+late judgement landing after the cancel. One lost, timed out, or that never
+got as far as a report before its run ended is `error`. Cost and tokens are
+still not recorded, and the payload says so rather than showing a `0`.
 
 `factory bench run <dataset> --agent <scope>/<agent> [--attempts N]
 [--concurrency N] [--case <id>]` starts a run; `factory bench runs`, `show`,

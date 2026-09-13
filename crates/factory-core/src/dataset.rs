@@ -114,7 +114,12 @@ impl Dataset {
     /// Read `<dir>/<name>.yaml`. `None` when the file does not exist -- an
     /// absent dataset is a fact for the caller to decide what to do with,
     /// not an error.
+    ///
+    /// Refuses a `name` that is not a slug before it ever touches a path --
+    /// defense in depth behind the daemon's own check, since `name` here
+    /// becomes a path component and `../elsewhere` is otherwise a valid one.
     pub fn load(dir: &Path, name: &str) -> Result<Option<Self>> {
+        refuse_bad_name(name)?;
         let path = dir.join(format!("{name}.yaml"));
         match std::fs::read_to_string(&path) {
             Ok(text) => Ok(Some(Self::parse(&text)?)),
@@ -130,7 +135,11 @@ impl Dataset {
     /// mid-write never leaves half a YAML file. The caller (the daemon) is
     /// responsible for holding this dataset's write lock and bumping
     /// `revision` before calling this.
+    ///
+    /// Refuses a `self.name` that is not a slug -- same defense in depth as
+    /// `load`, since `validate()` is a separate call a caller could forget.
     pub fn write_atomic(&self, dir: &Path) -> Result<()> {
+        refuse_bad_name(&self.name)?;
         std::fs::create_dir_all(dir)
             .map_err(|e| FactoryError::Other(anyhow::anyhow!("making {}: {e}", dir.display())))?;
         let path = dir.join(format!("{}.yaml", self.name));
@@ -188,6 +197,19 @@ pub fn is_slug(s: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// A dataset `name` becomes a path component the moment it reaches `load` or
+/// `write_atomic` -- `is_slug` is what stands between that and `../elsewhere`
+/// or an absolute path escaping `<root>/.factory/datasets/` entirely.
+fn refuse_bad_name(name: &str) -> Result<()> {
+    if is_slug(name) {
+        Ok(())
+    } else {
+        Err(FactoryError::BadRequest(format!(
+            "dataset name {name:?} must match [a-z0-9][a-z0-9-]*"
+        )))
+    }
+}
+
 /// What is wrong with one case, as `(field, detail)` pairs -- everything a
 /// write refuses. `id`'s pattern is checked here too; duplicate detection
 /// needs the whole dataset (or the whole imported batch) and stays with the
@@ -206,7 +228,40 @@ fn case_problems(case: &Case) -> Vec<(String, String)> {
     if case.instructions.trim().is_empty() {
         out.push(("instructions".to_string(), "instructions is required".to_string()));
     }
+    if let Some(base) = &case.base {
+        if !is_git_revish(base) {
+            out.push((
+                "base".to_string(),
+                format!(
+                    "{base:?} is not a safe git revision (letters, digits, `.` `_` `/` `-`, \
+                     no leading `-`, no `..`)"
+                ),
+            ));
+        }
+    }
     out
+}
+
+/// A conservative shape for a case's `base`: this is never trusted to *name
+/// an existing commit* here -- that needs a live git repository, which this
+/// module never touches -- only to be a string git's own argument parser
+/// cannot mistake for an option or a path-escaping revision range. No
+/// leading `-` (refuses `--detach`, `-b`, and the like, which git would
+/// otherwise parse as flags) and no `..` (refuses a range like `a..b` where
+/// a single commit is meant). `factory-daemon/src/bench/engine.rs` checks
+/// this again itself before ever building a `git` command line -- a
+/// hand-edited dataset file bypasses this check entirely, since it never
+/// goes through `validate()`.
+pub fn is_git_revish(s: &str) -> bool {
+    if s.is_empty() || s.contains("..") {
+        return false;
+    }
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
 }
 
 /// The one finding kind a dataset carries today: a case names a scope the
@@ -688,6 +743,41 @@ mod tests {
         assert!(e.contains("instructions"), "{e}");
     }
 
+    /// Reported by QA, reproduced live: `"base":"--detach"` reached `git`
+    /// unvalidated and was parsed as a flag rather than a revision. A `base`
+    /// must be shaped like a revision `git` could only ever read as one --
+    /// checked at write time here; `factory-daemon/src/bench/engine.rs`
+    /// checks it again itself, right before ever building a `git` command
+    /// line, since a hand-edited dataset file skips `validate()` entirely.
+    #[test]
+    fn a_base_shaped_like_a_git_option_or_a_range_is_refused() {
+        let mut ds = Dataset::new("demo", None);
+        let mut bad = case("a");
+        bad.base = Some("--detach".into());
+        ds.cases.push(bad);
+        let e = ds.validate().unwrap_err().to_string();
+        assert!(e.contains("base"), "{e}");
+        assert!(e.contains("--detach"), "{e}");
+
+        let mut ds = Dataset::new("demo", None);
+        let mut bad = case("a");
+        bad.base = Some("main..feature".into());
+        ds.cases.push(bad);
+        let e = ds.validate().unwrap_err().to_string();
+        assert!(e.contains("base"), "{e}");
+
+        // A bad shape is refused at write time; an unresolvable-but-well-
+        // shaped one (a commit that plausibly never existed) is not this
+        // module's problem to catch -- `resolve_commit` at bench-run start
+        // is what checks a `base` actually names a commit, since only that
+        // needs a live git repository.
+        let mut ds = Dataset::new("demo", None);
+        let mut ok = case("a");
+        ok.base = Some("deadbeef".into());
+        ds.cases.push(ok);
+        ds.validate().unwrap();
+    }
+
     #[test]
     fn a_duplicate_case_id_is_refused() {
         let mut ds = Dataset::new("demo", None);
@@ -737,6 +827,31 @@ mod tests {
         assert_eq!(loaded, ds);
         assert!(Dataset::load(&dir, "missing").unwrap().is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `load` and `write_atomic` take `name` (or `self.name`) as a path
+    /// component -- `../elsewhere` would otherwise read or, worse, let a
+    /// caller further up write outside `<root>/.factory/datasets/` entirely.
+    /// This is the defense-in-depth layer behind the daemon's own
+    /// `refuse_bad_name` (`factory-daemon/src/datasets.rs`); this test is
+    /// what proves this module refuses it even if that layer is ever
+    /// bypassed or forgotten at a new call site.
+    #[test]
+    fn load_and_write_atomic_refuse_a_name_that_would_escape_the_datasets_directory() {
+        let dir = std::env::temp_dir().join(format!("factory-dataset-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file a path-traversing `load`/`delete` could otherwise reach.
+        std::fs::write(dir.parent().unwrap().join("outside.yaml"), "name: outside\ncases: []\n").ok();
+
+        let e = Dataset::load(&dir, "../outside").unwrap_err().to_string();
+        assert!(e.contains("must match"), "{e}");
+
+        let bad = Dataset::new("../outside", None);
+        let e = bad.write_atomic(&dir).unwrap_err().to_string();
+        assert!(e.contains("must match"), "{e}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(dir.parent().unwrap().join("outside.yaml")).ok();
     }
 
     // -- importers -----------------------------------------------------

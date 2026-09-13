@@ -60,14 +60,30 @@ pub struct Engine {
     /// every attempt has settled. Coarse -- one lock for every run, the same
     /// trade `workflow_edit` already makes -- rather than one per run.
     pub(crate) bench_edit: tokio::sync::Mutex<()>,
-    /// Task ids currently being judged: the guard that keeps a report and a
-    /// cancel racing each other (or a live judgement racing recovery's own
-    /// sweep) from running the same case's gate command twice. Deliberately
-    /// not `bench_edit`: a gate can run for the case's own timeout or ten
-    /// minutes, and holding the one lock every bench run's dispatch decision
-    /// needs for that long would serialize every run in the instance behind
-    /// whichever gate happened to be slowest.
+    /// Task ids already enqueued for judgement, or currently being judged by
+    /// the worker: the guard that keeps a report and a cancel racing each
+    /// other (or a live enqueue racing recovery's own sweep) from queuing
+    /// the same attempt's gate command twice over. The worker itself only
+    /// ever processes one task id at a time, so this is a dedup on the
+    /// queue, not a lock a gate holds -- nothing here is held for the
+    /// gate's own duration.
     pub(crate) bench_judging: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Where a bench attempt's judgement is actually carried out: sending a
+    /// task id here is the only thing `record_bench_task_state` and
+    /// `sync_bench_for_task` do now. Judging never runs on a caller's own
+    /// path -- a request handler, `fail_run`, the scheduler watchdog -- only
+    /// on `spawn_bench_judge`'s dedicated worker, which receives from the
+    /// other end of this channel. Unbounded: a bounded channel's `send`
+    /// would have to be awaited, reintroducing the exact "the caller waits
+    /// on a gate" problem this exists to remove, and a full channel's
+    /// `try_send` would silently drop a judgement.
+    pub(crate) bench_judge_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    /// Taken by `spawn_bench_judge` the one time it runs. `Engine::new`
+    /// cannot itself spawn the worker -- it returns `Self`, not `Arc<Self>`,
+    /// and the worker needs to hold an `Arc` to call back into judging and
+    /// advancing -- so the receiver waits here until an `Arc<Engine>` exists
+    /// to spawn it from.
+    pub(crate) bench_judge_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
     pub(crate) dataset_locks: crate::datasets::DatasetLocks,
     pub bus: EventBus,
     pub factory_bin: PathBuf,
@@ -116,6 +132,7 @@ impl Engine {
         factory_bin: PathBuf,
         interfaces: Vec<String>,
     ) -> Self {
+        let (bench_judge_tx, bench_judge_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             factory: std::sync::RwLock::new(factory),
             configuration_edit: Default::default(),
@@ -128,6 +145,8 @@ impl Engine {
                 .expect("an in-memory bench store should open"),
             bench_edit: tokio::sync::Mutex::new(()),
             bench_judging: Default::default(),
+            bench_judge_tx,
+            bench_judge_rx: std::sync::Mutex::new(Some(bench_judge_rx)),
             dataset_locks: Default::default(),
             bus: EventBus::default(),
             factory_bin,
