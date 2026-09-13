@@ -210,16 +210,24 @@
     <div class="bar">
       <h2>Workflows</h2>
       <span class="sub" id="workflow-revision"></span>
+      <span class="sub warn" id="workflow-dirty" hidden>unsaved changes</span>
+      <span class="sub" id="workflow-notice" hidden></span>
+      <div class="seg" id="workflow-mode" role="group" aria-label="Design or run view">
+        <button type="button" class="on" data-mode="design">Design</button>
+        <button type="button" data-mode="run">Run</button>
+      </div>
       <span class="sp"></span>
-      <span class="err" id="workflow-error"></span>
       <button class="btn" id="workflow-new">New workflow</button>
       <button class="btn" id="workflow-save">Save</button>
       <button class="btn primary" id="workflow-run">Run</button>
       <button class="btn" id="workflow-cancel">Cancel run</button>
     </div>
+    <div class="err" id="workflow-error" hidden></div>
     <div class="workflow-shell">
       <aside class="workflow-list" aria-label="Workflow definitions">
         <div id="workflow-list"></div>
+        <h3>Recent runs</h3>
+        <div id="workflow-runs"><div class="empty">No runs yet.</div></div>
       </aside>
       <section class="workflow-editor">
         <div class="workflow-toolbar">
@@ -227,37 +235,54 @@
           <button class="btn" id="workflow-connect">Connect</button>
           <button class="btn" id="workflow-duplicate">Duplicate</button>
           <button class="btn" id="workflow-delete-node">Delete node</button>
+          <button class="btn" id="workflow-delete-edge">Delete link</button>
+          <span class="sep"></span>
+          <button class="btn icon" id="workflow-zoom-out" aria-label="Zoom out">−</button>
+          <button class="btn" id="workflow-zoom-reset" aria-label="Reset zoom to 100%">100%</button>
+          <button class="btn icon" id="workflow-zoom-in" aria-label="Zoom in">+</button>
+          <button class="btn" id="workflow-fit">Fit</button>
+          <span class="sp"></span>
+          <span class="sub" id="workflow-run-status"></span>
           <button class="btn danger" id="workflow-delete">Delete workflow</button>
-          <span class="sp"></span><span class="sub" id="workflow-run-status"></span>
         </div>
         <div class="workflow-canvas" id="workflow-canvas" tabindex="0"
-          aria-label="Workflow canvas. Use Tab to select nodes, arrow keys to move one, and Delete to remove it.">
+          aria-label="Workflow canvas. Tab selects a node, arrow keys move it, Delete removes it. The summary below gives the same graph as text.">
           <div class="workflow-world" id="workflow-world">
             <svg id="workflow-edges" aria-hidden="true"></svg>
             <div id="workflow-nodes"></div>
           </div>
-          <div class="workflow-zoom" id="workflow-zoom">100%</div>
         </div>
+        <div class="workflow-hint" id="workflow-hint" aria-live="polite"></div>
         <details class="workflow-summary" open>
           <summary>Text workflow summary</summary>
+          <p class="sub">Nodes, in dependency order:</p>
           <ol id="workflow-summary"></ol>
+          <p class="sub">Links:</p>
+          <ol id="workflow-edge-summary"></ol>
         </details>
       </section>
       <aside class="workflow-inspector" aria-label="Workflow properties">
-        <h3>Workflow</h3>
-        <label>Name<input id="workflow-name" type="text"></label>
-        <label>Description<textarea id="workflow-description" rows="3"></textarea></label>
-        <label>Scope<input id="workflow-scope" type="text" readonly></label>
-        <div id="workflow-node-fields" hidden>
-          <h3>Task node</h3>
-          <label>Title<input id="workflow-node-title" type="text"></label>
-          <label>Instructions<textarea id="workflow-node-instructions" rows="7"></textarea></label>
-          <label>Agent<select id="workflow-node-agent"></select></label>
-          <label class="check"><input id="workflow-node-worktree" type="checkbox" checked> Own worktree</label>
-          <label>Estimate (seconds)<input id="workflow-node-estimate" type="number" min="1"></label>
-          <label>Acknowledgement timeout<input id="workflow-node-ack" type="number" min="1"></label>
-          <label>Run timeout<input id="workflow-node-timeout" type="number" min="1"></label>
-          <label>Blocked timeout<input id="workflow-node-blocked" type="number" min="1"></label>
+        <div id="workflow-properties">
+          <h3>Workflow</h3>
+          <label>Name<input id="workflow-name" type="text"></label>
+          <label>Description<textarea id="workflow-description" rows="3"></textarea></label>
+          <label>Scope<input id="workflow-scope" type="text" readonly></label>
+          <div id="workflow-node-fields" hidden>
+            <h3>Task node</h3>
+            <label>Title<input id="workflow-node-title" type="text"></label>
+            <label>Instructions<textarea id="workflow-node-instructions" rows="7"></textarea></label>
+            <label>Scope<input id="workflow-node-scope" type="text" readonly></label>
+            <label>Agent<select id="workflow-node-agent"></select></label>
+            <label class="check"><input id="workflow-node-worktree" type="checkbox" checked> Own worktree</label>
+            <label>Estimate (seconds)<input id="workflow-node-estimate" type="number" min="1"></label>
+            <label>Acknowledgement timeout (seconds)<input id="workflow-node-ack" type="number" min="1"></label>
+            <label>Run timeout (seconds)<input id="workflow-node-timeout" type="number" min="1"></label>
+            <label>Blocked timeout (seconds)<input id="workflow-node-blocked" type="number" min="1"></label>
+          </div>
+        </div>
+        <div id="workflow-run-panel" hidden>
+          <h3>Run</h3>
+          <div id="workflow-run-meta"></div>
         </div>
       </aside>
     </div>

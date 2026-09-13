@@ -6,8 +6,7 @@ use factory_core::event::Event;
 use factory_core::run::Trigger;
 use factory_core::task::{TaskStatus, WorkflowOrigin};
 use factory_core::workflow::{
-    WorkflowActor, WorkflowDefinition, WorkflowDraft, WorkflowNodeStatus, WorkflowRun,
-    WorkflowRunStatus,
+    WorkflowDefinition, WorkflowDraft, WorkflowNodeStatus, WorkflowRun, WorkflowRunStatus,
 };
 use std::sync::Arc;
 
@@ -24,7 +23,9 @@ mod tests {
     use factory_core::role::Role;
     use factory_core::run::RunStatus;
     use factory_core::task::{NewTask, SessionRef, TaskFilter, TaskReport};
-    use factory_core::workflow::{CanvasPoint, WorkflowEdge, WorkflowNode, WorkflowNodeKind};
+    use factory_core::workflow::{
+        CanvasPoint, WorkflowActor, WorkflowEdge, WorkflowNode, WorkflowNodeKind,
+    };
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
 
@@ -692,10 +693,17 @@ mod tests {
             .await
             .unwrap();
         let root_task = wait_for_tasks(&engine1, 1).await.pop().unwrap();
-        // Let the spawned dispatch actually land before pulling the rug out,
-        // so the "crash" is a clean restart rather than a torn write.
+        // Let the spawned dispatch -- and the `record_workflow_task_state`
+        // mirror `start_run` performs right behind it -- actually land
+        // before pulling the rug out, so the "crash" is a clean restart
+        // rather than a torn write. Dropping `engine1` here does not cancel
+        // that spawned task (it holds its own clone of the engine, same as
+        // any dispatch would); waiting for the node's own status to move
+        // off `Pending` is waiting for that write to have happened, since
+        // nothing else touches it in between.
         loop {
-            if engine1.store.active_run(&root_task.id).await.unwrap().is_some() {
+            let node = engine1.workflow_run(&run.id).await.unwrap();
+            if node.nodes.iter().any(|n| n.node_id == "a" && n.status != WorkflowNodeStatus::Pending) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
