@@ -9,6 +9,18 @@ const NODE_W = 184;
 const NODE_H = 84;
 const GAP = 18;
 
+/// Whether a pointer travelled far enough between `start` and `end` to count
+/// as a drag rather than a click. Chrome dispatches a zero-distance
+/// `pointermove` right after `setPointerCapture` on an ordinary click (R1),
+/// so treating any `pointermove` at all as a drag misreads a click as one --
+/// distance is the only signal that actually tells them apart. `threshold`
+/// is in the same units as `start`/`end` (screen px, when called from the
+/// canvas); real movement must exceed it, so a zero threshold still requires
+/// a nonzero distance.
+export function isDrag(start, end, threshold = 3) {
+  return Math.hypot(end.x - start.x, end.y - start.y) > threshold;
+}
+
 /// A node's title, or its id when it somehow has none -- used everywhere a
 /// message needs to name a node the way the canvas does rather than by its
 /// opaque id alone.

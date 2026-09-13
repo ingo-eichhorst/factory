@@ -7,6 +7,7 @@ import {
   edgeStatusClass,
   fitView,
   freePosition,
+  isDrag,
   nodeStatusClass,
   NODE_STATUSES,
   reachable,
@@ -35,6 +36,25 @@ test("Workflows is a Process peer of Tasks with an accessible canvas and summary
   assert.match(page, /id="workflow-canvas"[^>]*tabindex="0"/);
   assert.match(page, /id="workflow-summary"/);
   assert.match(app, /proc: \["tasks", "workflows"\]/);
+});
+
+// ------------------------------------------------------------------ R1: drag
+
+test("isDrag: a zero-distance pointermove (Chrome's own, after setPointerCapture) is not a drag", () => {
+  assert.equal(isDrag({ x: 100, y: 100 }, { x: 100, y: 100 }), false);
+});
+
+test("isDrag: movement inside the threshold is still a click, not a drag", () => {
+  assert.equal(isDrag({ x: 100, y: 100 }, { x: 102, y: 100 }, 3), false);
+});
+
+test("isDrag: movement past the threshold is a drag", () => {
+  assert.equal(isDrag({ x: 100, y: 100 }, { x: 105, y: 100 }, 3), true);
+});
+
+test("isDrag: even a zero threshold requires some actual movement", () => {
+  assert.equal(isDrag({ x: 100, y: 100 }, { x: 100, y: 100 }, 0), false);
+  assert.equal(isDrag({ x: 100, y: 100 }, { x: 100.5, y: 100 }, 0), true);
 });
 
 // ------------------------------------------------------------- graph editing
@@ -93,6 +113,18 @@ test("deleting a node not touched by any edge leaves the rest alone", () => {
   const result = removeNode(nodes, edges, "a");
   assert.deepEqual(result.nodes.map(n => n.id), ["b"]);
   assert.deepEqual(result.edges, []);
+});
+
+test("R2: delete targets exactly the given id, not a separately-tracked selection", () => {
+  // Regression for the workflows.js bug: `selectedNode` can lag behind
+  // keyboard focus (select "merge" via a button, Tab to "branch B", press
+  // Delete). `removeNode` takes the id to remove as an explicit argument --
+  // this pins that a caller acting on the *focused* card's id, whatever
+  // `selectedNode` happens to hold, is the contract to keep.
+  const nodes = [node("merge"), node("branchB")];
+  const focusedId = "branchB"; // not "merge", which some other state calls "selected"
+  const result = removeNode(nodes, [], focusedId);
+  assert.deepEqual(result.nodes.map(n => n.id), ["merge"]);
 });
 
 test("connecting a node to itself is refused, naming the node", () => {

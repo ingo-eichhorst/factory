@@ -18,6 +18,7 @@ import {
   edgeStatusClass,
   fitView,
   freePosition,
+  isDrag,
   nodeStatusClass,
   rootIds,
   topologicalSummary,
@@ -86,6 +87,21 @@ function clearDirty() {
   $("workflow-dirty").hidden = true;
 }
 
+/// R3/R4: everything that belongs to "a workflow is open" and nothing that
+/// belongs to the app as a whole. Used wherever the open workflow stops
+/// existing out from under the view -- scope filtering it out, deleting it,
+/// or a `workflow_deleted` event naming it -- rather than a deliberate
+/// navigation to something else that would set its own new state right
+/// after. "Recent runs" and the selection are the open workflow's alone;
+/// leaving either behind once nothing is open reads as if something still
+/// were.
+function closeWorkflow() {
+  current = null; currentRun = null;
+  selectedNode = null; selectedEdge = null; connectFrom = null;
+  runs = []; inspectorRenderedFor = null;
+  clearDirty();
+}
+
 // ---------------------------------------------------------------- routing
 
 export function workflowTail() {
@@ -128,7 +144,12 @@ export async function loadWorkflows(wanted, wantedRun) {
 
 export function renderWorkflows() {
   if (current && !inScope(current.scope)) {
-    current = null; currentRun = null; selectedNode = null; clearDirty();
+    closeWorkflow();
+    // R4: `scopes.js`'s rail `select()` writes the hash *before* calling
+    // back in here, so it wrote the outgoing scope's tail -- correct it now
+    // that the workflow it named is actually closed. `replaceState` fires
+    // no `hashchange`, so this cannot loop back into another rerender.
+    writeHash(true);
   }
   const visible = workflows.filter(workflow => inScope(workflow.scope));
   $("workflow-list").innerHTML = visible.length ? visible.map(workflow => `
@@ -176,6 +197,7 @@ function newWorkflow() {
     current.nodes.push(newTaskNode(state.scope));
     selectedNode = current.nodes[0].id;
     currentRun = null; mode = "design"; notice = null; clientErrors = []; serverError = null;
+    runs = []; inspectorRenderedFor = null; // R3: a brand new workflow has no runs to inherit
     clearDirty();
     renderWorkflows();
     writeHash();
@@ -310,19 +332,30 @@ function paintStatuses() {
 }
 
 function wireNode(element) {
-  element.onclick = event => {
-    if (event.target.closest('[data-role="open-task"], [data-port]')) return;
-    select(element.dataset.node);
-  };
+  // No card-level `onclick`: R1 found that Chrome dispatches a zero-distance
+  // `pointermove` right after `setPointerCapture` on an ordinary click, so a
+  // naive "moved -> drag" flag misreads every click as a drag and
+  // `onpointerup` re-renders the canvas before the browser gets to dispatch
+  // `click` -- which then has nowhere to land. `onpointerup` below is the
+  // single path for both a click (select/link) and a drag (move); there is
+  // no fallback relying on `click` finding this element afterward.
   element.onkeydown = event => {
-    if (mode === "run") return;
-    if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); deleteNode(); return; }
-    if (event.key === "Escape") { event.preventDefault(); cancelConnect(); return; }
-    if ((event.key === "Enter" || event.key === " ") && connectFrom) {
+    // Enter/Space select (or, mid-connect, complete a link) in either mode
+    // -- Run mode is read-only about the *definition*, not about which node
+    // is selected to inspect. Everything below this is a mutation, so it
+    // stays behind the mode check.
+    if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      completeConnect(element.dataset.node);
+      activateNode(element.dataset.node);
       return;
     }
+    if (mode === "run") return;
+    if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      deleteNode(element.dataset.node); // R2: the focused card, not `selectedNode`
+      return;
+    }
+    if (event.key === "Escape") { event.preventDefault(); cancelConnect(); return; }
     const delta = event.shiftKey ? 20 : 5;
     const move = { ArrowLeft: [-delta, 0], ArrowRight: [delta, 0], ArrowUp: [0, -delta], ArrowDown: [0, delta] }[event.key];
     if (!move) return;
@@ -333,6 +366,15 @@ function wireNode(element) {
     renderCanvas();
     $("workflow-nodes").querySelector(`[data-node="${CSS.escape(node.id)}"]`)?.focus();
   };
+  // R2/R5: landing keyboard focus on a card selects it in either mode --
+  // `focusin` bubbles from the port/open-task buttons inside the card too,
+  // `focus` would not.
+  // `onfocusin` is not a real IDL event handler property (unlike `onfocus`,
+  // `focusin`/`focusout` were never added to `GlobalEventHandlers`) --
+  // assigning to it silently does nothing, so this has to be
+  // `addEventListener`. Confirmed the hard way: `element.onfocusin = ...`
+  // never fired even though focus genuinely moved.
+  element.addEventListener("focusin", () => focusNode(element.dataset.node));
   const port = element.querySelector("[data-port]");
   if (port) {
     port.onclick = event => {
@@ -344,21 +386,33 @@ function wireNode(element) {
     };
   }
   element.onpointerdown = event => {
-    if (mode === "run" || event.button !== 0 || event.target.closest('[data-role="open-task"], [data-port]')) return;
-    const node = current.nodes.find(item => item.id === element.dataset.node);
-    const start = { x: event.clientX, y: event.clientY, nx: node.position.x, ny: node.position.y };
-    let moved = false;
+    // Checked, and must stay, before `setPointerCapture`: capturing the
+    // pointer on the card first would swallow the port/open-task button's
+    // own click. The port itself is hidden in Run mode (see app.css), so
+    // this exclusion only ever matters in Design mode.
+    if (event.button !== 0 || event.target.closest('[data-role="open-task"], [data-port]')) return;
+    // Run mode never repositions a node -- there is nothing to drag -- but
+    // a click there still selects it (R5), so pointer handling stays wired
+    // rather than bailing out the way keyboard movement does.
+    const node = mode === "run" ? null : current.nodes.find(item => item.id === element.dataset.node);
+    const start = { x: event.clientX, y: event.clientY };
+    const origin = node ? { x: node.position.x, y: node.position.y } : null;
+    let dragging = false;
     element.setPointerCapture(event.pointerId);
     element.onpointermove = move => {
-      moved = true;
-      node.position.x = Math.round(start.nx + (move.clientX - start.x) / view.zoom);
-      node.position.y = Math.round(start.ny + (move.clientY - start.y) / view.zoom);
+      if (!node) return;
+      const at = { x: move.clientX, y: move.clientY };
+      if (!dragging && !isDrag(start, at)) return; // R1: a real drag, not the incidental pointermove
+      dragging = true;
+      node.position.x = Math.round(origin.x + (at.x - start.x) / view.zoom);
+      node.position.y = Math.round(origin.y + (at.y - start.y) / view.zoom);
       element.style.left = `${node.position.x}px`;
       element.style.top = `${node.position.y}px`;
     };
     element.onpointerup = () => {
       element.onpointermove = null;
-      if (moved) { markDirty(); renderCanvas(); }
+      if (dragging) { markDirty(); renderCanvas(); return; }
+      activateNode(element.dataset.node);
     };
   };
 }
@@ -375,17 +429,36 @@ function wireEdge(group) {
   };
 }
 
-function select(id) {
-  // A click while connecting is an attempt to link, not a plain selection --
-  // `completeConnect` alone decides whether that moves the selection. A
-  // refused link must leave `selectedNode` exactly as it was: setting it
-  // here first (even on a rejection) would leave the inspector's fields
-  // showing the *previous* node while `selectedNode` already pointed at the
-  // new one, and the next `readEditor()` -- typing, or Save -- would write
-  // that stale text onto the wrong node.
-  if (connectFrom) { completeConnect(id); return; }
+/// Landing on `id` selects it, without rebuilding the canvas (R2): a full
+/// `renderEditor()` here would replace the very element that just received
+/// focus. `paintStatuses` (class names only) plus `renderInspector` is
+/// enough, since nothing else about the structure changed. The
+/// `selectedNode === id` guard is load-bearing, not an optimisation: without
+/// it, tabbing across a card that is already selected would re-render the
+/// inspector on every focus event and fight whatever is being typed there.
+function focusNode(id) {
+  if (selectedNode === id) return;
   selectedNode = id; selectedEdge = null;
-  renderEditor();
+  paintStatuses();
+  renderInspector();
+  renderButtons();
+}
+
+/// A click or an explicit Enter/Space -- as opposed to focus merely landing
+/// somewhere while tabbing through. While connecting, this is what
+/// completes (or refuses) the link; `completeConnect` alone decides whether
+/// that moves the selection, since a refused link must leave it exactly as
+/// it was (see `completeConnect`'s own comment).
+function activateNode(id) {
+  if (connectFrom) { completeConnect(id); return; }
+  focusNode(id);
+}
+
+/// Selecting from the accessible summary (U8) rather than the card itself:
+/// nothing there already has DOM focus on the card, so it is moved there
+/// explicitly once the selection (or a completed connection) has settled.
+function selectFromSummary(id) {
+  activateNode(id);
   $("workflow-nodes").querySelector(`[data-node="${CSS.escape(id)}"]`)?.focus();
 }
 
@@ -412,20 +485,25 @@ function cancelConnect() {
 
 function renderInspector() {
   const readOnly = mode === "run";
-  const node = current.nodes.find(item => item.id === selectedNode);
+  // R5: Run mode reads the run's own immutable snapshot -- `activeGraph()`,
+  // the same source `renderCanvas` draws from -- never the live `current`,
+  // which may have been renamed/re-shaped by edits or later revisions since
+  // this run started.
+  const graph = activeGraph();
+  const node = graph.nodes.find(item => item.id === selectedNode);
   $("workflow-node-fields").hidden = !node;
-  const key = `${mode}:${current.id}:${selectedNode || ""}:${current.revision}`;
+  const key = `${mode}:${graph.id}:${selectedNode || ""}:${graph.revision}:${currentRun?.id || ""}`;
   const selectionChanged = key !== inspectorRenderedFor;
   for (const id of ["workflow-name", "workflow-description", "workflow-node-title", "workflow-node-instructions", "workflow-node-agent", "workflow-node-worktree", "workflow-node-estimate", "workflow-node-ack", "workflow-node-timeout", "workflow-node-blocked"]) {
     $(id).disabled = readOnly;
   }
-  $("workflow-scope").value = current.scope;
+  $("workflow-scope").value = graph.scope;
   if (!selectionChanged) return;
   inspectorRenderedFor = key;
-  $("workflow-name").value = current.name;
-  $("workflow-description").value = current.description || "";
+  $("workflow-name").value = graph.name;
+  $("workflow-description").value = graph.description || "";
   if (!node) return;
-  const agents = state.scopes.find(scope => scope.name === current.scope)?.agents || [];
+  const agents = state.scopes.find(scope => scope.name === graph.scope)?.agents || [];
   const options = agents.map(agent => agent.name);
   // U10: an agent set through the API (an adapter name like `shell`) that is
   // not among the scope's declared agents must stay selectable, not vanish
@@ -433,7 +511,7 @@ function renderInspector() {
   if (node.task.agent && !options.includes(node.task.agent)) options.push(node.task.agent);
   $("workflow-node-agent").innerHTML = `<option value="">Default agent</option>` +
     options.map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join("");
-  $("workflow-node-scope").value = node.task.scope || current.scope;
+  $("workflow-node-scope").value = node.task.scope || graph.scope;
   $("workflow-node-title").value = node.task.title || "";
   $("workflow-node-instructions").value = node.task.instructions || "";
   $("workflow-node-agent").value = node.task.agent || "";
@@ -504,7 +582,7 @@ function renderSummary() {
       </li>`;
   }).join("");
   for (const button of $("workflow-summary").querySelectorAll("[data-select-node]")) {
-    button.onclick = () => select(button.dataset.selectNode);
+    button.onclick = () => selectFromSummary(button.dataset.selectNode);
   }
   for (const button of $("workflow-edge-summary").querySelectorAll("[data-remove-edge]")) {
     button.onclick = () => deleteEdge(button.dataset.removeEdge);
@@ -663,10 +741,11 @@ async function cancel() {
 
 async function removeWorkflow() {
   if (!current?.id || !confirm(`Delete workflow "${current.name}"? Run history and spawned tasks remain.`)) return;
+  const id = current.id;
   try {
-    await api(`/api/workflows/${current.id}`, { method: "DELETE" });
-    workflows = workflows.filter(workflow => workflow.id !== current.id);
-    current = null; currentRun = null; clearDirty();
+    await api(`/api/workflows/${id}`, { method: "DELETE" });
+    workflows = workflows.filter(workflow => workflow.id !== id);
+    closeWorkflow();
     renderWorkflows(); writeHash();
   } catch (error) { showServerError(error); }
 }
@@ -692,11 +771,16 @@ function duplicate() {
   renderEditor();
 }
 
-function deleteNode() {
-  if (mode === "run" || !selectedNode) return;
-  current.nodes = current.nodes.filter(node => node.id !== selectedNode);
-  current.edges = current.edges.filter(edge => edge.from !== selectedNode && edge.to !== selectedNode);
-  selectedNode = null; selectedEdge = null; connectFrom = null;
+/// R2: deletes `id` -- defaulting to `selectedNode` for the toolbar button,
+/// which has no card of its own to target -- rather than always trusting
+/// `selectedNode`, which a keyboard user's focus can otherwise outrun (Tab
+/// moves focus without necessarily going through `selectedNode` first).
+function deleteNode(id = selectedNode) {
+  if (mode === "run" || !id) return;
+  current.nodes = current.nodes.filter(node => node.id !== id);
+  current.edges = current.edges.filter(edge => edge.from !== id && edge.to !== id);
+  if (selectedNode === id) selectedNode = null;
+  selectedEdge = null; connectFrom = null;
   markDirty();
   renderEditor();
   $("workflow-canvas").focus();
@@ -746,13 +830,21 @@ export function acceptWorkflowEvent(event) {
     applyRunEvent(event.run);
     return;
   }
+  const wasOpen = event.type === "workflow_deleted" && current?.id === event.id;
   const next = applyWorkflowEvent({ workflows, current, currentRun, dirty }, event);
   workflows = next.workflows;
   if (next.notice) notice = next.notice;
   const currentChanged = next.current !== current;
   current = next.current;
   currentRun = next.currentRun;
-  if (event.type === "workflow_deleted" && !current) { clearDirty(); mode = "design"; }
+  if (wasOpen) {
+    // R3/R4: someone else's delete (or this tab's own delete, echoed back)
+    // closes the workflow exactly as `removeWorkflow` does -- clearing
+    // "Recent runs" and correcting the route tail, not just `current`.
+    closeWorkflow();
+    mode = "design";
+    writeHash(true);
+  }
   renderWorkflows();
   if (currentChanged) renderProblems();
 }
@@ -789,7 +881,7 @@ export function wireWorkflows() {
   $("workflow-delete").onclick = removeWorkflow;
   $("workflow-add-node").onclick = addNode;
   $("workflow-duplicate").onclick = duplicate;
-  $("workflow-delete-node").onclick = deleteNode;
+  $("workflow-delete-node").onclick = () => deleteNode();
   $("workflow-delete-edge").onclick = () => selectedEdge && deleteEdge(selectedEdge);
   $("workflow-connect").onclick = () => { if (selectedNode && mode !== "run") { connectFrom = selectedNode; renderCanvas(); } };
   $("workflow-zoom-in").onclick = () => zoomBy(1.2);
@@ -814,10 +906,18 @@ export function wireWorkflows() {
   };
   canvas.onpointerdown = event => {
     if (event.target.closest?.(".workflow-node, [data-edge]")) return;
-    selectedEdge = null;
     const start = { x: event.clientX, y: event.clientY, vx: view.x, vy: view.y };
+    let dragging = false;
     canvas.setPointerCapture(event.pointerId);
-    canvas.onpointermove = move => { view.x = start.vx + move.clientX - start.x; view.y = start.vy + move.clientY - start.y; renderCanvas(); };
-    canvas.onpointerup = () => { canvas.onpointermove = null; };
+    canvas.onpointermove = move => {
+      const at = { x: move.clientX, y: move.clientY };
+      if (!dragging && !isDrag(start, at)) return; // R1: the same incidental pointermove, on the background
+      dragging = true;
+      view.x = start.vx + at.x - start.x; view.y = start.vy + at.y - start.y; renderCanvas();
+    };
+    canvas.onpointerup = () => {
+      canvas.onpointermove = null;
+      if (!dragging) { selectedEdge = null; paintStatuses(); $("workflow-hint").textContent = edgeHint(); }
+    };
   };
 }
