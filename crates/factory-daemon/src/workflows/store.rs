@@ -239,6 +239,28 @@ impl WorkflowStore {
         })
         .await
     }
+
+    /// The most recently touched terminal runs, for one-off startup
+    /// reconciliation of a node overlay a missed event or an older, buggier
+    /// build left stale (see B2/R11) -- bounded rather than exhaustive: a
+    /// `done` run from months ago is not worth reading on every restart, but
+    /// one from a recent crash is.
+    pub async fn recent_terminal_runs(&self, limit: u32) -> Result<Vec<WorkflowRun>> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, data FROM workflow_runs WHERE status!='running' ORDER BY updated_at DESC LIMIT ?1",
+                )
+                .map_err(error)?;
+            let rows = stmt
+                .query_map([limit], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(error)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(error)?;
+            Ok(decode_all(rows, "workflow_runs"))
+        })
+        .await
+    }
 }
 
 #[cfg(test)]

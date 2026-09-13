@@ -752,6 +752,43 @@ mod tests {
         engine.recover_workflows().await;
         assert_eq!(tasks(&engine).await.len(), 1, "a second recovery does not duplicate it");
     }
+
+    #[tokio::test]
+    async fn recovery_also_mirrors_a_stale_node_inside_an_already_terminal_run() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a")], vec![]).await;
+        let run = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        let task = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        finish(&engine, &task.id, RunStatus::Done).await;
+        let settled = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(settled.status, WorkflowRunStatus::Done);
+
+        // R11: simulate the staleness this test exists for -- an older
+        // build (or a missed event) left the run terminal but its node
+        // overlay still "running", even though the task itself is done.
+        let mut stale = settled;
+        stale.nodes[0].status = WorkflowNodeStatus::Running;
+        engine.workflows.put_run(&stale).await.unwrap();
+
+        engine.recover_workflows().await;
+
+        let recovered = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(
+            recovered.status,
+            WorkflowRunStatus::Done,
+            "a terminal run's own status is never rewritten by reconciliation"
+        );
+        assert_eq!(
+            recovered.nodes[0].status,
+            WorkflowNodeStatus::Done,
+            "the stale node overlay is corrected to match its task"
+        );
+        assert_eq!(
+            tasks(&engine).await.len(),
+            1,
+            "reconciling a terminal run never spawns anything"
+        );
+    }
 }
 
 fn node_status(status: TaskStatus) -> WorkflowNodeStatus {
@@ -1324,6 +1361,35 @@ impl Engine {
                         }
                     }
                 }
+            }
+        }
+
+        // R11: a terminal run can still carry a node overlay that never
+        // caught up with its task -- a report the daemon missed, or a row
+        // an older, buggier build wrote. `advance_workflow` already mirrors
+        // unconditionally and refuses to spawn anything or rewrite a
+        // terminal run's own status once it sees the run is settled (B2),
+        // so reusing it here is exactly "mirror only, do nothing else" with
+        // no separate mechanism to keep in sync with that one.
+        match self.workflows.recent_terminal_runs(200).await {
+            Ok(terminal_runs) => {
+                for run in terminal_runs {
+                    let stale = run
+                        .nodes
+                        .iter()
+                        .any(|node| node.task_id.is_some() && !node.status.is_terminal());
+                    if stale {
+                        if let Err(error) = self.advance_workflow(&run.id).await {
+                            tracing::warn!(
+                                workflow_run = run.id,
+                                "could not reconcile a terminal workflow run: {error}"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!("could not load recent workflow runs for reconciliation: {error}");
             }
         }
     }
