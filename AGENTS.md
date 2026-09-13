@@ -119,6 +119,12 @@ something impossible.
 - A role is data, not a match arm: grants and reach live in `factory-core/src/role.rs`
   and are checked in one place. A new request has to say which grant it needs --
   the match in `access.rs` has no wildcard arm, so the compiler asks.
+- Which roles exist is a question about a scope. `Engine::roles_for(scope)`
+  resolves the chain -- presets, the root's `roles:`, then each scope's
+  `scope.roles` down to that scope -- from the live snapshot, and `authorize`,
+  `set_agent_role`, declaration writes and the guide all ask it; never keep a
+  second, flat copy. Ancestry is `Scope.path`, never a name, and inheriting a
+  definition never widens reach past the agent's own scope.
 - A permanent agent is quiet by design. It is checked for whether its session is
   still there and nothing else -- never for whether it has said anything. The
   run timeouts must not reach it.

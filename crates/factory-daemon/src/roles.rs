@@ -40,6 +40,27 @@ fn written_by(roles: &Roles, origin: &RoleOrigin) -> Vec<RoleView> {
         .collect()
 }
 
+/// The layer a scope writes its roles into. The instance root's scope has no
+/// `scope.roles` of its own -- it writes the top-level `roles:` every scope
+/// starts from -- and every other scope writes its own block.
+pub(crate) fn layer_written_by(
+    factory: &factory_core::config::Factory,
+    scope: &factory_core::config::Scope,
+) -> RoleOrigin {
+    let is_root = factory
+        .config
+        .scope
+        .as_ref()
+        .is_some_and(|root| root.id == scope.id);
+    if is_root {
+        RoleOrigin::Instance
+    } else {
+        RoleOrigin::Scope {
+            scope: scope.name.clone(),
+        }
+    }
+}
+
 impl Engine {
     /// The roles that hold in every scope, and each scope's own set where it
     /// differs because it, or a scope above it, writes roles of its own. The
@@ -80,15 +101,16 @@ impl Engine {
             })
             .collect();
 
-        let (selected, mut roles) = match scope {
+        let (selected, writes, mut roles) = match scope {
             Some(name) => {
                 let found = factory.scope(name)?;
                 (
                     Some(found.name.clone()),
+                    Some(layer_written_by(&factory, found)),
                     views(&factory.config.roles_for_scope(found)?),
                 )
             }
-            None => (None, views(&factory.config.roles()?)),
+            None => (None, None, views(&factory.config.roles()?)),
         };
 
         if let Some(name) = &selected {
@@ -150,6 +172,7 @@ impl Engine {
         Ok(RoleBoard {
             grants,
             scope: selected,
+            writes,
             roles,
             layers,
         })
@@ -265,6 +288,7 @@ mod tests {
 
         let board = e.role_board(Some("demo-app")).await.unwrap();
         assert_eq!(board.scope.as_deref(), Some("demo-app"));
+        assert_eq!(board.writes, Some(RoleOrigin::Scope { scope: "demo-app".into() }));
         assert_eq!(board.grants.len(), Grant::ALL.len());
         assert_eq!(board.grants[0].describe, "create tasks");
         assert_eq!(board.grants[0].group, "Tasks");

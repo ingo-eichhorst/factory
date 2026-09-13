@@ -7,7 +7,7 @@ import { inScope } from "./scopes.js";
 /// Turn links from the former Agents wrapper into the peer page that replaced
 /// it. Anything after the old inner-view segment still belongs to that page.
 export function legacyAgentRoute(tail) {
-  const views = new Set(["occupancy", "roster", "agent-runtime"]);
+  const views = new Set(["occupancy", "roster", "agent-runtime", "roles"]);
   return views.has(tail[0])
     ? { page: tail[0], tail: tail.slice(1) }
     : { page: "occupancy", tail };

@@ -9,6 +9,7 @@ import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyT
 import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { legacyAgentRoute, loadRuntimeConnections, renderRuntimeConnections } from "./agent-runtime.js";
+import { loadRoles, wireRoles } from "./roles.js";
 import { openCreate } from "./task-form.js";
 import { acceptWorkflowEvent, loadWorkflows, readWorkflowTail, renderWorkflows, wireWorkflows, workflowTail } from "./workflows.js";
 import { loadDashboard, renderDashboard, renderInbox, wireDashboard } from "./dashboard.js";
@@ -54,6 +55,7 @@ const VIEWS = {
   },
   roster: { onShow: startRoster, onHide: stopAgentPoll },
   "agent-runtime": { onShow: startAgentRuntime, onHide: stopAgentPoll },
+  roles: { onShow: startRoles, onHide: stopAgentPoll },
   sandboxes: { onShow: startEnvironment, onHide: stopAgentPoll },
   secrets: { onShow: startEnvironment, onHide: stopAgentPoll },
 };
@@ -131,7 +133,7 @@ function applyModal([taskId, runId]) {
 const LEVEL_VIEWS = {
   dash: ["dashboard", "site", "activity", "inbox"],
   proc: ["tasks", "workflows"],
-  harn: ["occupancy", "roster", "agent-runtime"],
+  harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets"],
 };
 
@@ -218,6 +220,9 @@ function rerender(route) {
   if (state.tab === "occupancy") renderOccupancy();
   else if (state.tab === "roster") renderAgents();
   else if (state.tab === "agent-runtime") renderRuntimeConnections();
+  // Not a re-render: the roles in effect, and who holds them, are a
+  // different answer in every scope, and the daemon is what resolves it.
+  else if (state.tab === "roles") loadRoles();
   // Both L2 tabs answer to the rail. Secrets narrows only the rows that
   // belong to a scope: a credential in the owner's home belongs to none of
   // them and is reachable from all of them, so it survives every selection.
@@ -291,6 +296,13 @@ function startRoster() {
   stopAgentPoll();
   loadAgents();
   state.agentPoll = setInterval(renderAgents, 5000);
+}
+
+/// No poll: roles change only when somebody writes one or gives one, and
+/// both of those arrive as events.
+function startRoles() {
+  stopAgentPoll();
+  loadRoles();
 }
 
 function startAgentRuntime() {
@@ -370,6 +382,7 @@ async function boot() {
     b.onclick = () => setTasksView(b.dataset.view);
   }
   $("runtime-refresh").onclick = () => loadRuntimeConnections();
+  wireRoles();
   $("environment-refresh").onclick = () => refreshEnvironment();
   $("secrets-refresh").onclick = () => refreshEnvironment();
   $("occ-window").onchange = () => loadOccupancy();
@@ -454,6 +467,15 @@ function onEvent(ev) {
   if (ev.type.startsWith("run_") || ev.type.startsWith("agent_")) {
     if (state.tab === "occupancy") loadOccupancy();
     else if (state.tab === "roster") loadAgents();
+  }
+  // A role written or removed changes what every scope below it has, and a
+  // role given or a declaration changed changes who holds what. Not
+  // `agent_activity`, which is a runtime saying an agent is busy, several
+  // times a minute.
+  if (ev.type === "roles_changed" || ev.type === "agent_updated" || ev.type === "agent_removed"
+      || ev.type === "agent_configured" || ev.type === "agent_deleted") {
+    if (state.tab === "roles") loadRoles();
+    else if (state.tab === "roster" && ev.type === "roles_changed") loadAgents();
   }
   // The site draws queued work too -- the crates at a hall's door, and the
   // floors its scope's load lights -- so a task arriving, being taken or being

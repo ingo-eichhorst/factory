@@ -80,6 +80,7 @@
   <button id="tab-occupancy" hidden>Occupancy</button>
   <button id="tab-roster" hidden>Roster</button>
   <button id="tab-agent-runtime" hidden>Agent-runtime</button>
+  <button id="tab-roles" hidden>Roles</button>
   <button id="tab-sandboxes" hidden>Sandboxes</button>
   <button id="tab-secrets" hidden>Secrets</button>
 </nav>
@@ -317,6 +318,23 @@
       <button class="btn" id="runtime-refresh">Refresh</button>
     </div>
     <div class="runtime-connections" id="agent-runtime"></div>
+  </div>
+
+  <div id="view-roles" hidden>
+    <div class="bar">
+      <h2>Roles</h2>
+      <span class="sp"></span>
+      <button class="btn" id="roles-refresh">Refresh</button>
+      <button class="btn primary" id="roles-new" disabled>New role…</button>
+    </div>
+    <!-- In the markup, not the fetched answer, so it goes on being said when
+         the request fails. A page that lays grants out like permissions is
+         exactly where someone would read them as a wall. -->
+    <p class="env-note">Roles are guard-rails, not a security boundary. Every agent runs as the owner of
+      this instance and can reach the same socket, so an agent that leaves its token out cannot be told
+      apart from you. A role keeps an agent that follows its instructions inside its job; it does not
+      stop one that does not.</p>
+    <div class="roles" id="roles"></div>
   </div>
 
   <div id="view-sandboxes" hidden>

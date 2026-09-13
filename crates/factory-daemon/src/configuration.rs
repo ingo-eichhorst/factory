@@ -1081,15 +1081,10 @@ impl Engine {
         let current = factory.scope(scope_name)?.clone();
         // The instance root writes its roles at the top of its own file; every
         // other scope writes them under its `scope:` block.
-        let file = if factory
-            .config
-            .scope
-            .as_ref()
-            .is_some_and(|root| root.id == current.id)
-        {
-            RoleFile::Root
-        } else {
-            RoleFile::Scope
+        let origin = crate::roles::layer_written_by(&factory, &current);
+        let file = match origin {
+            RoleOrigin::Instance => RoleFile::Root,
+            _ => RoleFile::Scope,
         };
         let path = match file {
             RoleFile::Root => factory.factory_dir().join(CONFIG_FILE),
@@ -1097,12 +1092,6 @@ impl Engine {
                 .scope_path(&current.name)?
                 .join(FACTORY_DIR)
                 .join(CONFIG_FILE),
-        };
-        let origin = match file {
-            RoleFile::Root => RoleOrigin::Instance,
-            RoleFile::Scope => RoleOrigin::Scope {
-                scope: current.name.clone(),
-            },
         };
 
         let text = fs::read_to_string(&path).map_err(|error| {

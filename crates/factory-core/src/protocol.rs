@@ -513,6 +513,11 @@ pub struct RoleBoard {
     /// The scope `roles` is about, by its canonical name. `None` for all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// The layer that scope writes when a role is defined there: the instance
+    /// root's `roles:` for the root scope, its own `scope.roles` otherwise.
+    /// A role whose origin is this one is "defined here".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writes: Option<RoleOrigin>,
     /// Every role in effect in `scope`, with who holds each -- or, with no
     /// scope, the roles that hold everywhere.
     pub roles: Vec<RoleView>,
