@@ -26,8 +26,8 @@ const FIXED_NOTE =
   "and no configuration is pinned.";
 
 const SCOPE_NOTE =
-  "The results table above covers every case in this run; the rail beside this page narrows only the attempts " +
-  "matrix below, never the aggregated results.";
+  "The results table below covers every case in this run; the rail beside this page narrows only the attempts " +
+  "matrix further down, never the aggregated results.";
 
 // ------------------------------------------------------------------ loading
 

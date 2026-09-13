@@ -141,6 +141,7 @@ function renderDatasetDetail() {
   if (!data) {
     $("dataset-detail-revision").textContent = state.datasetError || "loading…";
     $("dataset-description").textContent = "";
+    $("dataset-description").hidden = true;
     $("dataset-findings").innerHTML = "";
     $("dataset-cases").innerHTML = "";
     $("no-cases").hidden = true;
@@ -148,7 +149,11 @@ function renderDatasetDetail() {
   }
   const { dataset, findings } = data;
   $("dataset-detail-revision").textContent = `revision ${dataset.revision}`;
+  // `.env-note` always carries a border and a background -- an empty one is
+  // still a visible, empty box, so hide it outright rather than leaving it
+  // showing nothing between the header and the case table.
   $("dataset-description").textContent = dataset.description || "";
+  $("dataset-description").hidden = !dataset.description;
   $("dataset-findings").innerHTML = findingsBlock(findings);
 
   const cases = visibleCases(dataset.cases);
