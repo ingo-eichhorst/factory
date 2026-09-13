@@ -119,6 +119,8 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/production", get(production))
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
+        .route("/api/knowledge", get(knowledge))
+        .route("/api/benchmarks", get(benchmarks))
         // The id of a standing agent is `<scope>/<name>`, which has a slash in
         // it, so these take it in the body rather than the path.
         .route("/api/agents/start", post(agent_start))
@@ -270,6 +272,14 @@ async fn site_footprint(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn environment(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Environment).await
+}
+
+async fn knowledge(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Knowledge).await
+}
+
+async fn benchmarks(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Benchmarks).await
 }
 
 async fn list_tasks(
