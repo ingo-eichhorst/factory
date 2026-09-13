@@ -2,8 +2,11 @@
 //! runtime knows by name, plus the words that carry a task into it.
 
 use async_trait::async_trait;
-use factory_core::adapter::agent::{Agent, AgentContext, LaunchKind, LaunchSpec};
-use factory_core::error::Result;
+use factory_core::adapter::agent::{
+    truncate_tail, Agent, AgentContext, LaunchKind, LaunchSpec, UpstreamOutput,
+    UPSTREAM_RESULT_BYTE_CAP,
+};
+use factory_core::error::{FactoryError, Result};
 
 /// An interactive coding agent the runtime can start by name.
 pub struct HarnessAgent {
@@ -153,6 +156,14 @@ impl Agent for HarnessAgent {
                  node_modules, target, and the like -- is not present.\n"
             ));
         }
+        // Direct parents only, never a transitive ancestor -- see the
+        // README's Workflows section. This is task content (what upstream
+        // steps produced), not an instruction about Factory itself, so it
+        // lives here rather than in `factory_guide`/`reporting_contract`.
+        if !binding.upstream.is_empty() {
+            prompt.push('\n');
+            prompt.push_str(&upstream_section(&binding.upstream));
+        }
         prompt.push_str(&format!(
             "\n{instructions}\n\
              \n\
@@ -163,6 +174,34 @@ impl Agent for HarnessAgent {
         ));
         Ok(prompt)
     }
+}
+
+/// The section a harness agent's prompt gets when this task followed others
+/// in a workflow -- each direct parent named by its title and node/task id,
+/// with the result it finished with (or a plain admission that it reported
+/// none). Truncated again here, defensively: `Engine::dispatch` already caps
+/// each result when it computes `upstream`, but this is what actually bounds
+/// what reaches a prompt, so it does not simply trust that the value in hand
+/// was already capped by whoever set it.
+fn upstream_section(upstream: &[UpstreamOutput]) -> String {
+    let mut out = String::from("Output from the workflow steps this task follows:\n\n");
+    for parent in upstream {
+        out.push_str(&format!(
+            "- {title} (node {node_id}, task {task_id}):\n",
+            title = parent.title,
+            node_id = parent.node_id,
+            task_id = parent.task_id,
+        ));
+        match parent.result.as_deref().map(str::trim) {
+            Some(result) if !result.is_empty() => {
+                out.push_str(&truncate_tail(result, UPSTREAM_RESULT_BYTE_CAP));
+                out.push('\n');
+            }
+            _ => out.push_str("(no result reported)\n"),
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// Not an AI agent at all: runs the task's instructions as a shell command and
@@ -178,15 +217,22 @@ impl Agent for ShellAgent {
     }
 
     fn description(&self) -> String {
-        "runs the instructions as a shell command and reports the exit status".into()
+        "runs the instructions as a shell command and reports the exit status and stdout".into()
     }
 
     async fn launch_spec(&self, ctx: &AgentContext) -> Result<LaunchSpec> {
-        // Nothing to start: the session's own shell is the agent.
+        // Nothing to start: the session's own shell is the agent. The upstream
+        // file, if this task has one, is written here so it exists as soon as
+        // the session comes up -- `prompt` writes it too (see its own
+        // comment), so neither call depends on running before the other.
+        let mut env = ctx.env();
+        if let Some(path) = ctx.write_upstream_file()? {
+            env.insert("FACTORY_UPSTREAM_FILE".into(), path.display().to_string());
+        }
         Ok(LaunchSpec {
             kind: LaunchKind::Command(Vec::new()),
             args: Vec::new(),
-            env: ctx.env(),
+            env,
         })
     }
 
@@ -196,16 +242,102 @@ impl Agent for ShellAgent {
         let id = &binding.task.id;
         let command = binding.task.instructions.trim();
         let command = if command.is_empty() { "true" } else { command };
-        // One line, because it is typed into a shell prompt. The report is part
-        // of the same line so a task cannot be left open by a command that
-        // succeeds and then forgets to say so. The subshell is what keeps an
-        // instruction ending in `exit` from taking the pane's shell with it.
-        Ok(format!(
-            "{bin} task report {id} --status running --message 'shell agent started' >/dev/null; \
-             if ( {command} ); then {bin} task report {id} --status done --result 'command exited 0'; \
-             else {bin} task report {id} --status failed --error \"command exited $?\"; fi"
-        ))
+
+        // A downstream node reads its parents' outputs from a file rather
+        // than having them spliced into this typed line -- quotes, `$`,
+        // backticks and newlines in a parent's stdout would otherwise have
+        // to survive being embedded in the line that reports *this* task.
+        // Written again here rather than trusted from `launch_spec` (herdr
+        // does carry `LaunchSpec.env` through, but this is the same value
+        // computed the same way, not a dependency on call order). The path
+        // is daemon-generated -- guides_dir joined with a task id -- so it
+        // never contains a quote or a newline in practice, but this runs in
+        // the daemon process, where a stray one is skipped rather than
+        // asserted into a panic (a plugin -- and this is one of the
+        // built-in ones -- must never take the daemon down with it).
+        let export_upstream = ctx
+            .write_upstream_file()?
+            .and_then(|path| shell_single_quote(&path.display().to_string()))
+            .map(|quoted| format!("export FACTORY_UPSTREAM_FILE={quoted}; "))
+            .unwrap_or_default();
+
+        // One line, because it is typed into a shell prompt, and it has to
+        // work in both bash and zsh: no `PIPESTATUS`/`pipestatus`, no process
+        // substitution. Stdout stays visible in the pane (`tee`) and is also
+        // captured to a temp file, so it can travel -- with the command's
+        // real exit code -- into `--result-file` instead of being
+        // interpolated into the typed line. `echo $? > "$_o.rc"` runs before
+        // the pipe to `tee` can replace `$?` with `tee`'s own status, which
+        // is what makes the captured code the command's rather than the
+        // pipe's. `mktemp` takes an explicit template because the BSD
+        // `mktemp` on macOS (unlike GNU's) refuses a bare invocation; `"$_o.rc"`
+        // reuses that one temp name rather than calling `mktemp` a second
+        // time. The outer `( … )` subshell is unchanged from before this
+        // feature: it is what stops an instruction ending in `exit` from
+        // taking the pane's own shell down with it, and it is also where
+        // `FACTORY_UPSTREAM_FILE` is exported, so it never leaks into the
+        // pane once the command finishes. Cleanup runs once, after both
+        // branches, so a failure does not skip it.
+        //
+        // Kept as short as the feature allows, deliberately: this line is
+        // *typed into a real pty*, not passed as a subprocess argument, and
+        // a pty's line discipline in canonical mode has its own limit on
+        // how much it will buffer before a newline -- 1024 bytes on both
+        // Linux and macOS (`MAX_CANON`). Past that, bytes are silently
+        // dropped rather than reported anywhere, and the agent hangs
+        // forever having never actually sent the command. `bin` and `id` are
+        // each bound to a short variable once instead of repeated three
+        // times, which is the single biggest saving available here; a very
+        // long task or a very deep instance root can still approach the
+        // limit, and there is no way to make an arbitrarily long instruction
+        // fit in one typed line, so `MAX_LINE_BYTES` below turns "too long"
+        // into a reported failure instead of a silent hang.
+        //
+        // Unlike the upstream path above, there is no sensible fallback if
+        // `bin` somehow held a newline -- skipping it would leave `$_f`
+        // undefined and every report call broken -- so this always quotes
+        // rather than bailing out. `id` is a daemon-generated task id (a
+        // uuid), never anything a shell would treat specially, so it is
+        // bound unquoted.
+        let bin_quoted = format!("'{}'", bin.to_string().replace('\'', r"'\''"));
+        let line = format!(
+            "_f={bin_quoted}; _t={id}; _o=$(mktemp \"${{TMPDIR:-/tmp}}/fXXXXXX\"); \
+             $_f task report $_t --status running --message 'shell agent started' >/dev/null; \
+             {{ ( {export_upstream}{command} ); echo $? > \"$_o.rc\"; }} | tee \"$_o\"; \
+             _c=$(cat \"$_o.rc\"); \
+             if [ \"$_c\" = 0 ]; then $_f task report $_t --status done --result 'command exited 0' --result-file \"$_o\"; \
+             else $_f task report $_t --status failed --result \"command exited $_c\" --error \"command exited $_c\" --result-file \"$_o\"; fi; \
+             rm -f \"$_o\" \"$_o.rc\""
+        );
+        // A silent hang with no error anywhere is a much worse failure mode
+        // than a task ending `failed` with a message that names the actual
+        // problem -- see the comment above. 1000 rather than 1024 itself
+        // leaves room for the newline that submits the line and a small
+        // margin, without pretending to know the exact number every runtime
+        // and terminal agrees on.
+        const MAX_LINE_BYTES: usize = 1000;
+        if line.len() > MAX_LINE_BYTES {
+            return Err(FactoryError::BadRequest(format!(
+                "this task's shell report line is {} bytes, over the {MAX_LINE_BYTES} a \
+                 terminal's canonical-mode input queue can be trusted to hold -- shorten the \
+                 instructions (or what is upstream of this node)",
+                line.len(),
+            )));
+        }
+        Ok(line)
     }
+}
+
+/// Escape `s` for embedding inside single quotes in the one-line shell
+/// command above. Every caller here only ever passes a daemon-generated
+/// path, which never contains a quote (handled anyway, cheaply) or a
+/// newline -- a newline cannot be escaped inside a *single* line, so a path
+/// that somehow had one is left un-exported rather than breaking the line.
+fn shell_single_quote(s: &str) -> Option<String> {
+    if s.contains('\n') {
+        return None;
+    }
+    Some(format!("'{}'", s.replace('\'', r"'\''")))
 }
 
 #[cfg(test)]
@@ -263,10 +395,17 @@ mod tests {
                 attempt: 1,
                 token: "tok".into(),
                 worktree_branch,
+                upstream: Vec::new(),
             }),
             identity_token: None,
             role: None,
         }
+    }
+
+    fn ctx_with_upstream(upstream: Vec<UpstreamOutput>) -> AgentContext {
+        let mut context = ctx(None);
+        context.task.as_mut().unwrap().upstream = upstream;
+        context
     }
 
     #[tokio::test]
@@ -315,6 +454,67 @@ mod tests {
                 contract = ctx(None).reporting_contract(),
             )
         );
+    }
+
+    // -- upstream outputs, in the prompt for a harness agent -----------------
+
+    #[tokio::test]
+    async fn a_root_nodes_prompt_is_unchanged_by_this_feature() {
+        // Same guarantee as `the_ordinary_prompt_is_unchanged_by_the_worktree_branch_alone`,
+        // for the other thing that can now be added to a task's prompt: with
+        // nothing upstream, byte for byte, this must read exactly as it did
+        // before `upstream` existed.
+        let agent = HarnessAgent::claude_code();
+        let prompt = agent.prompt(&ctx_with_upstream(Vec::new())).await.unwrap();
+        assert!(!prompt.contains("Output from the workflow steps"));
+        assert_eq!(prompt, agent.prompt(&ctx(None)).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_downstream_nodes_prompt_names_every_direct_parent() {
+        let agent = HarnessAgent::claude_code();
+        let upstream = vec![
+            UpstreamOutput {
+                node_id: "a".into(),
+                task_id: "ta".into(),
+                title: "build it".into(),
+                result: Some("build succeeded".into()),
+            },
+            UpstreamOutput {
+                node_id: "b".into(),
+                task_id: "tb".into(),
+                title: "lint it".into(),
+                result: None,
+            },
+        ];
+        let prompt = agent.prompt(&ctx_with_upstream(upstream)).await.unwrap();
+        assert!(prompt.contains("Output from the workflow steps this task follows"));
+        assert!(prompt.contains("build it"));
+        assert!(prompt.contains("node a"));
+        assert!(prompt.contains("task ta"));
+        assert!(prompt.contains("build succeeded"));
+        assert!(prompt.contains("lint it"));
+        assert!(prompt.contains("node b"));
+        assert!(prompt.contains("(no result reported)"), "a parent with no result says so plainly: {prompt}");
+    }
+
+    #[tokio::test]
+    async fn a_huge_parent_result_is_truncated_in_the_prompt() {
+        let agent = HarnessAgent::claude_code();
+        let huge = "x".repeat(UPSTREAM_RESULT_BYTE_CAP * 4);
+        let upstream = vec![UpstreamOutput {
+            node_id: "a".into(),
+            task_id: "ta".into(),
+            title: "noisy".into(),
+            result: Some(huge),
+        }];
+        let prompt = agent.prompt(&ctx_with_upstream(upstream)).await.unwrap();
+        assert!(
+            prompt.len() < UPSTREAM_RESULT_BYTE_CAP * 2,
+            "the huge result must not reach the prompt whole: {} bytes",
+            prompt.len()
+        );
+        assert!(prompt.contains("truncated"), "the cut is marked: {prompt}");
     }
 
     // -- the guide, injected per harness in `launch_spec` -------------------
@@ -426,25 +626,216 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_shell_agents_launch_and_prompt_stay_unchanged() {
-        // The shell agent is not a model and gets no guide at all: its launch
-        // and its prompt must be exactly what they were before this feature
-        // existed, byte for byte.
+    async fn the_shell_agents_launch_is_unchanged_without_upstream_outputs() {
+        // The shell agent is not a model and gets no guide at all; with
+        // nothing upstream, its launch carries nothing new either.
         let context = ctx(None);
         let launch = ShellAgent.launch_spec(&context).await.unwrap();
         assert_eq!(launch.kind, LaunchKind::Command(Vec::new()));
         assert!(launch.args.is_empty());
         assert_eq!(launch.env, context.env());
+    }
 
+    #[tokio::test]
+    async fn the_shell_agents_prompt_reports_stdout_via_a_result_file() {
+        let context = ctx(None);
         let prompt = ShellAgent.prompt(&context).await.unwrap();
         let bin = context.factory_bin.display();
         assert_eq!(
             prompt,
             format!(
-                "{bin} task report t1 --status running --message 'shell agent started' >/dev/null; \
-                 if ( make it stop flaking ); then {bin} task report t1 --status done --result 'command exited 0'; \
-                 else {bin} task report t1 --status failed --error \"command exited $?\"; fi"
+                "_f='{bin}'; _t=t1; _o=$(mktemp \"${{TMPDIR:-/tmp}}/fXXXXXX\"); \
+                 $_f task report $_t --status running --message 'shell agent started' >/dev/null; \
+                 {{ ( make it stop flaking ); echo $? > \"$_o.rc\"; }} | tee \"$_o\"; \
+                 _c=$(cat \"$_o.rc\"); \
+                 if [ \"$_c\" = 0 ]; then $_f task report $_t --status done --result 'command exited 0' --result-file \"$_o\"; \
+                 else $_f task report $_t --status failed --result \"command exited $_c\" --error \"command exited $_c\" --result-file \"$_o\"; fi; \
+                 rm -f \"$_o\" \"$_o.rc\""
             )
         );
+        assert!(!prompt.contains("FACTORY_UPSTREAM_FILE"), "nothing upstream, nothing exported: {prompt}");
+        assert!(
+            prompt.len() < 512,
+            "kept well under a pty's canonical-mode line limit (1024 bytes) with headroom for a real \
+             instruction and bin path: {} bytes",
+            prompt.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_absurdly_long_instruction_fails_loudly_instead_of_hanging_a_pane_forever() {
+        // The line this would produce could not be typed into a pty intact
+        // (see the byte-budget comment on `prompt`); reporting that plainly
+        // beats a task that sits `dispatching` forever with no error at all,
+        // which is what actually happens on the pty this guards against.
+        let mut context = ctx(None);
+        context.task.as_mut().unwrap().task.instructions = "x".repeat(2000);
+        let error = ShellAgent.prompt(&context).await.unwrap_err();
+        assert!(error.to_string().contains("bytes"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_shell_agents_prompt_and_launch_export_the_upstream_file_only_when_there_is_one() {
+        let upstream = vec![UpstreamOutput {
+            node_id: "a".into(),
+            task_id: "ta".into(),
+            title: "build it".into(),
+            result: Some("build succeeded".into()),
+        }];
+        let context = ctx_with_upstream(upstream);
+        let expected_path = context.upstream_path().expect("this task has an upstream file");
+
+        let launch = ShellAgent.launch_spec(&context).await.unwrap();
+        assert_eq!(
+            launch.env.get("FACTORY_UPSTREAM_FILE"),
+            Some(&expected_path.display().to_string()),
+            "launch_spec exports it too, for herdr's own --env"
+        );
+
+        let prompt = ShellAgent.prompt(&context).await.unwrap();
+        assert!(
+            prompt.contains(&format!("export FACTORY_UPSTREAM_FILE='{}'", expected_path.display())),
+            "the typed line exports it as well, for robustness: {prompt}"
+        );
+        assert!(prompt.contains("--result-file"), "stdout still goes through a file: {prompt}");
+
+        let written: Vec<UpstreamOutput> =
+            serde_json::from_str(&std::fs::read_to_string(&expected_path).unwrap()).unwrap();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].result.as_deref(), Some("build succeeded"));
+        std::fs::remove_dir_all(&context.guides_dir).ok();
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_embedded_quotes_and_refuses_a_newline() {
+        assert_eq!(shell_single_quote("plain"), Some("'plain'".to_string()));
+        assert_eq!(shell_single_quote("it's"), Some(r"'it'\''s'".to_string()));
+        assert_eq!(shell_single_quote("a\nb"), None, "a newline cannot survive a one-line command");
+    }
+
+    // -- actually running the line, in both bash and zsh ---------------------
+    //
+    // Everything above pins the *text* of the line. This runs it for real, in
+    // both shells this line has to work in, against a stub standing in for
+    // the real `factory` binary -- so quoting, the temp-file dance, and the
+    // exit code really do survive a live shell rather than just looking like
+    // they should on paper.
+
+    fn find_on_path(name: &str) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path).find_map(|dir| {
+            let candidate = dir.join(name);
+            candidate.is_file().then_some(candidate)
+        })
+    }
+
+    /// Stands in for the real `factory` binary: instead of talking to a
+    /// daemon, it records every invocation's `--status`, `--error`,
+    /// `--result`, and (reading the file `--result-file` names, since that
+    /// is the whole point being tested) `--result-file`'s content, into
+    /// files under `$STUB_DIR` -- each call overwrites the last, so what is
+    /// left after the whole line runs is whatever the *final* report said.
+    /// `--result` and `--result-file` are captured separately rather than
+    /// combined here: how they combine into one report is the real CLI's
+    /// own job (and its own unit tests), not something worth re-implementing
+    /// in a shell script for this one.
+    const STUB_FACTORY: &str = r#"#!/bin/sh
+echo "$@" >> "$STUB_DIR/calls.log"
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    --status) echo "$arg" > "$STUB_DIR/last_status" ;;
+    --error) printf '%s' "$arg" > "$STUB_DIR/last_error" ;;
+    --result) printf '%s' "$arg" > "$STUB_DIR/last_result_header" ;;
+    --result-file) cat "$arg" > "$STUB_DIR/last_result_body" 2>/dev/null || : ;;
+  esac
+  prev="$arg"
+done
+exit 0
+"#;
+
+    fn write_stub_factory(dir: &std::path::Path) -> PathBuf {
+        let path = dir.join("factory");
+        std::fs::write(&path, STUB_FACTORY).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        path
+    }
+
+    #[derive(Debug)]
+    struct StubReport {
+        status: String,
+        error: String,
+        result_header: String,
+        result_body: String,
+        pane_stdout: String,
+    }
+
+    async fn run_shell_line(shell: &str, command: &str) -> StubReport {
+        let dir = std::env::temp_dir().join(format!("factory-shell-line-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stub = write_stub_factory(&dir);
+
+        let mut context = ctx(None);
+        context.factory_bin = stub;
+        context.task.as_mut().unwrap().task.instructions = command.to_string();
+        let line = ShellAgent.prompt(&context).await.unwrap();
+
+        let output = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(&line)
+            .env("STUB_DIR", &dir)
+            .output()
+            .unwrap_or_else(|e| panic!("running `{shell} -c '{line}'`: {e}"));
+
+        let report = StubReport {
+            status: std::fs::read_to_string(dir.join("last_status")).unwrap_or_default().trim().to_string(),
+            error: std::fs::read_to_string(dir.join("last_error")).unwrap_or_default(),
+            result_header: std::fs::read_to_string(dir.join("last_result_header")).unwrap_or_default(),
+            result_body: std::fs::read_to_string(dir.join("last_result_body")).unwrap_or_default(),
+            pane_stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        };
+        std::fs::remove_dir_all(&dir).ok();
+        report
+    }
+
+    #[tokio::test]
+    async fn the_shell_line_survives_quoting_and_carries_real_stdout_and_exit_code() {
+        for shell in ["bash", "zsh"] {
+            if find_on_path(shell).is_none() {
+                eprintln!("skipping {shell}: not on PATH");
+                continue;
+            }
+
+            // Single quotes, double quotes, `$` that must not expand, a
+            // backtick, and more than one line.
+            let success = run_shell_line(
+                shell,
+                r#"printf '%s\n' 'it'\''s "quoted" $HOME'; printf '%s\n' 'back`tick`'"#,
+            )
+            .await;
+            assert_eq!(success.status, "done", "{shell}: {success:?}");
+            assert_eq!(success.result_header, "command exited 0", "{shell}: {success:?}");
+            assert_eq!(
+                success.result_body,
+                "it's \"quoted\" $HOME\nback`tick`\n",
+                "the command's real stdout, byte for byte ({shell}): {success:?}"
+            );
+            assert!(
+                success.pane_stdout.contains(r#"it's "quoted" $HOME"#),
+                "stdout stays visible in the pane too ({shell}): {success:?}"
+            );
+
+            let failure = run_shell_line(shell, "echo out; exit 3").await;
+            assert_eq!(failure.status, "failed", "{shell}: {failure:?}");
+            assert_eq!(failure.error.trim(), "command exited 3", "{shell}: {failure:?}");
+            assert_eq!(failure.result_header, "command exited 3", "{shell}: {failure:?}");
+            assert_eq!(failure.result_body, "out\n", "{shell}: {failure:?}");
+        }
     }
 }

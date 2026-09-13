@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use factory_core::adapter::agent::{Agent, AgentContext, LaunchKind, LaunchSpec};
+use factory_core::adapter::agent::{Agent, AgentContext, LaunchKind, LaunchSpec, UpstreamOutput};
 use factory_core::adapter::store::TaskStore;
 use factory_core::error::{FactoryError, Result};
 use factory_core::agent::AgentSession;
@@ -41,6 +41,12 @@ struct WireContext {
     /// built-ins knowing.
     #[serde(skip_serializing_if = "Option::is_none")]
     worktree_branch: Option<String>,
+    /// This task's direct parents in a workflow and what each finished with
+    /// -- empty for a root node or a task outside any workflow, same as
+    /// `TaskBinding::upstream`, so a plugin agent can build the same
+    /// upstream section the built-ins do instead of only they getting it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    upstream: Vec<UpstreamOutput>,
     /// The same contract the built-in agents put in their prompts, so a plugin
     /// can paste it instead of reconstructing the commands.
     reporting_contract: String,
@@ -64,6 +70,7 @@ impl From<&AgentContext> for WireContext {
             attempt: ctx.task.as_ref().map(|b| b.attempt),
             token: ctx.task.as_ref().map(|b| b.token.clone()),
             worktree_branch: ctx.task.as_ref().and_then(|b| b.worktree_branch.clone()),
+            upstream: ctx.task.as_ref().map(|b| b.upstream.clone()).unwrap_or_default(),
             reporting_contract: ctx.reporting_contract(),
             factory_guide: ctx.factory_guide(),
             env: ctx.env(),
