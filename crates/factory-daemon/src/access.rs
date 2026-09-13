@@ -559,6 +559,28 @@ mod tests {
         ))
     }
 
+    /// The same, for an instance that also names a root scope -- what
+    /// `dataset.edit` and `bench.run` are checked against, since datasets and
+    /// bench runs are company-wide rather than any one scope's own.
+    fn engine_with_roles_and_root_scope(root: &str, yaml: &str) -> Arc<Engine> {
+        let config: Config = serde_yaml_ng::from_str(&format!(
+            "instance:\n  id: i\n  name: test\nscope:\n  name: {root}\n  path: .\nscopes:\n  - name: demo\n    path: .\n  - name: other\n    path: .\n{yaml}"
+        ))
+        .unwrap();
+        config.validate().unwrap();
+        let factory = Factory {
+            root: PathBuf::from("/tmp/factory-access-test"),
+            config,
+        };
+        Arc::new(Engine::new(
+            factory,
+            Registry::with_builtins(),
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            vec![],
+        ))
+    }
+
     fn wearing(role: &str) -> Caller {
         Caller::Agent {
             scope: "demo".into(),
@@ -621,6 +643,84 @@ mod tests {
             .await,
             "starting a workflow is refused for reach alone, before any id is even looked up"
         );
+    }
+
+    /// `dataset.edit` and `bench.run` are subject to the instance's
+    /// *configured* root scope, resolved from `config.scope` -- never a
+    /// literal scope named "root", and never granted at all when the
+    /// instance declares no root scope. Without either grant, both write
+    /// paths are refused; holding the grant outside the root scope is
+    /// refused too, since the subject is the root scope, not the caller's
+    /// own.
+    #[tokio::test]
+    async fn dataset_and_bench_grants_are_checked_against_the_configured_root_scope() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  bencher:\n    grants: [dataset.edit, bench.run]\n    reach: scope\n",
+        );
+
+        let create = Request::DatasetCreate { name: "ds".into(), description: None };
+        let start = Request::BenchRunStart {
+            dataset: "ds".into(),
+            agents: vec!["shell".into()],
+            attempts: None,
+            concurrency: None,
+            cases: None,
+        };
+
+        let in_root = Caller::Agent {
+            scope: "demo".into(),
+            name: "w".into(),
+            role: Role::new("bencher"),
+            run_id: None,
+        };
+        let outside_root = Caller::Agent {
+            scope: "other".into(),
+            name: "w".into(),
+            role: Role::new("bencher"),
+            run_id: None,
+        };
+
+        assert!(
+            allowed(&e, &in_root, create.clone()).await,
+            "the root scope's own caller, holding the grant, may create a dataset"
+        );
+        assert!(
+            allowed(&e, &in_root, start.clone()).await,
+            "the root scope's own caller, holding the grant, may start a bench run"
+        );
+        assert!(
+            !allowed(&e, &outside_root, create).await,
+            "the same grant held outside the root scope is refused -- the subject is the \
+             root scope, not wherever the caller happens to work"
+        );
+        assert!(!allowed(&e, &outside_root, start).await);
+
+        // A caller in the root scope but without the grant at all is refused
+        // the ordinary way, before the root-scope check is ever reached.
+        assert!(
+            !allowed(&e, &worker("w"), Request::DatasetCreate { name: "ds2".into(), description: None }).await
+        );
+
+        // An instance that declares no root scope at all grants neither to
+        // anybody, however the caller is named or where it works.
+        let no_root = engine_with_roles(
+            "roles:\n  bencher:\n    grants: [dataset.edit, bench.run]\n    reach: scope\n",
+        );
+        let demo_caller = Caller::Agent {
+            scope: "demo".into(),
+            name: "w".into(),
+            role: Role::new("bencher"),
+            run_id: None,
+        };
+        assert!(
+            !allowed(&no_root, &demo_caller, Request::DatasetCreate { name: "ds3".into(), description: None })
+                .await,
+            "no root scope is configured, so nobody may manage datasets"
+        );
+
+        // The owner is never subject to any of this.
+        assert!(allowed(&e, &Caller::Owner, Request::DatasetCreate { name: "ds4".into(), description: None }).await);
     }
 
     async fn task_in(engine: &Engine, id: &str, scope: &str, agent: &str) -> Task {

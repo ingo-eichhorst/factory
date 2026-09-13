@@ -673,3 +673,296 @@ impl Engine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! `judge_bench_attempt`'s two least obvious edges, pinned directly
+    //! rather than only through the shell-agent e2e run: the string chain
+    //! `place_run` -> `fail_run` -> `run.error` -> "was this a reset
+    //! failure" runs through two independent `format!` call sites before it
+    //! is ever read back here, and `was_reported_by_agent` is the one
+    //! predicate that decides whether a `Failed` run's own report or its
+    //! case's gate gets the last word. Either one silently regressing would
+    //! misfile a verdict rather than fail loudly.
+
+    use super::*;
+    use factory_core::adapter::TaskStore;
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
+    use factory_core::run::{NewRun, RunPatch};
+    use factory_core::task::NewTask;
+    use factory_plugins::{Registry, SqliteStore};
+
+    fn test_engine(scope_path: std::path::PathBuf) -> Arc<Engine> {
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            roles: Default::default(),
+            scope: None,
+            scopes: vec![Scope {
+                id: "scope-id".into(),
+                name: "demo".into(),
+                path: scope_path,
+                agent: None,
+                agents: Vec::new(),
+                runtime: None,
+                git: None,
+                task_store: None,
+                roles: Default::default(),
+            }],
+            plugins_dir: None,
+        };
+        let factory = Factory {
+            root: std::env::temp_dir().join(format!("factory-bench-engine-test-{}", uuid::Uuid::new_v4())),
+            config,
+        };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(factory, registry, store, std::path::PathBuf::from("factory"), Vec::new()))
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("factory-bench-engine-test-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// One case, one pending attempt, and a `BenchRun` holding just that --
+    /// enough for `record_bench_task_state`/`judge_bench_attempt` to find
+    /// the attempt by identity and settle it, without a real dispatch.
+    async fn seed(engine: &Arc<Engine>, run_id: &str, case: Case, agent: &str) -> (BenchOrigin, Task) {
+        let origin = BenchOrigin {
+            bench_run_id: run_id.to_string(),
+            case_id: case.id.clone(),
+            agent: agent.to_string(),
+            attempt: 1,
+        };
+        let attempt = BenchAttempt::pending(uuid::Uuid::new_v4().to_string(), case.id.clone(), agent.to_string(), 1);
+        let run = BenchRun {
+            id: run_id.to_string(),
+            dataset: "demo-set".into(),
+            dataset_revision: 1,
+            cases: vec![case],
+            case_bases: Default::default(),
+            agents: vec![agent.to_string()],
+            attempts_per_case: 1,
+            concurrency: 1,
+            status: BenchRunStatus::Running,
+            attempts: vec![attempt],
+            started_at: Utc::now(),
+            ended_at: None,
+        };
+        engine.bench.put_run(&run).await.unwrap();
+        for attempt in &run.attempts {
+            engine.bench.put_attempt(&run.id, attempt).await.unwrap();
+        }
+
+        let task = engine
+            .create_bench_task(
+                NewTask {
+                    title: format!("bench {}", origin.case_id),
+                    scope: Some("demo".into()),
+                    worktree: Some(false),
+                    ..Default::default()
+                },
+                origin.clone(),
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .await
+            .unwrap();
+        (origin, task)
+    }
+
+    /// Mirrors exactly what a real dispatch failure produces: `place_run`
+    /// turns a failing reset into `FactoryError::BadRequest(format!("reset
+    /// failed: {detail}"))`, and `start_run`'s catch arm hands that to
+    /// `fail_run` as `format!("dispatch failed: {e}")` -- so the stored
+    /// `run.error` carries both prefixes by the time judging ever reads it.
+    /// If either `format!` changes shape, this is the test that notices.
+    #[tokio::test]
+    async fn a_reset_failure_is_read_back_as_skipped_never_error() {
+        let scope_dir = temp_dir("reset-failure");
+        let engine = test_engine(scope_dir);
+
+        let case = Case {
+            id: "case-1".into(),
+            title: "case one".into(),
+            scope: "demo".into(),
+            instructions: "do the thing".into(),
+            gate: None,
+            reset: Some("false".into()),
+            base: None,
+            timeout_seconds: None,
+            origin: None,
+        };
+        let (origin, task) = seed(&engine, "run-reset-failure", case, "shell").await;
+
+        let task_run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Bench,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "local".into(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &task_run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Failed),
+                    error: Some("dispatch failed: reset failed: exit 1: nope".into()),
+                    ended_at: Some(Utc::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Deliberately no agent-authored entry: nothing reported anything --
+        // the daemon gave up before the agent ever ran.
+
+        engine.record_bench_task_state(&task.id).await;
+
+        let settled = engine.bench.get_run(&origin.bench_run_id).await.unwrap().unwrap();
+        let attempt = &settled.attempts[0];
+        assert_eq!(attempt.verdict, Some(Verdict::Skipped), "{attempt:?}");
+        assert!(
+            attempt.reason.as_deref().unwrap_or_default().contains("reset failed"),
+            "{attempt:?}"
+        );
+    }
+
+    /// The same shape of failure, but without the "reset failed" substring
+    /// anywhere in the error -- an ordinary daemon give-up (an ack timeout,
+    /// a session that vanished) must still read as `Error`, not `Skipped`.
+    /// Pinning both directions is what makes the substring check above
+    /// trustworthy rather than a test that would pass no matter what the
+    /// code did.
+    #[tokio::test]
+    async fn a_daemon_give_up_with_no_reset_failure_text_is_error_not_skipped() {
+        let scope_dir = temp_dir("give-up");
+        let engine = test_engine(scope_dir);
+
+        let case = Case {
+            id: "case-1".into(),
+            title: "case one".into(),
+            scope: "demo".into(),
+            instructions: "do the thing".into(),
+            gate: None,
+            reset: None,
+            base: None,
+            timeout_seconds: None,
+            origin: None,
+        };
+        let (origin, task) = seed(&engine, "run-give-up", case, "shell").await;
+
+        let task_run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Bench,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "local".into(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &task_run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Failed),
+                    error: Some("dispatch failed: the session never came up".into()),
+                    ended_at: Some(Utc::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        engine.record_bench_task_state(&task.id).await;
+
+        let settled = engine.bench.get_run(&origin.bench_run_id).await.unwrap().unwrap();
+        let attempt = &settled.attempts[0];
+        assert_eq!(attempt.verdict, Some(Verdict::Error), "{attempt:?}");
+    }
+
+    /// The gate is the judge, never the agent's own word: a run the agent
+    /// itself reported `failed` on must still be handed to the case's gate,
+    /// not folded into `Error` as if the daemon had merely given up. This is
+    /// the test that would catch `was_reported_by_agent` reading the wrong
+    /// entry field -- if it always answered `false`, this attempt would
+    /// land on `Error` instead of running the gate at all.
+    #[tokio::test]
+    async fn an_agent_reported_failure_is_still_judged_by_its_gate() {
+        let scope_dir = temp_dir("agent-reported");
+        let engine = test_engine(scope_dir.clone());
+
+        let case = Case {
+            id: "case-1".into(),
+            title: "case one".into(),
+            scope: "demo".into(),
+            instructions: "do the thing".into(),
+            gate: Some("exit 0".into()),
+            reset: None,
+            base: None,
+            timeout_seconds: Some(5),
+            origin: None,
+        };
+        let (origin, task) = seed(&engine, "run-agent-reported", case, "shell").await;
+
+        let task_run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Bench,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "local".into(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &task_run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Failed),
+                    error: Some("agent process exited".into()),
+                    ended_at: Some(Utc::now()),
+                    worktree_path: Some(scope_dir.to_string_lossy().to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        engine
+            .store
+            .append_entry(
+                &task.id,
+                &TaskEntry::new("agent", "failed", "I could not finish").in_run(task_run.id.clone()),
+            )
+            .await
+            .unwrap();
+
+        engine.record_bench_task_state(&task.id).await;
+
+        let settled = engine.bench.get_run(&origin.bench_run_id).await.unwrap().unwrap();
+        let attempt = &settled.attempts[0];
+        assert_eq!(attempt.reported.as_deref(), Some("failed"), "{attempt:?}");
+        assert_eq!(
+            attempt.verdict,
+            Some(Verdict::Pass),
+            "the gate exited 0, so the verdict must be Pass even though the agent itself \
+             reported failure -- proving was_reported_by_agent took the gate branch \
+             rather than reading this as a daemon give-up: {attempt:?}"
+        );
+    }
+}
