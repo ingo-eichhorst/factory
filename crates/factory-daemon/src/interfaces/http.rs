@@ -328,12 +328,17 @@ async fn create_dataset(
     .await
 }
 
+#[derive(serde::Deserialize)]
+struct AddDatasetCases {
+    cases: Vec<factory_core::dataset::Case>,
+}
+
 async fn add_dataset_cases(
     State(engine): State<Arc<Engine>>,
     Path(name): Path<String>,
-    Json(cases): Json<Vec<factory_core::dataset::Case>>,
+    Json(body): Json<AddDatasetCases>,
 ) -> AxumResponse {
-    run(&engine, Request::DatasetAddCases { name, cases }).await
+    run(&engine, Request::DatasetAddCases { name, cases: body.cases }).await
 }
 
 #[derive(serde::Deserialize)]

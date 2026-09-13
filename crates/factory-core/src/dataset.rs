@@ -114,7 +114,12 @@ impl Dataset {
     /// Read `<dir>/<name>.yaml`. `None` when the file does not exist -- an
     /// absent dataset is a fact for the caller to decide what to do with,
     /// not an error.
+    ///
+    /// Refuses a `name` that is not a slug before it ever touches a path --
+    /// defense in depth behind the daemon's own check, since `name` here
+    /// becomes a path component and `../elsewhere` is otherwise a valid one.
     pub fn load(dir: &Path, name: &str) -> Result<Option<Self>> {
+        refuse_bad_name(name)?;
         let path = dir.join(format!("{name}.yaml"));
         match std::fs::read_to_string(&path) {
             Ok(text) => Ok(Some(Self::parse(&text)?)),
@@ -130,7 +135,11 @@ impl Dataset {
     /// mid-write never leaves half a YAML file. The caller (the daemon) is
     /// responsible for holding this dataset's write lock and bumping
     /// `revision` before calling this.
+    ///
+    /// Refuses a `self.name` that is not a slug -- same defense in depth as
+    /// `load`, since `validate()` is a separate call a caller could forget.
     pub fn write_atomic(&self, dir: &Path) -> Result<()> {
+        refuse_bad_name(&self.name)?;
         std::fs::create_dir_all(dir)
             .map_err(|e| FactoryError::Other(anyhow::anyhow!("making {}: {e}", dir.display())))?;
         let path = dir.join(format!("{}.yaml", self.name));
@@ -186,6 +195,19 @@ pub fn is_slug(s: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A dataset `name` becomes a path component the moment it reaches `load` or
+/// `write_atomic` -- `is_slug` is what stands between that and `../elsewhere`
+/// or an absolute path escaping `<root>/.factory/datasets/` entirely.
+fn refuse_bad_name(name: &str) -> Result<()> {
+    if is_slug(name) {
+        Ok(())
+    } else {
+        Err(FactoryError::BadRequest(format!(
+            "dataset name {name:?} must match [a-z0-9][a-z0-9-]*"
+        )))
+    }
 }
 
 /// What is wrong with one case, as `(field, detail)` pairs -- everything a
@@ -737,6 +759,31 @@ mod tests {
         assert_eq!(loaded, ds);
         assert!(Dataset::load(&dir, "missing").unwrap().is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `load` and `write_atomic` take `name` (or `self.name`) as a path
+    /// component -- `../elsewhere` would otherwise read or, worse, let a
+    /// caller further up write outside `<root>/.factory/datasets/` entirely.
+    /// This is the defense-in-depth layer behind the daemon's own
+    /// `refuse_bad_name` (`factory-daemon/src/datasets.rs`); this test is
+    /// what proves this module refuses it even if that layer is ever
+    /// bypassed or forgotten at a new call site.
+    #[test]
+    fn load_and_write_atomic_refuse_a_name_that_would_escape_the_datasets_directory() {
+        let dir = std::env::temp_dir().join(format!("factory-dataset-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file a path-traversing `load`/`delete` could otherwise reach.
+        std::fs::write(dir.parent().unwrap().join("outside.yaml"), "name: outside\ncases: []\n").ok();
+
+        let e = Dataset::load(&dir, "../outside").unwrap_err().to_string();
+        assert!(e.contains("must match"), "{e}");
+
+        let bad = Dataset::new("../outside", None);
+        let e = bad.write_atomic(&dir).unwrap_err().to_string();
+        assert!(e.contains("must match"), "{e}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(dir.parent().unwrap().join("outside.yaml")).ok();
     }
 
     // -- importers -----------------------------------------------------

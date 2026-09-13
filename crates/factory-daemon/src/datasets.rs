@@ -34,12 +34,29 @@ impl DatasetLocks {
     }
 }
 
-fn refuse_bad_name(name: &str) -> Result<()> {
+/// Checked at every daemon entry point that takes a dataset `name` off the
+/// wire, before it ever reaches `factory_core::dataset` (which refuses it
+/// again itself -- defense in depth, since `name` becomes a path component
+/// and `../elsewhere` or an absolute path is otherwise a legal string).
+pub(crate) fn refuse_bad_name(name: &str) -> Result<()> {
     if factory_core::dataset::is_slug(name) {
         Ok(())
     } else {
         Err(FactoryError::BadRequest(format!(
             "dataset name {name:?} must match [a-z0-9][a-z0-9-]*"
+        )))
+    }
+}
+
+/// The same, for a case `id` taken off the wire on its own (`delete_case`) --
+/// every other entry point either generates the id itself or validates it as
+/// part of the whole dataset via `Dataset::validate`.
+fn refuse_bad_case_id(id: &str) -> Result<()> {
+    if factory_core::dataset::is_slug(id) {
+        Ok(())
+    } else {
+        Err(FactoryError::BadRequest(format!(
+            "case id {id:?} must match [a-z0-9][a-z0-9-]*"
         )))
     }
 }
@@ -87,6 +104,7 @@ impl Engine {
     }
 
     pub(crate) fn dataset_view(&self, name: &str) -> Result<(Dataset, Vec<DatasetFinding>)> {
+        refuse_bad_name(name)?;
         let dir = self.factory_snapshot().datasets_dir();
         let dataset = Dataset::load(&dir, name)?
             .ok_or_else(|| FactoryError::BadRequest(format!("no such dataset: {name:?}")))?;
@@ -102,13 +120,18 @@ impl Engine {
         if Dataset::load(&dir, name)?.is_some() {
             return Err(FactoryError::BadRequest(format!("dataset {name:?} already exists")));
         }
-        let dataset = Dataset::new(name, description);
+        let mut dataset = Dataset::new(name, description);
+        // `Dataset::new` starts at 0 -- the value of a dataset that has never
+        // been written. This call is itself the first write Factory makes,
+        // so it bumps to 1, the same as every other write here does.
+        dataset.revision += 1;
         dataset.validate()?;
         dataset.write_atomic(&dir)?;
         Ok(dataset)
     }
 
     pub(crate) async fn dataset_add_cases(&self, name: &str, cases: Vec<Case>) -> Result<Dataset> {
+        refuse_bad_name(name)?;
         let lock = self.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
         let dir = self.factory_snapshot().datasets_dir();
@@ -128,6 +151,7 @@ impl Engine {
         content: &str,
         replace: bool,
     ) -> Result<Dataset> {
+        refuse_bad_name(name)?;
         let cases = factory_core::dataset::import(format, content).map_err(|problems| {
             FactoryError::BadRequest(
                 problems.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("; "),
@@ -155,6 +179,7 @@ impl Engine {
     }
 
     pub(crate) async fn dataset_from_tasks(&self, name: &str, task_ids: Vec<String>) -> Result<Dataset> {
+        refuse_bad_name(name)?;
         let lock = self.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
         let dir = self.factory_snapshot().datasets_dir();
@@ -209,6 +234,8 @@ impl Engine {
     }
 
     pub(crate) async fn dataset_delete_case(&self, name: &str, id: &str) -> Result<Dataset> {
+        refuse_bad_name(name)?;
+        refuse_bad_case_id(id)?;
         let lock = self.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
         let dir = self.factory_snapshot().datasets_dir();
@@ -225,6 +252,7 @@ impl Engine {
     }
 
     pub(crate) async fn dataset_delete(&self, name: &str) -> Result<bool> {
+        refuse_bad_name(name)?;
         let lock = self.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
         let dir = self.factory_snapshot().datasets_dir();
@@ -266,4 +294,110 @@ async fn merge_base_if_branch_exists(scope_path: &Path, branch: &str) -> Option<
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    //! `refuse_bad_name` at every entry point, and `refuse_bad_case_id` in
+    //! `dataset_delete_case` -- reported by QA, reproduced live:
+    //! `DELETE /api/datasets/..%2Foutside` deleted a file outside the
+    //! datasets directory entirely, and `GET /api/datasets/..%2Fconfig` read
+    //! `.factory/config.yaml` back as a dataset parse error. Every one of
+    //! these is checked here directly against the engine method, not just
+    //! through HTTP, since `factory_core::dataset::load`/`write_atomic`
+    //! refusing the same name too (see that module's own tests) is defense
+    //! in depth behind this, not a replacement for it.
+
+    use super::*;
+    use factory_core::adapter::TaskStore;
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance};
+    use factory_plugins::{Registry, SqliteStore};
+    use std::path::PathBuf;
+
+    fn test_engine() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-datasets-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory")).unwrap();
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            roles: Default::default(),
+            scope: None,
+            scopes: Vec::new(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    fn escaping_name(engine: &Engine) -> String {
+        // A dataset-shaped file one level above the datasets directory --
+        // exactly where `../outside` would resolve to.
+        let dir = engine.factory_snapshot().factory_dir();
+        std::fs::write(dir.join("outside.yaml"), "name: outside\nversion: 1\ncases: []\n").unwrap();
+        "../outside".to_string()
+    }
+
+    #[tokio::test]
+    async fn every_read_and_write_entry_point_refuses_a_name_that_would_escape_the_datasets_directory() {
+        let engine = test_engine();
+        let bad = escaping_name(&engine);
+
+        let e = engine.dataset_view(&bad).unwrap_err().to_string();
+        assert!(e.contains("must match"), "{e}");
+
+        let e = engine.dataset_add_cases(&bad, Vec::new()).await.unwrap_err().to_string();
+        assert!(e.contains("must match"), "{e}");
+
+        let e = engine
+            .dataset_import(&bad, "jsonl", "", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("must match"), "{e}");
+
+        let e = engine.dataset_from_tasks(&bad, Vec::new()).await.unwrap_err().to_string();
+        assert!(e.contains("must match"), "{e}");
+
+        let e = engine.dataset_delete_case(&bad, "some-id").await.unwrap_err().to_string();
+        assert!(e.contains("must match"), "{e}");
+
+        let e = engine.dataset_delete(&bad).await.unwrap_err().to_string();
+        assert!(e.contains("must match"), "{e}");
+
+        // The file this test planted must still be exactly where it was --
+        // never read, never deleted, by any of the calls above.
+        let dir = engine.factory_snapshot().factory_dir();
+        assert!(dir.join("outside.yaml").exists(), "the file outside the datasets directory must survive untouched");
+    }
+
+    #[tokio::test]
+    async fn dataset_delete_case_also_refuses_a_bad_case_id() {
+        let engine = test_engine();
+        engine.dataset_create("demo", None).await.unwrap();
+        let e = engine
+            .dataset_delete_case("demo", "../elsewhere")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("must match"), "{e}");
+    }
+
+    /// Reported by QA: `Dataset::new` starts at revision 0, and
+    /// `dataset_create` never bumped it -- so a freshly created dataset
+    /// stayed at `revision: 0` even though the create itself is a write.
+    /// Every other write here (`dataset_add_cases`, `dataset_import`,
+    /// `dataset_from_tasks`) already bumps to 1 on a dataset's first write,
+    /// via the same `Dataset::new` plus `+= 1`; this is the one that did not.
+    #[tokio::test]
+    async fn dataset_create_leaves_a_fresh_dataset_at_revision_one() {
+        let engine = test_engine();
+        let ds = engine.dataset_create("probe", None).await.unwrap();
+        assert_eq!(ds.revision, 1, "{ds:?}");
+        // And the same read back off disk, not only the in-memory answer.
+        let (loaded, _findings) = engine.dataset_view("probe").unwrap();
+        assert_eq!(loaded.revision, 1, "{loaded:?}");
+    }
 }
