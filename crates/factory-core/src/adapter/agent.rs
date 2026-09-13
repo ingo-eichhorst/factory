@@ -371,6 +371,12 @@ impl AgentContext {
                 Grant::KnowledgeWrite => format!(
                     "knowledge.write -> {bin} knowledge import <dir> or {bin} knowledge add <file>...; the knowledge base is company-wide, not scoped to {scope}"
                 ),
+                Grant::DatasetEdit => format!(
+                    "dataset.edit -> {bin} dataset create|case add|case rm|rm|import|from-tasks ..."
+                ),
+                Grant::BenchRun => format!(
+                    "bench.run -> {bin} bench run <dataset> --agent <scope>/<agent> [--attempts N] [--concurrency N]; also bench cancel/clean <run-id>"
+                ),
             });
         }
         lines
@@ -549,6 +555,7 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             workflow_origin: None,
+            bench_origin: None,
         }
     }
 

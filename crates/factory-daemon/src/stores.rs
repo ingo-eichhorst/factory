@@ -315,6 +315,7 @@ mod tests {
             next_run_at: None,
             worktree: false,
             workflow_origin: None,
+            bench_origin: None,
         }
     }
 

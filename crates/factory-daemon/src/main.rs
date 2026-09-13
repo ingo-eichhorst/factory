@@ -3,7 +3,9 @@
 
 mod access;
 mod agents;
+mod bench;
 mod configuration;
+mod datasets;
 mod discovery;
 mod engine;
 mod interfaces;
@@ -246,13 +248,14 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
         .collect();
 
     let workflow_store = workflows::WorkflowStore::open(&factory.database_path())?;
+    let bench_store = bench::BenchStore::open(&factory.database_path())?;
     let engine = Arc::new(Engine::new(
         factory.clone(),
         registry,
         store,
         factory_bin(),
         interface_names,
-    ).with_workflow_store(workflow_store));
+    ).with_workflow_store(workflow_store).with_bench_store(bench_store));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut mounted = Vec::new();
@@ -311,6 +314,11 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // Reconcile persisted workflow decisions only after runtimes and standing
     // agents are available. Recovery reuses task ids recorded before a crash.
     engine.recover_workflows().await;
+    // The one place a bench attempt's gate actually runs -- started before
+    // recovery below, so anything it enqueues has a consumer immediately.
+    engine.spawn_bench_judge();
+    // The same, for bench runs still `running` when the daemon last stopped.
+    engine.recover_bench_runs().await;
 
     let sched = tokio::spawn(scheduler::run(engine.clone(), shutdown_rx.clone()));
 

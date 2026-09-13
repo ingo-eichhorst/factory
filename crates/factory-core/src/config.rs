@@ -756,6 +756,14 @@ impl Factory {
         self.factory_dir().join("knowledge")
     }
 
+    /// Where dataset files live: `<root>/.factory/datasets/<name>.yaml`.
+    /// Authored content, like the knowledge vault -- not daemon-owned state,
+    /// even though it sits under `.factory/` -- so nothing here ever deletes
+    /// the directory itself, only the one file a `dataset rm` names.
+    pub fn datasets_dir(&self) -> PathBuf {
+        self.factory_dir().join("datasets")
+    }
+
     /// Where the guide to Factory itself lives, for a harness whose
     /// system-prompt mechanism wants a file rather than inline text. Under
     /// `.factory/`, never inside a scope -- a scope owns only its own

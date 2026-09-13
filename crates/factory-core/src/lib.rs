@@ -4,9 +4,11 @@
 
 pub mod adapter;
 pub mod agent;
+pub mod bench;
 pub mod benchmark;
 pub mod building;
 pub mod config;
+pub mod dataset;
 pub mod error;
 pub mod event;
 pub mod knowledge;

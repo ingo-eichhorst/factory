@@ -3,8 +3,10 @@
 
 mod client;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
+use factory_core::bench::{BenchResult, BenchRun, Verdict};
+use factory_core::dataset::{Case, Dataset, DatasetFinding, DatasetSummary};
 use factory_core::event::Event;
 use factory_core::knowledge::FindingKind;
 use factory_core::protocol::{Payload, Request, Response};
@@ -69,9 +71,127 @@ enum Command {
     },
     /// The L5 Benchmarks tab: one configuration per distinct harness, full
     /// arguments and sandbox a task could be dispatched with today, and what
-    /// each one is still missing to be a comparable score. Declares and
-    /// displays; nothing here runs or scores anything.
-    Bench,
+    /// each one is still missing to be a comparable score. With no
+    /// subcommand, keeps that v1 output; `run`, `runs`, `show`, `cancel` and
+    /// `clean` are v2's bench runs.
+    Bench {
+        #[command(subcommand)]
+        cmd: Option<BenchCmd>,
+    },
+    /// Datasets: sets of cases a bench run attempts. `<root>/.factory/datasets/<name>.yaml`
+    /// is the source of truth; every read re-parses it, so a hand edit shows
+    /// up on the next call.
+    #[command(subcommand)]
+    Dataset(DatasetCmd),
+}
+
+#[derive(Subcommand)]
+enum BenchCmd {
+    /// Start a bench run: dataset@revision x agents x attempts.
+    Run {
+        dataset: String,
+        /// `[<scope>/]<agent>`, repeatable. Only the trailing name is used --
+        /// the agent must resolve in each case's own scope, not the scope it
+        /// happened to be found under in the roster.
+        #[arg(long = "agent", required = true)]
+        agents: Vec<String>,
+        #[arg(long, default_value_t = 1)]
+        attempts: u32,
+        #[arg(long, default_value_t = 1)]
+        concurrency: u32,
+        /// A case id to attempt, repeatable. Omit for every case.
+        #[arg(long = "case")]
+        cases: Vec<String>,
+    },
+    /// List bench runs, most recently updated first.
+    Runs {
+        #[arg(long)]
+        dataset: Option<String>,
+    },
+    /// One bench run: its results table and every attempt.
+    Show { id: String },
+    /// Cancel a bench run still going: cancels every in-flight attempt and
+    /// marks the rest cancelled.
+    Cancel { id: String },
+    /// Remove exactly this finished run's worktrees and branches. Owner
+    /// only; refused while the run is still going.
+    Clean { id: String },
+}
+
+#[derive(Subcommand)]
+enum DatasetCmd {
+    /// List every dataset.
+    List,
+    /// One dataset: its cases, description, and findings.
+    Show { name: String },
+    /// Create an empty dataset.
+    Create {
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Add or remove a case.
+    #[command(subcommand)]
+    Case(CaseCmd),
+    /// Bulk import cases from a file: `.jsonl` (one case per line), `.json`
+    /// (an array), `.yaml`/`.yml` (a whole dataset or a list of cases), or
+    /// `.csv` (a header row of case field names; `origin` is not accepted).
+    /// All or nothing -- a bad case anywhere refuses the whole file. Creates
+    /// the dataset if it does not exist yet.
+    Import {
+        name: String,
+        file: PathBuf,
+        /// Overrides the format normally inferred from the file's extension.
+        #[arg(long)]
+        format: Option<String>,
+        /// Replace every existing case instead of appending.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Turn recorded tasks into cases. Each becomes one case, with its id a
+    /// slug of the title, de-duplicated; a generated case never carries a
+    /// `gate`.
+    FromTasks {
+        name: String,
+        /// Explicit task ids. Omit and use --scope/--status to select in
+        /// bulk instead.
+        task_ids: Vec<String>,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        status: Option<TaskStatus>,
+    },
+    /// Delete a whole dataset.
+    Rm { name: String },
+}
+
+#[derive(Subcommand)]
+enum CaseCmd {
+    Add {
+        name: String,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        scope: String,
+        #[arg(long)]
+        instructions: String,
+        /// A commit to branch attempts from. Absent means the scope's HEAD
+        /// when the bench run starts.
+        #[arg(long)]
+        base: Option<String>,
+        /// Runs in the attempt worktree before the agent starts.
+        #[arg(long)]
+        reset: Option<String>,
+        /// Runs in the attempt worktree after the attempt ends; its exit
+        /// status is the verdict. Absent means the case runs `unverified`.
+        #[arg(long)]
+        gate: Option<String>,
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
+    Rm { name: String, id: String },
 }
 
 #[derive(Subcommand)]
@@ -536,7 +656,7 @@ async fn main() -> Result<()> {
 
         Command::Knowledge { command: Some(cmd) } => knowledge_cmd(cli.json, &client, cmd).await,
 
-        Command::Bench => {
+        Command::Bench { cmd: None } => {
             let payload = client.send(Request::Benchmarks).await?;
             print(&payload, cli.json, |p| match p {
                 Payload::Benchmarks { configurations } => {
@@ -574,6 +694,8 @@ async fn main() -> Result<()> {
                 _ => None,
             })
         }
+        Command::Bench { cmd: Some(cmd) } => bench_cmd(cli.json, &client, cmd).await,
+        Command::Dataset(cmd) => dataset_cmd(cli.json, &client, cmd).await,
     }
 }
 
@@ -624,6 +746,232 @@ async fn knowledge_cmd(json: bool, client: &Client, cmd: KnowledgeCmd) -> Result
     }
 }
 
+async fn dataset_cmd(json: bool, client: &Client, cmd: DatasetCmd) -> Result<()> {
+    match cmd {
+        DatasetCmd::List => {
+            let payload = client.send(Request::Datasets).await?;
+            print(&payload, json, |p| match p {
+                Payload::Datasets { root, datasets } => Some(if datasets.is_empty() {
+                    format!("no datasets in {root}")
+                } else {
+                    datasets.iter().map(dataset_summary_line).collect::<Vec<_>>().join("\n")
+                }),
+                _ => None,
+            })
+        }
+        DatasetCmd::Show { name } => {
+            let payload = client.send(Request::Dataset { name }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Dataset { dataset, findings } => Some(dataset_detail(dataset, findings)),
+                _ => None,
+            })
+        }
+        DatasetCmd::Create { name, description } => {
+            let payload = client.send(Request::DatasetCreate { name, description }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Dataset { dataset, findings } => Some(dataset_detail(dataset, findings)),
+                _ => None,
+            })
+        }
+        DatasetCmd::Case(CaseCmd::Add {
+            name,
+            id,
+            title,
+            scope,
+            instructions,
+            base,
+            reset,
+            gate,
+            timeout,
+        }) => {
+            let case = Case {
+                id,
+                title,
+                scope,
+                instructions,
+                base,
+                reset,
+                gate,
+                timeout_seconds: timeout,
+                origin: None,
+            };
+            let payload = client
+                .send(Request::DatasetAddCases { name, cases: vec![case] })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Dataset { dataset, findings } => Some(dataset_detail(dataset, findings)),
+                _ => None,
+            })
+        }
+        DatasetCmd::Case(CaseCmd::Rm { name, id }) => {
+            let payload = client.send(Request::DatasetDeleteCase { name, id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Dataset { dataset, findings } => Some(dataset_detail(dataset, findings)),
+                _ => None,
+            })
+        }
+        DatasetCmd::Import { name, file, format, replace } => {
+            let format = format.or_else(|| {
+                file.extension().and_then(|e| e.to_str()).map(str::to_string)
+            }).ok_or_else(|| anyhow!("cannot tell the import format from {file:?}; pass --format"))?;
+            let content = std::fs::read_to_string(&file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            let payload = client
+                .send(Request::DatasetImport { name, format, content, replace })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Dataset { dataset, findings } => Some(dataset_detail(dataset, findings)),
+                _ => None,
+            })
+        }
+        DatasetCmd::FromTasks { name, task_ids, scope, status } => {
+            let task_ids = if !task_ids.is_empty() {
+                task_ids
+            } else if scope.is_some() || status.is_some() {
+                let payload = client
+                    .send(Request::TaskList(TaskFilter { status, scope, limit: None }))
+                    .await?;
+                match payload {
+                    Payload::Tasks { tasks } => tasks.into_iter().map(|t| t.id).collect(),
+                    _ => return Err(anyhow!("unexpected answer to task.list")),
+                }
+            } else {
+                return Err(anyhow!(
+                    "name task ids directly, or select in bulk with --scope/--status"
+                ));
+            };
+            if task_ids.is_empty() {
+                return Err(anyhow!("no tasks matched; nothing to generate cases from"));
+            }
+            let payload = client
+                .send(Request::DatasetFromTasks { name, task_ids })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Dataset { dataset, findings } => Some(dataset_detail(dataset, findings)),
+                _ => None,
+            })
+        }
+        DatasetCmd::Rm { name } => {
+            let payload = client.send(Request::DatasetDelete { name: name.clone() }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Deleted { deleted } => Some(if *deleted {
+                    format!("deleted {name}")
+                } else {
+                    format!("no such dataset: {name}")
+                }),
+                _ => None,
+            })
+        }
+    }
+}
+
+fn dataset_summary_line(d: &DatasetSummary) -> String {
+    format!(
+        "{:<20} rev {:<4} {:>3} case(s), {:>3} gated{}",
+        d.name,
+        d.revision,
+        d.cases,
+        d.gated,
+        if d.findings.is_empty() {
+            String::new()
+        } else {
+            format!(", {} finding(s)", d.findings.len())
+        }
+    )
+}
+
+fn dataset_detail(d: &Dataset, findings: &[DatasetFinding]) -> String {
+    let mut out = format!(
+        "{}  rev {}{}\n",
+        d.name,
+        d.revision,
+        d.description.as_deref().map(|s| format!("  -- {s}")).unwrap_or_default()
+    );
+    if d.cases.is_empty() {
+        out.push_str("  no cases\n");
+    }
+    for c in &d.cases {
+        out.push_str(&format!(
+            "\n  {}  {}\n    scope {}  base {}  gate {}  reset {}\n",
+            c.id,
+            c.title,
+            c.scope,
+            c.base.as_deref().unwrap_or("scope HEAD"),
+            c.gate.as_deref().unwrap_or("-- unverified"),
+            c.reset.as_deref().unwrap_or("--"),
+        ));
+        if let Some(origin) = &c.origin {
+            out.push_str(&format!(
+                "    origin: task {} run {} outcome {} recorded {}\n",
+                origin.task, origin.run, origin.outcome, origin.recorded_at.to_rfc3339()
+            ));
+        }
+    }
+    if !findings.is_empty() {
+        out.push_str("\nFINDINGS\n");
+        for f in findings {
+            out.push_str(&format!("  {:?}  {}  {}\n", f.kind, f.case, f.detail));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+async fn bench_cmd(json: bool, client: &Client, cmd: BenchCmd) -> Result<()> {
+    match cmd {
+        BenchCmd::Run { dataset, agents, attempts, concurrency, cases } => {
+            let payload = client
+                .send(Request::BenchRunStart {
+                    dataset,
+                    agents,
+                    attempts: Some(attempts),
+                    concurrency: Some(concurrency),
+                    cases: if cases.is_empty() { None } else { Some(cases) },
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::BenchRun { run, results } => Some(bench_run_detail(run, results)),
+                _ => None,
+            })
+        }
+        BenchCmd::Runs { dataset } => {
+            let payload = client.send(Request::BenchRuns { dataset }).await?;
+            print(&payload, json, |p| match p {
+                Payload::BenchRuns { runs } => Some(if runs.is_empty() {
+                    "no bench runs".to_string()
+                } else {
+                    runs.iter().map(bench_run_line).collect::<Vec<_>>().join("\n")
+                }),
+                _ => None,
+            })
+        }
+        BenchCmd::Show { id } => {
+            let payload = client.send(Request::BenchRunGet { id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::BenchRun { run, results } => Some(bench_run_detail(run, results)),
+                _ => None,
+            })
+        }
+        BenchCmd::Cancel { id } => {
+            let payload = client.send(Request::BenchRunCancel { id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::BenchRun { run, results } => Some(bench_run_detail(run, results)),
+                _ => None,
+            })
+        }
+        BenchCmd::Clean { id } => {
+            let payload = client.send(Request::BenchRunClean { id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::BenchRun { run, .. } => Some(format!(
+                    "cleaned {} worktree(s) for {}",
+                    run.attempts.iter().filter(|a| a.run_id.is_some()).count(),
+                    run.id
+                )),
+                _ => None,
+            })
+        }
+    }
+}
+
 fn knowledge_write_text(p: &Payload) -> Option<String> {
     match p {
         Payload::KnowledgeWrite { copied, skipped_existing, skipped_hidden, refused, truncated } => {
@@ -654,6 +1002,73 @@ fn knowledge_write_text(p: &Payload) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn bench_run_line(r: &BenchRun) -> String {
+    let settled = r.attempts.iter().filter(|a| a.verdict.is_some()).count();
+    format!(
+        "{}  {}@{}  agents={}  {:<9} {}/{} settled",
+        &r.id[..8.min(r.id.len())],
+        r.dataset,
+        r.dataset_revision,
+        r.agents.join(","),
+        r.status.as_str(),
+        settled,
+        r.attempts.len(),
+    )
+}
+
+fn bench_run_detail(r: &BenchRun, results: &[BenchResult]) -> String {
+    let settled = r.attempts.iter().filter(|a| a.verdict.is_some()).count();
+    let mut out = format!(
+        "{}\n  dataset    {}@{}\n  agents     {}\n  status     {}\n  progress   {}/{} settled\n  started    {}\n",
+        r.id,
+        r.dataset,
+        r.dataset_revision,
+        r.agents.join(", "),
+        r.status.as_str(),
+        settled,
+        r.attempts.len(),
+        r.started_at.to_rfc3339(),
+    );
+    if let Some(ended) = r.ended_at {
+        out.push_str(&format!("  ended      {}\n", ended.to_rfc3339()));
+    }
+    out.push_str("\nRESULTS\n");
+    for res in results {
+        out.push_str(&format!(
+            "  {:<40} attempts={:<3} pass={:<3} fail={:<3} unverified={:<3} skipped={:<3} cancelled={:<3} error={:<3} resolve_rate={} mean_wall_clock={} cost=not recorded\n",
+            res.label,
+            res.attempts,
+            res.pass,
+            res.fail,
+            res.unverified,
+            res.skipped,
+            res.cancelled,
+            res.error,
+            res.resolve_rate.map(|r| format!("{r:.3}")).unwrap_or_else(|| "n/a".into()),
+            res.mean_wall_clock_seconds.map(|s| format!("{s:.0}s")).unwrap_or_else(|| "n/a".into()),
+        ));
+    }
+    out.push_str("\nATTEMPTS\n");
+    for a in &r.attempts {
+        out.push_str(&format!(
+            "  {:<24} {:<12} #{:<2} {:<10} {}\n",
+            a.case_id,
+            a.agent,
+            a.attempt,
+            a.verdict.map(verdict_str).unwrap_or("pending"),
+            a.task_id.as_deref().unwrap_or("--"),
+        ));
+        if let Some(reason) = &a.reason {
+            out.push_str(&format!("      {reason}\n"));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+fn verdict_str(v: Verdict) -> &'static str {
+    v.as_str()
 }
 
 async fn agent_cmd(json: bool, client: &Client, cmd: AgentCmd) -> Result<()> {
@@ -1283,6 +1698,13 @@ fn describe_event(e: &Event) -> String {
         Event::WorkflowUpdated { workflow } => format!("workflow updated  {} r{}", workflow.name, workflow.revision),
         Event::WorkflowDeleted { id } => format!("workflow deleted  {id}"),
         Event::WorkflowRunUpdated { run } => format!("workflow run  {}  {:?}", run.id, run.status),
+        Event::BenchRunUpdated { run } => format!(
+            "bench run  {}  {}  {}/{} settled",
+            run.id,
+            run.dataset,
+            run.attempts.iter().filter(|a| a.verdict.is_some()).count(),
+            run.attempts.len(),
+        ),
         Event::TaskEntry { id, entry } => format!(
             "entry    {}  {:<8} {}",
             &id[..8.min(id.len())],

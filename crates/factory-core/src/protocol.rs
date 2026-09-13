@@ -270,6 +270,81 @@ pub enum Request {
     /// run and nothing is scored -- see `benchmark::configurations`.
     #[serde(rename = "benchmarks")]
     Benchmarks,
+    /// Every dataset, summarized. Read-only.
+    #[serde(rename = "datasets")]
+    Datasets,
+    /// One dataset, in full -- every case.
+    #[serde(rename = "dataset")]
+    Dataset { name: String },
+    /// `factory dataset create`. `dataset.edit`, checked against the root
+    /// scope -- datasets are company-wide, not one project's.
+    #[serde(rename = "dataset.create")]
+    DatasetCreate {
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+    },
+    /// `factory dataset case add`.
+    #[serde(rename = "dataset.add_cases")]
+    DatasetAddCases {
+        name: String,
+        cases: Vec<crate::dataset::Case>,
+    },
+    /// `factory dataset import`. All or nothing: a bad case anywhere refuses
+    /// the whole file, naming every line or row and field that is wrong.
+    #[serde(rename = "dataset.import")]
+    DatasetImport {
+        name: String,
+        /// `jsonl`, `json`, `yaml`, `yml`, or `csv`.
+        format: String,
+        content: String,
+        #[serde(default)]
+        replace: bool,
+    },
+    /// `factory dataset from-tasks`. Each task becomes one case; a generated
+    /// case never carries a `gate`.
+    #[serde(rename = "dataset.from_tasks")]
+    DatasetFromTasks { name: String, task_ids: Vec<String> },
+    #[serde(rename = "dataset.delete_case")]
+    DatasetDeleteCase { name: String, id: String },
+    #[serde(rename = "dataset.delete")]
+    DatasetDelete { name: String },
+    /// `factory bench run`. `bench.run`, checked against the root scope, the
+    /// same as `dataset.edit`.
+    #[serde(rename = "bench.run")]
+    BenchRunStart {
+        dataset: String,
+        /// An agent name from each `--agent [<scope>/]<agent>`; only the
+        /// trailing name is kept, since the agent that actually resolves in
+        /// each case's own scope is what matters, not the scope a person
+        /// happened to find it under in the roster.
+        agents: Vec<String>,
+        #[serde(default)]
+        attempts: Option<u32>,
+        #[serde(default)]
+        concurrency: Option<u32>,
+        /// A subset of the dataset's cases. Absent means every case.
+        #[serde(default)]
+        cases: Option<Vec<String>>,
+    },
+    /// Every bench run, most recently updated first. Read-only.
+    #[serde(rename = "bench.runs")]
+    BenchRuns {
+        #[serde(default)]
+        dataset: Option<String>,
+    },
+    /// One bench run, with its attempts and the results aggregated from
+    /// them. Read-only.
+    #[serde(rename = "bench.run_get")]
+    BenchRunGet { id: String },
+    /// `factory bench cancel`.
+    #[serde(rename = "bench.cancel")]
+    BenchRunCancel { id: String },
+    /// `factory bench clean`. Owner-only: an explicit removal of exactly
+    /// this finished run's worktrees and branches. Refused while the run is
+    /// still going.
+    #[serde(rename = "bench.clean")]
+    BenchRunClean { id: String },
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -364,6 +439,25 @@ pub enum Payload {
     /// The L5 Benchmarks tab. Every configuration is `pinned: false` today --
     /// see `benchmark::Configuration`.
     Benchmarks { configurations: Vec<Configuration> },
+    /// Every dataset, summarized -- see `dataset::DatasetSummary`.
+    Datasets {
+        root: String,
+        datasets: Vec<crate::dataset::DatasetSummary>,
+    },
+    /// One dataset in full, with the findings against the live config a
+    /// summary already carries too.
+    Dataset {
+        dataset: crate::dataset::Dataset,
+        findings: Vec<crate::dataset::DatasetFinding>,
+    },
+    /// A bench run, with its attempts and the results aggregated from them
+    /// -- see `bench::aggregate`.
+    BenchRun {
+        run: crate::bench::BenchRun,
+        results: Vec<crate::bench::BenchResult>,
+    },
+    /// Every bench run, most recently updated first.
+    BenchRuns { runs: Vec<crate::bench::BenchRun> },
 }
 
 /// A request plus who is making it.
@@ -844,6 +938,115 @@ mod tests {
         let env: Envelope =
             serde_json::from_str(r#"{"op":"benchmarks"}"#).expect("request parses");
         assert!(matches!(env.request, Request::Benchmarks));
+    }
+
+    #[test]
+    fn a_datasets_request_is_a_read_without_parameters() {
+        let env: Envelope = serde_json::from_str(r#"{"op":"datasets"}"#).expect("request parses");
+        assert!(matches!(env.request, Request::Datasets));
+    }
+
+    #[test]
+    fn a_dataset_request_names_the_dataset() {
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"dataset","params":{"name":"registration"}}"#)
+                .expect("request parses");
+        assert!(matches!(env.request, Request::Dataset { name } if name == "registration"));
+    }
+
+    #[test]
+    fn a_dataset_create_request_round_trips() {
+        let json = r#"{"op":"dataset.create","params":{"name":"registration","description":"d"}}"#;
+        let env: Envelope = serde_json::from_str(json).expect("request parses");
+        match &env.request {
+            Request::DatasetCreate { name, description } => {
+                assert_eq!(name, "registration");
+                assert_eq!(description.as_deref(), Some("d"));
+            }
+            other => panic!("wrong request: {other:?}"),
+        }
+        let back = serde_json::to_string(&env).unwrap();
+        let again: Envelope = serde_json::from_str(&back).unwrap();
+        assert!(matches!(again.request, Request::DatasetCreate { .. }));
+    }
+
+    #[test]
+    fn a_bench_run_start_request_keeps_only_the_agent_names() {
+        let json = r#"{"op":"bench.run","params":{"dataset":"registration","agents":["builder"],"attempts":2,"concurrency":2}}"#;
+        let env: Envelope = serde_json::from_str(json).expect("request parses");
+        match env.request {
+            Request::BenchRunStart { dataset, agents, attempts, concurrency, cases } => {
+                assert_eq!(dataset, "registration");
+                assert_eq!(agents, vec!["builder".to_string()]);
+                assert_eq!(attempts, Some(2));
+                assert_eq!(concurrency, Some(2));
+                assert_eq!(cases, None);
+            }
+            other => panic!("wrong request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bench_runs_request_narrows_by_an_optional_dataset() {
+        let env: Envelope = serde_json::from_str(r#"{"op":"bench.runs","params":{}}"#)
+            .expect("no dataset is fine");
+        assert!(matches!(env.request, Request::BenchRuns { dataset: None }));
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"bench.runs","params":{"dataset":"registration"}}"#)
+                .expect("request parses");
+        assert!(matches!(env.request, Request::BenchRuns { dataset: Some(d) } if d == "registration"));
+    }
+
+    #[test]
+    fn a_datasets_payload_carries_the_wire_fields_the_issue_names() {
+        let response = Response::ok(Payload::Datasets {
+            root: "/inst/.factory/datasets".into(),
+            datasets: vec![crate::dataset::DatasetSummary {
+                name: "registration".into(),
+                description: Some("Registering a scope".into()),
+                revision: 3,
+                cases: 2,
+                gated: 1,
+                findings: vec![],
+            }],
+        });
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json.pointer("/data/kind").and_then(serde_json::Value::as_str), Some("datasets"));
+        assert_eq!(
+            json.pointer("/data/datasets/0/name").and_then(serde_json::Value::as_str),
+            Some("registration")
+        );
+        assert_eq!(json.pointer("/data/datasets/0/revision").and_then(serde_json::Value::as_u64), Some(3));
+    }
+
+    #[test]
+    fn a_bench_run_payload_carries_the_result_aggregation() {
+        use crate::bench::{BenchAttempt, BenchResult, BenchRun, BenchRunStatus, Verdict};
+        let mut attempt = BenchAttempt::pending("a1".into(), "add-scope".into(), "builder".into(), 1);
+        attempt.verdict = Some(Verdict::Pass);
+        let run = BenchRun {
+            id: "r1".into(),
+            dataset: "registration".into(),
+            dataset_revision: 3,
+            cases: vec![],
+            case_bases: Default::default(),
+            agents: vec!["builder".into()],
+            attempts_per_case: 1,
+            concurrency: 1,
+            status: BenchRunStatus::Done,
+            attempts: vec![attempt],
+            started_at: chrono::Utc::now(),
+            ended_at: Some(chrono::Utc::now()),
+        };
+        let results: Vec<BenchResult> = crate::bench::aggregate(&run.attempts);
+        let response = Response::ok(Payload::BenchRun { run, results });
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json.pointer("/data/kind").and_then(serde_json::Value::as_str), Some("bench_run"));
+        assert_eq!(
+            json.pointer("/data/run/status").and_then(serde_json::Value::as_str),
+            Some("done")
+        );
+        assert!(json.pointer("/data/results/0/resolve_rate").is_some());
     }
 
     #[test]

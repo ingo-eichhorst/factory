@@ -417,19 +417,80 @@ instance root may hold it.
 
 ## Benchmarks
 
-**v1 declares and displays; it runs nothing and records no score.**
-`factory bench` and `GET /api/benchmarks` group every agent Factory can
-dispatch — every declared agent, plus the foreman `daemon.foreman` would
-synthesize — into one configuration per distinct harness, full arguments, and
-sandbox, and say which of what a real score would need is recorded today.
+**v1 declared and displayed configurations and ran nothing. v2 adds datasets
+and the ability to run a dataset against chosen agents.**
 
-Today that is: the harness itself, and a model when a declaration's `args`
-spells out `--model`, `--model=`, or `-m`. Harness version, tool surface,
-context policy, and retry budget are recorded nowhere yet, so every
-configuration comes back `pinned: false`. No argument value but the extracted
-model ever reaches the payload — an `args` entry can be a secret, the same
-rule the Secrets tab already lives by, so everything else is reduced to its
-flag with the value elided.
+A *configuration* is still what it was: one distinct harness, full arguments,
+and sandbox that a task could be dispatched with today, including the foreman
+`daemon.foreman` would synthesize. `factory bench` with no subcommand, and
+`GET /api/benchmarks`, still show that inventory — the harness itself, and a
+model when a declaration's `args` spells out `--model`, `--model=`, or `-m`.
+Harness version, tool surface, context policy, and retry budget are recorded
+nowhere yet, so every configuration is still `pinned: false`. No argument
+value but the extracted model ever reaches a payload — an `args` entry can be
+a secret, the same rule the Secrets tab lives by, so everything else is
+reduced to its flag with the value elided; a bench attempt's own
+configuration snapshot follows the same rule, and its full arguments exist
+only long enough to be folded into a sha256 `config_hash` inside the daemon.
+
+A **dataset** is a set of cases, one file at
+`<root>/.factory/datasets/<name>.yaml` — authored content, like the knowledge
+vault, and the source of truth: it is re-parsed on every read, so a hand edit
+shows up on the next call, and `revision` bumps on every write Factory makes
+to it. A case names a scope, carries instructions, and may pin a `base`
+commit, a `reset` command that runs before an attempt starts, and a `gate`
+command whose exit status is the verdict. `gate` and `reset` run as the owner
+inside the attempt's own worktree — the same trust as the `shell` agent, and
+the dataset view says so. Datasets are built three ways: by hand
+(`factory dataset create` and `case add`), generated from recorded tasks
+(`factory dataset from-tasks`, which copies title, instructions and scope,
+records `origin` for reference only, and never sets a `gate`), or
+bulk-imported (`factory dataset import`, accepting `.jsonl`, `.json`,
+`.yaml`/`.yml`, or `.csv`; all-or-nothing, naming every line or row and field
+that is wrong).
+
+A **bench run** is `dataset@revision × agents × attempts`: a snapshot of the
+dataset's cases taken the moment it starts, so a later edit to the dataset
+never changes a run already going. Each case's `base` — its own pinned
+commit, or the scope's HEAD when the run starts — is resolved once, to the
+full commit SHA it names in that scope, so every agent's every attempt at a
+case branches from exactly the same commit and `git` itself only ever sees a
+SHA, never a case-authored string. A `base` that does not resolve to a
+commit there — a bad revision, or one that has since been rewritten away —
+never dispatches: every attempt at that case is `skipped`, with a reason
+naming the base, the same as an agent that does not resolve. Each attempt is
+one ordinary Factory task with its own worktree, so `--attempts N` means N
+independent tries, never "retry until it passes," and `--concurrency N`
+(default 1) bounds how many attempts are in flight at once.
+
+**The verdict.** A case's verdict is the exit status of its gate command,
+recorded with the exit code, the last 4 KiB of its combined output, and the
+attempt's wall-clock time — even when the agent itself reported `failed`, the
+gate still runs and is still the judge. Judging a settled attempt — which
+means running its gate — never happens on a caller's own path: a report, a
+cancel, the scheduler's own watchdog, and restart recovery all merely queue
+it, so a slow gate (up to the case's own timeout, ten minutes by default)
+never makes `factory task report` itself hang, and never stalls anything
+else the scheduler is doing meanwhile. A case with no gate still runs, and
+its result is `unverified`: the agent's own report of `done` or `failed`,
+shown but never counted in a resolve rate (`pass / (pass + fail)`; `null`
+when nothing was gated at all). A case whose reset command fails is
+`skipped` before the agent is ever dispatched — a case is never run dirty.
+An agent that does not resolve in a case's own scope is `skipped` with the
+reason, and the run continues past it. A run cancelled mid-flight settles
+every remaining attempt `cancelled`, even one whose judgement was already
+queued or under way — that verdict, once written, is never overwritten by a
+late judgement landing after the cancel. One lost, timed out, or that never
+got as far as a report before its run ended is `error`. Cost and tokens are
+still not recorded, and the payload says so rather than showing a `0`.
+
+`factory bench run <dataset> --agent <scope>/<agent> [--attempts N]
+[--concurrency N] [--case <id>]` starts a run; `factory bench runs`, `show`,
+`cancel` and `clean` list, inspect, stop, and — once a run is finished —
+remove exactly that run's worktrees and branches, explicitly, and only for
+the owner. Restarting the daemon mid-run resumes it: an attempt already
+settled but not yet judged is judged, one that never started is started, and
+one still in flight is left to the ordinary run watchdog.
 
 ## Tasks and runs
 
@@ -728,7 +789,12 @@ HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `GET /api/runs/{id}/entries`, `GET /api/runs/{id}/output`, `GET /api/agents`,
 `GET /api/agent-runtime`, `GET /api/environment`, `GET /api/knowledge`,
 `PUT /api/knowledge/files?path=&overwrite=` (raw bytes, its own 50 MiB body
-limit), `GET /api/benchmarks`, workflow CRUD under `/api/workflows`, workflow-run
+limit), `GET /api/benchmarks`, dataset CRUD under `/api/datasets` (plus
+`POST /api/datasets/{name}/cases`, `.../import` and `.../from-tasks`, and
+`DELETE /api/datasets/{name}/cases/{id}`), bench runs under
+`POST /api/bench/runs`, `GET /api/bench/runs[?dataset=]`,
+`GET /api/bench/runs/{id}`, `POST /api/bench/runs/{id}/cancel` and
+`.../clean`, workflow CRUD under `/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
 `POST /api/rpc` for the raw envelope. `GET /ws`
 is the event stream: a snapshot of every task first, then one message per event.
