@@ -228,7 +228,40 @@ fn case_problems(case: &Case) -> Vec<(String, String)> {
     if case.instructions.trim().is_empty() {
         out.push(("instructions".to_string(), "instructions is required".to_string()));
     }
+    if let Some(base) = &case.base {
+        if !is_git_revish(base) {
+            out.push((
+                "base".to_string(),
+                format!(
+                    "{base:?} is not a safe git revision (letters, digits, `.` `_` `/` `-`, \
+                     no leading `-`, no `..`)"
+                ),
+            ));
+        }
+    }
     out
+}
+
+/// A conservative shape for a case's `base`: this is never trusted to *name
+/// an existing commit* here -- that needs a live git repository, which this
+/// module never touches -- only to be a string git's own argument parser
+/// cannot mistake for an option or a path-escaping revision range. No
+/// leading `-` (refuses `--detach`, `-b`, and the like, which git would
+/// otherwise parse as flags) and no `..` (refuses a range like `a..b` where
+/// a single commit is meant). `factory-daemon/src/bench/engine.rs` checks
+/// this again itself before ever building a `git` command line -- a
+/// hand-edited dataset file bypasses this check entirely, since it never
+/// goes through `validate()`.
+pub fn is_git_revish(s: &str) -> bool {
+    if s.is_empty() || s.contains("..") {
+        return false;
+    }
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
 }
 
 /// The one finding kind a dataset carries today: a case names a scope the
@@ -708,6 +741,41 @@ mod tests {
         assert!(e.contains("title"), "{e}");
         assert!(e.contains("scope"), "{e}");
         assert!(e.contains("instructions"), "{e}");
+    }
+
+    /// Reported by QA, reproduced live: `"base":"--detach"` reached `git`
+    /// unvalidated and was parsed as a flag rather than a revision. A `base`
+    /// must be shaped like a revision `git` could only ever read as one --
+    /// checked at write time here; `factory-daemon/src/bench/engine.rs`
+    /// checks it again itself, right before ever building a `git` command
+    /// line, since a hand-edited dataset file skips `validate()` entirely.
+    #[test]
+    fn a_base_shaped_like_a_git_option_or_a_range_is_refused() {
+        let mut ds = Dataset::new("demo", None);
+        let mut bad = case("a");
+        bad.base = Some("--detach".into());
+        ds.cases.push(bad);
+        let e = ds.validate().unwrap_err().to_string();
+        assert!(e.contains("base"), "{e}");
+        assert!(e.contains("--detach"), "{e}");
+
+        let mut ds = Dataset::new("demo", None);
+        let mut bad = case("a");
+        bad.base = Some("main..feature".into());
+        ds.cases.push(bad);
+        let e = ds.validate().unwrap_err().to_string();
+        assert!(e.contains("base"), "{e}");
+
+        // A bad shape is refused at write time; an unresolvable-but-well-
+        // shaped one (a commit that plausibly never existed) is not this
+        // module's problem to catch -- `resolve_commit` at bench-run start
+        // is what checks a `base` actually names a commit, since only that
+        // needs a live git repository.
+        let mut ds = Dataset::new("demo", None);
+        let mut ok = case("a");
+        ok.base = Some("deadbeef".into());
+        ds.cases.push(ok);
+        ds.validate().unwrap();
     }
 
     #[test]

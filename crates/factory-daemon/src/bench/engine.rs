@@ -55,18 +55,37 @@ async fn run_shell_capture(dir: &Path, command: &str, timeout_secs: u64) -> (Opt
     }
 }
 
-async fn scope_head(scope_path: &Path) -> std::result::Result<String, String> {
+/// Resolve `rev` to the full 40-hex commit SHA it names in `scope_path`, or
+/// `None` when it does not name one there -- an unknown revision, or `rev`
+/// itself not even shaped like one. Checked here as well as at write time
+/// (`Case::validate`'s `is_git_revish`): a hand-edited dataset file never
+/// goes through `validate()` at all, and `--end-of-options` on top of that
+/// keeps `git` from ever reading `rev` as a flag (a `base` of `--detach`
+/// would otherwise be parsed as one) even if both checks were somehow
+/// skipped. Recording the resolved SHA rather than `rev` itself is what
+/// lets `worktree::create` hand `git` a value it can never mistake for
+/// anything but a commit.
+async fn resolve_commit(scope_path: &Path, rev: &str) -> Option<String> {
+    if !factory_core::dataset::is_git_revish(rev) {
+        return None;
+    }
     let output = tokio::process::Command::new("git")
         .arg("-C")
         .arg(scope_path)
-        .args(["rev-parse", "HEAD"])
+        .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
+        .arg(format!("{rev}^{{commit}}"))
         .output()
         .await
-        .map_err(|e| e.to_string())?;
+        .ok()?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        return None;
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
 }
 
 impl Engine {
@@ -81,6 +100,7 @@ impl Engine {
         concurrency: u32,
         case_ids: Option<Vec<String>>,
     ) -> Result<BenchRun> {
+        crate::datasets::refuse_bad_name(dataset_name)?;
         if agents.is_empty() {
             return Err(FactoryError::BadRequest(
                 "a bench run needs at least one --agent".into(),
@@ -118,35 +138,58 @@ impl Engine {
             ));
         }
 
-        // Resolved once, now: every agent's attempt at a case must start from
-        // the same commit, so a case without its own `base` gets the scope's
-        // HEAD pinned here rather than re-read at each attempt's own dispatch.
-        // Best-effort -- a scope that cannot be reached yet is not a reason to
-        // refuse the whole run; `resolve_agent` refuses its own cases later,
-        // by name, once dispatch actually gets there.
+        // Resolved once, now, to the full commit SHA: every agent's attempt
+        // at a case must start from the same commit, so a case without its
+        // own `base` gets the scope's HEAD pinned here rather than re-read
+        // at each attempt's own dispatch, and `git` downstream only ever
+        // sees a SHA, never a case-supplied string. A scope that is not
+        // configured at all is left out of both maps -- `resolve_agent`
+        // refuses those attempts later, by name, with a message specific to
+        // the missing scope. A scope that *is* reachable but whose `base`
+        // (given, or the implied `HEAD`) does not resolve to a commit there
+        // never dispatches at all: recorded in `unresolved` below, and every
+        // attempt at that case is marked `skipped` instead of pending.
         let mut case_bases = std::collections::BTreeMap::new();
+        let mut unresolved: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         for case in &cases {
-            if let Some(base) = &case.base {
-                case_bases.insert(case.id.clone(), base.clone());
+            let Ok(scope_path) = factory.scope_path(&case.scope) else {
                 continue;
-            }
-            if let Ok(scope_path) = factory.scope_path(&case.scope) {
-                if let Ok(head) = scope_head(&scope_path).await {
-                    case_bases.insert(case.id.clone(), head);
+            };
+            let wanted = case.base.as_deref().unwrap_or("HEAD");
+            match resolve_commit(&scope_path, wanted).await {
+                Some(sha) => {
+                    case_bases.insert(case.id.clone(), sha);
+                }
+                None => {
+                    unresolved.insert(
+                        case.id.clone(),
+                        format!(
+                            "base {wanted:?} does not resolve to a commit in scope {:?}",
+                            case.scope
+                        ),
+                    );
                 }
             }
         }
 
+        let now = Utc::now();
         let mut attempts = Vec::new();
         for case in &cases {
             for agent in &agents {
                 for n in 1..=attempts_per_case {
-                    attempts.push(BenchAttempt::pending(
+                    let mut attempt = BenchAttempt::pending(
                         uuid::Uuid::new_v4().to_string(),
                         case.id.clone(),
                         agent.clone(),
                         n,
-                    ));
+                    );
+                    if let Some(reason) = unresolved.get(&case.id) {
+                        attempt.verdict = Some(Verdict::Skipped);
+                        attempt.reason = Some(reason.clone());
+                        attempt.started_at = Some(now);
+                        attempt.ended_at = Some(now);
+                    }
+                    attempts.push(attempt);
                 }
             }
         }
@@ -344,52 +387,81 @@ impl Engine {
         }
     }
 
-    /// Judge a bench attempt once its task's run has settled, and nothing
-    /// more -- called at every site `record_workflow_task_state` is (a
-    /// dispatch that ends before any report at all: `start_run`'s two
-    /// branches, and `fail_run`), all of which `advance_bench_run`'s own
-    /// spawned continuations can reach. Deliberately does not advance the
-    /// run afterward: see `sync_bench_for_task`, which does, and why that
-    /// has to live in a function these dispatch-path sites never call.
+    /// Enqueue `task_id` for the judge worker (`spawn_bench_judge`) to look
+    /// at once its task's run has settled. Judging -- which means running
+    /// the case's own `gate`, for up to its own timeout or the ten-minute
+    /// default -- must never run on the caller's own path: this used to
+    /// call `judge_bench_attempt` directly and was split from
+    /// `sync_bench_for_task` only to dodge an `E0391` compiler cycle
+    /// through `advance_bench_run`'s spawned continuations. Enqueueing
+    /// instead of calling removes the cycle at its root (nothing here calls
+    /// back into `advance_bench_run`'s own opaque future type at all), so
+    /// the split is kept only for the two names' separate call-site
+    /// histories -- both do exactly the same thing now.
     ///
-    /// A no-op when the task carries no `bench_origin`, when its run is not
-    /// terminal yet, or when the attempt already has a verdict -- which is
-    /// what makes calling this (or `sync_bench_for_task`) more than once for
-    /// the same settle safe.
+    /// A no-op when the task carries no `bench_origin`, or when it is
+    /// already enqueued or being judged -- which is what makes calling this
+    /// (or `sync_bench_for_task`) more than once for the same settle safe,
+    /// without ever running the same case's gate command twice.
     pub(crate) async fn record_bench_task_state(self: &Arc<Self>, task_id: &str) {
-        let Ok(Some(task)) = self.store.get(task_id).await else { return };
-        let Some(origin) = task.bench_origin.clone() else { return };
+        self.enqueue_bench_judgement(task_id).await;
+    }
 
-        // One judgement per attempt, ever. A report and a cancel racing each
-        // other, or a live call racing recovery's own sweep, must never run
-        // the same case's gate command twice.
+    /// The same enqueue. Kept as its own name for the call sites that used
+    /// to need it to also advance the run afterward (`TaskReport`,
+    /// `TaskCancel`, restart recovery) -- the worker does that unconditionally
+    /// now, for every enqueue, so there is nothing left for this to do that
+    /// `record_bench_task_state` does not.
+    pub(crate) async fn sync_bench_for_task(self: &Arc<Self>, task_id: &str) {
+        self.enqueue_bench_judgement(task_id).await;
+    }
+
+    async fn enqueue_bench_judgement(&self, task_id: &str) {
+        let Ok(Some(task)) = self.store.get(task_id).await else { return };
+        if task.bench_origin.is_none() {
+            return;
+        }
         {
             let mut judging = self.bench_judging.lock().unwrap();
             if !judging.insert(task_id.to_string()) {
-                return;
+                return; // already queued, or the worker is on it right now
             }
         }
-        if let Err(e) = self.judge_bench_attempt(&origin, &task).await {
-            tracing::warn!(task = task_id, "could not judge bench attempt: {e}");
-        }
-        self.bench_judging.lock().unwrap().remove(task_id);
+        let _ = self.bench_judge_tx.send(task_id.to_string());
     }
 
-    /// The same, and then try to advance the run -- judging just settled an
-    /// attempt, which may have freed a concurrency slot. Called only from
-    /// request-level entry points (`TaskReport`, `TaskCancel`) and restart
-    /// recovery: none of those are ever reachable from inside
-    /// `advance_bench_run`'s own call tree, which is what makes calling
-    /// `advance_bench_run` from here safe rather than a cycle.
-    pub(crate) async fn sync_bench_for_task(self: &Arc<Self>, task_id: &str) {
-        let Ok(Some(task)) = self.store.get(task_id).await else { return };
-        let Some(origin) = task.bench_origin.clone() else { return };
-        self.record_bench_task_state(task_id).await;
-        let _ = self.advance_bench_run(&origin.bench_run_id).await;
+    /// The judge worker: the one place a bench attempt's gate actually
+    /// runs. Started once, at daemon startup (`main.rs`, right before
+    /// `recover_bench_runs`), and processes one task id at a time for the
+    /// life of the daemon -- sequential on purpose, so two enqueues of the
+    /// same task id can never run its gate twice (the second sees the first
+    /// attempt's verdict already set and is a fast no-op in
+    /// `judge_bench_attempt`), at the cost of one slow gate delaying every
+    /// other bench run's judgement behind it in the queue. A second call
+    /// (there should never be one) is a no-op: the receiver is taken once,
+    /// the first time, and `None` after.
+    pub fn spawn_bench_judge(self: &Arc<Self>) {
+        let Some(mut rx) = self.bench_judge_rx.lock().unwrap().take() else {
+            return;
+        };
+        let engine = self.clone();
+        tokio::spawn(async move {
+            while let Some(task_id) = rx.recv().await {
+                if let Ok(Some(task)) = engine.store.get(&task_id).await {
+                    if let Some(origin) = task.bench_origin.clone() {
+                        if let Err(e) = engine.judge_bench_attempt(&origin, &task).await {
+                            tracing::warn!(task = %task_id, "could not judge bench attempt: {e}");
+                        }
+                        let _ = engine.advance_bench_run(&origin.bench_run_id).await;
+                    }
+                }
+                engine.bench_judging.lock().unwrap().remove(&task_id);
+            }
+        });
     }
 
     async fn judge_bench_attempt(self: &Arc<Self>, origin: &BenchOrigin, task: &Task) -> Result<()> {
-        let Some(mut run) = self.bench.get_run(&origin.bench_run_id).await? else {
+        let Some(run) = self.bench.get_run(&origin.bench_run_id).await? else {
             return Ok(());
         };
         let Some(idx) = run.attempts.iter().position(|a| {
@@ -400,6 +472,12 @@ impl Engine {
         if run.attempts[idx].verdict.is_some() {
             return Ok(()); // already settled -- the idempotency this exists for
         }
+        // A local copy, not a borrow of `run` -- the gate below can run for
+        // minutes, and `finish_bench_judgement` re-reads the run's own
+        // current state itself rather than trusting this snapshot to still
+        // be true by the time it writes anything back. See its own doc
+        // comment for why.
+        let mut attempt = run.attempts[idx].clone();
 
         let now = Utc::now();
         let task_run = self.store.runs(&task.id, 1).await?.into_iter().next();
@@ -411,7 +489,6 @@ impl Engine {
             if !task.status.is_terminal() {
                 return Ok(());
             }
-            let attempt = &mut run.attempts[idx];
             attempt.verdict = Some(if task.status == TaskStatus::Cancelled {
                 Verdict::Cancelled
             } else {
@@ -424,7 +501,7 @@ impl Engine {
             attempt.started_at = Some(task.created_at);
             attempt.ended_at = Some(now);
             attempt.wall_clock_seconds = Some((now - task.created_at).num_seconds());
-            return self.finish_bench_judgement(run, idx, task).await;
+            return self.finish_bench_judgement(&origin.bench_run_id, task, attempt).await;
         };
 
         if !task_run.status.is_terminal() {
@@ -432,36 +509,33 @@ impl Engine {
         }
 
         let ended_at = task_run.ended_at.unwrap_or(now);
-        {
-            let attempt = &mut run.attempts[idx];
-            attempt.run_id = Some(task_run.id.clone());
-            attempt.started_at = Some(task_run.started_at);
-            attempt.ended_at = Some(ended_at);
-            attempt.wall_clock_seconds = Some((ended_at - task_run.started_at).num_seconds());
-        }
+        attempt.run_id = Some(task_run.id.clone());
+        attempt.started_at = Some(task_run.started_at);
+        attempt.ended_at = Some(ended_at);
+        attempt.wall_clock_seconds = Some((ended_at - task_run.started_at).num_seconds());
 
         let case = run.cases.iter().find(|c| c.id == origin.case_id).cloned();
 
         match task_run.status {
             RunStatus::Cancelled => {
-                run.attempts[idx].verdict = Some(Verdict::Cancelled);
+                attempt.verdict = Some(Verdict::Cancelled);
             }
             RunStatus::Done => {
-                run.attempts[idx].reported = Some("done".to_string());
-                self.judge_with_gate_or_unverified(&mut run, idx, case.as_ref(), &task_run).await;
+                attempt.reported = Some("done".to_string());
+                self.judge_with_gate_or_unverified(&mut attempt, case.as_ref(), &task_run).await;
             }
             RunStatus::Failed => {
                 if self.was_reported_by_agent(&task_run.id).await {
-                    run.attempts[idx].reported = Some("failed".to_string());
-                    self.judge_with_gate_or_unverified(&mut run, idx, case.as_ref(), &task_run).await;
+                    attempt.reported = Some("failed".to_string());
+                    self.judge_with_gate_or_unverified(&mut attempt, case.as_ref(), &task_run).await;
                 } else {
                     let error = task_run.error.clone().unwrap_or_default();
                     if error.contains("reset failed") {
-                        run.attempts[idx].verdict = Some(Verdict::Skipped);
-                        run.attempts[idx].reason = Some(error);
+                        attempt.verdict = Some(Verdict::Skipped);
+                        attempt.reason = Some(error);
                     } else {
-                        run.attempts[idx].verdict = Some(Verdict::Error);
-                        run.attempts[idx].reason = Some(if error.is_empty() {
+                        attempt.verdict = Some(Verdict::Error);
+                        attempt.reason = Some(if error.is_empty() {
                             "the run ended before any report came back".to_string()
                         } else {
                             error
@@ -474,7 +548,7 @@ impl Engine {
             }
         }
 
-        self.finish_bench_judgement(run, idx, task).await
+        self.finish_bench_judgement(&origin.bench_run_id, task, attempt).await
     }
 
     /// Whether the agent itself ever reported a terminal outcome for this
@@ -496,32 +570,32 @@ impl Engine {
     /// own worktree and record exit code, output, and pass/fail. Runs even
     /// when the agent reported `failed` -- the gate is the judge, not the
     /// agent's own word.
-    async fn judge_with_gate_or_unverified(
-        &self,
-        run: &mut BenchRun,
-        idx: usize,
-        case: Option<&Case>,
-        task_run: &Run,
-    ) {
+    ///
+    /// Takes a bare `BenchAttempt` rather than a borrow into a `BenchRun`:
+    /// the gate below can run for the case's own timeout, up to ten minutes
+    /// by default, and nothing here should hold, or silently go stale
+    /// against, the run's own state for that long. `finish_bench_judgement`
+    /// re-reads the run fresh once this returns.
+    async fn judge_with_gate_or_unverified(&self, attempt: &mut BenchAttempt, case: Option<&Case>, task_run: &Run) {
         let Some(case) = case else {
-            run.attempts[idx].verdict = Some(Verdict::Error);
-            run.attempts[idx].reason = Some("the case no longer exists in this run's snapshot".into());
+            attempt.verdict = Some(Verdict::Error);
+            attempt.reason = Some("the case no longer exists in this run's snapshot".into());
             return;
         };
         let Some(gate) = &case.gate else {
-            run.attempts[idx].verdict = Some(Verdict::Unverified);
+            attempt.verdict = Some(Verdict::Unverified);
             return;
         };
         let Some(dir) = task_run.worktree_path.as_ref() else {
-            run.attempts[idx].verdict = Some(Verdict::Error);
-            run.attempts[idx].reason = Some("no worktree recorded for this run; the gate could not be run".into());
+            attempt.verdict = Some(Verdict::Error);
+            attempt.reason = Some("no worktree recorded for this run; the gate could not be run".into());
             return;
         };
         let timeout = case.timeout_seconds.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS);
         let (exit_code, output) = run_shell_capture(Path::new(dir), gate, timeout).await;
-        run.attempts[idx].gate_exit_code = exit_code;
-        run.attempts[idx].gate_output = Some(tail_4kib(&output));
-        run.attempts[idx].verdict = Some(if exit_code == Some(0) { Verdict::Pass } else { Verdict::Fail });
+        attempt.gate_exit_code = exit_code;
+        attempt.gate_output = Some(tail_4kib(&output));
+        attempt.verdict = Some(if exit_code == Some(0) { Verdict::Pass } else { Verdict::Fail });
     }
 
     /// Persist the verdict, write it onto the task's own timeline, and
@@ -532,9 +606,32 @@ impl Engine {
     /// doc comment explains. `sync_bench_for_task` advances after calling
     /// the judging path that leads here; the scheduler's periodic sweep is
     /// the safety net for the paths that only reach `record_bench_task_state`.
-    async fn finish_bench_judgement(self: &Arc<Self>, mut run: BenchRun, idx: usize, task: &Task) -> Result<()> {
-        let attempt = run.attempts[idx].clone();
-        self.bench.put_attempt(&run.id, &attempt).await?;
+    ///
+    /// Re-reads the run fresh under `bench_edit` rather than trusting
+    /// whatever `judge_bench_attempt` saw before the gate ran (which can
+    /// take minutes): a `cancel_bench_run` landing in that window may have
+    /// already moved the run to `Cancelled`, or its own settle-whatever's-
+    /// left pass may have already given this very attempt a `Cancelled`
+    /// verdict of its own. Either way, that decision stands -- this one
+    /// checks the attempt is still unsettled in the fresh read before
+    /// writing anything, and never flips a run that is not still `Running`.
+    async fn finish_bench_judgement(self: &Arc<Self>, run_id: &str, task: &Task, attempt: BenchAttempt) -> Result<()> {
+        let _guard = self.bench_edit.lock().await;
+        let Some(mut run) = self.bench.get_run(run_id).await? else {
+            return Ok(());
+        };
+        let Some(idx) = run.attempts.iter().position(|a| a.id == attempt.id) else {
+            return Ok(());
+        };
+        if run.attempts[idx].verdict.is_some() {
+            // Settled by somebody else -- a concurrent cancel's own pass --
+            // while the gate above was running. That verdict stands; this
+            // one is dropped rather than overwriting it.
+            return Ok(());
+        }
+        run.attempts[idx] = attempt.clone();
+
+        self.bench.put_attempt(run_id, &attempt).await?;
         self.entry(
             &task.id,
             TaskEntry::new(
@@ -546,12 +643,12 @@ impl Engine {
         )
         .await;
 
-        if run.attempts.iter().all(|a| a.verdict.is_some()) && run.status == BenchRunStatus::Running {
+        if run.status == BenchRunStatus::Running && run.attempts.iter().all(|a| a.verdict.is_some()) {
             run.status = BenchRunStatus::Done;
             run.ended_at = Some(Utc::now());
+            self.bench.put_run(&run).await?;
         }
-        self.bench.put_run(&run).await?;
-        self.bus.publish(Event::BenchRunUpdated { run: run.clone() });
+        self.bus.publish(Event::BenchRunUpdated { run });
         Ok(())
     }
 
@@ -591,31 +688,45 @@ impl Engine {
             if self.store.active_run(task_id).await.ok().flatten().is_some() {
                 let _ = self.cancel_task_run(task_id).await;
             }
-            // `cancel_task_run` closes the run but, unlike the request-level
-            // `TaskCancel` path, never itself judges the attempt behind it --
-            // so without this, the attempt would reach the settle-whatever's-
-            // left pass below with no `run_id`, no `started_at`, and no
-            // `wall_clock_seconds`, and its worktree would never be
-            // reachable by `clean_bench_run` again. Safe to call
-            // unconditionally: a no-op cycle (E0391) is not a risk here --
-            // `cancel_bench_run` is never on `advance_bench_run`'s own spawn
-            // tree -- and a no-op read of what already happened is fine when
-            // there was nothing to cancel.
+            // Best-effort: `judge_bench_attempt`, via the worker, may settle
+            // this properly (with `reported`, and whatever the case's own
+            // gate says) before the fallback pass below ever gets to it.
+            // Not load-bearing for correctness either way -- that pass fills
+            // in `run_id` itself now, and `finish_bench_judgement` (see its
+            // own doc comment) never overwrites a verdict this fallback
+            // already gave it, whichever lands first.
             self.record_bench_task_state(task_id).await;
         }
 
         // Settle whatever the cancellation above did not already -- a task
         // already terminal for some other reason (it happened to finish in
-        // the gap between the two locked sections) is left with whatever
-        // verdict a concurrent judgement already gave it.
+        // the gap between the two locked sections), or one the async judge
+        // worker has not reached yet, is left with whatever verdict a
+        // concurrent judgement already gave it. Anything still unsettled is
+        // marked `cancelled` directly, with `run_id` and timing looked up
+        // from the store when it was dispatched -- `clean_bench_run` needs
+        // exactly that `run_id` to find this attempt's worktree, and
+        // nothing here can assume the worker got to it first.
         let _guard = self.bench_edit.lock().await;
         let mut run = self.bench.get_run(run_id).await?.ok_or_else(|| missing("bench run", run_id))?;
-        for attempt in &mut run.attempts {
-            if attempt.verdict.is_some() {
+        for idx in 0..run.attempts.len() {
+            if run.attempts[idx].verdict.is_some() {
                 continue;
             }
-            attempt.verdict = Some(Verdict::Cancelled);
-            attempt.ended_at = Some(Utc::now());
+            let now = Utc::now();
+            if let Some(task_id) = run.attempts[idx].task_id.clone() {
+                if let Ok(Some(task_run)) = self.store.runs(&task_id, 1).await.map(|mut v| v.pop()) {
+                    let ended_at = task_run.ended_at.unwrap_or(now);
+                    run.attempts[idx].run_id = Some(task_run.id.clone());
+                    run.attempts[idx].started_at = Some(task_run.started_at);
+                    run.attempts[idx].ended_at = Some(ended_at);
+                    run.attempts[idx].wall_clock_seconds = Some((ended_at - task_run.started_at).num_seconds());
+                }
+            }
+            run.attempts[idx].verdict = Some(Verdict::Cancelled);
+            if run.attempts[idx].ended_at.is_none() {
+                run.attempts[idx].ended_at = Some(now);
+            }
         }
         for attempt in &run.attempts {
             self.bench.put_attempt(run_id, attempt).await?;
@@ -700,7 +811,7 @@ mod tests {
     use factory_core::adapter::TaskStore;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
     use factory_core::run::{NewRun, RunPatch};
-    use factory_core::task::NewTask;
+    use factory_core::task::{NewTask, TaskReport};
     use factory_plugins::{Registry, SqliteStore};
 
     fn test_engine(scope_path: std::path::PathBuf) -> Arc<Engine> {
@@ -729,13 +840,66 @@ mod tests {
         };
         let registry = Registry::with_builtins();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
-        Arc::new(Engine::new(factory, registry, store, std::path::PathBuf::from("factory"), Vec::new()))
+        let engine = Arc::new(Engine::new(factory, registry, store, std::path::PathBuf::from("factory"), Vec::new()));
+        // Judging happens off the caller's path now (see `spawn_bench_judge`),
+        // so any test that enqueues a judgement needs a worker actually
+        // running to pick it up -- exactly what a real daemon does at
+        // startup.
+        engine.spawn_bench_judge();
+        engine
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("factory-bench-engine-test-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A real git repository with one commit, for the tests that need
+    /// `resolve_commit` to actually resolve something. Returns the full
+    /// 40-hex SHA of that commit.
+    async fn init_repo_with_a_commit(dir: &std::path::Path) -> String {
+        async fn run(dir: &std::path::Path, args: &[&str]) {
+            assert!(tokio::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .await
+                .unwrap()
+                .success());
+        }
+        run(dir, &["init", "-q"]).await;
+        run(dir, &["config", "user.email", "factory@example.com"]).await;
+        run(dir, &["config", "user.name", "factory"]).await;
+        std::fs::write(dir.join("f.txt"), "hi").unwrap();
+        run(dir, &["add", "f.txt"]).await;
+        run(dir, &["commit", "-q", "-m", "initial"]).await;
+        let out = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Poll `bench.get_run` until the run's first attempt has a verdict, or
+    /// give up -- judging now happens on a worker off the caller's own path,
+    /// so a test can no longer assume it is done the instant
+    /// `record_bench_task_state`/`sync_bench_for_task` returns.
+    async fn wait_for_settled(engine: &Arc<Engine>, run_id: &str) -> BenchRun {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(Some(run)) = engine.bench.get_run(run_id).await {
+                if run.attempts.iter().all(|a| a.verdict.is_some()) {
+                    return run;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("bench run {run_id} did not settle within 5s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     /// One case, one pending attempt, and a `BenchRun` holding just that --
@@ -838,7 +1002,7 @@ mod tests {
 
         engine.record_bench_task_state(&task.id).await;
 
-        let settled = engine.bench.get_run(&origin.bench_run_id).await.unwrap().unwrap();
+        let settled = wait_for_settled(&engine, &origin.bench_run_id).await;
         let attempt = &settled.attempts[0];
         assert_eq!(attempt.verdict, Some(Verdict::Skipped), "{attempt:?}");
         assert!(
@@ -899,7 +1063,7 @@ mod tests {
 
         engine.record_bench_task_state(&task.id).await;
 
-        let settled = engine.bench.get_run(&origin.bench_run_id).await.unwrap().unwrap();
+        let settled = wait_for_settled(&engine, &origin.bench_run_id).await;
         let attempt = &settled.attempts[0];
         assert_eq!(attempt.verdict, Some(Verdict::Error), "{attempt:?}");
     }
@@ -965,7 +1129,7 @@ mod tests {
 
         engine.record_bench_task_state(&task.id).await;
 
-        let settled = engine.bench.get_run(&origin.bench_run_id).await.unwrap().unwrap();
+        let settled = wait_for_settled(&engine, &origin.bench_run_id).await;
         let attempt = &settled.attempts[0];
         assert_eq!(attempt.reported.as_deref(), Some("failed"), "{attempt:?}");
         assert_eq!(
@@ -1088,5 +1252,373 @@ mod tests {
             "a cancelled in-flight attempt must still carry the run id `clean_bench_run` \
              needs to find its worktree: {attempt:?}"
         );
+    }
+
+    /// Reported by QA, not found by inspection: `judge_bench_attempt` reads
+    /// the run once, then a slow gate can run for minutes before
+    /// `finish_bench_judgement` ever writes anything back. A
+    /// `cancel_bench_run` landing in that window used to be clobbered --
+    /// the stale snapshot's `put_run` wrote the run back to `Running`/`Done`,
+    /// and the late verdict overwrote the attempt's own `Cancelled`. Fixed
+    /// by having `finish_bench_judgement` re-read the run fresh, under
+    /// `bench_edit`, and refuse to write over an attempt someone else
+    /// already settled.
+    #[tokio::test]
+    async fn a_cancel_landing_during_a_slow_gate_is_never_clobbered_by_the_late_verdict() {
+        let scope_dir = temp_dir("cancel-during-gate");
+        let engine = test_engine(scope_dir.clone());
+
+        let case = Case {
+            id: "slow-gate-case".into(),
+            title: "a case whose gate takes a moment".into(),
+            scope: "demo".into(),
+            instructions: "true".into(),
+            gate: Some("sleep 1; true".into()),
+            reset: None,
+            base: None,
+            timeout_seconds: Some(30),
+            origin: None,
+        };
+        let (origin, task) = seed(&engine, "run-cancel-during-gate", case, "shell").await;
+
+        let task_run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Bench,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "local".into(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &task_run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    worktree_path: Some(scope_dir.to_string_lossy().to_string()),
+                    ended_at: Some(Utc::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        engine
+            .store
+            .append_entry(
+                &task.id,
+                &TaskEntry::new("agent", "done", "finished").in_run(task_run.id.clone()),
+            )
+            .await
+            .unwrap();
+
+        // `seed` starts the attempt pending (no `task_id` yet); already
+        // dispatched and in flight is what this test needs, so it is
+        // patched in directly -- this is exactly the shape
+        // `cancel_bench_run`'s in-flight branch expects.
+        let mut run = engine.bench.get_run(&origin.bench_run_id).await.unwrap().unwrap();
+        run.attempts[0].task_id = Some(task.id.clone());
+        engine.bench.put_attempt(&run.id, &run.attempts[0]).await.unwrap();
+
+        // Start judging in the background: its gate sleeps for a second,
+        // simulating the window a cancel can land in.
+        let judging_engine = engine.clone();
+        let judging_task_id = task.id.clone();
+        let handle = tokio::spawn(async move {
+            judging_engine.record_bench_task_state(&judging_task_id).await;
+        });
+
+        // Give the gate time to actually be running before cancelling.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let cancelled = engine.cancel_bench_run(&origin.bench_run_id).await.unwrap();
+        assert_eq!(cancelled.status, BenchRunStatus::Cancelled);
+
+        handle.await.unwrap();
+
+        let settled = wait_for_settled(&engine, &origin.bench_run_id).await;
+        let attempt = &settled.attempts[0];
+        assert_eq!(
+            attempt.verdict,
+            Some(Verdict::Cancelled),
+            "a cancel that lands while the gate is still running must win, not the late \
+             Pass the gate computes afterward: {attempt:?}"
+        );
+        assert_eq!(
+            settled.status,
+            BenchRunStatus::Cancelled,
+            "the run's own status must not be flipped back to Done by the late judgement"
+        );
+    }
+
+    /// Reported by QA: judging used to run inline on the reporting agent's
+    /// own path, so a case with `gate: "sleep 15; true"` made `factory task
+    /// report` itself hang for 15 seconds. Judging now only ever happens on
+    /// `spawn_bench_judge`'s worker (see `enqueue_bench_judgement`), so
+    /// `report` -- and `sync_bench_for_task` right after it, exactly what
+    /// `dispatch_request`'s `TaskReport` arm calls -- must return well
+    /// before the gate below (2s) does, and the verdict must still show up
+    /// once the worker gets to it.
+    #[tokio::test]
+    async fn a_report_on_a_slow_gated_attempt_returns_promptly_and_the_verdict_appears_afterward() {
+        let scope_dir = temp_dir("report-returns-promptly");
+        let engine = test_engine(scope_dir.clone());
+
+        let case = Case {
+            id: "slow-gate-case".into(),
+            title: "a case whose gate is slow".into(),
+            scope: "demo".into(),
+            instructions: "true".into(),
+            gate: Some("sleep 2; true".into()),
+            reset: None,
+            base: None,
+            timeout_seconds: Some(30),
+            origin: None,
+        };
+        let (origin, task) = seed(&engine, "run-report-promptly", case, "shell").await;
+
+        let task_run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Bench,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "local".into(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &task_run.id,
+                &RunPatch {
+                    worktree_path: Some(scope_dir.to_string_lossy().to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some("command exited 0".into()),
+                    error: None,
+                    token: Some("tok".into()),
+                },
+            )
+            .await
+            .unwrap();
+        engine.sync_bench_for_task(&task.id).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "a report must never wait on the gate it just queued for judgement; took {elapsed:?}"
+        );
+
+        // The gate is slow, not skipped -- the verdict still shows up, once
+        // the worker gets to it, and it is the gate's own answer (`Pass`),
+        // not a shortcut taken because the report path did not wait for it.
+        let settled = wait_for_settled(&engine, &origin.bench_run_id).await;
+        let attempt = &settled.attempts[0];
+        assert_eq!(attempt.verdict, Some(Verdict::Pass), "{attempt:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "sanity: the earlier measurement must not have been retroactively \
+             widened by anything since"
+        );
+    }
+
+    /// The same property, for the path the scheduler's own watchdog reaches:
+    /// `fail_run` (an ack timeout, a task timeout, a session that vanished)
+    /// calls `record_bench_task_state`, which used to judge inline too --
+    /// meaning a slow gate on one bench run could stall the scheduler's
+    /// entire tick (due tasks, other timeouts, standing-agent checks) behind
+    /// it. `fail_run` must return promptly regardless of how slow the
+    /// case's gate is.
+    #[tokio::test]
+    async fn fail_run_on_a_slow_gated_attempt_returns_promptly() {
+        let scope_dir = temp_dir("fail-run-returns-promptly");
+        let engine = test_engine(scope_dir.clone());
+
+        let case = Case {
+            id: "slow-gate-case".into(),
+            title: "a case whose gate is slow".into(),
+            scope: "demo".into(),
+            instructions: "true".into(),
+            gate: Some("sleep 2; true".into()),
+            reset: None,
+            base: None,
+            timeout_seconds: Some(30),
+            origin: None,
+        };
+        let (origin, task) = seed(&engine, "run-fail-run-promptly", case, "shell").await;
+
+        let task_run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Bench,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "local".into(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &task_run.id,
+                &RunPatch {
+                    // Even a report the agent itself sent, so `fail_run`'s
+                    // own judging (via the worker) takes the gate-judging
+                    // branch rather than the no-report-came-back one.
+                    worktree_path: Some(scope_dir.to_string_lossy().to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        engine
+            .store
+            .append_entry(
+                &task.id,
+                &TaskEntry::new("agent", "done", "finished").in_run(task_run.id.clone()),
+            )
+            .await
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        engine.fail_run(&task_run.id, "the agent's session is gone").await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "fail_run is reachable from the scheduler's own tick; it must never wait on a \
+             case's gate. took {elapsed:?}"
+        );
+
+        let settled = wait_for_settled(&engine, &origin.bench_run_id).await;
+        let attempt = &settled.attempts[0];
+        // `fail_run` moves the task_run to `Failed`, and the agent already
+        // reported a terminal outcome (a `done` entry) before the session
+        // vanished -- `judge_bench_attempt`'s `RunStatus::Failed` branch
+        // names that `"failed"`, matching the run's own terminal status,
+        // regardless of which terminal status the agent's own entry named.
+        assert_eq!(attempt.reported.as_deref(), Some("failed"), "{attempt:?}");
+        assert_eq!(attempt.verdict, Some(Verdict::Pass), "{attempt:?}");
+    }
+
+    #[tokio::test]
+    async fn start_bench_run_refuses_a_dataset_name_that_would_escape_the_datasets_directory() {
+        let scope_dir = temp_dir("bad-dataset-name");
+        let engine = test_engine(scope_dir);
+        let e = engine
+            .start_bench_run("../outside", vec!["shell".into()], 1, 1, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("must match"), "{e}");
+    }
+
+    /// Reported by QA, reproduced live: `"base":"deadbeef"` used to reach
+    /// `git` unvalidated and only fail at dispatch, as an opaque `error` on
+    /// the attempt. `start_bench_run` now resolves every case's base before
+    /// ever building an attempt to dispatch; one that does not resolve is
+    /// `skipped`, by name, and the agent is never even asked to run it.
+    #[tokio::test]
+    async fn a_case_with_an_unresolvable_base_is_skipped_before_ever_dispatching() {
+        let scope_dir = temp_dir("unresolvable-base");
+        init_repo_with_a_commit(&scope_dir).await;
+        let engine = test_engine(scope_dir);
+
+        engine.dataset_create("demo-set", None).await.unwrap();
+        engine
+            .dataset_add_cases(
+                "demo-set",
+                vec![Case {
+                    id: "bad-base".into(),
+                    title: "a case with a bad base".into(),
+                    scope: "demo".into(),
+                    instructions: "true".into(),
+                    base: Some("deadbeef".into()),
+                    reset: None,
+                    gate: None,
+                    timeout_seconds: None,
+                    origin: None,
+                }],
+            )
+            .await
+            .unwrap();
+
+        let run = engine
+            .start_bench_run("demo-set", vec!["shell".into()], 1, 1, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            run.status,
+            BenchRunStatus::Done,
+            "the run's only attempt pre-settles, so the run is immediately done: {run:?}"
+        );
+        let attempt = &run.attempts[0];
+        assert_eq!(attempt.verdict, Some(Verdict::Skipped), "{attempt:?}");
+        assert!(
+            attempt.task_id.is_none(),
+            "a case whose base never resolves must never dispatch at all: {attempt:?}"
+        );
+        assert!(
+            attempt.reason.as_deref().unwrap_or_default().contains("deadbeef"),
+            "{attempt:?}"
+        );
+        assert!(!run.case_bases.contains_key("bad-base"), "{run:?}");
+    }
+
+    /// The given `base` -- however it was spelled -- is what dispatch must
+    /// never see again once this resolves it: only the full SHA reaches
+    /// `case_bases`, and from there `worktree::create`'s own `git` argument.
+    #[tokio::test]
+    async fn a_case_with_a_real_base_records_its_full_commit_sha() {
+        let scope_dir = temp_dir("real-base");
+        let head = init_repo_with_a_commit(&scope_dir).await;
+        let short = head[..7].to_string();
+        let engine = test_engine(scope_dir);
+
+        engine.dataset_create("demo-set", None).await.unwrap();
+        engine
+            .dataset_add_cases(
+                "demo-set",
+                vec![Case {
+                    id: "good-base".into(),
+                    title: "a case with a real base".into(),
+                    scope: "demo".into(),
+                    instructions: "true".into(),
+                    base: Some(short),
+                    reset: None,
+                    gate: None,
+                    timeout_seconds: None,
+                    origin: None,
+                }],
+            )
+            .await
+            .unwrap();
+
+        // An agent that resolves nowhere: the point here is `case_bases`,
+        // resolved before any agent is ever looked up, not a real dispatch
+        // (which would open a real session).
+        let run = engine
+            .start_bench_run("demo-set", vec!["nonexistent-agent".into()], 1, 1, None)
+            .await
+            .unwrap();
+        assert_eq!(run.case_bases.get("good-base"), Some(&head), "{run:?}");
     }
 }
