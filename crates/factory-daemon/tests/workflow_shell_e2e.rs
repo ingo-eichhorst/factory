@@ -256,7 +256,11 @@ fn provision() -> Daemon {
     let herdr_bin = find_on_path("herdr").expect("checked by the caller");
     let factory_bin = find_factory_bin().expect("checked by the caller");
 
-    let root = std::env::temp_dir().join(format!("f45e2e-{}", std::process::id()));
+    // The process id alone would collide: the default test harness runs every
+    // `#[test]` in this binary as a thread of one process, and more than one
+    // of them now calls `provision()`. The uuid is what keeps two concurrent
+    // instances from fighting over the same root.
+    let root = std::env::temp_dir().join(format!("f45e2e-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
     if root.exists() {
         std::fs::remove_dir_all(&root).expect("clear a leftover root from a previous run");
     }
@@ -293,10 +297,17 @@ fn provision() -> Daemon {
     let mut http = serde_yaml_ng::Mapping::new();
     http.insert("kind".into(), "http".into());
     http.insert("bind".into(), format!("127.0.0.1:{port}").into());
-    doc["daemon"]["interfaces"]
+    let interfaces = doc["daemon"]["interfaces"]
         .as_sequence_mut()
-        .expect("daemon.interfaces is a list")
-        .push(serde_yaml_ng::Value::Mapping(http));
+        .expect("daemon.interfaces is a list");
+    // `factory-daemon init` already wrote a default `http` entry with no
+    // `bind` of its own, which falls back to a fixed default port -- drop it
+    // rather than leave it running alongside ours, or two instances
+    // provisioned for two tests in the same process (this file now has more
+    // than one) collide on that fixed port even though each picked its own
+    // free one for the interface it actually talks to.
+    interfaces.retain(|i| i["kind"].as_str() != Some("http"));
+    interfaces.push(serde_yaml_ng::Value::Mapping(http));
 
     let mut agent = serde_yaml_ng::Mapping::new();
     agent.insert("harness".into(), "shell".into());
@@ -319,11 +330,13 @@ fn provision() -> Daemon {
 
 // -------------------------------------------------------------- the test
 
-#[test]
-fn diamond_dag_and_restart_recovery_with_the_shell_agent() {
+/// `true` (and prints why) when this binary and the environment cannot run
+/// any test in this file -- shared so a second test does not have to repeat
+/// (or drift from) the same two checks.
+fn missing_prerequisites() -> bool {
     if find_on_path("herdr").is_none() {
         eprintln!("skipping: herdr is not on PATH");
-        return;
+        return true;
     }
     if find_factory_bin().is_none() {
         eprintln!(
@@ -332,6 +345,14 @@ fn diamond_dag_and_restart_recovery_with_the_shell_agent() {
              the shell agent's own prompt calls back into it to report status, so \
              without it no task here could ever reach `done`"
         );
+        return true;
+    }
+    false
+}
+
+#[test]
+fn diamond_dag_and_restart_recovery_with_the_shell_agent() {
+    if missing_prerequisites() {
         return;
     }
 
@@ -475,4 +496,72 @@ fn diamond_dag_and_restart_recovery_with_the_shell_agent() {
         "restart recovery duplicated the root task: {root_tasks:#?}"
     );
     assert_eq!(root_tasks[0]["status"], "done");
+}
+
+/// Issue #57: a node's task receives the outputs of its direct parents. Node
+/// A prints to stdout; node B reads `$FACTORY_UPSTREAM_FILE` back out with
+/// `cat`, which is the acceptance bar the design settled on -- a downstream
+/// shell command must be able to get at what its parent said with nothing
+/// more than that one environment variable.
+#[test]
+fn a_downstream_shell_node_reads_its_parents_stdout_from_the_upstream_file() {
+    if missing_prerequisites() {
+        return;
+    }
+
+    let daemon = provision();
+    let base = daemon.base_url();
+
+    let draft = json!({
+        "name": "upstream-outputs",
+        "scope": "demo",
+        "nodes": [
+            task_node("a", "printf 'hello from A\\n'"),
+            task_node("b", "cat \"$FACTORY_UPSTREAM_FILE\""),
+        ],
+        "edges": [edge("ab", "a", "b")],
+    });
+    let created = expect_ok(
+        &format!("{base}/api/workflows"),
+        &post(&format!("{base}/api/workflows"), &draft),
+    );
+    let workflow_id = created["workflow"]["id"].as_str().unwrap().to_string();
+
+    let started = expect_ok(
+        &format!("{base}/api/workflows/{workflow_id}/run"),
+        &post(&format!("{base}/api/workflows/{workflow_id}/run"), &json!({})),
+    );
+    let run_id = started["run"]["id"].as_str().unwrap().to_string();
+
+    let finished = wait_for("the upstream-outputs run to finish", Duration::from_secs(30), || {
+        let run = run_status(&base, &run_id);
+        matches!(run["status"].as_str(), Some("done") | Some("failed") | Some("cancelled"))
+            .then_some(run)
+    });
+    assert_eq!(
+        finished["status"], "done",
+        "the upstream-outputs run did not succeed: {finished}"
+    );
+
+    let all_tasks = tasks(&base);
+    let mut by_node = std::collections::HashMap::new();
+    for task in &all_tasks {
+        let Some(origin) = task["workflow_origin"].as_object() else { continue };
+        if origin["workflow_run_id"].as_str() != Some(run_id.as_str()) {
+            continue;
+        }
+        let node_id = origin["node_id"].as_str().unwrap().to_string();
+        by_node.insert(node_id, task.clone());
+    }
+    assert_eq!(by_node.len(), 2, "expected exactly 2 tasks, one per node: {all_tasks:#?}");
+
+    let a_result = by_node["a"]["result"].as_str().unwrap_or_default();
+    assert!(a_result.contains("hello from A"), "a's own stdout should be in its result: {a_result:?}");
+    assert!(a_result.contains("command exited 0"), "and its exit code: {a_result:?}");
+
+    let b_result = by_node["b"]["result"].as_str().unwrap_or_default();
+    assert!(
+        b_result.contains("hello from A"),
+        "b read a's parent output back out of $FACTORY_UPSTREAM_FILE: {b_result:?}"
+    );
 }

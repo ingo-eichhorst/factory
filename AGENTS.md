@@ -36,8 +36,9 @@ and real secrets. Make a throwaway instance instead:
     target/debug/factory-daemon --root /tmp/dev run
 
 The `shell` agent runs the task's instructions as a shell command and reports
-the exit status, so the whole dispatch path can be exercised without spending a
-model call. Use it for anything that is not specifically about an AI harness.
+the exit status and stdout, so the whole dispatch path can be exercised
+without spending a model call. Use it for anything that is not specifically
+about an AI harness.
 
 Set the hooks up once per clone, before writing any code, from the primary
 checkout:

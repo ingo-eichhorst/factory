@@ -491,6 +491,19 @@ run Run mode shows; starting a run switches to it. The ordered textual
 summary and keyboard node/edge controls carry the same graph for people who
 do not use the canvas, including a link to any node's spawned task.
 
+A node's task is dispatched with its **direct parents'** outputs, never a
+transitive ancestor's — computed at dispatch from that moment's workflow-run
+state, so it survives a restart without `recover_workflows` needing to know
+about it. A harness agent (`claude-code`, `pi`, `codex`, `opencode`) gets a
+labelled "Output from the workflow steps this task follows" section in its
+prompt, one entry per parent with its title, node/task id, and result (or a
+plain "no result reported"). The `shell` agent instead writes the same
+outputs as JSON to a file and exports its path as `FACTORY_UPSTREAM_FILE`, so
+a downstream command can do `cat "$FACTORY_UPSTREAM_FILE"` to see what its
+parents said — the acceptance bar is that literal command. Either way, each
+parent's result is tail-truncated to a byte budget first, so one noisy
+upstream step can't blow up every prompt downstream of it.
+
 ## How a task actually runs
 
 1. `task.create` resolves the scope, agent, and runtime — from the request, then
