@@ -17,7 +17,9 @@ import { initActivity, recordEvent, markWatching, renderActivity, activityFilter
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 import { loadEnvironment, renderSandboxes } from "./sandboxes.js";
 import { renderSecrets } from "./secrets.js";
-import { loadBenchmarks, renderBenchmarks } from "./benchmarks.js";
+import { benchTail, loadBenchmarks, readBenchTail, renderBenchmarks, wireBenchmarkSegments } from "./benchmarks.js";
+import { loadDatasets, renderDatasetsSegment, wireDatasets } from "./datasets.js";
+import { acceptBenchRunEvent, loadBenchRuns, renderBenchRunsSegment, wireBenchRuns } from "./bench-runs.js";
 import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from "./knowledge.js";
 
 // ------------------------------------------------------------------ views
@@ -60,7 +62,11 @@ const VIEWS = {
   roles: { onShow: startRoles, onHide: stopAgentPoll },
   sandboxes: { onShow: startEnvironment, onHide: stopAgentPoll },
   secrets: { onShow: startEnvironment, onHide: stopAgentPoll },
-  benchmarks: { onShow: startBenchmarks, onHide: stopAgentPoll },
+  benchmarks: {
+    onShow: startBenchmarks,
+    onHide: stopAgentPoll,
+    tail: { write: () => benchTail(), read: (tail) => readBenchTail(tail) },
+  },
   knowledge: {
     onShow: startKnowledge,
     onHide: stopAgentPoll,
@@ -238,7 +244,15 @@ function rerender(route) {
   // them and is reachable from all of them, so it survives every selection.
   else if (state.tab === "sandboxes") renderSandboxes();
   else if (state.tab === "secrets") renderSecrets();
-  else if (state.tab === "benchmarks") renderBenchmarks();
+  else if (state.tab === "benchmarks") {
+    // The rail narrows a selected dataset's cases and a selected run's
+    // attempts matrix; Configurations narrows its agents the same way it
+    // always has. All three redraw from whatever they already hold -- no
+    // view here answers to a scope-scoped fetch, unlike the dashboard above.
+    renderBenchmarks();
+    renderDatasetsSegment();
+    renderBenchRunsSegment();
+  }
   // Knowledge answers to no scope -- the knowledge base is company-wide --
   // so this redraws the same rows every time. Included anyway so the map
   // above stays a complete list of every tab rather than all-but-one.
@@ -347,9 +361,29 @@ function startEnvironment() {
 // only changes when someone edits a file, so a fetch on show plus Refresh is
 // the whole story -- `stopAgentPoll` still runs, to clear a poll left running
 // by whichever view was on screen before.
+//
+// Benchmarks now has three segments, and each fetches its own answer:
+// configurations and the (company-wide) dataset list are cheap enough to load
+// unconditionally, so switching segments in-tab is instant; bench runs are
+// fetched only once the Runs segment is actually the one showing, whether
+// that came from a click (`onBenchSegmentSwitch`) or straight off the hash on
+// boot or reload. `loadDatasets`/`loadBenchRuns` each settle their own
+// selection against the fresh answer and load its detail, so a deep link to
+// one dataset or run needs nothing further here.
 function startBenchmarks() {
   stopAgentPoll();
   loadBenchmarks();
+  loadDatasets();
+  if (state.benchSegment === "runs") loadBenchRuns();
+}
+
+/// Fired when the segmented control switches to a segment this file has not
+/// loaded yet -- `benchmarks.js` cannot import `datasets.js`/`bench-runs.js`
+/// itself (see its header comment), so it hands the switch back here, the one
+/// file that already knows every view.
+function onBenchSegmentSwitch(seg) {
+  if (seg === "datasets" && !state.datasets) loadDatasets();
+  if (seg === "runs" && !state.benchRuns) loadBenchRuns();
 }
 
 function startKnowledge() {
@@ -415,7 +449,14 @@ async function boot() {
   wireRoles();
   $("environment-refresh").onclick = () => refreshEnvironment();
   $("secrets-refresh").onclick = () => refreshEnvironment();
-  $("benchmarks-refresh").onclick = () => loadBenchmarks();
+  $("benchmarks-refresh").onclick = () => {
+    loadBenchmarks();
+    loadDatasets();
+    if (state.benchSegment === "runs") loadBenchRuns();
+  };
+  wireBenchmarkSegments(onBenchSegmentSwitch);
+  wireDatasets();
+  wireBenchRuns();
   $("knowledge-refresh").onclick = () => loadKnowledge();
   $("occ-window").onchange = () => loadOccupancy();
   $("newTask").onclick = () => openCreate();
@@ -492,6 +533,9 @@ function onEvent(ev) {
         renderModal();
         retimeTerminal();
       }
+      break;
+    case "bench_run_updated":
+      acceptBenchRunEvent(ev.run);
       break;
   }
   // Occupancy and roster are reads over runs and standing agents; either can
