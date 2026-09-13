@@ -8,7 +8,7 @@ use crate::building::{Activity, Cues, RepoMetrics, Shape};
 use crate::agent::AgentSession;
 use crate::config::ScopeAgent;
 use crate::event::Event;
-use crate::knowledge::{Finding, Gap, Note};
+use crate::knowledge::{Document, Finding, Gap, Page, Refusal, Tag};
 use crate::occupancy::Occupancy;
 use crate::role::{RoleOrigin, RoleSpec};
 use crate::run::Run;
@@ -226,11 +226,44 @@ pub enum Request {
     /// changing anything.
     #[serde(rename = "environment")]
     Environment,
-    /// The L5 Knowledge tab: an index of `<root>/knowledge/wiki`, rebuilt
-    /// from the files on every request. Read-only, like `Environment` -- see
-    /// `knowledge::index`, which does the actual walk.
+    /// The L5 Knowledge tab: an index of `<root>/.factory/knowledge/`,
+    /// rebuilt from the files on every request. Read-only, like
+    /// `Environment` -- see `knowledge::index`, which does the actual walk.
     #[serde(rename = "knowledge")]
     Knowledge,
+    /// Bulk-copy a directory tree into the vault, preserving relative paths
+    /// so `[[area/page]]` still resolves afterwards. The daemon does the
+    /// copy -- the CLI and the daemon share a machine and a user, so the CLI
+    /// sends the path rather than the bytes. Needs `Grant::KnowledgeWrite`.
+    #[serde(rename = "knowledge.import")]
+    KnowledgeImport {
+        source: String,
+        #[serde(default)]
+        into: Option<String>,
+        #[serde(default)]
+        overwrite: bool,
+    },
+    /// Add one or more files by path, the same way, for `factory knowledge
+    /// add`. Needs `Grant::KnowledgeWrite`.
+    #[serde(rename = "knowledge.add")]
+    KnowledgeAdd {
+        sources: Vec<String>,
+        #[serde(default)]
+        into: Option<String>,
+        #[serde(default)]
+        overwrite: bool,
+    },
+    /// Write one file's bytes directly -- the UI's "Add documents" upload,
+    /// which cannot name a path on the daemon's own disk the way a CLI
+    /// invocation can. `PUT /api/knowledge/files?path=&overwrite=` is the
+    /// only caller in practice. Needs `Grant::KnowledgeWrite`.
+    #[serde(rename = "knowledge.write_file")]
+    KnowledgeWriteFile {
+        path: String,
+        #[serde(default)]
+        overwrite: bool,
+        bytes: Vec<u8>,
+    },
     /// The L5 Benchmarks tab: one configuration per distinct harness, full
     /// `args`, and sandbox that a task could be dispatched with today,
     /// including the foreman `daemon.foreman` would synthesize. Nothing is
@@ -301,17 +334,32 @@ pub enum Payload {
         sandboxes: Vec<SandboxRow>,
         credentials: Vec<CredentialRow>,
     },
-    /// The L5 Knowledge tab. `present: false` when `<root>/knowledge/wiki`
-    /// does not exist -- an empty state, not an error -- with `root` still
-    /// naming the path that was looked in. No note body text is ever in
-    /// here; see `knowledge::index`.
+    /// The L5 Knowledge tab. `present: false` when the vault
+    /// (`<root>/.factory/knowledge/`) does not exist -- an empty state, not
+    /// an error -- with `root` still naming the path that was looked in, and
+    /// `legacy` naming `<root>/knowledge/wiki` when that v1 path exists. No
+    /// page body text and no document bytes are ever in here; see
+    /// `knowledge::index`.
     Knowledge {
         root: String,
         present: bool,
-        notes: Vec<Note>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        legacy: Option<String>,
+        pages: Vec<Page>,
+        tags: Vec<Tag>,
+        documents: Vec<Document>,
         gaps: Vec<Gap>,
-        pages: Vec<String>,
         findings: Vec<Finding>,
+    },
+    /// The result of `Request::KnowledgeImport`/`KnowledgeAdd`/
+    /// `KnowledgeWriteFile` -- never a body: `copied` and the rest are
+    /// vault-relative paths, never bytes. See `knowledge::WriteResult`.
+    KnowledgeWrite {
+        copied: Vec<String>,
+        skipped_existing: Vec<String>,
+        skipped_hidden: Vec<String>,
+        refused: Vec<Refusal>,
+        truncated: bool,
     },
     /// The L5 Benchmarks tab. Every configuration is `pinned: false` today --
     /// see `benchmark::Configuration`.
@@ -801,11 +849,13 @@ mod tests {
     #[test]
     fn a_knowledge_payload_carries_the_wire_fields_the_issue_names() {
         let response = Response::ok(Payload::Knowledge {
-            root: "/inst/knowledge/wiki".into(),
+            root: "/inst/.factory/knowledge".into(),
             present: true,
-            notes: vec![crate::knowledge::Note {
+            legacy: None,
+            pages: vec![crate::knowledge::Page {
                 id: "partners/acme".into(),
                 title: "Acme GmbH".into(),
+                frontmatter: true,
                 area: Some("partners".into()),
                 status: Some("current".into()),
                 updated: Some("2026-09-01".into()),
@@ -813,12 +863,23 @@ mod tests {
                 links: vec!["partners/jane-doe".into()],
                 gaps: vec!["example.club".into()],
                 backlinks: vec!["company/pricing".into()],
+                tags: vec!["pricing".into()],
+                documents: vec!["documents/acme-contract.pdf".into()],
+            }],
+            tags: vec![crate::knowledge::Tag {
+                name: "pricing".into(),
+                pages: vec!["partners/acme".into()],
+            }],
+            documents: vec![crate::knowledge::Document {
+                id: "documents/acme-contract.pdf".into(),
+                ext: "pdf".into(),
+                bytes: 48213,
+                referenced_by: vec!["partners/acme".into()],
             }],
             gaps: vec![crate::knowledge::Gap {
                 target: "example.club".into(),
                 from: vec!["partners/acme".into(), "partners/jane-doe".into()],
             }],
-            pages: vec!["index.md".into()],
             findings: vec![crate::knowledge::Finding {
                 kind: crate::knowledge::FindingKind::Unsourced,
                 note: "partners/jane-doe".into(),
@@ -831,8 +892,16 @@ mod tests {
             Some("knowledge")
         );
         assert_eq!(
-            json.pointer("/data/notes/0/id").and_then(serde_json::Value::as_str),
+            json.pointer("/data/pages/0/id").and_then(serde_json::Value::as_str),
             Some("partners/acme")
+        );
+        assert_eq!(
+            json.pointer("/data/tags/0/name").and_then(serde_json::Value::as_str),
+            Some("pricing")
+        );
+        assert_eq!(
+            json.pointer("/data/documents/0/id").and_then(serde_json::Value::as_str),
+            Some("documents/acme-contract.pdf")
         );
         assert_eq!(
             json.pointer("/data/gaps/0/target").and_then(serde_json::Value::as_str),
@@ -841,6 +910,41 @@ mod tests {
         assert_eq!(
             json.pointer("/data/findings/0/kind").and_then(serde_json::Value::as_str),
             Some("unsourced")
+        );
+    }
+
+    #[test]
+    fn a_knowledge_import_request_parses_with_its_optional_fields_defaulted() {
+        let env: Envelope = serde_json::from_str(
+            r#"{"op":"knowledge.import","params":{"source":"/tmp/import-me"}}"#,
+        )
+        .expect("request parses");
+        assert!(matches!(
+            env.request,
+            Request::KnowledgeImport { into: None, overwrite: false, .. }
+        ));
+    }
+
+    #[test]
+    fn a_knowledge_write_result_carries_the_wire_shape_the_issue_names() {
+        let response = Response::ok(Payload::KnowledgeWrite {
+            copied: vec!["documents/x.pdf".into()],
+            skipped_existing: vec![],
+            skipped_hidden: vec![],
+            refused: vec![crate::knowledge::Refusal {
+                path: None,
+                reason: "a source under data/secrets/ is never read".into(),
+            }],
+            truncated: false,
+        });
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            json.pointer("/data/copied/0").and_then(serde_json::Value::as_str),
+            Some("documents/x.pdf")
+        );
+        assert!(
+            json.pointer("/data/refused/0/path").is_none(),
+            "a secret-source refusal must not carry even a null path field"
         );
     }
 
