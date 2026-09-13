@@ -15,6 +15,7 @@ use factory_core::adapter::interface::{Interface, InterfaceContext};
 use factory_core::config::ScopeAgent;
 use factory_core::error::{FactoryError, Result};
 use factory_core::protocol::{Envelope, Payload, ProductionBin, Request, Response};
+use factory_core::role::RoleSpec;
 use factory_core::task::{NewTask, TaskFilter, TaskPatch, TaskReport};
 use factory_core::workflow::WorkflowDraft;
 use futures_util::{sink::SinkExt, stream::StreamExt};
@@ -119,6 +120,12 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/production", get(production))
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
+        // A role is written into one scope's config, so like a declaration it
+        // is addressed by scope and name in the body rather than the path.
+        .route(
+            "/api/roles",
+            get(role_list).post(role_define).delete(role_delete),
+        )
         // The id of a standing agent is `<scope>/<name>`, which has a slash in
         // it, so these take it in the body rather than the path.
         .route("/api/agents/start", post(agent_start))
@@ -461,6 +468,63 @@ struct ConfigureAgent {
 struct DeleteAgent {
     scope: String,
     name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RolesQuery {
+    scope: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct DefineRole {
+    scope: String,
+    name: String,
+    role: RoleSpec,
+    #[serde(default)]
+    replace: bool,
+}
+
+async fn role_list(
+    State(engine): State<Arc<Engine>>,
+    Query(q): Query<RolesQuery>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::RoleList {
+            scope: q.scope.filter(|s| !s.is_empty()),
+        },
+    )
+    .await
+}
+
+async fn role_define(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<DefineRole>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::RoleDefine {
+            scope: body.scope,
+            name: body.name,
+            role: body.role,
+            replace: body.replace,
+        },
+    )
+    .await
+}
+
+async fn role_delete(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<DeleteAgent>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::RoleDelete {
+            scope: body.scope,
+            name: body.name,
+        },
+    )
+    .await
 }
 
 #[derive(serde::Deserialize)]

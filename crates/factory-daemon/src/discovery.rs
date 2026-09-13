@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use factory_core::config::{Factory, Scope, CONFIG_FILE, FACTORY_DIR};
+use factory_core::config::{refuse_misplaced_scope_roles, Factory, Scope, CONFIG_FILE, FACTORY_DIR};
 use factory_core::error::{FactoryError, Result};
 use serde::Deserialize;
 
@@ -104,12 +104,18 @@ fn read_scope(path: &Path) -> Result<Scope> {
             path.display()
         ))
     })?;
-    let file: ScopeFile = serde_yaml_ng::from_str(&text).map_err(|e| {
+    let parsing = |e: serde_yaml_ng::Error| {
         FactoryError::Other(anyhow::anyhow!(
             "parsing scope config {}: {e}",
             path.display()
         ))
-    })?;
+    };
+    let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).map_err(parsing)?;
+    // Only the `scope:` block is read, so a `roles:` beside it would vanish
+    // without a word. Refuse it here, with the file named, before the daemon
+    // starts on a role set somebody believes is different.
+    refuse_misplaced_scope_roles(&document, path)?;
+    let file: ScopeFile = serde_yaml_ng::from_value(document).map_err(parsing)?;
     Ok(file.scope)
 }
 
@@ -352,6 +358,34 @@ mod tests {
 
         let error = apply(&mut f).unwrap_err().to_string();
         assert!(error.contains(&path.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn a_roles_block_beside_the_scope_block_is_refused_with_the_file_named() {
+        let s = Scratch::new("misplaced-roles");
+        let path = s.write_scope(
+            "projects",
+            "scope: { id: p-id, name: projects }\nroles:\n  reviewer:\n    grants: [task.report]\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        let error = apply(&mut f).unwrap_err().to_string();
+        assert!(error.contains("scope.roles"), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn scope_roles_are_read_from_a_nested_scope_file() {
+        let s = Scratch::new("scope-roles");
+        s.write_scope(
+            "projects",
+            "scope:\n  id: p-id\n  name: projects\n  roles:\n    reviewer:\n      grants: [task.report]\n      reach: own\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        apply(&mut f).unwrap();
+
+        assert!(f.config.scopes[0].roles.contains_key("reviewer"));
     }
 
     #[test]

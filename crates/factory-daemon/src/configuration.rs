@@ -5,10 +5,14 @@
 //! configuration snapshot so the declaration is usable without a restart.
 
 use factory_core::agent::Lifetime;
-use factory_core::config::{AgentRef, Scope, ScopeAgent, CONFIG_FILE, FACTORY_DIR};
+use factory_core::config::{
+    refuse_misplaced_scope_roles, AgentRef, Config, Scope, ScopeAgent, CONFIG_FILE, FACTORY_DIR,
+};
 use factory_core::error::{FactoryError, Result};
+use factory_core::role::{Role, RoleOrigin, RoleSpec};
 use serde::Deserialize;
 use serde_yaml_ng::{Mapping, Value};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -33,6 +37,7 @@ fn read_document(path: &Path) -> Result<(String, Value, Scope)> {
     })?;
     let document: Value = serde_yaml_ng::from_str(&text)
         .map_err(|error| bad(format!("parsing scope config {}: {error}", path.display())))?;
+    refuse_misplaced_scope_roles(&document, path)?;
     let parsed: ScopeFile = serde_yaml_ng::from_str(&text)
         .map_err(|error| bad(format!("parsing scope config {}: {error}", path.display())))?;
     Ok((text, document, parsed.scope))
@@ -617,11 +622,13 @@ impl Engine {
             ));
         }
         self.registry.agent(&agent.harness)?;
-        if !self.roles.contains(&agent.role) {
+        let roles = factory.config.roles_for_scope(&from_file)?;
+        if !roles.contains(&agent.role) {
             return Err(bad(format!(
-                "no role named {:?}. This instance has: {}",
+                "no role named {:?} in {}. The roles available there are: {}",
                 agent.role.as_str(),
-                self.roles.names().join(", ")
+                current.name,
+                roles.names().join(", ")
             )));
         }
         if agent.harness == "shell" && !agent.args.is_empty() {
@@ -699,10 +706,500 @@ impl Engine {
     }
 }
 
+// -- roles ------------------------------------------------------------------
+//
+// A role layer is one mapping in one file: `scope.roles` in a nested scope's
+// own config, or the top-level `roles:` in the instance root's. Edits splice
+// exactly one entry of that mapping and leave every other line a person wrote
+// where it was, the same promise the agent edits above make. Every splice is
+// parsed back before it is written, and refused unless the file then says
+// exactly what was asked: a text edit that guessed wrong about somebody's
+// YAML must fail loudly, never land.
+
+/// Which of the two places a layer is written.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RoleFile {
+    /// The instance root's config: top-level `roles:`.
+    Root,
+    /// A nested scope's own config: `scope.roles`.
+    Scope,
+}
+
+/// Names an agent's `role:` is matched against exactly, typed by people into
+/// YAML, into the CLI and into a URL. Kept to what never needs quoting.
+fn valid_role_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn line_table(text: &str) -> Vec<(usize, usize, &str)> {
+    let mut lines = Vec::new();
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        lines.push((offset, offset + line.len(), line));
+        offset += line.len();
+    }
+    lines
+}
+
+/// A line that says something: not blank, and not only a comment.
+fn is_content(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty() && !trimmed.starts_with('#')
+}
+
+fn offset_of(lines: &[(usize, usize, &str)], text: &str, index: usize) -> usize {
+    lines.get(index).map(|(start, _, _)| *start).unwrap_or(text.len())
+}
+
+/// The last line in `from..to` that says something, if any does.
+fn last_content(lines: &[(usize, usize, &str)], from: usize, to: usize) -> Option<usize> {
+    (from..to).rev().find(|index| is_content(lines[*index].2))
+}
+
+/// The first line after `start`, before `to`, that says something at or left
+/// of `indent` -- where the block `start` opens ends.
+fn block_end(lines: &[(usize, usize, &str)], start: usize, to: usize, indent: usize) -> usize {
+    (start + 1..to)
+        .find(|index| {
+            let line = lines[*index].2;
+            is_content(line) && indentation(line).is_some_and(|at| at <= indent)
+        })
+        .unwrap_or(to)
+}
+
+/// Whether `line` opens the mapping entry `name`, bare or quoted.
+fn opens_entry(line: &str, name: &str) -> bool {
+    [name.to_string(), format!("\"{name}\""), format!("'{name}'")]
+        .iter()
+        .any(|key| key_rest(line, key).is_some())
+}
+
+fn rendered_role(name: &str, spec: &RoleSpec, indent: usize) -> Result<String> {
+    let yaml = serde_yaml_ng::to_string(&BTreeMap::from([(name, spec)])).map_err(|error| {
+        FactoryError::Other(anyhow::anyhow!("encoding role {name:?}: {error}"))
+    })?;
+    let pad = " ".repeat(indent);
+    Ok(yaml.lines().map(|line| format!("{pad}{line}\n")).collect())
+}
+
+fn rendered_roles(roles: &BTreeMap<String, RoleSpec>, indent: usize) -> Result<String> {
+    let mut out = format!("{}roles:\n", " ".repeat(indent));
+    for (name, spec) in roles {
+        out.push_str(&rendered_role(name, spec, indent + 2)?);
+    }
+    Ok(out)
+}
+
+/// Set (`Some`) or remove (`None`) one entry of the `roles:` mapping that sits
+/// at `indent` among `lines[from..to]`. `after` is the whole mapping once the
+/// change is made, for the one case with no line of its own to edit: a
+/// flow-style `roles: { … }`, which is expanded to a block.
+#[allow(clippy::too_many_arguments)]
+fn splice_roles_block(
+    text: &str,
+    lines: &[(usize, usize, &str)],
+    from: usize,
+    to: usize,
+    indent: usize,
+    name: &str,
+    spec: Option<&RoleSpec>,
+    after: &BTreeMap<String, RoleSpec>,
+) -> Result<String> {
+    let pad = " ".repeat(indent);
+    let Some(roles_at) = (from..to).find(|index| {
+        let line = lines[*index].2;
+        indentation(line) == Some(indent) && key_rest(line, "roles").is_some()
+    }) else {
+        let Some(spec) = spec else {
+            return Err(bad(format!("there is no roles block to remove {name:?} from")));
+        };
+        // No block yet: open one after the last thing this level says, so it
+        // lands inside the scope rather than after a comment meant for
+        // whatever follows it.
+        let at = last_content(lines, from, to)
+            .map(|index| offset_of(lines, text, index + 1))
+            .unwrap_or_else(|| offset_of(lines, text, from));
+        let addition = format!("{pad}roles:\n{}", rendered_role(name, spec, indent + 2)?);
+        return Ok(insert_at(text, at, &addition));
+    };
+
+    let rest = key_rest(lines[roles_at].2, "roles").unwrap_or_default();
+    if !rest.trim().is_empty() && !rest.trim_start().starts_with('#') {
+        let replacement = if after.is_empty() {
+            String::new()
+        } else {
+            rendered_roles(after, indent)?
+        };
+        let (start, end, _) = lines[roles_at];
+        return Ok(format!("{}{}{}", &text[..start], replacement, &text[end..]));
+    }
+
+    let end = block_end(lines, roles_at, to, indent);
+    let entry_indent = (roles_at + 1..end)
+        .filter(|index| is_content(lines[*index].2))
+        .filter_map(|index| indentation(lines[index].2))
+        .min()
+        .unwrap_or(indent + 2);
+    let entry_at = (roles_at + 1..end).find(|index| {
+        let line = lines[*index].2;
+        indentation(line) == Some(entry_indent) && opens_entry(line, name)
+    });
+
+    match (entry_at, spec) {
+        (Some(entry), Some(spec)) => {
+            let entry_end = block_end(lines, entry, end, entry_indent);
+            let last = last_content(lines, entry, entry_end).unwrap_or(entry);
+            let start = offset_of(lines, text, entry);
+            let stop = offset_of(lines, text, last + 1);
+            Ok(format!(
+                "{}{}{}",
+                &text[..start],
+                rendered_role(name, spec, entry_indent)?,
+                &text[stop..]
+            ))
+        }
+        (None, Some(spec)) => {
+            let last = last_content(lines, roles_at, end).unwrap_or(roles_at);
+            let at = offset_of(lines, text, last + 1);
+            Ok(insert_at(text, at, &rendered_role(name, spec, entry_indent)?))
+        }
+        (Some(entry), None) => {
+            // The last entry takes the block with it, rather than leaving a
+            // `roles:` that parses as nothing at all.
+            let (start, last) = if after.is_empty() {
+                (roles_at, last_content(lines, roles_at, end).unwrap_or(roles_at))
+            } else {
+                let entry_end = block_end(lines, entry, end, entry_indent);
+                (entry, last_content(lines, entry, entry_end).unwrap_or(entry))
+            };
+            let from = offset_of(lines, text, start);
+            let stop = offset_of(lines, text, last + 1);
+            Ok(format!("{}{}", &text[..from], &text[stop..]))
+        }
+        (None, None) => Err(bad(format!("there is no role named {name:?} here to remove"))),
+    }
+}
+
+/// The file's text with one role set or removed, in whichever of the two
+/// places `file` says the layer is written.
+fn splice_role(
+    text: &str,
+    document: &Value,
+    file: RoleFile,
+    name: &str,
+    spec: Option<&RoleSpec>,
+    after: &BTreeMap<String, RoleSpec>,
+    path: &Path,
+) -> Result<String> {
+    let lines = line_table(text);
+    if file == RoleFile::Root {
+        return splice_roles_block(text, &lines, 0, lines.len(), 0, name, spec, after);
+    }
+
+    let scope_index = lines
+        .iter()
+        .position(|(_, _, line)| indentation(line) == Some(0) && key_rest(line, "scope").is_some())
+        .ok_or_else(|| {
+            bad(format!(
+                "scope config {} has no top-level scope block",
+                path.display()
+            ))
+        })?;
+    let scope_rest = key_rest(lines[scope_index].2, "scope").unwrap_or_default();
+    let block_scope = scope_rest.trim().is_empty() || scope_rest.trim_start().starts_with('#');
+    if !block_scope {
+        // A flow-style scope has no line for its roles. Expand just that one
+        // `scope:` line to a block, as adding an agent to one already does.
+        let mut scope = document
+            .as_mapping()
+            .and_then(|root| root.get(Value::String("scope".into())))
+            .cloned()
+            .ok_or_else(|| bad(format!("scope config {} has no scope block", path.display())))?;
+        let scope_map = mapping(&mut scope, "scope", path)?;
+        let key = Value::String("roles".into());
+        if after.is_empty() {
+            scope_map.remove(&key);
+        } else {
+            let encoded = serde_yaml_ng::to_value(after).map_err(|error| {
+                FactoryError::Other(anyhow::anyhow!("encoding roles: {error}"))
+            })?;
+            scope_map.insert(key, encoded);
+        }
+        let comment = scope_rest
+            .find('#')
+            .map(|at| format!(" {}", scope_rest[at..].trim()))
+            .unwrap_or_default();
+        let replacement = rendered_scope(&scope, &comment, path)?;
+        let (start, end, _) = lines[scope_index];
+        return Ok(format!("{}{}{}", &text[..start], replacement, &text[end..]));
+    }
+
+    let scope_end = lines
+        .iter()
+        .enumerate()
+        .skip(scope_index + 1)
+        .find(|(_, (_, _, line))| is_content(line) && indentation(line) == Some(0))
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+    let child_indent = lines[scope_index + 1..scope_end]
+        .iter()
+        .filter(|(_, _, line)| is_content(line))
+        .filter_map(|(_, _, line)| indentation(line))
+        .min()
+        .unwrap_or(2);
+    splice_roles_block(
+        text,
+        &lines,
+        scope_index + 1,
+        scope_end,
+        child_indent,
+        name,
+        spec,
+        after,
+    )
+}
+
+impl Engine {
+    /// Write one role into a scope's own config and make it hold from the
+    /// next request. `replace` must say whether the file already defines it:
+    /// creating over a definition, or editing one that is not there, is a
+    /// mistake about which scope the page is looking at, not a request to
+    /// guess.
+    pub(crate) async fn define_role(
+        &self,
+        scope_name: &str,
+        name: &str,
+        mut spec: RoleSpec,
+        replace: bool,
+    ) -> Result<(String, String)> {
+        let name = name.trim().to_string();
+        if !valid_role_name(&name) {
+            return Err(bad(
+                "a role name is letters, digits, `-`, `_` and `.`, and cannot be empty",
+            ));
+        }
+        if name == Role::WORKER || name == Role::FOREMAN {
+            return Err(bad(format!(
+                "{name:?} is a built-in role and cannot be redefined at any level"
+            )));
+        }
+        spec.describe = spec
+            .describe
+            .map(|describe| describe.trim().to_string())
+            .filter(|describe| !describe.is_empty());
+        spec.grants = spec
+            .grants
+            .into_iter()
+            .map(|grant| grant.trim().to_string())
+            .filter(|grant| !grant.is_empty())
+            .collect();
+        let given = self.given_roles().await?;
+        let scope = self.edit_role_layer(scope_name, &name, Some(spec), &given, |_, current, before, _| {
+            match (before.contains_key(&name), replace) {
+                (true, false) => Err(bad(format!(
+                    "{} already defines {name:?}; edit that definition instead",
+                    current.name
+                ))),
+                (false, true) => Err(bad(format!(
+                    "{} defines no role named {name:?} of its own to edit. \
+                     An inherited role is overridden by defining it here",
+                    current.name
+                ))),
+                _ => Ok(()),
+            }
+        })?;
+        Ok((scope, name))
+    }
+
+    /// Remove one role from a scope's own config. Refused while any agent --
+    /// in this scope or below it, declared or given -- still resolves the
+    /// name to this definition, and the refusal names every one of them.
+    pub(crate) async fn delete_role(&self, scope_name: &str, name: &str) -> Result<(String, String)> {
+        let name = name.trim().to_string();
+        if name == Role::WORKER || name == Role::FOREMAN {
+            return Err(bad(format!("{name:?} is a built-in role and cannot be deleted")));
+        }
+        let given = self.given_roles().await?;
+        let scope = self.edit_role_layer(scope_name, &name, None, &given, |factory, current, before, origin| {
+            if !before.contains_key(&name) {
+                return Err(bad(format!(
+                    "{} defines no role named {name:?} of its own. \
+                     An inherited role is removed where it is defined",
+                    current.name
+                )));
+            }
+            let dependents = self.dependents_of(factory, origin, &Role::new(name.clone()), &given)?;
+            if !dependents.is_empty() {
+                return Err(bad(format!(
+                    "{name:?} is still held by {}. Give them another role first",
+                    dependents.join(", ")
+                )));
+            }
+            Ok(())
+        })?;
+        Ok((scope, name))
+    }
+
+    /// Every role somebody gave a standing agent, by agent id. Read before a
+    /// role edit takes the configuration lock, which is a plain mutex and
+    /// cannot be held across the store's await.
+    async fn given_roles(&self) -> Result<HashMap<String, Role>> {
+        Ok(self
+            .store
+            .agents()
+            .await?
+            .into_iter()
+            .filter_map(|agent| agent.assigned_role.map(|role| (agent.id, role)))
+            .collect())
+    }
+
+    /// Set or remove one role in the layer `scope_name` writes, after `check`
+    /// has had its say about the layer as it stands. The whole instance is
+    /// validated with the change applied before a byte is written: no agent,
+    /// declared or given, may be left on a role nothing in its chain defines.
+    fn edit_role_layer(
+        &self,
+        scope_name: &str,
+        name: &str,
+        spec: Option<RoleSpec>,
+        given: &HashMap<String, Role>,
+        check: impl FnOnce(
+            &factory_core::config::Factory,
+            &Scope,
+            &BTreeMap<String, RoleSpec>,
+            &RoleOrigin,
+        ) -> Result<()>,
+    ) -> Result<String> {
+        let _edit = self
+            .configuration_edit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let factory = self.factory_snapshot();
+        let current = factory.scope(scope_name)?.clone();
+        // The instance root writes its roles at the top of its own file; every
+        // other scope writes them under its `scope:` block.
+        let file = if factory
+            .config
+            .scope
+            .as_ref()
+            .is_some_and(|root| root.id == current.id)
+        {
+            RoleFile::Root
+        } else {
+            RoleFile::Scope
+        };
+        let path = match file {
+            RoleFile::Root => factory.factory_dir().join(CONFIG_FILE),
+            RoleFile::Scope => factory
+                .scope_path(&current.name)?
+                .join(FACTORY_DIR)
+                .join(CONFIG_FILE),
+        };
+        let origin = match file {
+            RoleFile::Root => RoleOrigin::Instance,
+            RoleFile::Scope => RoleOrigin::Scope {
+                scope: current.name.clone(),
+            },
+        };
+
+        let text = fs::read_to_string(&path).map_err(|error| {
+            FactoryError::Other(anyhow::anyhow!("reading {}: {error}", path.display()))
+        })?;
+        let document: Value = serde_yaml_ng::from_str(&text)
+            .map_err(|error| bad(format!("parsing {}: {error}", path.display())))?;
+        let mut from_file = None;
+        let before = match file {
+            RoleFile::Root => {
+                let config: Config = serde_yaml_ng::from_str(&text)
+                    .map_err(|error| bad(format!("parsing {}: {error}", path.display())))?;
+                config.roles
+            }
+            RoleFile::Scope => {
+                let (_, _, mut scope) = read_document(&path)?;
+                if scope.id != current.id || scope.name != current.name {
+                    return Err(bad(format!(
+                        "scope config {} changed identity since startup; restart Factory before editing it",
+                        path.display()
+                    )));
+                }
+                scope.path = current.path.clone();
+                let roles = scope.roles.clone();
+                from_file = Some(scope);
+                roles
+            }
+        };
+
+        check(&factory, &current, &before, &origin)?;
+
+        let mut after = before.clone();
+        match &spec {
+            Some(spec) => {
+                after.insert(name.to_string(), spec.clone());
+            }
+            None => {
+                after.remove(name);
+            }
+        }
+
+        // The instance as it would be, checked whole.
+        let mut candidate = factory.clone();
+        match (&file, &mut from_file) {
+            (RoleFile::Root, _) => candidate.config.roles = after.clone(),
+            (RoleFile::Scope, Some(scope)) => {
+                scope.roles = after.clone();
+                if let Some(slot) = candidate.config.scopes.iter_mut().find(|s| s.id == current.id) {
+                    *slot = scope.clone();
+                }
+            }
+            (RoleFile::Scope, None) => unreachable!("a scope layer was read from its file"),
+        }
+        candidate.config.validate()?;
+        for (id, role) in given {
+            let Some((scope, agent)) = id.rsplit_once('/') else { continue };
+            if !candidate.roles_for(scope)?.contains(role) {
+                return Err(bad(format!(
+                    "{agent} in {scope} was given the role {:?}, which nothing in {scope} would define after this change. \
+                     Give it another role first",
+                    role.as_str()
+                )));
+            }
+        }
+
+        let serialized = splice_role(&text, &document, file, name, spec.as_ref(), &after, &path)?;
+        let written: BTreeMap<String, RoleSpec> = match file {
+            RoleFile::Root => serde_yaml_ng::from_str::<Config>(&serialized).map(|c| c.roles),
+            RoleFile::Scope => serde_yaml_ng::from_str::<ScopeFile>(&serialized).map(|f| f.scope.roles),
+        }
+        .map_err(|error| {
+            FactoryError::Other(anyhow::anyhow!(
+                "could not edit the roles in {} without breaking it ({error}); nothing was written",
+                path.display()
+            ))
+        })?;
+        if written != after {
+            return Err(FactoryError::Other(anyhow::anyhow!(
+                "could not edit the roles in {} without changing more than {name:?}; nothing was written",
+                path.display()
+            )));
+        }
+        atomic_write(&path, &serialized)?;
+
+        match (file, from_file) {
+            (RoleFile::Root, _) => self.replace_instance_roles(after),
+            (RoleFile::Scope, Some(scope)) => self.replace_scope(&current.id, scope),
+            (RoleFile::Scope, None) => unreachable!("a scope layer was read from its file"),
+        }
+        Ok(current.name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance, Sandbox};
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance as InstanceInfo, Sandbox};
     use factory_core::role::Role;
     use factory_plugins::registry::Registry;
     use factory_plugins::SqliteStore;
@@ -748,7 +1245,7 @@ mod tests {
             root: scratch.0.clone(),
             config: Config {
                 version: 1,
-                instance: Instance {
+                instance: InstanceInfo {
                     id: "i".into(),
                     name: "test".into(),
                 },
@@ -1055,5 +1552,337 @@ mod tests {
             Event::AgentDeleted { scope, name }
                 if scope == "demo" && name == "reviewer"
         ));
+    }
+
+    // -- roles ----------------------------------------------------------------
+
+    /// A real instance on disk -- the root's config and each nested scope's,
+    /// at their paths -- loaded the way the daemon loads one, through
+    /// discovery, so the scope list and its paths are the real ones.
+    struct Instance(PathBuf);
+
+    impl Instance {
+        fn new(tag: &str, root: &str, scopes: &[(&str, &str)]) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "factory-roles-{tag}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(dir.join(FACTORY_DIR)).unwrap();
+            fs::write(dir.join(FACTORY_DIR).join(CONFIG_FILE), root).unwrap();
+            for (rel, yaml) in scopes {
+                let at = dir.join(rel).join(FACTORY_DIR);
+                fs::create_dir_all(&at).unwrap();
+                fs::write(at.join(CONFIG_FILE), yaml).unwrap();
+            }
+            Self(dir)
+        }
+
+        fn engine(&self) -> Arc<Engine> {
+            let mut factory = Factory::load(&self.0).unwrap();
+            crate::discovery::apply(&mut factory).unwrap();
+            factory.config.validate().unwrap();
+            Arc::new(Engine::new(
+                factory,
+                Registry::with_builtins(),
+                Arc::new(SqliteStore::in_memory().unwrap()),
+                PathBuf::from("factory"),
+                vec![],
+            ))
+        }
+
+        fn file(&self, rel: &str) -> PathBuf {
+            self.0.join(rel).join(FACTORY_DIR).join(CONFIG_FILE)
+        }
+
+        fn text(&self, rel: &str) -> String {
+            fs::read_to_string(self.file(rel)).unwrap()
+        }
+
+        fn yaml(&self, rel: &str) -> Value {
+            serde_yaml_ng::from_str(&self.text(rel)).unwrap()
+        }
+    }
+
+    impl Drop for Instance {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const ROOT: &str = "version: 1\ninstance: { id: i, name: test }\n";
+
+    fn spec(describe: &str, grants: &[&str], reach: &str) -> RoleSpec {
+        serde_yaml_ng::from_str(&format!(
+            "describe: {describe}\ngrants: [{}]\nreach: {reach}\n",
+            grants.join(", ")
+        ))
+        .unwrap()
+    }
+
+    fn grants(yaml: &Value, rel_role: &str) -> Vec<String> {
+        yaml["scope"]["roles"][rel_role]["grants"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|g| g.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn defining_a_role_writes_scope_roles_and_leaves_every_other_line_alone() {
+        let instance = Instance::new(
+            "define",
+            ROOT,
+            &[(
+                "projects",
+                "# owner note\nversion: 1\nscope:\n  id: p\n  name: projects\n  # the runtime stays put\n  runtime: herdr\n# runtime belongs to another manager\nruntime:\n  provider: local\n",
+            )],
+        );
+        let engine = instance.engine();
+
+        engine
+            .define_role("projects", "reviewer", spec("works its own tasks", &["task.edit", "task.report"], "own"), false)
+            .await
+            .unwrap();
+
+        let text = instance.text("projects");
+        for kept in ["# owner note", "# the runtime stays put", "runtime: herdr", "# runtime belongs to another manager"] {
+            assert!(text.contains(kept), "{kept:?} is gone from:\n{text}");
+        }
+        assert!(
+            text.find("roles:").unwrap() < text.find("# runtime belongs to another manager").unwrap(),
+            "the block lands inside the scope, not after a comment meant for what follows:\n{text}"
+        );
+        let yaml = instance.yaml("projects");
+        assert_eq!(grants(&yaml, "reviewer"), ["task.edit", "task.report"]);
+        assert_eq!(yaml["scope"]["roles"]["reviewer"]["reach"].as_str(), Some("own"));
+        assert_eq!(yaml["runtime"]["provider"].as_str(), Some("local"));
+        assert!(
+            engine.roles_for("projects").contains(&Role::new("reviewer")),
+            "the running daemon has it from the next request"
+        );
+    }
+
+    #[tokio::test]
+    async fn editing_replaces_the_whole_definition_and_leaves_its_neighbours() {
+        let instance = Instance::new(
+            "edit",
+            ROOT,
+            &[(
+                "projects",
+                "version: 1\nscope:\n  id: p\n  name: projects\n  roles:\n    reviewer:\n      describe: works its own tasks\n      grants: [task.edit, task.report]\n      reach: own\n    # the lead runs the board\n    lead:\n      grants: [task.run]\n      reach: scope\n  task_store: sqlite\n",
+            )],
+        );
+        let engine = instance.engine();
+
+        let exists = engine
+            .define_role("projects", "reviewer", spec("x", &["task.create"], "own"), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(exists.contains("already defines"), "{exists}");
+        let missing = engine
+            .define_role("projects", "ghost", spec("x", &["task.create"], "own"), true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("defines no role"), "{missing}");
+
+        engine
+            .define_role("projects", "reviewer", spec("reviews, and opens follow-ups", &["task.create"], "scope"), true)
+            .await
+            .unwrap();
+
+        let text = instance.text("projects");
+        assert!(text.contains("# the lead runs the board"), "{text}");
+        assert!(text.contains("task_store: sqlite"), "{text}");
+        let yaml = instance.yaml("projects");
+        assert_eq!(grants(&yaml, "reviewer"), ["task.create"], "replaced, never merged");
+        assert_eq!(yaml["scope"]["roles"]["reviewer"]["reach"].as_str(), Some("scope"));
+        assert_eq!(grants(&yaml, "lead"), ["task.run"]);
+    }
+
+    #[tokio::test]
+    async fn deleting_removes_one_entry_and_the_last_one_takes_the_block() {
+        let instance = Instance::new(
+            "delete",
+            ROOT,
+            &[(
+                "projects",
+                "version: 1\nscope:\n  id: p\n  name: projects\n  roles:\n    reviewer:\n      grants: [task.report]\n    lead:\n      grants: [task.run]\n  runtime: herdr\n",
+            )],
+        );
+        let engine = instance.engine();
+
+        engine.delete_role("projects", "reviewer").await.unwrap();
+        let yaml = instance.yaml("projects");
+        assert!(yaml["scope"]["roles"].get("reviewer").is_none());
+        assert_eq!(grants(&yaml, "lead"), ["task.run"]);
+
+        engine.delete_role("projects", "lead").await.unwrap();
+        let text = instance.text("projects");
+        assert!(!text.contains("roles"), "no empty block is left behind:\n{text}");
+        assert!(text.contains("runtime: herdr"), "{text}");
+        assert!(!engine.roles_for("projects").contains(&Role::new("lead")));
+    }
+
+    #[tokio::test]
+    async fn a_role_still_in_use_is_not_deleted_and_every_holder_is_named() {
+        let parent = "version: 1\nscope:\n  id: p\n  name: projects\n  roles:\n    reviewer:\n      grants: [task.report]\n";
+        let instance = Instance::new(
+            "in-use",
+            ROOT,
+            &[
+                ("projects", parent),
+                (
+                    "projects/demo",
+                    "version: 1\nscope:\n  id: d\n  name: demo\n  agents:\n    - name: critic\n      harness: pi\n      role: reviewer\n",
+                ),
+            ],
+        );
+        let engine = instance.engine();
+        let watcher = factory_core::agent::AgentSession::new(
+            "demo", "watcher", "pi", "herdr", Lifetime::Permanent, Role::worker(),
+        );
+        engine.store.put_agent(&watcher).await.unwrap();
+        engine.set_agent_role("demo/watcher", Some(Role::new("reviewer"))).await.unwrap();
+
+        let error = engine.delete_role("projects", "reviewer").await.unwrap_err().to_string();
+        assert!(error.contains("critic in demo"), "{error}");
+        assert!(error.contains("watcher"), "a given role counts too: {error}");
+        assert_eq!(instance.text("projects"), parent, "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn a_parent_definition_nobody_resolves_to_can_go_while_an_override_below_is_held() {
+        let instance = Instance::new(
+            "override",
+            ROOT,
+            &[
+                ("projects", "version: 1\nscope:\n  id: p\n  name: projects\n  roles:\n    reviewer:\n      grants: [task.report]\n"),
+                (
+                    "projects/demo",
+                    "version: 1\nscope:\n  id: d\n  name: demo\n  roles:\n    reviewer:\n      grants: [task.create]\n  agents:\n    - name: critic\n      harness: pi\n      role: reviewer\n",
+                ),
+            ],
+        );
+        let engine = instance.engine();
+
+        let held = engine.delete_role("demo", "reviewer").await.unwrap_err().to_string();
+        assert!(held.contains("critic in demo"), "critic resolves to demo's own: {held}");
+
+        engine.delete_role("projects", "reviewer").await.unwrap();
+        let roles = engine.roles_for("demo");
+        let entry = roles.entry(&Role::new("reviewer")).unwrap();
+        assert_eq!(entry.origin, RoleOrigin::Scope { scope: "demo".into() });
+        assert_eq!(entry.overrides, None, "nothing above it to replace any more");
+    }
+
+    #[tokio::test]
+    async fn the_two_that_ship_are_refused_at_every_level() {
+        let instance = Instance::new("presets", ROOT, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
+        let engine = instance.engine();
+        for name in ["worker", "foreman"] {
+            let defined = engine
+                .define_role("projects", name, spec("wider", &["task.create"], "scope"), false)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(defined.contains("built-in"), "{defined}");
+            let deleted = engine.delete_role("projects", name).await.unwrap_err().to_string();
+            assert!(deleted.contains("built-in"), "{deleted}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bad_role_is_refused_with_the_file_untouched() {
+        let yaml = "version: 1\nscope:\n  id: p\n  name: projects\n";
+        let instance = Instance::new("bad", ROOT, &[("projects", yaml)]);
+        let engine = instance.engine();
+
+        let error = engine
+            .define_role("projects", "approver", spec("x", &["task.approve"], "own"), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("task.approve"), "{error}");
+        let error = engine
+            .define_role("projects", "has space", spec("x", &["task.report"], "own"), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("role name"), "{error}");
+        assert_eq!(instance.text("projects"), yaml);
+    }
+
+    #[tokio::test]
+    async fn the_instance_root_writes_its_top_level_roles() {
+        let root = "version: 1\ninstance: { id: i, name: test }\nscope:\n  id: root\n  name: company\n# daemon settings follow\ndaemon:\n  tick_seconds: 5\n";
+        let instance = Instance::new("root", root, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
+        let engine = instance.engine();
+
+        engine
+            .define_role("company", "runner", spec("starts what is on the board", &["task.run", "task.cancel"], "scope"), false)
+            .await
+            .unwrap();
+
+        let text = instance.text("");
+        assert!(text.contains("# daemon settings follow"), "{text}");
+        let yaml = instance.yaml("");
+        assert!(yaml["roles"]["runner"].is_mapping(), "{text}");
+        assert!(yaml["scope"].get("roles").is_none(), "never scope.roles on the root:\n{text}");
+        assert_eq!(yaml["daemon"]["tick_seconds"].as_u64(), Some(5));
+        let everywhere = engine.roles_for("projects");
+        assert_eq!(everywhere.entry(&Role::new("runner")).unwrap().origin, RoleOrigin::Instance);
+    }
+
+    #[tokio::test]
+    async fn a_flow_style_scope_is_expanded_to_hold_its_roles() {
+        let instance = Instance::new(
+            "flow",
+            ROOT,
+            &[("projects", "version: 1\n# identity\nscope: { id: p, name: projects }\nruntime: { provider: local }\n")],
+        );
+        let engine = instance.engine();
+
+        engine
+            .define_role("projects", "reviewer", spec("works its own tasks", &["task.report"], "own"), false)
+            .await
+            .unwrap();
+
+        let text = instance.text("projects");
+        assert!(text.contains("# identity"), "{text}");
+        assert!(text.contains("runtime: { provider: local }"), "{text}");
+        assert_eq!(grants(&instance.yaml("projects"), "reviewer"), ["task.report"]);
+    }
+
+    #[tokio::test]
+    async fn the_role_requests_answer_and_announce_the_change() {
+        use factory_core::event::Event;
+        use factory_core::protocol::{Payload, Request, Response};
+
+        let instance = Instance::new("request", ROOT, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
+        let engine = instance.engine();
+        let mut events = engine.bus.subscribe();
+
+        let response = engine
+            .handle_request(Request::RoleDefine {
+                scope: "projects".into(),
+                name: "reviewer".into(),
+                role: spec("works its own tasks", &["task.report"], "own"),
+                replace: false,
+            })
+            .await;
+        assert!(matches!(response, Response::Ok { data: Payload::Ok }), "{response:?}");
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            Event::RolesChanged { scope, name } if scope == "projects" && name == "reviewer"
+        ));
+
+        let response = engine
+            .handle_request(Request::RoleDelete { scope: "projects".into(), name: "reviewer".into() })
+            .await;
+        assert!(matches!(response, Response::Ok { data: Payload::Deleted { deleted: true } }), "{response:?}");
     }
 }

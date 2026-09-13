@@ -51,9 +51,6 @@ pub struct Engine {
     /// Serializes read-modify-write edits to local scope config files.
     pub(crate) configuration_edit: std::sync::Mutex<()>,
     pub registry: Registry,
-    /// Every role this instance knows, resolved once. Nothing asks the config
-    /// again: two answers to "what may this agent do" is how they drift.
-    pub roles: Roles,
     pub store: Arc<dyn TaskStore>,
     pub(crate) workflows: crate::workflows::WorkflowStore,
     pub(crate) workflow_edit: tokio::sync::Mutex<()>,
@@ -104,18 +101,10 @@ impl Engine {
         factory_bin: PathBuf,
         interfaces: Vec<String>,
     ) -> Self {
-        // `Factory::load` refuses a config whose roles do not resolve, so this
-        // can only fail for an instance assembled in code. Say so and carry on
-        // with the two that ship rather than taking the daemon down.
-        let roles = factory.config.roles().unwrap_or_else(|e| {
-            tracing::error!("{e}; falling back to the built-in roles");
-            Roles::presets()
-        });
         Self {
             factory: std::sync::RwLock::new(factory),
             configuration_edit: Default::default(),
             registry,
-            roles,
             store,
             workflows: crate::workflows::WorkflowStore::in_memory()
                 .expect("an in-memory workflow store should open"),
@@ -147,6 +136,38 @@ impl Engine {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// Every role in effect in `scope` right now.
+    ///
+    /// Resolved from the live snapshot on every call rather than kept beside
+    /// it, so a scope-config write -- a declaration from the roster, a role
+    /// from the Roles view -- holds from the next request with nothing to
+    /// invalidate, and "what may this agent do" has exactly one answer. It is
+    /// the only way the daemon asks: `authorize` checks against it, and the
+    /// guide tells an agent what it says.
+    ///
+    /// Startup and every write validate the chain before it reaches the
+    /// snapshot, so resolution can only fail for an instance assembled in
+    /// code. Say so and carry on with the two that ship rather than taking
+    /// the daemon down.
+    pub fn roles_for(&self, scope: &str) -> Roles {
+        self.factory_snapshot().roles_for(scope).unwrap_or_else(|e| {
+            tracing::error!(scope, "{e}; falling back to the built-in roles");
+            Roles::presets()
+        })
+    }
+
+    /// The instance root's own `roles:`, after a write to its config.
+    pub(crate) fn replace_instance_roles(
+        &self,
+        roles: std::collections::BTreeMap<String, factory_core::role::RoleSpec>,
+    ) {
+        let mut factory = self
+            .factory
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        factory.config.roles = roles;
     }
 
     pub(crate) fn replace_scope(&self, id: &str, replacement: factory_core::config::Scope) {
@@ -218,11 +239,31 @@ impl Engine {
             }),
             Request::Agents => {
                 let (scopes, available) = self.scope_views().await?;
+                let (roles, scope_roles) = self.role_views();
                 Ok(Payload::Scopes {
                     scopes,
                     available,
-                    roles: self.role_views(),
+                    roles,
+                    scope_roles,
                 })
+            }
+            Request::RoleList { scope } => Ok(Payload::Roles {
+                board: self.role_board(scope.as_deref()).await?,
+            }),
+            Request::RoleDefine {
+                scope,
+                name,
+                role,
+                replace,
+            } => {
+                let (scope, name) = self.define_role(&scope, &name, role, replace).await?;
+                self.bus.publish(Event::RolesChanged { scope, name });
+                Ok(Payload::Ok)
+            }
+            Request::RoleDelete { scope, name } => {
+                let (scope, name) = self.delete_role(&scope, &name).await?;
+                self.bus.publish(Event::RolesChanged { scope, name });
+                Ok(Payload::Deleted { deleted: true })
             }
             Request::Occupancy { minutes } => Ok(Payload::Occupancy {
                 occupancy: self.occupancy(minutes).await?,
@@ -862,19 +903,6 @@ impl Engine {
         Ok((views, available))
     }
 
-    /// Every role this instance knows, for a roster and for a picker.
-    pub fn role_views(&self) -> Vec<factory_core::protocol::RoleView> {
-        self.roles
-            .all()
-            .map(|r| factory_core::protocol::RoleView {
-                name: r.name.as_str().to_string(),
-                describe: r.describe.clone(),
-                grants: r.written().into_iter().map(str::to_string).collect(),
-                reach: r.reach.as_str().to_string(),
-            })
-            .collect()
-    }
-
     // -- naming an agent ----------------------------------------------------
 
     /// Turn what a task asked for into the agent it will actually run as.
@@ -1143,7 +1171,7 @@ impl Engine {
         // whatever the task's own record says -- `resolve_agent` may have
         // fallen back to a bare adapter name the task did not ask for.
         let role = self.effective_role(&task.scope, &agent_name).await;
-        let role = self.roles.get(&role).cloned();
+        let role = self.roles_for(&task.scope).get(&role).cloned();
 
         let ctx = AgentContext {
             scope: task.scope.clone(),
@@ -1697,6 +1725,7 @@ mod tests {
                 runtime: None,
                 git: None,
                 task_store: None,
+                roles: Default::default(),
             }],
             plugins_dir: None,
         };

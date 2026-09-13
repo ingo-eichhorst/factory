@@ -5,6 +5,12 @@
 //! needs, in the same vocabulary the daemon checks against, so the config and
 //! the check cannot drift into different words.
 //!
+//! Roles are written in layers: the two built in, the instance root's
+//! `roles:`, then each scope's `scope.roles` from the top of the tree down to
+//! the scope itself. The nearest definition wins, and it wins whole -- a
+//! definition that merged grants with the one it replaced could only ever
+//! widen, and nobody reading either file could say what the result was.
+//!
 //! This bounds what an agent does by accident, not what it could do if it
 //! tried: every agent runs as the owner of the instance and can reach the
 //! control socket, so one that simply omits its token is indistinguishable
@@ -175,6 +181,29 @@ impl Grant {
         }
     }
 
+    /// Which part of the board this grant is about, as a person reads it. The
+    /// view groups a role's grants by this rather than keeping its own copy of
+    /// which grant belongs where.
+    pub fn group(self) -> &'static str {
+        match self {
+            Self::TaskCreate
+            | Self::TaskEdit
+            | Self::TaskDelete
+            | Self::TaskRun
+            | Self::TaskCancel
+            | Self::TaskReport => "Tasks",
+            Self::AgentStart | Self::AgentConfigure | Self::AgentStop | Self::AgentInput => {
+                "Agents"
+            }
+            Self::RunInput => "Runs",
+            Self::WorkflowCreate
+            | Self::WorkflowEdit
+            | Self::WorkflowDelete
+            | Self::WorkflowRun
+            | Self::WorkflowCancel => "Workflows",
+        }
+    }
+
     /// One written grant, which may be a wildcard: `task.*`, `agent.*`, `*`.
     /// Anything that names nothing is refused rather than ignored -- a typo
     /// that quietly grants less is the failure nobody notices.
@@ -228,7 +257,7 @@ impl Reach {
 }
 
 /// A role as the config writes it.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleSpec {
     /// One line, for the roster and for the agent itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,9 +288,43 @@ impl RoleDef {
     }
 }
 
-/// Every role this instance knows: the two built in, plus whatever it named.
+/// Where a role's definition was written.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RoleOrigin {
+    /// Ships with Factory: `worker` and `foreman`.
+    #[default]
+    Builtin,
+    /// The instance root's top-level `roles:`.
+    Instance,
+    /// A scope's own `scope.roles`, which also holds in every scope below it.
+    Scope { scope: String },
+}
+
+impl RoleOrigin {
+    /// The words an error uses for where a definition was written.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Builtin => "Factory itself".into(),
+            Self::Instance => "the instance root".into(),
+            Self::Scope { scope } => format!("scope {scope:?}"),
+        }
+    }
+}
+
+/// One role in effect, and which layer put it there.
 #[derive(Debug, Clone)]
-pub struct Roles(BTreeMap<String, RoleDef>);
+pub struct RoleEntry {
+    pub def: RoleDef,
+    pub origin: RoleOrigin,
+    /// The inherited definition this one replaced, when it replaced one.
+    pub overrides: Option<RoleOrigin>,
+}
+
+/// Every role in effect somewhere: the two built in, plus whatever the layers
+/// above that place named.
+#[derive(Debug, Clone)]
+pub struct Roles(BTreeMap<String, RoleEntry>);
 
 impl Default for Roles {
     fn default() -> Self {
@@ -287,44 +350,70 @@ impl Roles {
             grants: Grant::ALL.into_iter().collect(),
             reach: Reach::Scope,
         };
+        let builtin = |def: RoleDef| RoleEntry {
+            def,
+            origin: RoleOrigin::Builtin,
+            overrides: None,
+        };
         Self(BTreeMap::from([
-            (Role::WORKER.to_string(), worker),
-            (Role::FOREMAN.to_string(), foreman),
+            (Role::WORKER.to_string(), builtin(worker)),
+            (Role::FOREMAN.to_string(), builtin(foreman)),
         ]))
     }
 
-    /// The presets plus the instance's own. A preset cannot be redefined: an
-    /// instance that could rewrite `worker` could widen every agent that never
-    /// asked for a role, from one line nobody reads twice.
+    /// The presets plus the instance's own.
     pub fn resolve(written: &BTreeMap<String, RoleSpec>) -> Result<Self> {
-        let mut roles = Self::presets();
+        Self::presets().layered(RoleOrigin::Instance, written)
+    }
+
+    /// These roles with one more layer written over them. A same-named role
+    /// replaces the one it inherits entirely -- description, grants and reach.
+    ///
+    /// A preset cannot be redefined at any level: a layer that could rewrite
+    /// `worker` could widen every agent that never asked for a role, from one
+    /// line nobody reads twice.
+    pub fn layered(mut self, origin: RoleOrigin, written: &BTreeMap<String, RoleSpec>) -> Result<Self> {
         for (name, spec) in written {
-            if roles.0.contains_key(name) {
+            let replaced = self.0.get(name).map(|entry| entry.origin.clone());
+            if replaced == Some(RoleOrigin::Builtin) {
                 return Err(FactoryError::BadRequest(format!(
-                    "{name:?} is a built-in role and cannot be redefined"
+                    "{} redefines {name:?}, a built-in role that cannot be redefined at any level",
+                    origin.describe()
                 )));
             }
             let mut grants = BTreeSet::new();
             for written in &spec.grants {
-                grants.extend(Grant::expand(written)?);
+                grants.extend(Grant::expand(written).map_err(|e| {
+                    FactoryError::BadRequest(format!("role {name:?} in {}: {e}", origin.describe()))
+                })?);
             }
-            roles.0.insert(
+            let describe = spec.describe.clone().unwrap_or_else(|| match &origin {
+                RoleOrigin::Scope { scope } => format!("a role scope {scope} named"),
+                _ => "a role this instance named".into(),
+            });
+            self.0.insert(
                 name.clone(),
-                RoleDef {
-                    name: Role::new(name.clone()),
-                    describe: spec
-                        .describe
-                        .clone()
-                        .unwrap_or_else(|| "a role this instance named".into()),
-                    grants,
-                    reach: spec.reach,
+                RoleEntry {
+                    def: RoleDef {
+                        name: Role::new(name.clone()),
+                        describe,
+                        grants,
+                        reach: spec.reach,
+                    },
+                    origin: origin.clone(),
+                    overrides: replaced,
                 },
             );
         }
-        Ok(roles)
+        Ok(self)
     }
 
     pub fn get(&self, role: &Role) -> Option<&RoleDef> {
+        self.0.get(role.as_str()).map(|entry| &entry.def)
+    }
+
+    /// The role with where it was written, for anything that has to say so.
+    pub fn entry(&self, role: &Role) -> Option<&RoleEntry> {
         self.0.get(role.as_str())
     }
 
@@ -337,6 +426,10 @@ impl Roles {
     }
 
     pub fn all(&self) -> impl Iterator<Item = &RoleDef> {
+        self.0.values().map(|entry| &entry.def)
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = &RoleEntry> {
         self.0.values()
     }
 }
@@ -416,6 +509,65 @@ mod tests {
         )]);
         let e = Roles::resolve(&written).unwrap_err().to_string();
         assert!(e.contains("worker"), "{e}");
+    }
+
+    fn spec(describe: &str, grants: &[&str], reach: Reach) -> RoleSpec {
+        RoleSpec {
+            describe: Some(describe.into()),
+            grants: grants.iter().map(|g| g.to_string()).collect(),
+            reach,
+        }
+    }
+
+    #[test]
+    fn a_nearer_layer_replaces_the_whole_definition_and_says_what_it_replaced() {
+        let instance = BTreeMap::from([(
+            "reviewer".to_string(),
+            spec("works its own tasks", &["task.edit", "task.report"], Reach::Own),
+        )]);
+        let scope = BTreeMap::from([(
+            "reviewer".to_string(),
+            spec("reviews the whole scope", &["task.create"], Reach::Scope),
+        )]);
+        let roles = Roles::resolve(&instance)
+            .unwrap()
+            .layered(RoleOrigin::Scope { scope: "projects".into() }, &scope)
+            .unwrap();
+
+        let entry = roles.entry(&Role::new("reviewer")).unwrap();
+        assert_eq!(entry.def.describe, "reviews the whole scope");
+        assert_eq!(entry.def.reach, Reach::Scope);
+        // Replaced, never merged: the inherited task.edit is gone.
+        assert_eq!(entry.def.grants, BTreeSet::from([Grant::TaskCreate]));
+        assert_eq!(entry.origin, RoleOrigin::Scope { scope: "projects".into() });
+        assert_eq!(entry.overrides, Some(RoleOrigin::Instance));
+        assert_eq!(roles.entry(&Role::worker()).unwrap().origin, RoleOrigin::Builtin);
+    }
+
+    #[test]
+    fn a_preset_cannot_be_redefined_by_a_scope_either() {
+        for name in [Role::WORKER, Role::FOREMAN] {
+            let written = BTreeMap::from([(name.to_string(), spec("wider", &["*"], Reach::Scope))]);
+            let e = Roles::presets()
+                .layered(RoleOrigin::Scope { scope: "projects/demo".into() }, &written)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(name), "{e}");
+            assert!(e.contains("projects/demo"), "the message says where: {e}");
+        }
+    }
+
+    #[test]
+    fn every_grant_belongs_to_a_group_a_person_reads() {
+        for grant in Grant::ALL {
+            assert!(
+                ["Tasks", "Agents", "Runs", "Workflows"].contains(&grant.group()),
+                "{} has no group",
+                grant.as_str()
+            );
+        }
+        assert_eq!(Grant::RunInput.group(), "Runs");
+        assert_eq!(Grant::AgentInput.group(), "Agents");
     }
 
     #[test]
