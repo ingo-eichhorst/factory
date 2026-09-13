@@ -15,6 +15,7 @@ import {
   areaColorTokens,
   shouldShowAllLabels,
   unitsPerPixel,
+  viewBoxPoint,
   zoomAt,
   panBy,
   nodeTail,
@@ -294,6 +295,37 @@ test("unitsPerPixel uses the constrained (meet) axis when the rect's aspect rati
 
 test("unitsPerPixel returns 1 for a rect with no measurable size", () => {
   assert.equal(unitsPerPixel({ width: 640, height: 420 }, { width: 0, height: 0 }), 1);
+});
+
+test("viewBoxPoint maps the rect's own centre to the viewBox's centre regardless of letterboxing", () => {
+  const viewBox = { width: 640, height: 420 };
+  // Wider than the viewBox's own aspect ratio -- height is the constrained
+  // (meet) axis, width letterboxes, so the content does not start flush
+  // with rect.left the way a naive (clientX - rect.left) * ppu assumes.
+  const rect = { left: 100, top: 50, width: 1280, height: 420 };
+  const centre = viewBoxPoint(viewBox, rect, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  assert.ok(Math.abs(centre.x - viewBox.width / 2) < 1e-9, `expected x near 320, got ${centre.x}`);
+  assert.ok(Math.abs(centre.y - viewBox.height / 2) < 1e-9, `expected y near 210, got ${centre.y}`);
+});
+
+test("viewBoxPoint maps the content's own left edge, not the rect's, to viewBox x=0", () => {
+  const viewBox = { width: 640, height: 420 };
+  const rect = { left: 100, top: 50, width: 1280, height: 420 };
+  // The content is letterboxed by (1280 - 640/1)/2 = 320px on each side at
+  // ppu=1 (height-constrained) -- so the content's left edge sits at
+  // rect.left + 320, not at rect.left itself.
+  const atContentEdge = viewBoxPoint(viewBox, rect, rect.left + 320, rect.top);
+  assert.ok(Math.abs(atContentEdge.x) < 1e-9, `expected x near 0 at the content's own edge, got ${atContentEdge.x}`);
+  const atRectEdge = viewBoxPoint(viewBox, rect, rect.left, rect.top);
+  assert.ok(atRectEdge.x < 0, "the rect's own edge sits outside the content when letterboxed, so x must be negative");
+});
+
+test("viewBoxPoint matches the naive (clientX - rect.left) * ppu formula when the rect's aspect matches the viewBox's", () => {
+  const viewBox = { width: 640, height: 420 };
+  const rect = { left: 10, top: 20, width: 1280, height: 840 }; // exactly 2x, same aspect ratio
+  const p = viewBoxPoint(viewBox, rect, 10 + 300, 20 + 150);
+  assert.ok(Math.abs(p.x - 150) < 1e-9);
+  assert.ok(Math.abs(p.y - 75) < 1e-9);
 });
 
 test("zoomAt keeps the anchor's underlying content fixed on screen", () => {

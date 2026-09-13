@@ -24,6 +24,7 @@ import {
   areaColorTokens,
   shouldShowAllLabels,
   unitsPerPixel,
+  viewBoxPoint,
   zoomAt,
   panBy,
   nodeTail,
@@ -389,8 +390,7 @@ function wireGraphInteraction() {
     (e) => {
       e.preventDefault();
       const rect = svg.getBoundingClientRect();
-      const ppu = unitsPerPixel(VIEW_BOX, rect);
-      const anchor = { x: (e.clientX - rect.left) * ppu, y: (e.clientY - rect.top) * ppu };
+      const anchor = viewBoxPoint(VIEW_BOX, rect, e.clientX, e.clientY);
       zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15, anchor);
     },
     { passive: false },

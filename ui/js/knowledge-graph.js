@@ -376,6 +376,23 @@ export function unitsPerPixel(viewBox, rect) {
   return Math.max(viewBox.width / rect.width, viewBox.height / rect.height);
 }
 
+/// A screen point (`clientX`/`clientY`, page coordinates) as a point in the
+/// fixed viewBox space `zoomAt`'s `anchor` lives in -- the wheel handler's
+/// own use for this. `unitsPerPixel` alone is not enough here: whichever
+/// axis has slack under `xMidYMid meet` is letterboxed, so the viewBox's
+/// content starts inset from `rect.left`/`rect.top` by half that slack, not
+/// flush with it. Skipping the inset (as if the content always started at
+/// the rect's own corner) anchors a wheel-zoom off wherever the two axes'
+/// unscaled ratios happen to differ -- exactly the case `unitsPerPixel`
+/// itself exists to handle correctly for the *scale*, but not, on its own,
+/// for *where the origin sits*.
+export function viewBoxPoint(viewBox, rect, clientX, clientY) {
+  const ppu = unitsPerPixel(viewBox, rect);
+  const offX = (rect.width - viewBox.width / ppu) / 2;
+  const offY = (rect.height - viewBox.height / ppu) / 2;
+  return { x: (clientX - rect.left - offX) * ppu, y: (clientY - rect.top - offY) * ppu };
+}
+
 /// `view` (`{scale, tx, ty}`) after zooming by `factor` around `anchor`
 /// (`{x, y}`, in the same fixed viewBox space `tx`/`ty` live in) -- the
 /// local point currently drawn under `anchor` stays under it once the new
