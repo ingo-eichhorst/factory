@@ -1,9 +1,9 @@
 use crate::agent::Lifetime;
-use crate::role::{Role, RoleSpec, Roles};
+use crate::role::{Role, RoleOrigin, RoleSpec, Roles};
 use crate::error::{FactoryError, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The directory that marks a Factory instance or a configured scope. Runtime
 /// state belongs to the instance root's directory; nested copies contain only
@@ -29,7 +29,8 @@ pub struct Config {
     #[serde(default, skip_serializing)]
     pub scopes: Vec<Scope>,
     /// Roles this instance names for itself, on top of `worker` and `foreman`.
-    /// Keyed by the name an agent is given in its `role:`.
+    /// Keyed by the name an agent is given in its `role:`. They hold in every
+    /// scope; a nested scope adds its own under `scope.roles`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub roles: BTreeMap<String, RoleSpec>,
     /// Where the daemon looks for out-of-process adapters, relative to
@@ -39,32 +40,79 @@ pub struct Config {
 }
 
 impl Config {
-    /// Every role this instance knows: the two built in, plus its own.
+    /// The roles every scope starts from: the two built in, plus the instance
+    /// root's own. Not the whole answer for any nested scope -- see
+    /// `roles_for_scope`.
     pub fn roles(&self) -> Result<Roles> {
         Roles::resolve(&self.roles)
     }
 
-    /// Refuse a config that gives an agent a role nothing defines, and say
-    /// which agent it was. Falling back to the default instead would demote an
-    /// agent on a typo and never mention it.
+    /// The configured scopes above `scope`, top of the tree first.
+    ///
+    /// Ancestry is `Scope.path` and nothing else. Discovery produces a flat,
+    /// path-sorted list and directory nesting is the only nesting it records;
+    /// names may contain `/` and are matched loosely on purpose
+    /// (`names_scope`, `last_segment`), so a name prefix is not a parent.
+    /// Directories without a scope config are not in the list, so they are
+    /// passed over without being asked.
+    pub fn ancestors_of(&self, scope: &Scope) -> Vec<&Scope> {
+        let own = path_segments(&scope.path);
+        let mut above: Vec<(usize, &Scope)> = self
+            .scopes
+            .iter()
+            .filter_map(|candidate| {
+                let theirs = path_segments(&candidate.path);
+                (theirs.len() < own.len() && own.starts_with(&theirs))
+                    .then_some((theirs.len(), candidate))
+            })
+            .collect();
+        above.sort_by_key(|(depth, _)| *depth);
+        above.into_iter().map(|(_, s)| s).collect()
+    }
+
+    /// Every role in effect in `scope`: the built-in presets, the instance
+    /// root's `roles:`, then each scope's `scope.roles` from the top of the
+    /// tree down to `scope` itself. The nearest definition wins, whole.
+    ///
+    /// Roles never flow up or sideways: only ancestors and the scope itself
+    /// are layered here, so a role `projects/a` defines does not exist in
+    /// `projects/b`. And a definition inherited from above carries no
+    /// authority from above -- reach is still the agent's own scope.
+    pub fn roles_for_scope(&self, scope: &Scope) -> Result<Roles> {
+        let mut roles = self.roles()?;
+        for layer in self.ancestors_of(scope).into_iter().chain(std::iter::once(scope)) {
+            if layer.roles.is_empty() {
+                continue;
+            }
+            roles = roles.layered(
+                RoleOrigin::Scope {
+                    scope: layer.name.clone(),
+                },
+                &layer.roles,
+            )?;
+        }
+        Ok(roles)
+    }
+
+    /// Refuse a config that gives an agent a role nothing in its scope's chain
+    /// defines, and say which agent it was and what that scope does have.
+    /// Falling back to the default instead would demote an agent on a typo
+    /// and never mention it.
     pub fn validate(&self) -> Result<()> {
-        let roles = self.roles()?;
+        self.roles()?;
+        self.refuse_root_scope_roles()?;
         for scope in self.scope.iter().chain(&self.scopes) {
+            let roles = self.roles_for_scope(scope)?;
             for agent in scope.declared_agents() {
-                if agent.harness == "shell" && !agent.args.is_empty() {
-                    return Err(FactoryError::BadRequest(format!(
-                        "scope {:?} gives shell agent {:?} arguments, but the shell agent runs the task's instructions directly and cannot use them",
-                        scope.name,
-                        agent.name(),
-                    )));
-                }
+                refuse_shell_args(scope, &agent)?;
                 if !roles.contains(&agent.role) {
                     return Err(FactoryError::BadRequest(format!(
-                        "scope {:?} gives {:?} the role {:?}, which this instance does not define. \
-                         The roles it has are: {}",
+                        "scope {:?} gives {:?} the role {:?}, which is not defined in that scope. \
+                         The roles available in {:?} are: {}",
                         scope.name,
                         agent.name(),
                         agent.role.as_str(),
+                        scope.name,
                         roles.names().join(", ")
                     )));
                 }
@@ -75,21 +123,21 @@ impl Config {
 
     /// Validate the instance file before discovery replaces its legacy scope
     /// list. Local scope files are checked by `validate` after discovery.
+    ///
+    /// This runs before discovery, so the only roles it can know are the
+    /// instance root's. That is the whole answer for the root scope, which is
+    /// the only scope checked here, and its message says it is the root's
+    /// list -- never that it is every role a nested scope might have.
     pub fn validate_instance(&self) -> Result<()> {
         let roles = self.roles()?;
+        self.refuse_root_scope_roles()?;
         if let Some(scope) = &self.scope {
             for agent in scope.declared_agents() {
-                if agent.harness == "shell" && !agent.args.is_empty() {
-                    return Err(FactoryError::BadRequest(format!(
-                        "scope {:?} gives shell agent {:?} arguments, but the shell agent runs the task's instructions directly and cannot use them",
-                        scope.name,
-                        agent.name(),
-                    )));
-                }
+                refuse_shell_args(scope, &agent)?;
                 if !roles.contains(&agent.role) {
                     return Err(FactoryError::BadRequest(format!(
-                        "scope {:?} gives {:?} the role {:?}, which this instance does not define. \
-                         The roles it has are: {}",
+                        "scope {:?} gives {:?} the role {:?}, which the instance root does not define. \
+                         The roles defined at the instance root are: {}",
                         scope.name,
                         agent.name(),
                         agent.role.as_str(),
@@ -100,6 +148,59 @@ impl Config {
         }
         Ok(())
     }
+
+    /// The instance root already has a role layer, its top-level `roles:`.
+    /// One file with two would leave a person guessing which one wins.
+    fn refuse_root_scope_roles(&self) -> Result<()> {
+        match &self.scope {
+            Some(scope) if !scope.roles.is_empty() => Err(FactoryError::BadRequest(format!(
+                "the instance root's config gives its scope {:?} a `scope.roles` block. \
+                 The root's roles belong in its top-level `roles:`; move {} there",
+                scope.name,
+                scope.roles.keys().cloned().collect::<Vec<_>>().join(", ")
+            ))),
+            _ => Ok(()),
+        }
+    }
+}
+
+fn refuse_shell_args(scope: &Scope, agent: &ScopeAgent) -> Result<()> {
+    if agent.harness == "shell" && !agent.args.is_empty() {
+        return Err(FactoryError::BadRequest(format!(
+            "scope {:?} gives shell agent {:?} arguments, but the shell agent runs the task's instructions directly and cannot use them",
+            scope.name,
+            agent.name(),
+        )));
+    }
+    Ok(())
+}
+
+/// A scope's path as ancestry reads it: its components, with `.` dropped, so
+/// the root scope's `.` is the empty path and sits above every other. Whole
+/// components, so `projects/factory` is never above `projects/factory-x`.
+fn path_segments(path: &Path) -> Vec<String> {
+    path.components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Refuse a `roles:` block written at the top of a nested scope's own config.
+/// Only the `scope:` block of that file is Factory's, so serde would drop it
+/// without a word -- and a role that silently does not exist is found only
+/// when an agent is refused for holding it.
+pub fn refuse_misplaced_scope_roles(document: &serde_yaml_ng::Value, path: &Path) -> Result<()> {
+    let misplaced = document
+        .as_mapping()
+        .is_some_and(|root| root.contains_key(serde_yaml_ng::Value::String("roles".into())));
+    if misplaced {
+        return Err(FactoryError::BadRequest(format!(
+            "scope config {} has a top-level `roles:` block, which a scope's own file does not read. \
+             Move it under `scope.roles`",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn default_version() -> u32 {
@@ -450,6 +551,12 @@ pub struct Scope {
     /// instance default, `daemon.task_store`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_store: Option<String>,
+    /// Roles this scope names for itself and for every scope below it by
+    /// path. A same-named role here replaces the inherited one whole. Only a
+    /// nested scope writes these: the instance root uses its top-level
+    /// `roles:` instead, and refuses this block.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub roles: BTreeMap<String, RoleSpec>,
 }
 
 /// The last `/`-separated segment of `s`, or all of `s` when it has none.
@@ -732,6 +839,16 @@ impl Factory {
             .unwrap_or_else(|_| name.to_string())
     }
 
+    /// Every role in effect in the scope a name resolves to. A name that
+    /// resolves to no scope -- a caller whose scope has since gone -- gets
+    /// only what holds everywhere, never a guess at some other scope's roles.
+    pub fn roles_for(&self, scope: &str) -> Result<Roles> {
+        match self.scope(scope) {
+            Ok(found) => self.config.roles_for_scope(found),
+            Err(_) => self.config.roles(),
+        }
+    }
+
     /// The absolute working directory for a scope.
     pub fn scope_path(&self, name: &str) -> Result<PathBuf> {
         let scope = self.scope(name)?;
@@ -932,6 +1049,143 @@ mod tests {
         );
         c.validate().unwrap();
         assert!(c.roles().unwrap().contains(&Role::new("reviewer")));
+    }
+
+    /// A scope at `path` named `name`, declaring `roles` and one agent holding
+    /// `holds`, if given. Names and paths deliberately differ in the tests
+    /// below: inheritance must follow the path, never the name.
+    fn scope_with_roles(name: &str, path: &str, roles: &str, holds: Option<&str>) -> Scope {
+        let mut yaml = format!("id: {name}-id\nname: {name}\n");
+        if !roles.is_empty() {
+            yaml.push_str(&format!("roles:\n{roles}"));
+        }
+        if let Some(role) = holds {
+            yaml.push_str(&format!("agents:\n  - name: critic\n    harness: pi\n    role: {role}\n"));
+        }
+        let mut scope: Scope = serde_yaml_ng::from_str(&yaml).unwrap();
+        scope.path = PathBuf::from(path);
+        scope
+    }
+
+    fn tree() -> Config {
+        let mut c = config_with(
+            "roles:\n  runner:\n    grants: [task.run, task.cancel]\n    reach: scope\n",
+        );
+        c.scopes = vec![
+            scope_with_roles("company", ".", "", None),
+            // Named nothing like its path, and nothing like its children's.
+            scope_with_roles(
+                "engineering",
+                "projects",
+                "  reviewer:\n    describe: works its own tasks\n    grants: [task.edit, task.report]\n    reach: own\n",
+                None,
+            ),
+            scope_with_roles(
+                "demo-app",
+                "projects/demo",
+                "  reviewer:\n    describe: reviews, and may open follow-ups\n    grants: [task.create, task.edit, task.report]\n    reach: own\n",
+                None,
+            ),
+            scope_with_roles("engineering/tools", "projects/tools", "", None),
+            // A name that reads as a child of `engineering` but is not below
+            // `projects` on disk, and a path that shares a prefix string.
+            scope_with_roles("engineering/other", "elsewhere", "", None),
+            scope_with_roles("lookalike", "projects-x", "", None),
+        ];
+        c
+    }
+
+    fn scope_named<'a>(c: &'a Config, name: &str) -> &'a Scope {
+        c.scopes.iter().find(|s| s.name == name).unwrap()
+    }
+
+    #[test]
+    fn roles_inherit_down_the_path_tree_and_never_up_or_sideways() {
+        let c = tree();
+        let reviewer = Role::new("reviewer");
+
+        let tools = c.roles_for_scope(scope_named(&c, "engineering/tools")).unwrap();
+        let inherited = tools.entry(&reviewer).expect("projects/tools is below projects");
+        assert_eq!(inherited.origin, RoleOrigin::Scope { scope: "engineering".into() });
+        assert!(tools.contains(&Role::new("runner")), "instance roles hold everywhere");
+
+        for elsewhere in ["company", "engineering/other", "lookalike"] {
+            let roles = c.roles_for_scope(scope_named(&c, elsewhere)).unwrap();
+            assert!(
+                !roles.contains(&reviewer),
+                "{elsewhere} is not below projects by path, whatever its name says"
+            );
+        }
+    }
+
+    #[test]
+    fn a_child_override_replaces_the_inherited_definition_whole() {
+        let c = tree();
+        let roles = c.roles_for_scope(scope_named(&c, "demo-app")).unwrap();
+        let entry = roles.entry(&Role::new("reviewer")).unwrap();
+        assert_eq!(entry.origin, RoleOrigin::Scope { scope: "demo-app".into() });
+        assert_eq!(entry.overrides, Some(RoleOrigin::Scope { scope: "engineering".into() }));
+        assert_eq!(entry.def.describe, "reviews, and may open follow-ups");
+        assert!(entry.def.allows(crate::role::Grant::TaskCreate));
+    }
+
+    #[test]
+    fn a_scope_may_not_redefine_a_preset_and_the_error_names_it() {
+        let mut c = tree();
+        c.scopes.push(scope_with_roles(
+            "sneaky",
+            "projects/sneaky",
+            "  worker:\n    grants: ['*']\n",
+            None,
+        ));
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("worker"), "{e}");
+        assert!(e.contains("sneaky"), "{e}");
+    }
+
+    #[test]
+    fn an_agent_may_hold_an_inherited_role_but_not_one_from_elsewhere() {
+        let mut c = tree();
+        c.scopes.push(scope_with_roles("inner", "projects/demo/inner", "", Some("reviewer")));
+        c.validate().unwrap();
+
+        c.scopes.push(scope_with_roles("outsider", "elsewhere/team", "", Some("reviewer")));
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("outsider"), "{e}");
+        assert!(e.contains("reviewer"), "{e}");
+        assert!(e.contains("runner"), "it lists what that scope does have: {e}");
+    }
+
+    #[test]
+    fn the_root_config_refuses_scope_roles_and_points_at_its_own_roles() {
+        let c = config_with("scope:\n  name: company\n  roles:\n    runner:\n      grants: [task.run]\n");
+        let e = c.validate_instance().unwrap_err().to_string();
+        assert!(e.contains("scope.roles"), "{e}");
+        assert!(e.contains("top-level `roles:`"), "{e}");
+    }
+
+    #[test]
+    fn a_top_level_roles_block_in_a_nested_scope_file_is_refused() {
+        let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            "scope:\n  id: s\n  name: demo\nroles:\n  reviewer:\n    grants: [task.report]\n",
+        )
+        .unwrap();
+        let e = refuse_misplaced_scope_roles(&document, Path::new("/x/projects/demo/.factory/config.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("scope.roles"), "{e}");
+        assert!(e.contains("projects/demo"), "{e}");
+
+        let fine: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("scope:\n  id: s\n  name: demo\n  roles: {}\n").unwrap();
+        refuse_misplaced_scope_roles(&fine, Path::new("x")).unwrap();
+    }
+
+    #[test]
+    fn the_instance_root_message_does_not_claim_to_list_every_role() {
+        let c = config_with("scope:\n  name: company\n  agents:\n    - name: critic\n      harness: pi\n      role: reviewer\n");
+        let e = c.validate_instance().unwrap_err().to_string();
+        assert!(e.contains("defined at the instance root"), "{e}");
     }
 
     #[test]

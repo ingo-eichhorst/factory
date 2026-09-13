@@ -19,6 +19,9 @@ export async function loadAgents() {
     const board = await api("/api/agents");
     state.scopes = board.scopes;
     state.roles = board.roles || [];
+    // Only the scopes whose roles differ from the instance's are listed; the
+    // rest have exactly `roles`. See `rolesFor`.
+    state.scopeRoles = board.scope_roles || {};
     // Served once alongside the scopes now, not copied onto each of them --
     // see `Payload::Scopes` -- so `available` comes off the board itself.
     state.adapters = board.available;
@@ -31,6 +34,13 @@ export async function loadAgents() {
   }
 }
 
+
+/// The roles in effect in one scope -- exactly what `set_agent_role` will
+/// accept for an agent there, so the picker never offers a role the daemon
+/// then refuses.
+export function rolesFor(scope) {
+  return (state.scopeRoles && state.scopeRoles[scope]) || state.roles || [];
+}
 
 export function agentTags(a) {
   const tags = [];
@@ -74,7 +84,7 @@ export function renderAgents() {
 
       const rolePicker = standing && a.id
         ? `<select class="rolepick" data-act="role" data-id="${esc(a.id)}" title="What this agent is allowed to do">
-             ${(state.roles || []).map(r => `
+             ${rolesFor(s.name).map(r => `
                <option value="${esc(r.name)}" ${r.name === a.role ? "selected" : ""}
                        title="${esc(r.describe)}">${esc(r.name)}</option>`).join("")}
              ${a.assigned_role ? `<option value="">use the config's</option>` : ""}
@@ -177,7 +187,7 @@ export function openAgentCreate(scope) {
   dropModal();
   const adapters = state.adapters.map(adapter =>
     `<option value="${esc(adapter)}">${esc(adapter)}</option>`).join("");
-  const roles = state.roles.map(role =>
+  const roles = rolesFor(scope).map(role =>
     `<option value="${esc(role.name)}" ${role.name === "worker" ? "selected" : ""} title="${esc(role.describe)}">${esc(role.name)}</option>`).join("");
   scrim(`
     <header><div><h2>New agent</h2><code class="id">${esc(scope)}</code></div>

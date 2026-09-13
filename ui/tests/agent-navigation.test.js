@@ -8,6 +8,7 @@ test("agent screens are peer header tabs without an Agents wrapper", () => {
   assert.match(page, /id="tab-occupancy"[^>]*>Occupancy<\/button>/);
   assert.match(page, /id="tab-roster"[^>]*>Roster<\/button>/);
   assert.match(page, /id="tab-agent-runtime"[^>]*>Agent-runtime<\/button>/);
+  assert.match(page, /id="tab-roles"[^>]*>Roles<\/button>/);
   assert.doesNotMatch(page, /id="tab-agents"/);
   assert.doesNotMatch(page, /id="agent-view"/);
   assert.doesNotMatch(page, /id="view-agents"/);

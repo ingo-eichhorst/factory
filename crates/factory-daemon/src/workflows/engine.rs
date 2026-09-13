@@ -84,6 +84,7 @@ mod tests {
                 runtime: Some("quiet".into()),
                 git: None,
                 task_store: None,
+                roles: Default::default(),
             }],
             plugins_dir: None,
         };
@@ -666,6 +667,7 @@ mod tests {
                     runtime: Some("quiet".into()),
                     git: None,
                     task_store: None,
+                    roles: Default::default(),
                 }],
                 plugins_dir: None,
             };

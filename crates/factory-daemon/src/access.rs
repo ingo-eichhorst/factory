@@ -211,11 +211,15 @@ impl Engine {
             | Request::WorkflowList { .. }
             | Request::WorkflowRunGet { .. }
             | Request::WorkflowRunList { .. }
+            | Request::RoleList { .. }
             | Request::Subscribe => return Needs::Nothing,
 
             // Giving an agent a role is the owner's alone. An agent that could
             // hand itself one is not bounded by the one it has.
             Request::AgentRole { .. } => return Needs::Owner,
+            // For the same reason, and not `agent.configure`: an agent that can
+            // rewrite what a role allows can widen the one it holds.
+            Request::RoleDefine { .. } | Request::RoleDelete { .. } => return Needs::Owner,
         })
     }
 
@@ -241,11 +245,15 @@ impl Engine {
             Needs::Grant(grant) => grant,
         };
 
-        // A role the config no longer defines is refused rather than defaulted:
-        // the agent is holding a job description nobody can read.
-        let Some(def) = self.roles.get(role) else {
+        // A role nothing in the caller's chain defines is refused rather than
+        // defaulted: the agent is holding a job description nobody can read.
+        // The chain is the caller's own scope's -- a role defined in
+        // `projects/a` is no role at all to an agent in `projects/b`.
+        let roles = self.roles_for(scope);
+        let Some(def) = roles.get(role) else {
             return Err(deny(&format!(
-                "act: this instance no longer defines the role {role:?}"
+                "act: {scope} does not define the role {role:?}. The roles available in {scope} are: {}",
+                roles.names().join(", ")
             )));
         };
         if !def.allows(grant) {
@@ -1119,6 +1127,174 @@ mod tests {
         // Reading is still open: that is checked before the role is looked up
         // at all, and an agent that cannot see the board cannot even say so.
         assert!(allowed(&e, &wearing("ghost"), Request::TaskList(Default::default())).await);
+    }
+
+    // -- roles inherited down the scope tree -------------------------------
+
+    /// A small tree whose scope names deliberately do not match their paths:
+    /// inheritance must follow `Scope.path`, and a name that reads like a child
+    /// must not be one.
+    ///
+    ///     .                    company
+    ///     projects             engineering   defines reviewer (own), lead (scope)
+    ///     projects/demo        demo-app
+    ///     projects/demo/inner  demo-app/inner
+    ///     projects/sibling     sibling
+    ///     elsewhere            engineering/outsider
+    fn engine_tree() -> Arc<Engine> {
+        let at = |name: &str, path: &str, roles: &str| {
+            let mut yaml = format!("id: {name}-id\nname: {name}\n");
+            if !roles.is_empty() {
+                yaml.push_str(&format!("roles:\n{roles}"));
+            }
+            let mut scope: factory_core::config::Scope = serde_yaml_ng::from_str(&yaml).unwrap();
+            scope.path = PathBuf::from(path);
+            scope
+        };
+        let mut config: Config =
+            serde_yaml_ng::from_str("instance:\n  id: i\n  name: test\n").unwrap();
+        config.scopes = vec![
+            at("company", ".", ""),
+            at(
+                "engineering",
+                "projects",
+                "  reviewer:\n    grants: [task.edit, task.report]\n    reach: own\n  lead:\n    grants: [task.run, task.cancel]\n    reach: scope\n",
+            ),
+            at("demo-app", "projects/demo", ""),
+            at("demo-app/inner", "projects/demo/inner", ""),
+            at("sibling", "projects/sibling", ""),
+            at("engineering/outsider", "elsewhere", ""),
+        ];
+        config.validate().unwrap();
+        Arc::new(Engine::new(
+            Factory {
+                root: PathBuf::from("/tmp/factory-access-tree-test"),
+                config,
+            },
+            Registry::with_builtins(),
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            vec![],
+        ))
+    }
+
+    fn in_scope(scope: &str, name: &str, role: &str) -> Caller {
+        Caller::Agent {
+            scope: scope.into(),
+            name: name.into(),
+            role: Role::new(role),
+            run_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_below_the_defining_scope_may_use_the_role_it_inherits() {
+        let e = engine_tree();
+        task_in(&e, "mine", "demo-app", "critic").await;
+        let critic = in_scope("demo-app", "critic", "reviewer");
+        assert!(
+            allowed(&e, &critic, Request::TaskReport { id: "mine".into(), report: report() }).await,
+            "demo-app is below projects on disk, so it has engineering's reviewer"
+        );
+        assert!(!allowed(&e, &critic, Request::TaskRun { id: "mine".into() }).await);
+    }
+
+    #[tokio::test]
+    async fn a_role_from_outside_the_chain_is_no_role_and_the_refusal_lists_what_there_is() {
+        let e = engine_tree();
+        task_in(&e, "theirs", "engineering/outsider", "critic").await;
+        let outsider = in_scope("engineering/outsider", "critic", "reviewer");
+        let err = e
+            .authorize(&outsider, &Request::TaskReport { id: "theirs".into(), report: report() })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reviewer"), "{err}");
+        assert!(
+            err.contains("available in engineering/outsider are: foreman, worker"),
+            "a name that reads like engineering's child is not below it: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_inherited_scope_reach_role_still_stops_at_the_agents_own_scope() {
+        let e = engine_tree();
+        for (id, scope) in [
+            ("here", "demo-app"),
+            ("parent", "engineering"),
+            ("sibling", "sibling"),
+            ("child", "demo-app/inner"),
+        ] {
+            task_in(&e, id, scope, "somebody").await;
+        }
+        let lead = in_scope("demo-app", "boss", "lead");
+        assert!(allowed(&e, &lead, Request::TaskRun { id: "here".into() }).await);
+        for elsewhere in ["parent", "sibling", "child"] {
+            assert!(
+                !allowed(&e, &lead, Request::TaskRun { id: elsewhere.into() }).await,
+                "inheriting lead from projects gives no authority over {elsewhere}"
+            );
+            assert!(!allowed(&e, &lead, Request::TaskCancel { id: elsewhere.into() }).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn changing_role_definitions_is_the_owners_alone() {
+        let e = engine_with_roles("roles:\n  everything:\n    grants: ['*']\n    reach: scope\n");
+        let requests = [
+            Request::RoleDefine {
+                scope: "demo".into(),
+                name: "runner".into(),
+                role: factory_core::role::RoleSpec::default(),
+                replace: false,
+            },
+            Request::RoleDelete {
+                scope: "demo".into(),
+                name: "runner".into(),
+            },
+        ];
+        for request in requests {
+            assert!(allowed(&e, &Caller::Owner, request.clone()).await);
+            // Not a foreman, and not a role handed every grant there is: an
+            // agent that can rewrite what a role allows can widen its own.
+            assert!(!allowed(&e, &foreman(), request.clone()).await);
+            assert!(!allowed(&e, &wearing("everything"), request.clone()).await);
+            assert!(!allowed(&e, &worker("w"), request).await);
+        }
+        assert!(
+            allowed(&e, &worker("w"), Request::RoleList { scope: Some("demo".into()) }).await,
+            "reading the roles is reading the board"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_role_is_given_only_where_its_scope_can_see_it() {
+        let e = engine_tree();
+        for scope in ["demo-app", "engineering/outsider"] {
+            let agent = AgentSession::new(scope, "watcher", "pi", "herdr", Lifetime::Permanent, Role::worker());
+            e.store.put_agent(&agent).await.unwrap();
+        }
+        let given = e
+            .set_agent_role("demo-app/watcher", Some(Role::new("reviewer")))
+            .await
+            .unwrap();
+        assert_eq!(given.role, Role::new("reviewer"));
+
+        let err = e
+            .set_agent_role("engineering/outsider/watcher", Some(Role::new("reviewer")))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("engineering/outsider"), "{err}");
+        assert!(err.contains("foreman, worker"), "it lists the roles that scope has: {err}");
+    }
+
+    #[tokio::test]
+    async fn roles_for_resolves_down_the_path_tree_and_never_up_or_sideways() {
+        let e = engine_tree();
+        assert!(e.roles_for("demo-app/inner").contains(&Role::new("lead")));
+        assert!(!e.roles_for("engineering/outsider").contains(&Role::new("lead")));
+        assert!(!e.roles_for("company").contains(&Role::new("lead")), "never up");
     }
 
     // -- giving an agent a role --------------------------------------------

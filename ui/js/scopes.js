@@ -262,11 +262,7 @@ export function writeHash(replace) {
   // While a route is being applied the URL is the truth and the page is the one
   // catching up. `applyRoute` writes the corrected hash once, at the end.
   if (applying) return;
-  // `all` is the keyword for no selection, so a scope actually called `all` has
-  // to be written as something that decodes back to its name without reading as
-  // the keyword. Every other name survives encodeURIComponent unchanged.
-  const head = state.scope === null ? ALL
-    : state.scope === ALL ? "%61ll" : encodeURIComponent(state.scope);
+  const head = scopeSegment(state.scope);
   const tail = tailOf().filter(seg => seg !== null && seg !== undefined && seg !== "");
   const level = state.level || levelForPage(state.tab);
   const next = `#${[head, level, state.tab, ...tail.map(encodeURIComponent)].join("/")}`;
@@ -276,6 +272,24 @@ export function writeHash(replace) {
   if (location.hash === next) return;
   if (replace) history.replaceState(null, "", next);
   else location.hash = next;
+}
+
+/// The hash segment for a selection. `all` is the keyword for no selection, so
+/// a scope actually called `all` has to be written as something that decodes
+/// back to its name without reading as the keyword. Every other name survives
+/// encodeURIComponent unchanged.
+function scopeSegment(scope) {
+  if (scope === null) return ALL;
+  return scope === ALL ? "%61ll" : encodeURIComponent(scope);
+}
+
+/// A link to `page` with `scope` selected, in the same shape `writeHash`
+/// writes, for a view that points somewhere else rather than going there
+/// itself. The level is left out when no level claims the page, which
+/// `readHash` reads as a hash written before levels existed.
+export function routeHref(scope, page) {
+  const level = levelForPage(page);
+  return `#${[scopeSegment(scope), ...(level ? [level] : []), page].join("/")}`;
 }
 
 /// `{scope, level, page, tail}` for a hash that names a route, `null` for

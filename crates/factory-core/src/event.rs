@@ -64,6 +64,13 @@ pub enum Event {
         scope: String,
         name: String,
     },
+    /// A role definition was written into, or removed from, one scope's own
+    /// configuration. Every scope below it may now resolve that name
+    /// differently.
+    RolesChanged {
+        scope: String,
+        name: String,
+    },
     /// A push from a runtime, mapped onto whichever standing agent or run's
     /// session it was about. This never moves a task or a run -- only the
     /// agent's own `factory task report` may do that -- so `task_id()` is
@@ -104,7 +111,8 @@ impl Event {
             Event::AgentUpdated { .. }
             | Event::AgentRemoved { .. }
             | Event::AgentConfigured { .. }
-            | Event::AgentDeleted { .. } => None,
+            | Event::AgentDeleted { .. }
+            | Event::RolesChanged { .. } => None,
             Event::WorkflowCreated { .. }
             | Event::WorkflowUpdated { .. }
             | Event::WorkflowDeleted { .. }
