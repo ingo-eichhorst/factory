@@ -36,6 +36,11 @@ pub enum Event {
     WorkflowRunUpdated {
         run: WorkflowRun,
     },
+    /// A bench run's attempts changed -- one was dispatched, judged, or the
+    /// run itself was cancelled. Wired exactly like `WorkflowRunUpdated`.
+    BenchRunUpdated {
+        run: crate::bench::BenchRun,
+    },
     /// A journal line was appended. Carries the task id so a UI can route it,
     /// and the entry carries the run it belongs to.
     TaskEntry {
@@ -116,7 +121,8 @@ impl Event {
             Event::WorkflowCreated { .. }
             | Event::WorkflowUpdated { .. }
             | Event::WorkflowDeleted { .. }
-            | Event::WorkflowRunUpdated { .. } => None,
+            | Event::WorkflowRunUpdated { .. }
+            | Event::BenchRunUpdated { .. } => None,
             Event::AgentActivity { .. } => None,
             Event::DaemonStarted { .. } => None,
         }

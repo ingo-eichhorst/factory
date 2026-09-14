@@ -10,6 +10,7 @@
 
 import { $, esc, state } from "./core.js";
 import { inScope, writeHash } from "./scopes.js";
+import { progress } from "./bench-model.js";
 
 const LIMIT = 500;
 let log = [];
@@ -161,6 +162,18 @@ function describe(ev) {
       return { at, kind: "run_", label: "run started", detail: `task ${ev.run.task_id} · attempt ${ev.run.attempt} · ${ev.run.trigger}` };
     case "run_updated":
       return { at, kind: "run_", label: `run → ${ev.run.status}`, detail: `task ${ev.run.task_id} · attempt ${ev.run.attempt}` };
+    // A bench run has no single scope of its own -- its cases can span
+    // several -- so `scopeOf`'s default (`undefined`, narrowed by nothing)
+    // is the honest answer for it, the same as for `daemon_started`.
+    case "bench_run_updated": {
+      const { settled, total } = progress(ev.run.attempts);
+      return {
+        at,
+        kind: "run_",
+        label: `bench run → ${ev.run.status}`,
+        detail: `${ev.run.dataset}@${ev.run.dataset_revision} · ${settled}/${total} settled`,
+      };
+    }
     case "agent_updated":
       return { at, kind: "agent_", label: "agent updated", detail: `${ev.agent.scope}/${ev.agent.name} · ${ev.agent.state}` };
     case "agent_removed":

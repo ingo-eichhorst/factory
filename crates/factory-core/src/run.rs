@@ -79,6 +79,9 @@ pub enum Trigger {
     Schedule,
     Agent,
     Workflow,
+    /// Started as one attempt of a bench run -- see `bench::BenchOrigin`,
+    /// which the task itself carries.
+    Bench,
 }
 
 impl Trigger {
@@ -88,6 +91,7 @@ impl Trigger {
             Self::Schedule => "schedule",
             Self::Agent => "agent",
             Self::Workflow => "workflow",
+            Self::Bench => "bench",
         }
     }
 }

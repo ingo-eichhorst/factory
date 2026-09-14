@@ -140,6 +140,12 @@ pub struct Task {
     /// parsing labels or titles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_origin: Option<WorkflowOrigin>,
+    /// The bench attempt that created this task, when there is one. Follows
+    /// `workflow_origin`'s own shape and reason for existing: `#[serde(default)]`
+    /// reads a task written before this field existed as `None`, and a task
+    /// carries at most one of the two origins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench_origin: Option<crate::bench::BenchOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

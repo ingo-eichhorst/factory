@@ -122,6 +122,7 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         // opposite once a task already exists.
         worktree: new.worktree.unwrap_or(true),
         workflow_origin: None,
+        bench_origin: None,
     }
 }
 

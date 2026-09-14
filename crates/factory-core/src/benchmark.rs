@@ -116,13 +116,7 @@ pub fn configurations(scopes: &[Scope], foreman: &ForemanConfig) -> Vec<Configur
             g.agents
                 .sort_by(|a, b| a.scope.cmp(&b.scope).then_with(|| a.agent.cmp(&b.agent)));
             let model_source = g.model.as_ref().map(|_| "args".to_string());
-            let mut missing = vec!["harness version".to_string()];
-            if g.model.is_none() {
-                missing.push("model".to_string());
-            }
-            missing.push("tool surface".to_string());
-            missing.push("context policy".to_string());
-            missing.push("retry budget".to_string());
+            let missing = missing_fields(&g.model);
             let pinned = missing.is_empty();
             Configuration {
                 harness: g.harness,
@@ -158,6 +152,21 @@ pub fn configurations(scopes: &[Scope], foreman: &ForemanConfig) -> Vec<Configur
 
 fn lifetime_str(lifetime: Lifetime) -> String {
     lifetime.as_str().to_string()
+}
+
+/// What a comparable score still needs, for a given `model` outcome -- shared
+/// by `configurations` above and `bench::derive_config`, which both start
+/// from the same accounting of what nothing records yet. `"model"` is the
+/// only entry that depends on the argument; the rest is always missing.
+pub(crate) fn missing_fields(model: &Option<String>) -> Vec<String> {
+    let mut missing = vec!["harness version".to_string()];
+    if model.is_none() {
+        missing.push("model".to_string());
+    }
+    missing.push("tool surface".to_string());
+    missing.push("context policy".to_string());
+    missing.push("retry budget".to_string());
+    missing
 }
 
 /// The shape a token must have before this module will show any part of it.
@@ -252,7 +261,7 @@ fn consume_flag(flags: &mut Vec<String>, shown: String, next: Option<&String>) -
 /// harnesses themselves use for a repeated flag) and reduce everything else
 /// to a flag with its value elided. The model's own flag never appears in
 /// the returned `flags`, so a page showing both never repeats the value.
-fn analyze_args(args: &[String]) -> (Option<String>, Vec<String>) {
+pub(crate) fn analyze_args(args: &[String]) -> (Option<String>, Vec<String>) {
     let mut model = None;
     let mut flags = Vec::new();
     let mut i = 0;

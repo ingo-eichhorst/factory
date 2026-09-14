@@ -371,41 +371,126 @@ check, and there is no write path, in the UI or over the socket.
 
 ## Knowledge
 
-The instance root's `knowledge/wiki/` is a wiki people and agents write by
-hand — `SCHEMA.md` sets the rules, pages carry YAML frontmatter and
-`[[links]]`. The L5 **Knowledge** tab reads it. Nothing else does yet, and
-nothing writes to it.
+`<root>/.factory/knowledge/` is a vault Factory keeps — one Obsidian-compatible
+directory of Markdown pages and any other document, holding authored content
+nothing in Factory regenerates (see the `.factory/` rule above). The L5
+**Knowledge** tab draws it as a graph. The old `<root>/knowledge/wiki/` (v1's
+fixed path) comes in only through an explicit import; nothing moves on its
+own, and there is no fallback read of it.
 
 `factory knowledge` and `GET /api/knowledge` rebuild the index from the files
-on every call: no link table to keep in step, and nothing is ever written. A
-`.md` file whose frontmatter parses and names a `title` is a note; every
-other one is a page, listed but not a graph node. A `[[link]]` resolves
-page-relative, then root-relative, then by a unique file name; more than one
+on every call: no link table to keep in step, and an index request never
+writes anything. Every `.md` file is a page and a graph node — frontmatter is
+optional, and a page's title falls back to its file name when there is none
+or it names no `title`. Every other regular file is a document, stat-ed and
+never opened. A page carries tags from frontmatter `tags:`/`keywords:` and
+inline `#tag` (Obsidian's rules: not purely numeric, not in code or a
+heading, not glued to a URL), and can reference a document through
+`![[f.ext]]`, `[[f.ext]]` or `[text](rel/f.ext)`; `[text](page.md)` is a page
+edge too. A link resolves page-relative, then root-relative, then by a
+unique file name in its own namespace (pages or documents); more than one
 match is reported rather than guessed at, and an unresolved or ambiguous
-target is a gap, not an error.
+target is a gap, not an error. `present: false` names `legacy` when the old
+wiki still exists, and the empty state shows the exact import command.
 
-**v1 indexes; it does not read.** No note's body ever reaches the browser or
-the CLI — only titles, frontmatter fields, links, and findings. A `sources[]`
-entry under `data/secrets/` is reported as a finding and nothing under it is
-ever opened or even stat-ed; that call is decided from the string alone,
-before any filesystem access. The knowledge base is company-wide: the scope
-rail does not filter this tab.
+**The index reads; it does not write.** No page's text and no document's
+bytes ever reach the browser or the CLI — only titles, tags, links, and file
+metadata. A `sources[]` entry under `data/secrets/` is reported as a finding
+and nothing under it is ever opened or even stat-ed; that call is decided
+from the string alone, before any filesystem access. The knowledge base is
+company-wide: the scope rail does not filter this tab.
+
+**Writing only ever adds a file.** `factory knowledge import <dir>
+[--into <subdir>] [--overwrite]` copies a directory tree into the vault,
+preserving relative paths; `factory knowledge add <file>... [--into]
+[--overwrite]` adds one or more files, defaulting a `.md` file to the vault
+root and everything else to `documents/`. The UI's "Add documents" uploads
+through `PUT /api/knowledge/files?path=&overwrite=`, the one write path a
+browser can reach, since it cannot name a path on the daemon's own disk.
+Nothing here edits or deletes an existing file except an explicit
+`--overwrite` replacement. A target that would escape the vault, or a source
+under `data/secrets/` or elsewhere under `.factory/`, is refused before a
+byte is touched — the latter two refusals never echo the path back. This is
+the one place `Grant::KnowledgeWrite` gates: the knowledge base is
+company-wide, so only the owner or a foreman whose own scope *is* the
+instance root may hold it.
 
 ## Benchmarks
 
-**v1 declares and displays; it runs nothing and records no score.**
-`factory bench` and `GET /api/benchmarks` group every agent Factory can
-dispatch — every declared agent, plus the foreman `daemon.foreman` would
-synthesize — into one configuration per distinct harness, full arguments, and
-sandbox, and say which of what a real score would need is recorded today.
+**v1 declared and displayed configurations and ran nothing. v2 adds datasets
+and the ability to run a dataset against chosen agents.**
 
-Today that is: the harness itself, and a model when a declaration's `args`
-spells out `--model`, `--model=`, or `-m`. Harness version, tool surface,
-context policy, and retry budget are recorded nowhere yet, so every
-configuration comes back `pinned: false`. No argument value but the extracted
-model ever reaches the payload — an `args` entry can be a secret, the same
-rule the Secrets tab already lives by, so everything else is reduced to its
-flag with the value elided.
+A *configuration* is still what it was: one distinct harness, full arguments,
+and sandbox that a task could be dispatched with today, including the foreman
+`daemon.foreman` would synthesize. `factory bench` with no subcommand, and
+`GET /api/benchmarks`, still show that inventory — the harness itself, and a
+model when a declaration's `args` spells out `--model`, `--model=`, or `-m`.
+Harness version, tool surface, context policy, and retry budget are recorded
+nowhere yet, so every configuration is still `pinned: false`. No argument
+value but the extracted model ever reaches a payload — an `args` entry can be
+a secret, the same rule the Secrets tab lives by, so everything else is
+reduced to its flag with the value elided; a bench attempt's own
+configuration snapshot follows the same rule, and its full arguments exist
+only long enough to be folded into a sha256 `config_hash` inside the daemon.
+
+A **dataset** is a set of cases, one file at
+`<root>/.factory/datasets/<name>.yaml` — authored content, like the knowledge
+vault, and the source of truth: it is re-parsed on every read, so a hand edit
+shows up on the next call, and `revision` bumps on every write Factory makes
+to it. A case names a scope, carries instructions, and may pin a `base`
+commit, a `reset` command that runs before an attempt starts, and a `gate`
+command whose exit status is the verdict. `gate` and `reset` run as the owner
+inside the attempt's own worktree — the same trust as the `shell` agent, and
+the dataset view says so. Datasets are built three ways: by hand
+(`factory dataset create` and `case add`), generated from recorded tasks
+(`factory dataset from-tasks`, which copies title, instructions and scope,
+records `origin` for reference only, and never sets a `gate`), or
+bulk-imported (`factory dataset import`, accepting `.jsonl`, `.json`,
+`.yaml`/`.yml`, or `.csv`; all-or-nothing, naming every line or row and field
+that is wrong).
+
+A **bench run** is `dataset@revision × agents × attempts`: a snapshot of the
+dataset's cases taken the moment it starts, so a later edit to the dataset
+never changes a run already going. Each case's `base` — its own pinned
+commit, or the scope's HEAD when the run starts — is resolved once, to the
+full commit SHA it names in that scope, so every agent's every attempt at a
+case branches from exactly the same commit and `git` itself only ever sees a
+SHA, never a case-authored string. A `base` that does not resolve to a
+commit there — a bad revision, or one that has since been rewritten away —
+never dispatches: every attempt at that case is `skipped`, with a reason
+naming the base, the same as an agent that does not resolve. Each attempt is
+one ordinary Factory task with its own worktree, so `--attempts N` means N
+independent tries, never "retry until it passes," and `--concurrency N`
+(default 1) bounds how many attempts are in flight at once.
+
+**The verdict.** A case's verdict is the exit status of its gate command,
+recorded with the exit code, the last 4 KiB of its combined output, and the
+attempt's wall-clock time — even when the agent itself reported `failed`, the
+gate still runs and is still the judge. Judging a settled attempt — which
+means running its gate — never happens on a caller's own path: a report, a
+cancel, the scheduler's own watchdog, and restart recovery all merely queue
+it, so a slow gate (up to the case's own timeout, ten minutes by default)
+never makes `factory task report` itself hang, and never stalls anything
+else the scheduler is doing meanwhile. A case with no gate still runs, and
+its result is `unverified`: the agent's own report of `done` or `failed`,
+shown but never counted in a resolve rate (`pass / (pass + fail)`; `null`
+when nothing was gated at all). A case whose reset command fails is
+`skipped` before the agent is ever dispatched — a case is never run dirty.
+An agent that does not resolve in a case's own scope is `skipped` with the
+reason, and the run continues past it. A run cancelled mid-flight settles
+every remaining attempt `cancelled`, even one whose judgement was already
+queued or under way — that verdict, once written, is never overwritten by a
+late judgement landing after the cancel. One lost, timed out, or that never
+got as far as a report before its run ended is `error`. Cost and tokens are
+still not recorded, and the payload says so rather than showing a `0`.
+
+`factory bench run <dataset> --agent <scope>/<agent> [--attempts N]
+[--concurrency N] [--case <id>]` starts a run; `factory bench runs`, `show`,
+`cancel` and `clean` list, inspect, stop, and — once a run is finished —
+remove exactly that run's worktrees and branches, explicitly, and only for
+the owner. Restarting the daemon mid-run resumes it: an attempt already
+settled but not yet judged is judged, one that never started is started, and
+one still in flight is left to the ordinary run watchdog.
 
 ## Tasks and runs
 
@@ -703,7 +788,13 @@ HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`,
 `GET /api/runs/{id}/entries`, `GET /api/runs/{id}/output`, `GET /api/agents`,
 `GET /api/agent-runtime`, `GET /api/environment`, `GET /api/knowledge`,
-`GET /api/benchmarks`, workflow CRUD under `/api/workflows`, workflow-run
+`PUT /api/knowledge/files?path=&overwrite=` (raw bytes, its own 50 MiB body
+limit), `GET /api/benchmarks`, dataset CRUD under `/api/datasets` (plus
+`POST /api/datasets/{name}/cases`, `.../import` and `.../from-tasks`, and
+`DELETE /api/datasets/{name}/cases/{id}`), bench runs under
+`POST /api/bench/runs`, `GET /api/bench/runs[?dataset=]`,
+`GET /api/bench/runs/{id}`, `POST /api/bench/runs/{id}/cancel` and
+`.../clean`, workflow CRUD under `/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
 `POST /api/rpc` for the raw envelope. `GET /ws`
 is the event stream: a snapshot of every task first, then one message per event.
@@ -856,6 +947,23 @@ measurement of zero — and its floor says "not recorded" instead of a treemap
 drawn from nothing; a walk that hit its cap says its numbers are a lower bound;
 the file a session is editing is not read at all, and is not drawn.
 
+**Benchmarks** gets a segmented control — **Datasets**, **Runs** and
+**Configurations** — each with its own hash route
+(`#<scope>/imp/benchmarks/datasets/<name>`, `.../runs/<id>`,
+`.../configurations`) that boots directly and survives reload and
+back/forward. **Datasets** lists every dataset, company-wide; selecting one
+shows its cases, findings, and *New dataset*, *Add case*, *From tasks…*,
+*Import…* and *Run…* — the last starts a bench run and switches to **Runs**.
+**Runs** lists every bench run and, for the selected one, a results table per
+configuration, an attempts matrix of case × configuration whose verdict chips
+link to each attempt's task, and a small scatter of resolve rate against mean
+wall-clock; it updates live on `bench_run_updated` and offers *Cancel* and,
+once a run has finished, *Remove worktrees*. The rail narrows a selected
+dataset's own cases and a selected run's attempts matrix; it never narrows the
+company-wide dataset list or the aggregated results table, which stays the
+daemon's own numbers for the whole run. **Configurations** is v1's cards,
+unchanged.
+
 ## What this prototype does not do yet
 
 - **Runtime and interface plugins.** The manifest accepts `kind: runtime` and
@@ -916,5 +1024,6 @@ the file a session is editing is not read at all, and is not drawn.
     ui/js/{dashboard,activity,site,site-render}.js               the new views
     ui/js/{sandboxes,secrets}.js                                 L2's two tabs
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
+    ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter

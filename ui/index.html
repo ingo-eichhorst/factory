@@ -387,16 +387,109 @@
       <h2>Benchmarks</h2>
       <span class="sub" id="benchmarks-count"></span>
       <span class="sp"></span>
+      <div class="seg" id="bench-seg" role="group" aria-label="Datasets, runs or configurations">
+        <button type="button" data-seg="datasets" class="on">Datasets</button>
+        <button type="button" data-seg="runs">Runs</button>
+        <button type="button" data-seg="configurations">Configurations</button>
+      </div>
       <button class="btn" id="benchmarks-refresh">Refresh</button>
     </div>
-    <p class="env-note" id="benchmarks-note"></p>
-    <p class="env-note bad" id="benchmarks-error" hidden></p>
-    <div class="bench-cards" id="benchmarks-cards"></div>
-    <div class="empty" id="noBenchmarks" hidden>No agents declared yet.</div>
-    <section class="bench-need">
-      <h3>What a score would need</h3>
-      <ul id="benchmarks-needs"></ul>
-    </section>
+
+    <!-- ------------------------------------------------------- datasets -->
+    <div id="bench-pane-datasets">
+      <p class="env-note" id="datasets-note"></p>
+      <p class="env-note bad" id="datasets-error" hidden></p>
+      <div class="bar" style="margin:0 14px 10px">
+        <span class="sp"></span>
+        <button class="btn primary" id="dataset-new">New dataset</button>
+      </div>
+      <section>
+        <table>
+          <thead><tr><th>Name</th><th>Cases</th><th>Gated</th><th>Ungated</th><th>Revision</th></tr></thead>
+          <tbody id="dataset-rows"></tbody>
+        </table>
+        <div class="empty" id="no-datasets" hidden>No datasets yet.</div>
+      </section>
+
+      <section id="dataset-detail" hidden style="margin-top:12px">
+        <div class="bar" style="margin:0 14px 11px">
+          <h3 id="dataset-detail-name" style="margin:0"></h3>
+          <span class="sub" id="dataset-detail-revision"></span>
+          <span class="sp"></span>
+          <button class="btn" id="dataset-add-case">Add case</button>
+          <button class="btn" id="dataset-from-tasks">From tasks…</button>
+          <button class="btn" id="dataset-import">Import…</button>
+          <button class="btn primary" id="dataset-run">Run…</button>
+          <button class="btn danger" id="dataset-delete">Delete dataset</button>
+        </div>
+        <p class="env-note" id="dataset-description" style="margin:10px 14px 0"></p>
+        <div id="dataset-findings"></div>
+        <table>
+          <thead><tr>
+            <th>Id</th><th>Title</th><th>Scope</th><th>Base</th><th>Gate</th><th>Reset</th><th>Origin</th><th></th>
+          </tr></thead>
+          <tbody id="dataset-cases"></tbody>
+        </table>
+        <div class="empty" id="no-cases" hidden>No cases yet.</div>
+      </section>
+    </div>
+
+    <!-- ----------------------------------------------------------- runs -->
+    <div id="bench-pane-runs" hidden>
+      <p class="env-note" id="bench-runs-note"></p>
+      <p class="env-note bad" id="bench-runs-error" hidden></p>
+      <section>
+        <table>
+          <thead><tr><th>Dataset@revision</th><th>Agents</th><th>Started</th><th>Status</th><th>Progress</th></tr></thead>
+          <tbody id="bench-run-rows"></tbody>
+        </table>
+        <div class="empty" id="no-bench-runs" hidden>No bench runs yet.</div>
+      </section>
+
+      <section id="bench-run-detail" hidden style="margin-top:12px">
+        <div class="bar" style="margin:0 14px 11px">
+          <h3 id="bench-run-title" style="margin:0"></h3>
+          <span class="sub" id="bench-run-status"></span>
+          <span class="sp"></span>
+          <button class="btn" id="bench-run-cancel">Cancel</button>
+          <button class="btn danger" id="bench-run-clean">Remove worktrees</button>
+        </div>
+        <p class="env-note" id="bench-run-scope-note" style="margin:10px 14px 0"></p>
+
+        <h4 style="margin:14px 14px 4px">Results</h4>
+        <table>
+          <thead><tr>
+            <th>Configuration</th><th>Resolve rate</th><th>Pass</th><th>Fail</th>
+            <th>Unverified</th><th>Skipped</th><th>Mean wall-clock</th><th>Cost</th>
+          </tr></thead>
+          <tbody id="bench-results"></tbody>
+        </table>
+
+        <h4 style="margin:14px 14px 4px">Attempts</h4>
+        <table>
+          <thead><tr id="bench-matrix-head"><th>Case</th></tr></thead>
+          <tbody id="bench-matrix-body"></tbody>
+        </table>
+        <div class="empty" id="no-bench-attempts" hidden>No attempts in this run.</div>
+
+        <h4 style="margin:14px 14px 4px">Resolve rate vs. mean wall-clock</h4>
+        <svg id="bench-scatter" viewBox="0 0 420 220" preserveAspectRatio="xMidYMid meet"
+          aria-label="Scatter of resolve rate against mean wall-clock, one point per configuration. Cost is not recorded and cannot be plotted."></svg>
+        <p class="sub" id="bench-scatter-caption" style="margin:0 14px 12px"></p>
+      </section>
+    </div>
+
+    <!-- --------------------------------------------------- configurations -->
+    <div id="bench-pane-configurations" hidden>
+      <p class="env-note" id="benchmarks-note"></p>
+      <p class="env-note bad" id="benchmarks-error" hidden></p>
+      <div class="bench-cards" id="benchmarks-cards"></div>
+      <div class="empty" id="noBenchmarks" hidden>No agents declared yet.</div>
+      <section class="bench-need">
+        <h3>What a score would need</h3>
+        <ul id="benchmarks-needs"></ul>
+      </section>
+    </div>
   </div>
 
   <div id="view-knowledge" hidden>
@@ -412,17 +505,67 @@
     <div class="empty" id="knowledge-empty" hidden></div>
     <div class="know-shell" id="knowledge-shell">
       <section class="know-graph-wrap">
+        <div class="know-toolbar" id="knowledge-toolbar">
+          <input type="search" id="knowledge-search" placeholder="Search…" aria-label="Search the knowledge graph">
+          <label class="know-toggle"><input type="checkbox" id="knowledge-toggle-tags">Tags</label>
+          <label class="know-toggle"><input type="checkbox" id="knowledge-toggle-documents">Documents</label>
+          <label class="know-toggle"><input type="checkbox" id="knowledge-toggle-orphans">Orphans</label>
+          <label class="know-toggle"><input type="checkbox" id="knowledge-toggle-gaps">Gaps</label>
+          <label class="know-toggle"><input type="checkbox" id="knowledge-local">Local graph</label>
+          <select id="knowledge-depth" aria-label="Local graph depth">
+            <option value="1">depth 1</option>
+            <option value="2" selected>depth 2</option>
+            <option value="3">depth 3</option>
+          </select>
+          <span class="sp"></span>
+          <button class="btn icon" type="button" id="knowledge-zoom-out" aria-label="Zoom out">−</button>
+          <button class="btn icon" type="button" id="knowledge-zoom-in" aria-label="Zoom in">+</button>
+          <button class="btn" type="button" id="knowledge-zoom-fit">Fit</button>
+        </div>
         <!-- No `role="img"` here: that role would flatten the SVG to a single
              opaque picture and strip every focusable node below out of the
              accessibility tree, which is exactly backwards for a diagram
              whose nodes are each their own tab stop (`role="button"` on the
-             `<g>` `buildGraphSvg` draws in knowledge.js). The notes table
-             below is the accessible, tabular fallback to this picture. -->
+             `<g>` `buildGraphSvg` draws in knowledge.js). The tables below
+             are the accessible, tabular fallback to this picture. -->
         <svg id="knowledge-graph" viewBox="0 0 640 420" preserveAspectRatio="xMidYMid meet"
-          aria-label="Knowledge graph. Notes are solid nodes sized by backlink count; gaps -- links to pages never written -- are dashed. Select a node to see it in the inspector."></svg>
+          aria-label="Knowledge graph. Pages are circles sized by backlink count and coloured by area; tags are diamonds; documents are squares; gaps -- links to something never written -- are dashed. Select a node to see it in the inspector."></svg>
       </section>
-      <aside class="know-inspector" id="knowledge-inspector" aria-label="Selected note"></aside>
+      <aside class="know-inspector" id="knowledge-inspector" aria-label="Selected item"></aside>
     </div>
+    <section class="know-add">
+      <h3>Add documents</h3>
+      <p class="sub">Files you choose here are copied into the vault; nothing on this page edits or deletes one.</p>
+      <input type="file" id="knowledge-upload" multiple aria-label="Add documents to the knowledge vault">
+      <div class="err" id="knowledge-upload-errors" hidden></div>
+    </section>
+    <section>
+      <h3>Pages</h3>
+      <table>
+        <thead><tr>
+          <th>Title</th><th>Id</th><th>Area</th><th>Status</th>
+          <th>Backlinks</th><th>Links</th><th>Tags</th><th>Documents</th><th>Sources</th>
+        </tr></thead>
+        <tbody id="knowledge-pages"></tbody>
+      </table>
+      <div class="empty" id="knowledge-no-pages" hidden>No pages indexed.</div>
+    </section>
+    <section>
+      <h3>Tags</h3>
+      <table>
+        <thead><tr><th>Tag</th><th>Pages</th></tr></thead>
+        <tbody id="knowledge-tags"></tbody>
+      </table>
+      <div class="empty" id="knowledge-no-tags" hidden>No tags.</div>
+    </section>
+    <section>
+      <h3>Documents</h3>
+      <table>
+        <thead><tr><th>Path</th><th>Type</th><th>Size</th><th>Referenced by</th></tr></thead>
+        <tbody id="knowledge-documents"></tbody>
+      </table>
+      <div class="empty" id="knowledge-no-documents" hidden>No documents.</div>
+    </section>
     <section>
       <h3>Gaps</h3>
       <table>
@@ -436,18 +579,6 @@
       <div id="knowledge-findings"></div>
       <div class="empty" id="knowledge-no-findings" hidden>No findings.</div>
     </section>
-    <section>
-      <h3>Notes</h3>
-      <table>
-        <thead><tr>
-          <th>Title</th><th>Id</th><th>Area</th><th>Status</th>
-          <th>Backlinks</th><th>Links</th><th>Sources</th>
-        </tr></thead>
-        <tbody id="knowledge-notes"></tbody>
-      </table>
-      <div class="empty" id="knowledge-no-notes" hidden>No notes indexed.</div>
-    </section>
-    <p class="env-note" id="knowledge-pages-note"></p>
   </div>
   </div>
 </main>
