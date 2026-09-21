@@ -125,6 +125,11 @@ pub struct Engine {
             ),
         >,
     >,
+    /// Keeps the host awake for as long as any run is active -- see
+    /// `crate::power` and issue #61. Acquired once a run's row exists
+    /// (`dispatch`), released for every run `close_session` ever sees,
+    /// terminal outcome or not.
+    pub(crate) power: crate::power::PowerAssertions,
 }
 
 impl Engine {
@@ -136,6 +141,7 @@ impl Engine {
         interfaces: Vec<String>,
     ) -> Self {
         let (bench_judge_tx, bench_judge_rx) = tokio::sync::mpsc::unbounded_channel();
+        let power = crate::power::PowerAssertions::new(factory.config.daemon.power_assertion);
         Self {
             factory: std::sync::RwLock::new(factory),
             configuration_edit: Default::default(),
@@ -159,6 +165,7 @@ impl Engine {
             site_walks: Default::default(),
             worktree_caps: Default::default(),
             site_memory: Default::default(),
+            power,
         }
     }
 
@@ -1341,6 +1348,16 @@ impl Engine {
             })
             .await?;
 
+        // The run exists from here on, so it holds its share of the power
+        // assertion from here on too -- every `?` below this point ends the
+        // run through `start_run`'s own error handling, which reaches
+        // `fail_run` (since `active_run` now finds this row) and so
+        // `close_session`, the one place this is ever released. Acquired
+        // before the worktree and the agent/runtime calls rather than after
+        // them: those are exactly the slow, fallible steps a sleeping host
+        // could stall inside, which is the case this issue is about.
+        self.power.acquire(&run.id).await;
+
         self.bus.publish(Event::RunStarted { run: run.clone() });
         self.publish_task(task_id).await;
         self.entry(
@@ -1808,6 +1825,13 @@ impl Engine {
     /// actually knows a run is over rather than guessing from one caller's
     /// reason for closing it.
     async fn close_session(&self, run: &Run) {
+        // First and unconditional, ahead of the early `return` below for a
+        // run that never got as far as a session (a dispatch failure) --
+        // `power.release` is the counterpart to `dispatch`'s own
+        // `power.acquire`, and every run that reaches this function reaches
+        // it regardless of whether it ever had a session to close.
+        self.power.release(&run.id).await;
+
         // The guide file, if this run's harness wrote one, is named after the
         // task rather than the run and nothing else removes it. It cannot be
         // deleted right after launch: a harness may read its configured
@@ -2032,7 +2056,20 @@ mod tests {
                 id: "test".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
+            daemon: DaemonConfig {
+                // Every dispatching test in this module runs in this same
+                // process, several in parallel, and the default is on -- a
+                // real `power_assertion` would fork a real `caffeinate`
+                // holding a real PreventSystemSleep assertion on whatever
+                // machine runs `cargo test`, once per test, for tests that
+                // never mean to exercise that. `crate::power`'s own tests
+                // already cover the platform call in isolation with a fake;
+                // what the tests in *this* file need from `engine.power` is
+                // only the bookkeeping (`active_count`), which is identical
+                // whichever backend sits behind it.
+                power_assertion: false,
+                ..DaemonConfig::default()
+            },
             roles: Default::default(),
             scope: None,
             scopes: vec![Scope {
@@ -2357,6 +2394,58 @@ mod tests {
         assert!(
             entries.iter().any(|e| e.message.contains("not a git repository")),
             "the journal gets git's complaint too"
+        );
+
+        // `start_run`'s own error handling ran this all the way through
+        // `fail_run` -> `close_session`, so the assertion `dispatch` took
+        // out for this run when its row was made must be back down to zero
+        // by now -- see issue #61.
+        assert_eq!(
+            engine.power.active_count().await,
+            0,
+            "a failed dispatch must not leave the power assertion held forever"
+        );
+
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    // -- power assertion, issue #61 ------------------------------------------
+
+    /// `dispatch` itself -- called directly here, below `start_run`'s own
+    /// error handling -- is where the assertion is acquired, right after the
+    /// run's row exists. This proves that half of the wiring on its own:
+    /// the companion test above proves the release half, once `start_run`'s
+    /// failure handling has run `close_session` for it.
+    #[tokio::test]
+    async fn dispatch_acquires_the_power_assertion_as_soon_as_the_run_row_exists() {
+        let scope_dir = temp_dir("power-acquire");
+        let engine = test_engine(scope_dir.clone());
+
+        let task = engine
+            .create(NewTask {
+                title: "try the worktree".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(engine.power.active_count().await, 0, "nothing has dispatched yet");
+
+        // Not a git repository, so this fails inside `place_run` -- after
+        // the run row (and so the acquire) but before a session. Calling
+        // `dispatch` directly rather than through `start_run` is what lets
+        // this test see the assertion still held: `start_run` would carry
+        // the same error straight into `fail_run` and release it again.
+        let err = engine.dispatch(&task.id, Trigger::Manual).await.unwrap_err();
+        assert!(err.to_string().contains("not a git repository"), "got: {err}");
+
+        assert_eq!(
+            engine.power.active_count().await,
+            1,
+            "the run row exists, so its share of the assertion must already be held"
         );
 
         std::fs::remove_dir_all(&scope_dir).ok();
