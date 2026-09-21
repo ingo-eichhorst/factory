@@ -885,14 +885,31 @@ impl AgentRuntime for HerdrRuntime {
     }
 
     /// `status`, plus whether herdr is reporting a hook's word or guessing
-    /// from the screen. Only worth asking about `blocked`: `pane get` already
-    /// answers every other status for free, and `agent explain` is a second
-    /// subprocess herdr has to run -- paying for it every five seconds on
-    /// every active run, for a question that only `blocked` needs answered,
-    /// is not a trade worth making.
+    /// from the screen. Worth asking about for `blocked` and, since issue
+    /// #62, `idle` too: `pane get` already answers every other status for
+    /// free, and `agent explain` is a second subprocess herdr has to run --
+    /// paying for it every five seconds on every active run, for a question
+    /// that only these two statuses need answered, is not a trade worth
+    /// making. `idle` joined `blocked` here because the daemon can only fail
+    /// a run whose turn ended without a report the moment the *harness*
+    /// says so (see `AGENTS.md` and `occupancy::turn_ended_action`) -- a
+    /// `pane get` that merely looks idle is exactly the screen guess that
+    /// rule forbids acting on.
     async fn status_report(&self, session: &SessionRef) -> Result<StatusReport> {
         let status = self.status(session).await?;
-        if status != RuntimeStatus::Blocked {
+        let ask_why = match status {
+            RuntimeStatus::Blocked => true,
+            // A shell-mode pane (`LaunchKind::Command`, see `start()`) never
+            // has an agent on it for herdr to explain -- there is nothing
+            // for `agent explain` to say about it but an error. Restricting
+            // the new `idle` case to a pane herdr actually put an agent on
+            // costs nothing when that guess is right, and avoids a doomed
+            // subprocess on every tick of every shell-agent run if it is
+            // ever wrong.
+            RuntimeStatus::Idle => session.meta.get("mode").map(String::as_str) == Some("agent"),
+            _ => false,
+        };
+        if !ask_why {
             return Ok(StatusReport {
                 status,
                 source: StatusSource::Unknown,
@@ -904,33 +921,62 @@ impl AgentRuntime for HerdrRuntime {
             .run(&[s("agent"), s("explain"), s(pane), s("--format"), s("json")])
             .await
         {
-            // `pane get`'s answer is enveloped as `{"id":..,"result":{..}}`;
-            // `explain`'s is the bare object. `run` already unwraps either
-            // shape (it hands back `result` when there is one, the whole
-            // object otherwise), but look in both places explicitly rather
-            // than lean on that alone -- the two commands are not guaranteed
-            // to agree on their envelope forever.
             Ok(explained) => {
-                let skipped = explained
-                    .get("screen_detection_skipped")
-                    .or_else(|| explained.get("result").and_then(|r| r.get("screen_detection_skipped")))
+                // `pane get`'s answer is enveloped as `{"id":..,"result":{..}}`;
+                // `explain`'s is the bare object. `run` already unwraps either
+                // shape (it hands back `result` when there is one, the whole
+                // object otherwise), but look in both places explicitly rather
+                // than lean on that alone -- the two commands are not guaranteed
+                // to agree on their envelope forever.
+                let field = |name: &str| -> Option<&Value> {
+                    explained
+                        .get(name)
+                        .or_else(|| explained.get("result").and_then(|r| r.get(name)))
+                };
+                let skipped = field("screen_detection_skipped")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                if skipped {
-                    // A `pi` pane looks like this: `screen_detection_skipped:
-                    // true`, `skip_reason: "full_lifecycle_hook_authority"`,
-                    // `evaluated_rules: []`. The harness told herdr; herdr is
-                    // just the messenger.
-                    StatusSource::Reported
-                } else {
+                if !skipped {
                     // `claude`, `codex` and `opencode` panes come back with a
                     // `matched_rule` from herdr's screen-region regexes. That
                     // is inference, however confident it looks.
                     StatusSource::Inferred
+                } else if status == RuntimeStatus::Blocked {
+                    // A `pi` pane looks like this: `screen_detection_skipped:
+                    // true`, `screen_detection_skip_reason:
+                    // "full_lifecycle_hook_authority"`, `evaluated_rules: []`.
+                    // The harness told herdr; herdr is just the messenger.
+                    // (Verified against a live `herdr agent explain --json`;
+                    // an earlier version of this comment named the field
+                    // `skip_reason`, which does not exist on the wire and
+                    // cost issue #62's first pass its `idle` case entirely.)
+                    StatusSource::Reported
+                } else {
+                    // `idle` asks for more proof than `blocked` does before
+                    // trusting `skipped`. Ending a run outright is far less
+                    // reversible than moving it into `Blocked` -- a wrongly
+                    // `Reported` block only pauses a run for a human, a
+                    // wrongly `Reported` idle kills it (see `AGENTS.md` and
+                    // issue #62) -- and `screen_detection_skipped` alone
+                    // does not distinguish "the harness told me" from herdr
+                    // skipping detection for some other reason entirely (no
+                    // agent on the pane yet, detection turned off, a pane
+                    // that never became ready). Only the specific
+                    // `screen_detection_skip_reason` above actually means a
+                    // hook is speaking, so the `idle` path insists on it by
+                    // name rather than trusting the bool on its own.
+                    let reason = field("screen_detection_skip_reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if reason == "full_lifecycle_hook_authority" {
+                        StatusSource::Reported
+                    } else {
+                        StatusSource::Inferred
+                    }
                 }
             }
             // `explain` failing tells us nothing either way about how the
-            // `blocked` we already have came about. A guess is the safe
+            // status we already have came about. A guess is the safe
             // assumption -- never claim a report we could not actually read.
             Err(_) => StatusSource::Inferred,
         };
@@ -1149,6 +1195,158 @@ mod tests {
             .error
             .unwrap_or_default()
             .contains("configured Herdr client"));
+    }
+
+    /// A fake `herdr` binary that answers `status` (for `with_bin`'s own
+    /// session-detection probe), `pane get` with the given `agent_status`,
+    /// and `agent explain` with the given raw JSON -- and, for the
+    /// `explain`-was-never-called test below, touches a marker file first
+    /// so a test can prove that branch was never reached rather than only
+    /// checking the source it would have produced. Returns the binary's
+    /// path and the directory it lives in, which the caller owns and must
+    /// clean up once the runtime built from it is done being used.
+    #[cfg(unix)]
+    fn fake_herdr_for_explain(agent_status: &str, explain_json: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "factory-herdr-status-report-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("explain-called");
+        let bin = dir.join("fake-herdr");
+        std::fs::write(
+            &bin,
+            format!(
+                r#"#!/bin/sh
+if [ "$1" = "status" ] && [ "$2" != "--json" ]; then
+  printf 'socket: /tmp/factory-herdr-status-report-test/herdr.sock\n'
+elif [ "$1" = "pane" ] && [ "$2" = "get" ]; then
+  printf '%s\n' '{{"result":{{"pane":{{"agent_status":"{agent_status}"}}}}}}'
+elif [ "$1" = "agent" ] && [ "$2" = "explain" ]; then
+  : > '{marker}'
+  printf '%s\n' '{explain_json}'
+else
+  exit 9
+fi
+"#,
+                marker = marker.display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&bin).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&bin, permissions).unwrap();
+        (bin, dir)
+    }
+
+    #[cfg(unix)]
+    fn agent_mode_session() -> SessionRef {
+        SessionRef {
+            runtime: ADAPTER.into(),
+            handle: "pane1".into(),
+            meta: BTreeMap::from([("mode".to_string(), "agent".to_string())]),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_full_lifecycle_hook_authority_idle_is_a_report_not_a_guess() {
+        // Captured verbatim from a live `herdr --session factory agent
+        // explain <pi-pane> --json` against a real `pi` pane, precisely so
+        // this test fails if herdr's field name ever drifts again the way
+        // it already did once: the first pass of this function read
+        // `skip_reason`, which does not exist on the wire -- the real key
+        // is `screen_detection_skip_reason` -- so the `idle` case never
+        // fired for a single pane, hook authority included, and this test
+        // still passed because its own fixture used the same wrong name.
+        // Keep this fixture byte-for-byte what the binary actually said.
+        let (bin, dir) = fake_herdr_for_explain(
+            "idle",
+            r#"{"agent":"pi","cached_remote_version":null,"evaluated_rules":[],"fallback_reason":null,"local_override_shadowing_remote":false,"manifest_source":null,"manifest_version":null,"matched_rule":null,"remote_update_error":null,"remote_update_status":null,"screen_detection_skip_reason":"full_lifecycle_hook_authority","screen_detection_skipped":true,"skip_state_update":false,"skipped_update_reason":null,"state":"idle","visible_blocker":false,"visible_idle":false,"visible_working":false,"warning":null}"#,
+        );
+        let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        let report = runtime.status_report(&agent_mode_session()).await.unwrap();
+        assert_eq!(report.status, RuntimeStatus::Idle);
+        assert_eq!(
+            report.source,
+            StatusSource::Reported,
+            "a pane with full lifecycle hook authority is the harness speaking, not herdr guessing"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_claude_panes_idle_is_a_guess_not_a_report() {
+        // Trimmed from a live `herdr --session factory agent explain
+        // <claude-pane> --json` against a real `claude-code` pane (the
+        // evaluated_rules array is cut down from ~15 entries to the one
+        // that actually matched; everything else -- crucially,
+        // `screen_detection_skipped: false` and the absence of any
+        // `screen_detection_skip_reason` key at all -- is what herdr
+        // really said). A `claude` pane's idle is screen inference through
+        // and through: herdr has no hook telling it the turn ended, only a
+        // regex match on the prompt box. See issue #62's follow-up: this is
+        // exactly why the incident's own run (a `claude-code` pane) is not
+        // fixed by this file alone.
+        let (bin, dir) = fake_herdr_for_explain(
+            "idle",
+            r#"{"agent":"claude","cached_remote_version":"2026.09.11.1","evaluated_rules":[{"id":"live_prompt_box","matched":true,"priority":950,"region":"prompt_box_body","state":"idle"}],"fallback_reason":null,"local_override_shadowing_remote":false,"manifest_source":"remote:/Users/factory/.local/state/herdr/agent-detection/remote/claude.toml","manifest_version":"2026.09.11.1","matched_rule":{"id":"live_prompt_box","priority":950,"region":"prompt_box_body","state":"idle"},"remote_update_error":null,"remote_update_status":"current","screen_detection_skipped":false,"skip_state_update":false,"skipped_update_reason":null,"state":"idle","visible_blocker":false,"visible_idle":true,"visible_working":false,"warning":null}"#,
+        );
+        let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        let report = runtime.status_report(&agent_mode_session()).await.unwrap();
+        assert_eq!(report.status, RuntimeStatus::Idle);
+        assert_eq!(report.source, StatusSource::Inferred);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_skipped_idle_with_some_other_reason_is_still_a_guess() {
+        // `screen_detection_skipped: true` alone is not proof of a hook --
+        // herdr sets it for reasons other than "the harness told me" too.
+        // Only `screen_detection_skip_reason:
+        // "full_lifecycle_hook_authority"` may promote `idle` to
+        // `Reported`; anything else stays a guess, because ending a run on
+        // a false positive here is a run lost, not merely a run paused
+        // (see `AGENTS.md` and issue #62).
+        let (bin, dir) = fake_herdr_for_explain(
+            "idle",
+            r#"{"screen_detection_skipped":true,"screen_detection_skip_reason":"no_agent_on_pane"}"#,
+        );
+        let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        let report = runtime.status_report(&agent_mode_session()).await.unwrap();
+        assert_eq!(report.status, RuntimeStatus::Idle);
+        assert_eq!(report.source, StatusSource::Inferred);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shell_mode_panes_idle_never_pays_for_explain() {
+        // A shell pane has no agent for herdr to explain -- `start()` never
+        // runs `agent start` for `LaunchKind::Command`. Paying for the extra
+        // subprocess there would only ever buy a failure, so `status_report`
+        // must not even try: proven here by the marker `agent explain`
+        // would have written never appearing, not merely by the source it
+        // would have produced.
+        let (bin, dir) = fake_herdr_for_explain("idle", r#"{"screen_detection_skipped":true}"#);
+        let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        let session = SessionRef {
+            runtime: ADAPTER.into(),
+            handle: "pane1".into(),
+            meta: BTreeMap::from([("mode".to_string(), "shell".to_string())]),
+        };
+        let report = runtime.status_report(&session).await.unwrap();
+        assert_eq!(report.status, RuntimeStatus::Idle);
+        assert_eq!(report.source, StatusSource::Unknown);
+        assert!(
+            !dir.join("explain-called").exists(),
+            "a shell-mode pane must never trigger `agent explain`"
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[cfg(unix)]

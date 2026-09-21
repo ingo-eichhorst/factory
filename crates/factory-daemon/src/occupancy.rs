@@ -267,12 +267,13 @@ impl Engine {
     /// like while it held the bay.
     ///
     /// This is also the one place a hook-reported `blocked` (or the runtime
-    /// saying working again) is acted on. The scheduler has its own poll of
-    /// the runtime for the `Gone` check, but that is an existing, unrelated
-    /// call to plain `status` -- putting the block/unblock logic here instead
-    /// means `status_report`, the one call that can cost an extra
+    /// saying working again), and, since issue #62, a hook-reported `idle`
+    /// on a run nothing has reported the end of, are acted on. The scheduler
+    /// has its own poll of the runtime for the `Gone` check, but that is an
+    /// existing, unrelated call to plain `status` -- putting this logic here
+    /// instead means `status_report`, the one call that can cost an extra
     /// subprocess (`herdr agent explain`), is asked for exactly once per run
-    /// per tick, not twice.
+    /// per tick, not two or three times over.
     pub async fn record_run_liveness(self: &Arc<Self>) {
         let runs = self.store.active_runs().await.unwrap_or_default();
         for run in runs {
@@ -293,6 +294,63 @@ impl Engine {
                 run.block_suspected_since.is_some(),
             );
             self.apply_block_action(&run, action).await;
+
+            // `turn_ended_action` is judged against `run.status` as this
+            // loop found it, before `apply_block_action`'s patch above has
+            // landed. That means a run this same poll's `block_action` just
+            // `Unblock`ed -- it was `Blocked` a moment ago, and this same
+            // `idle`+`Reported` report is what let it go -- cannot also
+            // `Fail` in the same tick: `run.status` here still reads
+            // `Blocked`, not `Running`. If the harness is still saying
+            // `idle` on the very next poll, that one will fail it; a run is
+            // never killed and reopened in the same breath, only across
+            // two, the same way a `Blocked` run flipping twice needs two
+            // polls of `block_action` to say so. A run whose earlier
+            // *inferred* block just had its suspicion cleared above, by
+            // contrast, is free to also `Fail` here in the same tick -- the
+            // two are independent facts read off the same report, and
+            // neither depends on the other.
+            //
+            // KNOWN GAP (issue #62 QA round 1): this only ever fires for a
+            // harness herdr itself treats as hook-authoritative for `idle`,
+            // and today that is `pi` alone. Verified live against `herdr
+            // agent explain --json`: a `pi` pane answers
+            // `screen_detection_skipped: true`, `screen_detection_skip_reason:
+            // "full_lifecycle_hook_authority"`; a `claude` pane answers
+            // `screen_detection_skipped: false` with a `matched_rule`
+            // instead, for every state including `idle` -- herdr is
+            // guessing from the screen for `claude-code` today, full stop,
+            // with no hook-authority mode to ask for. That means the run
+            // that actually motivated this issue (a `claude-code` pane
+            // whose turn ended mid-response) is *not* caught by this patch:
+            // `HerdrRuntime::status_report` will keep answering
+            // `StatusSource::Inferred` for it, and `turn_ended_action` is
+            // deliberately built to change nothing for an `Inferred` idle
+            // -- see its own doc comment for why that bar is correct, not a
+            // bug to route around here.
+            //
+            // Closing that gap needs a second, independent signal path that
+            // never goes through herdr at all: Claude Code supports a
+            // `Stop` hook (configurable per-launch via its own `--settings
+            // <file-or-json>` flag, confirmed present on the CLI this
+            // instance runs), which fires in-process, in the harness
+            // itself, the moment its turn ends -- the harness speaking,
+            // exactly the sanctioned route, with none of herdr's screen
+            // detection in between. Wiring that in is a real feature, not a
+            // follow-up line here: a new authenticated request the hook's
+            // command can call (reusing the run's `FACTORY_TASK_TOKEN` the
+            // way `report()` already does), a CLI subcommand for the hook
+            // script to invoke, and a generated `--settings` payload added
+            // to `HarnessAgent::launch_spec`'s `"claude"` arm alongside the
+            // system prompt file it already writes -- plus deciding
+            // whether that signal feeds this same `turn_ended_action`
+            // (consistent, but needs a `StatusSource`-shaped answer from a
+            // path that is not `session_status_report`) or fails the run
+            // directly. Left for a follow-up issue rather than forced into
+            // this one.
+            if turn_ended_action(&report, run.status) == TurnEndedAction::Fail {
+                self.fail_run(&run.id, TURN_ENDED_REASON).await;
+            }
         }
     }
 
@@ -502,6 +560,61 @@ fn block_action(
     }
 
     BlockAction::Nothing
+}
+
+/// Why `fail_run` is called below for a turn that ended without a report.
+/// Pulled out to a constant, rather than written inline, so the exact text
+/// -- issue #62's acceptance criteria is specifically about this string
+/// saying what happened rather than reciting a timeout -- is something a
+/// test can assert on directly, the same way `scheduler.rs`'s own overdue
+/// reasons are tested by their callers.
+const TURN_ENDED_REASON: &str = "its turn ended without reporting -- the harness said the \
+    session went idle and nothing followed. Its session may still be there; look at the \
+    transcript before starting it again.";
+
+/// What a fresh status report says about whether a run's turn ended without
+/// the agent ever calling back. Kept beside `block_action`, and for the
+/// identical reason: only a hook-reported fact may move a run, a screen's
+/// guess never may (see `AGENTS.md` and issue #62), and that is worth
+/// pinning down in a test that needs no store, no runtime and no `Engine`.
+///
+/// Unlike `block_action`, an `Inferred` or `Unknown` idle here does not even
+/// earn a suspicion. Ending a run outright is far less reversible than
+/// moving it into `Blocked` -- a wrongly `Reported` block only pauses a run
+/// for a human to look at, but a wrongly `Reported` idle would kill one
+/// that is still working -- so the bar for acting is a plain fact from the
+/// harness, not a guess with a timestamp attached. Nothing today shows a
+/// `block_suspected_since`-shaped suspicion for this either, and inventing
+/// display-only state for a guess this consequential is not worth doing
+/// until something actually reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnEndedAction {
+    /// The harness itself said the turn ended, and the run is still
+    /// `Running` with no terminal report to show for it -- fail it now
+    /// rather than waiting out `timeout_seconds`.
+    Fail,
+    Nothing,
+}
+
+/// Gated on `RunStatus::Running` on purpose, not `Dispatching` too, even
+/// though the run that motivated issue #62 could in principle have died
+/// waiting in either state: `Running` only happens once the agent's own
+/// first report said `running` (see `AgentContext::reporting_contract`), so
+/// a hook saying the turn ended here is a turn that genuinely started and
+/// then stopped. A `Dispatching` run has not been handed anything to have a
+/// turn about yet -- a launch that is merely slow to draw its first prompt
+/// would look exactly like an idle pane to this check -- and it already
+/// answers to `ack_timeout_seconds` (180s by default, against
+/// `task_timeout_seconds`'s 3600s), a much shorter leash than the one this
+/// issue is trying to shrink in the first place.
+fn turn_ended_action(report: &StatusReport, run_status: RunStatus) -> TurnEndedAction {
+    if run_status == RunStatus::Running
+        && report.status == RuntimeStatus::Idle
+        && report.source == StatusSource::Reported
+    {
+        return TurnEndedAction::Fail;
+    }
+    TurnEndedAction::Nothing
 }
 
 fn block_of(run: &Run, title: Option<&str>, estimate_seconds: Option<u64>) -> OccupancyBlock {
@@ -740,6 +853,61 @@ mod tests {
                 "only the agent's own next report may clear a block it set"
             );
         }
+    }
+
+    #[test]
+    fn a_hook_reported_idle_ends_a_running_turn() {
+        let action = turn_ended_action(&report(RuntimeStatus::Idle, StatusSource::Reported), RunStatus::Running);
+        assert_eq!(action, TurnEndedAction::Fail);
+    }
+
+    #[test]
+    fn a_guessed_idle_never_ends_a_turn() {
+        // The whole point of issue #62: only the harness's own word may end
+        // a run early. A screen that merely looks idle must never be acted
+        // on, and there is nothing here that even shows it as a suspicion.
+        for source in [StatusSource::Inferred, StatusSource::Unknown] {
+            let action = turn_ended_action(&report(RuntimeStatus::Idle, source), RunStatus::Running);
+            assert_eq!(action, TurnEndedAction::Nothing, "{source:?} must never end a turn");
+        }
+    }
+
+    #[test]
+    fn a_reported_idle_outside_running_changes_nothing() {
+        // `Dispatching` answers to its own, much shorter `ack_timeout_seconds`;
+        // the terminal statuses have no turn left to end.
+        for status in [
+            RunStatus::Dispatching,
+            RunStatus::Blocked,
+            RunStatus::Done,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+        ] {
+            let action = turn_ended_action(&report(RuntimeStatus::Idle, StatusSource::Reported), status);
+            assert_eq!(action, TurnEndedAction::Nothing, "{status:?} must not be failed by this check");
+        }
+    }
+
+    #[test]
+    fn only_a_reported_idle_ends_a_turn_no_other_reported_status_does() {
+        for status in [
+            RuntimeStatus::Working,
+            RuntimeStatus::Starting,
+            RuntimeStatus::Blocked,
+            RuntimeStatus::Gone,
+            RuntimeStatus::Unknown,
+        ] {
+            let action = turn_ended_action(&report(status, StatusSource::Reported), RunStatus::Running);
+            assert_eq!(action, TurnEndedAction::Nothing, "{status:?} is not a turn having ended");
+        }
+    }
+
+    #[test]
+    fn the_turn_ended_reason_says_what_happened_not_a_timeout() {
+        // Issue #62's acceptance criteria in a single assertion: the reason
+        // a run failed with names the event, not a duration.
+        assert!(TURN_ENDED_REASON.contains("turn ended without reporting"), "{TURN_ENDED_REASON}");
+        assert!(!TURN_ENDED_REASON.contains("no report in"), "{TURN_ENDED_REASON}");
     }
 
     #[test]
