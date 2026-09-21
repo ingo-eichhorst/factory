@@ -64,6 +64,58 @@ pub enum Schedule {
     Every { seconds: u64 },
 }
 
+/// How a scheduled task's run responds to failure. `Task::retry` overrides
+/// the daemon's own default (`DaemonConfig::default_retry`) when set --
+/// `None` there means "use the default", which is a different thing from
+/// `RetryPolicy::None` spelled out on a task: the explicit form is how a
+/// task says a re-run would be actively harmful (a payment run, anything
+/// non-idempotent) and none should ever be attempted automatically, no
+/// matter what the instance's default is.
+///
+/// Deliberately a flat backoff rather than a curve that grows with each
+/// attempt: a scheduled task's own firing is already the natural ceiling --
+/// retries exist to ride out a transient failure before the next real
+/// slot, not to explore how long the daemon is willing to keep trying --
+/// and a flat number is one fewer thing to explain in `factory task show`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryPolicy {
+    /// A failed run displaces nothing: the task sits `pending`, showing that
+    /// run's error, until its next regular firing.
+    None,
+    Backoff {
+        /// How many retries this failure streak may queue, on top of the
+        /// attempt that just failed.
+        max_attempts: u32,
+        /// How long to wait before each retry.
+        backoff_seconds: u64,
+    },
+}
+
+/// A retry queued after a scheduled task's run failed, waiting for its
+/// backoff to elapse. Exists only for the life of a failure streak: the
+/// moment a retry succeeds, is cancelled, or the policy's `max_attempts` is
+/// used up, it is cleared. This is exactly the mirror `AGENTS.md` warns
+/// about -- a copy kept on the task so the scheduler does not have to read
+/// a run to know whether the next due firing is a retry or the schedule's
+/// own -- and a stale copy left behind after a successful retry would
+/// misreport a task that just succeeded as still mid-retry, or let a later,
+/// unrelated failure resume counting from someone else's streak instead of
+/// starting its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRetry {
+    /// How many retries this streak has already queued -- 1 right after the
+    /// first one is scheduled, compared against the policy's `max_attempts`
+    /// to know whether another is allowed.
+    pub attempts: u32,
+    /// The regular firing this streak is standing in front of. Captured once,
+    /// when the streak began, from `next_run_at` as `advance_schedule` had
+    /// already left it -- the *next* regular slot, since it runs before
+    /// dispatch -- and restored to `next_run_at` the moment the streak ends,
+    /// so a retry can never permanently displace the schedule.
+    pub resume_at: DateTime<Utc>,
+}
+
 /// The identity of a live agent session, as the runtime adapter that created it
 /// understands it. The daemon treats `handle` as opaque.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +198,17 @@ pub struct Task {
     /// carries at most one of the two origins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bench_origin: Option<crate::bench::BenchOrigin>,
+    /// This task's own retry policy for a scheduled run that fails. `None`
+    /// means "use the daemon's default" -- see `RetryPolicy`'s own comment
+    /// for why that is not the same as `Some(RetryPolicy::None)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryPolicy>,
+    /// A retry queued and waiting on its backoff, if this failure streak has
+    /// one. `None` the rest of the time, including right after a regular
+    /// firing -- see `PendingRetry`'s own comment on why it must never
+    /// outlive the streak it describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_retry: Option<PendingRetry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +248,10 @@ pub struct NewTask {
     /// merely fails to mention it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<bool>,
+    /// This task's own retry policy, overriding the daemon's default. Absent
+    /// means "use the default" -- see `RetryPolicy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryPolicy>,
 }
 
 /// A partial update. `None` means "leave alone" throughout, so a store can
@@ -245,6 +312,25 @@ pub struct TaskPatch {
     pub next_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
+    /// This task's own retry policy. `Some(RetryPolicy::None)` is a real
+    /// value -- "never retry" -- distinct from leaving this patch field
+    /// `None`, which means "leave alone"; going back to the daemon's default
+    /// needs `clear_retry` instead, the same three-way shape `schedule` and
+    /// `clear_schedule` already use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryPolicy>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_retry: bool,
+    /// Set by the engine when a scheduled run fails and its policy allows
+    /// another attempt, or cleared once the streak ends -- see
+    /// `PendingRetry`. Not something a caller outside the engine has reason
+    /// to set directly, but it is an ordinary mirrored field like `result`
+    /// and `error`, so it gets the same `Option`-plus-`clear` shape they do
+    /// rather than a special case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_retry: Option<PendingRetry>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_pending_retry: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -340,6 +426,22 @@ mod tests {
         let task: Task = serde_json::from_str(json).unwrap();
         assert!(!task.worktree);
         assert_eq!(task.estimate_seconds, None, "old tasks remain unestimated");
+        assert_eq!(task.retry, None, "an old row names no policy of its own -- the daemon default applies");
+        assert_eq!(
+            task.pending_retry, None,
+            "an old row predates retries entirely, so it is certainly not mid-streak"
+        );
+    }
+
+    /// `RetryPolicy::None` has to round-trip as the bare string `retry: none`
+    /// -- the exact spelling the issue this exists for asks for, and what
+    /// `factory-cli`'s own `parse_retry` accepts.
+    #[test]
+    fn retry_none_is_the_bare_string_none_on_the_wire() {
+        let task_json = serde_json::json!({ "retry": "none" });
+        let policy: RetryPolicy = serde_json::from_value(task_json["retry"].clone()).unwrap();
+        assert_eq!(policy, RetryPolicy::None);
+        assert_eq!(serde_json::to_value(RetryPolicy::None).unwrap(), serde_json::json!("none"));
     }
 
     #[test]

@@ -378,6 +378,8 @@ mod tests {
             worktree: true,
             workflow_origin: None,
             bench_origin: None,
+            retry: None,
+            pending_retry: None,
         }
     }
 

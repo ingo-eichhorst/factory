@@ -316,6 +316,8 @@ mod tests {
             worktree: false,
             workflow_origin: None,
             bench_origin: None,
+            retry: None,
+            pending_retry: None,
         }
     }
 
