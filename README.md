@@ -633,6 +633,16 @@ Three timeouts catch the rest:
   instead, counted from when the block began rather than when the run did, so
   a person has a real chance to see it and answer before the daemon gives up.
 
+None of the three above notice a host that cannot execute at all. A run's
+`task_timeout_seconds` is spent by wall clock, and wall clock keeps moving
+while a sleeping host has nothing running -- so `power_assertion` (on by
+default) holds an OS-level "do not sleep" assertion for as long as any run is
+active, released the moment the last one ends. macOS only for now
+(`caffeinate`, behind a seam so every other platform reads the setting and
+no-ops); the host-level power settings that let this happen in the first
+place are a separate fix, and this is only ever the defence-in-depth for the
+moments that one does not reach.
+
 ## Configuration
 
 The instance root's `.factory/config.yaml` owns daemon-wide settings and may
@@ -657,6 +667,7 @@ daemon:
   blocked_timeout_seconds: 86400
   default_agent: claude-code
   default_runtime: herdr
+  power_assertion: true        # hold the host awake while a run is active
 
 scope:                       # optional: make the instance root a scope too
   id: cc23161d-82b9-4e75-8d88-e5195bc6d6e8

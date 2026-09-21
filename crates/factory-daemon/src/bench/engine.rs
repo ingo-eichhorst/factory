@@ -818,7 +818,11 @@ mod tests {
         let config = Config {
             version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
+            // `power_assertion` off: these tests dispatch real bench
+            // attempts through the real `Engine`, and the default would
+            // fork a real `caffeinate` on whatever machine runs the tests --
+            // see the same note on `engine::tests::test_engine`.
+            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
             roles: Default::default(),
             scope: None,
             scopes: vec![Scope {

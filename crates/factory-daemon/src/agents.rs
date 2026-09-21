@@ -796,7 +796,11 @@ mod tests {
                 id: "i".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
+            // `power_assertion` off: this file's tests dispatch real runs
+            // through `start_run`, and the default would fork a real
+            // `caffeinate` on whatever machine runs `cargo test` -- see the
+            // same note on `engine::tests::test_engine`.
+            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
             scope: None,
             scopes: vec![serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap()],
             roles: Default::default(),
@@ -1097,7 +1101,9 @@ mod tests {
                 id: "i".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
+            // Same reason as `engine()`/`engine_with` above: off, so a real
+            // run dispatched here never forks a real `caffeinate`.
+            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
             scope: None,
             scopes: vec![serde_yaml_ng::from_str(scope_yaml).unwrap()],
             roles: Default::default(),
