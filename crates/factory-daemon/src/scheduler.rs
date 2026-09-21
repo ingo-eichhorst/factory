@@ -157,9 +157,13 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
 /// has its own, separate `Gone`-session check to make afterwards.
 ///
 /// A `Blocked` run is measured against `blocked_secs` from `blocked_since`,
-/// never against `ack_secs` or `timeout_secs` from `started_at` -- both of
-/// those exist to catch a run that went quiet on its own, and a run sitting
-/// on a hook-reported block is the opposite of quiet, it is being watched.
+/// never against `ack_secs` or `timeout_secs` from `started_at` -- `ack_secs`
+/// exists to catch a run that never said a word, and `timeout_secs` caps how
+/// long the whole run may take, however often it reports in the meantime.
+/// A run sitting on a hook-reported block is not silent, so `ack_secs` never
+/// applies to it; `timeout_secs` is suspended for exactly as long as it
+/// stays blocked, in favour of `blocked_secs`, and picks back up the moment
+/// it unblocks -- see the comment below on why that reunion is often abrupt.
 fn overdue(
     status: RunStatus,
     started_at: DateTime<Utc>,
@@ -209,9 +213,13 @@ fn overdue(
     // correspondingly generous `timeout_seconds`, the same way it would for
     // any run that legitimately takes long.
     if age > timeout_secs {
+        // Name the condition this actually is -- a total-duration cap on
+        // `age`, not a silence watchdog -- so whoever reads the run's error
+        // goes looking at the right clock instead of the time since its
+        // last report.
         return Some(format!(
-            "no report in {timeout_secs}s; giving up. The agent may still \
-             be working -- look at its session before starting it again."
+            "ran for longer than {timeout_secs}s without finishing; giving up. The agent may \
+             still be working -- look at its session before starting it again."
         ));
     }
 
@@ -268,7 +276,18 @@ mod tests {
     #[test]
     fn a_running_run_past_its_task_timeout_fails_with_that_reason() {
         let why = overdue(RunStatus::Running, at(0), None, at(4000), 100, 3600, 10_000).unwrap();
-        assert!(why.contains("no report in"), "{why}");
+        assert!(why.contains("ran for longer than 3600s"), "{why}");
+    }
+
+    #[test]
+    fn the_task_timeout_message_names_a_duration_cap_not_a_silence_watchdog() {
+        // Regression for the mismatch in issue #63: `age` is `now -
+        // started_at`, so a run that reported constantly right up until the
+        // tick that catches it is still killed here -- the message must not
+        // claim it went quiet, only that it ran too long.
+        let why = overdue(RunStatus::Running, at(0), None, at(5726), 100, 5400, 10_000).unwrap();
+        assert!(!why.contains("no report"), "{why}");
+        assert!(why.contains("ran for longer than 5400s without finishing"), "{why}");
     }
 
     #[test]

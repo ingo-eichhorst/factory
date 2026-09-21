@@ -10,6 +10,7 @@ mod discovery;
 mod engine;
 mod interfaces;
 mod occupancy;
+mod power;
 mod production;
 mod roles;
 mod scheduler;

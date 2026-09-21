@@ -165,9 +165,10 @@ pub struct Task {
     /// How long a run of this task may sit `Blocked` before the daemon stops
     /// waiting for a human to answer it. `None` uses the instance's default
     /// (`DaemonConfig::blocked_timeout_seconds`). Kept apart from
-    /// `timeout_seconds` on purpose: a blocked run is not the "went quiet"
-    /// failure that field exists for, and wants a clock long enough that a
-    /// person actually gets the chance to see it.
+    /// `timeout_seconds` on purpose: that field is a cap on the run's total
+    /// duration, and a blocked run waiting on a human wants a separate,
+    /// longer clock than that -- one that gives a person a real chance to
+    /// see it and answer before the daemon gives up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

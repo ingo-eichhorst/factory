@@ -130,7 +130,10 @@ mod tests {
                 id: "test".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
+            // `power_assertion` off -- these tests dispatch real runs
+            // through the real `Engine`, and the default would fork a
+            // real `caffeinate` on whatever machine runs the tests.
+            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
             roles: Default::default(),
             scope: None,
             scopes: vec![Scope {
@@ -164,7 +167,12 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("factory-workflow-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        // None of these fixtures write a `daemon:` block, so this would
+        // otherwise default on -- and some of these tests dispatch real
+        // runs, which would fork a real `caffeinate` on whatever machine
+        // runs them.
+        config.daemon.power_assertion = false;
         config.validate().unwrap();
         let mut registry = Registry::with_builtins();
         registry.add_runtime(Arc::new(QuietRuntime), "test");
@@ -191,7 +199,10 @@ mod tests {
                 id: "test".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
+            // `power_assertion` off -- these tests dispatch real runs
+            // through the real `Engine`, and the default would fork a
+            // real `caffeinate` on whatever machine runs the tests.
+            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
             roles: Default::default(),
             scope: None,
             scopes: vec![Scope {
@@ -954,7 +965,10 @@ mod tests {
                     id: "test".into(),
                     name: "test".into(),
                 },
-                daemon: DaemonConfig::default(),
+                // `power_assertion` off -- these tests dispatch real runs
+                // through the real `Engine`, and the default would fork a
+                // real `caffeinate` on whatever machine runs the tests.
+                daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
                 roles: Default::default(),
                 scope: None,
                 scopes: vec![Scope {

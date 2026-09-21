@@ -224,7 +224,10 @@ pub struct DaemonConfig {
     /// How often the scheduler looks for due tasks.
     #[serde(default = "default_tick")]
     pub tick_seconds: u64,
-    /// A dispatched task that never reports back is failed after this long.
+    /// A cap on how long a dispatched task's run may take in total, counted
+    /// from when it started -- not a check on how long it has gone without
+    /// reporting, so a run that reports constantly is still failed once this
+    /// is reached.
     #[serde(default = "default_task_timeout")]
     pub task_timeout_seconds: u64,
     /// How long an agent has to say it has started. An agent that is up but
@@ -256,6 +259,15 @@ pub struct DaemonConfig {
     /// Give every scope a foreman without writing one into each of them.
     #[serde(default)]
     pub foreman: ForemanConfig,
+    /// Hold an OS-level "do not sleep" assertion for as long as any run is
+    /// active -- see issue #61. `task_timeout_seconds` is spent by wall
+    /// clock, which keeps ticking while the host cannot execute anything, so
+    /// a laptop that drops into a DarkWake-and-back-to-sleep cycle burns a
+    /// run's whole budget on time nobody could use. On by default; the
+    /// platform seam in `factory-daemon::power` no-ops on anything but
+    /// macOS, so this is safe to leave on everywhere.
+    #[serde(default = "default_power_assertion")]
+    pub power_assertion: bool,
 }
 
 /// A foreman per scope, synthesised rather than written out.
@@ -319,6 +331,9 @@ fn default_agent() -> String {
 fn default_runtime() -> String {
     "herdr".into()
 }
+fn default_power_assertion() -> bool {
+    true
+}
 /// Three attempts, five minutes apart. Enough to ride out the transient
 /// failures a retry is for -- a runtime hiccup, a moment's network trouble --
 /// without turning into a slow-motion version of the very cadence the task's
@@ -352,6 +367,7 @@ impl Default for DaemonConfig {
             default_runtime: default_runtime(),
             default_retry: default_retry(),
             foreman: ForemanConfig::default(),
+            power_assertion: default_power_assertion(),
         }
     }
 }
