@@ -627,7 +627,9 @@ Three timeouts catch the rest:
 - `ack_timeout_seconds` (180 by default) — the agent is up but has not said a
   word. This is what an agent sitting on a first-run trust prompt or a login
   looks like.
-- `task_timeout_seconds` (3600 by default) — it acknowledged and then went quiet.
+- `task_timeout_seconds` (3600 by default) — a cap on the whole run, counted
+  from `started_at`: the run has not finished within this many seconds,
+  however often it has reported in between.
 - `blocked_timeout_seconds` (86400 by default) — a run a hook reported
   `Blocked` is exempt from the two above and given this much longer clock
   instead, counted from when the block began rather than when the run did, so
