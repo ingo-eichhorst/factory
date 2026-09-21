@@ -27,8 +27,8 @@ pub use role::{Grant, Reach, Role, RoleDef, RoleSpec, Roles};
 pub use event::{Event, EventBus};
 pub use run::{BlockSource, NewRun, Run, RunPatch, RunStatus, Trigger};
 pub use task::{
-    NewTask, Schedule, SessionRef, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
-    WorkflowOrigin,
+    NewTask, PendingRetry, RetryPolicy, Schedule, SessionRef, Task, TaskEntry, TaskFilter, TaskPatch,
+    TaskReport, TaskStatus, WorkflowOrigin,
 };
 pub use workflow::{
     CanvasPoint, WorkflowDefinition, WorkflowDraft, WorkflowEdge, WorkflowNode, WorkflowNodeKind,

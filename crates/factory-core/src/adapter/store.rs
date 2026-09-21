@@ -123,6 +123,8 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         worktree: new.worktree.unwrap_or(true),
         workflow_origin: None,
         bench_origin: None,
+        retry: new.retry,
+        pending_retry: None,
     }
 }
 

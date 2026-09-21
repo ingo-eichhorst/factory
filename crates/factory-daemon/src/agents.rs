@@ -862,6 +862,8 @@ mod tests {
             next_run_at: None,
             workflow_origin: None,
             bench_origin: None,
+            retry: None,
+            pending_retry: None,
         };
         let task = engine.store.create(&task).await.unwrap();
         let run = engine
@@ -1262,6 +1264,8 @@ mod tests {
             next_run_at: None,
             workflow_origin: None,
             bench_origin: None,
+            retry: None,
+            pending_retry: None,
         };
         engine.store.create(&task).await.unwrap();
 

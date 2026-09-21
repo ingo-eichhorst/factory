@@ -12,7 +12,7 @@ use factory_core::knowledge::FindingKind;
 use factory_core::protocol::{Payload, Request, Response};
 use factory_core::run::{Run, RunStatus};
 use factory_core::task::{
-    NewTask, Schedule, Task, TaskFilter, TaskPatch, TaskReport, TaskStatus,
+    NewTask, RetryPolicy, Schedule, Task, TaskFilter, TaskPatch, TaskReport, TaskStatus,
 };
 use std::path::{Path, PathBuf};
 
@@ -313,6 +313,12 @@ enum TaskCmd {
         /// daemon gives up on it too.
         #[arg(long)]
         blocked_timeout: Option<u64>,
+        /// How a failed *scheduled* run of this task is retried: `none`, or
+        /// `<attempts>x<backoff>` as in `3x5m`. Unset uses the daemon's
+        /// default -- see `factory task show` on an existing task for what
+        /// that resolves to.
+        #[arg(long)]
+        retry: Option<String>,
         /// Repeatable: `--label area=infra`.
         #[arg(long = "label")]
         labels: Vec<String>,
@@ -359,6 +365,12 @@ enum TaskCmd {
         /// Go back to the instance defaults.
         #[arg(long)]
         default_timeouts: bool,
+        /// `none`, or `<attempts>x<backoff>` as in `3x5m`.
+        #[arg(long)]
+        retry: Option<String>,
+        /// Go back to the daemon's default retry policy.
+        #[arg(long)]
+        default_retry: bool,
         /// Repeatable; replaces the whole set.
         #[arg(long = "label")]
         labels: Vec<String>,
@@ -1238,12 +1250,14 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             ack_timeout,
             timeout,
             blocked_timeout,
+            retry,
             labels,
             worktree,
             no_worktree,
             run,
         } => {
             let schedule = schedule.as_deref().map(parse_schedule).transpose()?;
+            let retry = retry.as_deref().map(parse_retry).transpose()?;
             // Absent means on -- so passing neither flag says the same thing
             // as passing `--worktree` does. `--no-worktree` is the only way
             // to mean off, and it wins if both are somehow given.
@@ -1266,6 +1280,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     ack_timeout_seconds: ack_timeout,
                     timeout_seconds: timeout,
                     blocked_timeout_seconds: blocked_timeout,
+                    retry,
                     labels: parse_labels(&labels)?,
                     worktree,
                 }))
@@ -1306,8 +1321,11 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             timeout,
             blocked_timeout,
             default_timeouts,
+            retry,
+            default_retry,
             labels,
         } => {
+            let retry = retry.as_deref().map(parse_retry).transpose()?;
             let patch = TaskPatch {
                 title,
                 instructions,
@@ -1324,6 +1342,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 clear_ack_timeout: default_timeouts,
                 clear_timeout: default_timeouts,
                 clear_blocked_timeout: default_timeouts,
+                retry,
+                clear_retry: default_retry,
                 labels: if labels.is_empty() {
                     None
                 } else {
@@ -1515,25 +1535,47 @@ fn parse_labels(pairs: &[String]) -> Result<std::collections::BTreeMap<String, S
 fn parse_schedule(text: &str) -> Result<Schedule> {
     let text = text.trim();
     if let Some(rest) = text.strip_prefix("every ").or_else(|| text.strip_prefix("every")) {
-        let rest = rest.trim();
-        let (digits, unit): (String, String) = rest
-            .chars()
-            .partition(|c| c.is_ascii_digit());
-        let n: u64 = digits
-            .parse()
+        let seconds = parse_duration_seconds(rest.trim())
             .map_err(|_| anyhow!("`every` wants a number, as in `every 300` or `every 5m`"))?;
-        let unit = unit.trim().to_lowercase();
-        let seconds = match unit.as_str() {
-            "" | "s" | "sec" | "secs" | "second" | "seconds" => n,
-            "m" | "min" | "mins" | "minute" | "minutes" => n * 60,
-            "h" | "hr" | "hrs" | "hour" | "hours" => n * 3600,
-            other => return Err(anyhow!("unknown unit {other:?}; use s, m, or h")),
-        };
         return Ok(Schedule::Every { seconds });
     }
     Ok(Schedule::Cron(
         text.strip_prefix("cron ").unwrap_or(text).trim().to_string(),
     ))
+}
+
+/// A plain number of seconds, or one suffixed `s`/`m`/`h` -- `300`, `5m`,
+/// `1h`. Shared by `parse_schedule`'s `every` form and `parse_retry`'s
+/// backoff, so the two do not drift into accepting slightly different
+/// spellings of the same thing.
+fn parse_duration_seconds(text: &str) -> Result<u64> {
+    let (digits, unit): (String, String) = text.chars().partition(|c| c.is_ascii_digit());
+    let n: u64 = digits.parse().map_err(|_| anyhow!("{text:?} is not a duration"))?;
+    let unit = unit.trim().to_lowercase();
+    Ok(match unit.as_str() {
+        "" | "s" | "sec" | "secs" | "second" | "seconds" => n,
+        "m" | "min" | "mins" | "minute" | "minutes" => n * 60,
+        "h" | "hr" | "hrs" | "hour" | "hours" => n * 3600,
+        other => return Err(anyhow!("unknown unit {other:?}; use s, m, or h")),
+    })
+}
+
+/// `none`, or `<attempts>x<backoff>` as in `3x5m` -- three retries, five
+/// minutes apart.
+fn parse_retry(text: &str) -> Result<RetryPolicy> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("none") {
+        return Ok(RetryPolicy::None);
+    }
+    let (attempts, backoff) = text
+        .split_once('x')
+        .ok_or_else(|| anyhow!("retry wants `none` or `<attempts>x<backoff>`, as in `3x5m`"))?;
+    let max_attempts: u32 = attempts
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("retry's attempt count must be a number, as in `3x5m`"))?;
+    let backoff_seconds = parse_duration_seconds(backoff.trim())?;
+    Ok(RetryPolicy::Backoff { max_attempts, backoff_seconds })
 }
 
 fn one_line(t: &Task) -> String {
@@ -1643,9 +1685,25 @@ fn detail(t: &Task) -> String {
     );
     if let Some(sched) = &t.schedule {
         s.push_str(&format!("  schedule   {}\n", describe_schedule(sched)));
+        s.push_str(&format!(
+            "  retry      {}\n",
+            t.retry.map(describe_retry).unwrap_or_else(|| "(daemon default)".into())
+        ));
     }
     if let Some(next) = t.next_run_at {
         s.push_str(&format!("  next run   {}\n", next.to_rfc3339()));
+    }
+    // The one thing `AGENTS.md` warns loudest about getting wrong: a task
+    // sitting `pending` on a stale `error` from an attempt a retry already
+    // superseded. Surfaced here, right next to `next run`, so a retry in
+    // flight is visible from `factory task show` alone -- no daemon log
+    // needed to notice a scheduled run failed and is being tried again.
+    if let Some(retry) = &t.pending_retry {
+        s.push_str(&format!(
+            "  retrying   attempt {} queued, resuming the regular schedule at {} once it settles\n",
+            retry.attempts,
+            retry.resume_at.to_rfc3339(),
+        ));
     }
     if let Some(v) = t.estimate_seconds {
         s.push_str(&format!("  estimate   {v}s\n"));
@@ -1685,6 +1743,15 @@ fn describe_schedule(s: &Schedule) -> String {
     match s {
         Schedule::Cron(expr) => format!("cron {expr}"),
         Schedule::Every { seconds } => format!("every {seconds}s"),
+    }
+}
+
+fn describe_retry(p: RetryPolicy) -> String {
+    match p {
+        RetryPolicy::None => "none".into(),
+        RetryPolicy::Backoff { max_attempts, backoff_seconds } => {
+            format!("{max_attempts}x{backoff_seconds}s")
+        }
     }
 }
 

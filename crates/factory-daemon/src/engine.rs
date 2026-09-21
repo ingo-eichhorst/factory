@@ -21,7 +21,8 @@ use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
 use factory_core::run::{BlockSource, NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
-    NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus, WorkflowOrigin,
+    NewTask, PendingRetry, RetryPolicy, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
+    WorkflowOrigin,
 };
 use factory_plugins::registry::Registry;
 use std::path::{Path, PathBuf};
@@ -1180,6 +1181,23 @@ impl Engine {
         if let Some(s) = &patch.schedule {
             patch.next_run_at = Some(schedule::next_after(s, Utc::now())?);
         }
+        // Same rule `create_task` enforces, checked against what the task's
+        // schedule will actually be once this patch lands rather than what
+        // it is now -- clearing the schedule in the same edit that sets a
+        // retry policy is just as silently pointless as setting one on a
+        // task that never had a schedule to begin with.
+        if patch.retry.is_some() {
+            let will_be_scheduled = if patch.clear_schedule {
+                false
+            } else {
+                patch.schedule.is_some() || current.schedule.is_some()
+            };
+            if !will_be_scheduled {
+                return Err(FactoryError::BadRequest(
+                    "a retry policy only means something for a scheduled task; add a schedule too, or drop retry".into(),
+                ));
+            }
+        }
 
         let task = self.store.update(id, &patch).await?;
         self.bus.publish(Event::TaskUpdated { task: task.clone() });
@@ -1224,6 +1242,16 @@ impl Engine {
         if new.estimate_seconds == Some(0) {
             return Err(FactoryError::BadRequest(
                 "a task estimate must be at least one second".into(),
+            ));
+        }
+        // A retry policy governs what happens after a *scheduled* run fails
+        // (`Engine::settle_retry` never looks at it for a task with no
+        // `schedule`) -- refused here, at creation, rather than accepted and
+        // silently ignored until whoever set it notices nothing ever
+        // retries.
+        if new.retry.is_some() && new.schedule.is_none() {
+            return Err(FactoryError::BadRequest(
+                "a retry policy only means something for a scheduled task; add a schedule too, or drop retry".into(),
             ));
         }
 
@@ -1738,7 +1766,177 @@ impl Engine {
                 .await;
         }
         self.mirror_to_task(&run).await;
+        self.settle_retry(&run).await;
         Ok(run)
+    }
+
+    /// After the task's mirror is updated, decide what a scheduled task's
+    /// retry state should be. Only a task with a `schedule` retries at all --
+    /// a one-off task that fails just stays failed, exactly as before this
+    /// existed.
+    ///
+    /// A run that finished by succeeding or by being cancelled ends any
+    /// retry streak in progress: `pending_retry` is the mirror `AGENTS.md`
+    /// warns about, and leaving it set past the run it describes would
+    /// misreport a task that just succeeded as still mid-retry, or -- worse
+    /// -- let a later, unrelated failure resume counting from someone else's
+    /// streak instead of starting its own. A run that failed either queues
+    /// the next retry, if the effective policy allows one, or lets the
+    /// streak end where it stands.
+    async fn settle_retry(&self, run: &Run) {
+        let Ok(Some(task)) = self.store.get(&run.task_id).await else {
+            return;
+        };
+        if task.schedule.is_none() {
+            return;
+        }
+
+        match run.status {
+            RunStatus::Failed => self.queue_or_end_retry(&task, run).await,
+            status if status.is_terminal() => {
+                // `Failed` is handled above, so this is `Done` or
+                // `Cancelled` -- either way, if a streak was in progress it
+                // is over now.
+                if let Some(pending) = &task.pending_retry {
+                    let why = if status == RunStatus::Done {
+                        "a retry succeeded"
+                    } else {
+                        "the pending retry was cancelled"
+                    };
+                    self.end_retry_streak(&task, pending.resume_at, why).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A scheduled task's run just failed. Either queue its next retry --
+    /// moving `next_run_at` to `now + backoff` without disturbing the regular
+    /// firing this streak is standing in front of -- or, if the policy
+    /// forbids retrying at all or this streak has used up its attempts, let
+    /// it end and fall back to that regular firing.
+    async fn queue_or_end_retry(&self, task: &Task, run: &Run) {
+        let policy = task
+            .retry
+            .unwrap_or(self.factory_snapshot().config.daemon.default_retry);
+        let (max_attempts, backoff_seconds) = match policy {
+            RetryPolicy::None => {
+                match &task.pending_retry {
+                    // A streak already in progress when the policy changes to
+                    // `none` (an edit landed mid-streak) is honoured
+                    // immediately rather than firing the retry it no longer
+                    // wants.
+                    Some(pending) => {
+                        self.end_retry_streak(task, pending.resume_at, "the task's retry policy is now `none`")
+                            .await;
+                    }
+                    // The ordinary case: no retry was ever queued, so
+                    // `mirror_to_task` deliberately left this task without a
+                    // "what happens next" line -- see its own comment on why
+                    // it stays silent for a `Failed` recurring task -- and
+                    // this is the one place that knows the answer is "just
+                    // its next regular firing".
+                    None => {
+                        self.entry(
+                            &task.id,
+                            TaskEntry::new(
+                                "daemon",
+                                "rearmed",
+                                "recurring task is pending again, waiting for its next turn",
+                            ),
+                        )
+                        .await;
+                    }
+                }
+                return;
+            }
+            RetryPolicy::Backoff { max_attempts, backoff_seconds } => (max_attempts, backoff_seconds),
+        };
+
+        // The regular firing this streak must never disturb. Captured once,
+        // the first time a run in this streak fails, from `next_run_at` as
+        // `advance_schedule` (or, mid-streak, `resume_from_retry`) had
+        // already left it before this attempt was dispatched -- every later
+        // failure in the same streak carries it forward from `pending_retry`
+        // rather than reading `next_run_at` again, which by then holds an
+        // earlier retry time, not the regular slot.
+        let resume_at = task
+            .pending_retry
+            .as_ref()
+            .map(|p| p.resume_at)
+            .or(task.next_run_at)
+            .unwrap_or_else(Utc::now);
+        let attempts = task.pending_retry.as_ref().map(|p| p.attempts).unwrap_or(0) + 1;
+
+        if attempts > max_attempts {
+            self.end_retry_streak(
+                task,
+                resume_at,
+                &format!(
+                    "retries exhausted after {max_attempts} attempt{}",
+                    if max_attempts == 1 { "" } else { "s" }
+                ),
+            )
+            .await;
+            return;
+        }
+
+        let retry_at = Utc::now() + chrono::Duration::seconds(backoff_seconds as i64);
+        self.entry(
+            &task.id,
+            TaskEntry::new(
+                "daemon",
+                "retrying",
+                format!(
+                    "attempt {} failed; retrying at {} (retry {attempts} of {max_attempts}), \
+                     without touching the regular firing at {}",
+                    run.attempt,
+                    retry_at.to_rfc3339(),
+                    resume_at.to_rfc3339(),
+                ),
+            )
+            .in_run(&run.id),
+        )
+        .await;
+
+        let patch = TaskPatch {
+            next_run_at: Some(retry_at),
+            pending_retry: Some(PendingRetry { attempts, resume_at }),
+            ..Default::default()
+        };
+        if let Ok(updated) = self.store.update(&task.id, &patch).await {
+            self.bus.publish(Event::TaskUpdated { task: updated });
+        }
+    }
+
+    /// End a retry streak: clear `pending_retry` and restore `next_run_at` to
+    /// the regular firing the streak was standing in front of. A no-op patch
+    /// is avoided when there was nothing to clear -- the common case, a task
+    /// whose very first failure got no retry at all, in which `next_run_at`
+    /// already holds `resume_at` untouched and `pending_retry` is already
+    /// `None`.
+    async fn end_retry_streak(&self, task: &Task, resume_at: chrono::DateTime<Utc>, why: &str) {
+        if task.pending_retry.is_none() && task.next_run_at == Some(resume_at) {
+            return;
+        }
+        self.entry(
+            &task.id,
+            TaskEntry::new(
+                "daemon",
+                "retry_settled",
+                format!("{why}; resuming the regular schedule at {}", resume_at.to_rfc3339()),
+            ),
+        )
+        .await;
+
+        let patch = TaskPatch {
+            next_run_at: Some(resume_at),
+            clear_pending_retry: true,
+            ..Default::default()
+        };
+        if let Ok(updated) = self.store.update(&task.id, &patch).await {
+            self.bus.publish(Event::TaskUpdated { task: updated });
+        }
     }
 
     /// The task's own row carries the latest run's outcome, so a list does not
@@ -1764,7 +1962,15 @@ impl Engine {
             run.status.as_task_status()
         };
 
-        if run.status.is_terminal() && recurring {
+        // A `Failed` recurring task does not necessarily get its next real
+        // turn next -- `finish_run` calls `settle_retry` right after this,
+        // and that may queue a retry sooner than the schedule's own next
+        // slot. Saying "waiting for its next turn" here and then, a moment
+        // later, "retrying in 5 minutes" would leave the journal
+        // contradicting itself on every retry, so this stays silent for
+        // `Failed` and leaves the "what happens next" line to whichever of
+        // `queue_or_end_retry` or `end_retry_streak` actually decides it.
+        if run.status.is_terminal() && recurring && run.status != RunStatus::Failed {
             self.entry(
                 &run.task_id,
                 TaskEntry::new(
@@ -1940,6 +2146,47 @@ impl Engine {
         Ok(())
     }
 
+    /// Move a queued retry's task back onto the regular slot its streak is
+    /// standing in front of, before dispatching the retry attempt itself --
+    /// the retry's own version of what `advance_schedule` does for a regular
+    /// firing above, and for the same reason: a dispatch slower than the
+    /// backoff must not pick the task up a second time.
+    ///
+    /// Deliberately does not recompute the schedule the way `advance_schedule`
+    /// does: `resume_at` was captured once, in `queue_or_end_retry`, when this
+    /// streak began, and must survive however many retries happen before it
+    /// ends. Recomputing from `now` here instead would be redundant at best
+    /// for a `Cron` schedule (grid-aligned, so it would usually land on the
+    /// same slot anyway) and actively wrong for an `Every` schedule, which
+    /// has no grid at all -- each recompute would push the regular firing
+    /// further out, which is exactly the displacement the scheduler's own
+    /// comment on `advance_schedule` running before dispatch warns against.
+    ///
+    /// Dispatches this retry unconditionally, even if the task's policy was
+    /// edited to `retry: none` after this streak began: a retry already
+    /// queued and due is one the daemon committed to when it queued it, and
+    /// pulling a run back out from under a dispatch already under way would
+    /// be its own kind of surprise. `queue_or_end_retry` is where the new
+    /// policy actually takes effect -- honoured on this attempt's outcome,
+    /// not retroactively on the attempt itself.
+    pub async fn resume_from_retry(&self, task: &Task) -> Result<()> {
+        let Some(retry) = &task.pending_retry else {
+            return Ok(());
+        };
+        let updated = self
+            .store
+            .update(
+                &task.id,
+                &TaskPatch {
+                    next_run_at: Some(retry.resume_at),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        self.bus.publish(Event::TaskUpdated { task: updated });
+        Ok(())
+    }
+
     /// One frame of a run's session. `None` once the run has ended and its
     /// session is released -- what is left then is the transcript.
     pub async fn run_screen(&self, run: &Run) -> Result<Option<Screen>> {
@@ -2043,6 +2290,7 @@ mod tests {
     use factory_core::agent::Lifetime;
     use factory_core::config::{Config, DaemonConfig, Instance, Scope};
     use factory_core::run::RunStatus;
+    use factory_core::task::Schedule;
     use factory_plugins::{Registry, SqliteStore};
 
     /// A scope pointed at `scope_path`, one store in memory, and every
@@ -2510,6 +2758,299 @@ mod tests {
         assert!(
             failed.block_suspected_since.is_none(),
             "a guess about a session that is gone is not worth keeping either"
+        );
+    }
+
+    /// A weekly-scheduled task, freshly created -- `engine.create()` has
+    /// already set `next_run_at` to the coming Monday, exactly as
+    /// `advance_schedule` would before a real dispatch.
+    async fn weekly_task(engine: &Engine, retry: Option<RetryPolicy>) -> Task {
+        engine
+            .create(NewTask {
+                title: "the weekly audit".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(false),
+                schedule: Some(Schedule::Cron("0 7 * * 1".into())),
+                retry,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+    }
+
+    /// A fresh run row for a task, as `dispatch` would leave one right before
+    /// handing it to an agent -- enough for `fail_run`/`finish_run` to act on
+    /// without going through a real runtime.
+    async fn run_for(engine: &Engine, task_id: &str, trigger: Trigger) -> Run {
+        engine
+            .store
+            .create_run(&factory_core::run::NewRun {
+                task_id: task_id.to_string(),
+                trigger,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "herdr".into(),
+                token: "tok".into(),
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_failed_scheduled_run_queues_a_retry_without_disturbing_the_regular_firing() {
+        let scope_dir = temp_dir("retry-queue");
+        let engine = test_engine(scope_dir.clone());
+        // The instance default (3 attempts, 5 minutes apart) applies: the
+        // task names no policy of its own.
+        let task = weekly_task(&engine, None).await;
+        let regular_next_run = task.next_run_at.expect("a schedule always sets one");
+        let run = run_for(&engine, &task.id, Trigger::Schedule).await;
+
+        engine.fail_run(&run.id, "the audit script exited 1").await;
+
+        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Pending, "recurring tasks go back to pending");
+        assert_eq!(
+            task.error.as_deref(),
+            Some("the audit script exited 1"),
+            "the mirror still shows what just happened -- there is no successful attempt yet to clear it"
+        );
+        let pending = task.pending_retry.expect("the default policy allows a retry");
+        assert_eq!(pending.attempts, 1);
+        assert_eq!(
+            pending.resume_at, regular_next_run,
+            "the regular firing `advance_schedule` set before dispatch is carried forward untouched"
+        );
+        let next_run_at = task.next_run_at.expect("a retry is queued");
+        assert!(
+            next_run_at < regular_next_run,
+            "the retry fires well before next Monday, not on it"
+        );
+        assert!(
+            (next_run_at - Utc::now()).num_seconds() <= 300 + 5,
+            "the default backoff is five minutes, so the retry should be due within that window"
+        );
+
+        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        assert!(
+            entries.iter().any(|e| e.kind == "retrying" && e.message.contains("retry 1 of 3")),
+            "the retry is visible in the journal without reading the daemon log: {entries:?}"
+        );
+        assert!(
+            !entries.iter().any(|e| e.kind == "rearmed"),
+            "a task about to retry in five minutes must not also claim it is \"waiting for its \
+             next turn\" -- `mirror_to_task` defers that line to `queue_or_end_retry` for exactly \
+             this reason: {entries:?}"
+        );
+    }
+
+    /// The exact bug `AGENTS.md` warns about: "if you add a field to that
+    /// mirror, clear it too, or a successful retry will show the previous
+    /// attempt's error." This drives a failure through to a queued retry and
+    /// then a successful one, and checks that nothing about the failed
+    /// attempt survives on the task once the retry lands.
+    #[tokio::test]
+    async fn a_successful_retry_clears_the_stale_error_and_restores_the_regular_firing() {
+        let scope_dir = temp_dir("retry-clears-error");
+        let engine = test_engine(scope_dir.clone());
+        let task = weekly_task(&engine, None).await;
+        let regular_next_run = task.next_run_at.unwrap();
+
+        let first = run_for(&engine, &task.id, Trigger::Schedule).await;
+        engine.fail_run(&first.id, "the audit script exited 1").await;
+        let mid = engine.store.get(&task.id).await.unwrap().unwrap();
+        assert!(mid.error.is_some(), "sanity: the failure is on the mirror before the retry runs");
+        assert!(mid.pending_retry.is_some(), "sanity: a retry is queued before it runs");
+
+        // The scheduler's own retry pickup (`resume_from_retry`) would run
+        // here in production; a fresh run row is all `finish_run` needs.
+        let retry = run_for(&engine, &task.id, Trigger::Retry).await;
+        engine
+            .finish_run(
+                &retry.id,
+                RunStatus::Done,
+                RunPatch { result: Some("all clear".into()), ..Default::default() },
+                "attempt ended",
+            )
+            .await
+            .unwrap();
+
+        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert_eq!(task.result.as_deref(), Some("all clear"));
+        assert!(
+            task.error.is_none(),
+            "a successful retry must not leave the previous attempt's error standing -- got {:?}",
+            task.error
+        );
+        assert!(
+            task.pending_retry.is_none(),
+            "the streak is over; a stale `pending_retry` would misreport this task as still mid-retry"
+        );
+        assert_eq!(
+            task.next_run_at,
+            Some(regular_next_run),
+            "the regular firing the streak was standing in front of is restored exactly"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_streak_that_uses_up_its_attempts_stops_retrying_and_falls_back_to_the_regular_firing() {
+        let scope_dir = temp_dir("retry-exhausted");
+        let engine = test_engine(scope_dir.clone());
+        let task = weekly_task(
+            &engine,
+            Some(RetryPolicy::Backoff { max_attempts: 1, backoff_seconds: 60 }),
+        )
+        .await;
+        let regular_next_run = task.next_run_at.unwrap();
+
+        let first = run_for(&engine, &task.id, Trigger::Schedule).await;
+        engine.fail_run(&first.id, "attempt 1 failed").await;
+        let mid = engine.store.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(mid.pending_retry.map(|p| p.attempts), Some(1), "the one allowed retry is queued");
+
+        let retry = run_for(&engine, &task.id, Trigger::Retry).await;
+        engine.fail_run(&retry.id, "attempt 2 failed too").await;
+
+        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        assert!(
+            task.pending_retry.is_none(),
+            "the single allowed attempt is used up, so the streak ends here"
+        );
+        assert_eq!(
+            task.next_run_at,
+            Some(regular_next_run),
+            "no more retries -- the task falls back to its next real firing"
+        );
+        assert_eq!(
+            task.error.as_deref(),
+            Some("attempt 2 failed too"),
+            "the task honestly shows the last thing that happened; nothing to clear here since nothing succeeded"
+        );
+
+        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        assert!(
+            entries.iter().any(|e| e.kind == "retry_settled" && e.message.contains("exhausted")),
+            "exhausting the policy is visible in the journal too: {entries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_with_retry_none_is_never_retried_matching_todays_behaviour() {
+        let scope_dir = temp_dir("retry-none");
+        let engine = test_engine(scope_dir.clone());
+        let task = weekly_task(&engine, Some(RetryPolicy::None)).await;
+        let regular_next_run = task.next_run_at.unwrap();
+
+        let run = run_for(&engine, &task.id, Trigger::Schedule).await;
+        engine.fail_run(&run.id, "boom").await;
+
+        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        assert!(task.pending_retry.is_none(), "`retry: none` queues nothing");
+        assert_eq!(
+            task.next_run_at,
+            Some(regular_next_run),
+            "the schedule is exactly as `advance_schedule` left it before dispatch -- untouched"
+        );
+        assert_eq!(task.error.as_deref(), Some("boom"));
+
+        // `mirror_to_task` stays silent on a `Failed` recurring task so it
+        // never contradicts a retry that might follow -- for a policy that
+        // never retries at all, `queue_or_end_retry` is the one that has to
+        // say the task is just waiting for its next turn.
+        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        assert!(
+            entries.iter().any(|e| e.kind == "rearmed"),
+            "a task that will never retry still needs a line saying what happens next: {entries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn creating_a_retry_policy_without_a_schedule_is_refused() {
+        let scope_dir = temp_dir("retry-needs-schedule");
+        let engine = test_engine(scope_dir.clone());
+
+        let err = engine
+            .create(NewTask {
+                title: "a one-off with a retry policy that would never apply".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(false),
+                retry: Some(RetryPolicy::Backoff { max_attempts: 3, backoff_seconds: 60 }),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("scheduled task"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn editing_in_a_retry_policy_while_clearing_the_schedule_in_the_same_edit_is_refused() {
+        let scope_dir = temp_dir("retry-needs-schedule-edit");
+        let engine = test_engine(scope_dir.clone());
+        let task = weekly_task(&engine, None).await;
+
+        let err = engine
+            .update(
+                &task.id,
+                TaskPatch {
+                    clear_schedule: true,
+                    retry: Some(RetryPolicy::Backoff { max_attempts: 3, backoff_seconds: 60 }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("scheduled task"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resume_from_retry_restores_the_captured_slot_rather_than_recomputing_it() {
+        // The whole reason `resume_from_retry` exists instead of reusing
+        // `advance_schedule`: for an `Every` schedule, recomputing from `now`
+        // would push the regular firing out every time a retry is picked up.
+        // `resume_at` must come back exactly as captured, however much later
+        // `now` has drifted.
+        let scope_dir = temp_dir("resume-from-retry");
+        let engine = test_engine(scope_dir.clone());
+        let task = engine
+            .create(NewTask {
+                title: "a tight interval".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(false),
+                schedule: Some(Schedule::Every { seconds: 60 }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let captured_resume_at = Utc::now() + chrono::Duration::hours(3);
+        let task = engine
+            .store
+            .update(
+                &task.id,
+                &TaskPatch {
+                    pending_retry: Some(PendingRetry { attempts: 1, resume_at: captured_resume_at }),
+                    next_run_at: Some(Utc::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        engine.resume_from_retry(&task).await.unwrap();
+
+        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            task.next_run_at,
+            Some(captured_resume_at),
+            "the captured slot comes back exactly, not `now + 60s`"
         );
     }
 

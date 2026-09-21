@@ -248,6 +248,14 @@ pub struct DaemonConfig {
     pub default_agent: String,
     #[serde(default = "default_runtime")]
     pub default_runtime: String,
+    /// How a scheduled task's failed run is retried, for a task that does
+    /// not set `Task::retry` itself. On by default: a scheduled task exists
+    /// because someone needs it to actually happen on a cadence, and a
+    /// transient failure silently costing a whole cycle -- a week, for a
+    /// weekly task -- is the more surprising default of the two. A task for
+    /// which a re-run would be actively harmful sets `retry: none` itself.
+    #[serde(default = "default_retry")]
+    pub default_retry: crate::task::RetryPolicy,
     /// Give every scope a foreman without writing one into each of them.
     #[serde(default)]
     pub foreman: ForemanConfig,
@@ -326,6 +334,13 @@ fn default_runtime() -> String {
 fn default_power_assertion() -> bool {
     true
 }
+/// Three attempts, five minutes apart. Enough to ride out the transient
+/// failures a retry is for -- a runtime hiccup, a moment's network trouble --
+/// without turning into a slow-motion version of the very cadence the task's
+/// own schedule already provides.
+fn default_retry() -> crate::task::RetryPolicy {
+    crate::task::RetryPolicy::Backoff { max_attempts: 3, backoff_seconds: 300 }
+}
 fn default_interfaces() -> Vec<InterfaceConfig> {
     vec![
         InterfaceConfig {
@@ -350,6 +365,7 @@ impl Default for DaemonConfig {
             blocked_timeout_seconds: default_blocked_timeout(),
             default_agent: default_agent(),
             default_runtime: default_runtime(),
+            default_retry: default_retry(),
             foreman: ForemanConfig::default(),
             power_assertion: default_power_assertion(),
         }

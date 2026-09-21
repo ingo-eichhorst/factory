@@ -77,6 +77,13 @@ impl std::str::FromStr for RunStatus {
 pub enum Trigger {
     Manual,
     Schedule,
+    /// A scheduled task's automatic retry of a run that just failed -- see
+    /// `Engine::queue_or_end_retry`. Deliberately its own variant rather than
+    /// reusing `Schedule`: "it failed" reads differently for the week's
+    /// regular firing than for the daemon quietly trying again a few minutes
+    /// later, and a journal or a dashboard that could not tell the two apart
+    /// would be exactly the "silently skipped" problem this exists to fix.
+    Retry,
     Agent,
     Workflow,
     /// Started as one attempt of a bench run -- see `bench::BenchOrigin`,
@@ -89,6 +96,7 @@ impl Trigger {
         match self {
             Self::Manual => "manual",
             Self::Schedule => "schedule",
+            Self::Retry => "retry",
             Self::Agent => "agent",
             Self::Workflow => "workflow",
             Self::Bench => "bench",

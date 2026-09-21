@@ -418,6 +418,18 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.labels {
                 task.labels = v;
             }
+            if patch.clear_retry {
+                task.retry = None;
+            }
+            if let Some(v) = patch.retry {
+                task.retry = Some(v);
+            }
+            if patch.clear_pending_retry {
+                task.pending_retry = None;
+            }
+            if let Some(v) = patch.pending_retry {
+                task.pending_retry = Some(v);
+            }
             task.updated_at = Utc::now();
 
             write_task(conn, &task)?;
@@ -856,6 +868,8 @@ mod tests {
             worktree: false,
             workflow_origin: None,
             bench_origin: None,
+            retry: None,
+            pending_retry: None,
         }
     }
 

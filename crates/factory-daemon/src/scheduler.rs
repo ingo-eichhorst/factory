@@ -30,18 +30,35 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         match engine.due_now().await {
             Ok(due) => {
                 for task in due {
-                    // Move the next firing before dispatching, so a dispatch
-                    // that takes longer than the interval cannot start the same
-                    // task twice.
-                    if let Err(e) = engine.advance_schedule(&task).await {
+                    // A task with a queued retry (`pending_retry`, set only by
+                    // `Engine::queue_or_end_retry`) is due here because its
+                    // backoff elapsed, not because the schedule's own next
+                    // slot arrived -- so it gets `resume_from_retry` rather
+                    // than `advance_schedule`, and `Trigger::Retry` rather
+                    // than `Trigger::Schedule`. Either way the next firing is
+                    // moved before dispatching, so a dispatch that takes
+                    // longer than the interval cannot start the same task
+                    // twice -- see each function's own comment for why they
+                    // move it differently.
+                    let (trigger, advanced) = if task.pending_retry.is_some() {
+                        (Trigger::Retry, engine.resume_from_retry(&task).await)
+                    } else {
+                        (Trigger::Schedule, engine.advance_schedule(&task).await)
+                    };
+                    if let Err(e) = advanced {
                         tracing::warn!(task = %task.id, "could not advance schedule: {e}");
                         continue;
                     }
-                    tracing::info!(task = %task.id, title = %task.title, "scheduled task is due");
+                    tracing::info!(
+                        task = %task.id,
+                        title = %task.title,
+                        trigger = trigger.as_str(),
+                        "scheduled task is due"
+                    );
                     let engine = engine.clone();
                     let id = task.id.clone();
                     tokio::spawn(async move {
-                        engine.start_run(&id, Trigger::Schedule).await;
+                        engine.start_run(&id, trigger).await;
                     });
                 }
             }
