@@ -224,7 +224,10 @@ pub struct DaemonConfig {
     /// How often the scheduler looks for due tasks.
     #[serde(default = "default_tick")]
     pub tick_seconds: u64,
-    /// A dispatched task that never reports back is failed after this long.
+    /// A cap on how long a dispatched task's run may take in total, counted
+    /// from when it started -- not a check on how long it has gone without
+    /// reporting, so a run that reports constantly is still failed once this
+    /// is reached.
     #[serde(default = "default_task_timeout")]
     pub task_timeout_seconds: u64,
     /// How long an agent has to say it has started. An agent that is up but
