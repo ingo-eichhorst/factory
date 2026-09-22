@@ -176,7 +176,9 @@ impl Engine {
             Request::TaskDelete { .. } => Grant::TaskDelete,
             Request::TaskRun { .. } => Grant::TaskRun,
             Request::TaskCancel { .. } => Grant::TaskCancel,
-            Request::TaskReport { .. } => Grant::TaskReport,
+            // The harness saying a turn ended is a report on the run in
+            // everything but who is speaking: same token, same authority.
+            Request::TaskReport { .. } | Request::TaskTurnEnded { .. } => Grant::TaskReport,
             Request::AgentStart { .. } => Grant::AgentStart,
             Request::AgentConfigure { .. } | Request::AgentDelete { .. } => Grant::AgentConfigure,
             Request::AgentStop { .. } => Grant::AgentStop,
@@ -356,7 +358,7 @@ impl Engine {
                 }
             }
 
-            Request::TaskReport { id, .. } => {
+            Request::TaskReport { id, .. } | Request::TaskTurnEnded { id, .. } => {
                 let Some(task) = self.store.get(id).await? else {
                     return Ok(());
                 };
@@ -937,6 +939,25 @@ mod tests {
             )
             .await
         );
+    }
+
+    #[tokio::test]
+    async fn a_turn_end_is_held_to_exactly_what_a_report_is() {
+        // The harness speaks for the run its session belongs to, no more:
+        // the same grant and the same reach as the agent's own report.
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        task_in(&e, "theirs", "demo", "someone-else").await;
+        let turn = || factory_core::task::TurnEnded {
+            event: factory_core::task::TurnEndEvent::Stop,
+            pending_background: 0,
+            error: None,
+            error_details: None,
+            last_message: None,
+            token: None,
+        };
+        assert!(allowed(&e, &worker("w"), Request::TaskTurnEnded { id: "mine".into(), turn: turn() }).await);
+        assert!(!allowed(&e, &worker("w"), Request::TaskTurnEnded { id: "theirs".into(), turn: turn() }).await);
     }
 
     #[tokio::test]

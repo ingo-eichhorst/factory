@@ -133,6 +133,18 @@ pub fn run_shell_script_path(guides_dir: &Path, run_id: &str) -> PathBuf {
     guides_dir.join(format!("shell-{run_id}.sh"))
 }
 
+/// Where a run's generated harness settings live -- for Claude Code, the
+/// `--settings` file that carries its turn-end hooks. Keyed by run id for the
+/// same reason as `run_shell_script_path`: the harness reads it for the
+/// session's whole life, and a retry must never share or delete a previous
+/// attempt's copy. A file of its own, passed by path, rather than anything
+/// written into the worktree: the scope's own `.claude/settings.json` is a
+/// person's, and Claude Code merges hooks from both rather than replacing
+/// either.
+pub fn run_hook_settings_path(guides_dir: &Path, run_id: &str) -> PathBuf {
+    guides_dir.join(format!("hooks-{run_id}.json"))
+}
+
 /// Everything an agent adapter needs to phrase a prompt and a launch.
 #[derive(Debug, Clone)]
 pub struct AgentContext {
@@ -203,7 +215,9 @@ impl AgentContext {
              - Gave up:         {bin} task report {id} --status failed --error \"<why>\"\n\
              \n\
              Report running first, then finish with exactly one of done, failed, or \
-             blocked. The task stays open until you do."
+             blocked -- before your turn ends. When your harness says a turn ended \
+             without one of them, and nothing is still running in the background to \
+             wake you, Factory may end the run as failed."
         )
     }
 
@@ -474,6 +488,22 @@ impl AgentContext {
         std::fs::write(&path, contents)
             .map_err(|e| FactoryError::Other(anyhow::anyhow!("writing {}: {e}", path.display())))?;
         Ok(path)
+    }
+
+    /// Write a run's harness settings file (see `run_hook_settings_path`).
+    /// `None` for a standing agent: there is no run for a turn to end.
+    pub fn write_hook_settings(&self, contents: &str) -> Result<Option<PathBuf>> {
+        let Some(binding) = &self.task else {
+            return Ok(None);
+        };
+        let path = run_hook_settings_path(&self.guides_dir, &binding.run_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| FactoryError::Other(anyhow::anyhow!("making {}: {e}", parent.display())))?;
+        }
+        std::fs::write(&path, contents)
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("writing {}: {e}", path.display())))?;
+        Ok(Some(path))
     }
 
     /// The same contract as environment, for adapters that would rather read it.

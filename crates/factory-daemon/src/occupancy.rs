@@ -11,6 +11,7 @@
 //!   that does not exist before Factory started writing it down.
 
 use chrono::{DateTime, Duration, Utc};
+use factory_core::adapter::agent::truncate_tail;
 use factory_core::adapter::{RuntimeStatus, StatusReport, StatusSource};
 use factory_core::error::Result;
 use factory_core::event::Event;
@@ -18,7 +19,7 @@ use factory_core::occupancy::{
     spans_from, Occupancy, OccupancyBlock, OccupancyPlan, OccupancyRow, OccupancyScope, StatusChange,
 };
 use factory_core::run::{BlockSource, Run, RunPatch, RunStatus};
-use factory_core::task::TaskEntry;
+use factory_core::task::{TaskEntry, TurnEndEvent, TurnEnded};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -311,47 +312,48 @@ impl Engine {
             // two are independent facts read off the same report, and
             // neither depends on the other.
             //
-            // KNOWN GAP (issue #62 QA round 1): this only ever fires for a
-            // harness herdr itself treats as hook-authoritative for `idle`,
-            // and today that is `pi` alone. Verified live against `herdr
-            // agent explain --json`: a `pi` pane answers
-            // `screen_detection_skipped: true`, `screen_detection_skip_reason:
-            // "full_lifecycle_hook_authority"`; a `claude` pane answers
-            // `screen_detection_skipped: false` with a `matched_rule`
-            // instead, for every state including `idle` -- herdr is
-            // guessing from the screen for `claude-code` today, full stop,
-            // with no hook-authority mode to ask for. That means the run
-            // that actually motivated this issue (a `claude-code` pane
-            // whose turn ended mid-response) is *not* caught by this patch:
-            // `HerdrRuntime::status_report` will keep answering
-            // `StatusSource::Inferred` for it, and `turn_ended_action` is
-            // deliberately built to change nothing for an `Inferred` idle
-            // -- see its own doc comment for why that bar is correct, not a
-            // bug to route around here.
+            // This only ever fires for a harness herdr itself treats as
+            // hook-authoritative for `idle`, and today that is `pi` alone.
+            // Verified live against `herdr agent explain --json`: a `pi`
+            // pane answers `screen_detection_skipped: true`,
+            // `screen_detection_skip_reason: "full_lifecycle_hook_authority"`;
+            // a `claude` pane answers `screen_detection_skipped: false` with
+            // a `matched_rule` instead, for every state including `idle` --
+            // herdr is guessing from the screen for `claude-code`, and
+            // `status_report` keeps answering `StatusSource::Inferred`, which
+            // `turn_ended_action` deliberately never acts on.
             //
-            // Closing that gap needs a second, independent signal path that
-            // never goes through herdr at all: Claude Code supports a
-            // `Stop` hook (configurable per-launch via its own `--settings
-            // <file-or-json>` flag, confirmed present on the CLI this
-            // instance runs), which fires in-process, in the harness
-            // itself, the moment its turn ends -- the harness speaking,
-            // exactly the sanctioned route, with none of herdr's screen
-            // detection in between. Wiring that in is a real feature, not a
-            // follow-up line here: a new authenticated request the hook's
-            // command can call (reusing the run's `FACTORY_TASK_TOKEN` the
-            // way `report()` already does), a CLI subcommand for the hook
-            // script to invoke, and a generated `--settings` payload added
-            // to `HarnessAgent::launch_spec`'s `"claude"` arm alongside the
-            // system prompt file it already writes -- plus deciding
-            // whether that signal feeds this same `turn_ended_action`
-            // (consistent, but needs a `StatusSource`-shaped answer from a
-            // path that is not `session_status_report`) or fails the run
-            // directly. Left for a follow-up issue rather than forced into
-            // this one.
+            // `claude-code` is covered by a second, independent path that
+            // never goes through herdr at all: Claude Code's own `Stop` and
+            // `StopFailure` hooks call the daemon directly the moment a turn
+            // ends (`Engine::turn_ended`, issue #69). A `claude` run is not
+            // caught here, and does not need to be.
             if turn_ended_action(&report, run.status) == TurnEndedAction::Fail {
                 self.fail_run(&run.id, TURN_ENDED_REASON).await;
             }
         }
+    }
+
+    /// A harness's lifecycle hook saying the agent's turn ended -- Claude
+    /// Code's `Stop` or `StopFailure`, by way of `factory task turn-ended`.
+    /// The harness speaking, not a guess about a terminal, so this may end
+    /// a run on its own word (see `AGENTS.md`); what it decides is
+    /// `hook_turn_ended_action`'s.
+    ///
+    /// A hook fires at the end of *every* turn, including the one in which
+    /// the agent reported `done` -- so a task with no run in progress is the
+    /// common case, not a mistake, and is answered quietly, with nothing
+    /// journalled. The token is checked exactly as for a report: without it,
+    /// anyone on the socket could end anyone's run.
+    pub(crate) async fn turn_ended(self: &Arc<Self>, task_id: &str, turn: TurnEnded) -> Result<()> {
+        let Some(run) = self.store.active_run(task_id).await? else {
+            return Ok(());
+        };
+        self.check_run_token(&run, turn.token.as_deref(), task_id)?;
+        if hook_turn_ended_action(&turn, run.status) == TurnEndedAction::Fail {
+            self.fail_run(&run.id, &hook_turn_ended_reason(&turn)).await;
+        }
+        Ok(())
     }
 
     /// Carry out what `block_action` decided. Split from it so the decision
@@ -616,6 +618,76 @@ fn turn_ended_action(report: &StatusReport, run_status: RunStatus) -> TurnEndedA
     }
     TurnEndedAction::Nothing
 }
+
+/// The same question as `turn_ended_action`, asked of the other path a
+/// turn's end can arrive by: the harness's own lifecycle hook calling the
+/// daemon directly (`Request::TaskTurnEnded`, Claude Code's `Stop` and
+/// `StopFailure` -- issue #69), rather than a runtime relaying what a hook
+/// told it. Kept a separate function rather than dressed up as a
+/// `StatusReport` for that one to judge: `StatusSource` says where a
+/// *runtime's* answer came from, and faking one would leave the herdr path's
+/// tests unsure what they prove.
+///
+/// Two differences from `turn_ended_action`, both deliberate:
+///
+/// * `Dispatching` counts. That check leaves it out because a slow launch
+///   looks exactly like an idle pane; nothing here is looking at a pane. A
+///   hook only fires after a turn, and a turn only happens once the prompt
+///   is submitted, so a `Dispatching` run whose turn ended is one whose
+///   agent answered without ever reporting `running` -- or, likelier, whose
+///   very first API call failed (`StopFailure`). Waiting out
+///   `ack_timeout_seconds` on that tells nobody anything they did not know.
+/// * Pending background work wins. Claude Code ends a turn and wakes itself
+///   again when a background task finishes or a session cron fires, so a
+///   turn that ended with any of that pending has paused, not finished --
+///   the hook's own payload says so (`background_tasks`, `session_crons`).
+///
+/// `Blocked` stays out for the same reason as there: an agent that reported
+/// `blocked` and ended its turn is doing exactly what it was told, waiting
+/// for a human.
+fn hook_turn_ended_action(turn: &TurnEnded, run_status: RunStatus) -> TurnEndedAction {
+    let open = matches!(run_status, RunStatus::Running | RunStatus::Dispatching);
+    if open && turn.pending_background == 0 {
+        return TurnEndedAction::Fail;
+    }
+    TurnEndedAction::Nothing
+}
+
+/// Why a run failed on a hook's word, naming which hook and, for an API
+/// error, what the API said -- issue #62 asks for the reason to say what
+/// happened, and "rate_limit" and "the turn just ended" call for different
+/// next steps.
+fn hook_turn_ended_reason(turn: &TurnEnded) -> String {
+    let mut why = match turn.event {
+        TurnEndEvent::Stop => "its turn ended without reporting -- the harness's Stop hook said \
+            the turn finished, and no done, failed or blocked report came before it."
+            .to_string(),
+        TurnEndEvent::StopFailure => {
+            let error = turn.error.as_deref().unwrap_or("unknown");
+            let mut why = format!(
+                "its turn ended on an API error ({error}) without reporting -- the harness's \
+                 StopFailure hook said so"
+            );
+            if let Some(details) = turn.error_details.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+                why.push_str(&format!(": {details}"));
+            }
+            why.push('.');
+            why
+        }
+    };
+    why.push_str(
+        " Its session may still be there; look at the transcript before starting it again.",
+    );
+    if let Some(last) = turn.last_message.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        why.push_str(&format!("\n\nIts last message:\n{}", truncate_tail(last, LAST_MESSAGE_BYTE_CAP)));
+    }
+    why
+}
+
+/// How much of the agent's last message a turn-end failure keeps -- the end,
+/// since that is where it stopped. Capped again here, whatever the CLI sent:
+/// this is what bounds the run's `error` field.
+const LAST_MESSAGE_BYTE_CAP: usize = 2048;
 
 fn block_of(run: &Run, title: Option<&str>, estimate_seconds: Option<u64>) -> OccupancyBlock {
     OccupancyBlock {
@@ -922,5 +994,80 @@ mod tests {
             true,
         );
         assert_eq!(action, BlockAction::ClearSuspicion);
+    }
+
+    // -- the harness's own turn-end hook (issue #69) ------------------------
+
+    fn turn(event: TurnEndEvent, pending_background: u32) -> TurnEnded {
+        TurnEnded {
+            event,
+            pending_background,
+            error: None,
+            error_details: None,
+            last_message: None,
+            token: None,
+        }
+    }
+
+    #[test]
+    fn a_hook_reported_turn_end_fails_a_run_still_waiting_on_a_report() {
+        for event in [TurnEndEvent::Stop, TurnEndEvent::StopFailure] {
+            for status in [RunStatus::Running, RunStatus::Dispatching] {
+                assert_eq!(
+                    hook_turn_ended_action(&turn(event, 0), status),
+                    TurnEndedAction::Fail,
+                    "{event:?} on a {status:?} run"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_turn_that_ended_with_background_work_pending_only_paused() {
+        for event in [TurnEndEvent::Stop, TurnEndEvent::StopFailure] {
+            assert_eq!(
+                hook_turn_ended_action(&turn(event, 1), RunStatus::Running),
+                TurnEndedAction::Nothing,
+                "the harness will wake the agent again; {event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hook_reported_turn_end_leaves_a_blocked_or_finished_run_alone() {
+        // Blocked is the agent doing what it was told: waiting for a human.
+        for status in [RunStatus::Blocked, RunStatus::Done, RunStatus::Failed, RunStatus::Cancelled] {
+            assert_eq!(
+                hook_turn_ended_action(&turn(TurnEndEvent::Stop, 0), status),
+                TurnEndedAction::Nothing,
+                "{status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hook_reasons_say_which_hook_and_what_the_api_said() {
+        let stop = hook_turn_ended_reason(&turn(TurnEndEvent::Stop, 0));
+        assert!(stop.contains("turn ended without reporting"), "{stop}");
+        assert!(stop.contains("Stop hook"), "{stop}");
+        assert!(!stop.contains("no report in"), "a turn ending is not a timeout: {stop}");
+
+        let mut failure = turn(TurnEndEvent::StopFailure, 0);
+        failure.error = Some("server_error".into());
+        failure.error_details = Some("Connection reset by peer".into());
+        failure.last_message = Some("Now I will write the fix".into());
+        let why = hook_turn_ended_reason(&failure);
+        assert!(why.contains("API error (server_error)"), "{why}");
+        assert!(why.contains("Connection reset by peer"), "{why}");
+        assert!(why.ends_with("Now I will write the fix"), "the last message closes it: {why}");
+    }
+
+    #[test]
+    fn a_huge_last_message_is_capped_in_the_reason() {
+        let mut long = turn(TurnEndEvent::Stop, 0);
+        long.last_message = Some(format!("{}the end", "y".repeat(LAST_MESSAGE_BYTE_CAP * 4)));
+        let why = hook_turn_ended_reason(&long);
+        assert!(why.len() < LAST_MESSAGE_BYTE_CAP + 500, "{} bytes", why.len());
+        assert!(why.ends_with("the end"));
     }
 }

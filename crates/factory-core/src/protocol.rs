@@ -12,7 +12,7 @@ use crate::knowledge::{Document, Finding, Gap, Page, Refusal, Tag};
 use crate::occupancy::Occupancy;
 use crate::role::{RoleOrigin, RoleSpec};
 use crate::run::Run;
-use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport};
+use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TurnEnded};
 use crate::workflow::{WorkflowDefinition, WorkflowDraft, WorkflowRun};
 use serde::{Deserialize, Serialize};
 
@@ -125,6 +125,11 @@ pub enum Request {
     TaskCancel { id: String },
     #[serde(rename = "task.report")]
     TaskReport { id: String, report: TaskReport },
+    /// A harness's lifecycle hook saying the agent's turn ended. Its own
+    /// request rather than a kind of `TaskReport`, so nothing can mistake the
+    /// harness speaking for the agent reporting.
+    #[serde(rename = "task.turn_ended")]
+    TaskTurnEnded { id: String, turn: TurnEnded },
     #[serde(rename = "task.entries")]
     TaskEntries {
         id: String,
@@ -1264,5 +1269,34 @@ mod tests {
             Request::AgentDelete { scope, name }
                 if scope == "demo" && name == "reviewer"
         ));
+    }
+
+    /// The two lines `factory task turn-ended` actually wrote to a socket
+    /// when a real `claude` 2.1.280 fired Factory's generated hooks -- one
+    /// normal turn, one ended on an API error (an unknown `--model`) -- so
+    /// the daemon's side is held to the wire the CLI speaks, not to a shape
+    /// either side only assumed.
+    #[test]
+    fn a_turn_end_as_the_real_hook_sent_it_parses() {
+        use crate::task::TurnEndEvent;
+        let stop = r#"{"op":"task.turn_ended","params":{"id":"task-e2e","turn":{"event":"stop","pending_background":0,"last_message":"pong","token":"secret-run-token"}},"token":"secret-run-token"}"#;
+        let failure = r#"{"op":"task.turn_ended","params":{"id":"task-e2e","turn":{"event":"stop_failure","pending_background":0,"error":"model_not_found","last_message":"There's an issue with the selected model (claude-no-such-model-9). It may not exist or you may not have access to it. Run --model to pick a different model.","token":"secret-run-token"}},"token":"secret-run-token"}"#;
+
+        let envelope: Envelope = serde_json::from_str(stop).unwrap();
+        assert_eq!(envelope.token.as_deref(), Some("secret-run-token"));
+        let Request::TaskTurnEnded { id, turn } = envelope.request else {
+            panic!("not a turn end");
+        };
+        assert_eq!(id, "task-e2e");
+        assert_eq!(turn.event, TurnEndEvent::Stop);
+        assert_eq!(turn.last_message.as_deref(), Some("pong"));
+        assert_eq!(turn.token.as_deref(), Some("secret-run-token"));
+
+        let Request::TaskTurnEnded { turn, .. } = serde_json::from_str::<Envelope>(failure).unwrap().request else {
+            panic!("not a turn end");
+        };
+        assert_eq!(turn.event, TurnEndEvent::StopFailure);
+        assert_eq!(turn.error.as_deref(), Some("model_not_found"));
+        assert!(turn.error_details.is_none(), "not every StopFailure carries details");
     }
 }

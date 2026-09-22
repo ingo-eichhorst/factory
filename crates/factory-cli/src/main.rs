@@ -424,6 +424,26 @@ enum TaskCmd {
         #[arg(long = "run-token", env = "FACTORY_TASK_TOKEN")]
         token: Option<String>,
     },
+    /// What a harness's turn-end hook runs -- Claude Code's `Stop` and
+    /// `StopFailure`, from the settings file Factory generates for a run.
+    /// Not for agents: it reads the hook's JSON from stdin, prints nothing,
+    /// and exits 0 whatever happens, because it runs inside the harness and
+    /// must never be the thing that disturbs a turn.
+    #[command(hide = true)]
+    TurnEnded {
+        id: Option<String>,
+        #[arg(long, value_enum)]
+        event: HookEvent,
+        #[arg(long = "run-token", env = "FACTORY_TASK_TOKEN")]
+        token: Option<String>,
+    },
+}
+
+/// Which hook fired, as `task turn-ended --event` spells it.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum HookEvent {
+    Stop,
+    StopFailure,
 }
 
 #[tokio::main]
@@ -1466,6 +1486,116 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 _ => None,
             })
         }
+
+        // Every failure is written to stderr (Claude Code keeps an async
+        // hook's in its debug log) and swallowed: nothing this can say would
+        // be seen by anyone who could act on it mid-turn, and the daemon's
+        // own timeouts still stand behind it if the call never lands.
+        TaskCmd::TurnEnded { id, event, token } => {
+            let hook = read_hook_input().await;
+            let turn = turn_ended_from_hook(event, &hook, token);
+            let sent = match need_id(id) {
+                Ok(id) => client.send(Request::TaskTurnEnded { id, turn }).await.map(|_| ()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = sent {
+                eprintln!("factory task turn-ended: {e}");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The JSON a hook is handed on stdin, or `Null` when there is none to read
+/// -- run by hand at a terminal, or piped something that is not JSON. Bounded
+/// in time: Claude Code writes the payload and closes the pipe, and a hook
+/// left waiting on one that never closes would be a process nobody reaps.
+async fn read_hook_input() -> serde_json::Value {
+    use std::io::IsTerminal;
+    use tokio::io::AsyncReadExt;
+    if std::io::stdin().is_terminal() {
+        return serde_json::Value::Null;
+    }
+    let mut buf = Vec::new();
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::io::stdin().read_to_end(&mut buf),
+    )
+    .await;
+    match read {
+        Ok(Ok(_)) => serde_json::from_slice(&buf).unwrap_or(serde_json::Value::Null),
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// The most of the agent's last message a turn-end call carries. The daemon
+/// caps it again before it lands in a run's `error`.
+const HOOK_LAST_MESSAGE_BYTE_CAP: usize = 4096;
+
+/// Translate a Claude Code hook payload into what the daemon is told. Pure,
+/// so the payload's actual shape -- captured from the installed `claude`,
+/// which does not always match its own documentation -- can be pinned in a
+/// test:
+///
+/// * `last_assistant_message` is a plain string on the wire; the documented
+///   `{ "type": "text", "text": ... }` object is accepted too.
+/// * `background_tasks` lists what the harness will wake the agent for,
+///   each entry with a `status`; one still `running` (or in any state not
+///   known to be over) means the turn paused rather than finished.
+///   `session_crons` wake it too, so every one of those counts.
+/// * `error` and `error_details` are `StopFailure`'s.
+fn turn_ended_from_hook(
+    event: HookEvent,
+    hook: &serde_json::Value,
+    token: Option<String>,
+) -> factory_core::task::TurnEnded {
+    use factory_core::task::{TurnEndEvent, TurnEnded};
+    const OVER: [&str; 6] = ["completed", "failed", "killed", "stopped", "cancelled", "done"];
+
+    let text = |key: &str| {
+        hook.get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let background = hook
+        .get("background_tasks")
+        .and_then(|v| v.as_array())
+        .map(|tasks| {
+            tasks
+                .iter()
+                .filter(|t| {
+                    let status = t.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    !OVER.contains(&status)
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let crons = hook
+        .get("session_crons")
+        .and_then(|v| v.as_array())
+        .map(Vec::len)
+        .unwrap_or(0);
+    let last_message = match hook.get("last_assistant_message") {
+        Some(serde_json::Value::String(s)) => Some(s.as_str()),
+        Some(v) => v.get("text").and_then(|t| t.as_str()),
+        None => None,
+    }
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .map(|s| factory_core::adapter::agent::truncate_tail(s, HOOK_LAST_MESSAGE_BYTE_CAP).into_owned());
+
+    TurnEnded {
+        event: match event {
+            HookEvent::Stop => TurnEndEvent::Stop,
+            HookEvent::StopFailure => TurnEndEvent::StopFailure,
+        },
+        pending_background: u32::try_from(background + crons).unwrap_or(u32::MAX),
+        error: text("error"),
+        error_details: text("error_details"),
+        last_message,
+        token: token.filter(|t| !t.is_empty()),
     }
 }
 
@@ -1904,5 +2034,101 @@ mod tests {
         let body = "é".repeat(100); // each 'é' is 2 bytes in UTF-8
         let kept = tail_lossy(body.as_bytes(), 51); // an odd cap forces the issue
         assert!(!kept.contains('\u{FFFD}'), "a clean cut needs no replacement character: {kept:?}");
+    }
+
+    // -- `task turn-ended`, the hook's side of issue #69 --------------------
+
+    /// Verbatim, less the paths, from the installed `claude` 2.1.280's
+    /// `Stop` hook -- not its documentation, which shows
+    /// `last_assistant_message` as an object and a `stop_reason` that never
+    /// arrives. A fixture written from the docs is how #67's first pass
+    /// passed its tests while reading a key that does not exist.
+    const LIVE_STOP: &str = r#"{"session_id":"93b16ca2-62a5-493a-ad7a-fd2d2d4df973","transcript_path":"/x.jsonl","cwd":"/x","prompt_id":"9180f541-fb48-423f-9e34-c3b5fc5aedf1","permission_mode":"default","effort":{"level":"high"},"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"pong","background_tasks":[],"session_crons":[]}"#;
+
+    /// The same, captured with a `run_in_background` shell still going.
+    const LIVE_STOP_WITH_BACKGROUND: &str = r#"{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"started","background_tasks":[{"id":"b5lt1eoho","type":"shell","status":"running","description":"Sleep for 25 seconds in background","command":"sleep 25"}],"session_crons":[]}"#;
+
+    fn hook(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn a_live_stop_payload_is_a_finished_turn_with_its_last_message() {
+        let turn = turn_ended_from_hook(HookEvent::Stop, &hook(LIVE_STOP), Some("tok".into()));
+        assert_eq!(turn.event, factory_core::task::TurnEndEvent::Stop);
+        assert_eq!(turn.pending_background, 0);
+        assert_eq!(turn.last_message.as_deref(), Some("pong"));
+        assert_eq!(turn.token.as_deref(), Some("tok"));
+        assert!(turn.error.is_none());
+    }
+
+    #[test]
+    fn a_running_background_task_means_the_turn_only_paused() {
+        let turn = turn_ended_from_hook(HookEvent::Stop, &hook(LIVE_STOP_WITH_BACKGROUND), None);
+        assert_eq!(turn.pending_background, 1);
+    }
+
+    #[test]
+    fn finished_background_tasks_do_not_count_but_session_crons_do() {
+        let payload = hook(
+            r#"{"background_tasks":[{"status":"completed"},{"status":"failed"},{"status":"killed"}],
+                "session_crons":[{"id":"c1"}]}"#,
+        );
+        let turn = turn_ended_from_hook(HookEvent::Stop, &payload, None);
+        assert_eq!(turn.pending_background, 1, "only the cron will wake it");
+
+        // A state this build has never heard of is not assumed to be over.
+        let unknown = hook(r#"{"background_tasks":[{"status":"queued"}]}"#);
+        assert_eq!(turn_ended_from_hook(HookEvent::Stop, &unknown, None).pending_background, 1);
+    }
+
+    #[test]
+    fn the_documented_object_form_of_the_last_message_is_read_too() {
+        let payload = hook(r#"{"last_assistant_message":{"type":"text","text":"I'll help"}}"#);
+        let turn = turn_ended_from_hook(HookEvent::Stop, &payload, None);
+        assert_eq!(turn.last_message.as_deref(), Some("I'll help"));
+    }
+
+    #[test]
+    fn a_stop_failure_carries_the_api_error() {
+        let payload = hook(
+            r#"{"hook_event_name":"StopFailure","error":"server_error","error_details":"Connection reset"}"#,
+        );
+        let turn = turn_ended_from_hook(HookEvent::StopFailure, &payload, None);
+        assert_eq!(turn.event, factory_core::task::TurnEndEvent::StopFailure);
+        assert_eq!(turn.error.as_deref(), Some("server_error"));
+        assert_eq!(turn.error_details.as_deref(), Some("Connection reset"));
+        assert!(turn.last_message.is_none(), "absent when no message was started");
+    }
+
+    #[test]
+    fn no_payload_at_all_is_still_a_turn_that_ended() {
+        // Run by hand, or a harness that sends nothing: the event itself is
+        // the fact, and nothing pending is the honest reading of silence.
+        let turn = turn_ended_from_hook(HookEvent::Stop, &serde_json::Value::Null, Some(String::new()));
+        assert_eq!(turn.pending_background, 0);
+        assert!(turn.last_message.is_none());
+        assert!(turn.token.is_none(), "an empty token is no token");
+    }
+
+    #[test]
+    fn a_long_last_message_keeps_its_end() {
+        let long = format!("{}THE END", "x".repeat(HOOK_LAST_MESSAGE_BYTE_CAP * 2));
+        let payload = serde_json::json!({ "last_assistant_message": long });
+        let turn = turn_ended_from_hook(HookEvent::Stop, &payload, None);
+        let kept = turn.last_message.unwrap();
+        assert!(kept.len() <= HOOK_LAST_MESSAGE_BYTE_CAP);
+        assert!(kept.ends_with("THE END"));
+    }
+
+    #[test]
+    fn the_hook_command_factory_writes_parses() {
+        // The exact argv `claude_turn_end_settings` puts in a hook, minus the
+        // binary: if this stops parsing, every hook silently does nothing.
+        for event in ["stop", "stop-failure"] {
+            let cli = Cli::try_parse_from(["factory", "task", "turn-ended", "t1", "--event", event])
+                .unwrap_or_else(|e| panic!("{event}: {e}"));
+            assert!(matches!(cli.command, Command::Task(TaskCmd::TurnEnded { .. })));
+        }
     }
 }
