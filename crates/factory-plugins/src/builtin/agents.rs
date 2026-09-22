@@ -80,6 +80,16 @@ impl Agent for HarnessAgent {
                 let path = ctx.write_guide_file()?;
                 args.push("--append-system-prompt-file".into());
                 args.push(path.display().to_string());
+                // The turn-end hooks, so a turn that ends without a report
+                // is known the moment it happens rather than at the run's
+                // timeout -- see `claude_turn_end_settings`. A path, never
+                // inline JSON, for the same reason as the guide above.
+                if let Some(settings) = claude_turn_end_settings(ctx) {
+                    if let Some(path) = ctx.write_hook_settings(&settings)? {
+                        args.push("--settings".into());
+                        args.push(path.display().to_string());
+                    }
+                }
             }
             "pi" => {
                 // pi's own flag reads a path's contents when given one.
@@ -174,6 +184,41 @@ impl Agent for HarnessAgent {
         ));
         Ok(prompt)
     }
+}
+
+/// Claude Code settings that make the harness itself say when a task run's
+/// turn ends: its `Stop` hook for a turn that finished, `StopFailure` for one
+/// an API error cut short. herdr only guesses a `claude` pane's state from the
+/// screen, which `AGENTS.md` does not let the daemon act on; this is the
+/// harness speaking, which it does. `None` for a standing agent, which has no
+/// run to end.
+///
+/// Both hooks are `async`: Claude Code neither waits for them nor reads their
+/// exit code or output, so a slow or absent daemon can never stall or alter a
+/// turn. The command identifies the run by task id alone and takes the token
+/// from `FACTORY_TASK_TOKEN`, which a hook inherits from the session -- the
+/// secret stays out of the file. Claude Code merges these with the hooks in
+/// the worktree's own `.claude/settings.json` rather than replacing them.
+fn claude_turn_end_settings(ctx: &AgentContext) -> Option<String> {
+    let binding = ctx.task.as_ref()?;
+    let bin = shell_quote_always(&ctx.factory_bin.display().to_string());
+    let id = shell_quote_always(&binding.task.id);
+    let hook = |event: &str| {
+        serde_json::json!([{
+            "hooks": [{
+                "type": "command",
+                "command": format!("{bin} task turn-ended {id} --event {event}"),
+                "async": true,
+            }]
+        }])
+    };
+    let settings = serde_json::json!({
+        "hooks": {
+            "Stop": hook("stop"),
+            "StopFailure": hook("stop-failure"),
+        }
+    });
+    Some(serde_json::to_string_pretty(&settings).unwrap_or_default())
 }
 
 /// The section a harness agent's prompt gets when this task followed others
@@ -539,6 +584,61 @@ mod tests {
         let path = &launch.args[flag + 1];
         assert_eq!(std::fs::read_to_string(path).unwrap(), context.factory_guide());
         std::fs::remove_dir_all(&context.guides_dir).ok();
+    }
+
+    // -- the turn-end hooks, claude only (issue #69) ------------------------
+
+    #[tokio::test]
+    async fn a_claude_task_run_gets_async_stop_and_stop_failure_hooks_by_settings_file() {
+        let context = ctx(None);
+        let launch = HarnessAgent::claude_code().launch_spec(&context).await.unwrap();
+        let flag = launch
+            .args
+            .iter()
+            .position(|a| a == "--settings")
+            .expect("claude gets a settings file");
+        let path = &launch.args[flag + 1];
+        assert_eq!(
+            PathBuf::from(path),
+            factory_core::adapter::agent::run_hook_settings_path(&context.guides_dir, "r1"),
+            "keyed by run, so a retry never shares an earlier attempt's file"
+        );
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        for (event, flag) in [("Stop", "stop"), ("StopFailure", "stop-failure")] {
+            let hook = &settings["hooks"][event][0]["hooks"][0];
+            assert_eq!(hook["type"], "command", "{event}");
+            assert_eq!(hook["async"], true, "{event} must never hold up a turn");
+            let command = hook["command"].as_str().unwrap();
+            assert_eq!(
+                command,
+                format!("'/usr/local/bin/factory' task turn-ended 't1' --event {flag}"),
+            );
+        }
+        assert!(
+            !std::fs::read_to_string(path).unwrap().contains("tok"),
+            "the run token comes from the session's environment, never the file"
+        );
+        std::fs::remove_dir_all(&context.guides_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_standing_claude_agent_gets_no_turn_end_hooks() {
+        let mut standing = ctx(None);
+        standing.task = None;
+        let launch = HarnessAgent::claude_code().launch_spec(&standing).await.unwrap();
+        assert!(!launch.args.iter().any(|a| a == "--settings"), "no run, so no turn to end");
+        std::fs::remove_dir_all(&standing.guides_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn only_claude_gets_the_turn_end_hooks() {
+        for agent in [HarnessAgent::pi(), HarnessAgent::codex(), HarnessAgent::opencode()] {
+            let context = ctx(None);
+            let launch = agent.launch_spec(&context).await.unwrap();
+            assert!(!launch.args.iter().any(|a| a == "--settings"), "{}", agent.name());
+            std::fs::remove_dir_all(&context.guides_dir).ok();
+        }
     }
 
     #[tokio::test]

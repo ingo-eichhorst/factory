@@ -3,7 +3,7 @@
 
 use chrono::Utc;
 use factory_core::adapter::agent::{
-    run_guide_path, run_shell_script_path, truncate_tail, upstream_output_path, AgentContext,
+    run_guide_path, run_hook_settings_path, run_shell_script_path, truncate_tail, upstream_output_path, AgentContext,
     LaunchSpec, TaskBinding, UpstreamOutput, UPSTREAM_RESULT_BYTE_CAP,
 };
 use factory_core::adapter::runtime::{
@@ -585,6 +585,12 @@ impl Engine {
                 self.sync_workflow_for_task(&id).await;
                 self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
+            }
+            Request::TaskTurnEnded { id, turn } => {
+                self.turn_ended(&id, turn).await?;
+                self.sync_workflow_for_task(&id).await;
+                self.sync_bench_for_task(&id).await;
+                Ok(Payload::Ok)
             }
             Request::TaskEntries { id, limit } => Ok(Payload::Entries {
                 entries: self.store.entries(&id, limit.unwrap_or(200)).await?,
@@ -1623,6 +1629,26 @@ impl Engine {
         outputs
     }
 
+    /// The token is what makes a call about a run come from that run --
+    /// the agent's own report, or its harness's turn-end hook -- rather than
+    /// from anyone on the socket closing anyone's run.
+    pub(crate) fn check_run_token(&self, run: &Run, given: Option<&str>, task_id: &str) -> Result<()> {
+        let Some(expected) = &run.token else {
+            return Ok(());
+        };
+        match given {
+            Some(given) if given == expected => Ok(()),
+            Some(_) => Err(FactoryError::Denied(format!(
+                "wrong token for attempt {} of task {task_id}",
+                run.attempt
+            ))),
+            None => Err(FactoryError::Denied(format!(
+                "attempt {} of task {task_id} needs its run token; it is FACTORY_TASK_TOKEN in the session, or pass --run-token",
+                run.attempt
+            ))),
+        }
+    }
+
     /// What an agent says about its own run. The token is what makes this a
     /// report rather than anyone on the socket closing anyone's run.
     pub async fn report(&self, task_id: &str, report: TaskReport) -> Result<Run> {
@@ -1632,23 +1658,7 @@ impl Engine {
             ))
         })?;
 
-        if let Some(expected) = &run.token {
-            match &report.token {
-                Some(given) if given == expected => {}
-                Some(_) => {
-                    return Err(FactoryError::Denied(format!(
-                        "wrong token for attempt {} of task {task_id}",
-                        run.attempt
-                    )))
-                }
-                None => {
-                    return Err(FactoryError::Denied(format!(
-                        "attempt {} of task {task_id} needs its run token; it is FACTORY_TASK_TOKEN in the session, or pass --run-token",
-                        run.attempt
-                    )))
-                }
-            }
-        }
+        self.check_run_token(&run, report.token.as_deref(), task_id)?;
 
         let message = report.message.clone().unwrap_or_else(|| {
             report
@@ -1676,6 +1686,9 @@ impl Engine {
             status: report.status,
             result: report.result,
             error: report.error,
+            // The agent is talking, so whatever turn a `Stop` hook said had
+            // ended has not -- see `occupancy::settle_turn_end`.
+            clear_turn_ended: true,
             ..Default::default()
         };
 
@@ -1752,6 +1765,9 @@ impl Engine {
                     // the agent's own report remembered to clear it.
                     clear_blocked: true,
                     clear_block_suspicion: true,
+                    // Likewise a held `Stop` turn end: nothing is left to
+                    // settle once the run is over.
+                    clear_turn_ended: true,
                     ended_at: Some(Utc::now()),
                     ..patch
                 },
@@ -2069,6 +2085,12 @@ impl Engine {
         // mid-script.
         let script = run_shell_script_path(&self.factory_snapshot().guides_dir(), &run.id);
         let _ = std::fs::remove_file(script);
+        // And the harness settings file carrying a `claude` run's turn-end
+        // hooks, keyed by run id for the same reason. Claude Code has
+        // already read it at startup; a hook that fires as the session
+        // closes runs from what it loaded then, and finds no run to end.
+        let hooks = run_hook_settings_path(&self.factory_snapshot().guides_dir(), &run.id);
+        let _ = std::fs::remove_file(hooks);
 
         let Some(session) = &run.session else { return };
         if let Ok(runtime) = self.registry.runtime(&session.runtime) {
@@ -2796,6 +2818,193 @@ mod tests {
             })
             .await
             .unwrap()
+    }
+
+    // -- a harness's turn-end hook (issue #69) --------------------------------
+
+    fn stop(token: Option<&str>, pending_background: u32) -> factory_core::task::TurnEnded {
+        factory_core::task::TurnEnded {
+            event: factory_core::task::TurnEndEvent::Stop,
+            pending_background,
+            error: None,
+            error_details: None,
+            last_message: Some("I think that is everything.".into()),
+            token: token.map(str::to_string),
+        }
+    }
+
+    /// A one-off task with a run the agent has said `running` on, as the
+    /// daemon sees it mid-turn.
+    async fn running_run(engine: &Engine, status: RunStatus) -> (Task, Run) {
+        let task = engine
+            .create(NewTask {
+                title: "a turn that ends quietly".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let run = run_for(engine, &task.id, Trigger::Manual).await;
+        let run = engine
+            .store
+            .update_run(&run.id, &RunPatch { status: Some(status), ..Default::default() })
+            .await
+            .unwrap();
+        (task, run)
+    }
+
+    /// Through `handle`, the way the CLI arrives: envelope, caller, authorize,
+    /// dispatch. The run token doubles as the caller's identity token, exactly
+    /// as `FACTORY_TOKEN` and `FACTORY_TASK_TOKEN` do in a real session.
+    async fn send_turn_end(engine: &Arc<Engine>, task_id: &str, turn: factory_core::task::TurnEnded) -> Response {
+        engine
+            .handle(Envelope {
+                token: turn.token.clone(),
+                request: Request::TaskTurnEnded { id: task_id.to_string(), turn },
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_stop_failure_with_no_report_before_it_fails_the_run_on_the_spot() {
+        let engine = test_engine(temp_dir("turn-end"));
+        let (task, run) = running_run(&engine, RunStatus::Running).await;
+        let mut turn = stop(Some("tok"), 0);
+        turn.event = factory_core::task::TurnEndEvent::StopFailure;
+        turn.error = Some("server_error".into());
+
+        let response = send_turn_end(&engine, &task.id, turn).await;
+        assert!(matches!(response, Response::Ok { .. }), "{response:?}");
+
+        let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, RunStatus::Failed, "not left for the timeout to find");
+        let error = failed.error.unwrap();
+        assert!(error.contains("API error (server_error)"), "{error}");
+        assert!(error.contains("I think that is everything."), "{error}");
+        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        assert!(
+            entries.iter().any(|e| e.source == "daemon" && e.kind == "failed"),
+            "the daemon ended it, and says so -- it is never journalled as the agent's report"
+        );
+        assert!(!entries.iter().any(|e| e.source == "agent"), "{entries:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_is_held_on_the_run_and_the_agents_next_report_lets_it_go() {
+        // Another Stop hook may have kept the turn going, so a Stop fails
+        // nothing by itself: it is written down for a later liveness tick.
+        let engine = test_engine(temp_dir("turn-end-held"));
+        let (task, run) = running_run(&engine, RunStatus::Running).await;
+
+        let response = send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
+        assert!(matches!(response, Response::Ok { .. }), "{response:?}");
+        let held = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(held.status, RunStatus::Running, "still running");
+        assert!(held.turn_ended_at.is_some());
+        let why = held.turn_end_reason.as_deref().unwrap();
+        assert!(why.contains("turn ended without reporting") && why.contains("Stop hook"), "{why}");
+
+        engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: None,
+                    message: Some("the hook was wrong, I am still here".into()),
+                    result: None,
+                    error: None,
+                    token: Some("tok".into()),
+                },
+            )
+            .await
+            .unwrap();
+        let resumed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert!(resumed.turn_ended_at.is_none(), "the agent talking is a turn that did not end");
+        assert!(resumed.turn_end_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_run_that_ends_takes_its_held_stop_with_it() {
+        let engine = test_engine(temp_dir("turn-end-finish"));
+        let (task, run) = running_run(&engine, RunStatus::Running).await;
+        send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
+
+        engine.fail_run(&run.id, "for some other reason").await;
+        let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert!(failed.turn_ended_at.is_none(), "nothing left to settle on a finished run");
+        assert!(failed.turn_end_reason.is_none());
+        assert_eq!(failed.error.as_deref(), Some("for some other reason"));
+    }
+
+    #[tokio::test]
+    async fn a_turn_end_without_the_runs_token_changes_nothing() {
+        let engine = test_engine(temp_dir("turn-end-token"));
+        let (task, run) = running_run(&engine, RunStatus::Running).await;
+
+        for token in [Some("not-it"), None] {
+            let response = send_turn_end(&engine, &task.id, stop(token, 0)).await;
+            assert!(matches!(response, Response::Error { .. }), "{token:?}: {response:?}");
+            let still = engine.store.get_run(&run.id).await.unwrap().unwrap();
+            assert_eq!(still.status, RunStatus::Running, "{token:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_stop_after_a_done_report_changes_nothing() {
+        // The hook fires at the end of every turn, the successful one
+        // included. By then the run is over and its token cleared, so the
+        // envelope's identity is refused before anything else looks at it --
+        // which the CLI swallows into the harness's debug log -- and even a
+        // caller whose identity is not in question (the owner, below) finds
+        // no run in progress and is answered with nothing done.
+        let engine = test_engine(temp_dir("turn-end-done"));
+        let (task, run) = running_run(&engine, RunStatus::Running).await;
+        engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    result: Some("did it".into()),
+                    token: Some("tok".into()),
+                    message: None,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+        let before = engine.store.entries(&task.id, 50).await.unwrap().len();
+
+        // Pinned rather than narrated: this is what every successful
+        // claude-code run's last Stop hook actually gets back.
+        match send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await {
+            Response::Error { code, .. } => assert_eq!(code, "denied"),
+            other => panic!("a finished run's token is nobody's: {other:?}"),
+        }
+        engine.turn_ended(&task.id, stop(Some("tok"), 0)).await.unwrap();
+
+        let done = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(done.status, RunStatus::Done);
+        assert!(done.error.is_none());
+        assert_eq!(engine.store.entries(&task.id, 50).await.unwrap().len(), before, "nothing journalled");
+    }
+
+    #[tokio::test]
+    async fn a_blocked_run_or_one_with_background_work_is_left_to_go_on() {
+        let engine = test_engine(temp_dir("turn-end-waiting"));
+
+        let (task, run) = running_run(&engine, RunStatus::Blocked).await;
+        send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
+        let still = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(still.status, RunStatus::Blocked, "it asked for a human and is waiting for one");
+        assert!(still.turn_ended_at.is_none(), "and nothing is held against it");
+
+        let (task, run) = running_run(&engine, RunStatus::Running).await;
+        send_turn_end(&engine, &task.id, stop(Some("tok"), 2)).await;
+        let still = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(still.status, RunStatus::Running, "the harness will wake it again");
+        assert!(still.turn_ended_at.is_none(), "a paused turn is not held as an ended one");
     }
 
     #[tokio::test]

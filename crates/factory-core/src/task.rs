@@ -400,6 +400,46 @@ pub struct TaskReport {
     pub token: Option<String>,
 }
 
+/// Which lifecycle event a harness fired when an agent's turn ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnEndEvent {
+    /// The turn finished normally -- Claude Code's `Stop`.
+    Stop,
+    /// The turn was cut short by an API error -- Claude Code's
+    /// `StopFailure`. This is how a turn killed mid-response by a host
+    /// sleep ends (issue #62).
+    StopFailure,
+}
+
+/// What a harness's own lifecycle hook says when an agent's turn ends: not
+/// the agent's report, and never mistaken for one -- the whole point is that
+/// the agent may not have sent one. It is the harness speaking, which is the
+/// exception `AGENTS.md` allows; the daemon decides what, if anything, it
+/// means for the run (see `occupancy::hook_turn_ended_action`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnEnded {
+    pub event: TurnEndEvent,
+    /// Work the harness will wake the agent up for without anyone typing:
+    /// background tasks still running and session-scoped crons. A turn that
+    /// ends with any of this pending has paused, not finished.
+    #[serde(default)]
+    pub pending_background: u32,
+    /// `StopFailure`'s error type (`rate_limit`, `server_error`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// `StopFailure`'s human-readable message from the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_details: Option<String>,
+    /// The tail of the agent's last message, so whoever looks at the failed
+    /// run can see where it stopped without opening the transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message: Option<String>,
+    /// The run's token, checked exactly as `TaskReport::token` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -109,7 +109,14 @@ something impossible.
   except a `blocked` a runtime reports through a lifecycle hook, which is the
   harness itself speaking, not a guess about a terminal, and the daemon may
   mark the run `Blocked` on that alone. A `blocked` a runtime only infers from
-  the screen stays a suspicion: it may be shown, never asserted.
+  the screen stays a suspicion: it may be shown, never asserted. A turn that
+  ended is the same kind of fact: the harness saying so through a lifecycle
+  hook -- herdr relaying one for `pi`, or Claude Code's `Stop`/`StopFailure`
+  calling `factory task turn-ended` directly -- may fail a run whose agent
+  never reported, unless the run is `Blocked` or the harness has background
+  work that will wake it. An `idle` read off a screen never may; it may only
+  hold such a fact back (a `Stop` another hook can overrule waits for one),
+  never stand in for it.
 - A task is the standing intent; a run is one attempt at it. Sessions, tokens
   and outcomes belong to the run. The task mirrors its newest run so lists stay
   cheap -- if you add a field to that mirror, clear it too, or a successful
