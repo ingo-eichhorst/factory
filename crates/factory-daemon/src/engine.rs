@@ -2783,6 +2783,71 @@ mod tests {
         );
     }
 
+    // -- cron timezones --------------------------------------------------------
+
+    fn berlin_monday_nine() -> Schedule {
+        Schedule::Cron(factory_core::task::CronSchedule {
+            expr: "0 9 * * 1".into(),
+            timezone: Some("Europe/Berlin".into()),
+        })
+    }
+
+    fn scheduled(schedule: Schedule) -> NewTask {
+        NewTask {
+            title: "the weekly audit".into(),
+            instructions: "true".into(),
+            scope: Some("demo".into()),
+            agent: Some("shell".into()),
+            worktree: Some(false),
+            schedule: Some(schedule),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_task_with_a_zoned_schedule_is_next_due_on_that_wall_clock() {
+        let engine = test_engine(temp_dir("tz-create"));
+        let task = engine.create(scheduled(berlin_monday_nine())).await.unwrap();
+        let next = task.next_run_at.unwrap().with_timezone(&chrono_tz::Europe::Berlin);
+        assert_eq!(next.format("%a %H:%M").to_string(), "Mon 09:00", "{next}");
+    }
+
+    #[tokio::test]
+    async fn a_misspelt_timezone_is_refused_when_the_schedule_is_set() {
+        let engine = test_engine(temp_dir("tz-typo"));
+        let typo = Schedule::Cron(factory_core::task::CronSchedule {
+            expr: "0 9 * * 1".into(),
+            timezone: Some("Europe/Berln".into()),
+        });
+        let err = engine.create(scheduled(typo.clone())).await.unwrap_err().to_string();
+        assert!(err.contains("Europe/Berln"), "{err}");
+
+        // And by an edit, which leaves the task as it was.
+        let task = engine.create(scheduled(Schedule::Cron("0 7 * * 1".into()))).await.unwrap();
+        let err = engine
+            .update(&task.id, TaskPatch { schedule: Some(typo), ..Default::default() })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Europe/Berln"), "{err}");
+        let unchanged = engine.store.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.schedule, Some(Schedule::Cron("0 7 * * 1".into())));
+    }
+
+    #[tokio::test]
+    async fn editing_a_utc_schedule_into_a_zoned_one_moves_its_next_firing() {
+        // The live audit's fix, in miniature: 07:00 UTC becomes 09:00 Berlin.
+        let engine = test_engine(temp_dir("tz-edit"));
+        let task = engine.create(scheduled(Schedule::Cron("0 7 * * 1".into()))).await.unwrap();
+        let edited = engine
+            .update(&task.id, TaskPatch { schedule: Some(berlin_monday_nine()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(edited.schedule, Some(berlin_monday_nine()));
+        let next = edited.next_run_at.unwrap().with_timezone(&chrono_tz::Europe::Berlin);
+        assert_eq!(next.format("%a %H:%M").to_string(), "Mon 09:00", "{next}");
+    }
+
     /// A weekly-scheduled task, freshly created -- `engine.create()` has
     /// already set `next_run_at` to the coming Monday, exactly as
     /// `advance_schedule` would before a real dispatch.

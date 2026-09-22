@@ -54,8 +54,8 @@ factory task create "add a test for the parser" \
   -i "Add a test covering empty input, then run the suite." \
   --scope demo --agent claude-code --run
 
-# Recurring work.
-factory task create "morning sweep" -i "..." --schedule "0 9 * * 1-5"
+# Recurring work. A cron schedule is UTC unless it names a timezone.
+factory task create "morning sweep" -i "..." --schedule "0 9 * * 1-5" --timezone Europe/Berlin
 factory task create "heartbeat" -i "date >> beat.txt" --agent shell --schedule "every 5m"
 
 factory watch
@@ -518,6 +518,17 @@ factory task edit <id> --no-schedule --default-timeouts
 
 `--ack-timeout` is how long the agent has to say it has started; `--timeout` is
 how long the whole run may take. Both fall back to the instance defaults.
+
+A cron schedule's fields are read in UTC unless `--timezone` names an IANA
+zone, in which case they are that wall clock's: `--schedule "0 9 * * 1"
+--timezone Europe/Berlin` is nine o'clock in Berlin every Monday, in summer
+and in winter, and its UTC firing moves with the clock change. On the two days
+a year the clock jumps, a firing that falls in the spring-forward gap runs at
+the first minute after it, and one in the autumn overlap runs once, not twice.
+`--timezone` goes with `--schedule` — an edit restates the whole schedule —
+and a name Factory does not know is refused when it is set, not discovered
+when it fails to fire. An `every` schedule is an interval and takes no
+timezone.
 
 ```sh
 factory task run <id>          # a retry is just another run

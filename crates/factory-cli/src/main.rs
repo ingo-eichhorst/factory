@@ -12,7 +12,7 @@ use factory_core::knowledge::FindingKind;
 use factory_core::protocol::{Payload, Request, Response};
 use factory_core::run::{Run, RunStatus};
 use factory_core::task::{
-    NewTask, RetryPolicy, Schedule, Task, TaskFilter, TaskPatch, TaskReport, TaskStatus,
+    CronSchedule, NewTask, RetryPolicy, Schedule, Task, TaskFilter, TaskPatch, TaskReport, TaskStatus,
 };
 use std::path::{Path, PathBuf};
 
@@ -300,6 +300,10 @@ enum TaskCmd {
         /// `every 300`, `every 5m`, or a cron expression.
         #[arg(long)]
         schedule: Option<String>,
+        /// The IANA timezone a cron schedule's fields are read in, as in
+        /// `Europe/Berlin`. Without it they are UTC.
+        #[arg(long, requires = "schedule")]
+        timezone: Option<String>,
         /// Expected seconds one run will occupy its agent (advisory only).
         #[arg(long)]
         estimate: Option<u64>,
@@ -345,8 +349,14 @@ enum TaskCmd {
         agent: Option<String>,
         #[arg(long)]
         runtime: Option<String>,
+        /// `every 300`, `every 5m`, or a cron expression.
         #[arg(long)]
         schedule: Option<String>,
+        /// The IANA timezone a cron schedule's fields are read in, as in
+        /// `Europe/Berlin`. Without it they are UTC. Goes with `--schedule`,
+        /// which it is part of: an edit restates the whole schedule.
+        #[arg(long, requires = "schedule")]
+        timezone: Option<String>,
         /// Drop the schedule and go back to manual.
         #[arg(long)]
         no_schedule: bool,
@@ -1266,6 +1276,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             agent,
             runtime,
             schedule,
+            timezone,
             estimate,
             ack_timeout,
             timeout,
@@ -1276,7 +1287,10 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             no_worktree,
             run,
         } => {
-            let schedule = schedule.as_deref().map(parse_schedule).transpose()?;
+            let schedule = schedule
+                .as_deref()
+                .map(|text| parse_schedule(text, timezone.as_deref()))
+                .transpose()?;
             let retry = retry.as_deref().map(parse_retry).transpose()?;
             // Absent means on -- so passing neither flag says the same thing
             // as passing `--worktree` does. `--no-worktree` is the only way
@@ -1334,6 +1348,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             agent,
             runtime,
             schedule,
+            timezone,
             no_schedule,
             estimate,
             no_estimate,
@@ -1352,7 +1367,10 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 scope,
                 agent,
                 runtime,
-                schedule: schedule.as_deref().map(parse_schedule).transpose()?,
+                schedule: schedule
+                    .as_deref()
+                    .map(|text| parse_schedule(text, timezone.as_deref()))
+                    .transpose()?,
                 clear_schedule: no_schedule,
                 estimate_seconds: estimate,
                 clear_estimate: no_estimate,
@@ -1662,16 +1680,25 @@ fn parse_labels(pairs: &[String]) -> Result<std::collections::BTreeMap<String, S
         .collect()
 }
 
-fn parse_schedule(text: &str) -> Result<Schedule> {
+/// `timezone` is `--timezone`'s value. Whether it names a real zone is the
+/// daemon's to say, where every way of setting a schedule is checked alike.
+fn parse_schedule(text: &str, timezone: Option<&str>) -> Result<Schedule> {
     let text = text.trim();
+    let timezone = timezone.map(str::trim).filter(|t| !t.is_empty());
     if let Some(rest) = text.strip_prefix("every ").or_else(|| text.strip_prefix("every")) {
+        if timezone.is_some() {
+            return Err(anyhow!(
+                "an `every` schedule is an interval, and no timezone changes it; --timezone is for a cron schedule"
+            ));
+        }
         let seconds = parse_duration_seconds(rest.trim())
             .map_err(|_| anyhow!("`every` wants a number, as in `every 300` or `every 5m`"))?;
         return Ok(Schedule::Every { seconds });
     }
-    Ok(Schedule::Cron(
-        text.strip_prefix("cron ").unwrap_or(text).trim().to_string(),
-    ))
+    Ok(Schedule::Cron(CronSchedule {
+        expr: text.strip_prefix("cron ").unwrap_or(text).trim().to_string(),
+        timezone: timezone.map(str::to_string),
+    }))
 }
 
 /// A plain number of seconds, or one suffixed `s`/`m`/`h` -- `300`, `5m`,
@@ -1871,7 +1898,7 @@ fn detail(t: &Task) -> String {
 
 fn describe_schedule(s: &Schedule) -> String {
     match s {
-        Schedule::Cron(expr) => format!("cron {expr}"),
+        Schedule::Cron(cron) => format!("cron {}", cron.describe()),
         Schedule::Every { seconds } => format!("every {seconds}s"),
     }
 }
@@ -2130,5 +2157,41 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{event}: {e}"));
             assert!(matches!(cli.command, Command::Task(TaskCmd::TurnEnded { .. })));
         }
+    }
+
+    // -- --timezone ----------------------------------------------------------
+
+    #[test]
+    fn a_cron_schedule_takes_its_timezone_from_the_flag() {
+        let s = parse_schedule("0 9 * * 1", Some("Europe/Berlin")).unwrap();
+        assert_eq!(
+            s,
+            Schedule::Cron(CronSchedule { expr: "0 9 * * 1".into(), timezone: Some("Europe/Berlin".into()) })
+        );
+        assert_eq!(describe_schedule(&s), "cron 0 9 * * 1 (Europe/Berlin)");
+        assert_eq!(parse_schedule("cron 0 7 * * 1", None).unwrap(), Schedule::Cron("0 7 * * 1".into()));
+    }
+
+    #[test]
+    fn an_interval_with_a_timezone_is_refused() {
+        let err = parse_schedule("every 5m", Some("Europe/Berlin")).unwrap_err().to_string();
+        assert!(err.contains("--timezone is for a cron schedule"), "{err}");
+    }
+
+    #[test]
+    fn a_timezone_on_its_own_is_refused_by_the_parser() {
+        // An edit restates the whole schedule; a zone with no expression
+        // would have to guess which schedule it belongs to.
+        for sub in ["create", "edit"] {
+            let args: Vec<&str> = match sub {
+                "create" => vec!["factory", "task", "create", "t", "--timezone", "Europe/Berlin"],
+                _ => vec!["factory", "task", "edit", "id", "--timezone", "Europe/Berlin"],
+            };
+            assert!(Cli::try_parse_from(args).is_err(), "{sub}");
+        }
+        assert!(Cli::try_parse_from([
+            "factory", "task", "edit", "id", "--schedule", "0 9 * * 1", "--timezone", "Europe/Berlin",
+        ])
+        .is_ok());
     }
 }
