@@ -480,7 +480,7 @@ impl Engine {
                 Some(updated)
             }
             Err(e) => {
-                tracing::warn!(run = %run.id, "could not record a block/unblock: {e}");
+                tracing::warn!(run = %run.id, "could not update the run from its runtime or harness: {e}");
                 None
             }
         }
@@ -679,6 +679,13 @@ enum HookTurnAction {
 ///   the hook's own payload says so (`background_tasks`, `session_crons`).
 ///   If that work never does wake it, no later turn ends to say so, and the
 ///   run falls back to `task_timeout_seconds` -- where it stood before this.
+///
+/// The same fallback, silently, where the hook cannot prove which run it
+/// speaks for: with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, Claude Code strips
+/// `FACTORY_TASK_TOKEN` (and `FACTORY_TOKEN`) from every subprocess --
+/// verified live -- so the call arrives with no token and is refused. The
+/// agent's own `task report` loses its token the same way, so that setting
+/// already breaks the reporting contract as a whole, not just this.
 /// * `Blocked` stays out for the same reason as there: an agent that
 ///   reported `blocked` and ended its turn is doing exactly what it was
 ///   told, waiting for a human.
