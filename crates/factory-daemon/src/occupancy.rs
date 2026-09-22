@@ -326,10 +326,14 @@ impl Engine {
             // `claude-code` is covered by a second, independent path that
             // never goes through herdr at all: Claude Code's own `Stop` and
             // `StopFailure` hooks call the daemon directly the moment a turn
-            // ends (`Engine::turn_ended`, issue #69). A `claude` run is not
-            // caught here, and does not need to be.
+            // ends (`Engine::turn_ended`, issue #69). A `StopFailure` fails
+            // the run there and then; a `Stop` is only held on the run, and
+            // stands here, below, once `settle_turn_end` says it has.
             if turn_ended_action(&report, run.status) == TurnEndedAction::Fail {
                 self.fail_run(&run.id, TURN_ENDED_REASON).await;
+            } else if settle_turn_end(run.status, run.turn_ended_at, report.status, Utc::now()) {
+                let why = run.turn_end_reason.as_deref().unwrap_or(TURN_ENDED_REASON);
+                self.fail_run(&run.id, why).await;
             }
         }
     }
@@ -338,7 +342,8 @@ impl Engine {
     /// Code's `Stop` or `StopFailure`, by way of `factory task turn-ended`.
     /// The harness speaking, not a guess about a terminal, so this may end
     /// a run on its own word (see `AGENTS.md`); what it decides is
-    /// `hook_turn_ended_action`'s.
+    /// `hook_turn_ended_action`'s -- at once for `StopFailure`, and for
+    /// `Stop` by way of `settle_turn_end` on a later liveness tick.
     ///
     /// A hook fires at the end of *every* turn, including the one in which
     /// the agent reported `done` -- so a task with no run in progress is the
@@ -350,8 +355,22 @@ impl Engine {
             return Ok(());
         };
         self.check_run_token(&run, turn.token.as_deref(), task_id)?;
-        if hook_turn_ended_action(&turn, run.status) == TurnEndedAction::Fail {
-            self.fail_run(&run.id, &hook_turn_ended_reason(&turn)).await;
+        match hook_turn_ended_action(&turn, run.status) {
+            HookTurnAction::FailNow => {
+                self.fail_run(&run.id, &hook_turn_ended_reason(&turn)).await;
+            }
+            HookTurnAction::Settle => {
+                self.patch_run(
+                    &run,
+                    RunPatch {
+                        turn_ended_at: Some(Utc::now()),
+                        turn_end_reason: Some(hook_turn_ended_reason(&turn)),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
+            HookTurnAction::Nothing => {}
         }
         Ok(())
     }
@@ -627,30 +646,86 @@ fn turn_ended_action(report: &StatusReport, run_status: RunStatus) -> TurnEndedA
 /// `StatusReport` for that one to judge: `StatusSource` says where a
 /// *runtime's* answer came from, and faking one would leave the herdr path's
 /// tests unsure what they prove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookTurnAction {
+    /// The turn is over and nothing can bring it back: fail the run now.
+    FailNow,
+    /// The turn ended as far as this hook knows, but another hook may yet
+    /// keep it going -- hold the fact on the run and let
+    /// `settle_turn_end` decide on a later tick.
+    Settle,
+    Nothing,
+}
+
+/// What a turn-end hook means for a run in `run_status`.
 ///
-/// Two differences from `turn_ended_action`, both deliberate:
-///
-/// * `Dispatching` counts. That check leaves it out because a slow launch
-///   looks exactly like an idle pane; nothing here is looking at a pane. A
-///   hook only fires after a turn, and a turn only happens once the prompt
-///   is submitted, so a `Dispatching` run whose turn ended is one whose
-///   agent answered without ever reporting `running` -- or, likelier, whose
-///   very first API call failed (`StopFailure`). Waiting out
-///   `ack_timeout_seconds` on that tells nobody anything they did not know.
+/// * `StopFailure` fails the run at once. An API error ended the turn, and
+///   Claude Code documents that no hook can block it -- the session handles
+///   the error regardless -- so there is no turn left to continue.
+/// * `Stop` is only held (`Settle`). Every `Stop` hook in a session runs on
+///   the same event, and any of them may exit 2 to keep the turn going: a
+///   scope's own "you have not run the tests yet" hook, say. Verified live:
+///   Factory's hook fires, reports, and the turn carries on regardless.
+///   Failing on the spot would kill a run that is still working.
+/// * `Dispatching` counts, unlike in `turn_ended_action`. That check leaves
+///   it out because a slow launch looks exactly like an idle pane; nothing
+///   here is looking at a pane. A hook only fires after a turn, and a turn
+///   only happens once the prompt is submitted, so a `Dispatching` run whose
+///   turn ended is one whose agent answered without ever reporting
+///   `running` -- or, likelier, whose very first API call failed.
 /// * Pending background work wins. Claude Code ends a turn and wakes itself
 ///   again when a background task finishes or a session cron fires, so a
 ///   turn that ended with any of that pending has paused, not finished --
 ///   the hook's own payload says so (`background_tasks`, `session_crons`).
-///
-/// `Blocked` stays out for the same reason as there: an agent that reported
-/// `blocked` and ended its turn is doing exactly what it was told, waiting
-/// for a human.
-fn hook_turn_ended_action(turn: &TurnEnded, run_status: RunStatus) -> TurnEndedAction {
+///   If that work never does wake it, no later turn ends to say so, and the
+///   run falls back to `task_timeout_seconds` -- where it stood before this.
+/// * `Blocked` stays out for the same reason as there: an agent that
+///   reported `blocked` and ended its turn is doing exactly what it was
+///   told, waiting for a human.
+fn hook_turn_ended_action(turn: &TurnEnded, run_status: RunStatus) -> HookTurnAction {
     let open = matches!(run_status, RunStatus::Running | RunStatus::Dispatching);
-    if open && turn.pending_background == 0 {
-        return TurnEndedAction::Fail;
+    if !open || turn.pending_background > 0 {
+        return HookTurnAction::Nothing;
     }
-    TurnEndedAction::Nothing
+    match turn.event {
+        TurnEndEvent::StopFailure => HookTurnAction::FailNow,
+        TurnEndEvent::Stop => HookTurnAction::Settle,
+    }
+}
+
+/// How long a `Stop` hook's turn end is held before it may stand. Long
+/// enough for any other `Stop` hook to have started, and for a turn one of
+/// them kept going to show as working on the next few ticks; the screen
+/// check in `settle_turn_end` covers however long it then runs.
+const STOP_SETTLE_SECONDS: i64 = 30;
+
+/// Whether a held `Stop` turn end now stands, on a liveness tick. Three
+/// things, all of them:
+///
+/// * the run is still open and nothing has reported since -- any report
+///   from the agent clears `turn_ended_at`, and a `Stop` from a later turn
+///   replaces it, restarting the wait;
+/// * it has been held for `STOP_SETTLE_SECONDS`;
+/// * the runtime reads the session as `idle`, by whatever means.
+///
+/// The last is a screen reading for `claude`, and `AGENTS.md` forbids
+/// acting on one of those -- which this does not do. The harness's hook is
+/// the fact that fails the run; the screen can only hold it back. A pane
+/// that looks working, starting or blocked (a permission prompt in a turn
+/// another hook kept going) keeps the run alive; only one that looks idle,
+/// agreeing with what the harness said, lets the fact stand. The failure
+/// this risks is the safe one: a pane misread as busy falls back to
+/// `task_timeout_seconds`, which is where every run stood before this.
+fn settle_turn_end(
+    run_status: RunStatus,
+    turn_ended_at: Option<DateTime<Utc>>,
+    runtime_status: RuntimeStatus,
+    now: DateTime<Utc>,
+) -> bool {
+    let open = matches!(run_status, RunStatus::Running | RunStatus::Dispatching);
+    let held_long_enough = turn_ended_at
+        .is_some_and(|at| now - at >= Duration::seconds(STOP_SETTLE_SECONDS));
+    open && held_long_enough && runtime_status == RuntimeStatus::Idle
 }
 
 /// Why a run failed on a hook's word, naming which hook and, for an API
@@ -792,6 +867,8 @@ mod tests {
             blocked_since: None,
             blocked_source: None,
             block_suspected_since: None,
+            turn_ended_at: None,
+            turn_end_reason: None,
         }
     }
 
@@ -1010,15 +1087,25 @@ mod tests {
     }
 
     #[test]
-    fn a_hook_reported_turn_end_fails_a_run_still_waiting_on_a_report() {
-        for event in [TurnEndEvent::Stop, TurnEndEvent::StopFailure] {
-            for status in [RunStatus::Running, RunStatus::Dispatching] {
-                assert_eq!(
-                    hook_turn_ended_action(&turn(event, 0), status),
-                    TurnEndedAction::Fail,
-                    "{event:?} on a {status:?} run"
-                );
-            }
+    fn a_stop_failure_fails_a_run_still_waiting_on_a_report_at_once() {
+        // No hook can block a StopFailure, so there is no turn to continue.
+        for status in [RunStatus::Running, RunStatus::Dispatching] {
+            assert_eq!(
+                hook_turn_ended_action(&turn(TurnEndEvent::StopFailure, 0), status),
+                HookTurnAction::FailNow,
+                "{status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stop_is_only_held_because_another_hook_may_keep_the_turn_going() {
+        for status in [RunStatus::Running, RunStatus::Dispatching] {
+            assert_eq!(
+                hook_turn_ended_action(&turn(TurnEndEvent::Stop, 0), status),
+                HookTurnAction::Settle,
+                "{status:?}"
+            );
         }
     }
 
@@ -1027,7 +1114,7 @@ mod tests {
         for event in [TurnEndEvent::Stop, TurnEndEvent::StopFailure] {
             assert_eq!(
                 hook_turn_ended_action(&turn(event, 1), RunStatus::Running),
-                TurnEndedAction::Nothing,
+                HookTurnAction::Nothing,
                 "the harness will wake the agent again; {event:?}"
             );
         }
@@ -1036,12 +1123,55 @@ mod tests {
     #[test]
     fn a_hook_reported_turn_end_leaves_a_blocked_or_finished_run_alone() {
         // Blocked is the agent doing what it was told: waiting for a human.
+        for event in [TurnEndEvent::Stop, TurnEndEvent::StopFailure] {
+            for status in [RunStatus::Blocked, RunStatus::Done, RunStatus::Failed, RunStatus::Cancelled] {
+                assert_eq!(
+                    hook_turn_ended_action(&turn(event, 0), status),
+                    HookTurnAction::Nothing,
+                    "{event:?} on {status:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_held_stop_stands_once_it_is_old_enough_and_the_session_looks_idle() {
+        let ended = at(0);
+        let later = at(STOP_SETTLE_SECONDS);
+        assert!(settle_turn_end(RunStatus::Running, Some(ended), RuntimeStatus::Idle, later));
+        assert!(settle_turn_end(RunStatus::Dispatching, Some(ended), RuntimeStatus::Idle, later));
+    }
+
+    #[test]
+    fn a_held_stop_waits_out_its_settling_time() {
+        let early = at(STOP_SETTLE_SECONDS - 1);
+        assert!(!settle_turn_end(RunStatus::Running, Some(at(0)), RuntimeStatus::Idle, early));
+    }
+
+    #[test]
+    fn a_session_that_looks_busy_holds_a_stop_back_but_never_triggers_one() {
+        let later = at(STOP_SETTLE_SECONDS * 10);
+        // Another hook kept the turn going: working, or stopped at a
+        // permission prompt, or still coming up -- or the runtime cannot
+        // say. None of those lets the harness's word stand yet.
+        for status in [
+            RuntimeStatus::Working,
+            RuntimeStatus::Blocked,
+            RuntimeStatus::Starting,
+            RuntimeStatus::Unknown,
+            RuntimeStatus::Gone,
+        ] {
+            assert!(!settle_turn_end(RunStatus::Running, Some(at(0)), status, later), "{status:?}");
+        }
+        // And an idle screen with no hook behind it is never enough.
+        assert!(!settle_turn_end(RunStatus::Running, None, RuntimeStatus::Idle, later));
+    }
+
+    #[test]
+    fn a_held_stop_does_not_outlive_the_run_being_blocked_or_over() {
+        let later = at(STOP_SETTLE_SECONDS * 10);
         for status in [RunStatus::Blocked, RunStatus::Done, RunStatus::Failed, RunStatus::Cancelled] {
-            assert_eq!(
-                hook_turn_ended_action(&turn(TurnEndEvent::Stop, 0), status),
-                TurnEndedAction::Nothing,
-                "{status:?}"
-            );
+            assert!(!settle_turn_end(status, Some(at(0)), RuntimeStatus::Idle, later), "{status:?}");
         }
     }
 

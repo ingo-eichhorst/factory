@@ -491,6 +491,8 @@ impl TaskStore for SqliteStore {
                 blocked_since: None,
                 blocked_source: None,
                 block_suspected_since: None,
+                turn_ended_at: None,
+                turn_end_reason: None,
             };
             write_run(&tx, &run)?;
 
@@ -573,6 +575,16 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.block_suspected_since {
                 run.block_suspected_since = Some(v);
+            }
+            if patch.clear_turn_ended {
+                run.turn_ended_at = None;
+                run.turn_end_reason = None;
+            }
+            if let Some(v) = patch.turn_ended_at {
+                run.turn_ended_at = Some(v);
+            }
+            if let Some(v) = patch.turn_end_reason {
+                run.turn_end_reason = Some(v);
             }
             // A run that reached a terminal state is over, whether or not the
             // caller remembered to say when.

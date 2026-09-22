@@ -1686,6 +1686,9 @@ impl Engine {
             status: report.status,
             result: report.result,
             error: report.error,
+            // The agent is talking, so whatever turn a `Stop` hook said had
+            // ended has not -- see `occupancy::settle_turn_end`.
+            clear_turn_ended: true,
             ..Default::default()
         };
 
@@ -1762,6 +1765,9 @@ impl Engine {
                     // the agent's own report remembered to clear it.
                     clear_blocked: true,
                     clear_block_suspicion: true,
+                    // Likewise a held `Stop` turn end: nothing is left to
+                    // settle once the run is over.
+                    clear_turn_ended: true,
                     ended_at: Some(Utc::now()),
                     ..patch
                 },
@@ -2863,17 +2869,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stop_hook_with_no_report_before_it_fails_the_run_on_the_spot() {
+    async fn a_stop_failure_with_no_report_before_it_fails_the_run_on_the_spot() {
         let engine = test_engine(temp_dir("turn-end"));
         let (task, run) = running_run(&engine, RunStatus::Running).await;
+        let mut turn = stop(Some("tok"), 0);
+        turn.event = factory_core::task::TurnEndEvent::StopFailure;
+        turn.error = Some("server_error".into());
 
-        let response = send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
+        let response = send_turn_end(&engine, &task.id, turn).await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
 
         let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(failed.status, RunStatus::Failed, "not left for the timeout to find");
         let error = failed.error.unwrap();
-        assert!(error.contains("turn ended without reporting"), "{error}");
+        assert!(error.contains("API error (server_error)"), "{error}");
         assert!(error.contains("I think that is everything."), "{error}");
         let entries = engine.store.entries(&task.id, 50).await.unwrap();
         assert!(
@@ -2881,6 +2890,52 @@ mod tests {
             "the daemon ended it, and says so -- it is never journalled as the agent's report"
         );
         assert!(!entries.iter().any(|e| e.source == "agent"), "{entries:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_is_held_on_the_run_and_the_agents_next_report_lets_it_go() {
+        // Another Stop hook may have kept the turn going, so a Stop fails
+        // nothing by itself: it is written down for a later liveness tick.
+        let engine = test_engine(temp_dir("turn-end-held"));
+        let (task, run) = running_run(&engine, RunStatus::Running).await;
+
+        let response = send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
+        assert!(matches!(response, Response::Ok { .. }), "{response:?}");
+        let held = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(held.status, RunStatus::Running, "still running");
+        assert!(held.turn_ended_at.is_some());
+        let why = held.turn_end_reason.as_deref().unwrap();
+        assert!(why.contains("turn ended without reporting") && why.contains("Stop hook"), "{why}");
+
+        engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: None,
+                    message: Some("the hook was wrong, I am still here".into()),
+                    result: None,
+                    error: None,
+                    token: Some("tok".into()),
+                },
+            )
+            .await
+            .unwrap();
+        let resumed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert!(resumed.turn_ended_at.is_none(), "the agent talking is a turn that did not end");
+        assert!(resumed.turn_end_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_run_that_ends_takes_its_held_stop_with_it() {
+        let engine = test_engine(temp_dir("turn-end-finish"));
+        let (task, run) = running_run(&engine, RunStatus::Running).await;
+        send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
+
+        engine.fail_run(&run.id, "for some other reason").await;
+        let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert!(failed.turn_ended_at.is_none(), "nothing left to settle on a finished run");
+        assert!(failed.turn_end_reason.is_none());
+        assert_eq!(failed.error.as_deref(), Some("for some other reason"));
     }
 
     #[tokio::test]
@@ -2921,7 +2976,12 @@ mod tests {
             .unwrap();
         let before = engine.store.entries(&task.id, 50).await.unwrap().len();
 
-        send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
+        // Pinned rather than narrated: this is what every successful
+        // claude-code run's last Stop hook actually gets back.
+        match send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await {
+            Response::Error { code, .. } => assert_eq!(code, "denied"),
+            other => panic!("a finished run's token is nobody's: {other:?}"),
+        }
         engine.turn_ended(&task.id, stop(Some("tok"), 0)).await.unwrap();
 
         let done = engine.store.get_run(&run.id).await.unwrap().unwrap();
@@ -2938,11 +2998,13 @@ mod tests {
         send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
         let still = engine.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(still.status, RunStatus::Blocked, "it asked for a human and is waiting for one");
+        assert!(still.turn_ended_at.is_none(), "and nothing is held against it");
 
         let (task, run) = running_run(&engine, RunStatus::Running).await;
         send_turn_end(&engine, &task.id, stop(Some("tok"), 2)).await;
         let still = engine.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(still.status, RunStatus::Running, "the harness will wake it again");
+        assert!(still.turn_ended_at.is_none(), "a paused turn is not held as an ended one");
     }
 
     #[tokio::test]

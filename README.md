@@ -631,8 +631,13 @@ next tick. herdr has no hook for `claude`, only a guess from the screen, so a
 `StopFailure` hooks that call `factory task turn-ended` the moment the turn
 ends. They are `async`, so they never hold a turn up, and Claude Code merges
 them with the worktree's own `.claude/settings.json` hooks rather than
-replacing them. Either way the run is left alone if it is `Blocked` (waiting
-for a person is what it was told to do) or if Claude Code still has a
+replacing them. A `StopFailure` -- an API error, which no hook can override --
+fails the run at once. A `Stop` is only held on the run, because any other
+`Stop` hook in the session (the scope's own, or the user's) may keep the turn
+going; it stands after 30 seconds, on a tick where the session also looks
+idle, unless the agent reports something first. The screen can hold that back
+but never trigger it. Either way the run is left alone if it is `Blocked`
+(waiting for a person is what it was told to do) or if Claude Code still has a
 background task or session cron that will wake it; otherwise it fails with a
 reason saying which hook fired and, for an API error, what the API said.
 `codex` and `opencode` have neither, and still answer to the timeouts below.

@@ -186,6 +186,17 @@ pub struct Run {
     /// the moment the guess stops being `blocked`, confirmed or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_suspected_since: Option<DateTime<Utc>>,
+    /// When the harness's `Stop` hook last said this run's turn ended with no
+    /// report before it -- a fact the harness reported, held rather than acted
+    /// on at once, because another `Stop` hook in the same session may have
+    /// kept the turn going (see `occupancy::settle_turn_end`). Cleared by any
+    /// report from the agent and when the run ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_ended_at: Option<DateTime<Utc>>,
+    /// What the run fails with if that turn end stands. Set and cleared
+    /// together with `turn_ended_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_end_reason: Option<String>,
 }
 
 impl Run {
@@ -242,6 +253,15 @@ pub struct RunPatch {
     pub block_suspected_since: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_block_suspicion: bool,
+    /// Record a `Stop` hook's turn end: when, and the reason it will fail
+    /// with. Always set as a pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_ended_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_end_reason: Option<String>,
+    /// Clears both of the above.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_turn_ended: bool,
     /// Set once, right after `git worktree add` succeeds. Nothing ever clears
     /// these -- there is no "leave the worktree" patch, because there is
     /// nothing else for the run to have used once it had one.

@@ -114,7 +114,9 @@ something impossible.
   hook -- herdr relaying one for `pi`, or Claude Code's `Stop`/`StopFailure`
   calling `factory task turn-ended` directly -- may fail a run whose agent
   never reported, unless the run is `Blocked` or the harness has background
-  work that will wake it. An `idle` read off a screen never may.
+  work that will wake it. An `idle` read off a screen never may; it may only
+  hold such a fact back (a `Stop` another hook can overrule waits for one),
+  never stand in for it.
 - A task is the standing intent; a run is one attempt at it. Sessions, tokens
   and outcomes belong to the run. The task mirrors its newest run so lists stay
   cheap -- if you add a field to that mirror, clear it too, or a successful
