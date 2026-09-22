@@ -7,6 +7,10 @@ import { scrim, closeModal, dropModal } from "./modal.js";
 // saving goes back to it. A cycle ES modules handle, because nothing here runs
 // until a button is pressed.
 import { openTask, renderTasks } from "./tasks.js";
+import { parseSchedule, scheduleText, scheduleZone } from "./schedule.js";
+
+// Kept importable from here for anything that already does.
+export { parseSchedule, scheduleText };
 
 export function openCreate(prefill) {
   dropModal();
@@ -43,6 +47,7 @@ export function openEdit(task) {
         scope: task.scope,
         agent: task.agent,
         scheduleText: scheduleText(task.schedule),
+        scheduleZone: scheduleZone(task.schedule),
         estimate_seconds: task.estimate_seconds,
         ack_timeout_seconds: task.ack_timeout_seconds,
         timeout_seconds: task.timeout_seconds,
@@ -168,6 +173,8 @@ export function taskFields(v) {
     <div class="sub" id="c-worktree-sub">${worktreeHint(capable, reason, editing)}</div>
     <label for="c-schedule">Schedule <span class="sub" style="text-transform:none">(blank = manual)</span></label>
     <input id="c-schedule" placeholder="every 5m  ·  0 9 * * 1-5" value="${esc(v.scheduleText || "")}">
+    <label for="c-timezone">Timezone <span class="sub" style="text-transform:none">cron only · blank = UTC</span></label>
+    <input id="c-timezone" placeholder="Europe/Berlin" value="${esc(v.scheduleZone || "")}">
     <label for="c-estimate">Estimated duration <span class="sub" style="text-transform:none">seconds · planning only</span></label>
     <input id="c-estimate" type="number" min="1" placeholder="no estimate" value="${v.estimate_seconds ?? ""}">
     <div class="grid2">
@@ -224,32 +231,12 @@ export function readTaskFields() {
     instructions: $("c-instructions").value,
     scope: $("c-scope").value || null,
     agent: $("c-agent").value || null,
-    schedule: parseSchedule($("c-schedule").value),
+    schedule: parseSchedule($("c-schedule").value, $("c-timezone").value),
     estimate_seconds: num("c-estimate"),
     ack_timeout_seconds: num("c-ack"),
     timeout_seconds: num("c-timeout"),
     labels,
   };
-}
-
-export function scheduleText(s) {
-  if (!s) return "";
-  if (s.cron) return s.cron;
-  if (s.every) return `every ${s.every.seconds}s`;
-  return "";
-}
-
-export function parseSchedule(text) {
-  const v = text.trim();
-  if (!v) return null;
-  const m = v.match(/^every\s+(\d+)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hrs?|hours?)?$/i);
-  if (m) {
-    const n = parseInt(m[1], 10);
-    const u = (m[2] || "s").toLowerCase();
-    const mult = u.startsWith("h") ? 3600 : (u.startsWith("m") ? 60 : 1);
-    return { every: { seconds: n * mult } };
-  }
-  return { cron: v.replace(/^cron\s+/i, "") };
 }
 
 export async function create(andRun) {

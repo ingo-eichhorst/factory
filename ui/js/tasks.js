@@ -6,14 +6,10 @@ import { inScope, scopeLabel, writeHash } from "./scopes.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openEdit, scheduleText } from "./task-form.js";
+import { scheduleLabel } from "./schedule.js";
 import { describeWorkflowOrigin } from "./workflows.js";
 
-export function scheduleLabel(s) {
-  if (!s) return "manual";
-  if (s.cron) return `cron ${s.cron}`;
-  if (s.every) return `every ${s.every.seconds}s`;
-  return "scheduled";
-}
+export { scheduleLabel };
 
 // -------------------------------------------------------------- the shape
 // Kanban or table, remembered per browser the same way the theme is: a live

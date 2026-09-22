@@ -14,6 +14,7 @@ factory-plugins = { path = "../factory-plugins" }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 clap.workspace = true
 croner.workspace = true
 serde.workspace = true
