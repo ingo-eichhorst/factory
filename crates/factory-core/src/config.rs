@@ -1483,6 +1483,54 @@ mod tests {
     }
 
     #[test]
+    fn the_root_layer_is_named_from_its_own_registered_scope_and_never_appears_twice() {
+        // The common shape on a real instance: the root opts into being a
+        // scope, and discovery then places that same `Scope` (path `.`) in
+        // `self.scopes`, where it would otherwise surface as a second,
+        // empty "root" ancestor of everything below it.
+        let mut c = config_with("policies:\n  frameworks: [cra]\n");
+        let root_scope: Scope = serde_yaml_ng::from_str("id: root-id\nname: company\npath: .\n").unwrap();
+        c.scope = Some(root_scope.clone());
+        c.scopes = vec![
+            root_scope,
+            scope_with_policies("demo", "projects/demo", "  frameworks: [gdpr]\n"),
+        ];
+
+        let chain = c.policy_chain_for_scope(scope_named(&c, "demo"));
+        let scopes: Vec<&str> = chain.iter().map(|l| l.scope.as_str()).collect();
+        assert_eq!(
+            chain.len(),
+            2,
+            "the root's own Scope entry in `self.scopes` contributes nothing beyond the root layer: {scopes:?}"
+        );
+        assert_eq!(scopes, vec!["company", "demo"]);
+        assert_eq!(
+            chain[0].frameworks,
+            vec!["cra".to_string()],
+            "the root layer is named from its configured scope, not the instance name"
+        );
+    }
+
+    #[test]
+    fn factory_policy_chain_matches_config_policy_chain_for_scope_and_falls_back_for_an_unknown_name() {
+        let mut f = factory_with(vec![scope_with_policies("demo", "demo", "  frameworks: [gdpr]\n")]);
+        f.config.policies = PolicyDeclaration {
+            frameworks: vec!["cra".to_string()],
+            ..Default::default()
+        };
+
+        let expected = f.config.policy_chain_for_scope(f.scope("demo").unwrap());
+        assert_eq!(f.policy_chain("demo"), expected);
+
+        // A name that resolves to no scope -- a caller whose scope has since
+        // gone -- gets only the root layer, the same fallback `roles_for`
+        // makes for roles.
+        let root_only = f.policy_chain("gone");
+        assert_eq!(root_only.len(), 1);
+        assert_eq!(root_only[0].frameworks, vec!["cra".to_string()]);
+    }
+
+    #[test]
     fn a_populated_policy_declaration_round_trips_through_yaml() {
         // `tighten` is keyed by `ControlRef`, which #75 only ever exercised
         // through JSON and in-code construction -- confirm it also works as
