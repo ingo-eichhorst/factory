@@ -14,7 +14,9 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use factory_core::config::{refuse_misplaced_scope_roles, Factory, Scope, CONFIG_FILE, FACTORY_DIR};
+use factory_core::config::{
+    refuse_misplaced_scope_policies, refuse_misplaced_scope_roles, Factory, Scope, CONFIG_FILE, FACTORY_DIR,
+};
 use factory_core::error::{FactoryError, Result};
 use serde::Deserialize;
 
@@ -115,6 +117,8 @@ fn read_scope(path: &Path) -> Result<Scope> {
     // without a word. Refuse it here, with the file named, before the daemon
     // starts on a role set somebody believes is different.
     refuse_misplaced_scope_roles(&document, path)?;
+    // Same failure mode, for a top-level `policies:` block.
+    refuse_misplaced_scope_policies(&document, path)?;
     let file: ScopeFile = serde_yaml_ng::from_value(document).map_err(parsing)?;
     Ok(file.scope)
 }
@@ -236,6 +240,7 @@ mod tests {
                 scope: root_scope,
                 scopes: vec![legacy],
                 roles: Default::default(),
+                policies: Default::default(),
                 plugins_dir: None,
             },
         }
@@ -386,6 +391,34 @@ mod tests {
         apply(&mut f).unwrap();
 
         assert!(f.config.scopes[0].roles.contains_key("reviewer"));
+    }
+
+    #[test]
+    fn a_policies_block_beside_the_scope_block_is_refused_with_the_file_named() {
+        let s = Scratch::new("misplaced-policies");
+        let path = s.write_scope(
+            "projects",
+            "scope: { id: p-id, name: projects }\npolicies:\n  frameworks: [cra]\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        let error = apply(&mut f).unwrap_err().to_string();
+        assert!(error.contains("scope.policies"), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn scope_policies_are_read_from_a_nested_scope_file() {
+        let s = Scratch::new("scope-policies");
+        s.write_scope(
+            "projects",
+            "scope:\n  id: p-id\n  name: projects\n  policies:\n    frameworks: [iso27001]\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        apply(&mut f).unwrap();
+
+        assert_eq!(f.config.scopes[0].policies.frameworks, vec!["iso27001".to_string()]);
     }
 
     #[test]

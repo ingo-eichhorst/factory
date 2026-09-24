@@ -214,6 +214,18 @@ impl Engine {
         })
     }
 
+    /// Every policy layer in effect for `scope` right now, root first --
+    /// resolved from the live snapshot on every call for the same reason
+    /// `roles_for` is: a scope-config write holds from the next request with
+    /// nothing to invalidate. Nothing folds these into a status yet -- that
+    /// is `policy::applicable` and `policy::evaluate`, called from whatever
+    /// surfaces the L6 Policy tab (`#77` onward, not this ticket) -- so this
+    /// has no caller within #76 itself.
+    #[allow(dead_code)]
+    pub fn policy_chain(&self, scope: &str) -> Vec<factory_core::policy::PolicyLayer> {
+        self.factory_snapshot().policy_chain(scope)
+    }
+
     /// The instance root's own `roles:`, after a write to its config.
     pub(crate) fn replace_instance_roles(
         &self,
@@ -2462,6 +2474,7 @@ mod tests {
                 ..DaemonConfig::default()
             },
             roles: Default::default(),
+            policies: Default::default(),
             scope: None,
             scopes: vec![Scope {
                 id: "scope-id".into(),
@@ -2473,6 +2486,7 @@ mod tests {
                 git: None,
                 task_store: None,
                 roles: Default::default(),
+                policies: Default::default(),
             }],
             plugins_dir: None,
         };

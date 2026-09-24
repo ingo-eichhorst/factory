@@ -137,6 +137,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         git: None,
         task_store: None,
         roles: Default::default(),
+        policies: Default::default(),
     };
     let config = Config {
         version: 1,
@@ -148,6 +149,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         scope: root_is_scope.then(|| first_scope.clone()),
         scopes: Vec::new(),
         roles: Default::default(),
+        policies: Default::default(),
         plugins_dir: None,
     };
     std::fs::write(&config_path, serde_yaml_ng::to_string(&config)?)?;

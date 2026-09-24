@@ -668,6 +668,7 @@ mod tests {
             ))
             .unwrap()],
             roles: Default::default(),
+            policies: Default::default(),
             plugins_dir: None,
         };
         Arc::new(Engine::new(

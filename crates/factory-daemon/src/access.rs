@@ -540,6 +540,7 @@ mod tests {
                 serde_yaml_ng::from_str("name: other\npath: .\n").unwrap(),
             ],
             roles: Default::default(),
+            policies: Default::default(),
             plugins_dir: None,
         };
         let factory = Factory {

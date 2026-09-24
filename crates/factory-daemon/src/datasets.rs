@@ -322,6 +322,7 @@ mod tests {
             instance: Instance { id: "test".into(), name: "test".into() },
             daemon: DaemonConfig::default(),
             roles: Default::default(),
+            policies: Default::default(),
             scope: None,
             scopes: Vec::new(),
             plugins_dir: None,
