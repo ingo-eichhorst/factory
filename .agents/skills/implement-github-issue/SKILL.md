@@ -5,14 +5,14 @@ description: Implement a GitHub issue end-to-end: review and self-assign it, req
 
 # Implement a GitHub Issue
 
-Use this skill with an issue number or URL. Require `gh` authentication and stop if the repository or issue is ambiguous. Treat assignment, PR creation, and issue comments as external writes: proceed only when the request explicitly authorizes them.
+Use this skill with an issue number or URL. Require `gh` authentication and stop if the repository or issue is ambiguous. Self-assignment is part of running this skill: always claim the issue on GitHub before starting work, so everyone can see someone is on it. Treat PR creation and issue comments as external writes: proceed only when the request explicitly authorizes them.
 
 ```sh
 ISSUE="$1"
 ISSUE_NUMBER="$(gh issue view "$ISSUE" --json number --jq .number)"
 ```
 
-1. Load the issue and its discussion, then assign it to yourself:
+1. Load the issue and its discussion, then claim it by assigning yourself so others can see it is being worked on:
    ```sh
    gh issue view "$ISSUE" --comments
    gh issue edit "$ISSUE" --add-assignee @me
