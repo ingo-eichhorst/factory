@@ -1,0 +1,56 @@
+# A small, valid example catalogue for the EU Cyber Resilience Act, in the
+# shape `factory_core::policy::load_all` reads from
+# `<root>/.factory/policies/<framework>.yaml`. The text of the controls
+# below is our own wording of the CRA's public Annex I requirements, not a
+# copy of the regulation itself -- see `.specs/adr/0004-policy-controls.md`.
+#
+# `maps_to` is left off every control here: it names equivalent controls in
+# other frameworks (ISO/IEC 27001, BSI IT-Grundschutz), and this directory
+# only carries the CRA catalogue, so a cross-framework reference here would
+# be exactly the "maps_to naming nothing known" case `load_all` reports as a
+# finding. Add the other frameworks' files alongside this one before wiring
+# `maps_to` back in.
+framework: cra
+title: Cyber Resilience Act
+kind: regulation
+controls:
+  - id: annex-i-2-1
+    title: Identify and document components (SBOM)
+    max_age: 30d
+    remediation: |
+      Add a scheduled task that exports a software bill of materials and
+      publishes it as a knowledge page tagged control/cra/annex-i-2-1.
+    evidence:
+      - check: knowledge
+      - check: attestation
+      - check: task
+        task: sbom-export
+        max_age: 30d
+
+  - id: annex-i-2-2
+    title: Vulnerability handling procedure is documented
+    evidence:
+      - check: knowledge
+      - check: attestation
+
+  - id: annex-i-2-3
+    title: Known exploitable vulnerabilities are tracked and remediated
+    max_age: 7d
+    remediation: |
+      Add a scheduled task that runs a vulnerability scan and records the
+      result.
+    evidence:
+      - check: task
+        task: vuln-scan
+        max_age: 7d
+      - check: attestation
+
+  - id: annex-i-2-4
+    title: Security updates are provided without undue delay
+    evidence:
+      - check: attestation
+
+  - id: annex-i-2-5
+    title: A coordinated vulnerability disclosure policy is published
+    evidence:
+      - check: knowledge
