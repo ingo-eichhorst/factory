@@ -133,7 +133,10 @@ impl Engine {
             .collect();
 
         Ok(PolicyReport {
-            scope: scope.map(str::to_string),
+            // The canonical name, like `RoleBoard.scope` -- a caller that
+            // asked by a legacy bare name still gets back exactly what
+            // `rows[].scope` uses, not the spelling it happened to type.
+            scope: asked.as_ref().map(|s| s.name.clone()),
             rows,
             rollup: subtree_rollup,
             not_applicable: not_applicable
