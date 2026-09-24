@@ -877,6 +877,12 @@ pub struct PolicyControlDetail {
     pub max_age: Option<crate::policy::Duration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_applicable: Option<crate::policy::AppliedNotApplicable>,
+    /// Machine-readable pointers alongside `status`'s reasons -- see
+    /// `policy::EvidenceRef`. `ControlStatus` already carries these;
+    /// `policy_control` (`factory-daemon`) would otherwise drop them
+    /// building this from it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<crate::policy::EvidenceRef>,
     pub status: crate::policy::Status,
     /// Every attestation ever recorded for this control at this scope or an
     /// ancestor of it, most recent first -- withdrawn and expired ones

@@ -38,19 +38,26 @@
 //! [`evaluate`] takes the applicable controls, a bundle of [`Evidence`]
 //! Factory already has lying around, and `now`, and produces a
 //! [`ControlStatus`] per control -- pure, so a caller passes `now` in rather
-//! than this module reading the clock. v1 (this ticket) only *evaluates*
-//! two of the ADR's seven check kinds, `knowledge` and `attestation`; the
-//! catalogue format already parses every kind the ADR names (`task`,
-//! `workflow`, `gate`, `roles`, `sandbox`, `secrets`, `daemon`) so later
-//! tickets (`#81`) only have to teach `evaluate` what those checks mean, not
-//! change what a catalogue can say. A check this module cannot yet evaluate
-//! never satisfies anything -- its `unevaluated` reason says so rather than
+//! than this module reading the clock. `evaluate` now understands five of
+//! `Check`'s nine kinds: `knowledge` and `attestation` (v1), and `task`,
+//! `workflow` and `gate` (`#81`). `roles`, `sandbox`, `secrets` and `daemon`
+//! are `#82`'s -- the catalogue format already parses all four, so that
+//! ticket only has to teach `evaluate` what they mean, not change what a
+//! catalogue can say. A check this module cannot yet evaluate never
+//! satisfies anything -- its `unevaluated` reason says so rather than
 //! silently counting as met.
 //!
-//! `Evidence` is deliberately thin in v1 (a set of knowledge tags and a list
-//! of attestations) and is expected to grow a field per check kind as later
-//! tickets teach `evaluate` to read it; every field it has is `#[serde(default)]`
-//! so an older caller building one is still a valid, if incomplete, bundle.
+//! `task`, `workflow` and `gate` never touch a store themselves -- this
+//! module stays pure. The engine (`Engine::policy_report`/`policy_control`
+//! in `factory-daemon`) resolves whatever a check names -- a task, a
+//! workflow, a dataset's bench runs -- into a [`TaskFact`], [`WorkflowFact`]
+//! or [`GateFact`] first, and hands the result in on [`Evidence`]. Resolution
+//! happens once per evaluated scope, and only for the names an applicable
+//! check actually references -- never every task or workflow a scope has.
+//!
+//! `Evidence` grows a field per check kind as each ticket teaches `evaluate`
+//! to read it; every field it has is `#[serde(default)]` so an older caller
+//! building one is still a valid, if incomplete, bundle.
 //!
 //! `maps_to` lets one piece of evidence satisfy more than one control: two
 //! frameworks that both require, say, an SBOM should not need separate proof
@@ -65,8 +72,11 @@
 //! `is_tag_char` already accepts, and every page frontmatter or `#tag` link
 //! keeps working unmodified.
 
+use crate::bench::Verdict;
 use crate::dataset::is_slug;
 use crate::role::Grant;
+use crate::run::RunStatus;
+use crate::workflow::WorkflowRunStatus;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -241,21 +251,22 @@ pub enum Check {
     /// Satisfied by an unexpired, unwithdrawn `Attestation` recorded for
     /// this control.
     Attestation,
-    /// A scheduled task's newest run is `done` within `max_age`. Parsed now,
-    /// evaluated in `#81`.
+    /// A scheduled task's newest run is `done` within `max_age`. `task`
+    /// names a task in the evaluated scope, by id or by exact title; an
+    /// ambiguous title is a [`Finding`], via [`evidence_findings`].
     Task {
         task: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_age: Option<Duration>,
     },
-    /// Same as `task`, for a workflow. Parsed now, evaluated in `#81`.
+    /// Same as `task`, for a workflow.
     Workflow {
         workflow: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_age: Option<Duration>,
     },
-    /// A dataset case's gate passed in a bench run within `max_age`. Parsed
-    /// now, evaluated in `#81`.
+    /// A dataset's gated cases (or, with `case`, one named case) all passed
+    /// in the newest *settled* bench run of `dataset`, within `max_age`.
     Gate {
         dataset: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -264,18 +275,18 @@ pub enum Check {
         max_age: Option<Duration>,
     },
     /// A stated condition on role grants holds, e.g. no role below the root
-    /// holds any of `forbid`. Parsed now, evaluated in `#81`.
+    /// holds any of `forbid`. Parsed now, evaluated in `#82`.
     Roles {
         #[serde(default)]
         forbid: Vec<Grant>,
     },
     /// Every agent in the scope declares a sandbox. Parsed now, evaluated in
-    /// `#81`.
+    /// `#82`.
     Sandbox,
     /// Secrets reach agents only through the Secrets seam. Parsed now,
-    /// evaluated in `#81`.
+    /// evaluated in `#82`.
     Secrets,
-    /// A stated daemon or backup fact holds. Parsed now, evaluated in `#81`.
+    /// A stated daemon or backup fact holds. Parsed now, evaluated in `#82`.
     Daemon { fact: String },
 }
 
@@ -361,6 +372,12 @@ pub enum FindingKind {
     UnknownControl,
     LooseningHasNoEffect,
     EmptyRationale,
+    /// A `task` or `workflow` check named something that matched more than
+    /// one task's title, or more than one workflow's name, in the evaluated
+    /// scope -- see [`evidence_findings`]. `evaluate` also reports the same
+    /// control `open` over it, but the mistake is in the catalogue (or the
+    /// scope's tasks), not in the evidence, so it is a finding too.
+    AmbiguousCheckTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,9 +572,10 @@ pub struct Applied {
     pub maps_to: Vec<ControlRef>,
     /// Exactly as the catalogue wrote it -- a `Task`/`Workflow`/`Gate`
     /// check's own `max_age` here has *not* been tightened by any layer.
-    /// Whatever reads freshness for a check (`#81`) must read this
-    /// control's own `max_age` field below, not a check's, or a scope's
-    /// `tighten` is silently ignored.
+    /// Whatever reads freshness for a check reads this control's own
+    /// `max_age` field below, not a check's -- `direct_status` does exactly
+    /// this for `task`/`workflow`/`gate`; reading a check's own field
+    /// instead would silently ignore a scope's `tighten`.
     pub evidence: Vec<Check>,
     /// The minimum of the control's own `max_age`, every one of its checks'
     /// own `max_age`, and every layer's `tighten` for it -- `None` when
@@ -800,12 +818,93 @@ pub fn parse_expiry(s: &str, now: DateTime<Utc>) -> std::result::Result<DateTime
     Err(bad())
 }
 
-/// Every piece of evidence `evaluate` has to check controls against. `#77`,
-/// `#81`, and `#82` each add a field here as they teach `evaluate` another
-/// check kind (a task/workflow run, a gate verdict, a role snapshot, a
-/// sandbox/secrets/daemon fact) -- every field is `#[serde(default)]`, so an
-/// `Evidence` built before a field existed is still a valid, if incomplete,
-/// one, and no caller has to be updated the moment a new field is added.
+/// Enough about one task's newest run for `evaluate`'s `task` check to judge
+/// it without reading a `Run` itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunFact {
+    pub id: String,
+    pub status: RunStatus,
+    pub started_at: DateTime<Utc>,
+    /// `None` for a run that has not ended -- a terminal run that somehow
+    /// has none is handled the same way, defensively, by `evaluate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// One task a `task` check's name could mean, resolved by the engine
+/// (`Engine::policy_report`/`policy_control`) against the tasks in the
+/// evaluated scope alone. `Evidence::tasks` keys a `Vec` of these by the
+/// check's own `task` string, exactly as the catalogue wrote it -- the
+/// length says how resolution went: empty means no task matched, by id or by
+/// exact title; one means it resolved; more than one means the name is an
+/// ambiguous title (ids are unique, so that can only happen for a name that
+/// is not one), which [`evidence_findings`] reports as a
+/// [`FindingKind::AmbiguousCheckTarget`] and `evaluate` treats as `open`.
+/// `newest_run` is only ever resolved for the single unambiguous match --
+/// fetching it for every candidate of an ambiguous name would cost a lookup
+/// `evaluate` can never use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskFact {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_run: Option<RunFact>,
+}
+
+/// Enough about one workflow's newest run for `evaluate`'s `workflow` check
+/// to judge it without reading a `WorkflowRun` itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRunFact {
+    pub id: String,
+    pub status: WorkflowRunStatus,
+    /// A `WorkflowRun` has no `ended_at` of its own -- this is its
+    /// `updated_at`, which is exactly its last change and so, once `status`
+    /// is terminal, its completion time.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// The workflow-side twin of [`TaskFact`] -- see it for how
+/// `Evidence::workflows`' `Vec` encodes resolution (empty, one, or an
+/// ambiguous name).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowFact {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_run: Option<WorkflowRunFact>,
+}
+
+/// One case as it stood in a dataset's newest *settled* bench run
+/// (`BenchRun::settled`) -- `gated` is `Case::gate.is_some()` at the moment
+/// that run started, and `verdicts` is every attempt's verdict for this case
+/// in that run, in no particular order. An ungated case's `verdicts` is
+/// still recorded (an attempt's own `Verdict::Unverified` never becomes a
+/// `pass`), but `gated: false` is what actually keeps it out of a `gate`
+/// check with no `case` named.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateCase {
+    pub id: String,
+    pub gated: bool,
+    pub verdicts: Vec<Verdict>,
+}
+
+/// A dataset's newest settled bench run, resolved by the engine for
+/// `evaluate`'s `gate` check. `Evidence::gates` keys these by the check's own
+/// `dataset` name; a dataset absent from the map has never had one settle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateFact {
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    pub cases: Vec<GateCase>,
+}
+
+/// Every piece of evidence `evaluate` has to check controls against. `#77`
+/// added `tags`/`attestations`; `#81` adds `tasks`/`workflows`/`gates`;
+/// `#82` will add a role snapshot and a sandbox/secrets/daemon fact --
+/// every field is `#[serde(default)]`, so an `Evidence` built before a field
+/// existed is still a valid, if incomplete, one, and no caller has to be
+/// updated the moment a new field is added.
 ///
 /// Not `deny_unknown_fields`, for the same reason: a wire payload from a
 /// newer build of Factory naming a field this build does not know about yet
@@ -821,6 +920,19 @@ pub struct Evidence {
     /// scope tree of its own to check that against.
     #[serde(default)]
     pub attestations: Vec<Attestation>,
+    /// One entry per distinct `task` name an applicable `task` check names
+    /// at the evaluated scope -- see [`TaskFact`].
+    #[serde(default)]
+    pub tasks: BTreeMap<String, Vec<TaskFact>>,
+    /// One entry per distinct `workflow` name an applicable `workflow`
+    /// check names at the evaluated scope -- see [`WorkflowFact`].
+    #[serde(default)]
+    pub workflows: BTreeMap<String, Vec<WorkflowFact>>,
+    /// One entry per distinct `dataset` name an applicable `gate` check
+    /// names -- see [`GateFact`]. Datasets are instance-wide, not scoped, so
+    /// this is the same across every scope a report evaluates.
+    #[serde(default)]
+    pub gates: BTreeMap<String, GateFact>,
 }
 
 // =============================================================== evaluate
@@ -901,23 +1013,103 @@ impl Status {
     }
 }
 
+/// What kind of thing an [`EvidenceRef`] points at -- exactly the id spaces
+/// `evaluate` ever has one for. `knowledge` evidence has no ref yet:
+/// `Evidence.tags` only knows a tag is present, never which page carries it,
+/// so there is nothing cheap to point at until that changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceRefKind {
+    Task,
+    Run,
+    WorkflowRun,
+    BenchRun,
+    Attestation,
+}
+
+/// A machine-readable pointer alongside a status's human `reasons`, so a UI
+/// can link straight to the task, run, workflow run, bench run or
+/// attestation that made a control what it is. Additive: only ever added
+/// where a check's evidence already carries the id, never invented for the
+/// occasion.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct EvidenceRef {
+    pub kind: EvidenceRefKind,
+    pub id: String,
+}
+
+impl EvidenceRef {
+    fn task(id: impl Into<String>) -> Self {
+        Self { kind: EvidenceRefKind::Task, id: id.into() }
+    }
+    fn run(id: impl Into<String>) -> Self {
+        Self { kind: EvidenceRefKind::Run, id: id.into() }
+    }
+    fn workflow_run(id: impl Into<String>) -> Self {
+        Self { kind: EvidenceRefKind::WorkflowRun, id: id.into() }
+    }
+    fn bench_run(id: impl Into<String>) -> Self {
+        Self { kind: EvidenceRefKind::BenchRun, id: id.into() }
+    }
+    fn attestation(id: impl Into<String>) -> Self {
+        Self { kind: EvidenceRefKind::Attestation, id: id.into() }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlStatus {
     pub control: ControlRef,
     pub title: String,
     pub kind: Kind,
+    /// Machine-readable pointers alongside `status`'s reasons -- see
+    /// [`EvidenceRef`]. Empty whenever nothing behind the status carries an
+    /// id yet (a `knowledge` check, an unevaluated check kind, `n/a`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<EvidenceRef>,
     #[serde(flatten)]
     pub status: Status,
 }
 
-/// This control's status from its own checks alone -- `knowledge` and
-/// `attestation` evaluated for real; every other kind `evaluate` cannot yet
-/// evaluate contributes an `unevaluated` reason and nothing else.
-fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> Status {
+/// Whether evidence dated `since` is still current under `max_age` at `now`.
+/// `None` is the issue's own rule for `task`/`workflow`/`gate`: "controls
+/// without a `max_age` treat any successful run as current" -- there is no
+/// window to have fallen outside of. Reads `applied.max_age`, the control's
+/// *effective* freshness window after every layer's tightening and every
+/// check's own `max_age` are already folded in by [`applicable`] -- never a
+/// `Check` variant's own `max_age` field, which would silently ignore a
+/// scope's `tighten` (see the doc comment on [`Applied::evidence`]).
+fn within_max_age(max_age: Option<Duration>, since: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    match max_age {
+        None => true,
+        Some(max_age) => now - since <= chrono::Duration::hours(max_age.as_hours() as i64),
+    }
+}
+
+/// `WorkflowRunStatus` has no `as_str` of its own (unlike `RunStatus`) --
+/// this is only for a reason string, so a small local match is cheaper than
+/// asking serde to round-trip one.
+fn workflow_run_status_str(status: WorkflowRunStatus) -> &'static str {
+    match status {
+        WorkflowRunStatus::Running => "running",
+        WorkflowRunStatus::Done => "done",
+        WorkflowRunStatus::Failed => "failed",
+        WorkflowRunStatus::Cancelled => "cancelled",
+    }
+}
+
+/// This control's status from its own checks alone, and the refs those
+/// checks can point at -- `knowledge`, `attestation`, `task`, `workflow` and
+/// `gate` evaluated for real (`#77`, `#81`); `roles`, `sandbox`, `secrets`
+/// and `daemon` (`#82`) still contribute only an `unevaluated` reason.
+fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> (Status, Vec<EvidenceRef>) {
     let mut satisfied = Vec::new();
+    let mut satisfied_refs = Vec::new();
     let mut attested = Vec::new();
+    let mut attested_refs = Vec::new();
     let mut stale = Vec::new();
+    let mut stale_refs = Vec::new();
     let mut open = Vec::new();
+    let mut open_refs = Vec::new();
 
     for check in &applied.evidence {
         match check {
@@ -941,6 +1133,7 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                             "attestation: `{}` by {}, valid until {}",
                             att.id, att.attested_by, att.expires_at
                         ));
+                        attested_refs.push(EvidenceRef::attestation(&att.id));
                         any_valid = true;
                     } else if expired.is_none() {
                         expired = Some(att);
@@ -952,29 +1145,214 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                             "attestation: `{}` expired at {}",
                             att.id, att.expires_at
                         ));
+                        stale_refs.push(EvidenceRef::attestation(&att.id));
                     } else {
                         open.push("attestation: none recorded".to_string());
                     }
                 }
             }
-            other => {
+            Check::Task { task: name, .. } => match evidence.tasks.get(name).map(Vec::as_slice) {
+                None | Some([]) => {
+                    open.push(format!("task: no task named `{name}` in this scope"));
+                }
+                Some([fact]) => match &fact.newest_run {
+                    None => {
+                        open.push(format!("task: `{name}` ({}) has never run", fact.id));
+                        open_refs.push(EvidenceRef::task(&fact.id));
+                    }
+                    Some(run) if run.status == RunStatus::Done => match run.ended_at {
+                        Some(ended_at) => {
+                            let refs = [EvidenceRef::task(&fact.id), EvidenceRef::run(&run.id)];
+                            if within_max_age(applied.max_age, ended_at, now) {
+                                satisfied.push(format!(
+                                    "task: `{name}` ({}) run {} done at {ended_at}",
+                                    fact.id, run.id
+                                ));
+                                satisfied_refs.extend(refs);
+                            } else {
+                                stale.push(format!(
+                                    "task: `{name}` ({}) run {} done at {ended_at}, older than {}",
+                                    fact.id,
+                                    run.id,
+                                    applied.max_age.expect("stale only ever follows a max_age")
+                                ));
+                                stale_refs.extend(refs);
+                            }
+                        }
+                        None => {
+                            open.push(format!(
+                                "task: `{name}` ({}) run {} is done but has no recorded end time",
+                                fact.id, run.id
+                            ));
+                            open_refs.push(EvidenceRef::task(&fact.id));
+                            open_refs.push(EvidenceRef::run(&run.id));
+                        }
+                    },
+                    Some(run) => {
+                        open.push(format!(
+                            "task: `{name}` ({}) newest run {} is {}, not done",
+                            fact.id,
+                            run.id,
+                            run.status.as_str()
+                        ));
+                        open_refs.push(EvidenceRef::task(&fact.id));
+                        open_refs.push(EvidenceRef::run(&run.id));
+                    }
+                },
+                Some(candidates) => {
+                    let ids: Vec<&str> = candidates.iter().map(|f| f.id.as_str()).collect();
+                    open.push(format!(
+                        "task: `{name}` matches more than one task's title ({}); name it by id",
+                        ids.join(", ")
+                    ));
+                }
+            },
+            Check::Workflow { workflow: name, .. } => match evidence.workflows.get(name).map(Vec::as_slice) {
+                None | Some([]) => {
+                    open.push(format!("workflow: no workflow named `{name}` in this scope"));
+                }
+                Some([fact]) => match &fact.newest_run {
+                    None => {
+                        open.push(format!("workflow: `{name}` ({}) has never run", fact.id));
+                    }
+                    Some(run) if run.status == WorkflowRunStatus::Done => {
+                        let refs = [EvidenceRef::workflow_run(&run.id)];
+                        if within_max_age(applied.max_age, run.updated_at, now) {
+                            satisfied.push(format!(
+                                "workflow: `{name}` ({}) run {} done at {}",
+                                fact.id, run.id, run.updated_at
+                            ));
+                            satisfied_refs.extend(refs);
+                        } else {
+                            stale.push(format!(
+                                "workflow: `{name}` ({}) run {} done at {}, older than {}",
+                                fact.id,
+                                run.id,
+                                run.updated_at,
+                                applied.max_age.expect("stale only ever follows a max_age")
+                            ));
+                            stale_refs.extend(refs);
+                        }
+                    }
+                    Some(run) => {
+                        open.push(format!(
+                            "workflow: `{name}` ({}) newest run {} is {}, not done",
+                            fact.id,
+                            run.id,
+                            workflow_run_status_str(run.status)
+                        ));
+                        open_refs.push(EvidenceRef::workflow_run(&run.id));
+                    }
+                },
+                Some(candidates) => {
+                    let ids: Vec<&str> = candidates.iter().map(|f| f.id.as_str()).collect();
+                    open.push(format!(
+                        "workflow: `{name}` matches more than one workflow's name ({}); name it by id",
+                        ids.join(", ")
+                    ));
+                }
+            },
+            Check::Gate { dataset, case, .. } => match evidence.gates.get(dataset) {
+                None => {
+                    open.push(format!("gate: dataset `{dataset}` has no settled bench run"));
+                }
+                Some(fact) => {
+                    let refs = [EvidenceRef::bench_run(&fact.run_id)];
+                    let passed: Result<(), String> = match case {
+                        Some(case_id) => match fact.cases.iter().find(|c| &c.id == case_id) {
+                            None => Err(format!(
+                                "gate: dataset `{dataset}` case `{case_id}` is not part of bench run {}",
+                                fact.run_id
+                            )),
+                            Some(c) if !c.gated => Err(format!(
+                                "gate: dataset `{dataset}` case `{case_id}` has no gate configured (bench run {})",
+                                fact.run_id
+                            )),
+                            Some(c) if !c.verdicts.is_empty() && c.verdicts.iter().all(|v| *v == Verdict::Pass) => Ok(()),
+                            Some(_) => Err(format!(
+                                "gate: dataset `{dataset}` case `{case_id}` did not pass in bench run {}",
+                                fact.run_id
+                            )),
+                        },
+                        None => {
+                            let gated: Vec<&GateCase> = fact.cases.iter().filter(|c| c.gated).collect();
+                            if gated.is_empty() {
+                                Err(format!(
+                                    "gate: dataset `{dataset}` has no gated cases in bench run {}",
+                                    fact.run_id
+                                ))
+                            } else {
+                                let failing: Vec<&str> = gated
+                                    .iter()
+                                    .filter(|c| c.verdicts.is_empty() || !c.verdicts.iter().all(|v| *v == Verdict::Pass))
+                                    .map(|c| c.id.as_str())
+                                    .collect();
+                                if failing.is_empty() {
+                                    Ok(())
+                                } else {
+                                    Err(format!(
+                                        "gate: dataset `{dataset}` gated case(s) not passing in bench run {}: {}",
+                                        fact.run_id,
+                                        failing.join(", ")
+                                    ))
+                                }
+                            }
+                        }
+                    };
+                    match passed {
+                        Ok(()) => match fact.ended_at {
+                            Some(ended_at) => {
+                                if within_max_age(applied.max_age, ended_at, now) {
+                                    satisfied.push(format!(
+                                        "gate: dataset `{dataset}` run {} passed, ended at {ended_at}",
+                                        fact.run_id
+                                    ));
+                                    satisfied_refs.extend(refs);
+                                } else {
+                                    stale.push(format!(
+                                        "gate: dataset `{dataset}` run {} passed, ended at {ended_at}, older than {}",
+                                        fact.run_id,
+                                        applied.max_age.expect("stale only ever follows a max_age")
+                                    ));
+                                    stale_refs.extend(refs);
+                                }
+                            }
+                            None => {
+                                open.push(format!(
+                                    "gate: dataset `{dataset}` run {} passed but has no recorded end time",
+                                    fact.run_id
+                                ));
+                                open_refs.extend(refs);
+                            }
+                        },
+                        Err(reason) => {
+                            open.push(reason);
+                            open_refs.extend(refs);
+                        }
+                    }
+                }
+            },
+            other @ (Check::Roles { .. } | Check::Sandbox | Check::Secrets | Check::Daemon { .. }) => {
                 open.push(format!("{}: unevaluated", other.kind_name()));
             }
         }
     }
 
     if !satisfied.is_empty() {
-        Status::Satisfied { reasons: satisfied }
+        (Status::Satisfied { reasons: satisfied }, satisfied_refs)
     } else if !attested.is_empty() {
-        Status::Attested { reasons: attested }
+        (Status::Attested { reasons: attested }, attested_refs)
     } else if !stale.is_empty() {
-        Status::Stale { reasons: stale }
+        (Status::Stale { reasons: stale }, stale_refs)
     } else if open.is_empty() {
-        Status::Open {
-            reasons: vec!["no evidence".to_string()],
-        }
+        (
+            Status::Open {
+                reasons: vec!["no evidence".to_string()],
+            },
+            Vec::new(),
+        )
     } else {
-        Status::Open { reasons: open }
+        (Status::Open { reasons: open }, open_refs)
     }
 }
 
@@ -984,8 +1362,13 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
 /// across a link -- stale or open evidence for a mapped control says
 /// nothing about this one. Pure: `now` is a parameter, never read off the
 /// clock.
+///
+/// An ambiguous `task`/`workflow` name never reaches here as anything but an
+/// `open` control -- see [`evidence_findings`] for the authoring mistake
+/// that produced it, which the engine folds into the same findings list
+/// `applicable`'s own findings go into.
 pub fn evaluate(applied: &[Applied], evidence: &Evidence, now: DateTime<Utc>) -> Vec<ControlStatus> {
-    let direct: BTreeMap<&ControlRef, Status> = applied
+    let direct: BTreeMap<&ControlRef, (Status, Vec<EvidenceRef>)> = applied
         .iter()
         .map(|a| (&a.control, direct_status(a, evidence, now)))
         .collect();
@@ -1008,6 +1391,7 @@ pub fn evaluate(applied: &[Applied], evidence: &Evidence, now: DateTime<Utc>) ->
                 control: a.control.clone(),
                 title: a.title.clone(),
                 kind: a.kind,
+                refs: Vec::new(),
                 status: Status::NotApplicable {
                     reasons: vec![format!(
                         "marked not applicable at {}: {}",
@@ -1018,22 +1402,25 @@ pub fn evaluate(applied: &[Applied], evidence: &Evidence, now: DateTime<Utc>) ->
             continue;
         }
 
-        let own = &direct[&a.control];
-        let mut reasons = own.reasons().to_vec();
-        let mut best = own.kind();
+        let (own_status, own_refs) = &direct[&a.control];
+        let mut reasons = own_status.reasons().to_vec();
+        let mut refs: BTreeSet<EvidenceRef> = own_refs.iter().cloned().collect();
+        let mut best = own_status.kind();
 
         if let Some(ns) = neighbors.get(&a.control) {
             for neighbor in ns {
-                let neighbor_status = &direct[neighbor];
+                let (neighbor_status, neighbor_refs) = &direct[neighbor];
                 match neighbor_status.kind() {
                     StatusKind::Satisfied => {
                         reasons.push(format!("satisfied via {neighbor} (maps_to)"));
+                        refs.extend(neighbor_refs.iter().cloned());
                         if StatusKind::Satisfied.rank() > best.rank() {
                             best = StatusKind::Satisfied;
                         }
                     }
                     StatusKind::Attested => {
                         reasons.push(format!("attested via {neighbor} (maps_to)"));
+                        refs.extend(neighbor_refs.iter().cloned());
                         if StatusKind::Attested.rank() > best.rank() {
                             best = StatusKind::Attested;
                         }
@@ -1047,12 +1434,52 @@ pub fn evaluate(applied: &[Applied], evidence: &Evidence, now: DateTime<Utc>) ->
             control: a.control.clone(),
             title: a.title.clone(),
             kind: a.kind,
+            refs: refs.into_iter().collect(),
             status: Status::from_kind(best, reasons),
         });
     }
 
     out.sort_by(|a, b| a.control.cmp(&b.control));
     out
+}
+
+/// The findings resolving `Evidence` can turn up on its own -- currently
+/// just a `task`/`workflow` check whose name matched more than one task's
+/// title or workflow's name in the evaluated scope. Kept separate from
+/// [`evaluate`], which stays a pure function of applicable controls alone
+/// with nothing to say about a name no control's checks reference; the
+/// caller folds this into the same `Vec<Finding>` [`applicable`]'s own
+/// findings go into (`Engine::policy_report`/`policy_control`).
+pub fn evidence_findings(evidence: &Evidence, scope: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (name, candidates) in &evidence.tasks {
+        if candidates.len() > 1 {
+            let ids: Vec<&str> = candidates.iter().map(|f| f.id.as_str()).collect();
+            findings.push(Finding {
+                kind: FindingKind::AmbiguousCheckTarget,
+                subject: scope.to_string(),
+                detail: format!(
+                    "task check names {name:?}, which matches more than one task's title: {}",
+                    ids.join(", ")
+                ),
+            });
+        }
+    }
+    for (name, candidates) in &evidence.workflows {
+        if candidates.len() > 1 {
+            let ids: Vec<&str> = candidates.iter().map(|f| f.id.as_str()).collect();
+            findings.push(Finding {
+                kind: FindingKind::AmbiguousCheckTarget,
+                subject: scope.to_string(),
+                detail: format!(
+                    "workflow check names {name:?}, which matches more than one workflow's name: {}",
+                    ids.join(", ")
+                ),
+            });
+        }
+    }
+    findings.sort_by(|a, b| a.subject.cmp(&b.subject).then(a.kind.cmp(&b.kind)).then(a.detail.cmp(&b.detail)));
+    findings
 }
 
 // ================================================================= rollup
@@ -1677,14 +2104,7 @@ mod tests {
 
     #[test]
     fn an_unevaluated_check_kind_never_satisfies_and_says_so() {
-        let applied = vec![applied_control(
-            "a",
-            vec![Check::Task {
-                task: "sbom-export".to_string(),
-                max_age: None,
-            }],
-            Vec::new(),
-        )];
+        let applied = vec![applied_control("a", vec![Check::Sandbox], Vec::new())];
         let statuses = evaluate(&applied, &Evidence::default(), Utc::now());
         assert_eq!(statuses[0].status.kind(), StatusKind::Open);
         assert!(statuses[0].status.reasons().iter().any(|r| r.contains("unevaluated")));
@@ -1858,13 +2278,16 @@ mod tests {
     /// `#[serde(flatten)]` over an internally-tagged `Status`, which is
     /// exactly the serde combination that can silently misbehave (nesting
     /// under a `status` key instead of flattening it). This proves the
-    /// literal JSON shape, not just that it round-trips.
+    /// literal JSON shape, not just that it round-trips -- and that `refs`
+    /// is an ordinary sibling field, present when non-empty and absent (not
+    /// `null` or `[]`) when it is.
     #[test]
     fn control_status_serializes_flat_with_status_and_reasons_alongside_control() {
         let cs = ControlStatus {
             control: ControlRef::new("cra", "a"),
             title: "A".to_string(),
             kind: Kind::Regulation,
+            refs: vec![EvidenceRef::task("task-1")],
             status: Status::Satisfied {
                 reasons: vec!["knowledge: tag `control/cra/a` is present".to_string()],
             },
@@ -1876,12 +2299,17 @@ mod tests {
                 "control": "cra/a",
                 "title": "A",
                 "kind": "regulation",
+                "refs": [{"kind": "task", "id": "task-1"}],
                 "status": "satisfied",
                 "reasons": ["knowledge: tag `control/cra/a` is present"],
             })
         );
         let back: ControlStatus = serde_json::from_value(json).unwrap();
         assert_eq!(back, cs);
+
+        let empty = ControlStatus { refs: Vec::new(), ..cs };
+        let json = serde_json::to_value(&empty).unwrap();
+        assert!(json.get("refs").is_none(), "{json:?}");
     }
 
     #[test]
@@ -1897,6 +2325,497 @@ mod tests {
         assert!(statuses.iter().all(|s| s.status.kind() == StatusKind::Open));
     }
 
+    // -- evaluate: task ----------------------------------------------------
+
+    fn with_max_age(mut a: Applied, max_age: &str) -> Applied {
+        a.max_age = Some(max_age.parse().unwrap());
+        a
+    }
+
+    fn done_run(id: &str, ended_at: DateTime<Utc>) -> RunFact {
+        RunFact {
+            id: id.to_string(),
+            status: RunStatus::Done,
+            started_at: ended_at - chrono::Duration::hours(1),
+            ended_at: Some(ended_at),
+        }
+    }
+
+    #[test]
+    fn a_task_check_is_satisfied_by_a_recent_done_run() {
+        let now = Utc::now();
+        let applied = with_max_age(
+            applied_control(
+                "a",
+                vec![Check::Task {
+                    task: "sbom-export".to_string(),
+                    max_age: None,
+                }],
+                Vec::new(),
+            ),
+            "7d",
+        );
+        let mut evidence = Evidence::default();
+        evidence.tasks.insert(
+            "sbom-export".to_string(),
+            vec![TaskFact {
+                id: "task-1".to_string(),
+                title: "sbom-export".to_string(),
+                newest_run: Some(done_run("run-1", now - chrono::Duration::hours(1))),
+            }],
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+        assert!(statuses[0].refs.contains(&EvidenceRef::task("task-1")));
+        assert!(statuses[0].refs.contains(&EvidenceRef::run("run-1")));
+    }
+
+    #[test]
+    fn a_task_check_with_no_max_age_treats_any_done_run_as_current() {
+        let now = Utc::now();
+        let applied = applied_control(
+            "a",
+            vec![Check::Task {
+                task: "sbom-export".to_string(),
+                max_age: None,
+            }],
+            Vec::new(),
+        );
+        let mut evidence = Evidence::default();
+        evidence.tasks.insert(
+            "sbom-export".to_string(),
+            vec![TaskFact {
+                id: "task-1".to_string(),
+                title: "sbom-export".to_string(),
+                newest_run: Some(done_run("run-1", now - chrono::Duration::days(400))),
+            }],
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+    }
+
+    #[test]
+    fn a_task_check_is_stale_once_its_newest_run_is_older_than_max_age() {
+        let now = Utc::now();
+        let applied = with_max_age(
+            applied_control(
+                "a",
+                vec![Check::Task {
+                    task: "sbom-export".to_string(),
+                    max_age: None,
+                }],
+                Vec::new(),
+            ),
+            "7d",
+        );
+        let mut evidence = Evidence::default();
+        evidence.tasks.insert(
+            "sbom-export".to_string(),
+            vec![TaskFact {
+                id: "task-1".to_string(),
+                title: "sbom-export".to_string(),
+                newest_run: Some(done_run("run-1", now - chrono::Duration::days(30))),
+            }],
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Stale);
+        assert!(statuses[0].refs.contains(&EvidenceRef::run("run-1")));
+    }
+
+    #[test]
+    fn a_task_check_is_open_with_no_matching_task() {
+        let applied = applied_control(
+            "a",
+            vec![Check::Task {
+                task: "sbom-export".to_string(),
+                max_age: None,
+            }],
+            Vec::new(),
+        );
+        let statuses = evaluate(&[applied], &Evidence::default(), Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons()[0].contains("no task named"), "{:?}", statuses[0].status);
+        assert!(statuses[0].refs.is_empty());
+    }
+
+    #[test]
+    fn a_task_check_is_open_when_the_task_has_never_run() {
+        let applied = applied_control(
+            "a",
+            vec![Check::Task {
+                task: "sbom-export".to_string(),
+                max_age: None,
+            }],
+            Vec::new(),
+        );
+        let mut evidence = Evidence::default();
+        evidence.tasks.insert(
+            "sbom-export".to_string(),
+            vec![TaskFact {
+                id: "task-1".to_string(),
+                title: "sbom-export".to_string(),
+                newest_run: None,
+            }],
+        );
+        let statuses = evaluate(&[applied], &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons()[0].contains("never run"), "{:?}", statuses[0].status);
+    }
+
+    #[test]
+    fn a_task_check_is_open_when_the_newest_run_is_not_done() {
+        let now = Utc::now();
+        let applied = applied_control(
+            "a",
+            vec![Check::Task {
+                task: "sbom-export".to_string(),
+                max_age: None,
+            }],
+            Vec::new(),
+        );
+        let mut evidence = Evidence::default();
+        evidence.tasks.insert(
+            "sbom-export".to_string(),
+            vec![TaskFact {
+                id: "task-1".to_string(),
+                title: "sbom-export".to_string(),
+                newest_run: Some(RunFact {
+                    id: "run-1".to_string(),
+                    status: RunStatus::Failed,
+                    started_at: now - chrono::Duration::hours(2),
+                    ended_at: Some(now - chrono::Duration::hours(1)),
+                }),
+            }],
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons()[0].contains("failed"), "{:?}", statuses[0].status);
+    }
+
+    #[test]
+    fn a_task_check_naming_an_ambiguous_title_is_open_and_a_finding() {
+        let applied = applied_control(
+            "a",
+            vec![Check::Task {
+                task: "nightly sweep".to_string(),
+                max_age: None,
+            }],
+            Vec::new(),
+        );
+        let mut evidence = Evidence::default();
+        evidence.tasks.insert(
+            "nightly sweep".to_string(),
+            vec![
+                TaskFact {
+                    id: "task-1".to_string(),
+                    title: "nightly sweep".to_string(),
+                    newest_run: None,
+                },
+                TaskFact {
+                    id: "task-2".to_string(),
+                    title: "nightly sweep".to_string(),
+                    newest_run: None,
+                },
+            ],
+        );
+        let statuses = evaluate(&[applied], &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(
+            statuses[0].status.reasons()[0].contains("matches more than one task's title"),
+            "{:?}",
+            statuses[0].status
+        );
+
+        let findings = evidence_findings(&evidence, "demo");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::AmbiguousCheckTarget);
+        assert_eq!(findings[0].subject, "demo");
+        assert!(findings[0].detail.contains("task-1") && findings[0].detail.contains("task-2"));
+    }
+
+    // -- evaluate: workflow --------------------------------------------------
+
+    fn done_workflow_run(id: &str, updated_at: DateTime<Utc>) -> WorkflowRunFact {
+        WorkflowRunFact {
+            id: id.to_string(),
+            status: WorkflowRunStatus::Done,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn a_workflow_check_is_satisfied_by_a_recent_done_run() {
+        let now = Utc::now();
+        let applied = with_max_age(
+            applied_control(
+                "a",
+                vec![Check::Workflow {
+                    workflow: "release train".to_string(),
+                    max_age: None,
+                }],
+                Vec::new(),
+            ),
+            "7d",
+        );
+        let mut evidence = Evidence::default();
+        evidence.workflows.insert(
+            "release train".to_string(),
+            vec![WorkflowFact {
+                id: "wf-1".to_string(),
+                name: "release train".to_string(),
+                newest_run: Some(done_workflow_run("wfr-1", now - chrono::Duration::hours(1))),
+            }],
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+        assert!(statuses[0].refs.contains(&EvidenceRef::workflow_run("wfr-1")));
+    }
+
+    #[test]
+    fn a_workflow_check_is_stale_once_its_newest_run_is_older_than_max_age() {
+        let now = Utc::now();
+        let applied = with_max_age(
+            applied_control(
+                "a",
+                vec![Check::Workflow {
+                    workflow: "release train".to_string(),
+                    max_age: None,
+                }],
+                Vec::new(),
+            ),
+            "7d",
+        );
+        let mut evidence = Evidence::default();
+        evidence.workflows.insert(
+            "release train".to_string(),
+            vec![WorkflowFact {
+                id: "wf-1".to_string(),
+                name: "release train".to_string(),
+                newest_run: Some(done_workflow_run("wfr-1", now - chrono::Duration::days(30))),
+            }],
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Stale);
+    }
+
+    #[test]
+    fn a_workflow_check_is_open_with_no_matching_workflow() {
+        let applied = applied_control(
+            "a",
+            vec![Check::Workflow {
+                workflow: "release train".to_string(),
+                max_age: None,
+            }],
+            Vec::new(),
+        );
+        let statuses = evaluate(&[applied], &Evidence::default(), Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons()[0].contains("no workflow named"), "{:?}", statuses[0].status);
+    }
+
+    #[test]
+    fn a_workflow_check_naming_an_ambiguous_name_is_open_and_a_finding() {
+        let applied = applied_control(
+            "a",
+            vec![Check::Workflow {
+                workflow: "release train".to_string(),
+                max_age: None,
+            }],
+            Vec::new(),
+        );
+        let mut evidence = Evidence::default();
+        evidence.workflows.insert(
+            "release train".to_string(),
+            vec![
+                WorkflowFact {
+                    id: "wf-1".to_string(),
+                    name: "release train".to_string(),
+                    newest_run: None,
+                },
+                WorkflowFact {
+                    id: "wf-2".to_string(),
+                    name: "release train".to_string(),
+                    newest_run: None,
+                },
+            ],
+        );
+        let statuses = evaluate(&[applied], &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0]
+            .status
+            .reasons()[0]
+            .contains("matches more than one workflow's name"));
+
+        let findings = evidence_findings(&evidence, "demo");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::AmbiguousCheckTarget);
+    }
+
+    // -- evaluate: gate ------------------------------------------------------
+
+    fn gate_check(dataset: &str, case: Option<&str>) -> Check {
+        Check::Gate {
+            dataset: dataset.to_string(),
+            case: case.map(str::to_string),
+            max_age: None,
+        }
+    }
+
+    #[test]
+    fn a_gate_check_is_satisfied_when_every_gated_case_passed_recently() {
+        let now = Utc::now();
+        let applied = with_max_age(
+            applied_control("a", vec![gate_check("smoke", None)], Vec::new()),
+            "7d",
+        );
+        let mut evidence = Evidence::default();
+        evidence.gates.insert(
+            "smoke".to_string(),
+            GateFact {
+                run_id: "bench-1".to_string(),
+                ended_at: Some(now - chrono::Duration::hours(1)),
+                cases: vec![
+                    GateCase {
+                        id: "case-1".to_string(),
+                        gated: true,
+                        verdicts: vec![Verdict::Pass, Verdict::Pass],
+                    },
+                    GateCase {
+                        id: "case-2".to_string(),
+                        gated: false,
+                        verdicts: vec![Verdict::Unverified],
+                    },
+                ],
+            },
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+        assert!(statuses[0].refs.contains(&EvidenceRef::bench_run("bench-1")));
+    }
+
+    #[test]
+    fn a_gate_check_for_one_named_case_only_looks_at_that_case() {
+        let now = Utc::now();
+        let applied = with_max_age(
+            applied_control("a", vec![gate_check("smoke", Some("case-1"))], Vec::new()),
+            "7d",
+        );
+        let mut evidence = Evidence::default();
+        evidence.gates.insert(
+            "smoke".to_string(),
+            GateFact {
+                run_id: "bench-1".to_string(),
+                ended_at: Some(now - chrono::Duration::hours(1)),
+                cases: vec![
+                    GateCase {
+                        id: "case-1".to_string(),
+                        gated: true,
+                        verdicts: vec![Verdict::Pass],
+                    },
+                    GateCase {
+                        id: "case-2".to_string(),
+                        gated: true,
+                        verdicts: vec![Verdict::Fail],
+                    },
+                ],
+            },
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied, "case-2 failing must not matter");
+    }
+
+    #[test]
+    fn a_gate_check_is_stale_once_the_settled_run_is_older_than_max_age() {
+        let now = Utc::now();
+        let applied = with_max_age(
+            applied_control("a", vec![gate_check("smoke", None)], Vec::new()),
+            "7d",
+        );
+        let mut evidence = Evidence::default();
+        evidence.gates.insert(
+            "smoke".to_string(),
+            GateFact {
+                run_id: "bench-1".to_string(),
+                ended_at: Some(now - chrono::Duration::days(30)),
+                cases: vec![GateCase {
+                    id: "case-1".to_string(),
+                    gated: true,
+                    verdicts: vec![Verdict::Pass],
+                }],
+            },
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Stale);
+    }
+
+    #[test]
+    fn a_gate_check_is_open_with_no_settled_run() {
+        let applied = applied_control("a", vec![gate_check("smoke", None)], Vec::new());
+        let statuses = evaluate(&[applied], &Evidence::default(), Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons()[0].contains("no settled bench run"), "{:?}", statuses[0].status);
+    }
+
+    #[test]
+    fn a_gate_check_is_open_when_a_gated_case_did_not_pass() {
+        let now = Utc::now();
+        let applied = applied_control("a", vec![gate_check("smoke", None)], Vec::new());
+        let mut evidence = Evidence::default();
+        evidence.gates.insert(
+            "smoke".to_string(),
+            GateFact {
+                run_id: "bench-1".to_string(),
+                ended_at: Some(now),
+                cases: vec![GateCase {
+                    id: "case-1".to_string(),
+                    gated: true,
+                    verdicts: vec![Verdict::Fail],
+                }],
+            },
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons()[0].contains("case-1"), "{:?}", statuses[0].status);
+    }
+
+    #[test]
+    fn a_gate_check_naming_a_case_with_no_gate_is_open() {
+        let now = Utc::now();
+        let applied = applied_control("a", vec![gate_check("smoke", Some("case-1"))], Vec::new());
+        let mut evidence = Evidence::default();
+        evidence.gates.insert(
+            "smoke".to_string(),
+            GateFact {
+                run_id: "bench-1".to_string(),
+                ended_at: Some(now),
+                cases: vec![GateCase {
+                    id: "case-1".to_string(),
+                    gated: false,
+                    verdicts: vec![Verdict::Unverified],
+                }],
+            },
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons()[0].contains("no gate configured"), "{:?}", statuses[0].status);
+    }
+
+    // -- evidence_findings ---------------------------------------------------
+
+    #[test]
+    fn evidence_findings_is_empty_when_nothing_is_ambiguous() {
+        let mut evidence = Evidence::default();
+        evidence.tasks.insert(
+            "sbom-export".to_string(),
+            vec![TaskFact {
+                id: "task-1".to_string(),
+                title: "sbom-export".to_string(),
+                newest_run: None,
+            }],
+        );
+        assert_eq!(evidence_findings(&evidence, "demo"), Vec::new());
+    }
+
     // -- rollup ----------------------------------------------------------
 
     fn status(framework: &str, id: &str, kind: Kind, status: Status) -> ControlStatus {
@@ -1904,6 +2823,7 @@ mod tests {
             control: ControlRef::new(framework, id),
             title: id.to_string(),
             kind,
+            refs: Vec::new(),
             status,
         }
     }
@@ -1986,18 +2906,21 @@ mod tests {
                 control: a.clone(),
                 title: "A".into(),
                 kind: Kind::Regulation,
+                refs: Vec::new(),
                 status: Status::Satisfied { reasons: vec![] },
             }],
             vec![ControlStatus {
                 control: a.clone(),
                 title: "A".into(),
                 kind: Kind::Regulation,
+                refs: Vec::new(),
                 status: Status::Attested { reasons: vec![] },
             }],
             vec![ControlStatus {
                 control: a,
                 title: "A".into(),
                 kind: Kind::Regulation,
+                refs: Vec::new(),
                 status: Status::Stale { reasons: vec![] },
             }],
         ];
