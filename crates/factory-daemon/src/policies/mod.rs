@@ -3,8 +3,9 @@
 //! *what* a control is (`factory_core::policy`, pure and tested on its
 //! own), re-read on every request; this module only assembles the evidence
 //! that already lives elsewhere in the daemon -- the knowledge index, the
-//! attestations store, tasks, workflows and bench runs -- and folds it
-//! against them.
+//! attestations store, tasks, workflows, bench runs, the live config
+//! snapshot and the L2 Secrets tab's own credential inventory -- and folds
+//! it against them.
 //!
 //! The one piece of state this module owns is the attestations themselves,
 //! kept in `PolicyStore` (`store.rs`), append-only.
@@ -15,9 +16,11 @@ pub use store::PolicyStore;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
+use factory_core::config::{ForemanConfig, Scope};
 use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
-use factory_core::protocol::{CatalogueSummary, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy};
+use factory_core::protocol::{CatalogueSummary, CredentialRow, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy};
+use factory_core::role::Roles;
 use factory_core::task::{Task, TaskFilter};
 use factory_core::workflow::WorkflowDefinition;
 
@@ -46,6 +49,89 @@ fn gate_dataset_names(applied: &[policy::Applied]) -> BTreeSet<String> {
             _ => None,
         })
         .collect()
+}
+
+/// Whether any check among `applied` is `roles` or `sandbox` -- both read
+/// `Evidence::agents`, so a scope whose catalogue never asks either
+/// question never pays for `Engine::agent_facts_for`'s `roles_for` lookup.
+fn needs_agent_facts(applied: &[policy::Applied]) -> bool {
+    applied
+        .iter()
+        .flat_map(|a| &a.evidence)
+        .any(|check| matches!(check, policy::Check::Roles { .. } | policy::Check::Sandbox))
+}
+
+/// Whether any check among `applied` is `secrets` -- gates
+/// `Engine::credential_inventory`, the one part of this module's evidence
+/// gathering that touches the filesystem, behind an actual need for it.
+fn needs_secrets_facts(applied: &[policy::Applied]) -> bool {
+    applied
+        .iter()
+        .flat_map(|a| &a.evidence)
+        .any(|check| matches!(check, policy::Check::Secrets { .. }))
+}
+
+/// Whether any check among `applied` is `daemon`.
+fn needs_daemon_facts(applied: &[policy::Applied]) -> bool {
+    applied
+        .iter()
+        .flat_map(|a| &a.evidence)
+        .any(|check| matches!(check, policy::Check::Daemon { .. }))
+}
+
+/// Every agent Factory would actually dispatch in `scope` --
+/// `Scope::agents_with`, which folds in a synthesised foreman when
+/// `daemon.foreman` covers this scope. That is a deliberate choice, not an
+/// oversight of the issue's literal `Scope::declared_agents`: a synthesised
+/// foreman is a real agent Factory starts and hands work to, and it is
+/// hard-coded `Sandbox::None` (`ScopeAgent`'s own doc comment on
+/// `Scope::agents_with`), so a scope that turns the foreman on without
+/// giving it a sandbox of its own now shows up in a `sandbox` check instead
+/// of being silently exempt because it was never "declared". See the
+/// README's "Policies" section.
+///
+/// Unlike `resolve_task_and_workflow_facts`, nothing here touches a store --
+/// `roles` is `Engine::roles_for`'s live, in-memory read of the config
+/// snapshot -- so this is a plain sync function, not spawned or awaited.
+fn agent_facts_for(scope: &Scope, foreman: &ForemanConfig, roles: &Roles) -> Vec<policy::AgentFact> {
+    scope
+        .agents_with(foreman)
+        .into_iter()
+        .map(|agent| {
+            let grants = roles.get(&agent.role).map(|def| def.grants.clone());
+            policy::AgentFact {
+                name: agent.name(),
+                role: agent.role.as_str().to_string(),
+                grants,
+                has_sandbox: !agent.sandbox.is_none(),
+            }
+        })
+        .collect()
+}
+
+/// The `secrets` fact for one scope, out of the L2 Secrets tab's own
+/// inventory (`Engine::credential_inventory`): the five machine-wide
+/// locations (an agent runs as the daemon's owner, so these are identical
+/// for every scope) plus `scope`'s own `.env`, mapped to the location ids
+/// [`policy::KNOWN_SECRETS_LOCATIONS`] names. `rows` is fetched once per
+/// report (`policy_report`/`policy_control` each call `credential_inventory`
+/// at most once), not once per scope -- it already walks every scope's
+/// `.env` in one pass.
+fn secrets_fact_map(rows: &[CredentialRow], scope: &str) -> BTreeMap<String, bool> {
+    let mut map = BTreeMap::new();
+    for row in rows {
+        let id = match (row.integration.as_str(), row.scope.as_deref()) {
+            ("anthropic", None) => "anthropic",
+            ("github", None) => "github",
+            ("aws", None) => "aws",
+            ("netrc", None) => "netrc",
+            ("ssh", None) => "ssh",
+            ("scope env", Some(s)) if s == scope => "scope_env",
+            _ => continue,
+        };
+        map.insert(id.to_string(), row.present);
+    }
+    map
 }
 
 impl Engine {
@@ -136,6 +222,48 @@ impl Engine {
             }
         }
         Ok(gates)
+    }
+
+    /// [`policy::KNOWN_DAEMON_FACTS`]'s whole vocabulary, read off the live
+    /// config snapshot -- the same for every scope a report evaluates
+    /// (`Evidence::gates`' own reasoning), so this is resolved once, not per
+    /// scope, and it is a plain sync read: no store, no filesystem walk,
+    /// just the config `Engine::infrastructure` already reads for
+    /// `DaemonFacts.interfaces`.
+    fn daemon_facts(&self) -> policy::DaemonFact {
+        let snapshot = self.factory_snapshot();
+        let daemon_config = &snapshot.config.daemon;
+
+        let http_binds: Vec<String> = daemon_config
+            .interfaces
+            .iter()
+            .filter(|i| i.kind == "http")
+            .map(|i| {
+                i.string("bind")
+                    .unwrap_or_else(|| crate::interfaces::http::DEFAULT_BIND.to_string())
+            })
+            .collect();
+        // No `http` interface at all is vacuously loopback-only -- nothing
+        // is exposed beyond loopback either way. A `bind` that does not
+        // parse as a socket address (a bare hostname, say) is left `None`:
+        // this module makes no DNS lookup and no guess about what a name
+        // resolves to.
+        let http_loopback_only = if http_binds.is_empty() {
+            Some(true)
+        } else {
+            http_binds
+                .iter()
+                .map(|bind| bind.parse::<std::net::SocketAddr>().map(|addr| addr.ip().is_loopback()))
+                .collect::<std::result::Result<Vec<bool>, _>>()
+                .ok()
+                .map(|loopback| loopback.iter().all(|l| *l))
+        };
+
+        policy::DaemonFact {
+            foreman_enabled: daemon_config.foreman.enabled,
+            http_loopback_only,
+            power_assertion: daemon_config.power_assertion,
+        }
     }
 
     /// Every task in `scoped` (the evaluated scope's own tasks) that `name`
@@ -328,9 +456,26 @@ impl Engine {
 
         let gates = self.gate_facts_for(&dataset_names).await?;
 
+        // `daemon` is the same fact set for every scope, so it is resolved
+        // once, only when some scope's catalogue actually asks a `daemon`
+        // question. `secrets`' credential inventory is the one part of this
+        // that touches the filesystem, so it gets the same "only if named"
+        // treatment `gate_facts_for`'s own dataset union already follows.
+        let daemon_fact = per_scope_applied
+            .iter()
+            .any(|(_, applied)| needs_daemon_facts(applied))
+            .then(|| self.daemon_facts());
+        let credential_rows = if per_scope_applied.iter().any(|(_, applied)| needs_secrets_facts(applied)) {
+            self.credential_inventory().await
+        } else {
+            Vec::new()
+        };
+
         // Second pass: task/workflow resolution is still per scope (they do
-        // have one), but every scope's `Evidence` shares the same `gates`
-        // map resolved above.
+        // have one), but every scope's `Evidence` shares the `gates`/`daemon`
+        // facts resolved above, and `agents`/`secrets` -- resolved per scope,
+        // since a scope's own roster and its own `.env` are its own -- only
+        // when that scope's applicable checks actually ask for them.
         for (t, applied) in &per_scope_applied {
             let ancestor_names: BTreeSet<&str> = snapshot
                 .config
@@ -339,6 +484,15 @@ impl Engine {
                 .map(|ancestor| ancestor.name.as_str())
                 .collect();
             let (tasks, workflows) = self.resolve_task_and_workflow_facts(&t.name, applied).await?;
+            let agents = needs_agent_facts(applied).then(|| {
+                let roles = self.roles_for(&t.name);
+                agent_facts_for(t, &snapshot.config.daemon.foreman, &roles)
+            });
+            let secrets = if needs_secrets_facts(applied) {
+                secrets_fact_map(&credential_rows, &t.name)
+            } else {
+                BTreeMap::new()
+            };
             let evidence = policy::Evidence {
                 tags: tags.clone(),
                 attestations: all_attestations
@@ -349,6 +503,9 @@ impl Engine {
                 tasks,
                 workflows,
                 gates: gates.clone(),
+                agents,
+                secrets,
+                daemon: daemon_fact,
             };
             findings.extend(policy::evidence_findings(&evidence, &t.name));
 
@@ -429,12 +586,25 @@ impl Engine {
         // too, or propagation would see it as wrongly `open`.
         let (tasks, workflows) = self.resolve_task_and_workflow_facts(&scope_obj.name, &applied).await?;
         let gates = self.gate_facts_for(&gate_dataset_names(&applied)).await?;
+        let agents = needs_agent_facts(&applied).then(|| {
+            let roles = self.roles_for(&scope_obj.name);
+            agent_facts_for(&scope_obj, &snapshot.config.daemon.foreman, &roles)
+        });
+        let secrets = if needs_secrets_facts(&applied) {
+            secrets_fact_map(&self.credential_inventory().await, &scope_obj.name)
+        } else {
+            BTreeMap::new()
+        };
+        let daemon = needs_daemon_facts(&applied).then(|| self.daemon_facts());
         let evidence = policy::Evidence {
             tags,
             attestations: history.clone(),
             tasks,
             workflows,
             gates,
+            agents,
+            secrets,
+            daemon,
         };
         let evaluated = policy::evaluate(&applied, &evidence, Utc::now())
             .into_iter()
@@ -1006,5 +1176,143 @@ mod tests {
         // it too, not just the scope that happened to trigger the lookup.
         let demo_app = by_id(&report.rows.iter().find(|r| r.scope == "demo-app").unwrap().statuses);
         assert_eq!(demo_app["f"].status.kind(), StatusKind::Satisfied, "{:?}", demo_app["f"].status);
+    }
+
+    // -- roles / sandbox / secrets / daemon ----------------------------------
+
+    /// A second small instance, just for `roles`/`sandbox`/`secrets`/`daemon`:
+    /// `root` (the instance root -- named exactly `root` so `ForemanConfig`'s
+    /// own default `exclude: ["root"]` keeps it foreman-free) and `team`
+    /// (`projects/team`), which declares one `worker` agent with
+    /// `sandbox: docker`. `daemon.foreman` is turned on, so `team` also gets
+    /// a synthesised foreman -- hard-coded `Sandbox::None` -- proving both
+    /// halves of the documented choice to count it in `Scope::agents_with`:
+    /// it holds `policy.attest` (the `foreman` preset's grants are
+    /// `Grant::ALL`), so `g` (forbidding it) goes `open` at `team` even
+    /// though the one agent someone actually *declared* holds nothing of the
+    /// kind; and it is the reason `h` (sandbox) still finds something
+    /// missing at `team` even though `worker` itself has one.
+    ///
+    /// `root`'s own `.env` is created on disk so `i` (secrets, default
+    /// `absent: [scope_env]`) is `open` there and `satisfied` at `team`,
+    /// which has none -- both branches in one engine, and neither reads a
+    /// home-directory credential a developer's machine might or might not
+    /// have.
+    fn l123_test_engine() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-policies-l123-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/house.yaml"),
+            "framework: house\n\
+             title: House rules\n\
+             kind: best-practice\n\
+             controls:\n\
+             \x20\x20- id: g\n\x20\x20\x20\x20title: No role may attest\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: roles\n\x20\x20\x20\x20\x20\x20\x20\x20forbid: [policy.attest]\n\
+             \x20\x20- id: h\n\x20\x20\x20\x20title: Every agent is sandboxed\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: sandbox\n\
+             \x20\x20- id: i\n\x20\x20\x20\x20title: No plaintext .env\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: secrets\n\
+             \x20\x20- id: j\n\x20\x20\x20\x20title: Power assertion is held\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: daemon\n\x20\x20\x20\x20\x20\x20\x20\x20fact: power_assertion\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".env"), "SECRET=shh\n").unwrap();
+
+        let mut config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig {
+                foreman: ForemanConfig { enabled: true, ..ForemanConfig::default() },
+                ..DaemonConfig::default()
+            },
+            scope: None,
+            scopes: Vec::new(),
+            roles: Default::default(),
+            policies: PolicyDeclaration { frameworks: vec!["house".to_string()], ..Default::default() },
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let root_scope = scope_at("root-id", "root", ".", "");
+        let mut team_scope: Scope = serde_yaml_ng::from_str(
+            "id: team-id\nname: team\nagents:\n  - name: worker\n    harness: shell\n    role: worker\n    sandbox: docker\n",
+        )
+        .unwrap();
+        team_scope.path = PathBuf::from("projects/team");
+        config.scopes = vec![root_scope, team_scope];
+
+        let factory = Factory { root, config };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    #[tokio::test]
+    async fn roles_is_satisfied_with_no_agent_and_open_once_a_synthesised_foreman_holds_the_forbidden_grant() {
+        let engine = l123_test_engine();
+        let report = engine.policy_report(None).await.unwrap();
+
+        let root = by_id(&report.rows.iter().find(|r| r.scope == "root").unwrap().statuses);
+        assert_eq!(root["g"].status.kind(), StatusKind::Satisfied, "{:?}", root["g"].status);
+        assert!(root["g"].status.reasons().iter().any(|r| r.contains("no agent declared")), "{:?}", root["g"].status);
+
+        let team = by_id(&report.rows.iter().find(|r| r.scope == "team").unwrap().statuses);
+        assert_eq!(team["g"].status.kind(), StatusKind::Open, "{:?}", team["g"].status);
+        assert!(
+            team["g"].status.reasons().iter().any(|r| r.contains("foreman") && r.contains("policy.attest")),
+            "the synthesised foreman, not the declared worker, is what holds it: {:?}",
+            team["g"].status
+        );
+    }
+
+    #[tokio::test]
+    async fn sandbox_is_open_at_a_scope_whose_only_gap_is_its_synthesised_foreman() {
+        let engine = l123_test_engine();
+        let report = engine.policy_report(None).await.unwrap();
+
+        let root = by_id(&report.rows.iter().find(|r| r.scope == "root").unwrap().statuses);
+        assert_eq!(root["h"].status.kind(), StatusKind::Satisfied, "{:?}", root["h"].status);
+
+        let team = by_id(&report.rows.iter().find(|r| r.scope == "team").unwrap().statuses);
+        assert_eq!(team["h"].status.kind(), StatusKind::Open, "{:?}", team["h"].status);
+        assert!(
+            team["h"].status.reasons().iter().any(|r| r.contains("foreman")),
+            "worker declares docker; only the synthesised foreman is missing one: {:?}",
+            team["h"].status
+        );
+    }
+
+    #[tokio::test]
+    async fn secrets_reads_each_scopes_own_env_never_a_sibling_scopes() {
+        let engine = l123_test_engine();
+        let report = engine.policy_report(None).await.unwrap();
+
+        let root = by_id(&report.rows.iter().find(|r| r.scope == "root").unwrap().statuses);
+        assert_eq!(root["i"].status.kind(), StatusKind::Open, "{:?}", root["i"].status);
+        assert!(root["i"].status.reasons().iter().any(|r| r.contains("scope_env")), "{:?}", root["i"].status);
+
+        let team = by_id(&report.rows.iter().find(|r| r.scope == "team").unwrap().statuses);
+        assert_eq!(team["i"].status.kind(), StatusKind::Satisfied, "team has no .env of its own: {:?}", team["i"].status);
+    }
+
+    #[tokio::test]
+    async fn daemon_reads_the_same_fact_for_every_scope() {
+        let engine = l123_test_engine();
+        let report = engine.policy_report(None).await.unwrap();
+
+        for scope in ["root", "team"] {
+            let statuses = by_id(&report.rows.iter().find(|r| r.scope == scope).unwrap().statuses);
+            assert_eq!(
+                statuses["j"].status.kind(),
+                StatusKind::Satisfied,
+                "power_assertion defaults to true: {:?} ({scope})",
+                statuses["j"].status
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_facts_reads_the_default_http_bind_as_loopback_only() {
+        let engine = l123_test_engine();
+        let facts = engine.daemon_facts();
+        assert!(facts.foreman_enabled);
+        assert_eq!(facts.http_loopback_only, Some(true), "the default bind, 127.0.0.1:8787, is loopback");
+        assert!(facts.power_assertion);
     }
 }

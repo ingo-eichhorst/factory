@@ -971,8 +971,11 @@ impl Engine {
     /// The honest v1 answer to "what can an agent already reach": a fixed
     /// list of places a credential commonly sits, checked for existence and
     /// nothing else. No value is ever opened, held, or logged -- `present` is
-    /// the entire result of each check.
-    async fn credential_inventory(&self) -> Vec<CredentialRow> {
+    /// the entire result of each check. `pub(crate)` so `policies::secrets_fact_map`
+    /// can build a `secrets` check's evidence from the same inventory this
+    /// tab shows -- one fact, read once, never a second copy of what
+    /// "present" means.
+    pub(crate) async fn credential_inventory(&self) -> Vec<CredentialRow> {
         let mut rows = Vec::new();
 
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {

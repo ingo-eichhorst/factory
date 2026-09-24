@@ -38,14 +38,22 @@
 //! [`evaluate`] takes the applicable controls, a bundle of [`Evidence`]
 //! Factory already has lying around, and `now`, and produces a
 //! [`ControlStatus`] per control -- pure, so a caller passes `now` in rather
-//! than this module reading the clock. `evaluate` now understands five of
-//! `Check`'s nine kinds: `knowledge` and `attestation` (v1), and `task`,
-//! `workflow` and `gate` (`#81`). `roles`, `sandbox`, `secrets` and `daemon`
-//! are `#82`'s -- the catalogue format already parses all four, so that
-//! ticket only has to teach `evaluate` what they mean, not change what a
-//! catalogue can say. A check this module cannot yet evaluate never
-//! satisfies anything -- its `unevaluated` reason says so rather than
-//! silently counting as met.
+//! than this module reading the clock. `evaluate` now understands all nine
+//! of `Check`'s kinds: `knowledge` and `attestation` (v1), `task`,
+//! `workflow` and `gate` (`#81`), and `roles`, `sandbox`, `secrets` and
+//! `daemon` (`#82`). The last four read facts the engine resolves once,
+//! synchronously, from the live config snapshot rather than a store --
+//! `Evidence::agents` (`Engine::agent_facts_for`, `Scope::agents_with` and
+//! `Engine::roles_for`), `Evidence::secrets` (`Engine::credential_inventory`,
+//! the same inventory the L2 Secrets tab reads) and `Evidence::daemon`
+//! (`Engine::daemon_facts`, `DaemonConfig` and the mounted `http` interface's
+//! `bind`) -- but the shape is the same as `task`/`workflow`/`gate`: this
+//! module only ever reads a fact somebody else resolved, never a store or
+//! the config tree itself. A `roles`/`daemon`/`secrets` field left `None` (or,
+//! for `secrets`, a location missing from the map) means "never gathered",
+//! not "gathered and empty" -- `direct_status` reports that `open` by name
+//! rather than guessing it away, the same restraint an ambiguous
+//! `task`/`workflow` name gets.
 //!
 //! `task`, `workflow` and `gate` never touch a store themselves -- this
 //! module stays pure. The engine (`Engine::policy_report`/`policy_control`
@@ -75,6 +83,17 @@
 //! for is `control/<framework>/<id>` instead -- a `/` is a character
 //! `is_tag_char` already accepts, and every page frontmatter or `#tag` link
 //! keeps working unmodified.
+//!
+//! A second spelling amends the ADR: its evidence table says `secrets`
+//! holds when "secrets reach agents only through the Secrets seam", but
+//! there is no such seam -- the README's own "Secrets" section is explicit
+//! that Factory injects no credentials and gates nothing, because every
+//! agent runs as the daemon's owner and reads whatever that user can read.
+//! The L2 Secrets tab records one fact only, presence: whether a file sits
+//! at each of a handful of well-known locations, never a value. That is
+//! what `secrets` actually checks -- a named location's *absence*, not a
+//! seam that does not exist -- see [`Check::Secrets`] and
+//! [`KNOWN_SECRETS_LOCATIONS`].
 
 use crate::bench::Verdict;
 use crate::dataset::is_slug;
@@ -238,11 +257,11 @@ impl From<ControlRef> for String {
 }
 
 /// One thing Factory already records that can stand as evidence for a
-/// control. Every kind the ADR names is parsed here, even though `evaluate`
-/// only understands `knowledge` and `attestation` in v1 -- a catalogue
-/// author can write the whole shape today, and a later ticket only has to
-/// teach evaluation, never change the file format underneath an author who
-/// already wrote one.
+/// control. Every kind the ADR names is parsed here and `evaluate` now
+/// understands all nine -- v1 shipped `knowledge` and `attestation` writable
+/// ahead of evaluation, and every ticket since (`#81`, `#82`) taught
+/// `evaluate` a few more kinds without ever having to change the file format
+/// underneath an author who already wrote one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "check", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Check {
@@ -279,21 +298,53 @@ pub enum Check {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_age: Option<Duration>,
     },
-    /// A stated condition on role grants holds, e.g. no role below the root
-    /// holds any of `forbid`. Parsed now, evaluated in `#82`.
+    /// No agent Factory would dispatch in the scope (`Scope::agents_with`,
+    /// which includes a synthesised foreman -- see the README's "Policies"
+    /// section for why) is bound to a role holding any of `forbid`. A scope
+    /// that declares no agent at all is satisfied: nothing there can hold
+    /// the grant.
     Roles {
         #[serde(default)]
         forbid: Vec<Grant>,
     },
-    /// Every agent in the scope declares a sandbox. Parsed now, evaluated in
-    /// `#82`.
+    /// Every agent Factory would dispatch in the scope
+    /// (`Scope::agents_with`) declares a sandbox other than `none`
+    /// (`ScopeAgent.sandbox`). Same empty-scope rule as `roles`.
     Sandbox,
-    /// Secrets reach agents only through the Secrets seam. Parsed now,
-    /// evaluated in `#82`.
-    Secrets,
-    /// A stated daemon or backup fact holds. Parsed now, evaluated in `#82`.
+    /// None of `absent` (default: the scope's own `.env`, [`KNOWN_SECRETS_LOCATIONS`]'s
+    /// `scope_env`) is present, in the L2 Secrets tab's own inventory
+    /// (`Engine::credential_inventory`) -- presence only, never a value.
+    Secrets {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        absent: Vec<String>,
+    },
+    /// A named fact about the daemon's own configuration holds -- see
+    /// [`KNOWN_DAEMON_FACTS`] for the fixed vocabulary this evaluates; any
+    /// other name is a [`Finding`] ([`FindingKind::UnknownDaemonFact`]) and
+    /// stays `open`.
     Daemon { fact: String },
 }
+
+/// The `daemon` check's fixed vocabulary -- everything else `DaemonConfig`
+/// carries is either not a policy-relevant fact or ambiguous enough that
+/// "does it hold" would be a guess (ADR 0004's "facts only, no
+/// heuristics"). [`load_all`] checks a `fact` string against this at parse
+/// time ([`FindingKind::UnknownDaemonFact`]), so an authoring mistake shows
+/// up on the catalogue, not only once a report is evaluated.
+///
+/// - `foreman_enabled` -- `daemon.foreman.enabled`.
+/// - `http_loopback_only` -- every `http` interface the daemon mounts binds
+///   to a loopback address, or none is mounted at all.
+/// - `power_assertion` -- `daemon.power_assertion`.
+pub const KNOWN_DAEMON_FACTS: &[&str] = &["foreman_enabled", "http_loopback_only", "power_assertion"];
+
+/// The `secrets` check's fixed vocabulary -- exactly the locations the L2
+/// Secrets tab already reports on (`Engine::credential_inventory`): the
+/// five machine-wide locations every scope shares (an agent runs as the
+/// daemon's owner, so these are the same regardless of scope) plus a
+/// scope's own `.env`. Checked at parse time by [`load_all`]
+/// ([`FindingKind::UnknownSecretsLocation`]).
+pub const KNOWN_SECRETS_LOCATIONS: &[&str] = &["anthropic", "github", "aws", "netrc", "ssh", "scope_env"];
 
 impl Check {
     /// The `check:` value this variant was written as -- used to build a
@@ -307,7 +358,7 @@ impl Check {
             Check::Gate { .. } => "gate",
             Check::Roles { .. } => "roles",
             Check::Sandbox => "sandbox",
-            Check::Secrets => "secrets",
+            Check::Secrets { .. } => "secrets",
             Check::Daemon { .. } => "daemon",
         }
     }
@@ -383,6 +434,11 @@ pub enum FindingKind {
     /// control `open` over it, but the mistake is in the catalogue (or the
     /// scope's tasks), not in the evidence, so it is a finding too.
     AmbiguousCheckTarget,
+    /// A `daemon` check named a `fact` outside [`KNOWN_DAEMON_FACTS`].
+    UnknownDaemonFact,
+    /// A `secrets` check's `absent` named a location outside
+    /// [`KNOWN_SECRETS_LOCATIONS`].
+    UnknownSecretsLocation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -474,6 +530,44 @@ pub fn load_all(dir: &Path) -> (Vec<Catalogue>, Vec<Finding>) {
                     detail: format!("duplicate control id {:?}", control.id),
                 });
                 continue;
+            }
+            // `daemon`'s `fact` and `secrets`' `absent` are each a fixed,
+            // known vocabulary (`KNOWN_DAEMON_FACTS`/`KNOWN_SECRETS_LOCATIONS`)
+            // that never depends on live evidence, so an unknown name is
+            // caught here, at parse time, rather than only once a report is
+            // evaluated.
+            for check in &control.evidence {
+                match check {
+                    Check::Daemon { fact } if !KNOWN_DAEMON_FACTS.contains(&fact.as_str()) => {
+                        findings.push(Finding {
+                            kind: FindingKind::UnknownDaemonFact,
+                            subject: file_name.clone(),
+                            detail: format!(
+                                "{}/{} names daemon fact {fact:?}, which is not one of: {}",
+                                catalogue.framework,
+                                control.id,
+                                KNOWN_DAEMON_FACTS.join(", ")
+                            ),
+                        });
+                    }
+                    Check::Secrets { absent } => {
+                        for loc in absent {
+                            if !KNOWN_SECRETS_LOCATIONS.contains(&loc.as_str()) {
+                                findings.push(Finding {
+                                    kind: FindingKind::UnknownSecretsLocation,
+                                    subject: file_name.clone(),
+                                    detail: format!(
+                                        "{}/{} names secrets location {loc:?}, which is not one of: {}",
+                                        catalogue.framework,
+                                        control.id,
+                                        KNOWN_SECRETS_LOCATIONS.join(", ")
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
             controls.push(control);
         }
@@ -914,12 +1008,71 @@ pub struct GateFact {
     pub cases: Vec<GateCase>,
 }
 
+/// One agent Factory would actually dispatch in the evaluated scope --
+/// `Scope::agents_with(&daemon.foreman)`, which folds in a synthesised
+/// foreman when the instance turns one on for this scope. It counts: a
+/// synthesised foreman is a real agent Factory starts and hands work to,
+/// not a hypothetical one, and it happens to be hard-coded `Sandbox::None`
+/// (nothing names a sandbox for a foreman nobody wrote), so a scope that
+/// enables `daemon.foreman` without giving it one shows up in a `sandbox`
+/// check instead of being quietly exempt. See the README's "Policies"
+/// section for this written out as the documented choice it is.
+///
+/// Resolved by the engine (`Engine::agent_facts_for`), never here: `grants`
+/// comes from `Engine::roles_for`, a live, in-memory read with no store of
+/// its own, but still a lookup only the engine can make.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentFact {
+    pub name: String,
+    pub role: String,
+    /// `None` when `role` names nothing `roles_for` resolves at this scope
+    /// -- a role deleted out from under a declared agent, say. Never read
+    /// as "holds nothing" (which would silently satisfy `roles`);
+    /// `direct_status` reports it `open`, by name, instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grants: Option<BTreeSet<Grant>>,
+    /// `false` for `Sandbox::None` -- see the `sandbox` check's own doc.
+    pub has_sandbox: bool,
+}
+
+/// The `daemon` check's whole fixed vocabulary ([`KNOWN_DAEMON_FACTS`]),
+/// resolved once per report by the engine (`Engine::daemon_facts`) rather
+/// than per scope -- the daemon's own configuration is the same wherever
+/// it is asked from, the same reasoning `Evidence::gates` already uses for
+/// datasets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonFact {
+    pub foreman_enabled: bool,
+    /// `None` when it could not be determined -- a mounted `http`
+    /// interface whose `bind` does not parse as a socket address.
+    /// `Some(true)` covers both "every mounted `http` interface binds to a
+    /// loopback address" and "the daemon mounts no `http` interface at
+    /// all": nothing is exposed beyond loopback either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_loopback_only: Option<bool>,
+    pub power_assertion: bool,
+}
+
+/// The value [`KNOWN_DAEMON_FACTS`]'s names read off a [`DaemonFact`] --
+/// `None` for a name outside that list, which `direct_status` never passes
+/// in (it checks membership itself, to give the "not a fact this build
+/// knows" reason its own wording), so in practice `None` here only ever
+/// means `http_loopback_only`'s own "could not be determined".
+fn daemon_fact_value(fact: &str, facts: &DaemonFact) -> Option<bool> {
+    match fact {
+        "foreman_enabled" => Some(facts.foreman_enabled),
+        "http_loopback_only" => facts.http_loopback_only,
+        "power_assertion" => Some(facts.power_assertion),
+        _ => None,
+    }
+}
+
 /// Every piece of evidence `evaluate` has to check controls against. `#77`
-/// added `tags`/`attestations`; `#81` adds `tasks`/`workflows`/`gates`;
-/// `#82` will add a role snapshot and a sandbox/secrets/daemon fact --
-/// every field is `#[serde(default)]`, so an `Evidence` built before a field
-/// existed is still a valid, if incomplete, one, and no caller has to be
-/// updated the moment a new field is added.
+/// added `tags`/`attestations`; `#81` added `tasks`/`workflows`/`gates`;
+/// `#82` adds `agents`, `secrets` and `daemon` -- every field is
+/// `#[serde(default)]`, so an `Evidence` built before a field existed is
+/// still a valid, if incomplete, one, and no caller has to be updated the
+/// moment a new field is added.
 ///
 /// Not `deny_unknown_fields`, for the same reason: a wire payload from a
 /// newer build of Factory naming a field this build does not know about yet
@@ -948,14 +1101,33 @@ pub struct Evidence {
     /// this is the same across every scope a report evaluates.
     #[serde(default)]
     pub gates: BTreeMap<String, GateFact>,
+    /// Every agent Factory would dispatch in the evaluated scope -- see
+    /// [`AgentFact`]. `None` means "never gathered", distinct from
+    /// `Some(vec![])`, an honestly empty scope; `roles`/`sandbox` read it
+    /// that way.
+    #[serde(default)]
+    pub agents: Option<Vec<AgentFact>>,
+    /// Whether each of [`KNOWN_SECRETS_LOCATIONS`] a `secrets` check in the
+    /// evaluated scope names is present, keyed by that location id -- a
+    /// scoped slice of the L2 Secrets tab's own inventory
+    /// (`Engine::credential_inventory`). A location absent from this map was
+    /// never asked about, not confirmed absent -- see `direct_status`'s
+    /// `secrets` arm.
+    #[serde(default)]
+    pub secrets: BTreeMap<String, bool>,
+    /// The daemon-config facts `Check::Daemon` can name -- see
+    /// [`DaemonFact`]. `None` means "never gathered".
+    #[serde(default)]
+    pub daemon: Option<DaemonFact>,
 }
 
 // =============================================================== evaluate
 
 /// A control's status carries its own reasons, one per check that
-/// contributed to it (including a check this module cannot yet evaluate,
-/// whose reason says so) -- so a caller never has to go re-derive why a
-/// control is `open` from the checks alone.
+/// contributed to it (including a check whose evidence was never gathered,
+/// or whose `daemon`/`secrets` name this build does not recognize, whose
+/// reason says so) -- so a caller never has to go re-derive why a control is
+/// `open` from the checks alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusKind {
@@ -1078,7 +1250,8 @@ pub struct ControlStatus {
     pub kind: Kind,
     /// Machine-readable pointers alongside `status`'s reasons -- see
     /// [`EvidenceRef`]. Empty whenever nothing behind the status carries an
-    /// id yet (a `knowledge` check, an unevaluated check kind, `n/a`).
+    /// id yet (a `knowledge`/`roles`/`sandbox`/`secrets`/`daemon` check,
+    /// `n/a`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<EvidenceRef>,
     #[serde(flatten)]
@@ -1113,9 +1286,12 @@ fn workflow_run_status_str(status: WorkflowRunStatus) -> &'static str {
 }
 
 /// This control's status from its own checks alone, and the refs those
-/// checks can point at -- `knowledge`, `attestation`, `task`, `workflow` and
-/// `gate` evaluated for real (`#77`, `#81`); `roles`, `sandbox`, `secrets`
-/// and `daemon` (`#82`) still contribute only an `unevaluated` reason.
+/// checks can point at -- every one of `Check`'s nine kinds now evaluated
+/// for real (`knowledge`/`attestation` in v1, `task`/`workflow`/`gate` in
+/// `#81`, `roles`/`sandbox`/`secrets`/`daemon` in `#82`). None of the last
+/// four carries a ref: nothing behind them is an id a UI could link to
+/// (an agent name is not yet one of `EvidenceRefKind`'s kinds, and a
+/// daemon/secrets fact is not tied to any one record at all).
 fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> (Status, Vec<EvidenceRef>) {
     let mut satisfied = Vec::new();
     let mut satisfied_refs = Vec::new();
@@ -1382,8 +1558,98 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                     }
                 }
             },
-            other @ (Check::Roles { .. } | Check::Sandbox | Check::Secrets | Check::Daemon { .. }) => {
-                open.push(format!("{}: unevaluated", other.kind_name()));
+            Check::Roles { forbid } => match &evidence.agents {
+                None => open.push("roles: agents not resolved for this scope".to_string()),
+                Some(agents) if agents.is_empty() => {
+                    satisfied.push("roles: no agent declared in this scope -- nothing there can hold a grant".to_string());
+                }
+                Some(agents) => {
+                    let mut unresolved = Vec::new();
+                    let mut bad = Vec::new();
+                    for agent in agents {
+                        match &agent.grants {
+                            None => unresolved.push(format!(
+                                "roles: agent `{}` has role `{}`, which is not defined at this scope",
+                                agent.name, agent.role
+                            )),
+                            Some(grants) => {
+                                for grant in forbid {
+                                    if grants.contains(grant) {
+                                        bad.push(format!(
+                                            "roles: agent `{}` (role `{}`) holds `{}`",
+                                            agent.name,
+                                            agent.role,
+                                            grant.as_str()
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !unresolved.is_empty() {
+                        open.extend(unresolved);
+                    } else if !bad.is_empty() {
+                        open.extend(bad);
+                    } else {
+                        satisfied.push(format!(
+                            "roles: none of {} agent(s) holds a forbidden grant",
+                            agents.len()
+                        ));
+                    }
+                }
+            },
+            Check::Sandbox => match &evidence.agents {
+                None => open.push("sandbox: agents not resolved for this scope".to_string()),
+                Some(agents) if agents.is_empty() => {
+                    satisfied.push("sandbox: no agent declared in this scope".to_string());
+                }
+                Some(agents) => {
+                    let missing: Vec<&str> = agents.iter().filter(|a| !a.has_sandbox).map(|a| a.name.as_str()).collect();
+                    if missing.is_empty() {
+                        satisfied.push(format!("sandbox: every agent declares one ({} checked)", agents.len()));
+                    } else {
+                        open.push(format!("sandbox: no sandbox declared for {}", missing.join(", ")));
+                    }
+                }
+            },
+            Check::Secrets { absent } => {
+                let names: Vec<String> = if absent.is_empty() {
+                    vec!["scope_env".to_string()]
+                } else {
+                    absent.clone()
+                };
+                let mut not_resolved = Vec::new();
+                let mut present_at = Vec::new();
+                for name in &names {
+                    match evidence.secrets.get(name) {
+                        None => not_resolved.push(name.clone()),
+                        Some(true) => present_at.push(name.clone()),
+                        Some(false) => {}
+                    }
+                }
+                if !not_resolved.is_empty() {
+                    open.push(format!("secrets: not resolved for {}", not_resolved.join(", ")));
+                } else if !present_at.is_empty() {
+                    open.push(format!("secrets: present at {}", present_at.join(", ")));
+                } else {
+                    satisfied.push(format!("secrets: absent at {}", names.join(", ")));
+                }
+            }
+            Check::Daemon { fact } => {
+                if !KNOWN_DAEMON_FACTS.contains(&fact.as_str()) {
+                    open.push(format!(
+                        "daemon: `{fact}` is not a fact this build knows -- see the README's \"Policies\" section for the list"
+                    ));
+                } else {
+                    match evidence.daemon.as_ref().and_then(|facts| daemon_fact_value(fact, facts)) {
+                        Some(true) => satisfied.push(format!("daemon: `{fact}` holds")),
+                        Some(false) => open.push(format!("daemon: `{fact}` does not hold")),
+                        None if evidence.daemon.is_none() => {
+                            open.push(format!("daemon: not resolved for `{fact}`"));
+                        }
+                        None => open.push(format!("daemon: `{fact}` could not be determined")),
+                    }
+                }
             }
         }
     }
@@ -1933,6 +2199,51 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn a_daemon_check_naming_an_unknown_fact_is_a_finding_at_parse_time() {
+        let dir = tempdir("unknown-daemon-fact");
+        write(
+            &dir,
+            "cra.yaml",
+            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n\
+             \x20\x20- id: a\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20evidence:\n\
+             \x20\x20\x20\x20\x20\x20- check: daemon\n\x20\x20\x20\x20\x20\x20\x20\x20fact: launches_rockets\n",
+        );
+        let (catalogues, findings) = load_all(&dir);
+        assert_eq!(catalogues[0].controls.len(), 1, "the control still loads");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::UnknownDaemonFact);
+        assert_eq!(findings[0].subject, "cra.yaml");
+        assert!(findings[0].detail.contains("launches_rockets"), "{}", findings[0].detail);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_secrets_check_naming_an_unknown_location_is_a_finding_at_parse_time() {
+        let dir = tempdir("unknown-secrets-location");
+        write(
+            &dir,
+            "cra.yaml",
+            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n\
+             \x20\x20- id: a\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20evidence:\n\
+             \x20\x20\x20\x20\x20\x20- check: secrets\n\x20\x20\x20\x20\x20\x20\x20\x20absent: [anthropic, under-the-mat]\n",
+        );
+        let (catalogues, findings) = load_all(&dir);
+        assert_eq!(catalogues[0].controls.len(), 1, "the control still loads");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].kind, FindingKind::UnknownSecretsLocation);
+        assert!(findings[0].detail.contains("under-the-mat"), "{}", findings[0].detail);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_bare_check_secrets_still_parses_and_round_trips_with_no_absent_field() {
+        let check: Check = serde_yaml_ng::from_str("check: secrets\n").unwrap();
+        assert_eq!(check, Check::Secrets { absent: Vec::new() });
+        let json = serde_json::to_string(&check).unwrap();
+        assert_eq!(json, "{\"check\":\"secrets\"}", "an empty `absent` is not written out");
+    }
+
     // -- applicable ----------------------------------------------------------
 
     fn cra_catalogue(controls: Vec<Control>) -> Catalogue {
@@ -2152,12 +2463,267 @@ mod tests {
         assert_eq!(statuses[0].status.kind(), StatusKind::Open);
     }
 
+    // -- evaluate: roles ----------------------------------------------------
+
+    fn agent(name: &str, role: &str, grants: &[Grant]) -> AgentFact {
+        AgentFact {
+            name: name.to_string(),
+            role: role.to_string(),
+            grants: Some(grants.iter().copied().collect()),
+            has_sandbox: true,
+        }
+    }
+
     #[test]
-    fn an_unevaluated_check_kind_never_satisfies_and_says_so() {
+    fn roles_with_agents_never_resolved_stays_open() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Roles { forbid: vec![Grant::KnowledgeWrite] }],
+            Vec::new(),
+        )];
+        let statuses = evaluate(&applied, &Evidence::default(), Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons().iter().any(|r| r.contains("not resolved")), "{:?}", statuses[0].status);
+    }
+
+    #[test]
+    fn roles_with_no_agent_declared_is_satisfied() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Roles { forbid: vec![Grant::KnowledgeWrite] }],
+            Vec::new(),
+        )];
+        let evidence = Evidence { agents: Some(Vec::new()), ..Default::default() };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+    }
+
+    #[test]
+    fn roles_open_when_an_agents_role_holds_a_forbidden_grant() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Roles { forbid: vec![Grant::KnowledgeWrite] }],
+            Vec::new(),
+        )];
+        let evidence = Evidence {
+            agents: Some(vec![
+                agent("worker", "worker", &[Grant::TaskEdit]),
+                agent("foreman", "foreman", &[Grant::KnowledgeWrite, Grant::TaskEdit]),
+            ]),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(
+            statuses[0].status.reasons().iter().any(|r| r.contains("foreman") && r.contains("knowledge.write")),
+            "{:?}",
+            statuses[0].status
+        );
+    }
+
+    #[test]
+    fn roles_satisfied_when_no_agent_holds_a_forbidden_grant() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Roles { forbid: vec![Grant::PolicyAttest] }],
+            Vec::new(),
+        )];
+        let evidence = Evidence {
+            agents: Some(vec![agent("worker", "worker", &[Grant::TaskEdit, Grant::RunInput])]),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+    }
+
+    #[test]
+    fn roles_open_when_an_agents_role_does_not_resolve() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Roles { forbid: vec![Grant::PolicyAttest] }],
+            Vec::new(),
+        )];
+        let evidence = Evidence {
+            agents: Some(vec![AgentFact {
+                name: "ghost".to_string(),
+                role: "vanished".to_string(),
+                grants: None,
+                has_sandbox: true,
+            }]),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(
+            statuses[0].status.reasons().iter().any(|r| r.contains("ghost") && r.contains("vanished")),
+            "{:?}",
+            statuses[0].status
+        );
+    }
+
+    // -- evaluate: sandbox ----------------------------------------------------
+
+    #[test]
+    fn sandbox_with_agents_never_resolved_stays_open() {
         let applied = vec![applied_control("a", vec![Check::Sandbox], Vec::new())];
         let statuses = evaluate(&applied, &Evidence::default(), Utc::now());
         assert_eq!(statuses[0].status.kind(), StatusKind::Open);
-        assert!(statuses[0].status.reasons().iter().any(|r| r.contains("unevaluated")));
+        assert!(statuses[0].status.reasons().iter().any(|r| r.contains("not resolved")), "{:?}", statuses[0].status);
+    }
+
+    #[test]
+    fn sandbox_with_no_agent_declared_is_satisfied() {
+        let applied = vec![applied_control("a", vec![Check::Sandbox], Vec::new())];
+        let evidence = Evidence { agents: Some(Vec::new()), ..Default::default() };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+    }
+
+    #[test]
+    fn sandbox_open_when_an_agent_declares_none() {
+        let applied = vec![applied_control("a", vec![Check::Sandbox], Vec::new())];
+        let evidence = Evidence {
+            agents: Some(vec![
+                agent("worker", "worker", &[]),
+                AgentFact { name: "foreman".to_string(), role: "foreman".to_string(), grants: Some(BTreeSet::new()), has_sandbox: false },
+            ]),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons().iter().any(|r| r.contains("foreman")), "{:?}", statuses[0].status);
+    }
+
+    #[test]
+    fn sandbox_satisfied_when_every_agent_declares_one() {
+        let applied = vec![applied_control("a", vec![Check::Sandbox], Vec::new())];
+        let evidence = Evidence {
+            agents: Some(vec![agent("worker", "worker", &[]), agent("foreman", "foreman", &[])]),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+    }
+
+    // -- evaluate: secrets ----------------------------------------------------
+
+    #[test]
+    fn secrets_with_the_default_location_never_resolved_stays_open() {
+        let applied = vec![applied_control("a", vec![Check::Secrets { absent: Vec::new() }], Vec::new())];
+        let statuses = evaluate(&applied, &Evidence::default(), Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons().iter().any(|r| r.contains("not resolved")), "{:?}", statuses[0].status);
+    }
+
+    #[test]
+    fn secrets_satisfied_when_the_default_location_is_absent() {
+        let applied = vec![applied_control("a", vec![Check::Secrets { absent: Vec::new() }], Vec::new())];
+        let evidence = Evidence {
+            secrets: BTreeMap::from([("scope_env".to_string(), false)]),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+    }
+
+    #[test]
+    fn secrets_open_when_a_named_location_is_present() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Secrets { absent: vec!["anthropic".to_string(), "ssh".to_string()] }],
+            Vec::new(),
+        )];
+        let evidence = Evidence {
+            secrets: BTreeMap::from([("anthropic".to_string(), true), ("ssh".to_string(), false)]),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons().iter().any(|r| r.contains("anthropic")), "{:?}", statuses[0].status);
+    }
+
+    // -- evaluate: daemon -----------------------------------------------------
+
+    #[test]
+    fn daemon_check_with_no_facts_gathered_stays_open() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Daemon { fact: "power_assertion".to_string() }],
+            Vec::new(),
+        )];
+        let statuses = evaluate(&applied, &Evidence::default(), Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons().iter().any(|r| r.contains("not resolved")), "{:?}", statuses[0].status);
+    }
+
+    #[test]
+    fn daemon_check_satisfied_when_the_named_fact_holds() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Daemon { fact: "power_assertion".to_string() }],
+            Vec::new(),
+        )];
+        let evidence = Evidence {
+            daemon: Some(DaemonFact { foreman_enabled: false, http_loopback_only: None, power_assertion: true }),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+    }
+
+    #[test]
+    fn daemon_check_open_when_the_named_fact_does_not_hold() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Daemon { fact: "foreman_enabled".to_string() }],
+            Vec::new(),
+        )];
+        let evidence = Evidence {
+            daemon: Some(DaemonFact { foreman_enabled: false, http_loopback_only: None, power_assertion: true }),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+    }
+
+    #[test]
+    fn daemon_check_naming_an_unknown_fact_stays_open_with_its_own_reason() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Daemon { fact: "launches_rockets".to_string() }],
+            Vec::new(),
+        )];
+        let evidence = Evidence {
+            daemon: Some(DaemonFact::default()),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(
+            statuses[0].status.reasons().iter().any(|r| r.contains("not a fact this build knows")),
+            "{:?}",
+            statuses[0].status
+        );
+    }
+
+    #[test]
+    fn daemon_check_open_when_http_loopback_only_cannot_be_determined() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Daemon { fact: "http_loopback_only".to_string() }],
+            Vec::new(),
+        )];
+        let evidence = Evidence {
+            daemon: Some(DaemonFact { foreman_enabled: false, http_loopback_only: None, power_assertion: true }),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(
+            statuses[0].status.reasons().iter().any(|r| r.contains("could not be determined")),
+            "{:?}",
+            statuses[0].status
+        );
     }
 
     #[test]

@@ -202,6 +202,8 @@ test("findingsByKind groups by the wire's snake_case kind, and findingLabel tran
   assert.deepEqual([...groups.keys()], ["loosening_has_no_effect", "unknown_control"]);
   assert.equal(groups.get("unknown_control").length, 1);
   assert.equal(findingLabel("unknown_control"), "Names a control that is not applicable");
+  assert.equal(findingLabel("unknown_daemon_fact"), "Names a daemon fact nothing recognizes");
+  assert.equal(findingLabel("unknown_secrets_location"), "Names a secrets location nothing recognizes");
   assert.equal(findingLabel("a_future_kind"), "a_future_kind", "an unknown kind falls back to the raw string");
 });
 
@@ -223,8 +225,10 @@ test("closingLinks points a knowledge reason at the exact tag node, not just the
   assert.match(links[1].href, /^#demo\/tasks$/);
 });
 
-test("closingLinks never links a daemon reason -- L1 is not built", () => {
-  assert.deepEqual(closingLinks("demo", ["daemon: unevaluated"]), []);
+test("closingLinks points a daemon reason at L1 Infrastructure", () => {
+  const links = closingLinks("demo", ["daemon: `power_assertion` does not hold"]);
+  assert.deepEqual(links.map((l) => l.label), ["Infrastructure"]);
+  assert.match(links[0].href, /^#demo\/infrastructure$/);
 });
 
 test("defaultKnowledgeTag matches ControlRef::default_tag's own construction", () => {
@@ -240,7 +244,9 @@ test("checkTarget is exact, from the Check itself, not parsed out of a reason", 
   assert.equal(tagged.href, "#demo/knowledge/tag%3Acustom-tag");
 
   assert.equal(checkTarget("demo", "cra/annex-i-2-1", { check: "attestation" }), null);
-  assert.equal(checkTarget("demo", "cra/annex-i-2-1", { check: "daemon", fact: "x" }), null);
+  const daemon = checkTarget("demo", "cra/annex-i-2-1", { check: "daemon", fact: "x" });
+  assert.equal(daemon.label, "Infrastructure");
+  assert.match(daemon.href, /^#demo\/infrastructure$/);
   assert.equal(checkTarget("demo", "cra/annex-i-2-1", { check: "gate", dataset: "d" }).label, "Benchmarks");
 });
 
@@ -253,7 +259,9 @@ test("describeCheck matches the CLI's own describe_check, one line per check kin
   assert.equal(describeCheck({ check: "gate", dataset: "d", case: "c", max_age: "7d" }), "gate d/c (max_age 7d)");
   assert.equal(describeCheck({ check: "roles", forbid: ["knowledge.write"] }), "roles: forbid knowledge.write");
   assert.equal(describeCheck({ check: "sandbox" }), "sandbox");
-  assert.equal(describeCheck({ check: "daemon", fact: "backups exist" }), "daemon: backups exist");
+  assert.equal(describeCheck({ check: "secrets" }), "secrets");
+  assert.equal(describeCheck({ check: "secrets", absent: ["anthropic", "scope_env"] }), "secrets: absent anthropic, scope_env");
+  assert.equal(describeCheck({ check: "daemon", fact: "power_assertion" }), "daemon: power_assertion");
 });
 
 test("looksLikeExpiry accepts policy::Duration's grammar and the two absolute forms, softly", () => {

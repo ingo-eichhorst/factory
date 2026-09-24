@@ -601,8 +601,8 @@ empty one is a finding and the control stays applicable — and every `n/a`, at
 whichever scope declared it, is always listed rather than left silent: ISO
 27001 calls this a Statement of Applicability, and ADR 0004 keeps the name.
 
-**Checks and statuses.** Evidence is evaluated per check kind. Five of the
-nine are evaluated for real: `knowledge` (a vault page tagged
+**Checks and statuses.** Evidence is evaluated per check kind, and all nine
+are evaluated for real: `knowledge` (a vault page tagged
 `control/<framework>/<id>`, or a check's own `tag`), `attestation` (an
 unexpired, unwithdrawn attestation recorded for the control), `task` and
 `workflow` (the newest *finished* run — done, failed or cancelled; a run
@@ -614,21 +614,60 @@ and `gate` (a dataset's gated cases — or, with `case`, one named case — all
 `pass` in the newest *settled* bench run of that dataset, within `max_age`;
 `unverified` never counts). `task`/`workflow` name their target in the
 evaluated scope, by id or by exact title; a title matching more than one is
-a finding, reported `open` rather than guessed at. `roles`, `sandbox`,
-`secrets` and `daemon` already parse — a catalogue can name a role
-condition, a sandbox or secrets fact, or a daemon fact today — but each still
-evaluates to `unevaluated` until a later ticket teaches `evaluate` what it
-means; nothing is silently counted as met before then. A control's status is
-`satisfied` (a check found current evidence), `attested` (an unexpired
-attestation covers it), `stale` (evidence or an attestation existed but is
-older than `max_age`, or the attestation expired), `open` (no evidence), or
-`n/a` (does not apply here, with its rationale) — and, wherever the evidence
-behind it carries an id (a `task`, `workflow`, `gate` or `attestation` check,
-never yet a `knowledge` one), a `refs` list alongside its human reasons,
-pointing at the task, run, workflow run, bench run or attestation, for a UI
-to link straight to. Status is
-computed on every read, the same as the knowledge index — no status table to
-keep in step. **"Compliant" means the evidence is complete, not that the
+a finding, reported `open` rather than guessed at.
+
+The remaining four read facts the engine resolves once, synchronously, from
+the live config snapshot rather than a store:
+
+- **`roles { forbid: [grant...] }`** — satisfied when no agent Factory would
+  actually dispatch in the scope (`Scope::agents_with`, resolved against
+  `Engine::roles_for`) is bound to a role holding any of `forbid`; the
+  reasons name the offending agent, its role, and the grant. A scope that
+  declares no agent is satisfied outright — nothing there can hold the
+  grant. `agents_with`, not the narrower `declared_agents`, is deliberate: a
+  synthesized foreman (`daemon.foreman`) is a real agent Factory starts and
+  hands work to, and it is hard-coded `Sandbox::None` and the `foreman`
+  preset role (every grant there is), so a scope that turns it on shows up
+  here and in `sandbox` below rather than being silently exempt because
+  nobody wrote it down.
+- **`sandbox`** — satisfied when every agent `Scope::agents_with` names for
+  the scope has a sandbox other than `none` (`ScopeAgent.sandbox`). Same
+  empty-scope and same-foreman rule as `roles`.
+- **`secrets { absent: [location...] }`** — satisfied when none of the named
+  locations is present, read from the same inventory the L2 Secrets tab
+  itself reports (`Engine::credential_inventory`): presence only, never a
+  value. With no `absent` list (a bare `check: secrets` still parses), the
+  default is the scope's own `.env`. The known location ids are `anthropic`,
+  `github`, `aws`, `netrc`, `ssh` (machine-wide — every agent runs as the
+  daemon's owner, so these are the same regardless of scope) and
+  `scope_env` (that scope's own `.env`). This amends the ADR's own wording
+  — "secrets reach agents only through the Secrets seam" — since there is no
+  such seam (see "Secrets" above); what Factory actually records, and so
+  what this checks, is a named location's absence.
+- **`daemon { fact }`** — satisfied when the named fact about the daemon's
+  own configuration holds. Only a small, unambiguous set is supported:
+  `foreman_enabled` (`daemon.foreman.enabled`), `http_loopback_only` (every
+  mounted `http` interface binds to a loopback address, or none is mounted
+  at all — `Some(true)` either way; a `bind` that does not parse as a socket
+  address is left undetermined rather than guessed at with a DNS lookup),
+  and `power_assertion` (`daemon.power_assertion`). A `fact` outside this
+  set is a finding at catalogue load time and stays `open`.
+
+Neither `roles`/`sandbox`/`secrets`/`daemon` carries a `refs` entry: nothing
+behind them is an id a UI could link to yet (an agent name is not one of
+`EvidenceRefKind`'s kinds, and a daemon/secrets fact is not tied to any one
+record at all) — the L6 Policy tab instead links a gap in one of these to
+the level that can close it (Roles, Sandboxes, Secrets, or L1
+Infrastructure). A control's status is `satisfied` (a check found current
+evidence), `attested` (an unexpired attestation covers it), `stale`
+(evidence or an attestation existed but is older than `max_age`, or the
+attestation expired), `open` (no evidence), or `n/a` (does not apply here,
+with its rationale) — and, wherever the evidence behind it carries an id (a
+`task`, `workflow`, `gate` or `attestation` check, never yet a `knowledge`
+one), a `refs` list alongside its human reasons, pointing at the task, run,
+workflow run, bench run or attestation, for a UI to link straight to. Status
+is computed on every read, the same as the knowledge index — no status table
+to keep in step. **"Compliant" means the evidence is complete, not that the
 company is certified** — a framework's rollup is `compliant` only once every
 `regulation` and `standard` control in it is `satisfied`, `attested`, or
 `n/a`; `best-practice` controls are counted in their own bucket and never

@@ -137,8 +137,9 @@ export function notApplicableRows(report) {
 
 /// The wire's `FindingKind` values (`#[serde(rename_all = "snake_case")]` in
 /// `factory_core::policy`), translated the way `knowledge.js`'s
-/// `FINDING_LABELS` translates its own seven -- a kind this map has never
-/// heard of falls back to the raw string rather than hiding it.
+/// `FINDING_LABELS` translates its own -- a kind this map has never heard
+/// of (including `ambiguous_check_target`, left as its raw wire spelling)
+/// falls back to the raw string rather than hiding it.
 const FINDING_LABELS = {
   parse_failed: "Catalogue failed to parse",
   duplicate_control: "Duplicate control id",
@@ -148,6 +149,8 @@ const FINDING_LABELS = {
   unknown_control: "Names a control that is not applicable",
   loosening_has_no_effect: "A tighten did not shorten the freshness window",
   empty_rationale: "n/a declared with no rationale",
+  unknown_daemon_fact: "Names a daemon fact nothing recognizes",
+  unknown_secrets_location: "Names a secrets location nothing recognizes",
 };
 export function findingLabel(kind) {
   return FINDING_LABELS[kind] || kind;
@@ -203,8 +206,8 @@ export function reasonCheckKinds(reasons) {
 
 /// Where each check kind's own gap is closed. `attestation` is left out on
 /// purpose -- it is closed right here, with the Attest form below, not by
-/// following a link -- and so is `daemon`, since L1 Infrastructure is not
-/// built yet (`#87` is a different tab; this one stays inert until it is).
+/// following a link. `daemon` points at L1 Infrastructure (merged as `#86`/
+/// `#87`, the `infrastructure` page under level `infra`) now that it exists.
 const REMEDIATION = {
   knowledge: { page: "knowledge", label: "Knowledge" },
   task: { page: "tasks", label: "Tasks" },
@@ -213,6 +216,7 @@ const REMEDIATION = {
   roles: { page: "roles", label: "Roles" },
   sandbox: { page: "sandboxes", label: "Sandboxes" },
   secrets: { page: "secrets", label: "Secrets" },
+  daemon: { page: "infrastructure", label: "Infrastructure" },
 };
 
 /// A link to the exact tag node in the Knowledge graph, so following it lands
@@ -276,7 +280,7 @@ export function describeCheck(check) {
     case "sandbox":
       return "sandbox";
     case "secrets":
-      return "secrets";
+      return check.absent && check.absent.length ? `secrets: absent ${check.absent.join(", ")}` : "secrets";
     case "daemon":
       return `daemon: ${check.fact}`;
     default:
