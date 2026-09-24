@@ -21,10 +21,11 @@ import { benchTail, loadBenchmarks, readBenchTail, renderBenchmarks, wireBenchma
 import { loadDatasets, renderDatasetsSegment, wireDatasets } from "./datasets.js";
 import { acceptBenchRunEvent, loadBenchRuns, renderBenchRunsSegment, wireBenchRuns } from "./bench-runs.js";
 import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from "./knowledge.js";
+import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
 
 // ------------------------------------------------------------------ views
 //
-// Fourteen entries, not two: `showTab` used to toggle exactly two `hidden`
+// Fifteen entries, not two: `showTab` used to toggle exactly two `hidden`
 // containers and two button classes. It is a small registry now, but the
 // rule is the same -- one view visible, one button lit, and whatever that
 // view needs to start or stop doing while it is not the one on screen.
@@ -87,6 +88,7 @@ const VIEWS = {
     onHide: stopAgentPoll,
     tail: { write: knowledgeTail, read: readKnowledgeTail },
   },
+  infrastructure: { onShow: startInfrastructure, onHide: stopAgentPoll },
 };
 
 // ------------------------------------------------------------------- the URL
@@ -156,16 +158,17 @@ function applyModal([taskId, runId]) {
 // --------------------------------------------------------------- primary menu
 //
 // Dashboard is a peer of Factory's six decision levels in the first row. Its
-// four operational views live together beneath it; the four implemented
-// levels below it keep the view specific to each -- L6 (Direction) and L1
-// (Infrastructure) are still disabled and own no entry here. This single map
-// drives the second row, menu switching and the hash fallback in `scopes.js`.
+// four operational views live together beneath it; the five implemented
+// levels below it keep the view specific to each -- only L6 (Direction) is
+// still disabled and owns no entry here. This single map drives the second
+// row, menu switching and the hash fallback in `scopes.js`.
 const LEVEL_VIEWS = {
   dash: ["dashboard", "site", "activity", "inbox"],
   proc: ["tasks", "workflows"],
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets"],
   imp: ["benchmarks", "knowledge"],
+  infra: ["infrastructure"],
 };
 
 /// The live level that claims `tab`, for backfilling `state.level` before any
@@ -272,6 +275,10 @@ function rerender(route) {
   // so this redraws the same rows every time. Included anyway so the map
   // above stays a complete list of every tab rather than all-but-one.
   else if (state.tab === "knowledge") renderKnowledge();
+  // The host, the daemon and the accounts are the whole instance's, whatever
+  // the rail says; what narrows is the agents listed under each account and
+  // under Unassigned -- the same split Secrets keeps for the home directory.
+  else if (state.tab === "infrastructure") renderInfrastructure();
 }
 
 /// The rail is a view over `state.scopes`, so it is rebuilt wherever that is
@@ -406,6 +413,21 @@ function startKnowledge() {
   loadKnowledge();
 }
 
+/// L1 reads one answer and renders one view from it, on the same thirty
+/// seconds the L2 tabs poll at: the host's uptime, load and free disk move
+/// without any event to announce it, and the daemon collects them fresh on
+/// every request rather than caching them.
+async function refreshInfrastructure() {
+  await loadInfrastructure();
+  renderInfrastructure();
+}
+
+function startInfrastructure() {
+  stopAgentPoll();
+  refreshInfrastructure();
+  state.agentPoll = setInterval(refreshInfrastructure, 30000);
+}
+
 // ---------------------------------------------------------------------- boot
 
 async function boot() {
@@ -451,9 +473,9 @@ async function boot() {
   for (const k of Object.keys(VIEWS)) {
     $(`tab-${k}`).onclick = () => showTab(k);
   }
-  // Only Dashboard and the four live levels reach here with a working click --
-  // the two greyed ones (Direction, Infrastructure) carry `disabled` in the
-  // markup, and a disabled button never fires one.
+  // Only Dashboard and the five live levels reach here with a working click --
+  // the one greyed level (Direction) carries `disabled` in the markup, and a
+  // disabled button never fires one.
   for (const b of $("levels").querySelectorAll(".lvl")) {
     b.onclick = () => setLevel(b.dataset.level);
   }
@@ -473,6 +495,7 @@ async function boot() {
   wireDatasets();
   wireBenchRuns();
   $("knowledge-refresh").onclick = () => loadKnowledge();
+  $("infrastructure-refresh").onclick = () => refreshInfrastructure();
   $("occ-window").onchange = () => loadOccupancy();
   $("newTask").onclick = () => openCreate();
   wireDashboard();

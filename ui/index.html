@@ -38,9 +38,9 @@
 </header>
 
 <!-- Dashboard and the six decision levels Factory runs at, L6 (what it is for)
-     through L1 (what it runs on). L5 through L2 are built; L6 and L1
-     still carry `disabled` -- not just a dimming class -- so tabbing the
-     row skips straight over them, and a `title` says why. Which view tabs
+     through L1 (what it runs on). L5 through L1 are built; L6 still
+     carries `disabled` -- not just a dimming class -- so tabbing the row
+     skips straight over it, and a `title` says why. Which view tabs
      belong to each live primary entry is `LEVEL_VIEWS` in app.js. -->
 <nav class="levels" id="levels" aria-label="Primary menu">
   <button id="lv-dash" class="lvl on" data-level="dash">
@@ -61,8 +61,8 @@
   <button id="lv-env" class="lvl" data-level="env" data-lv="2">
     <span class="lv-n">L2</span><span class="lv-name">Environment</span><span class="lv-sub">Sandboxes and secrets</span>
   </button>
-  <button id="lv-infra" class="lvl" data-level="infra" data-lv="1" disabled title="Not built yet">
-    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Daemon and store</span>
+  <button id="lv-infra" class="lvl" data-level="infra" data-lv="1">
+    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Host, daemon and AI accounts</span>
   </button>
 </nav>
 
@@ -85,6 +85,7 @@
   <button id="tab-secrets" hidden>Secrets</button>
   <button id="tab-benchmarks" hidden>Benchmarks</button>
   <button id="tab-knowledge" hidden>Knowledge</button>
+  <button id="tab-infrastructure" hidden>Infrastructure</button>
 </nav>
 </div>
 
@@ -586,6 +587,28 @@
       <div id="knowledge-findings"></div>
       <div class="empty" id="knowledge-no-findings" hidden>No findings.</div>
     </section>
+  </div>
+
+  <div id="view-infrastructure" hidden>
+    <div class="bar">
+      <h2>Infrastructure</h2>
+      <span class="sp"></span>
+      <button class="btn" id="infrastructure-refresh">Refresh</button>
+    </div>
+    <!-- In the markup, not the fetched answer, so it goes on being said when
+         the request fails: this page reads no credential to draw itself. -->
+    <p class="env-note">AI accounts are declared in the root config, never discovered: Factory opens no
+      credential file, keychain or <code>.env</code> to draw this page. An account shows its name, vendor, kind
+      and plan, and the agents that use it -- never a value. An API key's environment variable is shown by
+      name only.</p>
+    <!-- A daemon built before this level existed has no /api/infrastructure
+         and answers a bare 404. That is not a fault, so it is said calmly,
+         in a note of its own, and never in the red error element below. -->
+    <p class="env-note" id="infrastructure-unavailable" hidden>Infrastructure is not available on this
+      daemon: it was built before <code>/api/infrastructure</code> existed. Rebuild and restart the daemon to
+      see the host, the daemon and the AI accounts here.</p>
+    <p class="env-note bad" id="infrastructure-error" hidden></p>
+    <div class="infra-stack" id="infrastructure" hidden></div>
   </div>
   </div>
 </main>
