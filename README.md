@@ -567,7 +567,7 @@ controls:
     evidence:
       - check: knowledge        # a vault page tagged control/cra/annex-i-2-1
       - check: attestation      # a person's recorded word, with an expiry
-      - check: task              # the task's newest run, done within max_age
+      - check: task              # the task's newest *finished* run, done within max_age
         task: sbom-export
         max_age: 30d
 ```
@@ -605,8 +605,11 @@ whichever scope declared it, is always listed rather than left silent: ISO
 nine are evaluated for real: `knowledge` (a vault page tagged
 `control/<framework>/<id>`, or a check's own `tag`), `attestation` (an
 unexpired, unwithdrawn attestation recorded for the control), `task` and
-`workflow` (the task's or workflow's newest run is `done`, within the
-control's effective `max_age` — with none, any done run counts as current),
+`workflow` (the newest *finished* run — done, failed or cancelled; a run
+still in progress is skipped, so a control never reads `open` for as long as
+its own evidence task happens to be running — is `done`, within the
+control's effective `max_age`; with none, any done run counts as current; no
+finished run at all is `open`, naming an in-progress one if there is one),
 and `gate` (a dataset's gated cases — or, with `case`, one named case — all
 `pass` in the newest *settled* bench run of that dataset, within `max_age`;
 `unverified` never counts). `task`/`workflow` name their target in the

@@ -54,6 +54,10 @@
 //! or [`GateFact`] first, and hands the result in on [`Evidence`]. Resolution
 //! happens once per evaluated scope, and only for the names an applicable
 //! check actually references -- never every task or workflow a scope has.
+//! `task` and `workflow` carry a bounded window of recent runs, not just the
+//! newest one, so `evaluate` can skip past a run still in progress to the
+//! newest *finished* one -- a scheduled evidence task must not flip its own
+//! control `open` for as long as it happens to be running.
 //!
 //! `Evidence` grows a field per check kind as each ticket teaches `evaluate`
 //! to read it; every field it has is `#[serde(default)]` so an older caller
@@ -251,9 +255,10 @@ pub enum Check {
     /// Satisfied by an unexpired, unwithdrawn `Attestation` recorded for
     /// this control.
     Attestation,
-    /// A scheduled task's newest run is `done` within `max_age`. `task`
-    /// names a task in the evaluated scope, by id or by exact title; an
-    /// ambiguous title is a [`Finding`], via [`evidence_findings`].
+    /// A scheduled task's newest *finished* run (skipping any still in
+    /// progress) is `done` within `max_age`. `task` names a task in the
+    /// evaluated scope, by id or by exact title; an ambiguous title is a
+    /// [`Finding`], via [`evidence_findings`].
     Task {
         task: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -818,7 +823,7 @@ pub fn parse_expiry(s: &str, now: DateTime<Utc>) -> std::result::Result<DateTime
     Err(bad())
 }
 
-/// Enough about one task's newest run for `evaluate`'s `task` check to judge
+/// Enough about one of a task's runs for `evaluate`'s `task` check to judge
 /// it without reading a `Run` itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunFact {
@@ -840,18 +845,26 @@ pub struct RunFact {
 /// ambiguous title (ids are unique, so that can only happen for a name that
 /// is not one), which [`evidence_findings`] reports as a
 /// [`FindingKind::AmbiguousCheckTarget`] and `evaluate` treats as `open`.
-/// `newest_run` is only ever resolved for the single unambiguous match --
+///
+/// `runs` is only ever resolved for the single unambiguous match --
 /// fetching it for every candidate of an ambiguous name would cost a lookup
-/// `evaluate` can never use.
+/// `evaluate` can never use -- and is a bounded lookback (the engine's own
+/// `RUN_LOOKBACK`), newest first, not the task's whole history: `evaluate`
+/// finds the newest run with a terminal status (`RunStatus::is_terminal`) in
+/// it and ignores every run still in progress, however many of those sit
+/// ahead of it. An in-flight run must never flip a control `open` for as
+/// long as it runs -- a nightly scan's control would otherwise read `open`
+/// for the whole scan, every night -- so `evaluate` only ever asks "is there
+/// a *finished* run, and how did it end", never "is the newest run done".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskFact {
     pub id: String,
     pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub newest_run: Option<RunFact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunFact>,
 }
 
-/// Enough about one workflow's newest run for `evaluate`'s `workflow` check
+/// Enough about one of a workflow's runs for `evaluate`'s `workflow` check
 /// to judge it without reading a `WorkflowRun` itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowRunFact {
@@ -865,13 +878,15 @@ pub struct WorkflowRunFact {
 
 /// The workflow-side twin of [`TaskFact`] -- see it for how
 /// `Evidence::workflows`' `Vec` encodes resolution (empty, one, or an
-/// ambiguous name).
+/// ambiguous name) and how `runs` (bounded, newest first) is read: the
+/// newest run with a terminal status (`WorkflowRunStatus::is_terminal`),
+/// ignoring every one still `Running` ahead of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowFact {
     pub id: String,
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub newest_run: Option<WorkflowRunFact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<WorkflowRunFact>,
 }
 
 /// One case as it stood in a dataset's newest *settled* bench run
@@ -1155,50 +1170,70 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                 None | Some([]) => {
                     open.push(format!("task: no task named `{name}` in this scope"));
                 }
-                Some([fact]) => match &fact.newest_run {
-                    None => {
-                        open.push(format!("task: `{name}` ({}) has never run", fact.id));
-                        open_refs.push(EvidenceRef::task(&fact.id));
-                    }
-                    Some(run) if run.status == RunStatus::Done => match run.ended_at {
-                        Some(ended_at) => {
-                            let refs = [EvidenceRef::task(&fact.id), EvidenceRef::run(&run.id)];
-                            if within_max_age(applied.max_age, ended_at, now) {
-                                satisfied.push(format!(
-                                    "task: `{name}` ({}) run {} done at {ended_at}",
+                Some([fact]) => {
+                    // A run still in progress never decides this check --
+                    // only the newest *terminal* one does, so a nightly
+                    // scan's control never reads `open` for the length of
+                    // the scan. `runs` is newest first, so the terminal one
+                    // is the first entry whose status says so; anything
+                    // ahead of it in the list is still running.
+                    let in_progress = fact.runs.first().filter(|r| !r.status.is_terminal());
+                    let terminal = fact.runs.iter().find(|r| r.status.is_terminal());
+                    match terminal {
+                        Some(run) if run.status == RunStatus::Done => match run.ended_at {
+                            Some(ended_at) => {
+                                let refs = [EvidenceRef::task(&fact.id), EvidenceRef::run(&run.id)];
+                                if within_max_age(applied.max_age, ended_at, now) {
+                                    satisfied.push(format!(
+                                        "task: `{name}` ({}) run {} done at {ended_at}",
+                                        fact.id, run.id
+                                    ));
+                                    satisfied_refs.extend(refs);
+                                } else {
+                                    stale.push(format!(
+                                        "task: `{name}` ({}) run {} done at {ended_at}, older than {}",
+                                        fact.id,
+                                        run.id,
+                                        applied.max_age.expect("stale only ever follows a max_age")
+                                    ));
+                                    stale_refs.extend(refs);
+                                }
+                            }
+                            None => {
+                                open.push(format!(
+                                    "task: `{name}` ({}) run {} is done but has no recorded end time",
                                     fact.id, run.id
                                 ));
-                                satisfied_refs.extend(refs);
-                            } else {
-                                stale.push(format!(
-                                    "task: `{name}` ({}) run {} done at {ended_at}, older than {}",
-                                    fact.id,
-                                    run.id,
-                                    applied.max_age.expect("stale only ever follows a max_age")
-                                ));
-                                stale_refs.extend(refs);
+                                open_refs.push(EvidenceRef::task(&fact.id));
+                                open_refs.push(EvidenceRef::run(&run.id));
                             }
-                        }
-                        None => {
+                        },
+                        Some(run) => {
                             open.push(format!(
-                                "task: `{name}` ({}) run {} is done but has no recorded end time",
-                                fact.id, run.id
+                                "task: `{name}` ({}) newest finished run {} is {}, not done",
+                                fact.id,
+                                run.id,
+                                run.status.as_str()
                             ));
                             open_refs.push(EvidenceRef::task(&fact.id));
                             open_refs.push(EvidenceRef::run(&run.id));
                         }
-                    },
-                    Some(run) => {
-                        open.push(format!(
-                            "task: `{name}` ({}) newest run {} is {}, not done",
-                            fact.id,
-                            run.id,
-                            run.status.as_str()
-                        ));
-                        open_refs.push(EvidenceRef::task(&fact.id));
-                        open_refs.push(EvidenceRef::run(&run.id));
+                        None => match in_progress {
+                            Some(run) => {
+                                open.push(format!(
+                                    "task: `{name}` ({}) run {} in progress, no finished run yet",
+                                    fact.id, run.id
+                                ));
+                                open_refs.push(EvidenceRef::task(&fact.id));
+                                open_refs.push(EvidenceRef::run(&run.id));
+                            }
+                            None => {
+                                open.push(format!("task: `{name}` ({}) has never run", fact.id));
+                                open_refs.push(EvidenceRef::task(&fact.id));
+                            }
+                        },
                     }
-                },
+                }
                 Some(candidates) => {
                     let ids: Vec<&str> = candidates.iter().map(|f| f.id.as_str()).collect();
                     open.push(format!(
@@ -1211,39 +1246,54 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                 None | Some([]) => {
                     open.push(format!("workflow: no workflow named `{name}` in this scope"));
                 }
-                Some([fact]) => match &fact.newest_run {
-                    None => {
-                        open.push(format!("workflow: `{name}` ({}) has never run", fact.id));
-                    }
-                    Some(run) if run.status == WorkflowRunStatus::Done => {
-                        let refs = [EvidenceRef::workflow_run(&run.id)];
-                        if within_max_age(applied.max_age, run.updated_at, now) {
-                            satisfied.push(format!(
-                                "workflow: `{name}` ({}) run {} done at {}",
-                                fact.id, run.id, run.updated_at
-                            ));
-                            satisfied_refs.extend(refs);
-                        } else {
-                            stale.push(format!(
-                                "workflow: `{name}` ({}) run {} done at {}, older than {}",
+                Some([fact]) => {
+                    // Same rule as `task`: a run still `Running` never
+                    // decides this check, only the newest terminal one does.
+                    let in_progress = fact.runs.first().filter(|r| !r.status.is_terminal());
+                    let terminal = fact.runs.iter().find(|r| r.status.is_terminal());
+                    match terminal {
+                        Some(run) if run.status == WorkflowRunStatus::Done => {
+                            let refs = [EvidenceRef::workflow_run(&run.id)];
+                            if within_max_age(applied.max_age, run.updated_at, now) {
+                                satisfied.push(format!(
+                                    "workflow: `{name}` ({}) run {} done at {}",
+                                    fact.id, run.id, run.updated_at
+                                ));
+                                satisfied_refs.extend(refs);
+                            } else {
+                                stale.push(format!(
+                                    "workflow: `{name}` ({}) run {} done at {}, older than {}",
+                                    fact.id,
+                                    run.id,
+                                    run.updated_at,
+                                    applied.max_age.expect("stale only ever follows a max_age")
+                                ));
+                                stale_refs.extend(refs);
+                            }
+                        }
+                        Some(run) => {
+                            open.push(format!(
+                                "workflow: `{name}` ({}) newest finished run {} is {}, not done",
                                 fact.id,
                                 run.id,
-                                run.updated_at,
-                                applied.max_age.expect("stale only ever follows a max_age")
+                                workflow_run_status_str(run.status)
                             ));
-                            stale_refs.extend(refs);
+                            open_refs.push(EvidenceRef::workflow_run(&run.id));
                         }
+                        None => match in_progress {
+                            Some(run) => {
+                                open.push(format!(
+                                    "workflow: `{name}` ({}) run {} in progress, no finished run yet",
+                                    fact.id, run.id
+                                ));
+                                open_refs.push(EvidenceRef::workflow_run(&run.id));
+                            }
+                            None => {
+                                open.push(format!("workflow: `{name}` ({}) has never run", fact.id));
+                            }
+                        },
                     }
-                    Some(run) => {
-                        open.push(format!(
-                            "workflow: `{name}` ({}) newest run {} is {}, not done",
-                            fact.id,
-                            run.id,
-                            workflow_run_status_str(run.status)
-                        ));
-                        open_refs.push(EvidenceRef::workflow_run(&run.id));
-                    }
-                },
+                }
                 Some(candidates) => {
                     let ids: Vec<&str> = candidates.iter().map(|f| f.id.as_str()).collect();
                     open.push(format!(
@@ -2361,7 +2411,7 @@ mod tests {
             vec![TaskFact {
                 id: "task-1".to_string(),
                 title: "sbom-export".to_string(),
-                newest_run: Some(done_run("run-1", now - chrono::Duration::hours(1))),
+                runs: vec![done_run("run-1", now - chrono::Duration::hours(1))],
             }],
         );
         let statuses = evaluate(&[applied], &evidence, now);
@@ -2387,11 +2437,84 @@ mod tests {
             vec![TaskFact {
                 id: "task-1".to_string(),
                 title: "sbom-export".to_string(),
-                newest_run: Some(done_run("run-1", now - chrono::Duration::days(400))),
+                runs: vec![done_run("run-1", now - chrono::Duration::days(400))],
             }],
         );
         let statuses = evaluate(&[applied], &evidence, now);
         assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+    }
+
+    /// The whole point of the in-flight rule: a nightly scan's own run must
+    /// never flip its control `open` for as long as it is running -- the
+    /// older, already-finished run underneath it still decides the status.
+    #[test]
+    fn a_task_check_is_satisfied_by_an_older_done_run_even_with_a_newer_one_in_progress() {
+        let now = Utc::now();
+        let applied = with_max_age(
+            applied_control(
+                "a",
+                vec![Check::Task {
+                    task: "sbom-export".to_string(),
+                    max_age: None,
+                }],
+                Vec::new(),
+            ),
+            "7d",
+        );
+        let mut evidence = Evidence::default();
+        evidence.tasks.insert(
+            "sbom-export".to_string(),
+            vec![TaskFact {
+                id: "task-1".to_string(),
+                title: "sbom-export".to_string(),
+                // Newest first, exactly as `TaskStore::runs` returns them:
+                // the in-progress run is ahead of the finished one.
+                runs: vec![
+                    RunFact {
+                        id: "run-2".to_string(),
+                        status: RunStatus::Running,
+                        started_at: now - chrono::Duration::minutes(5),
+                        ended_at: None,
+                    },
+                    done_run("run-1", now - chrono::Duration::hours(1)),
+                ],
+            }],
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied, "{:?}", statuses[0].status);
+        assert!(statuses[0].refs.contains(&EvidenceRef::run("run-1")));
+        assert!(!statuses[0].refs.contains(&EvidenceRef::run("run-2")), "the in-progress run is never cited as evidence");
+    }
+
+    #[test]
+    fn a_task_check_is_open_with_only_an_in_progress_run_and_says_so() {
+        let now = Utc::now();
+        let applied = applied_control(
+            "a",
+            vec![Check::Task {
+                task: "sbom-export".to_string(),
+                max_age: None,
+            }],
+            Vec::new(),
+        );
+        let mut evidence = Evidence::default();
+        evidence.tasks.insert(
+            "sbom-export".to_string(),
+            vec![TaskFact {
+                id: "task-1".to_string(),
+                title: "sbom-export".to_string(),
+                runs: vec![RunFact {
+                    id: "run-1".to_string(),
+                    status: RunStatus::Running,
+                    started_at: now,
+                    ended_at: None,
+                }],
+            }],
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons()[0].contains("in progress"), "{:?}", statuses[0].status);
+        assert!(statuses[0].refs.contains(&EvidenceRef::run("run-1")), "still worth linking to, even though it cannot satisfy the check");
     }
 
     #[test]
@@ -2414,7 +2537,7 @@ mod tests {
             vec![TaskFact {
                 id: "task-1".to_string(),
                 title: "sbom-export".to_string(),
-                newest_run: Some(done_run("run-1", now - chrono::Duration::days(30))),
+                runs: vec![done_run("run-1", now - chrono::Duration::days(30))],
             }],
         );
         let statuses = evaluate(&[applied], &evidence, now);
@@ -2454,7 +2577,7 @@ mod tests {
             vec![TaskFact {
                 id: "task-1".to_string(),
                 title: "sbom-export".to_string(),
-                newest_run: None,
+                runs: Vec::new(),
             }],
         );
         let statuses = evaluate(&[applied], &evidence, Utc::now());
@@ -2463,7 +2586,7 @@ mod tests {
     }
 
     #[test]
-    fn a_task_check_is_open_when_the_newest_run_is_not_done() {
+    fn a_task_check_is_open_when_the_newest_finished_run_is_not_done() {
         let now = Utc::now();
         let applied = applied_control(
             "a",
@@ -2479,12 +2602,12 @@ mod tests {
             vec![TaskFact {
                 id: "task-1".to_string(),
                 title: "sbom-export".to_string(),
-                newest_run: Some(RunFact {
+                runs: vec![RunFact {
                     id: "run-1".to_string(),
                     status: RunStatus::Failed,
                     started_at: now - chrono::Duration::hours(2),
                     ended_at: Some(now - chrono::Duration::hours(1)),
-                }),
+                }],
             }],
         );
         let statuses = evaluate(&[applied], &evidence, now);
@@ -2509,12 +2632,12 @@ mod tests {
                 TaskFact {
                     id: "task-1".to_string(),
                     title: "nightly sweep".to_string(),
-                    newest_run: None,
+                    runs: Vec::new(),
                 },
                 TaskFact {
                     id: "task-2".to_string(),
                     title: "nightly sweep".to_string(),
-                    newest_run: None,
+                    runs: Vec::new(),
                 },
             ],
         );
@@ -2563,12 +2686,79 @@ mod tests {
             vec![WorkflowFact {
                 id: "wf-1".to_string(),
                 name: "release train".to_string(),
-                newest_run: Some(done_workflow_run("wfr-1", now - chrono::Duration::hours(1))),
+                runs: vec![done_workflow_run("wfr-1", now - chrono::Duration::hours(1))],
             }],
         );
         let statuses = evaluate(&[applied], &evidence, now);
         assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
         assert!(statuses[0].refs.contains(&EvidenceRef::workflow_run("wfr-1")));
+    }
+
+    /// The workflow-side twin of the task in-flight test: a run still
+    /// `Running` ahead of a finished one in `runs` must not stop the older,
+    /// finished run from deciding the status.
+    #[test]
+    fn a_workflow_check_is_satisfied_by_an_older_done_run_even_with_a_newer_one_in_progress() {
+        let now = Utc::now();
+        let applied = with_max_age(
+            applied_control(
+                "a",
+                vec![Check::Workflow {
+                    workflow: "release train".to_string(),
+                    max_age: None,
+                }],
+                Vec::new(),
+            ),
+            "7d",
+        );
+        let mut evidence = Evidence::default();
+        evidence.workflows.insert(
+            "release train".to_string(),
+            vec![WorkflowFact {
+                id: "wf-1".to_string(),
+                name: "release train".to_string(),
+                runs: vec![
+                    WorkflowRunFact {
+                        id: "wfr-2".to_string(),
+                        status: WorkflowRunStatus::Running,
+                        updated_at: now - chrono::Duration::minutes(5),
+                    },
+                    done_workflow_run("wfr-1", now - chrono::Duration::hours(1)),
+                ],
+            }],
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied, "{:?}", statuses[0].status);
+        assert!(statuses[0].refs.contains(&EvidenceRef::workflow_run("wfr-1")));
+    }
+
+    #[test]
+    fn a_workflow_check_is_open_with_only_an_in_progress_run_and_says_so() {
+        let now = Utc::now();
+        let applied = applied_control(
+            "a",
+            vec![Check::Workflow {
+                workflow: "release train".to_string(),
+                max_age: None,
+            }],
+            Vec::new(),
+        );
+        let mut evidence = Evidence::default();
+        evidence.workflows.insert(
+            "release train".to_string(),
+            vec![WorkflowFact {
+                id: "wf-1".to_string(),
+                name: "release train".to_string(),
+                runs: vec![WorkflowRunFact {
+                    id: "wfr-1".to_string(),
+                    status: WorkflowRunStatus::Running,
+                    updated_at: now,
+                }],
+            }],
+        );
+        let statuses = evaluate(&[applied], &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons()[0].contains("in progress"), "{:?}", statuses[0].status);
     }
 
     #[test]
@@ -2591,7 +2781,7 @@ mod tests {
             vec![WorkflowFact {
                 id: "wf-1".to_string(),
                 name: "release train".to_string(),
-                newest_run: Some(done_workflow_run("wfr-1", now - chrono::Duration::days(30))),
+                runs: vec![done_workflow_run("wfr-1", now - chrono::Duration::days(30))],
             }],
         );
         let statuses = evaluate(&[applied], &evidence, now);
@@ -2630,12 +2820,12 @@ mod tests {
                 WorkflowFact {
                     id: "wf-1".to_string(),
                     name: "release train".to_string(),
-                    newest_run: None,
+                    runs: Vec::new(),
                 },
                 WorkflowFact {
                     id: "wf-2".to_string(),
                     name: "release train".to_string(),
-                    newest_run: None,
+                    runs: Vec::new(),
                 },
             ],
         );
@@ -2810,7 +3000,7 @@ mod tests {
             vec![TaskFact {
                 id: "task-1".to_string(),
                 title: "sbom-export".to_string(),
-                newest_run: None,
+                runs: Vec::new(),
             }],
         );
         assert_eq!(evidence_findings(&evidence, "demo"), Vec::new());

@@ -24,6 +24,16 @@ use factory_core::workflow::WorkflowDefinition;
 use crate::access::Caller;
 use crate::engine::Engine;
 
+/// How many of a task's or workflow's most recent runs `task_fact`/
+/// `workflow_fact` fetch, newest first, so `evaluate` can skip past any
+/// still in progress to the newest one that actually finished (`policy::
+/// TaskFact`/`WorkflowFact`'s own doc comments). A task or workflow
+/// ordinarily has at most one run in flight at a time, so this only has to
+/// cover that plus headroom for the unusual case -- not the whole history,
+/// which `TaskStore::runs`/`WorkflowStore::runs` would otherwise have to
+/// load in full.
+const RUN_LOOKBACK: u32 = 20;
+
 /// Every distinct dataset name a `gate` check among `applied`'s controls
 /// names -- what a caller resolving `gate` facts (`Engine::gate_facts_for`)
 /// has to ask about, and no more.
@@ -133,8 +143,8 @@ impl Engine {
     /// at most one match), and otherwise by exact title, which may match
     /// more than one. `evaluate` treats more than one match as an ambiguous
     /// name (`TaskFact`'s own doc comment), so only the sole unambiguous
-    /// match's newest run is worth fetching -- a run for every candidate of
-    /// an ambiguous name would cost a lookup nothing ever reads.
+    /// match's runs are worth fetching -- a lookup for every candidate of an
+    /// ambiguous name would cost something nothing ever reads.
     async fn task_facts_for(&self, scoped: &[Task], name: &str) -> Result<Vec<policy::TaskFact>> {
         if let Some(task) = scoped.iter().find(|t| t.id == name) {
             return Ok(vec![self.task_fact(task).await?]);
@@ -148,22 +158,33 @@ impl Engine {
             .map(|t| policy::TaskFact {
                 id: t.id.clone(),
                 title: t.title.clone(),
-                newest_run: None,
+                runs: Vec::new(),
             })
             .collect())
     }
 
     async fn task_fact(&self, task: &Task) -> Result<policy::TaskFact> {
-        let newest_run = self.store.runs(&task.id, 1).await?.into_iter().next().map(|r| policy::RunFact {
-            id: r.id,
-            status: r.status,
-            started_at: r.started_at,
-            ended_at: r.ended_at,
-        });
+        // Newest first (`TaskStore::runs`'s own contract), bounded to
+        // `RUN_LOOKBACK` rather than the task's whole history: `evaluate`
+        // only ever needs to walk past however many runs are still in
+        // progress to find the newest *finished* one, and a task normally
+        // has at most one of those at a time.
+        let runs = self
+            .store
+            .runs(&task.id, RUN_LOOKBACK)
+            .await?
+            .into_iter()
+            .map(|r| policy::RunFact {
+                id: r.id,
+                status: r.status,
+                started_at: r.started_at,
+                ended_at: r.ended_at,
+            })
+            .collect();
         Ok(policy::TaskFact {
             id: task.id.clone(),
             title: task.title.clone(),
-            newest_run,
+            runs,
         })
     }
 
@@ -181,27 +202,28 @@ impl Engine {
             .map(|d| policy::WorkflowFact {
                 id: d.id.clone(),
                 name: d.name.clone(),
-                newest_run: None,
+                runs: Vec::new(),
             })
             .collect())
     }
 
+    /// The workflow-side twin of `task_fact` -- see `RUN_LOOKBACK`.
     async fn workflow_fact(&self, def: &WorkflowDefinition, scope: &str) -> Result<policy::WorkflowFact> {
-        let newest_run = self
+        let runs = self
             .workflows
-            .runs(Some(&def.id), Some(scope), 1)
+            .runs(Some(&def.id), Some(scope), RUN_LOOKBACK)
             .await?
             .into_iter()
-            .next()
             .map(|r| policy::WorkflowRunFact {
                 id: r.id,
                 status: r.status,
                 updated_at: r.updated_at,
-            });
+            })
+            .collect();
         Ok(policy::WorkflowFact {
             id: def.id.clone(),
             name: def.name.clone(),
-            newest_run,
+            runs,
         })
     }
 
