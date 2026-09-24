@@ -1442,7 +1442,7 @@ fn describe_check(check: &factory_core::policy::Check) -> String {
         ),
         Check::Roles { forbid } => format!(
             "roles: forbid {}",
-            forbid.iter().map(|g| format!("{g:?}")).collect::<Vec<_>>().join(", ")
+            forbid.iter().map(|g| g.as_str()).collect::<Vec<_>>().join(", ")
         ),
         Check::Sandbox => "sandbox".to_string(),
         Check::Secrets { absent } => {
