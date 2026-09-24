@@ -755,6 +755,32 @@ pub struct Withdrawal {
     pub reason: Option<String>,
 }
 
+/// Turn what a person typed for an attestation's expiry into the absolute
+/// `expires_at` `Request::PolicyAttest` carries on the wire: `30d`/`12w`
+/// (this module's own [`Duration`] grammar, relative to `now`), a bare date
+/// (`2027-01-01`, midnight UTC), or a full RFC3339 timestamp. `#78`'s CLI
+/// and HTTP interface both accept the same three forms, so this is the one
+/// place the grammar is written down rather than two -- pure, like the rest
+/// of this module: `now` is a parameter, never read off the clock.
+pub fn parse_expiry(s: &str, now: DateTime<Utc>) -> std::result::Result<DateTime<Utc>, String> {
+    let bad = || {
+        format!(
+            "{s:?} is not a duration like 30d or 12w, a date like 2027-01-01, or an RFC3339 timestamp"
+        )
+    };
+    if let Ok(d) = s.parse::<Duration>() {
+        return Ok(now + chrono::Duration::hours(d.as_hours() as i64));
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let midnight = date.and_hms_opt(0, 0, 0).ok_or_else(bad)?;
+        return Ok(midnight.and_utc());
+    }
+    Err(bad())
+}
+
 /// Every piece of evidence `evaluate` has to check controls against. `#77`,
 /// `#81`, and `#82` each add a field here as they teach `evaluate` another
 /// check kind (a task/workflow run, a gate verdict, a role snapshot, a
@@ -1184,6 +1210,48 @@ mod tests {
         assert!("30m".parse::<Duration>().is_err());
         assert!("30".parse::<Duration>().is_err());
         assert!("abc".parse::<Duration>().is_err());
+    }
+
+    // -- parse_expiry --------------------------------------------------------
+
+    #[test]
+    fn parse_expiry_accepts_a_relative_duration() {
+        let now = "2026-09-24T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            parse_expiry("30d", now).unwrap(),
+            now + chrono::Duration::days(30)
+        );
+        assert_eq!(
+            parse_expiry("12w", now).unwrap(),
+            now + chrono::Duration::weeks(12)
+        );
+    }
+
+    #[test]
+    fn parse_expiry_accepts_a_bare_date_as_midnight_utc() {
+        let now = "2026-09-24T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            parse_expiry("2027-01-01", now).unwrap(),
+            "2027-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_expiry_accepts_an_rfc3339_timestamp() {
+        let now = "2026-09-24T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            parse_expiry("2027-01-01T08:30:00Z", now).unwrap(),
+            "2027-01-01T08:30:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_expiry_refuses_anything_else() {
+        let now = Utc::now();
+        let err = parse_expiry("soon", now).unwrap_err();
+        assert!(err.contains("soon"), "{err}");
+        assert!(parse_expiry("", now).is_err());
+        assert!(parse_expiry("2027-13-40", now).is_err());
     }
 
     // -- load_all ----------------------------------------------------------
