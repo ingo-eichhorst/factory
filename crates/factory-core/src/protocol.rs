@@ -236,6 +236,22 @@ pub enum Request {
     /// `Environment` -- see `knowledge::index`, which does the actual walk.
     #[serde(rename = "knowledge")]
     Knowledge,
+    /// Search the vault through the instance's knowledge provider
+    /// (`daemon.knowledge_provider`). Read-only and open to every agent,
+    /// like `Knowledge`. Hits are page ids with a reason, never page text --
+    /// see `adapter::KnowledgeProvider`. `limit` absent means
+    /// `DEFAULT_SEARCH_LIMIT`, and the daemon caps it at `MAX_SEARCH_LIMIT`.
+    #[serde(rename = "knowledge.search")]
+    KnowledgeSearch {
+        #[serde(default)]
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
     /// Bulk-copy a directory tree into the vault, preserving relative paths
     /// so `[[area/page]]` still resolves afterwards. The daemon does the
     /// copy -- the CLI and the daemon share a machine and a user, so the CLI
@@ -430,6 +446,15 @@ pub enum Payload {
         documents: Vec<Document>,
         gaps: Vec<Gap>,
         findings: Vec<Finding>,
+    },
+    /// The answer to `Request::KnowledgeSearch`, best first, with the name of
+    /// the provider that ranked it. `vault` is the vault's absolute path, so
+    /// a hit's page is `<vault>/<page>.md` -- the one step from an id to the
+    /// file an agent then opens for itself.
+    KnowledgeHits {
+        provider: String,
+        vault: String,
+        hits: Vec<crate::adapter::KnowledgeHit>,
     },
     /// The result of `Request::KnowledgeImport`/`KnowledgeAdd`/
     /// `KnowledgeWriteFile` -- never a body: `copied` and the rest are

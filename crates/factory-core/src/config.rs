@@ -218,6 +218,11 @@ pub struct DaemonConfig {
     /// Which task-store adapter backs the CRUD contract.
     #[serde(default = "default_store")]
     pub task_store: String,
+    /// Which knowledge provider answers `factory knowledge search`. One for
+    /// the whole instance, never per scope: the vault is company-wide, and
+    /// so is the search over it.
+    #[serde(default = "default_knowledge_provider")]
+    pub knowledge_provider: String,
     /// Interfaces the daemon mounts at startup.
     #[serde(default = "default_interfaces")]
     pub interfaces: Vec<InterfaceConfig>,
@@ -313,6 +318,9 @@ impl Default for ForemanConfig {
 fn default_store() -> String {
     "sqlite".into()
 }
+fn default_knowledge_provider() -> String {
+    "keyword".into()
+}
 fn default_tick() -> u64 {
     5
 }
@@ -358,6 +366,7 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             task_store: default_store(),
+            knowledge_provider: default_knowledge_provider(),
             interfaces: default_interfaces(),
             tick_seconds: default_tick(),
             task_timeout_seconds: default_task_timeout(),

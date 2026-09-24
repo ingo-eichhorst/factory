@@ -4,7 +4,7 @@ A daemon that gives tasks to coding agents and watches what happens.
 
 ## Layout
 
-    crates/factory-core      domain, events, wire protocol, the four adapter traits
+    crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
     crates/factory-cli       the `factory` binary
@@ -25,7 +25,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     examples/plugins         a worked example of an out-of-process adapter
 
 `README.md` explains the architecture and the plugin protocol. Read it before
-changing an adapter trait -- those four traits are the whole point of the shape.
+changing an adapter trait -- those five traits are the whole point of the shape.
 
 ## Working here
 

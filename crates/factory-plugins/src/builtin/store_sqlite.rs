@@ -424,6 +424,9 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.retry {
                 task.retry = Some(v);
             }
+            if let Some(v) = patch.knowledge_hints {
+                task.knowledge_hints = v;
+            }
             if patch.clear_pending_retry {
                 task.pending_retry = None;
             }
@@ -878,6 +881,7 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             worktree: false,
+            knowledge_hints: false,
             workflow_origin: None,
             bench_origin: None,
             retry: None,

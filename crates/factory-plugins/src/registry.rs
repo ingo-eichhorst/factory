@@ -1,14 +1,14 @@
 //! What the daemon has to choose from. Built-ins are registered first; plugins
 //! are discovered after and may not take a name that is already taken.
 
-use factory_core::adapter::{AdapterKind, Agent, AgentRuntime, TaskStore};
+use factory_core::adapter::{AdapterKind, Agent, AgentRuntime, KnowledgeProvider, TaskStore};
 use factory_core::error::{FactoryError, Result};
 use factory_core::protocol::{AdapterEntry, AdapterList};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::builtin::{HarnessAgent, HerdrRuntime, ShellAgent};
+use crate::builtin::{HarnessAgent, HerdrRuntime, KeywordKnowledge, ShellAgent};
 use crate::host::PluginProcess;
 use crate::manifest;
 use crate::proxy::{PluginAgent, PluginStore};
@@ -18,6 +18,7 @@ pub struct Registry {
     agents: BTreeMap<String, Arc<dyn Agent>>,
     runtimes: BTreeMap<String, Arc<dyn AgentRuntime>>,
     stores: BTreeMap<String, Arc<dyn TaskStore>>,
+    knowledge: BTreeMap<String, Arc<dyn KnowledgeProvider>>,
     sources: BTreeMap<(&'static str, String), String>,
     processes: Vec<Arc<PluginProcess>>,
     /// Plugins that could not be loaded, in the words a person can act on.
@@ -34,6 +35,7 @@ impl Registry {
         r.add_agent(Arc::new(HarnessAgent::opencode()), "builtin");
         r.add_agent(Arc::new(ShellAgent), "builtin");
         r.add_runtime(Arc::new(HerdrRuntime::new()), "builtin");
+        r.add_knowledge(Arc::new(KeywordKnowledge), "builtin");
         r
     }
 
@@ -55,6 +57,12 @@ impl Registry {
         self.stores.insert(store.name().to_string(), store);
     }
 
+    pub fn add_knowledge(&mut self, provider: Arc<dyn KnowledgeProvider>, source: &str) {
+        self.sources
+            .insert(("knowledge", provider.name().to_string()), source.to_string());
+        self.knowledge.insert(provider.name().to_string(), provider);
+    }
+
     /// Load every plugin under `dir`. Nothing here can fail the daemon: a
     /// plugin that will not load becomes a problem to report, not a panic.
     pub async fn load_plugins(&mut self, dir: &Path) {
@@ -68,6 +76,7 @@ impl Registry {
                 AdapterKind::Agent => self.agents.contains_key(&name),
                 AdapterKind::Runtime => self.runtimes.contains_key(&name),
                 AdapterKind::Task => self.stores.contains_key(&name),
+                AdapterKind::Knowledge => self.knowledge.contains_key(&name),
                 AdapterKind::Interface => false,
             };
             if taken {
@@ -111,6 +120,15 @@ impl Registry {
                     proc.shutdown().await;
                     continue;
                 }
+                AdapterKind::Knowledge => {
+                    self.problems.push(format!(
+                        "{}: knowledge plugins are not wired up yet -- the seam is \
+                         there, the proxy is not",
+                        plugin.manifest_path.display()
+                    ));
+                    proc.shutdown().await;
+                    continue;
+                }
             }
             self.processes.push(proc);
         }
@@ -147,6 +165,14 @@ impl Registry {
         })
     }
 
+    pub fn knowledge(&self, name: &str) -> Result<Arc<dyn KnowledgeProvider>> {
+        self.knowledge.get(name).cloned().ok_or_else(|| FactoryError::NoSuchAdapter {
+            kind: "knowledge",
+            name: name.to_string(),
+            available: keys(&self.knowledge),
+        })
+    }
+
     pub fn list(&self) -> AdapterList {
         let mut adapters = Vec::new();
         for (name, a) in &self.agents {
@@ -157,6 +183,9 @@ impl Registry {
         }
         for (name, s) in &self.stores {
             adapters.push(self.entry("task", name, s.description()));
+        }
+        for (name, k) in &self.knowledge {
+            adapters.push(self.entry("knowledge", name, k.description()));
         }
         AdapterList { adapters }
     }

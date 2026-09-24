@@ -503,6 +503,13 @@
     <p class="env-note" id="knowledge-scope-note"></p>
     <p class="env-note bad" id="knowledge-error" hidden></p>
     <div class="empty" id="knowledge-empty" hidden></div>
+    <form class="know-ask" id="knowledge-ask" hidden>
+      <input type="search" id="knowledge-ask-text" placeholder="Search the way an agent does: words, #tags"
+        aria-label="Search the knowledge base through its provider">
+      <button class="btn primary" type="submit">Search</button>
+      <button class="btn" type="button" id="knowledge-ask-clear" hidden>Clear</button>
+    </form>
+    <section class="know-results" id="knowledge-results" aria-live="polite" hidden></section>
     <div class="know-shell" id="knowledge-shell">
       <section class="know-graph-wrap">
         <div class="know-toolbar" id="knowledge-toolbar">

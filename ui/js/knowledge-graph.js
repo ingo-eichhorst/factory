@@ -319,10 +319,24 @@ export function matchesSearch(node, query) {
 /// instead of dimming the rest of the graph, since a default first-load
 /// selection (or a page found by search) should not make most of a small
 /// vault look greyed out.
-export function isNodeDimmed(node, query, focus, neighbours) {
+///
+/// `hits`, when given, is the set of page ids a provider search returned
+/// (the "Search" form above the graph, not the filter box in its toolbar):
+/// while it is showing, everything else is dimmed, whatever is hovered, so
+/// the answer stays readable on the graph until it is cleared. The filter
+/// box still wins over it -- typing there is the more recent question.
+export function isNodeDimmed(node, query, focus, neighbours, hits) {
   if (query) return !matchesSearch(node, query);
+  if (hits) return !hits.has(node.id);
   if (!focus) return false;
   return node.id !== focus && !(neighbours && neighbours.has(node.id));
+}
+
+/// The URL a provider search is asked at: the words as typed, since the
+/// provider reads `#tag` and plain words alike, and an explicit limit so the
+/// page shows the same number of hits whatever the daemon's default becomes.
+export function knowledgeSearchUrl(text, limit = 20) {
+  return `/api/knowledge/search?q=${encodeURIComponent(text.trim())}&limit=${limit}`;
 }
 
 /// Six colour tokens (the same `--ly1`..`--ly6` cycle the site plan's

@@ -1,5 +1,5 @@
 //! The vocabulary every part of Factory shares: the domain, the event stream,
-//! the wire protocol, and the four adapter traits. Nothing here knows about
+//! the wire protocol, and the five adapter traits. Nothing here knows about
 //! sqlite, herdr, axum, or any other concrete choice.
 
 pub mod adapter;

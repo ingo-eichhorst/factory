@@ -10,9 +10,9 @@ API, and a web UI.
 
 This is a prototype. It runs, and the parts that do not work yet say so.
 
-## The four seams
+## The five seams
 
-Everything Factory can be pointed at something else is one of four traits, and
+Everything Factory can be pointed at something else is one of five traits, and
 the daemon cannot tell a built-in implementation from a plugin:
 
 | Adapter | What it decides | Ships with |
@@ -21,6 +21,7 @@ the daemon cannot tell a built-in implementation from a plugin:
 | **Agent runtime** | where agents actually run | `herdr` |
 | **Task store** | where tasks live — the CRUD contract, chosen per scope | `sqlite` |
 | **Interface** | how the outside reaches the daemon | `cli` (unix socket), `http` (REST + WebSocket + UI) |
+| **Knowledge provider** | how the knowledge vault is searched — read side only | `keyword` |
 
 The traits are in `crates/factory-core/src/adapter/`. Nothing in core knows
 about sqlite, herdr, axum, or any other concrete choice.
@@ -415,6 +416,51 @@ the one place `Grant::KnowledgeWrite` gates: the knowledge base is
 company-wide, so only the owner or a foreman whose own scope *is* the
 instance root may hold it.
 
+**Searching goes through a provider.** `factory knowledge search <words>
+[--tag <tag>]... [--scope <scope>] [--limit <n>]` and
+`GET /api/knowledge/search?q=&tags=a,b&scope=&limit=` ask the instance's
+knowledge provider — `daemon.knowledge_provider`, `keyword` unless the config
+names another — and answer with page ids, titles and a one-line reason each
+matched, best first, plus the vault's path so a hit is one step from its
+file. Never page text: the agent opens the file itself. Searching is a read,
+open to every agent, and the guide says so; an agent that names no scope
+searches from its own. The limit defaults to 10 and is capped at 50, and a
+search with neither words nor tags is refused.
+
+The built-in `keyword` provider reads only what the index already carries.
+A query term that is one of a page's tags (or the last segment of a nested
+one) scores 4, a word of its title 2, a segment of its path 1 when the title
+did not already have it; a matched page whose `area` is the asking scope's
+last segment gains 1, and every page one link away from a matched page, in
+either direction, gains 1 per such page. `--tag` filters matches and
+neighbours alike, and on its own is the whole question. Equal scores are
+ordered by page id, so the same vault and query always give the same list.
+A word that appears only in a page's text is not found — that is a different
+provider's job. Writes do not pass through a provider: `import`, `add` and
+the upload keep their checks and tell the provider afterwards which files
+they wrote, and a provider that cannot keep up is a warning, never a failed
+write. A provider keeps at most a derived index, rebuildable from the vault.
+See `.specs/adr/0003-knowledge-search.md` in the company repository.
+
+**A task can also be handed pages instead of asking.** With
+`knowledge_hints` on (`factory task create --knowledge-hints`, `task edit
+--knowledge-hints`/`--no-knowledge-hints`, or the Knowledge box on the task
+form) every run of the task is searched for once, as it is dispatched: its
+title and instructions are the query, its scope is the asking scope, and the
+top five pages travel on the run's binding. A harness agent's prompt lists
+them as file paths with the reason each matched; the shell agent gets them as
+a `{vault, hits}` JSON file whose path it exports as `FACTORY_KNOWLEDGE_FILE`.
+The run's journal records exactly which pages it was handed (a `knowledge`
+entry, with the hits as its data), so a prompt can still be explained once the
+vault has moved on. Off by default. A search that fails or matches nothing is
+journaled and the run starts anyway -- hints are a help, never a reason not
+to start.
+
+The Knowledge tab asks the same provider from the Search form above the
+graph: the ranked answer is listed with each page's reason, and the hits stay
+lit in the graph until the answer is cleared. The filter box in the graph's
+own toolbar is unchanged -- it matches labels in the browser and asks nobody.
+
 ## Benchmarks
 
 **v1 declared and displayed configurations and ran nothing. v2 adds datasets
@@ -799,7 +845,9 @@ runtime should bring the agent up — either a harness the runtime knows by name
 (`{"kind": {"named": "gemini"}}`) or a command to run in the session
 (`{"kind": {"command": ["my-agent", "--headless"]}}`). `agent.prompt` returns
 the text to submit. Both are given the task, the working directory, the path to
-the `factory` binary, the callback token, `reporting_contract` — the exact
+the `factory` binary, the callback token, the knowledge pages the run was
+handed (`knowledge` on the binding, only when the task asked for them),
+`reporting_contract` — the exact
 wording the built-in agents use to say how to report back — and
 `factory_guide` — the same wording they use to say what Factory is, who this
 agent is, and which commands its role allows. Paste both rather than
@@ -832,6 +880,7 @@ HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`,
 `GET /api/runs/{id}/entries`, `GET /api/runs/{id}/output`, `GET /api/agents`,
 `GET /api/agent-runtime`, `GET /api/environment`, `GET /api/knowledge`,
+`GET /api/knowledge/search?q=&tags=&scope=&limit=`,
 `PUT /api/knowledge/files?path=&overwrite=` (raw bytes, its own 50 MiB body
 limit), `GET /api/benchmarks`, dataset CRUD under `/api/datasets` (plus
 `POST /api/datasets/{name}/cases`, `.../import` and `.../from-tasks`, and
@@ -1010,9 +1059,10 @@ unchanged.
 
 ## What this prototype does not do yet
 
-- **Runtime and interface plugins.** The manifest accepts `kind: runtime` and
-  `kind: interface`, and the daemon says plainly that it will not load them.
-  The traits are there; the proxies are not.
+- **Runtime, interface and knowledge plugins.** The manifest accepts
+  `kind: runtime`, `kind: interface` and `kind: knowledge`, and the daemon says
+  plainly that it will not load them. The traits are there; the proxies are
+  not.
 - **No schema migrations.** The database carries a version; one written by a
   different version is dropped and rebuilt. The daemon warns when it does this.
   Fine for a prototype, not for anything you would miss.
@@ -1055,7 +1105,7 @@ unchanged.
 
 ## Layout
 
-    crates/factory-core      domain, events, wire protocol, the four adapter traits
+    crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
     crates/factory-cli       the `factory` binary

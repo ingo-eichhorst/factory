@@ -53,6 +53,7 @@ export function openEdit(task) {
         timeout_seconds: task.timeout_seconds,
         labelText: Object.entries(task.labels || {}).map(([k, v]) => `${k}=${v}`).join("\n"),
         worktree: task.worktree,
+        knowledge_hints: task.knowledge_hints,
         editing: true,
       })}
       <div class="err" id="c-err"></div>
@@ -171,6 +172,12 @@ export function taskFields(v) {
       <span>Work in its own git worktree</span>
     </div>
     <div class="sub" id="c-worktree-sub">${worktreeHint(capable, reason, editing)}</div>
+    <label for="c-knowledge">Knowledge</label>
+    <div class="checkrow">
+      <input type="checkbox" id="c-knowledge" ${v.knowledge_hints ? "checked" : ""}>
+      <span>Hand each run the knowledge pages that match this task</span>
+    </div>
+    <div class="sub">Searched when a run starts, from the title and instructions. The agent gets paths, not page text.</div>
     <label for="c-schedule">Schedule <span class="sub" style="text-transform:none">(blank = manual)</span></label>
     <input id="c-schedule" placeholder="every 5m  ·  0 9 * * 1-5" value="${esc(v.scheduleText || "")}">
     <label for="c-timezone">Timezone <span class="sub" style="text-transform:none">cron only · blank = UTC</span></label>
@@ -236,6 +243,9 @@ export function readTaskFields() {
     ack_timeout_seconds: num("c-ack"),
     timeout_seconds: num("c-timeout"),
     labels,
+    // Sent either way: a create reads false as off, and an edit that
+    // unticks the box has to say so -- absent would mean "leave alone".
+    knowledge_hints: $("c-knowledge").checked,
   };
 }
 

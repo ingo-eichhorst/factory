@@ -6,6 +6,7 @@ use factory_core::adapter::agent::{
     truncate_tail, Agent, AgentContext, LaunchKind, LaunchSpec, UpstreamOutput,
     UPSTREAM_RESULT_BYTE_CAP,
 };
+use factory_core::adapter::KnowledgeHints;
 use factory_core::error::{FactoryError, Result};
 
 /// An interactive coding agent the runtime can start by name.
@@ -174,6 +175,13 @@ impl Agent for HarnessAgent {
             prompt.push('\n');
             prompt.push_str(&upstream_section(&binding.upstream));
         }
+        // Task content too: which pages of the company's knowledge base
+        // this task's own words matched, searched once at dispatch. Paths
+        // and reasons, never page text -- the agent opens what it needs.
+        if let Some(hints) = &binding.knowledge {
+            prompt.push('\n');
+            prompt.push_str(&knowledge_section(hints));
+        }
         prompt.push_str(&format!(
             "\n{instructions}\n\
              \n\
@@ -249,6 +257,19 @@ fn upstream_section(upstream: &[UpstreamOutput]) -> String {
     out
 }
 
+/// The section a harness agent's prompt gets when its task asked for
+/// knowledge hints and something matched.
+fn knowledge_section(hints: &KnowledgeHints) -> String {
+    let mut out = String::from(
+        "Pages in the company knowledge base that matched this task. They are \
+         not included here -- open the ones that look useful before you start:\n\n",
+    );
+    for hit in &hints.hits {
+        out.push_str(&format!("- {} -- {} ({})\n", hints.path_of(hit), hit.title, hit.why));
+    }
+    out
+}
+
 /// Not an AI agent at all: runs the task's instructions as a shell command and
 /// reports the outcome itself. It exists so the dispatch path -- scope, launch,
 /// prompt, callback, event -- can be exercised end to end without spending a
@@ -273,6 +294,9 @@ impl Agent for ShellAgent {
         let mut env = ctx.env();
         if let Some(path) = ctx.write_upstream_file()? {
             env.insert("FACTORY_UPSTREAM_FILE".into(), path.display().to_string());
+        }
+        if let Some(path) = ctx.write_knowledge_file()? {
+            env.insert("FACTORY_KNOWLEDGE_FILE".into(), path.display().to_string());
         }
         Ok(LaunchSpec {
             kind: LaunchKind::Command(Vec::new()),
@@ -301,6 +325,13 @@ impl Agent for ShellAgent {
             .write_upstream_file()?
             .and_then(|path| shell_single_quote(&path.display().to_string()))
             .map(|quoted| format!("export FACTORY_UPSTREAM_FILE={quoted}\n"))
+            .unwrap_or_default();
+        // The knowledge hints, the same way and for the same reason: a JSON
+        // file of `{vault, hits}` a command can read, never spliced in.
+        let export_knowledge = ctx
+            .write_knowledge_file()?
+            .and_then(|path| shell_single_quote(&path.display().to_string()))
+            .map(|quoted| format!("export FACTORY_KNOWLEDGE_FILE={quoted}\n"))
             .unwrap_or_default();
 
         // Everything the report needs -- the running/done/failed calls, the
@@ -339,7 +370,7 @@ impl Agent for ShellAgent {
              _factory_rc=$(mktemp \"${{TMPDIR:-/tmp}}/factory-rc-XXXXXX\")\n\
              \"$_factory_bin\" task report \"$_factory_id\" --status running --message 'shell agent started' >/dev/null\n\
              {{ (\n\
-             {export_upstream}{command}\n\
+             {export_upstream}{export_knowledge}{command}\n\
              ); echo $? > \"$_factory_rc\"; }} | tee \"$_factory_out\"\n\
              _factory_code=$(cat \"$_factory_rc\")\n\
              if [ \"$_factory_code\" = 0 ]; then\n\
@@ -421,6 +452,7 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             worktree: true,
+            knowledge_hints: false,
             workflow_origin: None,
             bench_origin: None,
             retry: None,
@@ -449,6 +481,7 @@ mod tests {
                 token: "tok".into(),
                 worktree_branch,
                 upstream: Vec::new(),
+                knowledge: None,
             }),
             identity_token: None,
             role: None,
@@ -842,6 +875,56 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&expected_path).unwrap()).unwrap();
         assert_eq!(written.len(), 1);
         assert_eq!(written[0].result.as_deref(), Some("build succeeded"));
+        std::fs::remove_dir_all(&context.guides_dir).ok();
+    }
+
+    fn ctx_with_knowledge() -> AgentContext {
+        let mut context = ctx(None);
+        context.task.as_mut().unwrap().knowledge = Some(KnowledgeHints {
+            vault: "/co/.factory/knowledge".into(),
+            hits: vec![factory_core::adapter::KnowledgeHit {
+                page: "clients/acme".into(),
+                title: "Acme GmbH".into(),
+                score: 4.0,
+                why: "tags: invoicing".into(),
+            }],
+        });
+        context
+    }
+
+    #[tokio::test]
+    async fn a_harness_prompt_lists_the_knowledge_pages_by_path_and_reason() {
+        let prompt = HarnessAgent::claude_code().prompt(&ctx_with_knowledge()).await.unwrap();
+        assert!(prompt.contains("company knowledge base"), "{prompt}");
+        assert!(
+            prompt.contains("- /co/.factory/knowledge/clients/acme.md -- Acme GmbH (tags: invoicing)"),
+            "{prompt}"
+        );
+        let hints_at = prompt.find("company knowledge base").unwrap();
+        let contract_at = prompt.find("Report progress").unwrap();
+        assert!(hints_at < contract_at, "task content comes before the reporting contract");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_without_knowledge_hints_says_nothing_about_them() {
+        let prompt = HarnessAgent::claude_code().prompt(&ctx(None)).await.unwrap();
+        assert!(!prompt.contains("knowledge base"), "{prompt}");
+        let launch = ShellAgent.launch_spec(&ctx(None)).await.unwrap();
+        assert!(!launch.env.contains_key("FACTORY_KNOWLEDGE_FILE"));
+    }
+
+    #[tokio::test]
+    async fn the_shell_agent_exports_the_knowledge_file_in_its_launch_and_its_script() {
+        let context = ctx_with_knowledge();
+        let launch = ShellAgent.launch_spec(&context).await.unwrap();
+        let path = launch.env.get("FACTORY_KNOWLEDGE_FILE").expect("exported for herdr's own --env").clone();
+
+        ShellAgent.prompt(&context).await.unwrap();
+        let script = std::fs::read_to_string(context.shell_script_path().unwrap()).unwrap();
+        assert!(script.contains(&format!("export FACTORY_KNOWLEDGE_FILE='{path}'")), "{script}");
+
+        let written: KnowledgeHints = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written, context.task.as_ref().unwrap().knowledge.clone().unwrap());
         std::fs::remove_dir_all(&context.guides_dir).ok();
     }
 

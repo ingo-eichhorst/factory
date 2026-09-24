@@ -121,6 +121,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
         .route("/api/knowledge", get(knowledge))
+        .route("/api/knowledge/search", get(knowledge_search))
         // Its own body limit, scoped to this one route with a nested router:
         // the browser's "Add documents" upload sends raw bytes, up to 50 MiB,
         // and every other route here still gets axum's ordinary default.
@@ -302,6 +303,45 @@ async fn environment(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn knowledge(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Knowledge).await
+}
+
+#[derive(serde::Deserialize)]
+struct KnowledgeSearchQuery {
+    #[serde(default)]
+    q: String,
+    /// Comma-separated, since a query string's repeated keys do not
+    /// deserialize into a list here.
+    #[serde(default)]
+    tags: String,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /api/knowledge/search?q=&tags=a,b&scope=&limit=` -- page ids and why
+/// they matched, never page text.
+async fn knowledge_search(
+    State(engine): State<Arc<Engine>>,
+    Query(q): Query<KnowledgeSearchQuery>,
+) -> AxumResponse {
+    let tags = q
+        .tags
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .collect();
+    run(
+        &engine,
+        Request::KnowledgeSearch {
+            text: q.q,
+            tags,
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+            limit: q.limit,
+        },
+    )
+    .await
 }
 
 #[derive(serde::Deserialize)]

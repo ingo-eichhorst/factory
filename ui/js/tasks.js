@@ -213,6 +213,7 @@ export function renderModal() {
   if (t.ack_timeout_seconds) meta += ` · ack ${t.ack_timeout_seconds}s`;
   if (t.timeout_seconds) meta += ` · timeout ${t.timeout_seconds}s`;
   if (t.worktree) meta += ` · own worktree`;
+  if (t.knowledge_hints) meta += ` · knowledge hints`;
   meta += `</div>`;
   if (t.workflow_origin) {
     // R9: this task's provenance, when a workflow spawned it -- linking
