@@ -43,6 +43,8 @@ export const state = {
   benchmarksError: null,
   knowledge: null,        // last /api/knowledge answer: { root, present, notes, gaps, pages, findings }
   knowledgeError: null,
+  policy: null,           // last /api/policy answer's report -- see PolicyReport in protocol.rs
+  policyError: null,
 
   // L5 Improvement, Benchmarks tab -- three segments over one shared state
   // object, the same pattern `sandboxes.js`/`secrets.js` already share for
