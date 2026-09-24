@@ -567,7 +567,7 @@ controls:
     evidence:
       - check: knowledge        # a vault page tagged control/cra/annex-i-2-1
       - check: attestation      # a person's recorded word, with an expiry
-      - check: task              # parsed now, evaluated once #81 lands
+      - check: task              # the task's newest run, done within max_age
         task: sbom-export
         max_age: 30d
 ```
@@ -601,19 +601,29 @@ empty one is a finding and the control stays applicable — and every `n/a`, at
 whichever scope declared it, is always listed rather than left silent: ISO
 27001 calls this a Statement of Applicability, and ADR 0004 keeps the name.
 
-**Checks and statuses.** Evidence is evaluated per check kind, and v1
-evaluates two of the nine check kinds: `knowledge` (a vault page tagged
-`control/<framework>/<id>`, or a check's own `tag`) and `attestation` (an
-unexpired, unwithdrawn attestation recorded for the control). `task`,
-`workflow`, `gate`, `roles`, `sandbox`, `secrets` and `daemon` already parse —
-a catalogue can name a scheduled task, a workflow, a dataset gate, a role
-condition, a sandbox or secrets fact, or a daemon fact today — but every one
-of them evaluates to `unevaluated` until a later ticket teaches `evaluate`
-what each means; nothing is silently counted as met before then. A control's
-status is `satisfied` (a check found current evidence), `attested` (an
-unexpired attestation covers it), `stale` (evidence or an attestation existed
-but is older than `max_age`, or the attestation expired), `open` (no
-evidence), or `n/a` (does not apply here, with its rationale). Status is
+**Checks and statuses.** Evidence is evaluated per check kind. Five of the
+nine are evaluated for real: `knowledge` (a vault page tagged
+`control/<framework>/<id>`, or a check's own `tag`), `attestation` (an
+unexpired, unwithdrawn attestation recorded for the control), `task` and
+`workflow` (the task's or workflow's newest run is `done`, within the
+control's effective `max_age` — with none, any done run counts as current),
+and `gate` (a dataset's gated cases — or, with `case`, one named case — all
+`pass` in the newest *settled* bench run of that dataset, within `max_age`;
+`unverified` never counts). `task`/`workflow` name their target in the
+evaluated scope, by id or by exact title; a title matching more than one is
+a finding, reported `open` rather than guessed at. `roles`, `sandbox`,
+`secrets` and `daemon` already parse — a catalogue can name a role
+condition, a sandbox or secrets fact, or a daemon fact today — but each still
+evaluates to `unevaluated` until a later ticket teaches `evaluate` what it
+means; nothing is silently counted as met before then. A control's status is
+`satisfied` (a check found current evidence), `attested` (an unexpired
+attestation covers it), `stale` (evidence or an attestation existed but is
+older than `max_age`, or the attestation expired), `open` (no evidence), or
+`n/a` (does not apply here, with its rationale) — and, wherever the evidence
+behind it carries an id (a `task`, `workflow`, `gate` or `attestation` check,
+never yet a `knowledge` one), a `refs` list alongside its human reasons,
+pointing at the task, run, workflow run, bench run or attestation, for a UI
+to link straight to. Status is
 computed on every read, the same as the knowledge index — no status table to
 keep in step. **"Compliant" means the evidence is complete, not that the
 company is certified** — a framework's rollup is `compliant` only once every
