@@ -165,6 +165,7 @@ test("frameworkCards joins the rollup with the catalogue title and kind, and tot
     kind: "regulation",
     counts: { satisfied: 0, attested: 1, stale: 0, open: 3, not_applicable: 1 },
     bestPractice: { satisfied: 0, attested: 0, stale: 0, open: 0, not_applicable: 0 },
+    countedTotal: 5,
     bestPracticeTotal: 0,
     compliant: false,
   });

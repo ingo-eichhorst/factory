@@ -74,6 +74,7 @@ export function frameworkCards(report) {
       kind: cat ? cat.kind : null,
       counts: r.counts,
       bestPractice: r.best_practice,
+      countedTotal: countsTotal(r.counts),
       bestPracticeTotal: countsTotal(r.best_practice),
       compliant: r.compliant,
     };

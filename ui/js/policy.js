@@ -67,17 +67,22 @@ function countsChips(counts) {
 // -------------------------------------------------------------------- cards
 
 function frameworkCard(card) {
+  // A framework made only of best practice has nothing that counts, so it
+  // is neither compliant nor not: its own counts are the whole card, and the
+  // badge says why they do not decide anything.
+  const onlyBestPractice = card.countedTotal === 0 && card.bestPracticeTotal > 0;
   return `<article class="pol-card">
     <div class="pol-card-head">
       <h3>${esc(card.title)}</h3>
       <code class="id">${esc(card.framework)}</code>
       <span class="sp"></span>
-      ${complianceBadge(card.compliant)}
+      ${onlyBestPractice ? `<span class="badge pol-not-counted">not counted</span>` : complianceBadge(card.compliant)}
     </div>
     ${card.kind ? `<div class="sub">${esc(kindLabel(card.kind))}</div>` : ""}
-    <div class="pol-counts">${countsChips(card.counts)}</div>
-    ${card.bestPracticeTotal
-      ? `<div class="sub pol-bp">best practice (shown, never counted): ${countsChips(card.bestPractice)}</div>`
+    <div class="pol-counts">${countsChips(onlyBestPractice ? card.bestPractice : card.counts)}</div>
+    ${card.bestPracticeTotal && !onlyBestPractice
+      ? `<div class="sub pol-bp">best practice (shown, never counted)</div>
+         <div class="pol-counts">${countsChips(card.bestPractice)}</div>`
       : ""}
   </article>`;
 }
@@ -246,7 +251,7 @@ function attestFormHtml() {
     <label for="cd-evidence">Evidence <span class="sub" style="text-transform:none">a pointer -- a document, a ticket, a page -- not the evidence itself</span></label>
     <input id="cd-evidence" placeholder="https://…">
     <label for="cd-expires">Expires <span class="sub" style="text-transform:none">30d, 12w, a date (2027-01-01), or a full timestamp</span></label>
-    <input id="cd-expires" placeholder="30d">
+    <input id="cd-expires" value="365d">
     <label for="cd-note">Note <span class="sub" style="text-transform:none">optional</span></label>
     <input id="cd-note">
     <div class="err" id="cd-err"></div>
