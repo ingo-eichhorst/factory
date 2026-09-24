@@ -1445,7 +1445,13 @@ fn describe_check(check: &factory_core::policy::Check) -> String {
             forbid.iter().map(|g| format!("{g:?}")).collect::<Vec<_>>().join(", ")
         ),
         Check::Sandbox => "sandbox".to_string(),
-        Check::Secrets => "secrets".to_string(),
+        Check::Secrets { absent } => {
+            if absent.is_empty() {
+                "secrets".to_string()
+            } else {
+                format!("secrets: absent {}", absent.join(", "))
+            }
+        }
         Check::Daemon { fact } => format!("daemon: {fact}"),
     }
 }

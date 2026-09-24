@@ -569,12 +569,14 @@ impl InterfaceConfig {
 
 /// Where a run declared with this agent executes.
 ///
-/// **Nothing reads this yet.** It is declared here and shown on the L2
-/// Environment page's Sandboxes tab, and that is the whole of what it does
-/// today: choosing `docker` or `srt` changes nothing about how the agent
-/// actually starts. `none` is the default -- today's behaviour, unchanged --
-/// and stays that way until a later increment teaches the runtime to act on
-/// this field.
+/// **Nothing in dispatch reads this yet.** It is declared here and shown on
+/// the L2 Environment page's Sandboxes tab, and choosing `docker` or `srt`
+/// still changes nothing about how the agent actually starts -- that stays
+/// true until a later increment teaches the runtime to act on this field.
+/// `none` is the default, today's behaviour, unchanged. `factory_core::
+/// policy`'s `sandbox` check does read it now (`#82`), but only to report
+/// evidence -- "every agent in the scope declares one" -- never to enforce
+/// anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sandbox {
