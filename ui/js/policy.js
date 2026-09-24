@@ -168,7 +168,7 @@ async function remediate(button) {
       body: JSON.stringify(remediateBody(control, scope)),
     });
     const task = answer.task;
-    cell.innerHTML = `<a class="linklike" href="${esc(taskLinkHref(scope, task.id))}">Task created: ${esc(task.title)}</a>`;
+    cell.innerHTML = `<a class="pol-task-created" href="${esc(taskLinkHref(scope, task.id))}" title="${esc(task.title)}">Task created →</a>`;
   } catch (e) {
     button.disabled = false;
     cell.insertAdjacentHTML("beforeend", `<div class="sub pol-remediate-err">${esc(e.message)}</div>`);
