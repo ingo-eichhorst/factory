@@ -319,7 +319,9 @@ impl AgentContext {
              Reading is open to every agent, whatever your role: {bin} task \
              list, task show <id>, task log <id>, task output <id>; {bin} \
              agents; {bin} run list [task-id], run show <run-id>, run log \
-             <run-id>, run output <run-id>; {bin} adapters.\n\n\
+             <run-id>, run output <run-id>; {bin} adapters; {bin} infra, \
+             which shows the host, the daemon and which AI account each \
+             agent's model calls go to.\n\n\
              The company's knowledge base is part of that: {bin} knowledge \
              search <words> [--tag <tag>] lists the pages that match, best \
              first, as file paths with the reason each matched. It never \

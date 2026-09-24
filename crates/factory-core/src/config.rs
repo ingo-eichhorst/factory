@@ -88,6 +88,13 @@ pub struct Config {
     /// (`refuse_root_scope_policies`).
     #[serde(default, skip_serializing_if = "PolicyDeclaration::is_empty")]
     pub policies: PolicyDeclaration,
+    /// What everything runs on that Factory does not run itself: today, the
+    /// AI accounts behind the agents. Only the instance root declares these
+    /// -- a nested scope's file refuses the block
+    /// (`refuse_misplaced_scope_infrastructure`) -- and nothing here is ever
+    /// discovered by reading a credential. See `Infrastructure`.
+    #[serde(default, skip_serializing_if = "Infrastructure::is_empty")]
+    pub infrastructure: Infrastructure,
     /// Where the daemon looks for out-of-process adapters, relative to
     /// `.factory/`. Defaults to `plugins`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,10 +211,12 @@ impl Config {
         self.roles()?;
         self.refuse_root_scope_roles()?;
         self.refuse_root_scope_policies()?;
+        self.infrastructure.validate()?;
         for scope in self.scope.iter().chain(&self.scopes) {
             let roles = self.roles_for_scope(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
+                self.infrastructure.refuse_unknown_provider(scope, &agent)?;
                 if !roles.contains(&agent.role) {
                     return Err(FactoryError::BadRequest(format!(
                         "scope {:?} gives {:?} the role {:?}, which is not defined in that scope. \
@@ -235,9 +244,11 @@ impl Config {
         let roles = self.roles()?;
         self.refuse_root_scope_roles()?;
         self.refuse_root_scope_policies()?;
+        self.infrastructure.validate()?;
         if let Some(scope) = &self.scope {
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
+                self.infrastructure.refuse_unknown_provider(scope, &agent)?;
                 if !roles.contains(&agent.role) {
                     return Err(FactoryError::BadRequest(format!(
                         "scope {:?} gives {:?} the role {:?}, which the instance root does not define. \
@@ -335,6 +346,25 @@ pub fn refuse_misplaced_scope_policies(document: &serde_yaml_ng::Value, path: &P
         return Err(FactoryError::BadRequest(format!(
             "scope config {} has a top-level `policies:` block, which a scope's own file does not read. \
              Move it under `scope.policies`",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse an `infrastructure:` block written at the top of a nested scope's
+/// own config, the same mistake `refuse_misplaced_scope_roles` guards
+/// against: the AI accounts are declared once, for the whole instance, in
+/// the root config, and serde would otherwise drop this block without a word
+/// -- leaving every agent it meant to bind showing up as unassigned.
+pub fn refuse_misplaced_scope_infrastructure(document: &serde_yaml_ng::Value, path: &Path) -> Result<()> {
+    let misplaced = document
+        .as_mapping()
+        .is_some_and(|root| root.contains_key(serde_yaml_ng::Value::String("infrastructure".into())));
+    if misplaced {
+        return Err(FactoryError::BadRequest(format!(
+            "scope config {} has an `infrastructure:` block, which only the instance root's config reads. \
+             Move its providers into the root .factory/config.yaml",
             path.display()
         )));
     }
@@ -570,6 +600,218 @@ impl Sandbox {
     }
 }
 
+/// The root config's `infrastructure:` block: what the agents run on that
+/// Factory does not run itself. Today that is only `providers`, the AI
+/// accounts that pay for the agents' model calls.
+///
+/// **Declared, never discovered.** Nothing in Factory opens a credential
+/// file, the Keychain or an `.env` to find out which accounts exist, and
+/// nothing here holds a secret: an api-key provider may name the environment
+/// variable its key lives in, and that *name* is all Factory ever keeps or
+/// shows -- the variable is never read.
+///
+/// `deny_unknown_fields`, on this and on `Provider`: `harness:` for
+/// `harnesses:` would otherwise bind nothing and parse clean, and every agent
+/// it meant to cover would quietly show up as unassigned.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Infrastructure {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<Provider>,
+}
+
+/// One AI account, as the root config declares it.
+///
+/// ```yaml
+/// infrastructure:
+///   providers:
+///     - name: claude-max
+///       vendor: anthropic
+///       kind: subscription
+///       plan: Max 20x
+///       harnesses: [claude-code]
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provider {
+    /// Unique across the instance. What an agent's `provider:` names.
+    pub name: String,
+    /// Who sells the account: `anthropic`, `openrouter`, ... Free text.
+    pub vendor: String,
+    pub kind: ProviderKind,
+    /// Free text, shown as written: `Max 20x`, `pay as you go`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// The *name* of the environment variable an api-key provider's key
+    /// lives in. Shown, never read. Refused on a subscription, which has no
+    /// key to point at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    /// The default binding: every agent on one of these harnesses uses this
+    /// provider unless its own `provider:` says otherwise. A harness may be
+    /// claimed by at most one provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<String>,
+}
+
+/// How an account is paid for. An unknown kind is refused when the config is
+/// parsed, naming the two there are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderKind {
+    Subscription,
+    ApiKey,
+}
+
+impl ProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Subscription => "subscription",
+            Self::ApiKey => "api-key",
+        }
+    }
+}
+
+/// Which rule bound an agent to its provider: its own `provider:`, or the
+/// provider whose `harnesses:` lists its harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderVia {
+    Agent,
+    Harness,
+}
+
+impl ProviderVia {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Harness => "harness",
+        }
+    }
+}
+
+/// `shell` runs the task's instructions as a command. It makes no model
+/// call, so it never has a provider -- and is never listed as missing one.
+pub const SHELL_HARNESS: &str = "shell";
+
+impl Infrastructure {
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
+
+    pub fn provider(&self, name: &str) -> Option<&Provider> {
+        self.providers.iter().find(|p| p.name == name)
+    }
+
+    /// The provider `agent` uses, and which rule chose it. An agent's own
+    /// `provider:` wins; otherwise the one provider whose `harnesses:` lists
+    /// its harness. `shell` never has one, and neither does a model agent
+    /// nothing claims -- that is not an error, it is what the view lists as
+    /// unassigned. A `provider:` naming nothing declared also answers `None`
+    /// here; `validate` is what refuses it, at load.
+    pub fn provider_for(&self, agent: &ScopeAgent) -> Option<(&Provider, ProviderVia)> {
+        if agent.harness == SHELL_HARNESS {
+            return None;
+        }
+        if let Some(name) = &agent.provider {
+            return self.provider(name).map(|p| (p, ProviderVia::Agent));
+        }
+        self.providers
+            .iter()
+            .find(|p| p.harnesses.iter().any(|h| h == &agent.harness))
+            .map(|p| (p, ProviderVia::Harness))
+    }
+
+    /// The load-time refusals that concern the provider list alone:
+    /// duplicate names, one harness claimed twice, an `env:` on a
+    /// subscription, and a provider claiming `shell`. An unknown `kind` never
+    /// gets this far -- serde refuses it while parsing.
+    pub fn validate(&self) -> Result<()> {
+        let mut names = std::collections::BTreeSet::new();
+        let mut claimed: BTreeMap<&str, &str> = BTreeMap::new();
+        for provider in &self.providers {
+            if provider.name.trim().is_empty() {
+                return Err(FactoryError::BadRequest(
+                    "infrastructure.providers has a provider with no name".into(),
+                ));
+            }
+            if !names.insert(provider.name.as_str()) {
+                return Err(FactoryError::BadRequest(format!(
+                    "infrastructure.providers declares {:?} twice. Provider names must be unique",
+                    provider.name
+                )));
+            }
+            if provider.kind == ProviderKind::Subscription {
+                if let Some(env) = &provider.env {
+                    return Err(FactoryError::BadRequest(format!(
+                        "provider {:?} is a subscription but names the environment variable {:?}. \
+                         Only an api-key provider has a key to point at; remove `env:` or make it `kind: api-key`",
+                        provider.name, env
+                    )));
+                }
+            }
+            for harness in &provider.harnesses {
+                if harness == SHELL_HARNESS {
+                    return Err(FactoryError::BadRequest(format!(
+                        "provider {:?} claims the shell harness, which makes no model call and never has a provider",
+                        provider.name
+                    )));
+                }
+                if let Some(first) = claimed.insert(harness.as_str(), provider.name.as_str()) {
+                    return Err(FactoryError::BadRequest(format!(
+                        "providers {:?} and {:?} both claim the harness {:?}. A harness may default to one provider; \
+                         give the agents that should use the other an explicit `provider:` instead",
+                        first, provider.name, harness
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse an agent whose `provider:` names nothing declared, or that
+    /// gives the shell harness a provider at all. Falling back to the harness
+    /// default instead would put a typo's model calls on a different account
+    /// and never mention it. `configure_agent` asks the same question before
+    /// it writes a declaration, so the roster cannot write a file the next
+    /// start would refuse.
+    pub fn refuse_unknown_provider(&self, scope: &Scope, agent: &ScopeAgent) -> Result<()> {
+        let Some(name) = &agent.provider else {
+            return Ok(());
+        };
+        if agent.harness == SHELL_HARNESS {
+            return Err(FactoryError::BadRequest(format!(
+                "scope {:?} gives shell agent {:?} the provider {:?}, but the shell agent makes no model call and never has one",
+                scope.name,
+                agent.name(),
+                name
+            )));
+        }
+        if self.provider(name).is_none() {
+            return Err(FactoryError::BadRequest(format!(
+                "scope {:?} gives {:?} the provider {:?}, which infrastructure.providers in the root config does not declare. {}",
+                scope.name,
+                agent.name(),
+                name,
+                self.declared_list()
+            )));
+        }
+        Ok(())
+    }
+
+    /// What there is instead, for a refusal to say.
+    fn declared_list(&self) -> String {
+        if self.providers.is_empty() {
+            "No providers are declared".into()
+        } else {
+            format!(
+                "The declared providers are: {}",
+                self.providers.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+            )
+        }
+    }
+}
+
 /// How a scope names its agent.
 ///
 /// `agent: pi` is what this daemon writes. Instances configured before the
@@ -599,6 +841,9 @@ pub enum AgentRef {
         /// See `Sandbox`'s doc comment: nothing reads this yet.
         #[serde(default, skip_serializing_if = "Sandbox::is_none")]
         sandbox: Sandbox,
+        /// See `ScopeAgent::provider`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
     },
 }
 
@@ -623,6 +868,8 @@ impl<'de> Deserialize<'de> for AgentRef {
             args: Vec<String>,
             #[serde(default)]
             sandbox: Sandbox,
+            #[serde(default)]
+            provider: Option<String>,
             // Older Factory configs wrote this in the singular declaration.
             // It has no effect now, but those files must continue to load.
             #[serde(default, rename = "max_sessions")]
@@ -643,6 +890,7 @@ impl<'de> Deserialize<'de> for AgentRef {
                     role: declaration.role,
                     args: declaration.args,
                     sandbox: declaration.sandbox,
+                    provider: declaration.provider,
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -693,6 +941,13 @@ pub struct ScopeAgent {
     /// See `Sandbox`'s doc comment: nothing reads this yet.
     #[serde(default, skip_serializing_if = "Sandbox::is_none")]
     pub sandbox: Sandbox,
+    /// The AI account this agent's model calls go to, by the name
+    /// `infrastructure.providers` in the root config declares it under.
+    /// Absent means the provider that claims this agent's harness, if any
+    /// does -- see `Infrastructure::provider_for`. A name nothing declares
+    /// is refused at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 impl ScopeAgent {
@@ -795,6 +1050,8 @@ impl Scope {
             // Synthesized, not declared: nothing names a sandbox for a
             // foreman nobody wrote, so it gets today's default forever.
             sandbox: Sandbox::None,
+            // Likewise: its harness's default provider, if one claims it.
+            provider: None,
         });
         out
     }
@@ -818,6 +1075,7 @@ impl Scope {
             role,
             args,
             sandbox,
+            provider,
         }) = &self.agent
         {
             out.push(ScopeAgent {
@@ -828,6 +1086,7 @@ impl Scope {
                 autostart: *autostart,
                 args: args.clone(),
                 sandbox: *sandbox,
+                provider: provider.clone(),
             });
         }
         for a in &self.agents {
@@ -1136,6 +1395,7 @@ mod tests {
                 scopes: vec![],
                 roles: BTreeMap::new(),
                 policies: PolicyDeclaration::default(),
+                infrastructure: Infrastructure::default(),
                 plugins_dir: None,
             },
         }
@@ -1855,5 +2115,212 @@ mod tests {
 
         let unnamed: Scope = serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap();
         assert!(!serde_yaml_ng::to_string(&unnamed).unwrap().contains("task_store"));
+    }
+
+    // -- infrastructure.providers ---------------------------------------------
+
+    const PROVIDERS: &str = "infrastructure:\n  providers:\n\
+        \x20   - name: claude-max\n      vendor: anthropic\n      kind: subscription\n      plan: Max 20x\n      harnesses: [claude-code]\n\
+        \x20   - name: openrouter\n      vendor: openrouter\n      kind: api-key\n      env: OPENROUTER_API_KEY\n      harnesses: [pi, opencode]\n";
+
+    /// A root config declaring `PROVIDERS`, plus `rest` after it.
+    fn with_providers(rest: &str) -> std::result::Result<Config, String> {
+        serde_yaml_ng::from_str::<Config>(&format!("instance:\n  id: i\n  name: n\n{PROVIDERS}{rest}"))
+            .map_err(|e| e.to_string())
+    }
+
+    /// The issue's own example block, parsed.
+    #[test]
+    fn the_issues_provider_block_parses() {
+        let c = with_providers("").unwrap();
+        c.validate_instance().unwrap();
+        c.validate().unwrap();
+        let [max, router] = c.infrastructure.providers.as_slice() else {
+            panic!("two providers: {:?}", c.infrastructure.providers)
+        };
+        assert_eq!(max.name, "claude-max");
+        assert_eq!(max.kind, ProviderKind::Subscription);
+        assert_eq!(max.plan.as_deref(), Some("Max 20x"));
+        assert_eq!(max.env, None);
+        assert_eq!(max.harnesses, ["claude-code"]);
+        assert_eq!(router.kind, ProviderKind::ApiKey);
+        assert_eq!(router.env.as_deref(), Some("OPENROUTER_API_KEY"));
+        assert_eq!(router.harnesses, ["pi", "opencode"]);
+
+        let rendered = serde_yaml_ng::to_string(&c).unwrap();
+        let reparsed: Config = serde_yaml_ng::from_str(&rendered).unwrap();
+        assert_eq!(reparsed.infrastructure, c.infrastructure, "round-trips through its own YAML");
+    }
+
+    #[test]
+    fn a_config_declaring_no_providers_writes_no_infrastructure_key() {
+        let c: Config = serde_yaml_ng::from_str("instance:\n  id: i\n  name: n\n").unwrap();
+        assert!(c.infrastructure.is_empty());
+        assert!(!serde_yaml_ng::to_string(&c).unwrap().contains("infrastructure"));
+    }
+
+    #[test]
+    fn an_unknown_provider_kind_is_refused_at_parse_naming_the_kinds_there_are() {
+        let e = serde_yaml_ng::from_str::<Config>(
+            "instance:\n  id: i\n  name: n\ninfrastructure:\n  providers:\n    - name: x\n      vendor: y\n      kind: prepaid\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("prepaid"), "{e}");
+        assert!(e.contains("api-key") && e.contains("subscription"), "{e}");
+    }
+
+    #[test]
+    fn a_misspelled_provider_field_is_refused_not_silently_dropped() {
+        for yaml in [
+            "infrastructure:\n  providers:\n    - name: x\n      vendor: y\n      kind: api-key\n      harness: [pi]\n",
+            "infrastructure:\n  provider:\n    - name: x\n",
+        ] {
+            let e = serde_yaml_ng::from_str::<Config>(&format!("instance:\n  id: i\n  name: n\n{yaml}"))
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("unknown field"), "{e}");
+        }
+    }
+
+    #[test]
+    fn duplicate_provider_names_are_refused() {
+        let c = with_providers(
+            "\x20   - name: claude-max\n      vendor: anthropic\n      kind: api-key\n",
+        )
+        .unwrap();
+        for e in [c.validate_instance().unwrap_err(), c.validate().unwrap_err()] {
+            let e = e.to_string();
+            assert!(e.contains("claude-max") && e.contains("twice"), "{e}");
+        }
+    }
+
+    #[test]
+    fn two_providers_claiming_one_harness_are_refused_with_both_named() {
+        let c = with_providers(
+            "\x20   - name: anthropic-api\n      vendor: anthropic\n      kind: api-key\n      harnesses: [claude-code]\n",
+        )
+        .unwrap();
+        let e = c.validate_instance().unwrap_err().to_string();
+        assert!(e.contains("claude-max") && e.contains("anthropic-api"), "{e}");
+        assert!(e.contains("claude-code"), "{e}");
+    }
+
+    #[test]
+    fn env_on_a_subscription_is_refused() {
+        let c: Config = serde_yaml_ng::from_str(
+            "instance:\n  id: i\n  name: n\ninfrastructure:\n  providers:\n\
+             \x20   - name: claude-max\n      vendor: anthropic\n      kind: subscription\n      env: ANTHROPIC_API_KEY\n",
+        )
+        .unwrap();
+        let e = c.validate_instance().unwrap_err().to_string();
+        assert!(e.contains("claude-max") && e.contains("subscription"), "{e}");
+        assert!(e.contains("env"), "{e}");
+    }
+
+    #[test]
+    fn a_provider_claiming_the_shell_harness_is_refused() {
+        let c = with_providers("\x20   - name: sh\n      vendor: none\n      kind: api-key\n      harnesses: [shell]\n")
+            .unwrap();
+        let e = c.validate_instance().unwrap_err().to_string();
+        assert!(e.contains("shell"), "{e}");
+    }
+
+    #[test]
+    fn an_agent_naming_an_undeclared_provider_is_refused_with_what_there_is() {
+        // Both entry points, both spellings: the root's own scope before
+        // discovery, and a nested scope's `agents:` list after it.
+        let root = with_providers(
+            "scope:\n  name: company\n  agent:\n    harness: pi\n    provider: openruter\n",
+        )
+        .unwrap();
+        let e = root.validate_instance().unwrap_err().to_string();
+        assert!(e.contains("openruter"), "{e}");
+        assert!(e.contains("claude-max, openrouter"), "it lists the declared ones: {e}");
+
+        let nested = with_providers(
+            "scopes:\n  - name: lab\n    path: lab\n    agents:\n      - name: model-lab\n        harness: opencode\n        provider: nowhere\n",
+        )
+        .unwrap();
+        nested.validate_instance().unwrap();
+        let e = nested.validate().unwrap_err().to_string();
+        assert!(e.contains("model-lab") && e.contains("nowhere"), "{e}");
+
+        let bare = config_with("scopes:\n  - name: lab\n    path: lab\n    agent:\n      harness: pi\n      provider: x\n");
+        let e = bare.validate().unwrap_err().to_string();
+        assert!(e.contains("No providers are declared"), "{e}");
+    }
+
+    #[test]
+    fn a_shell_agent_given_a_provider_is_refused() {
+        let c = with_providers(
+            "scopes:\n  - name: lab\n    path: lab\n    agents:\n      - name: scripted\n        harness: shell\n        provider: openrouter\n",
+        )
+        .unwrap();
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("scripted") && e.contains("shell"), "{e}");
+    }
+
+    /// `provider` lives in the same three places `sandbox` does -- see
+    /// `a_declared_sandbox_loads_from_both_spellings_and_the_default_is_none`.
+    #[test]
+    fn a_declared_provider_loads_from_both_spellings_and_the_default_is_none() {
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\nagent:\n  harness: pi\n  provider: openrouter\n\
+             agents:\n  - name: watcher\n    harness: claude-code\n    provider: claude-max\n\
+             \x20 - name: bare\n    harness: codex\n",
+        )
+        .unwrap();
+        let declared = s.declared_agents();
+        assert_eq!(declared[0].provider.as_deref(), Some("openrouter"), "the singular block");
+        assert_eq!(declared[1].provider.as_deref(), Some("claude-max"), "the agents: list");
+        assert_eq!(declared[2].provider, None);
+        assert!(
+            !serde_yaml_ng::to_string(&declared[2]).unwrap().contains("provider"),
+            "an agent that never named one is never written with one"
+        );
+    }
+
+    #[test]
+    fn an_agents_own_provider_wins_over_its_harness_default_and_shell_never_has_one() {
+        let c = with_providers("").unwrap();
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\nagents:\n\
+             \x20 - name: builder\n    harness: claude-code\n\
+             \x20 - name: model-lab\n    harness: claude-code\n    provider: openrouter\n\
+             \x20 - name: helper\n    harness: codex\n\
+             \x20 - name: scripted\n    harness: shell\n",
+        )
+        .unwrap();
+        let agents = s.declared_agents();
+        let bound: Vec<Option<(&str, ProviderVia)>> = agents
+            .iter()
+            .map(|a| c.infrastructure.provider_for(a).map(|(p, via)| (p.name.as_str(), via)))
+            .collect();
+        assert_eq!(
+            bound,
+            vec![
+                Some(("claude-max", ProviderVia::Harness)),
+                Some(("openrouter", ProviderVia::Agent)),
+                None, // a model agent nothing claims: unassigned, not an error
+                None, // shell: no provider, ever
+            ]
+        );
+    }
+
+    #[test]
+    fn an_infrastructure_block_in_a_nested_scope_file_is_refused() {
+        let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(&format!(
+            "scope:\n  id: s\n  name: demo\n{PROVIDERS}"
+        ))
+        .unwrap();
+        let e = refuse_misplaced_scope_infrastructure(&document, Path::new("/x/projects/demo/.factory/config.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("infrastructure"), "{e}");
+        assert!(e.contains("projects/demo"), "{e}");
+
+        let fine: serde_yaml_ng::Value = serde_yaml_ng::from_str("scope:\n  id: s\n  name: demo\n").unwrap();
+        refuse_misplaced_scope_infrastructure(&fine, Path::new("x")).unwrap();
     }
 }

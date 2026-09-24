@@ -149,6 +149,7 @@ mod tests {
                 roles: Default::default(),
                 policies: Default::default(),
             }],
+            infrastructure: Default::default(),
             plugins_dir: None,
         };
         let mut registry = Registry::with_builtins();
@@ -220,6 +221,7 @@ mod tests {
                 roles: Default::default(),
                 policies: Default::default(),
             }],
+            infrastructure: Default::default(),
             plugins_dir: None,
         };
         let recorder = Arc::new(RecordingRuntime::new());
@@ -988,6 +990,7 @@ mod tests {
                     roles: Default::default(),
                     policies: Default::default(),
                 }],
+                infrastructure: Default::default(),
                 plugins_dir: None,
             };
             let mut registry = Registry::with_builtins();

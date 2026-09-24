@@ -8,6 +8,7 @@ mod configuration;
 mod datasets;
 mod discovery;
 mod engine;
+mod host;
 mod interfaces;
 mod occupancy;
 mod policies;
@@ -151,6 +152,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         scopes: Vec::new(),
         roles: Default::default(),
         policies: Default::default(),
+        infrastructure: Default::default(),
         plugins_dir: None,
     };
     std::fs::write(&config_path, serde_yaml_ng::to_string(&config)?)?;

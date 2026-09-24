@@ -40,6 +40,11 @@ fn read_document(path: &Path) -> Result<(String, Value, Scope)> {
         .map_err(|error| bad(format!("parsing scope config {}: {error}", path.display())))?;
     refuse_misplaced_scope_roles(&document, path)?;
     refuse_misplaced_scope_policies(&document, path)?;
+    // Deliberately no `refuse_misplaced_scope_infrastructure` here, unlike
+    // discovery's `read_scope`: this also reads the instance root's own file
+    // when the roster edits the root scope, and that file is exactly where
+    // `infrastructure:` belongs. Discovery never reads the root through its
+    // reader, so it can refuse the block outright.
     let parsed: ScopeFile = serde_yaml_ng::from_str(&text)
         .map_err(|error| bad(format!("parsing scope config {}: {error}", path.display())))?;
     Ok((text, document, parsed.scope))
@@ -638,6 +643,18 @@ impl Engine {
                 "the shell agent runs task instructions directly and cannot use CLI arguments",
             ));
         }
+        // The same check the next start would make, made before the file is
+        // written: a roster edit must never leave a config the daemon then
+        // refuses to load.
+        agent.provider = agent
+            .provider
+            .take()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
+        factory
+            .config
+            .infrastructure
+            .refuse_unknown_provider(&from_file, &agent)?;
         if agent.lifetime == Lifetime::Task && agent.autostart.is_some() {
             return Err(bad("a task agent cannot set autostart"));
         }
@@ -1233,10 +1250,15 @@ mod tests {
             autostart: Some(false),
             args: vec!["--model".into(), "local model".into()],
             sandbox: Sandbox::None,
+            provider: None,
         }
     }
 
     fn engine(scratch: &Scratch) -> Arc<Engine> {
+        engine_with(scratch, Default::default())
+    }
+
+    fn engine_with(scratch: &Scratch, infrastructure: factory_core::config::Infrastructure) -> Arc<Engine> {
         let scope: Scope = serde_yaml_ng::from_str("id: scope-id\nname: demo\n").unwrap();
         let factory = Factory {
             root: scratch.0.clone(),
@@ -1251,6 +1273,7 @@ mod tests {
                 scopes: vec![scope],
                 roles: Default::default(),
                 policies: Default::default(),
+                infrastructure,
                 plugins_dir: None,
             },
         };
@@ -1334,6 +1357,66 @@ mod tests {
             Sandbox::Docker,
             "the file round-trips back into the same value"
         );
+    }
+
+    fn one_provider() -> factory_core::config::Infrastructure {
+        serde_yaml_ng::from_str(
+            "providers:\n  - name: openrouter\n    vendor: openrouter\n    kind: api-key\n    env: OPENROUTER_API_KEY\n",
+        )
+        .unwrap()
+    }
+
+    /// The roster must never write a declaration the next start refuses:
+    /// an undeclared provider is turned away before the file is touched.
+    #[test]
+    fn an_undeclared_provider_is_refused_with_the_file_untouched() {
+        let scratch = Scratch::new("provider-unknown", "version: 1\nscope:\n  id: scope-id\n  name: demo\n");
+        let engine = engine_with(&scratch, one_provider());
+        let path = scratch.0.join(FACTORY_DIR).join(CONFIG_FILE);
+        let before = fs::read(&path).unwrap();
+        let mut typo = agent("lab");
+        typo.provider = Some("openruter".into());
+
+        let e = engine.configure_agent("demo", typo).unwrap_err().to_string();
+        assert!(e.contains("openruter") && e.contains("openrouter"), "{e}");
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_declared_provider_is_written_and_reloaded() {
+        let scratch = Scratch::new("provider-declared", "version: 1\nscope:\n  id: scope-id\n  name: demo\n");
+        let engine = engine_with(&scratch, one_provider());
+        let mut lab = agent("lab");
+        lab.provider = Some(" openrouter ".into());
+
+        engine.configure_agent("demo", lab).unwrap();
+
+        let text = fs::read_to_string(scratch.0.join(FACTORY_DIR).join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("provider: openrouter"), "{text}");
+        let reloaded: ScopeFile = serde_yaml_ng::from_str(&text).unwrap();
+        assert_eq!(reloaded.scope.declared_agents()[0].provider.as_deref(), Some("openrouter"));
+    }
+
+    /// The roster edits the root scope through this same reader, and the
+    /// root's file is where `infrastructure:` lives -- a provider block must
+    /// never make that file uneditable.
+    #[test]
+    fn the_root_file_with_its_providers_stays_editable() {
+        let scratch = Scratch::new(
+            "provider-root",
+            "version: 1\ninstance: { id: i, name: test }\n\
+             infrastructure:\n  providers:\n    - name: openrouter\n      vendor: openrouter\n      kind: api-key\n\
+             scope:\n  id: scope-id\n  name: demo\n",
+        );
+        let engine = engine_with(&scratch, one_provider());
+        let mut lab = agent("lab");
+        lab.provider = Some("openrouter".into());
+
+        engine.configure_agent("demo", lab).unwrap();
+
+        let text = fs::read_to_string(scratch.0.join(FACTORY_DIR).join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("infrastructure:\n  providers:"), "left where it was: {text}");
+        assert!(text.contains("provider: openrouter"), "{text}");
     }
 
     #[test]

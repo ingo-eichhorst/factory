@@ -231,6 +231,13 @@ pub enum Request {
     /// changing anything.
     #[serde(rename = "environment")]
     Environment,
+    /// The L1 Infrastructure page: what everything runs on -- the host and
+    /// the daemon on it, read live on every request, and the AI accounts the
+    /// root config declares with the agents each one pays for. Read-only,
+    /// like `Environment`, and it never reads a credential: a provider is
+    /// only ever what the config says it is.
+    #[serde(rename = "infrastructure")]
+    Infrastructure,
     /// The L5 Knowledge tab: an index of `<root>/.factory/knowledge/`,
     /// rebuilt from the files on every request. Read-only, like
     /// `Environment` -- see `knowledge::index`, which does the actual walk.
@@ -475,6 +482,16 @@ pub enum Payload {
     Environment {
         sandboxes: Vec<SandboxRow>,
         credentials: Vec<CredentialRow>,
+    },
+    /// The L1 Infrastructure page, read from the bottom up: the host, the
+    /// daemon on it, the declared AI accounts above that with the agents
+    /// each one serves, and the model agents no account claims yet. A host
+    /// fact that cannot be read is `null`, never a failed request.
+    Infrastructure {
+        host: HostFacts,
+        daemon: DaemonFacts,
+        providers: Vec<ProviderRow>,
+        unassigned: Vec<UnassignedAgent>,
     },
     /// The L5 Knowledge tab. `present: false` when the vault
     /// (`<root>/.factory/knowledge/`) does not exist -- an empty state, not
@@ -936,6 +953,113 @@ pub struct CredentialRow {
     /// page goes on showing it whichever scope the rail has selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+}
+
+/// The machine the daemon runs on, read live on every request and never
+/// cached. Every field is its own fallible read: one that fails is `null` on
+/// the wire -- deliberately no `skip_serializing_if` anywhere here, so the
+/// page can tell "unreadable" from a field this daemon never heard of.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HostFacts {
+    pub hostname: Option<String>,
+    /// The hardware model identifier, e.g. `Mac17,7`.
+    pub model: Option<String>,
+    /// The CPU brand string, e.g. `Apple M5 Max`.
+    pub chip: Option<String>,
+    /// Physical cores.
+    pub cores: Option<u32>,
+    pub memory_bytes: Option<u64>,
+    /// Product name and version, e.g. `macOS 26.6.1`.
+    pub os: Option<String>,
+    /// What this daemon was built for, e.g. `aarch64`.
+    pub arch: Option<String>,
+    /// Since boot, wall clock -- time asleep included.
+    pub uptime_seconds: Option<u64>,
+    /// The 1, 5 and 15 minute load averages.
+    pub load: Option<[f64; 3]>,
+    /// The filesystem mounted at `/`, or `null` when it could not be read.
+    pub disk: Option<DiskFacts>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiskFacts {
+    pub mount: String,
+    pub total_bytes: u64,
+    /// Available to an unprivileged user, as `df` reports it.
+    pub free_bytes: u64,
+}
+
+/// The daemon answering, and where it keeps its state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DaemonFacts {
+    pub version: String,
+    pub pid: u32,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub root: String,
+    pub store: StoreFacts,
+    /// The control socket, relative to `root` when it sits under it -- a
+    /// deep root puts it in the temporary directory instead, and then this
+    /// is that absolute path.
+    pub socket: String,
+    pub interfaces: Vec<InterfaceFacts>,
+    /// The instance's default runtime adapter, `daemon.default_runtime`.
+    pub runtime: String,
+    /// The herdr session the daemon's own runtime calls go to, from its
+    /// `HERDR_SESSION`. `null` when the runtime is not herdr or none is set.
+    pub herdr_session: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoreFacts {
+    /// The instance's task-store adapter, `daemon.task_store`.
+    pub kind: String,
+    /// The daemon's database, relative to `root`.
+    pub path: String,
+    /// `null` when the file could not be read.
+    pub size_bytes: Option<u64>,
+}
+
+/// One interface the config mounts. `bind` is the one field on this page
+/// that is left out rather than `null`: the `cli` interface is a socket and
+/// has no address, which is not the same as one that could not be read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InterfaceFacts {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<String>,
+}
+
+/// One declared AI account and every agent it serves. Never a value: `env`
+/// is the name of the variable an api-key provider's key lives in, as the
+/// config wrote it, and nothing ever reads the variable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderRow {
+    pub name: String,
+    pub vendor: String,
+    pub kind: crate::config::ProviderKind,
+    pub plan: Option<String>,
+    pub env: Option<String>,
+    pub agents: Vec<ProviderAgent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderAgent {
+    pub scope: String,
+    pub agent: String,
+    pub harness: String,
+    /// `agent` when the agent's own `provider:` chose this account,
+    /// `harness` when its harness's default did.
+    pub via: crate::config::ProviderVia,
+}
+
+/// A model agent no provider claims. Not an error: it tells a person what
+/// to declare next. `shell` agents are never listed -- they make no model
+/// call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnassignedAgent {
+    pub scope: String,
+    pub agent: String,
+    pub harness: String,
 }
 
 /// How big a scope is on disk, for the site plan's hall footprint. The
@@ -1465,5 +1589,176 @@ mod tests {
         assert_eq!(turn.event, TurnEndEvent::StopFailure);
         assert_eq!(turn.error.as_deref(), Some("model_not_found"));
         assert!(turn.error_details.is_none(), "not every StopFailure carries details");
+    }
+
+    /// The issue's own example, key for key: this shape is the contract the
+    /// L1 page is built against, so the test is the example itself rather
+    /// than a paraphrase of it. The only addition is `kind`, which every
+    /// payload carries.
+    const INFRASTRUCTURE_EXAMPLE: &str = r#"{
+      "kind": "infrastructure",
+      "host": {
+        "hostname": "factory-mac",
+        "model": "Mac17,7",
+        "chip": "Apple M5 Max",
+        "cores": 18,
+        "memory_bytes": 68719476736,
+        "os": "macOS 26.6.1",
+        "arch": "aarch64",
+        "uptime_seconds": 864000,
+        "load": [2.1, 1.8, 1.6],
+        "disk": { "mount": "/", "total_bytes": 1995218165760, "free_bytes": 1539316654080 }
+      },
+      "daemon": {
+        "version": "0.1.0",
+        "pid": 4242,
+        "started_at": "2026-09-24T08:00:00Z",
+        "root": "/Users/factory/business-factory",
+        "store": { "kind": "sqlite", "path": ".factory/factory.sqlite", "size_bytes": 12582912 },
+        "socket": ".factory/factory.sock",
+        "interfaces": [ { "kind": "cli" }, { "kind": "http", "bind": "192.168.188.92:8791" } ],
+        "runtime": "herdr",
+        "herdr_session": "factory"
+      },
+      "providers": [
+        {
+          "name": "claude-max",
+          "vendor": "anthropic",
+          "kind": "subscription",
+          "plan": "Max 20x",
+          "env": null,
+          "agents": [ { "scope": "factory", "agent": "claude-code", "harness": "claude-code", "via": "harness" } ]
+        }
+      ],
+      "unassigned": [ { "scope": "model-lab", "agent": "model-lab", "harness": "opencode" } ]
+    }"#;
+
+    fn infrastructure_example() -> Payload {
+        use crate::config::{ProviderKind, ProviderVia};
+        Payload::Infrastructure {
+            host: HostFacts {
+                hostname: Some("factory-mac".into()),
+                model: Some("Mac17,7".into()),
+                chip: Some("Apple M5 Max".into()),
+                cores: Some(18),
+                memory_bytes: Some(68_719_476_736),
+                os: Some("macOS 26.6.1".into()),
+                arch: Some("aarch64".into()),
+                uptime_seconds: Some(864_000),
+                load: Some([2.1, 1.8, 1.6]),
+                disk: Some(DiskFacts {
+                    mount: "/".into(),
+                    total_bytes: 1_995_218_165_760,
+                    free_bytes: 1_539_316_654_080,
+                }),
+            },
+            daemon: DaemonFacts {
+                version: "0.1.0".into(),
+                pid: 4242,
+                started_at: "2026-09-24T08:00:00Z".parse().unwrap(),
+                root: "/Users/factory/business-factory".into(),
+                store: StoreFacts {
+                    kind: "sqlite".into(),
+                    path: ".factory/factory.sqlite".into(),
+                    size_bytes: Some(12_582_912),
+                },
+                socket: ".factory/factory.sock".into(),
+                interfaces: vec![
+                    InterfaceFacts { kind: "cli".into(), bind: None },
+                    InterfaceFacts {
+                        kind: "http".into(),
+                        bind: Some("192.168.188.92:8791".into()),
+                    },
+                ],
+                runtime: "herdr".into(),
+                herdr_session: Some("factory".into()),
+            },
+            providers: vec![ProviderRow {
+                name: "claude-max".into(),
+                vendor: "anthropic".into(),
+                kind: ProviderKind::Subscription,
+                plan: Some("Max 20x".into()),
+                env: None,
+                agents: vec![ProviderAgent {
+                    scope: "factory".into(),
+                    agent: "claude-code".into(),
+                    harness: "claude-code".into(),
+                    via: ProviderVia::Harness,
+                }],
+            }],
+            unassigned: vec![UnassignedAgent {
+                scope: "model-lab".into(),
+                agent: "model-lab".into(),
+                harness: "opencode".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn the_infrastructure_payload_is_the_issues_wire_shape_and_round_trips() {
+        let expected: serde_json::Value = serde_json::from_str(INFRASTRUCTURE_EXAMPLE).unwrap();
+        let written = serde_json::to_value(infrastructure_example()).unwrap();
+        assert_eq!(written, expected, "serializes to exactly the documented shape");
+
+        let read: Payload = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(read).unwrap(), expected, "and reads back to it");
+
+        // Inside a response, where the page actually finds it.
+        let response = serde_json::to_value(Response::ok(infrastructure_example())).unwrap();
+        assert_eq!(response.pointer("/data/kind").and_then(|v| v.as_str()), Some("infrastructure"));
+        assert_eq!(response.pointer("/data/providers/0/agents/0/via").and_then(|v| v.as_str()), Some("harness"));
+    }
+
+    #[test]
+    fn an_unreadable_host_fact_is_null_on_the_wire_never_missing() {
+        let Payload::Infrastructure { daemon, .. } = infrastructure_example() else {
+            unreachable!()
+        };
+        let payload = Payload::Infrastructure {
+            host: HostFacts::default(),
+            daemon: DaemonFacts {
+                store: StoreFacts { size_bytes: None, ..daemon.store.clone() },
+                herdr_session: None,
+                ..daemon
+            },
+            providers: vec![ProviderRow {
+                name: "openrouter".into(),
+                vendor: "openrouter".into(),
+                kind: crate::config::ProviderKind::ApiKey,
+                plan: None,
+                env: Some("OPENROUTER_API_KEY".into()),
+                agents: vec![],
+            }],
+            unassigned: vec![],
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        for field in [
+            "hostname", "model", "chip", "cores", "memory_bytes", "os", "arch", "uptime_seconds", "load", "disk",
+        ] {
+            assert_eq!(
+                json["host"].get(field),
+                Some(&serde_json::Value::Null),
+                "host.{field} is present and null, not left out"
+            );
+        }
+        assert_eq!(json["daemon"]["store"].get("size_bytes"), Some(&serde_json::Value::Null));
+        assert_eq!(json["daemon"].get("herdr_session"), Some(&serde_json::Value::Null));
+        assert_eq!(json["providers"][0].get("plan"), Some(&serde_json::Value::Null));
+        assert_eq!(json["providers"][0]["kind"], "api-key");
+        assert_eq!(json["providers"][0]["env"], "OPENROUTER_API_KEY");
+        assert!(
+            json["daemon"]["interfaces"][0].get("bind").is_none(),
+            "a socket interface has no address, which is left out rather than null"
+        );
+        let back: Payload = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(back).unwrap(), json);
+    }
+
+    #[test]
+    fn the_infrastructure_request_is_a_bare_op() {
+        let wire = serde_json::to_value(Envelope { request: Request::Infrastructure, token: None }).unwrap();
+        assert_eq!(wire["op"], "infrastructure");
+        let env: Envelope = serde_json::from_str(r#"{"op":"infrastructure"}"#).unwrap();
+        assert!(matches!(env.request, Request::Infrastructure));
     }
 }

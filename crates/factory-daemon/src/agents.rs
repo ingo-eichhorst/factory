@@ -809,6 +809,7 @@ mod tests {
             scopes: vec![serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap()],
             roles: Default::default(),
             policies: Default::default(),
+            infrastructure: Default::default(),
             plugins_dir: None,
         };
         let factory = Factory {
@@ -1116,6 +1117,7 @@ mod tests {
             scopes: vec![serde_yaml_ng::from_str(scope_yaml).unwrap()],
             roles: Default::default(),
             policies: Default::default(),
+            infrastructure: Default::default(),
             plugins_dir: None,
         };
         let mut registry = Registry::with_builtins();
