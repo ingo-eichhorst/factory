@@ -1303,13 +1303,25 @@ fn describe_check(check: &factory_core::policy::Check) -> String {
     }
 }
 
+/// A status as the wire spells it, so `show` and `--json` agree.
+fn policy_status_str(kind: factory_core::policy::StatusKind) -> &'static str {
+    use factory_core::policy::StatusKind;
+    match kind {
+        StatusKind::Satisfied => "satisfied",
+        StatusKind::Attested => "attested",
+        StatusKind::Stale => "stale",
+        StatusKind::Open => "open",
+        StatusKind::NotApplicable => "not_applicable",
+    }
+}
+
 fn policy_control_text(d: &PolicyControlDetail) -> String {
     let mut out = format!(
-        "{}  {}  [{}]\n  status: {:?}\n",
+        "{}  {}  [{}]\n  status: {}\n",
         d.control,
         d.title,
         policy_kind_str(d.kind),
-        d.status.kind(),
+        policy_status_str(d.status.kind()),
     );
     for reason in d.status.reasons() {
         out.push_str(&format!("    {reason}\n"));
