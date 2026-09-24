@@ -602,7 +602,7 @@ whichever scope declared it, is always listed rather than left silent: ISO
 27001 calls this a Statement of Applicability, and ADR 0004 keeps the name.
 
 **Checks and statuses.** Evidence is evaluated per check kind, and v1
-evaluates two of the ADR's seven: `knowledge` (a vault page tagged
+evaluates two of the nine check kinds: `knowledge` (a vault page tagged
 `control/<framework>/<id>`, or a check's own `tag`) and `attestation` (an
 unexpired, unwithdrawn attestation recorded for the control). `task`,
 `workflow`, `gate`, `roles`, `sandbox`, `secrets` and `daemon` already parse —
