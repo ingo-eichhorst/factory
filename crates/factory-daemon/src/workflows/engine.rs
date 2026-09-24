@@ -135,6 +135,7 @@ mod tests {
             // real `caffeinate` on whatever machine runs the tests.
             daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
             roles: Default::default(),
+            policies: Default::default(),
             scope: None,
             scopes: vec![Scope {
                 id: "demo-id".into(),
@@ -146,6 +147,7 @@ mod tests {
                 git: None,
                 task_store: None,
                 roles: Default::default(),
+                policies: Default::default(),
             }],
             plugins_dir: None,
         };
@@ -204,6 +206,7 @@ mod tests {
             // real `caffeinate` on whatever machine runs the tests.
             daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
             roles: Default::default(),
+            policies: Default::default(),
             scope: None,
             scopes: vec![Scope {
                 id: "demo-id".into(),
@@ -215,6 +218,7 @@ mod tests {
                 git: None,
                 task_store: None,
                 roles: Default::default(),
+                policies: Default::default(),
             }],
             plugins_dir: None,
         };
@@ -970,6 +974,7 @@ mod tests {
                 // real `caffeinate` on whatever machine runs the tests.
                 daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
                 roles: Default::default(),
+                policies: Default::default(),
                 scope: None,
                 scopes: vec![Scope {
                     id: "demo-id".into(),
@@ -981,6 +986,7 @@ mod tests {
                     git: None,
                     task_store: None,
                     roles: Default::default(),
+                    policies: Default::default(),
                 }],
                 plugins_dir: None,
             };

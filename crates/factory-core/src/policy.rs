@@ -22,7 +22,8 @@
 //! Which frameworks apply to a scope, and any per-scope tightening or `n/a`,
 //! comes from the same root-to-leaf chain roles use
 //! (`Engine::roles_for` in `factory-daemon`), just for policies instead --
-//! parsing that chain out of the live config is `#76`'s job, not this
+//! parsing that chain out of the live config is `Config::policy_chain_for_scope`,
+//! `Factory::policy_chain` and `Engine::policy_chain`'s job (`#76`), not this
 //! module's. [`PolicyLayer`] is what that chain hands to [`applicable`]:
 //! one layer per scope, root first. Unlike roles, where the nearest
 //! definition wins outright, a layer may only *add* a framework or *tighten*
@@ -520,7 +521,10 @@ pub struct NotApplicable {
 /// One scope's own policy declarations. `applicable` is handed a chain of
 /// these, root first -- the same shape `Engine::roles_for` walks for roles,
 /// just carrying additive-only data instead of nearest-wins overrides.
-/// Building this chain from the live config is `#76`'s job.
+/// Built from the live config by `Config::policy_chain_for_scope`,
+/// `Factory::policy_chain` and `Engine::policy_chain` (`#76`); the config-side
+/// declaration this is converted from (`PolicyDeclaration`, minus `scope`,
+/// which the chain builder fills in) lives in `factory-core::config`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyLayer {
     pub scope: String,

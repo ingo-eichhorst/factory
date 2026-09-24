@@ -214,6 +214,18 @@ impl Engine {
         })
     }
 
+    /// Every policy layer in effect for `scope` right now, root first --
+    /// resolved from the live snapshot on every call for the same reason
+    /// `roles_for` is: a scope-config write holds from the next request with
+    /// nothing to invalidate. Nothing folds these into a status yet -- that
+    /// is `policy::applicable` and `policy::evaluate`, called from whatever
+    /// surfaces the L6 Policy tab (`#77` onward, not this ticket) -- so this
+    /// has no caller within #76 itself.
+    #[allow(dead_code)]
+    pub fn policy_chain(&self, scope: &str) -> Vec<factory_core::policy::PolicyLayer> {
+        self.factory_snapshot().policy_chain(scope)
+    }
+
     /// The instance root's own `roles:`, after a write to its config.
     pub(crate) fn replace_instance_roles(
         &self,
@@ -2431,7 +2443,7 @@ mod tests {
     use super::*;
     use factory_core::adapter::RuntimeConnectionState;
     use factory_core::agent::Lifetime;
-    use factory_core::config::{Config, DaemonConfig, Instance, Scope};
+    use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration, Scope};
     use factory_core::run::RunStatus;
     use factory_core::task::Schedule;
     use factory_plugins::{Registry, SqliteStore};
@@ -2462,6 +2474,7 @@ mod tests {
                 ..DaemonConfig::default()
             },
             roles: Default::default(),
+            policies: Default::default(),
             scope: None,
             scopes: vec![Scope {
                 id: "scope-id".into(),
@@ -2473,6 +2486,7 @@ mod tests {
                 git: None,
                 task_store: None,
                 roles: Default::default(),
+                policies: Default::default(),
             }],
             plugins_dir: None,
         };
@@ -2526,6 +2540,34 @@ mod tests {
                 .contains("not-registered"),
             "the card says which configured adapter is absent"
         );
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// `policy_chain` has no caller yet within #76 (see the `allow(dead_code)`
+    /// on it), so this is what turns "unused" into "unused by production,
+    /// covered by test": it delegates to `Factory::policy_chain` on the live
+    /// snapshot, the same way `roles_for` delegates for roles.
+    #[tokio::test]
+    async fn policy_chain_delegates_to_the_live_snapshot() {
+        let scope_dir = temp_dir("policy-chain");
+        let engine = test_engine(scope_dir.clone());
+        {
+            let mut factory = engine.factory.write().unwrap();
+            factory.config.policies = PolicyDeclaration {
+                frameworks: vec!["cra".into()],
+                ..Default::default()
+            };
+            factory.config.scopes[0].policies = PolicyDeclaration {
+                frameworks: vec!["gdpr".into()],
+                ..Default::default()
+            };
+        }
+
+        let chain = engine.policy_chain("demo");
+        assert_eq!(chain, engine.factory_snapshot().policy_chain("demo"));
+        let scopes: Vec<&str> = chain.iter().map(|l| l.scope.as_str()).collect();
+        assert_eq!(scopes, vec!["test", "demo"], "root layer, then the scope's own");
 
         std::fs::remove_dir_all(scope_dir).ok();
     }
