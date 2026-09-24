@@ -549,10 +549,17 @@ pub struct Applied {
     pub title: String,
     pub kind: Kind,
     pub maps_to: Vec<ControlRef>,
+    /// Exactly as the catalogue wrote it -- a `Task`/`Workflow`/`Gate`
+    /// check's own `max_age` here has *not* been tightened by any layer.
+    /// Whatever reads freshness for a check (`#81`) must read this
+    /// control's own `max_age` field below, not a check's, or a scope's
+    /// `tighten` is silently ignored.
     pub evidence: Vec<Check>,
     /// The minimum of the control's own `max_age`, every one of its checks'
     /// own `max_age`, and every layer's `tighten` for it -- `None` when
-    /// nothing in any of those ever set one.
+    /// nothing in any of those ever set one. This, not a `Check` variant's
+    /// own `max_age` field, is the effective freshness window to check
+    /// evidence against.
     pub max_age: Option<Duration>,
     pub not_applicable: Option<AppliedNotApplicable>,
 }
@@ -1149,6 +1156,23 @@ mod tests {
     }
 
     #[test]
+    fn kind_best_practice_parses_from_its_hyphenated_spelling_and_its_alias() {
+        let hyphenated: Catalogue = serde_yaml_ng::from_str(
+            "framework: house\ntitle: House rules\nkind: best-practice\ncontrols: []\n",
+        )
+        .unwrap();
+        assert_eq!(hyphenated.kind, Kind::BestPractice);
+
+        let aliased: Catalogue = serde_yaml_ng::from_str(
+            "framework: house\ntitle: House rules\nkind: best_practice\ncontrols: []\n",
+        )
+        .unwrap();
+        assert_eq!(aliased.kind, Kind::BestPractice);
+
+        assert_eq!(serde_json::to_string(&Kind::BestPractice).unwrap(), "\"best-practice\"");
+    }
+
+    #[test]
     fn examples_policies_cra_loads_with_no_findings() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/policies");
         let (catalogues, findings) = load_all(&dir);
@@ -1185,6 +1209,23 @@ mod tests {
             "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n\
              \x20\x20- id: a\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20evidence:\n\
              \x20\x20\x20\x20\x20\x20- check: bogus\n",
+        );
+        let (catalogues, findings) = load_all(&dir);
+        assert!(catalogues.is_empty());
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::ParseFailed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unknown_field_inside_a_known_check_is_a_finding_never_a_panic() {
+        let dir = tempdir("unknown-check-field");
+        write(
+            &dir,
+            "cra.yaml",
+            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n\
+             \x20\x20- id: a\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20evidence:\n\
+             \x20\x20\x20\x20\x20\x20- check: knowledge\n\x20\x20\x20\x20\x20\x20\x20\x20bogus: 1\n",
         );
         let (catalogues, findings) = load_all(&dir);
         assert!(catalogues.is_empty());
@@ -1604,6 +1645,66 @@ mod tests {
         assert_eq!(by_id["a"].status.kind(), StatusKind::Satisfied);
         assert_eq!(by_id["b"].status.kind(), StatusKind::Satisfied);
         assert!(by_id["b"].status.reasons().iter().any(|r| r.contains("cra/a")));
+    }
+
+    #[test]
+    fn maps_to_propagates_an_attestation_and_names_it_attested_via() {
+        let now = Utc::now();
+        let a = applied_control(
+            "a",
+            vec![Check::Attestation],
+            vec![ControlRef::new("cra", "b")],
+        );
+        let b = applied_control("b", vec![Check::Knowledge { tag: None }], Vec::new());
+        let evidence = Evidence {
+            attestations: vec![Attestation {
+                id: "att-1".to_string(),
+                control: ControlRef::new("cra", "a"),
+                scope: "root".to_string(),
+                evidence: "https://example.com/policy".to_string(),
+                note: None,
+                attested_by: "owner".to_string(),
+                attested_at: now,
+                expires_at: now + chrono::Duration::days(30),
+                withdrawn: None,
+            }],
+            ..Default::default()
+        };
+        let statuses = evaluate(&[a, b], &evidence, now);
+        let by_id: BTreeMap<&str, &ControlStatus> =
+            statuses.iter().map(|s| (s.control.id.as_str(), s)).collect();
+        assert_eq!(by_id["b"].status.kind(), StatusKind::Attested);
+        assert!(by_id["b"].status.reasons().iter().any(|r| r.contains("attested via cra/a")));
+    }
+
+    /// The task notes' one hard wire requirement: `ControlStatus` carries
+    /// `#[serde(flatten)]` over an internally-tagged `Status`, which is
+    /// exactly the serde combination that can silently misbehave (nesting
+    /// under a `status` key instead of flattening it). This proves the
+    /// literal JSON shape, not just that it round-trips.
+    #[test]
+    fn control_status_serializes_flat_with_status_and_reasons_alongside_control() {
+        let cs = ControlStatus {
+            control: ControlRef::new("cra", "a"),
+            title: "A".to_string(),
+            kind: Kind::Regulation,
+            status: Status::Satisfied {
+                reasons: vec!["knowledge: tag `control/cra/a` is present".to_string()],
+            },
+        };
+        let json = serde_json::to_value(&cs).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "control": "cra/a",
+                "title": "A",
+                "kind": "regulation",
+                "status": "satisfied",
+                "reasons": ["knowledge: tag `control/cra/a` is present"],
+            })
+        );
+        let back: ControlStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(back, cs);
     }
 
     #[test]
