@@ -314,6 +314,7 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             worktree: false,
+            knowledge_hints: false,
             workflow_origin: None,
             bench_origin: None,
             retry: None,

@@ -22,6 +22,7 @@ import {
   readNodeTail,
   encodeToolbarFlags,
   decodeToolbarFlags,
+  knowledgeSearchUrl,
 } from "../js/knowledge-graph.js";
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
@@ -237,6 +238,21 @@ test("isNodeDimmed: with no query, dimming follows hover/keyboard focus and its 
   assert.equal(isNodeDimmed(focusNode, "", "hovered", neighbours), false, "the focus itself is never dimmed");
   assert.equal(isNodeDimmed(neighbourNode, "", "hovered", neighbours), false, "a neighbour of the focus is not dimmed");
   assert.equal(isNodeDimmed(farNode, "", "hovered", neighbours), true, "anything else is dimmed once something is focused");
+});
+
+test("isNodeDimmed: a provider search's hits stay lit, whatever is hovered, until the filter box asks something newer", () => {
+  const hit = { id: "clients/acme", label: "Acme", kind: "page" };
+  const miss = { id: "travel", label: "Travel", kind: "page" };
+  const hits = new Set(["clients/acme"]);
+  assert.equal(isNodeDimmed(hit, "", "travel", new Set(["travel"]), hits), false, "a hit is lit even while something else is hovered");
+  assert.equal(isNodeDimmed(miss, "", "travel", new Set(["travel"]), hits), true, "hovering a miss does not light it");
+  assert.equal(isNodeDimmed(miss, "trav", null, new Set(), hits), false, "the filter box wins over the hits");
+  assert.equal(isNodeDimmed(miss, "", null, new Set(), null), false, "no hits, no dimming");
+});
+
+test("knowledgeSearchUrl: encodes the words as typed, #tags included, with an explicit limit", () => {
+  assert.equal(knowledgeSearchUrl("  #invoicing acme & co "), "/api/knowledge/search?q=%23invoicing%20acme%20%26%20co&limit=20");
+  assert.equal(knowledgeSearchUrl("x", 5), "/api/knowledge/search?q=x&limit=5");
 });
 
 // -------------------------------------------------------------------- area colours

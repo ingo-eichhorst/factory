@@ -247,6 +247,22 @@ enum KnowledgeCmd {
         #[arg(long)]
         overwrite: bool,
     },
+    /// Find pages by words and tags, best first. Prints each page's path and
+    /// why it matched -- never its text; open the file to read it.
+    Search {
+        /// Words to look for. Quote them or not; they are joined either way.
+        words: Vec<String>,
+        /// Only pages carrying this tag. Repeat for more; a page needs all.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Weigh pages whose `area` is this scope. An agent's own scope is
+        /// used when it gives none.
+        #[arg(long)]
+        scope: Option<String>,
+        /// How many pages at most (default 10, never more than 50).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -332,6 +348,10 @@ enum TaskCmd {
         worktree: bool,
         #[arg(long)]
         no_worktree: bool,
+        /// Hand each run the knowledge pages that match this task's title and
+        /// instructions, searched when the run starts.
+        #[arg(long)]
+        knowledge_hints: bool,
         /// Dispatch it immediately as well.
         #[arg(long)]
         run: bool,
@@ -384,6 +404,12 @@ enum TaskCmd {
         /// Repeatable; replaces the whole set.
         #[arg(long = "label")]
         labels: Vec<String>,
+        /// Hand each run the knowledge pages that match this task.
+        #[arg(long, conflicts_with = "no_knowledge_hints")]
+        knowledge_hints: bool,
+        /// Stop handing runs knowledge pages.
+        #[arg(long)]
+        no_knowledge_hints: bool,
     },
     /// Show one task.
     Show { id: Option<String> },
@@ -784,6 +810,22 @@ async fn knowledge_cmd(json: bool, client: &Client, cmd: KnowledgeCmd) -> Result
                 .send(Request::KnowledgeAdd { sources, into, overwrite })
                 .await?;
             print(&payload, json, knowledge_write_text)
+        }
+        KnowledgeCmd::Search { words, tags, scope, limit } => {
+            let payload = client
+                .send(Request::KnowledgeSearch { text: words.join(" "), tags, scope, limit })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::KnowledgeHits { provider, vault, hits } => Some(if hits.is_empty() {
+                    format!("no page matches ({provider} search of {vault})")
+                } else {
+                    hits.iter()
+                        .map(|h| format!("{vault}/{}.md  {}\n    {}", h.page, h.title, h.why))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }),
+                _ => None,
+            })
         }
     }
 }
@@ -1285,6 +1327,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             labels,
             worktree,
             no_worktree,
+            knowledge_hints,
             run,
         } => {
             let schedule = schedule
@@ -1317,6 +1360,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     retry,
                     labels: parse_labels(&labels)?,
                     worktree,
+                    knowledge_hints,
                 }))
                 .await?;
             let created = match &payload {
@@ -1359,6 +1403,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             retry,
             default_retry,
             labels,
+            knowledge_hints,
+            no_knowledge_hints,
         } => {
             let retry = retry.as_deref().map(parse_retry).transpose()?;
             let patch = TaskPatch {
@@ -1382,6 +1428,11 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 clear_blocked_timeout: default_timeouts,
                 retry,
                 clear_retry: default_retry,
+                knowledge_hints: match (knowledge_hints, no_knowledge_hints) {
+                    (true, _) => Some(true),
+                    (_, true) => Some(false),
+                    _ => None,
+                },
                 labels: if labels.is_empty() {
                     None
                 } else {
@@ -1867,6 +1918,9 @@ fn detail(t: &Task) -> String {
     }
     if t.worktree {
         s.push_str("  worktree   yes, a fresh one before each run\n");
+    }
+    if t.knowledge_hints {
+        s.push_str("  knowledge  matching pages handed to each run\n");
     }
     if t.runs > 0 {
         s.push_str(&format!("  runs       {}\n", t.runs));

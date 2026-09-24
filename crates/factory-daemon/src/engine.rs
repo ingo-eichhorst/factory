@@ -3,8 +3,8 @@
 
 use chrono::Utc;
 use factory_core::adapter::agent::{
-    run_guide_path, run_hook_settings_path, run_shell_script_path, truncate_tail, upstream_output_path, AgentContext,
-    LaunchSpec, TaskBinding, UpstreamOutput, UPSTREAM_RESULT_BYTE_CAP,
+    knowledge_hints_path, run_guide_path, run_hook_settings_path, run_shell_script_path, truncate_tail,
+    upstream_output_path, AgentContext, LaunchSpec, TaskBinding, UpstreamOutput, UPSTREAM_RESULT_BYTE_CAP,
 };
 use factory_core::adapter::runtime::{
     RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
@@ -271,6 +271,14 @@ impl Engine {
                 if draft.scope.trim().is_empty() { draft.scope = scope.to_string(); }
                 Request::WorkflowCreate(draft)
             }
+            // An agent searching means from where it stands, so a provider
+            // that weighs `area` weighs it against the agent's own scope.
+            Request::KnowledgeSearch { text, tags, scope: None, limit } => Request::KnowledgeSearch {
+                text,
+                tags,
+                scope: Some(scope.to_string()),
+                limit,
+            },
             other => other,
         }
     }
@@ -353,6 +361,32 @@ impl Engine {
                     findings: index.findings,
                 })
             }
+            Request::KnowledgeSearch { text, tags, scope, limit } => {
+                let (root, provider_name) = {
+                    let factory = self.factory_snapshot();
+                    (factory.root, factory.config.daemon.knowledge_provider)
+                };
+                let provider = self.registry.knowledge(&provider_name)?;
+                let query = factory_core::adapter::KnowledgeQuery {
+                    text,
+                    tags,
+                    scope,
+                    limit: limit
+                        .unwrap_or(factory_core::adapter::knowledge::DEFAULT_SEARCH_LIMIT)
+                        .min(factory_core::adapter::knowledge::MAX_SEARCH_LIMIT),
+                };
+                if query.text.trim().is_empty() && query.tags.is_empty() {
+                    return Err(FactoryError::BadRequest(
+                        "nothing to search for: give some text, a tag, or both".into(),
+                    ));
+                }
+                let hits = provider.search(&root, &query).await?;
+                Ok(Payload::KnowledgeHits {
+                    provider: provider_name,
+                    vault: factory_core::knowledge::vault_root(&root).display().to_string(),
+                    hits,
+                })
+            }
             Request::KnowledgeImport { source, into, overwrite } => {
                 let root = self.factory_snapshot().root;
                 let source = PathBuf::from(source);
@@ -362,6 +396,7 @@ impl Engine {
                 .await
                 .map_err(|e| FactoryError::Other(anyhow::anyhow!("knowledge import: {e}")))?
                 .map_err(FactoryError::BadRequest)?;
+                self.knowledge_changed(&result.copied).await;
                 Ok(knowledge_write_payload(result))
             }
             Request::KnowledgeAdd { sources, into, overwrite } => {
@@ -372,6 +407,7 @@ impl Engine {
                 })
                 .await
                 .map_err(|e| FactoryError::Other(anyhow::anyhow!("knowledge add: {e}")))?;
+                self.knowledge_changed(&result.copied).await;
                 Ok(knowledge_write_payload(result))
             }
             Request::KnowledgeWriteFile { path, overwrite, bytes } => {
@@ -382,6 +418,7 @@ impl Engine {
                 .await
                 .map_err(|e| FactoryError::Other(anyhow::anyhow!("knowledge write: {e}")))?
                 .map_err(FactoryError::BadRequest)?;
+                self.knowledge_changed(std::slice::from_ref(&written)).await;
                 Ok(knowledge_write_payload(factory_core::knowledge::WriteResult {
                     copied: vec![written],
                     ..Default::default()
@@ -1424,6 +1461,7 @@ impl Engine {
         // pass, which dispatches through this same function, needs no
         // change of its own to pick this up.
         let upstream = self.upstream_outputs(&task).await;
+        let knowledge = self.knowledge_hints(&task, &run.id).await;
 
         let ctx = AgentContext {
             scope: task.scope.clone(),
@@ -1439,6 +1477,7 @@ impl Engine {
                 token,
                 worktree_branch: run.worktree_branch.clone(),
                 upstream,
+                knowledge,
             }),
             identity_token: None,
             role,
@@ -2074,6 +2113,9 @@ impl Engine {
         // to remove when this run never wrote one.
         let upstream = upstream_output_path(&self.factory_snapshot().guides_dir(), &run.task_id);
         let _ = std::fs::remove_file(upstream);
+        // And the knowledge-hints file, the same way for the same reader.
+        let knowledge = knowledge_hints_path(&self.factory_snapshot().guides_dir(), &run.task_id);
+        let _ = std::fs::remove_file(knowledge);
         // The shell agent's generated wrapper script, keyed by *run* id
         // rather than task id (see `run_shell_script_path`'s own comment) --
         // a retry's fresh run must never lose its script to this cleanup of
@@ -2290,6 +2332,85 @@ fn truncate(s: &str, n: usize) -> String {
     } else {
         let head: String = s.chars().take(n.saturating_sub(1)).collect();
         format!("{head}…")
+    }
+}
+
+impl Engine {
+    /// The knowledge pages a run of `task` is handed, when the task asks for
+    /// them: one search over its title and instructions, from its own scope,
+    /// at most `KNOWLEDGE_HINTS_LIMIT` pages. What was handed over is
+    /// written to the run's journal, so the prompt can be explained after
+    /// the vault has moved on. A search that fails is journaled too and the
+    /// run goes ahead without hints -- they are a help, never a reason not
+    /// to start.
+    async fn knowledge_hints(
+        &self,
+        task: &Task,
+        run_id: &str,
+    ) -> Option<factory_core::adapter::KnowledgeHints> {
+        if !task.knowledge_hints {
+            return None;
+        }
+        let (root, name) = {
+            let factory = self.factory_snapshot();
+            (factory.root, factory.config.daemon.knowledge_provider)
+        };
+        let query = factory_core::adapter::KnowledgeQuery {
+            text: format!("{}\n{}", task.title, task.instructions),
+            tags: Vec::new(),
+            scope: Some(task.scope.clone()),
+            limit: factory_core::adapter::knowledge::KNOWLEDGE_HINTS_LIMIT,
+        };
+        let searched = match self.registry.knowledge(&name) {
+            Ok(provider) => provider.search(&root, &query).await,
+            Err(e) => Err(e),
+        };
+        let entry = match &searched {
+            Ok(hits) if hits.is_empty() => {
+                TaskEntry::new("daemon", "knowledge", format!("no knowledge page matched ({name})"))
+            }
+            Ok(hits) => TaskEntry::new(
+                "daemon",
+                "knowledge",
+                format!(
+                    "handed {} knowledge page(s) ({name}): {}",
+                    hits.len(),
+                    hits.iter().map(|h| h.page.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+            )
+            .with_data(serde_json::json!({ "provider": name, "hits": hits })),
+            Err(e) => TaskEntry::new(
+                "daemon",
+                "knowledge",
+                format!("knowledge search failed, so this run has no hints ({name}): {e}"),
+            ),
+        };
+        self.entry(&task.id, entry.in_run(run_id)).await;
+        let hits = searched.ok().filter(|hits| !hits.is_empty())?;
+        Some(factory_core::adapter::KnowledgeHints {
+            vault: factory_core::knowledge::vault_root(&root).display().to_string(),
+            hits,
+        })
+    }
+
+    /// Tell the knowledge provider what a write just put in the vault. The
+    /// write has already happened and is the source of truth, so a provider
+    /// that cannot keep up is a warning, never a failed write.
+    async fn knowledge_changed(&self, files: &[String]) {
+        if files.is_empty() {
+            return;
+        }
+        let (root, name) = {
+            let factory = self.factory_snapshot();
+            (factory.root, factory.config.daemon.knowledge_provider)
+        };
+        let result = match self.registry.knowledge(&name) {
+            Ok(provider) => provider.changed(&root, files).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
+            tracing::warn!("knowledge provider {name:?} was not told about {} written file(s): {e}", files.len());
+        }
     }
 }
 
@@ -2524,6 +2645,251 @@ mod tests {
             }
             other => panic!("expected a knowledge payload: {other:?}"),
         }
+
+        std::fs::remove_dir_all(scope_dir).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn search(text: &str, limit: Option<usize>) -> Request {
+        Request::KnowledgeSearch { text: text.into(), tags: Vec::new(), scope: None, limit }
+    }
+
+    fn engine_with_vault(name: &str) -> (Arc<Engine>, PathBuf, PathBuf) {
+        let scope_dir = temp_dir(name);
+        let engine = test_engine(scope_dir.clone());
+        let root = temp_dir(&format!("{name}-root"));
+        engine.factory.write().unwrap().root.clone_from(&root);
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
+        (engine, scope_dir, root)
+    }
+
+    /// The whole pull path: the configured provider answers from the root's
+    /// vault, the payload names the vault so a hit can be opened, no page
+    /// text travels, and a page written a moment ago is found by the very
+    /// next search -- nothing to restart, nothing to rebuild.
+    #[tokio::test]
+    async fn a_search_answers_from_the_vault_and_sees_a_page_written_just_before() {
+        let (engine, scope_dir, root) = engine_with_vault("knowledge-search");
+        std::fs::write(
+            root.join(".factory/knowledge/acme.md"),
+            "---\ntitle: Acme\ntags: [invoicing]\n---\nSECRET-BODY-TEXT\n",
+        )
+        .unwrap();
+
+        match engine.handle_request(search("invoicing", None)).await {
+            Response::Ok { data: Payload::KnowledgeHits { provider, vault, hits } } => {
+                assert_eq!(provider, "keyword");
+                assert_eq!(vault, root.join(".factory/knowledge").display().to_string());
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].page, "acme");
+                let wire = serde_json::to_string(&hits).unwrap();
+                assert!(!wire.contains("SECRET-BODY-TEXT"), "no page text on the wire: {wire}");
+            }
+            other => panic!("expected hits: {other:?}"),
+        }
+
+        let written = engine
+            .handle_request(Request::KnowledgeWriteFile {
+                path: "billing.md".into(),
+                overwrite: false,
+                bytes: b"---\ntitle: Invoicing runbook\n---\nsteps\n".to_vec(),
+            })
+            .await;
+        assert!(matches!(written, Response::Ok { .. }), "{written:?}");
+        match engine.handle_request(search("invoicing", None)).await {
+            Response::Ok { data: Payload::KnowledgeHits { hits, .. } } => {
+                let ids: Vec<&str> = hits.iter().map(|h| h.page.as_str()).collect();
+                assert_eq!(ids, ["acme", "billing"]);
+            }
+            other => panic!("expected hits: {other:?}"),
+        }
+
+        std::fs::remove_dir_all(scope_dir).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_search_with_nothing_to_look_for_is_refused_and_a_huge_limit_is_capped() {
+        let (engine, scope_dir, root) = engine_with_vault("knowledge-search-limits");
+        for i in 0..60 {
+            std::fs::write(root.join(format!(".factory/knowledge/p{i:02}.md")), "#ops\n").unwrap();
+        }
+
+        match engine.handle_request(search("  ", None)).await {
+            Response::Error { message, .. } => assert!(message.contains("nothing to search for"), "{message}"),
+            other => panic!("expected a refusal: {other:?}"),
+        }
+        for (asked, got) in [(None, factory_core::adapter::knowledge::DEFAULT_SEARCH_LIMIT), (Some(1000), 50)] {
+            match engine.handle_request(search("ops", asked)).await {
+                Response::Ok { data: Payload::KnowledgeHits { hits, .. } } => assert_eq!(hits.len(), got),
+                other => panic!("expected hits: {other:?}"),
+            }
+        }
+
+        std::fs::remove_dir_all(scope_dir).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    async fn created(engine: &Arc<Engine>, new: NewTask) -> Task {
+        match engine.handle_request(Request::TaskCreate(new)).await {
+            Response::Ok { data: Payload::Task { task } } => task,
+            other => panic!("expected a task: {other:?}"),
+        }
+    }
+
+    /// Push, not pull: a task that asks for hints gets the pages its own
+    /// title and instructions match, from its own scope, capped, with the
+    /// vault to open them from -- and its journal records exactly which,
+    /// in the run the hints were for.
+    #[tokio::test]
+    async fn a_task_that_asks_for_knowledge_hints_is_handed_them_and_the_journal_says_which() {
+        let (engine, scope_dir, root) = engine_with_vault("knowledge-hints");
+        std::fs::write(root.join(".factory/knowledge/acme.md"), "---\ntitle: Acme\ntags: [invoicing]\n---\nx\n").unwrap();
+        for i in 0..8 {
+            std::fs::write(root.join(format!(".factory/knowledge/q{i}.md")), "#quarterly\n").unwrap();
+        }
+        let task = created(
+            &engine,
+            NewTask {
+                title: "Send the quarterly invoicing run".into(),
+                agent: Some("shell".into()),
+                knowledge_hints: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(task.knowledge_hints);
+
+        let hints = engine.knowledge_hints(&task, "run-1").await.expect("something matched");
+        assert_eq!(hints.vault, root.join(".factory/knowledge").display().to_string());
+        assert_eq!(hints.hits.len(), factory_core::adapter::knowledge::KNOWLEDGE_HINTS_LIMIT);
+        assert_eq!(hints.hits[0].page, "acme", "tag matches all score alike, so page id decides");
+
+        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entry = entries.iter().find(|e| e.kind == "knowledge").expect("journaled");
+        assert_eq!(entry.run_id.as_deref(), Some("run-1"));
+        assert!(entry.message.starts_with("handed 5 knowledge page(s) (keyword): acme, "), "{}", entry.message);
+        assert_eq!(entry.data.as_ref().unwrap()["hits"].as_array().unwrap().len(), 5);
+
+        std::fs::remove_dir_all(scope_dir).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_that_does_not_ask_gets_no_hints_and_no_journal_line() {
+        let (engine, scope_dir, root) = engine_with_vault("knowledge-hints-off");
+        std::fs::write(root.join(".factory/knowledge/acme.md"), "#invoicing\n").unwrap();
+        let task = created(
+            &engine,
+            NewTask { title: "invoicing".into(), agent: Some("shell".into()), ..Default::default() },
+        )
+        .await;
+        assert!(!task.knowledge_hints, "off unless asked for");
+        assert!(engine.knowledge_hints(&task, "run-1").await.is_none());
+        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        assert!(!entries.iter().any(|e| e.kind == "knowledge"));
+
+        // Turned on by an edit, it takes effect on the next run; a task whose
+        // words match nothing says so rather than staying silent.
+        let patch = TaskPatch { knowledge_hints: Some(true), title: Some("unrelated".into()), ..Default::default() };
+        let task = match engine.handle_request(Request::TaskUpdate { id: task.id.clone(), patch }).await {
+            Response::Ok { data: Payload::Task { task } } => task,
+            other => panic!("expected a task: {other:?}"),
+        };
+        assert!(task.knowledge_hints);
+        assert!(engine.knowledge_hints(&task, "run-2").await.is_none());
+        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entry = entries.iter().find(|e| e.kind == "knowledge").expect("journaled");
+        assert_eq!(entry.message, "no knowledge page matched (keyword)");
+
+        std::fs::remove_dir_all(scope_dir).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A provider that cannot answer never stops a run from starting.
+    #[tokio::test]
+    async fn a_failed_hint_search_is_journaled_and_the_run_goes_ahead_without() {
+        let (engine, scope_dir, root) = engine_with_vault("knowledge-hints-broken");
+        let task = created(
+            &engine,
+            NewTask { title: "anything".into(), agent: Some("shell".into()), knowledge_hints: true, ..Default::default() },
+        )
+        .await;
+        // Unknown only after startup's check -- the case a hand edit to a
+        // running instance's snapshot could still produce.
+        engine.factory.write().unwrap().config.daemon.knowledge_provider = "gone".into();
+        assert!(engine.knowledge_hints(&task, "run-1").await.is_none());
+        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entry = entries.iter().find(|e| e.kind == "knowledge").expect("journaled");
+        assert!(entry.message.starts_with("knowledge search failed"), "{}", entry.message);
+
+        std::fs::remove_dir_all(scope_dir).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// The seam is real: another provider, registered under the configured
+    /// name, answers instead -- and hears about every write -- with nothing
+    /// in the engine, the protocol or the CLI knowing the difference.
+    #[tokio::test]
+    async fn the_configured_provider_is_the_one_asked_and_told() {
+        struct Stub(std::sync::Mutex<Vec<String>>);
+        #[async_trait::async_trait]
+        impl factory_core::adapter::KnowledgeProvider for Stub {
+            fn name(&self) -> &str {
+                "stub"
+            }
+            async fn search(
+                &self,
+                _root: &std::path::Path,
+                query: &factory_core::adapter::KnowledgeQuery,
+            ) -> Result<Vec<factory_core::adapter::KnowledgeHit>> {
+                Ok(vec![factory_core::adapter::KnowledgeHit {
+                    page: format!("stub/{}", query.text),
+                    title: "Stub".into(),
+                    score: 1.0,
+                    why: format!("scope: {}", query.scope.as_deref().unwrap_or("-")),
+                }])
+            }
+            async fn changed(&self, _root: &std::path::Path, files: &[String]) -> Result<()> {
+                self.0.lock().unwrap().extend(files.iter().cloned());
+                Ok(())
+            }
+        }
+
+        let (mut engine, scope_dir, root) = engine_with_vault("knowledge-search-stub");
+        let stub = Arc::new(Stub(Default::default()));
+        Arc::get_mut(&mut engine)
+            .expect("nothing else holds the engine yet")
+            .registry
+            .add_knowledge(stub.clone(), "test");
+        engine.factory.write().unwrap().config.daemon.knowledge_provider = "stub".into();
+
+        // An agent that names no scope searches from its own.
+        let caller = crate::access::Caller::Agent {
+            scope: "projects/demo".into(),
+            name: "w".into(),
+            role: factory_core::role::Role::worker(),
+            run_id: None,
+        };
+        let request = engine.bind_caller(&caller, search("anything", None));
+        assert!(engine.authorize(&caller, &request).await.is_ok(), "searching is a read, open to a worker");
+        match engine.dispatch_request(&caller, request).await.unwrap() {
+            Payload::KnowledgeHits { provider, hits, .. } => {
+                assert_eq!(provider, "stub");
+                assert_eq!(hits[0].page, "stub/anything");
+                assert_eq!(hits[0].why, "scope: projects/demo");
+            }
+            other => panic!("expected hits: {other:?}"),
+        }
+
+        engine
+            .handle_request(Request::KnowledgeWriteFile {
+                path: "new.md".into(),
+                overwrite: false,
+                bytes: b"hello\n".to_vec(),
+            })
+            .await;
+        assert_eq!(*stub.0.lock().unwrap(), ["new.md"]);
 
         std::fs::remove_dir_all(scope_dir).ok();
         std::fs::remove_dir_all(root).ok();

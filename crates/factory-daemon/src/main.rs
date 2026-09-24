@@ -217,6 +217,13 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // tasks in, the runs, the journal and the standing agents stay here.
     let ledger = registry.store(&factory.config.daemon.task_store)?;
 
+    // Looked up again by name on every search, so this is only the check --
+    // but it belongs here, where a misspelt provider stops the daemon in
+    // front of whoever started it rather than failing every search later.
+    registry
+        .knowledge(&factory.config.daemon.knowledge_provider)
+        .context("daemon.knowledge_provider names a knowledge provider that is not registered")?;
+
     // A scope that names an engine nobody registered has to be a refusal now,
     // in front of whoever started the daemon. Falling back to the default
     // would put that project's tasks in the wrong database and say nothing.

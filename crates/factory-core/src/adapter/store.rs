@@ -121,6 +121,7 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         // store. See `Task::worktree` for why an absent key means the
         // opposite once a task already exists.
         worktree: new.worktree.unwrap_or(true),
+        knowledge_hints: new.knowledge_hints,
         workflow_origin: None,
         bench_origin: None,
         retry: new.retry,

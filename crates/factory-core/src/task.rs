@@ -269,6 +269,13 @@ pub struct Task {
     /// tasks created after this shipped carry the field explicitly.
     #[serde(default)]
     pub worktree: bool,
+    /// Whether a run of this task is handed the knowledge pages that match
+    /// its title and instructions, searched once at dispatch. Off unless a
+    /// caller turns it on, so a task written before the field existed reads
+    /// the same as one that never asked. The pages a run was given belong to
+    /// that run -- its journal records them -- and are never mirrored here.
+    #[serde(default)]
+    pub knowledge_hints: bool,
     /// The workflow attempt that created this task, when there is one. This is
     /// stored with the task so adapters preserve the relationship without
     /// parsing labels or titles.
@@ -330,6 +337,10 @@ pub struct NewTask {
     /// merely fails to mention it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<bool>,
+    /// Hand each run the knowledge pages that match this task -- see
+    /// `Task::knowledge_hints`. Absent means off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub knowledge_hints: bool,
     /// This task's own retry policy, overriding the daemon's default. Absent
     /// means "use the default" -- see `RetryPolicy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -403,6 +414,10 @@ pub struct TaskPatch {
     pub retry: Option<RetryPolicy>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_retry: bool,
+    /// Turn knowledge hints on or off. A plain setting, so `Some(false)` is
+    /// how to switch them off and no `clear_` twin is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_hints: Option<bool>,
     /// Set by the engine when a scheduled run fails and its policy allows
     /// another attempt, or cleared once the streak ends -- see
     /// `PendingRetry`. Not something a caller outside the engine has reason

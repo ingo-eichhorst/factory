@@ -31,6 +31,7 @@ import {
   readNodeTail,
   encodeToolbarFlags,
   decodeToolbarFlags,
+  knowledgeSearchUrl,
 } from "./knowledge-graph.js";
 
 // Assigned through `textContent` below, like `CORRECTION`/`BOUNDARY` in
@@ -71,6 +72,10 @@ let currentEdges = [];
 
 const toolbar = { tags: true, documents: true, orphans: true, gaps: true, local: false, depth: 2 };
 let search = "";
+/// The last provider search asked from the form above the graph: what was
+/// asked, and either the answer (`provider`, `vault`, `hits`) or the error.
+/// `null` when nothing has been asked, or it was cleared.
+let asked = null;
 const view = { scale: 1, tx: 0, ty: 0 };
 let dragging = null;
 let wired = false;
@@ -327,13 +332,14 @@ function updateGraphHighlight() {
   const focus = hovered;
   const neighbours = focus ? neighborhood(focus, currentEdges.map(([a, b]) => [a, b]), 1) : new Set();
   const query = search;
+  const hits = asked && asked.hits ? new Set(asked.hits.map((h) => h.page)) : null;
   const showAllLabels = shouldShowAllLabels(currentNodes.size, view.scale);
 
   for (const g of svg.querySelectorAll(".know-node")) {
     const id = g.dataset.id;
     const node = currentNodes.get(id);
     g.classList.toggle("selected", id === selected);
-    g.classList.toggle("dim", !!node && isNodeDimmed(node, query, focus, neighbours));
+    g.classList.toggle("dim", !!node && isNodeDimmed(node, query, focus, neighbours, hits));
   }
   for (const t of svg.querySelectorAll(".know-label")) {
     const id = t.dataset.id;
@@ -532,6 +538,71 @@ function selectNode(id) {
   writeHash();
 }
 
+// ------------------------------------------------------------ provider search
+
+/// The ranked answer under the form: each page with why it matched, and a
+/// button that selects it in the graph. Paths and reasons only -- the same
+/// answer an agent gets from `factory knowledge search`.
+function renderResults() {
+  const el = $("knowledge-results");
+  const clear = $("knowledge-ask-clear");
+  if (clear) clear.hidden = !asked;
+  if (!el) return;
+  el.hidden = !asked;
+  if (!asked) {
+    el.innerHTML = "";
+    return;
+  }
+  if (asked.error) {
+    el.innerHTML = `<p class="env-note bad">${esc(asked.error)}</p>`;
+    return;
+  }
+  const head = `<p class="sub">${asked.hits.length} page${asked.hits.length === 1 ? "" : "s"} for
+    <strong>${esc(asked.text)}</strong>, ranked by the <code>${esc(asked.provider)}</code> provider.</p>`;
+  if (!asked.hits.length) {
+    el.innerHTML = `${head}<p class="sub">Nothing matched. This provider reads tags, titles and links -- not a page's text.</p>`;
+    return;
+  }
+  el.innerHTML = `${head}<ol class="know-hits">${asked.hits
+    .map(
+      (h) => `<li>${goto(h.page)}${esc(h.title)}</button> <code>${esc(h.page)}</code>
+        <div class="sub">${esc(h.why)}</div></li>`,
+    )
+    .join("")}</ol>`;
+  for (const b of el.querySelectorAll("[data-goto]")) b.onclick = () => selectNode(b.dataset.goto);
+}
+
+async function ask(text) {
+  if (!text.trim()) {
+    asked = null;
+  } else {
+    try {
+      const data = await api(knowledgeSearchUrl(text));
+      asked = { text: text.trim(), provider: data.provider, vault: data.vault, hits: data.hits || [] };
+    } catch (error) {
+      asked = { text: text.trim(), error: error.message };
+    }
+  }
+  renderResults();
+  updateGraphHighlight();
+}
+
+function wireAsk() {
+  const form = $("knowledge-ask");
+  if (!form) return;
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    ask($("knowledge-ask-text").value);
+  };
+  const clear = $("knowledge-ask-clear");
+  if (clear) {
+    clear.onclick = () => {
+      $("knowledge-ask-text").value = "";
+      ask("");
+    };
+  }
+}
+
 // -------------------------------------------------------- gaps, findings, tables
 
 function pageRow(p) {
@@ -705,6 +776,7 @@ function wireToolbarOnce() {
 
   wireGraphInteraction();
   wireUpload();
+  wireAsk();
 }
 
 // ------------------------------------------------------------------- render
@@ -738,6 +810,10 @@ export function renderKnowledge() {
 
   const shell = $("knowledge-shell");
   if (shell) shell.hidden = !present;
+  const askForm = $("knowledge-ask");
+  if (askForm) askForm.hidden = !present;
+  if (!present) asked = null;
+  renderResults();
 
   const count = $("knowledge-count");
   if (count) {

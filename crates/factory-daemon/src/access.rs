@@ -212,6 +212,7 @@ impl Engine {
             | Request::SiteFootprint
             | Request::Environment
             | Request::Knowledge
+            | Request::KnowledgeSearch { .. }
             | Request::Benchmarks
             | Request::Datasets
             | Request::Dataset { .. }
@@ -757,6 +758,7 @@ mod tests {
             timeout_seconds: None,
             blocked_timeout_seconds: None,
             worktree: false,
+            knowledge_hints: false,
             labels: Default::default(),
             created_at: now,
             updated_at: now,

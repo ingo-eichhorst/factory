@@ -7,6 +7,6 @@ pub mod manifest;
 pub mod proxy;
 pub mod registry;
 
-pub use builtin::{HarnessAgent, HerdrRuntime, ShellAgent, SqliteStore};
+pub use builtin::{HarnessAgent, HerdrRuntime, KeywordKnowledge, ShellAgent, SqliteStore};
 pub use manifest::{PluginManifest, discover, load};
 pub use registry::Registry;

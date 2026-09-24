@@ -1,14 +1,16 @@
-//! The four seams. Each is a trait the daemon depends on and knows nothing
+//! The five seams. Each is a trait the daemon depends on and knows nothing
 //! behind: a built-in adapter and an out-of-process plugin are the same thing
 //! to the caller.
 
 pub mod agent;
 pub mod interface;
+pub mod knowledge;
 pub mod runtime;
 pub mod store;
 
 pub use agent::{Agent, AgentContext, LaunchKind, LaunchSpec, TaskBinding, UpstreamOutput};
 pub use interface::{Interface, InterfaceContext};
+pub use knowledge::{KnowledgeHints, KnowledgeHit, KnowledgeProvider, KnowledgeQuery};
 pub use runtime::{
     AgentRuntime, RuntimeConnectionDiagnostic, RuntimeConnectionState, RuntimeEvent,
     RuntimeEventKind, RuntimeEventStream, RuntimePeer, RuntimeStatus, Screen, StartRequest,
@@ -24,6 +26,7 @@ pub enum AdapterKind {
     Runtime,
     Task,
     Interface,
+    Knowledge,
 }
 
 impl AdapterKind {
@@ -33,6 +36,7 @@ impl AdapterKind {
             Self::Runtime => "runtime",
             Self::Task => "task",
             Self::Interface => "interface",
+            Self::Knowledge => "knowledge",
         }
     }
 }

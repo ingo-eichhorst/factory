@@ -1155,6 +1155,15 @@ button.badge:hover { filter: brightness(1.15); }
 .know-add { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px 14px; margin-bottom: 14px; }
 .know-add h3 { margin: 0 0 4px; font: 600 13.5px/1.3 var(--cond); color: var(--ink); text-transform: none; }
 .know-add input[type="file"] { width: auto; margin-top: 6px; }
+.know-ask { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 10px; }
+.know-ask input[type="search"] { flex: 1 1 220px; width: auto; min-width: 0; }
+.know-results {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 10px 14px; margin: 0 0 12px;
+  overflow-wrap: anywhere;
+}
+.know-results > p { margin: 0 0 6px; }
+.know-hits { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.know-hits code { color: var(--faint); font-size: 11px; }
 .know-inspector {
   background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px 14px;
   min-width: 0; overflow-wrap: anywhere;

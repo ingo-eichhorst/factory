@@ -57,6 +57,12 @@ pub struct TaskBinding {
     /// already existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub upstream: Vec<UpstreamOutput>,
+    /// The knowledge pages this run was handed, searched once at dispatch
+    /// when the task has `knowledge_hints` on and something matched. `None`
+    /// otherwise -- and absent on the wire then, for the same reason as
+    /// `upstream`. Page ids and reasons only, never page text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge: Option<crate::adapter::knowledge::KnowledgeHints>,
 }
 
 /// One direct parent's contribution to a downstream workflow node's dispatch:
@@ -117,6 +123,12 @@ pub fn truncate_tail(s: &str, max_bytes: usize) -> std::borrow::Cow<'_, str> {
 /// this file for cleanup long after the `AgentContext` that wrote it is gone.
 pub fn upstream_output_path(guides_dir: &Path, task_id: &str) -> PathBuf {
     guides_dir.join(format!("upstream-{task_id}.json"))
+}
+
+/// Where a task run's knowledge-hints file lives -- `upstream_output_path`'s
+/// twin, for the same reader (the shell agent) and the same cleanup.
+pub fn knowledge_hints_path(guides_dir: &Path, task_id: &str) -> PathBuf {
+    guides_dir.join(format!("knowledge-{task_id}.json"))
 }
 
 /// Where a run's generated shell-agent script lives, given only its run id
@@ -300,7 +312,13 @@ impl AgentContext {
              Reading is open to every agent, whatever your role: {bin} task \
              list, task show <id>, task log <id>, task output <id>; {bin} \
              agents; {bin} run list [task-id], run show <run-id>, run log \
-             <run-id>, run output <run-id>; {bin} adapters.\n\n",
+             <run-id>, run output <run-id>; {bin} adapters.\n\n\
+             The company's knowledge base is part of that: {bin} knowledge \
+             search <words> [--tag <tag>] lists the pages that match, best \
+             first, as file paths with the reason each matched. It never \
+             prints a page's text -- open the file to read it. Worth a look \
+             before you start on anything about a client, a product or a \
+             process the company already has.\n\n",
         ));
 
         if let Some(def) = &self.role {
@@ -423,6 +441,29 @@ impl AgentContext {
         std::fs::write(&path, self.factory_guide())
             .map_err(|e| FactoryError::Other(anyhow::anyhow!("writing {}: {e}", path.display())))?;
         Ok(path)
+    }
+
+    /// Write this run's knowledge hints to their file, for an agent (the
+    /// shell agent) that would rather be pointed at a path than have them
+    /// spliced into a typed line. `None` when the run was handed none.
+    /// Idempotent, like `write_upstream_file`, and for the same reason.
+    pub fn write_knowledge_file(&self) -> Result<Option<PathBuf>> {
+        let Some(binding) = self.task.as_ref() else {
+            return Ok(None);
+        };
+        let Some(hints) = &binding.knowledge else {
+            return Ok(None);
+        };
+        let path = knowledge_hints_path(&self.guides_dir, &binding.task.id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| FactoryError::Other(anyhow::anyhow!("making {}: {e}", parent.display())))?;
+        }
+        let json = serde_json::to_string_pretty(hints)
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("encoding knowledge hints: {e}")))?;
+        std::fs::write(&path, json)
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("writing {}: {e}", path.display())))?;
+        Ok(Some(path))
     }
 
     /// Where this run's upstream-outputs file would live, if it has anything
@@ -579,6 +620,7 @@ mod tests {
             timeout_seconds: None,
             blocked_timeout_seconds: None,
             worktree: false,
+            knowledge_hints: false,
             labels: Default::default(),
             created_at: now,
             updated_at: now,
@@ -613,6 +655,7 @@ mod tests {
             token: "tok".into(),
             worktree_branch: None,
             upstream: Vec::new(),
+            knowledge: None,
         });
         ctx.identity_token = None;
         ctx
@@ -672,6 +715,18 @@ mod tests {
         let guide = base(None).factory_guide();
         assert!(!guide.contains("Your role also lets you"));
         assert!(guide.contains("no longer defines"));
+    }
+
+    #[test]
+    fn every_agent_is_told_it_can_search_the_knowledge_base_whatever_its_role() {
+        // Searching is a read, open to every agent -- so it is named in the
+        // reading sentence, not among the grants, and a role with no grants
+        // at all (or one the instance no longer defines) still hears of it.
+        for role in [Some(worker()), Some(custom(&[], Reach::Own)), None] {
+            let guide = base(role).factory_guide();
+            assert!(guide.contains("knowledge search <words>"), "{guide}");
+            assert!(guide.contains("never prints a page's text"), "{guide}");
+        }
     }
 
     #[test]
