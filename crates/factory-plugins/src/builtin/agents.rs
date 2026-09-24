@@ -485,6 +485,7 @@ mod tests {
             }),
             identity_token: None,
             role: None,
+            policy_frameworks: Vec::new(),
         }
     }
 

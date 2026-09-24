@@ -576,6 +576,25 @@ fn min_duration(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
     }
 }
 
+/// The framework names named anywhere in `chain`, deduplicated and sorted --
+/// what `AgentContext::factory_guide` (`factory-core::adapter::agent`) names
+/// to an agent as the frameworks its scope is committed to. Deliberately
+/// cheaper than [`applicable`]: it reads only the chain a dispatch already
+/// resolved (`Engine::policy_chain`), never touches disk to load a
+/// catalogue, and never checks a name against one -- a framework with no
+/// loaded catalogue is still named here, the same way it is still a
+/// [`Finding`] `applicable` reports rather than silently drops. The guide is
+/// a plain restatement of what the config commits the scope to, not a report
+/// on whether that commitment resolved to something real.
+pub fn frameworks_in_chain(chain: &[PolicyLayer]) -> Vec<String> {
+    chain
+        .iter()
+        .flat_map(|layer| layer.frameworks.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Every control that applies at the scope `chain`'s last layer names,
 /// folding in every layer's tightening and `n/a` declarations -- add or
 /// tighten only, by construction:
@@ -1467,6 +1486,32 @@ mod tests {
             tighten: BTreeMap::new(),
             not_applicable: Vec::new(),
         }
+    }
+
+    // -- frameworks_in_chain --------------------------------------------------
+
+    #[test]
+    fn frameworks_in_chain_is_the_deduplicated_sorted_union() {
+        let chain = vec![
+            layer("root", &["cra", "gdpr"]),
+            layer("root/demo", &["gdpr", "iso27001"]),
+        ];
+        assert_eq!(frameworks_in_chain(&chain), vec!["cra", "gdpr", "iso27001"]);
+    }
+
+    #[test]
+    fn frameworks_in_chain_is_empty_for_an_empty_chain_or_one_with_nothing_declared() {
+        assert_eq!(frameworks_in_chain(&[]), Vec::<String>::new());
+        assert_eq!(frameworks_in_chain(&[layer("root", &[])]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn frameworks_in_chain_names_a_framework_with_no_loaded_catalogue() {
+        // Unlike `applicable`, this never checks a name against a loaded
+        // catalogue -- it is a plain restatement of the config, findings are
+        // `applicable`'s job.
+        let chain = vec![layer("root", &["not-a-real-framework"])];
+        assert_eq!(frameworks_in_chain(&chain), vec!["not-a-real-framework"]);
     }
 
     #[test]

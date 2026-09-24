@@ -287,6 +287,7 @@ mod tests {
             task: None,
             identity_token: Some("identity".into()),
             role: None,
+            policy_frameworks: Vec::new(),
         };
         let wire = WireContext::from(&ctx);
         assert_eq!(wire.factory_guide, ctx.factory_guide());

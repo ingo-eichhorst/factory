@@ -192,6 +192,7 @@ rather than ignored, and so is an agent given a role the instance never defined
     task.create  task.edit  task.delete  task.run  task.cancel  task.report
     agent.start  agent.configure  agent.stop  agent.input  run.input
     workflow.create  workflow.edit  workflow.delete  workflow.run  workflow.cancel
+    knowledge.write  dataset.edit  bench.run  policy.attest
 
 Reading is not among them, because reading is open to every agent: one that
 cannot see the board cannot coordinate with anyone.
@@ -537,6 +538,117 @@ remove exactly that run's worktrees and branches, explicitly, and only for
 the owner. Restarting the daemon mid-run resumes it: an attempt already
 settled but not yet judged is judged, one that never started is started, and
 one still in flight is left to the ordinary run watchdog.
+
+## Policies
+
+A **policy** is a catalogue of **controls** — a regulation, a standard, or the
+company's own best practice, broken into checkable items — plus a computed
+answer to one question per control: is there current evidence it is met?
+Nothing here evaluates a policy to *allow* or *forbid* anything; enforcement
+already lives in roles, sandboxes and the Secrets seam. This is deliberately a
+picture of the plant, not a policy engine — design §8 of the company spec
+defers a rule language evaluated at runtime, and this does not narrow that.
+See `.specs/adr/0004-policy-controls.md` in the company repository.
+
+**The catalogue.** `<root>/.factory/policies/<framework>.yaml` — authored
+content, like the knowledge vault and datasets: hand-written, re-parsed on
+every read, never written by Factory. One file per framework:
+
+```yaml
+# .factory/policies/cra.yaml
+framework: cra
+title: Cyber Resilience Act
+kind: regulation                # regulation | standard | best-practice
+controls:
+  - id: annex-i-2-1             # [a-z0-9][a-z0-9-]*, referenced as cra/annex-i-2-1
+    title: Identify and document components (SBOM)
+    max_age: 30d                # Nd, Nh, or Nw
+    maps_to: [iso27001/a-8-8]
+    evidence:
+      - check: knowledge        # a vault page tagged control/cra/annex-i-2-1
+      - check: attestation      # a person's recorded word, with an expiry
+      - check: task              # parsed now, evaluated once #81 lands
+        task: sbom-export
+        max_age: 30d
+```
+
+See `examples/policies/cra.yaml` for a complete one and
+`crates/factory-core/src/policy.rs` for every field. `kind` is set per
+framework and may be overridden per control; only `regulation` and `standard`
+controls count towards a rollup's `compliant` — `best-practice` controls are
+shown but never counted, since nobody is out of compliance for skipping a
+recommendation. `maps_to` names equivalent controls in other frameworks,
+declared one way and read both, one hop only — so one piece of evidence
+satisfies every framework asking for the same fact, and deliberately not
+transitive, so a chain of loosely related controls can never bootstrap each
+other into looking compliant. A file that fails to parse, names a `framework`
+other than its own file stem, or repeats a control id is a finding naming the
+file; every other file still loads.
+
+**Applicability, down the tree.** Which frameworks bind a scope is `policies:`
+at the instance root and `scope.policies` in a nested scope's own config — the
+same root-to-leaf chain `Engine::roles_for` walks for roles, resolved fresh
+from the live config on every read, never a second copy kept in step. Unlike
+roles, where the nearest definition wins, a policy layer may only **add or
+tighten**: name another framework, shorten a control's `max_age`, or mark one
+`n/a` with a rationale — never drop or loosen a commitment an ancestor already
+made, or a child project could opt itself out of the GDPR. A control's
+effective `max_age` is the minimum across the catalogue's own value, its
+checks' own value, and every layer's tightening, root to leaf; a `tighten`
+that would not lower that running minimum has no effect and is reported as a
+finding rather than silently ignored. `n/a` needs a non-empty rationale — an
+empty one is a finding and the control stays applicable — and every `n/a`, at
+whichever scope declared it, is always listed rather than left silent: ISO
+27001 calls this a Statement of Applicability, and ADR 0004 keeps the name.
+
+**Checks and statuses.** Evidence is evaluated per check kind, and v1
+evaluates two of the ADR's seven: `knowledge` (a vault page tagged
+`control/<framework>/<id>`, or a check's own `tag`) and `attestation` (an
+unexpired, unwithdrawn attestation recorded for the control). `task`,
+`workflow`, `gate`, `roles`, `sandbox`, `secrets` and `daemon` already parse —
+a catalogue can name a scheduled task, a workflow, a dataset gate, a role
+condition, a sandbox or secrets fact, or a daemon fact today — but every one
+of them evaluates to `unevaluated` until a later ticket teaches `evaluate`
+what each means; nothing is silently counted as met before then. A control's
+status is `satisfied` (a check found current evidence), `attested` (an
+unexpired attestation covers it), `stale` (evidence or an attestation existed
+but is older than `max_age`, or the attestation expired), `open` (no
+evidence), or `n/a` (does not apply here, with its rationale). Status is
+computed on every read, the same as the knowledge index — no status table to
+keep in step. **"Compliant" means the evidence is complete, not that the
+company is certified** — a framework's rollup is `compliant` only once every
+`regulation` and `standard` control in it is `satisfied`, `attested`, or
+`n/a`; `best-practice` controls are counted in their own bucket and never
+affect it.
+
+**Attestations** are the one piece of new state this introduces: a person's
+recorded word that a control is met, with a pointer to the evidence and an
+expiry — the only check kind a person satisfies by saying so. They are
+written through the API into the instance database, append-only like the
+journal: recording one inserts a row, and withdrawing one inserts another
+that references it rather than touching the first, so the history is never
+rewritten or lost. `Grant::PolicyAttest` (`policy.attest`) gates both — the
+same root-scope rule as `knowledge.write`: an attestation speaks for the
+company, not for one project, so only the owner or a foreman whose own scope
+*is* the instance root may record or withdraw one.
+
+**The subtree rollup.** Asking about a scope, or the whole instance, folds
+every scope in that subtree's own evaluation into one status per control: a
+scope where the control is `n/a` has nothing to say about it, and among the
+rest the worst status wins — `open` beats `stale` beats `attested` beats
+`satisfied` — so a control counts compliant only when every scope it applies
+to is, not merely one.
+
+`factory policy [status] [--scope S] [--framework F] [--json]` shows this:
+every applicable control's status, findings, and every `n/a` in scope, rolled
+up per framework. `factory policy show <fw>/<id> [--scope S] [--json]` is one
+control's full detail, including its whole attestation history. `factory
+policy attest <fw>/<id> --scope S --evidence <pointer> --expires
+<30d|2027-01-01> [--note N]` records one; `factory policy withdraw
+<attestation-id> --reason R` withdraws it. `factory policy frameworks
+[--json]` lists every loaded catalogue. The same requests answer over HTTP:
+`GET /api/policy?scope=`, `GET /api/policy/controls/{framework}/{id}?scope=`,
+`POST /api/policy/attestations`, and `POST /api/policy/attestations/{id}/withdraw`.
 
 ## Tasks and runs
 
@@ -887,7 +999,11 @@ limit), `GET /api/benchmarks`, dataset CRUD under `/api/datasets` (plus
 `DELETE /api/datasets/{name}/cases/{id}`), bench runs under
 `POST /api/bench/runs`, `GET /api/bench/runs[?dataset=]`,
 `GET /api/bench/runs/{id}`, `POST /api/bench/runs/{id}/cancel` and
-`.../clean`, workflow CRUD under `/api/workflows`, workflow-run
+`.../clean`, policy status and detail under `GET /api/policy?scope=` and
+`GET /api/policy/controls/{framework}/{id}?scope=`, attestations under
+`POST /api/policy/attestations` and
+`POST /api/policy/attestations/{id}/withdraw`, workflow CRUD under
+`/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
 `POST /api/rpc` for the raw envelope. `GET /ws`
 is the event stream: a snapshot of every task first, then one message per event.

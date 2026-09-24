@@ -185,6 +185,13 @@ pub struct AgentContext {
     /// role the agent was given -- `access.rs` then refuses every grant, so
     /// the guide says so too rather than describing one that would be denied.
     pub role: Option<RoleDef>,
+    /// The frameworks this agent's scope is committed to: the union of every
+    /// layer's `frameworks` in `Engine::policy_chain(scope)`, resolved once
+    /// at launch the same way `role` is -- never re-read once the guide is
+    /// built. Empty for a scope with no `policies:` anywhere in its chain,
+    /// which is the common case and not an error; `factory_guide` then says
+    /// nothing about policy at all rather than naming an empty list.
+    pub policy_frameworks: Vec<String>,
 }
 
 /// Where a task run's guide file lives, given only its task id and the
@@ -321,6 +328,16 @@ impl AgentContext {
              process the company already has.\n\n",
         ));
 
+        if !self.policy_frameworks.is_empty() {
+            out.push_str(&format!(
+                "Your scope is committed to {frameworks} -- {bin} policy \
+                 status --scope {scope} shows every control and where each \
+                 one stands.\n\n",
+                frameworks = self.policy_frameworks.join(", "),
+                scope = self.scope,
+            ));
+        }
+
         if let Some(def) = &self.role {
             let lines = self.granted_command_lines(def);
             if !lines.is_empty() {
@@ -410,7 +427,7 @@ impl AgentContext {
                     "bench.run -> {bin} bench run <dataset> --agent <scope>/<agent> [--attempts N] [--concurrency N]; also bench cancel/clean <run-id>"
                 ),
                 Grant::PolicyAttest => format!(
-                    "policy.attest -> {bin} policy attest <framework>/<id> --scope <scope> --evidence <url> --expires <date> [--note \"...\"]; also {bin} policy withdraw <attestation-id>; the subject is whichever scope the attestation is recorded for, but the grant itself is company-wide, not scoped to {scope}"
+                    "policy.attest -> {bin} policy attest <framework>/<id> --scope <scope> --evidence <pointer> --expires <30d|2027-01-01> [--note \"...\"]; also {bin} policy withdraw <attestation-id> --reason \"...\"; the subject is whichever scope the attestation is recorded for, but the grant itself is company-wide, not scoped to {scope}"
                 ),
             });
         }
@@ -647,6 +664,7 @@ mod tests {
             task: None,
             identity_token: Some("identity".into()),
             role,
+            policy_frameworks: Vec::new(),
         }
     }
 
@@ -730,6 +748,24 @@ mod tests {
             assert!(guide.contains("knowledge search <words>"), "{guide}");
             assert!(guide.contains("never prints a page's text"), "{guide}");
         }
+    }
+
+    #[test]
+    fn the_guide_names_the_frameworks_a_scope_with_policies_has() {
+        let mut ctx = base(Some(worker()));
+        ctx.policy_frameworks = vec!["cra".into(), "gdpr".into()];
+        let guide = ctx.factory_guide();
+        assert!(guide.contains("cra, gdpr"), "{guide}");
+        assert!(guide.contains("policy status --scope demo"), "{guide}");
+    }
+
+    #[test]
+    fn the_guide_says_nothing_about_policy_for_a_scope_with_none() {
+        let guide = base(Some(worker())).factory_guide();
+        assert!(
+            !guide.contains("policy status"),
+            "no policies apply, so nothing should point at the command: {guide}"
+        );
     }
 
     #[test]

@@ -1515,6 +1515,10 @@ impl Engine {
         // change of its own to pick this up.
         let upstream = self.upstream_outputs(&task).await;
         let knowledge = self.knowledge_hints(&task, &run.id).await;
+        // Same chain the L6 tab and `policy attest` fold against
+        // (`Engine::policy_chain`), reduced to just the names the guide
+        // names -- see `factory_core::policy::frameworks_in_chain`.
+        let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.policy_chain(&task.scope));
 
         let ctx = AgentContext {
             scope: task.scope.clone(),
@@ -1534,6 +1538,7 @@ impl Engine {
             }),
             identity_token: None,
             role,
+            policy_frameworks,
         };
 
         let mut launch = agent.launch_spec(&ctx).await?;
@@ -3970,6 +3975,7 @@ mod tests {
                     .unwrap()
                     .clone(),
             ),
+            policy_frameworks: Vec::new(),
         };
         let agent = HarnessAgent::pi().with_args(vec!["--model".into(), "sonnet".into()]);
         let mut launch = agent.launch_spec(&ctx).await.unwrap();

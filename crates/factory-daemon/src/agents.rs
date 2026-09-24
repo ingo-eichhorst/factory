@@ -244,7 +244,10 @@ impl Engine {
         let role = self.roles_for(scope).get(&role).cloned();
 
         // No task: a standing agent is started to be there, and is told
-        // nothing about one -- but it still gets the guide to Factory itself.
+        // nothing about one -- but it still gets the guide to Factory itself,
+        // including which frameworks its scope is committed to (a permanent
+        // agent gets this exactly once, at start, the same as its role).
+        let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.policy_chain(scope));
         let ctx = AgentContext {
             scope: scope.to_string(),
             agent_name: name.to_string(),
@@ -255,6 +258,7 @@ impl Engine {
             task: None,
             identity_token: Some(identity),
             role,
+            policy_frameworks,
         };
 
         let mut launch = match adapter.launch_spec(&ctx).await {
