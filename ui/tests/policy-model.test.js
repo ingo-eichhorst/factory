@@ -1,0 +1,285 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  attestBody,
+  checkTarget,
+  closingLinks,
+  defaultKnowledgeTag,
+  describeCheck,
+  findingLabel,
+  findingsByKind,
+  frameworkCards,
+  frameworkTitle,
+  gapRows,
+  kindLabel,
+  looksLikeExpiry,
+  notApplicableRows,
+  reasonCheckKinds,
+  statusLabel,
+  statusOf,
+} from "../js/policy-model.js";
+
+// A trimmed version of a real `GET /api/policy?scope=demo` answer, captured
+// from a throwaway daemon running `examples/policies/cra.yaml` with the root
+// declaring `policies: {frameworks: [cra]}` and `demo` tightening
+// `cra/annex-i-2-1` to `14d` and marking `cra/annex-i-2-4` not applicable --
+// not a shape invented by reading the Rust, but the JSON the daemon actually
+// sent (`.report`, after `api()` unwraps `{status, data}`).
+const report = {
+  scope: "demo",
+  rows: [
+    {
+      scope: "demo",
+      statuses: [
+        {
+          control: "cra/annex-i-2-1",
+          title: "Identify and document components (SBOM)",
+          kind: "regulation",
+          status: "open",
+          reasons: [
+            "knowledge: tag `control/cra/annex-i-2-1` not found",
+            "attestation: none recorded",
+            "task: unevaluated",
+          ],
+        },
+        {
+          control: "cra/annex-i-2-2",
+          title: "Vulnerability handling procedure is documented",
+          kind: "regulation",
+          status: "attested",
+          reasons: ["attestation: `2752b23a` by owner, valid until 2026-10-24 20:54:51 UTC"],
+        },
+        {
+          control: "cra/annex-i-2-3",
+          title: "Known exploitable vulnerabilities are tracked and remediated",
+          kind: "regulation",
+          status: "open",
+          reasons: ["task: unevaluated", "attestation: none recorded"],
+        },
+        {
+          control: "cra/annex-i-2-4",
+          title: "Security updates are provided without undue delay",
+          kind: "regulation",
+          status: "not_applicable",
+          reasons: [
+            "marked not applicable at demo: demo scope ships no updates of its own; the root's process covers it",
+          ],
+        },
+        {
+          control: "cra/annex-i-2-5",
+          title: "A coordinated vulnerability disclosure policy is published",
+          kind: "regulation",
+          status: "open",
+          reasons: ["knowledge: tag `control/cra/annex-i-2-5` not found"],
+        },
+      ],
+      rollup: [
+        {
+          framework: "cra",
+          counts: { satisfied: 0, attested: 1, stale: 0, open: 3, not_applicable: 1 },
+          best_practice: { satisfied: 0, attested: 0, stale: 0, open: 0, not_applicable: 0 },
+          compliant: false,
+        },
+      ],
+    },
+  ],
+  rollup: [
+    {
+      framework: "cra",
+      counts: { satisfied: 0, attested: 1, stale: 0, open: 3, not_applicable: 1 },
+      best_practice: { satisfied: 0, attested: 0, stale: 0, open: 0, not_applicable: 0 },
+      compliant: false,
+    },
+  ],
+  not_applicable: [
+    {
+      control: "cra/annex-i-2-4",
+      scope: "demo",
+      rationale: "demo scope ships no updates of its own; the root's process covers it",
+    },
+  ],
+  findings: [
+    { kind: "loosening_has_no_effect", subject: "demo", detail: "tightens cra/annex-i-2-9 to 30d, which is not shorter than the existing 7d" },
+    { kind: "unknown_control", subject: "demo", detail: "tightens cra/annex-i-2-99, which is not an applicable control" },
+  ],
+  catalogues: [{ framework: "cra", title: "Cyber Resilience Act", kind: "regulation", controls: 5 }],
+};
+
+// A real `GET /api/policy/controls/cra/annex-i-2-1?scope=demo` answer's
+// `.detail` -- `status` nested, unlike a row's own flattened `ControlStatus`.
+const detail = {
+  control: "cra/annex-i-2-1",
+  title: "Identify and document components (SBOM)",
+  kind: "regulation",
+  checks: [
+    { check: "knowledge" },
+    { check: "attestation" },
+    { check: "task", task: "sbom-export", max_age: "30d" },
+  ],
+  maps_to: [],
+  max_age: "2w",
+  status: {
+    status: "open",
+    reasons: [
+      "knowledge: tag `control/cra/annex-i-2-1` not found",
+      "attestation: none recorded",
+      "task: unevaluated",
+    ],
+  },
+  attestations: [],
+};
+
+test("statusOf normalises the flattened row shape and the nested detail shape alike", () => {
+  assert.deepEqual(statusOf(report.rows[0].statuses[0]), {
+    status: "open",
+    reasons: [
+      "knowledge: tag `control/cra/annex-i-2-1` not found",
+      "attestation: none recorded",
+      "task: unevaluated",
+    ],
+  });
+  assert.deepEqual(statusOf(detail), detail.status);
+});
+
+test("statusLabel shortens the one status the wire spells with an underscore", () => {
+  assert.equal(statusLabel("not_applicable"), "n/a");
+  assert.equal(statusLabel("open"), "open");
+  assert.equal(statusLabel("satisfied"), "satisfied");
+});
+
+test("kindLabel and frameworkTitle read the wire's own spellings", () => {
+  assert.equal(kindLabel("best-practice"), "Best practice");
+  assert.equal(kindLabel("regulation"), "Regulation");
+  assert.equal(kindLabel("something-new"), "something-new");
+  assert.equal(frameworkTitle(report.catalogues, "cra"), "Cyber Resilience Act");
+  assert.equal(frameworkTitle(report.catalogues, "dsgvo"), "dsgvo", "an unloaded framework falls back to its id");
+});
+
+test("frameworkCards joins the rollup with the catalogue title and kind, and totals best_practice", () => {
+  const cards = frameworkCards(report);
+  assert.equal(cards.length, 1);
+  assert.deepEqual(cards[0], {
+    framework: "cra",
+    title: "Cyber Resilience Act",
+    kind: "regulation",
+    counts: { satisfied: 0, attested: 1, stale: 0, open: 3, not_applicable: 1 },
+    bestPractice: { satisfied: 0, attested: 0, stale: 0, open: 0, not_applicable: 0 },
+    countedTotal: 5,
+    bestPracticeTotal: 0,
+    compliant: false,
+  });
+});
+
+test("gapRows is one row per (scope, control) that is open or stale, sorted by control then scope", () => {
+  const rows = gapRows(report);
+  assert.deepEqual(
+    rows.map((r) => r.control),
+    ["cra/annex-i-2-1", "cra/annex-i-2-3", "cra/annex-i-2-5"],
+    "attested and not_applicable are left out",
+  );
+  assert.equal(rows[0].scope, "demo");
+  assert.equal(rows[0].status, "open");
+  assert.deepEqual(rows[0].reasons, report.rows[0].statuses[0].reasons);
+});
+
+test("notApplicableRows recovers the title from any row's own ControlStatus", () => {
+  const rows = notApplicableRows(report);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].control, "cra/annex-i-2-4");
+  assert.equal(rows[0].title, "Security updates are provided without undue delay");
+  assert.equal(rows[0].scope, "demo");
+  assert.match(rows[0].rationale, /ships no updates of its own/);
+});
+
+test("notApplicableRows falls back to the control id when no row mentions it", () => {
+  const thin = { rows: [], not_applicable: [{ control: "cra/x", scope: "demo", rationale: "r" }] };
+  assert.equal(notApplicableRows(thin)[0].title, "cra/x");
+});
+
+test("findingsByKind groups by the wire's snake_case kind, and findingLabel translates it", () => {
+  const groups = findingsByKind(report.findings);
+  assert.deepEqual([...groups.keys()], ["loosening_has_no_effect", "unknown_control"]);
+  assert.equal(groups.get("unknown_control").length, 1);
+  assert.equal(findingLabel("unknown_control"), "Names a control that is not applicable");
+  assert.equal(findingLabel("a_future_kind"), "a_future_kind", "an unknown kind falls back to the raw string");
+});
+
+test("reasonCheckKinds reads the check-kind prefix direct_status writes, and ignores a maps_to reason", () => {
+  assert.deepEqual(reasonCheckKinds(report.rows[0].statuses[0].reasons), ["knowledge", "attestation", "task"]);
+  assert.deepEqual(reasonCheckKinds(["satisfied via cra/annex-i-2-2 (maps_to)"]), []);
+  assert.deepEqual(reasonCheckKinds(["no evidence"]), []);
+  assert.deepEqual(reasonCheckKinds(report.rows[0].statuses[3].reasons), [], "a not-applicable reason starts with 'marked', not a check kind");
+});
+
+test("closingLinks points a knowledge reason at the exact tag node, not just the Knowledge tab", () => {
+  const links = closingLinks("demo", report.rows[0].statuses[0].reasons);
+  assert.deepEqual(
+    links.map((l) => l.label),
+    ["Knowledge", "Tasks"],
+    "attestation has no link of its own -- it is closed by the Attest form, not a level",
+  );
+  assert.equal(links[0].href, "#demo/knowledge/tag%3Acontrol/cra/annex-i-2-1", "one hash segment per nodeTail segment, matching knowledgeTail's own encoding");
+  assert.match(links[1].href, /^#demo\/tasks$/);
+});
+
+test("closingLinks never links a daemon reason -- L1 is not built", () => {
+  assert.deepEqual(closingLinks("demo", ["daemon: unevaluated"]), []);
+});
+
+test("defaultKnowledgeTag matches ControlRef::default_tag's own construction", () => {
+  assert.equal(defaultKnowledgeTag("cra/annex-i-2-1"), "control/cra/annex-i-2-1");
+});
+
+test("checkTarget is exact, from the Check itself, not parsed out of a reason", () => {
+  const knowledge = checkTarget("demo", "cra/annex-i-2-1", { check: "knowledge" });
+  assert.equal(knowledge.label, "Knowledge");
+  assert.equal(knowledge.href, "#demo/knowledge/tag%3Acontrol/cra/annex-i-2-1", "no explicit tag falls back to the control's default");
+
+  const tagged = checkTarget("demo", "cra/annex-i-2-1", { check: "knowledge", tag: "custom-tag" });
+  assert.equal(tagged.href, "#demo/knowledge/tag%3Acustom-tag");
+
+  assert.equal(checkTarget("demo", "cra/annex-i-2-1", { check: "attestation" }), null);
+  assert.equal(checkTarget("demo", "cra/annex-i-2-1", { check: "daemon", fact: "x" }), null);
+  assert.equal(checkTarget("demo", "cra/annex-i-2-1", { check: "gate", dataset: "d" }).label, "Benchmarks");
+});
+
+test("describeCheck matches the CLI's own describe_check, one line per check kind", () => {
+  assert.equal(describeCheck({ check: "knowledge" }), "knowledge: default tag");
+  assert.equal(describeCheck({ check: "knowledge", tag: "x" }), "knowledge: tag `x`");
+  assert.equal(describeCheck({ check: "attestation" }), "attestation");
+  assert.equal(describeCheck({ check: "task", task: "sbom-export", max_age: "30d" }), "task sbom-export (max_age 30d)");
+  assert.equal(describeCheck({ check: "task", task: "sbom-export" }), "task sbom-export");
+  assert.equal(describeCheck({ check: "gate", dataset: "d", case: "c", max_age: "7d" }), "gate d/c (max_age 7d)");
+  assert.equal(describeCheck({ check: "roles", forbid: ["knowledge.write"] }), "roles: forbid knowledge.write");
+  assert.equal(describeCheck({ check: "sandbox" }), "sandbox");
+  assert.equal(describeCheck({ check: "daemon", fact: "backups exist" }), "daemon: backups exist");
+});
+
+test("looksLikeExpiry accepts policy::Duration's grammar and the two absolute forms, softly", () => {
+  assert.equal(looksLikeExpiry("30d"), true);
+  assert.equal(looksLikeExpiry("12w"), true);
+  assert.equal(looksLikeExpiry("6h"), true);
+  assert.equal(looksLikeExpiry("2027-01-01"), true);
+  assert.equal(looksLikeExpiry("2027-01-01T00:00:00Z"), true);
+  assert.equal(looksLikeExpiry(""), false);
+  assert.equal(looksLikeExpiry("soon"), false);
+});
+
+test("attestBody refuses empty evidence or expiry with a sentence, and drops an empty note", () => {
+  assert.throws(() => attestBody("cra/annex-i-2-1", "demo", { evidence: "", expires: "30d" }), /Evidence/);
+  assert.throws(() => attestBody("cra/annex-i-2-1", "demo", { evidence: "x", expires: " " }), /Expiry/);
+  assert.deepEqual(attestBody("cra/annex-i-2-1", "demo", { evidence: " https://x ", expires: "30d", note: "  " }), {
+    control: "cra/annex-i-2-1",
+    scope: "demo",
+    evidence: "https://x",
+    expires: "30d",
+  });
+  assert.deepEqual(attestBody("cra/annex-i-2-1", "demo", { evidence: "x", expires: "30d", note: " published " }), {
+    control: "cra/annex-i-2-1",
+    scope: "demo",
+    evidence: "x",
+    expires: "30d",
+    note: "published",
+  });
+});

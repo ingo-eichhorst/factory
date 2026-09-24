@@ -1278,3 +1278,63 @@ button.linklike:hover { color: var(--signal); }
   .infra-layer-label { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; }
   .infra-on span { grid-column: 1; }
 }
+
+/* ================================================================== L6
+   direction: policy. A control's five statuses reuse the shared `.badge
+   s-*` convention tasks already use (`statusBadge` in core.js) -- these
+   five class names are new, but the mechanism is not. `pol-compliant`/
+   `pol-not-compliant` are a framework's own badge, a different question
+   (every counted control at once) from any one control's own status. */
+.s-satisfied { color: var(--run); border-color: transparent; background: var(--run-wash); }
+.s-attested { color: var(--signal); border-color: transparent; background: var(--signal-wash); }
+.s-stale { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
+.s-open { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+.s-not_applicable { color: var(--muted); }
+.pol-compliant { color: var(--run); border-color: transparent; background: var(--run-wash); }
+.pol-not-compliant { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+
+.pol-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin: 14px 0; }
+.pol-card { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px 14px; }
+.pol-card-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.pol-card-head h3 { margin: 0; font: 600 14px/1.3 var(--cond); color: var(--ink); }
+.pol-counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.pol-count {
+  font: 500 11px/1 var(--mono); padding: 3px 7px; border-radius: 2px;
+  background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--line);
+}
+/* Compound selectors, not the bare `.s-*` above: `.pol-count` and `.s-*` tie
+   on specificity (one class each), so without this a plain `.s-satisfied`
+   rule earlier in the sheet would lose its `color` to `.pol-count`'s own,
+   defined later -- the same reason `.wf-badge.wf-s-running` etc. repeat
+   their colours instead of leaning on `.s-*` alone. */
+.pol-count.s-satisfied { color: var(--run); border-color: transparent; background: var(--run-wash); }
+.pol-count.s-attested { color: var(--signal); border-color: transparent; background: var(--signal-wash); }
+.pol-count.s-stale { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
+.pol-count.s-open { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+.pol-count.s-not_applicable { color: var(--muted); }
+.pol-bp { margin-top: 10px; }
+.pol-not-counted { color: var(--muted); border-color: transparent; background: var(--panel-2); }
+.pol-links a, .pol-checks a { color: var(--signal-ink); font-weight: 500; text-decoration: none; }
+.pol-links a:hover, .pol-checks a:hover { color: var(--signal); text-decoration: underline; }
+
+/* The gap table's own "Close it" links, and the control detail modal's
+   reasons and evidence lists. */
+.pol-links { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.pol-reasons, .pol-checks { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--ink-2); }
+.pol-reasons li, .pol-checks li { margin: 3px 0; }
+.pol-sub-head { margin: 16px 0 6px; font: 600 9.5px/1 var(--cond); letter-spacing: .13em; text-transform: uppercase; color: var(--faint); }
+.pol-detail-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pol-attestations td { font-size: 11.5px; }
+.pol-withdrawn { opacity: .55; }
+
+/* Findings, grouped by kind -- the same shape `.know-finding-group` already
+   draws for the Knowledge tab's own findings, kept separate because the two
+   tabs draw from different `Finding` types with no field in common beyond
+   `kind`/`detail`. */
+.pol-finding-group { padding: 9px 14px; border-bottom: 1px solid var(--line-soft); }
+.pol-finding-group:last-child { border-bottom: 0; }
+.pol-finding-group h4 {
+  margin: 0 0 4px; font: 600 9px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; color: var(--faint);
+}
+.pol-finding-group ul { margin: 0; padding-left: 18px; }
+.pol-finding-group li { font-size: 12px; color: var(--ink-2); margin: 3px 0; }

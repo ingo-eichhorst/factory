@@ -78,8 +78,6 @@ test("L1 Infrastructure is live, with its sub-label, one tab and a view", () => 
   assert.match(page, /id="lv-infra"[\s\S]*?<span class="lv-sub">Host, daemon and AI accounts<\/span>/);
   assert.match(page, /id="tab-infrastructure"[^>]*>Infrastructure<\/button>/);
   assert.match(page, /id="view-infrastructure"/);
-  // Direction is still the one unbuilt level.
-  assert.match(page, /id="lv-dir"[^>]*disabled/);
 });
 
 test("LEVEL_VIEWS.infra names exactly the one view, and the view is registered", () => {

@@ -22,6 +22,7 @@ import { loadDatasets, renderDatasetsSegment, wireDatasets } from "./datasets.js
 import { acceptBenchRunEvent, loadBenchRuns, renderBenchRunsSegment, wireBenchRuns } from "./bench-runs.js";
 import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from "./knowledge.js";
 import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
+import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
 
 // ------------------------------------------------------------------ views
 //
@@ -40,6 +41,12 @@ let activityStarted = false;
 const VIEWS = {
   dashboard: { onShow: loadDashboard },
   inbox: { onShow: () => renderInbox([...state.tasks.values()]) },
+  // No poll: a policy read is cheap (catalogues on disk, the knowledge index,
+  // the attestations store -- see `Request::Policy`'s doc comment) and
+  // changes only when somebody attests or withdraws, which arrives as
+  // `policy_changed` (`onEvent` below), the same no-poll rule `roles.js`
+  // already follows for the same reason.
+  policy: { onShow: loadPolicy },
   activity: {
     onShow: () => { if (!activityStarted) { initActivity(); activityStarted = true; } },
     tail: { write: activityFilter, read: ([f]) => setActivityFilter(f || "all") },
@@ -159,11 +166,12 @@ function applyModal([taskId, runId]) {
 //
 // Dashboard is a peer of Factory's six decision levels in the first row. Its
 // four operational views live together beneath it; the five implemented
-// levels below it keep the view specific to each -- only L6 (Direction) is
-// still disabled and owns no entry here. This single map drives the second
-// row, menu switching and the hash fallback in `scopes.js`.
+// levels below it keep the view specific to each -- all six are live now.
+// This single map drives the second row, menu switching and the hash
+// fallback in `scopes.js`.
 const LEVEL_VIEWS = {
   dash: ["dashboard", "site", "activity", "inbox"],
+  dir: ["policy"],
   proc: ["tasks", "workflows"],
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets"],
@@ -257,6 +265,10 @@ function rerender(route) {
   // Not a re-render: the roles in effect, and who holds them, are a
   // different answer in every scope, and the daemon is what resolves it.
   else if (state.tab === "roles") loadRoles();
+  // Same reason: which controls apply and their status differ by scope --
+  // the daemon folds the chain itself (`GET /api/policy?scope=`), so a rail
+  // change refetches rather than narrowing what is already on screen.
+  else if (state.tab === "policy") loadPolicy();
   // Both L2 tabs answer to the rail. Secrets narrows only the rows that
   // belong to a scope: a credential in the owner's home belongs to none of
   // them and is reachable from all of them, so it survives every selection.
@@ -474,8 +486,7 @@ async function boot() {
     $(`tab-${k}`).onclick = () => showTab(k);
   }
   // Only Dashboard and the five live levels reach here with a working click --
-  // the one greyed level (Direction) carries `disabled` in the markup, and a
-  // disabled button never fires one.
+  // Every level is live, so every button gets a handler.
   for (const b of $("levels").querySelectorAll(".lvl")) {
     b.onclick = () => setLevel(b.dataset.level);
   }
@@ -484,6 +495,7 @@ async function boot() {
   }
   $("runtime-refresh").onclick = () => loadRuntimeConnections();
   wireRoles();
+  wirePolicy();
   $("environment-refresh").onclick = () => refreshEnvironment();
   $("secrets-refresh").onclick = () => refreshEnvironment();
   $("benchmarks-refresh").onclick = () => {
@@ -612,6 +624,12 @@ function onEvent(ev) {
   // `/api/production` answers -- the dashboard's history cards refetch on it
   // rather than waiting for the window or scope to change.
   if (ev.type === "run_updated" && state.tab === "dashboard") loadDashboard();
+  // An attestation recorded or withdrawn, published on both -- see
+  // `Event::PolicyChanged`. Reload whenever the tab is open, not only when
+  // the scope it names is the one on screen: an ancestor's attestation can
+  // change a descendant's rollup too, and `reloadPolicy` also refreshes the
+  // control detail modal, if one happens to be open.
+  if (ev.type === "policy_changed" && state.tab === "policy") reloadPolicy();
 }
 
 /// The site's halls are built from `state.scopes`, which only the Roster view
