@@ -59,6 +59,11 @@ pub struct Engine {
     pub(crate) workflows: crate::workflows::WorkflowStore,
     pub(crate) workflow_edit: tokio::sync::Mutex<()>,
     pub(crate) bench: crate::bench::BenchStore,
+    /// The attestations audit trail -- see `policies::PolicyStore`. Nothing
+    /// else in a policy request is stateful: the catalogues are read fresh
+    /// off disk on every call, like `.factory/knowledge/` and
+    /// `.factory/datasets/`.
+    pub(crate) policies: crate::policies::PolicyStore,
     /// Serializes a bench run's own read-modify-write: choosing which
     /// pending attempts to start, and recomputing the run's own status once
     /// every attempt has settled. Coarse -- one lock for every run, the same
@@ -153,6 +158,8 @@ impl Engine {
             workflow_edit: tokio::sync::Mutex::new(()),
             bench: crate::bench::BenchStore::in_memory()
                 .expect("an in-memory bench store should open"),
+            policies: crate::policies::PolicyStore::in_memory()
+                .expect("an in-memory policy store should open"),
             bench_edit: tokio::sync::Mutex::new(()),
             bench_judging: Default::default(),
             bench_judge_tx,
@@ -181,6 +188,12 @@ impl Engine {
     /// The same, for bench runs.
     pub fn with_bench_store(mut self, bench: crate::bench::BenchStore) -> Self {
         self.bench = bench;
+        self
+    }
+
+    /// The same, for policy attestations.
+    pub fn with_policy_store(mut self, policies: crate::policies::PolicyStore) -> Self {
+        self.policies = policies;
         self
     }
 
@@ -217,11 +230,9 @@ impl Engine {
     /// Every policy layer in effect for `scope` right now, root first --
     /// resolved from the live snapshot on every call for the same reason
     /// `roles_for` is: a scope-config write holds from the next request with
-    /// nothing to invalidate. Nothing folds these into a status yet -- that
-    /// is `policy::applicable` and `policy::evaluate`, called from whatever
-    /// surfaces the L6 Policy tab (`#77` onward, not this ticket) -- so this
-    /// has no caller within #76 itself.
-    #[allow(dead_code)]
+    /// nothing to invalidate. Folded into a status by `policy::applicable`
+    /// and `policy::evaluate` -- see `policy_report`, `policy_control` and
+    /// `policy_attest` in `policies/mod.rs`, which are every caller.
     pub fn policy_chain(&self, scope: &str) -> Vec<factory_core::policy::PolicyLayer> {
         self.factory_snapshot().policy_chain(scope)
     }
@@ -517,6 +528,36 @@ impl Engine {
                 let run = self.clean_bench_run(&id).await?;
                 let results = factory_core::bench::aggregate(&run.attempts);
                 Ok(Payload::BenchRun { run, results })
+            }
+            Request::Policy { scope } => Ok(Payload::Policy {
+                report: self.policy_report(scope.as_deref()).await?,
+            }),
+            Request::PolicyControl { control, scope } => Ok(Payload::PolicyControl {
+                detail: self.policy_control(control, &scope).await?,
+            }),
+            Request::PolicyAttest {
+                control,
+                scope,
+                evidence,
+                note,
+                expires_at,
+            } => {
+                let attestation = self
+                    .policy_attest(caller, control, scope, evidence, note, expires_at)
+                    .await?;
+                self.bus.publish(Event::PolicyChanged {
+                    scope: attestation.scope.clone(),
+                    control: attestation.control.clone(),
+                });
+                Ok(Payload::PolicyAttestation { attestation })
+            }
+            Request::PolicyWithdraw { id, reason } => {
+                let attestation = self.policy_withdraw(caller, id, reason).await?;
+                self.bus.publish(Event::PolicyChanged {
+                    scope: attestation.scope.clone(),
+                    control: attestation.control.clone(),
+                });
+                Ok(Payload::PolicyAttestation { attestation })
             }
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),

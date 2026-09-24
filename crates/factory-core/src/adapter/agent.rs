@@ -409,6 +409,9 @@ impl AgentContext {
                 Grant::BenchRun => format!(
                     "bench.run -> {bin} bench run <dataset> --agent <scope>/<agent> [--attempts N] [--concurrency N]; also bench cancel/clean <run-id>"
                 ),
+                Grant::PolicyAttest => format!(
+                    "policy.attest -> {bin} policy attest <framework>/<id> --scope <scope> --evidence <url> --expires <date> [--note \"...\"]; also {bin} policy withdraw <attestation-id>; the subject is whichever scope the attestation is recorded for, but the grant itself is company-wide, not scoped to {scope}"
+                ),
             });
         }
         lines

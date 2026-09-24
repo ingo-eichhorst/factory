@@ -1075,6 +1075,66 @@ pub fn rollup(statuses: &[ControlStatus]) -> Vec<FrameworkRollup> {
     by_framework.into_values().collect()
 }
 
+/// How bad a control's status is for cross-scope aggregation, lowest is
+/// worst -- deliberately not `StatusKind::rank`, which orders `NotApplicable`
+/// *below* `Open` for a different purpose (whether a `maps_to` neighbour's
+/// status should win out over this control's own). Here `NotApplicable`
+/// means "this scope has nothing to say", which is not a status to compare
+/// against the real ones at all -- see [`worst_across_scopes`], which never
+/// calls this on one.
+fn compliance_severity(kind: StatusKind) -> u8 {
+    match kind {
+        StatusKind::Open => 0,
+        StatusKind::Stale => 1,
+        StatusKind::Attested => 2,
+        StatusKind::Satisfied => 3,
+        StatusKind::NotApplicable => 4,
+    }
+}
+
+/// One status per control, folding many scopes' own [`evaluate`] output
+/// into the single view a subtree-wide [`rollup`] needs: "a control counts
+/// compliant only if it is compliant in every scope it applies to" (ADR
+/// 0004). For each control, every scope where it is `not_applicable` is
+/// ignored -- that scope has nothing to say about whether it is met -- and
+/// the worst of whatever real statuses remain wins (`Open` beats `Stale`
+/// beats `Attested` beats `Satisfied`). A control that is `not_applicable`
+/// in every scope it appears in keeps that status; a control absent from
+/// every scope in `per_scope` never appears in the result at all.
+///
+/// Pure: no scope tree, no store, no clock -- just what each scope's own
+/// `evaluate` already produced. The caller (`Engine::policy_report`) is the
+/// one that knows which scopes are in the subtree being asked about.
+pub fn worst_across_scopes(per_scope: &[Vec<ControlStatus>]) -> Vec<ControlStatus> {
+    let mut worst: BTreeMap<ControlRef, ControlStatus> = BTreeMap::new();
+    let mut fallback_na: BTreeMap<ControlRef, ControlStatus> = BTreeMap::new();
+
+    for statuses in per_scope {
+        for status in statuses {
+            if status.status.kind() == StatusKind::NotApplicable {
+                fallback_na.entry(status.control.clone()).or_insert_with(|| status.clone());
+                continue;
+            }
+            match worst.get(&status.control) {
+                Some(current) if compliance_severity(current.status.kind()) <= compliance_severity(status.status.kind()) => {
+                    // The status already kept is at least as bad; nothing to do.
+                }
+                _ => {
+                    worst.insert(status.control.clone(), status.clone());
+                }
+            }
+        }
+    }
+
+    // A control that never had a real status anywhere it appeared is
+    // `not_applicable` everywhere -- keep exactly one of those entries.
+    for (control, status) in fallback_na {
+        worst.entry(control).or_insert(status);
+    }
+
+    worst.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1790,5 +1850,117 @@ mod tests {
         let rollups = rollup(&statuses);
         let names: Vec<&str> = rollups.iter().map(|r| r.framework.as_str()).collect();
         assert_eq!(names, vec!["cra", "gdpr"]);
+    }
+
+    // -- worst_across_scopes ------------------------------------------------
+
+    #[test]
+    fn the_worst_status_anywhere_wins_over_a_better_one_elsewhere() {
+        let per_scope = vec![
+            vec![status("cra", "a", Kind::Regulation, Status::Satisfied { reasons: vec![] })],
+            vec![status("cra", "a", Kind::Regulation, Status::Open { reasons: vec![] })],
+        ];
+        let worst = worst_across_scopes(&per_scope);
+        assert_eq!(worst.len(), 1);
+        assert_eq!(worst[0].status.kind(), StatusKind::Open);
+    }
+
+    #[test]
+    fn stale_outranks_attested_which_outranks_satisfied() {
+        let a = ControlRef::new("cra", "a");
+        let per_scope = vec![
+            vec![ControlStatus {
+                control: a.clone(),
+                title: "A".into(),
+                kind: Kind::Regulation,
+                status: Status::Satisfied { reasons: vec![] },
+            }],
+            vec![ControlStatus {
+                control: a.clone(),
+                title: "A".into(),
+                kind: Kind::Regulation,
+                status: Status::Attested { reasons: vec![] },
+            }],
+            vec![ControlStatus {
+                control: a,
+                title: "A".into(),
+                kind: Kind::Regulation,
+                status: Status::Stale { reasons: vec![] },
+            }],
+        ];
+        let worst = worst_across_scopes(&per_scope);
+        assert_eq!(worst[0].status.kind(), StatusKind::Stale);
+    }
+
+    /// The case the naive `StatusKind::rank()` ordering gets wrong:
+    /// `not_applicable` must never be treated as worse than a real `open` --
+    /// a scope with nothing to say about a control must not drag down one
+    /// that actually has to answer for it.
+    #[test]
+    fn not_applicable_never_outranks_a_real_status() {
+        let per_scope = vec![
+            vec![status(
+                "cra",
+                "a",
+                Kind::Regulation,
+                Status::NotApplicable { reasons: vec![] },
+            )],
+            vec![status("cra", "a", Kind::Regulation, Status::Satisfied { reasons: vec![] })],
+        ];
+        let worst = worst_across_scopes(&per_scope);
+        assert_eq!(worst.len(), 1);
+        assert_eq!(
+            worst[0].status.kind(),
+            StatusKind::Satisfied,
+            "the scope that actually applies the control decides, not the one that opted out"
+        );
+    }
+
+    #[test]
+    fn not_applicable_everywhere_keeps_that_status() {
+        let per_scope = vec![
+            vec![status(
+                "cra",
+                "a",
+                Kind::Regulation,
+                Status::NotApplicable { reasons: vec![] },
+            )],
+            vec![status(
+                "cra",
+                "a",
+                Kind::Regulation,
+                Status::NotApplicable { reasons: vec![] },
+            )],
+        ];
+        let worst = worst_across_scopes(&per_scope);
+        assert_eq!(worst.len(), 1);
+        assert_eq!(worst[0].status.kind(), StatusKind::NotApplicable);
+    }
+
+    #[test]
+    fn a_control_present_in_only_some_scopes_is_still_aggregated() {
+        let per_scope = vec![
+            vec![status("cra", "a", Kind::Regulation, Status::Open { reasons: vec![] })],
+            vec![status("gdpr", "b", Kind::Regulation, Status::Satisfied { reasons: vec![] })],
+        ];
+        let worst = worst_across_scopes(&per_scope);
+        let by_id: BTreeMap<&str, &ControlStatus> =
+            worst.iter().map(|s| (s.control.id.as_str(), s)).collect();
+        assert_eq!(by_id.len(), 2);
+        assert_eq!(by_id["a"].status.kind(), StatusKind::Open);
+        assert_eq!(by_id["b"].status.kind(), StatusKind::Satisfied);
+    }
+
+    /// Feeding the result straight into `rollup` is the whole point --
+    /// `PolicyReport.rollup` is built exactly this way.
+    #[test]
+    fn worst_across_scopes_feeds_rollup_to_the_subtree_wide_answer() {
+        let per_scope = vec![
+            vec![status("cra", "a", Kind::Regulation, Status::Satisfied { reasons: vec![] })],
+            vec![status("cra", "a", Kind::Regulation, Status::Open { reasons: vec![] })],
+        ];
+        let rollups = rollup(&worst_across_scopes(&per_scope));
+        assert_eq!(rollups.len(), 1);
+        assert!(!rollups[0].compliant, "open in even one applicable scope is not compliant");
     }
 }
