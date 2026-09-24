@@ -13,6 +13,7 @@ pub mod error;
 pub mod event;
 pub mod knowledge;
 pub mod occupancy;
+pub mod policy;
 pub mod protocol;
 pub mod role;
 pub mod run;
