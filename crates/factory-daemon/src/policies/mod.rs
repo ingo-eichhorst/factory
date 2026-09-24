@@ -19,9 +19,10 @@ use chrono::Utc;
 use factory_core::config::{ForemanConfig, Scope};
 use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
+use factory_core::policy_export;
 use factory_core::protocol::{CatalogueSummary, CredentialRow, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy};
 use factory_core::role::Roles;
-use factory_core::task::{Task, TaskFilter};
+use factory_core::task::{NewTask, Task, TaskFilter};
 use factory_core::workflow::WorkflowDefinition;
 
 use crate::access::Caller;
@@ -619,6 +620,7 @@ impl Engine {
             maps_to: found.maps_to.clone(),
             max_age: found.max_age,
             not_applicable: found.not_applicable.clone(),
+            remediation: found.remediation.clone(),
             refs: evaluated.refs,
             status: evaluated.status,
             attestations: history,
@@ -705,6 +707,147 @@ impl Engine {
         let mut withdrawn = existing;
         withdrawn.withdrawn = Some(withdrawal);
         Ok(withdrawn)
+    }
+
+    /// Close a gap: `Request::PolicyRemediate`. Creates the task through the
+    /// exact path `Request::TaskCreate` itself uses -- `Engine::create`, the
+    /// same function that request's own dispatch arm calls -- so every
+    /// validation it does (agent/runtime resolution, an empty title, a
+    /// schedule/retry mismatch) and its `Event::TaskCreated` apply here too.
+    /// Never routed through `self.handle_request(Request::TaskCreate(..))`,
+    /// which would re-enter as the owner and launder whatever grant the
+    /// real caller holds into full, unscoped task-creation authority.
+    ///
+    /// Refused outright when `control` is already `satisfied`, `attested`,
+    /// or `n/a` at `scope` -- there is no gap to remediate. Otherwise,
+    /// refused, naming the existing task, when a non-terminal task already
+    /// carries the label `policy=<framework>/<id>` in `scope` -- an exact
+    /// match against `control`'s own `framework/id` spelling, never a
+    /// title guess the way `task`/`workflow` checks have to fall back to.
+    pub(crate) async fn policy_remediate(&self, control: ControlRef, scope: String, agent: Option<String>) -> Result<Task> {
+        let snapshot = self.factory_snapshot();
+        let scope = snapshot.scope(&scope)?.name.clone();
+        // Reuses the same evaluation `Request::PolicyControl` itself
+        // answers with -- status, reasons, refs, the catalogue's own
+        // `remediation:` text -- rather than a second, parallel pass over
+        // the catalogue and the evidence stores.
+        let detail = self.policy_control(control.clone(), &scope).await?;
+
+        match detail.status.kind() {
+            policy::StatusKind::Satisfied => {
+                return Err(FactoryError::BadRequest(format!(
+                    "{control} is already satisfied at {scope:?}; nothing to remediate"
+                )));
+            }
+            policy::StatusKind::Attested => {
+                return Err(FactoryError::BadRequest(format!(
+                    "{control} is already attested at {scope:?}; nothing to remediate"
+                )));
+            }
+            policy::StatusKind::NotApplicable => {
+                let rationale = detail.not_applicable.as_ref().map(|na| na.rationale.as_str()).unwrap_or("");
+                return Err(FactoryError::BadRequest(format!(
+                    "{control} is not applicable at {scope:?}: {rationale}"
+                )));
+            }
+            policy::StatusKind::Open | policy::StatusKind::Stale => {}
+        }
+
+        let label = control.to_string();
+        let existing = self
+            .store
+            .list(&TaskFilter {
+                scope: Some(scope.clone()),
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            .find(|t| !t.status.is_terminal() && t.labels.get("policy").map(String::as_str) == Some(label.as_str()));
+        if let Some(task) = existing {
+            return Err(FactoryError::BadRequest(format!(
+                "a task to close {control} at {scope:?} is already open: {} ({:?})",
+                task.id, task.title
+            )));
+        }
+
+        let mut labels = BTreeMap::new();
+        labels.insert("policy".to_string(), label);
+        let new_task = NewTask {
+            title: format!("Close {control}: {}", detail.title),
+            instructions: policy::remediation_instructions(
+                &control,
+                detail.remediation.as_deref(),
+                &detail.status,
+                &detail.checks,
+            ),
+            scope: Some(scope),
+            agent,
+            labels,
+            ..Default::default()
+        };
+        self.create(new_task).await
+    }
+
+    /// `Request::PolicyExport`'s data: `policy_report(scope)` plus, per row,
+    /// every attestation recorded at that row's own scope or an ancestor of
+    /// it -- the same "scope or ancestor" rule this module's own `Evidence`
+    /// assembly already applies per scope, kept here rather than folded
+    /// into a status and discarded. An audit wants a control's *whole*
+    /// attestation history at a scope (withdrawn and expired included), not
+    /// only whichever one currently decides its status the way
+    /// `ControlStatus.refs` does.
+    pub(crate) async fn policy_export(&self, scope: Option<&str>) -> Result<policy_export::PolicyExport> {
+        let snapshot = self.factory_snapshot();
+        let report = self.policy_report(scope).await?;
+        let all_attestations = self.policies.all().await?;
+
+        let mut attestations: BTreeMap<String, Vec<Attestation>> = BTreeMap::new();
+        for row in &report.rows {
+            let scope_obj = snapshot.scope(&row.scope)?.clone();
+            let ancestor_names: BTreeSet<&str> = snapshot
+                .config
+                .ancestors_of(&scope_obj)
+                .iter()
+                .map(|ancestor| ancestor.name.as_str())
+                .collect();
+            let relevant: Vec<Attestation> = all_attestations
+                .iter()
+                .filter(|att| att.scope == row.scope || ancestor_names.contains(att.scope.as_str()))
+                .cloned()
+                .collect();
+            attestations.insert(row.scope.clone(), relevant);
+        }
+
+        Ok(policy_export::PolicyExport {
+            instance: snapshot.config.instance.name.clone(),
+            scope: report.scope.clone(),
+            produced_at: Utc::now(),
+            report,
+            attestations,
+        })
+    }
+
+    /// `policy_export`, rendered as `format` (`"md"` or `"json"`; anything
+    /// else is refused) -- the filename and body `Payload::PolicyExport`
+    /// carries. Kept beside `policy_export` rather than in `engine.rs`'s
+    /// dispatch, since the `http` interface's own export route needs the
+    /// same two values without going through the ordinary `Payload`
+    /// envelope (`interfaces/http.rs`'s `policy_export` handler builds a
+    /// download response from them instead).
+    pub(crate) async fn policy_export_render(&self, scope: Option<&str>, format: &str) -> Result<(String, String)> {
+        let export = self.policy_export(scope).await?;
+        let filename = policy_export::export_filename(&export, format);
+        let body = match format {
+            "md" => policy_export::export_markdown(&export),
+            "json" => serde_json::to_string_pretty(&export)
+                .map_err(|e| FactoryError::Other(anyhow::anyhow!("rendering policy export: {e}")))?,
+            other => {
+                return Err(FactoryError::BadRequest(format!(
+                    "unknown export format {other:?}; expected \"md\" or \"json\""
+                )));
+            }
+        };
+        Ok((filename, body))
     }
 }
 
@@ -1314,5 +1457,146 @@ mod tests {
         assert!(facts.foreman_enabled);
         assert_eq!(facts.http_loopback_only, Some(true), "the default bind, 127.0.0.1:8787, is loopback");
         assert!(facts.power_assertion);
+    }
+
+    // -- policy_remediate / policy_export (#83) ------------------------------
+
+    #[tokio::test]
+    async fn policy_remediate_creates_a_labeled_task_from_the_controls_own_reasons() {
+        let engine = test_engine();
+        let task = engine
+            .policy_remediate("cra/b".parse().unwrap(), "engineering".to_string(), None)
+            .await
+            .unwrap();
+        assert_eq!(task.scope, "engineering");
+        assert_eq!(task.labels.get("policy").map(String::as_str), Some("cra/b"));
+        assert_eq!(task.title, "Close cra/b: Control B");
+        assert!(task.instructions.contains("Missing evidence:"), "{}", task.instructions);
+        assert!(task.instructions.contains("attestation: none recorded"), "{}", task.instructions);
+        assert!(
+            task.instructions.contains("Any one of these checks passing closes cra/b:"),
+            "{}",
+            task.instructions
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_remediate_honours_an_explicit_agent() {
+        // `test_engine`'s scopes declare no agents of their own, so the one
+        // name guaranteed to resolve (`resolve_agent`'s own adapter
+        // fallback) is a builtin adapter's -- `shell`, the same one the
+        // rest of this file's tasks use.
+        let engine = test_engine();
+        let task = engine
+            .policy_remediate("cra/b".parse().unwrap(), "engineering".to_string(), Some("shell".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(task.agent, "shell");
+    }
+
+    #[tokio::test]
+    async fn policy_remediate_refuses_a_second_call_naming_the_open_task_and_creates_no_duplicate() {
+        let engine = test_engine();
+        let first = engine
+            .policy_remediate("cra/b".parse().unwrap(), "engineering".to_string(), None)
+            .await
+            .unwrap();
+
+        let err = engine
+            .policy_remediate("cra/b".parse().unwrap(), "engineering".to_string(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(&first.id), "{err}");
+        assert!(err.to_string().contains("already open"), "{err}");
+
+        let tasks = engine
+            .store
+            .list(&factory_core::task::TaskFilter {
+                scope: Some("engineering".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|t| t.labels.get("policy").map(String::as_str) == Some("cra/b"))
+                .count(),
+            1,
+            "the refusal must never create a second task"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_remediate_refuses_for_satisfied_attested_and_not_applicable_controls() {
+        let engine = test_engine();
+        let owner = Caller::Owner;
+
+        let err = engine
+            .policy_remediate("cra/a".parse().unwrap(), "engineering".to_string(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already satisfied"), "{err}");
+
+        engine
+            .policy_attest(
+                &owner,
+                "cra/b".parse().unwrap(),
+                "demo-app".to_string(),
+                "https://example.com".to_string(),
+                None,
+                Utc::now() + chrono::Duration::days(30),
+            )
+            .await
+            .unwrap();
+        let err = engine
+            .policy_remediate("cra/b".parse().unwrap(), "demo-app".to_string(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already attested"), "{err}");
+
+        let err = engine
+            .policy_remediate("cra/c".parse().unwrap(), "demo-app".to_string(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not applicable"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn policy_export_carries_a_controls_full_attestation_history_including_an_ancestors() {
+        let engine = test_engine();
+        let owner = Caller::Owner;
+        engine
+            .policy_attest(
+                &owner,
+                "cra/b".parse().unwrap(),
+                "company".to_string(),
+                "https://example.com/company".to_string(),
+                None,
+                Utc::now() + chrono::Duration::days(30),
+            )
+            .await
+            .unwrap();
+
+        let export = engine.policy_export(Some("engineering")).await.unwrap();
+        assert_eq!(export.scope.as_deref(), Some("engineering"));
+        let engineering_atts = export.attestations.get("engineering").expect("engineering has an entry");
+        assert!(
+            engineering_atts
+                .iter()
+                .any(|a| a.control == "cra/b".parse().unwrap() && a.scope == "company"),
+            "an ancestor's attestation is included in a descendant's own list: {engineering_atts:?}"
+        );
+
+        let (filename, body) = engine.policy_export_render(Some("engineering"), "md").await.unwrap();
+        assert!(filename.starts_with("policy-engineering-"), "{filename}");
+        assert!(body.contains("cra/b"), "{body}");
+        assert!(body.contains("https://example.com/company"), "{body}");
+
+        let (_, json) = engine.policy_export_render(Some("engineering"), "json").await.unwrap();
+        assert!(json.contains("\"instance\""), "{json}");
+
+        let err = engine.policy_export_render(Some("engineering"), "yaml").await.unwrap_err();
+        assert!(err.to_string().contains("unknown export format"), "{err}");
     }
 }

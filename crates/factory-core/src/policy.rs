@@ -370,6 +370,47 @@ impl Check {
             _ => None,
         }
     }
+
+    /// One line naming what this check asks for -- moved here from
+    /// `factory-cli`'s own `describe_check` (`#83`) so the CLI's `policy
+    /// show`, a remediation task's own instructions
+    /// ([`remediation_instructions`]), and anything else that wants to say
+    /// what a check is read the same wording from one place. `policy-model.js`'s
+    /// `describeCheck` stays a documented port of this, not an import --
+    /// see its own header comment.
+    pub fn describe(&self) -> String {
+        match self {
+            Check::Knowledge { tag: Some(tag) } => format!("knowledge: tag `{tag}`"),
+            Check::Knowledge { tag: None } => "knowledge: default tag".to_string(),
+            Check::Attestation => "attestation".to_string(),
+            Check::Task { task, max_age } => format!(
+                "task {task}{}",
+                max_age.map(|a| format!(" (max_age {a})")).unwrap_or_default()
+            ),
+            Check::Workflow { workflow, max_age } => format!(
+                "workflow {workflow}{}",
+                max_age.map(|a| format!(" (max_age {a})")).unwrap_or_default()
+            ),
+            Check::Gate { dataset, case, max_age } => format!(
+                "gate {dataset}{}{}",
+                case.as_deref().map(|c| format!("/{c}")).unwrap_or_default(),
+                max_age.map(|a| format!(" (max_age {a})")).unwrap_or_default()
+            ),
+            Check::Roles { forbid } => format!(
+                "roles: forbid {}",
+                forbid.iter().map(|g| g.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+            Check::Sandbox => "sandbox".to_string(),
+            Check::Secrets { absent } => {
+                if absent.is_empty() {
+                    "secrets".to_string()
+                } else {
+                    format!("secrets: absent {}", absent.join(", "))
+                }
+            }
+            Check::Daemon { fact } => format!("daemon: {fact}"),
+        }
+    }
 }
 
 /// One control within a framework: something that is either currently
@@ -683,6 +724,13 @@ pub struct Applied {
     /// evidence against.
     pub max_age: Option<Duration>,
     pub not_applicable: Option<AppliedNotApplicable>,
+    /// The catalogue's own `remediation:` text for this control, carried
+    /// through unchanged -- no layer tightens or overrides it, the same as
+    /// `title`. `Engine::policy_remediate` (`#83`) is the one reader; kept
+    /// here rather than looked up separately so a caller that already has
+    /// an `Applied` (or a `PolicyControlDetail` built from one) never needs
+    /// a second pass over the catalogue just for this field.
+    pub remediation: Option<String>,
 }
 
 fn min_duration(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
@@ -842,6 +890,7 @@ pub fn applicable(catalogues: &[Catalogue], chain: &[PolicyLayer]) -> (Vec<Appli
                 evidence: control.evidence.clone(),
                 max_age,
                 not_applicable,
+                remediation: control.remediation.clone(),
             });
         }
     }
@@ -1150,6 +1199,23 @@ impl StatusKind {
             StatusKind::Satisfied => 4,
         }
     }
+
+    /// The wire's own spelling (`#[serde(rename_all = "snake_case")]`) --
+    /// `"not_applicable"`, not the `n/a` shorthand a person reads on the L6
+    /// tab or the CLI's status board; a caller that wants that shorter word
+    /// does its own translation (`policy-model.js`'s `statusLabel`). One
+    /// place for the CLI (`policy_control_text`, formerly its own
+    /// `policy_status_str`) and `policy_export::export_markdown` (`#83`) to
+    /// agree on the string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StatusKind::Satisfied => "satisfied",
+            StatusKind::Attested => "attested",
+            StatusKind::Stale => "stale",
+            StatusKind::Open => "open",
+            StatusKind::NotApplicable => "not_applicable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1212,6 +1278,20 @@ pub enum EvidenceRefKind {
     WorkflowRun,
     BenchRun,
     Attestation,
+}
+
+impl EvidenceRefKind {
+    /// The wire's own spelling -- `policy_export::export_markdown` (`#83`)
+    /// prints a ref as `<kind>:<id>`, and this is the `<kind>`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EvidenceRefKind::Task => "task",
+            EvidenceRefKind::Run => "run",
+            EvidenceRefKind::WorkflowRun => "workflow_run",
+            EvidenceRefKind::BenchRun => "bench_run",
+            EvidenceRefKind::Attestation => "attestation",
+        }
+    }
 }
 
 /// A machine-readable pointer alongside a status's human `reasons`, so a UI
@@ -1796,6 +1876,35 @@ pub fn evidence_findings(evidence: &Evidence, scope: &str) -> Vec<Finding> {
     }
     findings.sort_by(|a, b| a.subject.cmp(&b.subject).then(a.kind.cmp(&b.kind)).then(a.detail.cmp(&b.detail)));
     findings
+}
+
+// ============================================================ remediation
+
+/// The instructions `Engine::policy_remediate` (`#83`) writes into the task
+/// it creates to close a gap -- three parts, in the order the issue asks
+/// for: the catalogue's own `remediation:` guidance, if it wrote one; the
+/// reasons the control's current `status` carries, verbatim -- exactly what
+/// a person reads on the L6 tab or `factory policy show`, so the task never
+/// says something the control's own evaluation does not; and a closing line
+/// naming every check that could satisfy it, so the task also says what
+/// would close it, not only what has not. Pure -- like the rest of this
+/// module, `Engine::policy_remediate` is the one caller, and it already has
+/// every argument from a `PolicyControlDetail`/`Applied` it already fetched.
+pub fn remediation_instructions(control: &ControlRef, remediation: Option<&str>, status: &Status, checks: &[Check]) -> String {
+    let mut out = String::new();
+    if let Some(r) = remediation.map(str::trim).filter(|r| !r.is_empty()) {
+        out.push_str(r);
+        out.push_str("\n\n");
+    }
+    out.push_str("Missing evidence:\n");
+    for reason in status.reasons() {
+        out.push_str(&format!("- {reason}\n"));
+    }
+    out.push_str(&format!("\nAny one of these checks passing closes {control}:\n"));
+    for check in checks {
+        out.push_str(&format!("- {}\n", check.describe()));
+    }
+    out.trim_end().to_string()
 }
 
 // ================================================================= rollup
@@ -2436,6 +2545,7 @@ mod tests {
             evidence,
             max_age: None,
             not_applicable: None,
+            remediation: None,
         }
     }
 
@@ -3754,5 +3864,64 @@ mod tests {
         let rollups = rollup(&worst_across_scopes(&per_scope));
         assert_eq!(rollups.len(), 1);
         assert!(!rollups[0].compliant, "open in even one applicable scope is not compliant");
+    }
+
+    // -- remediation (#83) --------------------------------------------------
+
+    #[test]
+    fn status_kind_and_evidence_ref_kind_spell_the_wire_form() {
+        assert_eq!(StatusKind::NotApplicable.as_str(), "not_applicable");
+        assert_eq!(StatusKind::Satisfied.as_str(), "satisfied");
+        assert_eq!(EvidenceRefKind::WorkflowRun.as_str(), "workflow_run");
+        assert_eq!(EvidenceRefKind::BenchRun.as_str(), "bench_run");
+    }
+
+    #[test]
+    fn check_describe_names_what_it_checks() {
+        assert_eq!(Check::Sandbox.describe(), "sandbox");
+        assert_eq!(
+            // `Duration`'s own `Display` prefers weeks when a value divides
+            // evenly -- 7 days is 1 week, so that is what prints.
+            Check::Task { task: "sbom export".into(), max_age: Some("7d".parse().unwrap()) }.describe(),
+            "task sbom export (max_age 1w)"
+        );
+        assert_eq!(
+            Check::Knowledge { tag: None }.describe(),
+            "knowledge: default tag"
+        );
+    }
+
+    #[test]
+    fn remediation_instructions_carries_all_three_parts_in_order() {
+        let control = ControlRef::new("cra", "annex-i-2-1");
+        let status = Status::Open {
+            reasons: vec!["knowledge: tag `control/cra/annex-i-2-1` not found".to_string()],
+        };
+        let checks = vec![Check::Knowledge { tag: None }, Check::Attestation];
+        let text = remediation_instructions(&control, Some("Publish an SBOM.  \n"), &status, &checks);
+
+        let remediation_at = text.find("Publish an SBOM.").expect("remediation text present");
+        let missing_at = text.find("Missing evidence:").expect("missing-evidence heading present");
+        let reason_at = text
+            .find("knowledge: tag `control/cra/annex-i-2-1` not found")
+            .expect("the control's own reason, verbatim");
+        let closing_at = text
+            .find("Any one of these checks passing closes cra/annex-i-2-1:")
+            .expect("closing line names the control");
+        assert!(remediation_at < missing_at, "{text}");
+        assert!(missing_at < reason_at, "{text}");
+        assert!(reason_at < closing_at, "{text}");
+        assert!(text.contains("- knowledge: default tag"), "{text}");
+        assert!(text.contains("- attestation"), "{text}");
+        // Trimmed, including the trailing whitespace `remediation:` carried.
+        assert!(!text.ends_with(char::is_whitespace), "{text:?}");
+    }
+
+    #[test]
+    fn remediation_instructions_omits_the_guidance_paragraph_when_there_is_none() {
+        let control = ControlRef::new("cra", "annex-i-2-2");
+        let status = Status::Stale { reasons: vec!["attestation: `att-1` expired at 2020-01-01T00:00:00Z".to_string()] };
+        let text = remediation_instructions(&control, None, &status, &[Check::Attestation]);
+        assert!(text.starts_with("Missing evidence:"), "{text:?}");
     }
 }

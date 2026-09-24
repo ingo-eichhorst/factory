@@ -702,6 +702,53 @@ policy attest <fw>/<id> --scope S --evidence <pointer> --expires
 `GET /api/policy?scope=`, `GET /api/policy/controls/{framework}/{id}?scope=`,
 `POST /api/policy/attestations`, and `POST /api/policy/attestations/{id}/withdraw`.
 
+**Closing a gap.** `factory policy remediate <fw>/<id> --scope S [--agent A]`
+creates an ordinary task in `S` through the exact path `factory task create`
+itself uses (`Engine::create`) — its validation, its worktree, its
+`Event::TaskCreated`, none of it a hand-rolled copy — titled `Close
+<fw>/<id>: <title>` and labelled `policy=<fw>/<id>`. Its instructions are the
+catalogue's own `remediation:` text (if the control carries one), the
+missing evidence — each unsatisfied check and why, verbatim, the same
+reasons the L6 tab and `policy show` themselves print — and a closing line
+naming every check that would satisfy the control
+(`policy::remediation_instructions`). It needs `task.create` in `S`, under
+the exact reach rule `Request::TaskCreate` itself is checked against
+(`access.rs` maps both to the same grant and the same caller's-own-scope
+check) — this is not a second door into creating a task, it is the one
+door. Refused outright when the control is already `satisfied`, `attested`,
+or `n/a` at `S` — there is nothing to remediate; refused, naming the
+existing task by id and title, when a non-terminal task already carries
+that label in `S` — a second `remediate` finds the same task rather than
+spawning a duplicate. `POST /api/policy/remediate` (`{control, scope,
+agent?}`) answers the same way `POST /api/tasks` does, `{"kind":"task",
+"task":{...}}` — a remediation task is an ordinary task in every way but how
+it was asked for. The L6 tab offers a "Create task" button on every open or
+stale row and in the control-detail modal (never on a satisfied, attested,
+or n/a control); after it creates one, the button becomes a link straight to
+it, and a refusal shows inline, next to the button — this page uses neither
+`alert()` nor `confirm()` anywhere.
+
+**Exporting for an audit.** `factory policy export [--scope S] [--format
+md|json]` prints a snapshot to stdout: an instance/scope/produced-at header
+and the "compliant means evidence complete, not certified" sentence, then
+per framework its rollup, then — scope by scope — every control that
+framework applies to there with its status, reasons, `refs` (the task, run,
+workflow run, bench run or attestation id behind it, never a page's own
+text), and its whole attestation history at that scope (evidence pointer,
+by, attested, expires, withdrawn — an audit trail, so a withdrawn or expired
+one is shown, not dropped), then every `n/a` with its rationale and
+declaring scope, then every finding. No page text anywhere in it, only
+pointers. `format` defaults to `md`; `json` is the same data
+(`policy_export::PolicyExport`, wrapping the `Request::Policy` report plus
+each scope's own attestations) as `serde_json::to_string_pretty`, so neither
+format can say something the other does not.
+`GET /api/policy/export?scope=&format=` answers with the body itself — not
+the usual `{"kind":...}` envelope — `Content-Type` `text/markdown;
+charset=utf-8` or `application/json; charset=utf-8`, and `Content-Disposition:
+attachment; filename="policy-<scope|instance>-<date>.<format>"`, so a browser
+click downloads it directly. The L6 tab's header carries an "Export" link
+that does exactly that click, for the scope currently selected on the rail.
+
 ## Tasks and runs
 
 A **task** is the standing intent: what to do, where, with which agent, and on
@@ -1122,7 +1169,10 @@ limit), `GET /api/benchmarks`, dataset CRUD under `/api/datasets` (plus
 `.../clean`, policy status and detail under `GET /api/policy?scope=` and
 `GET /api/policy/controls/{framework}/{id}?scope=`, attestations under
 `POST /api/policy/attestations` and
-`POST /api/policy/attestations/{id}/withdraw`, workflow CRUD under
+`POST /api/policy/attestations/{id}/withdraw`, closing a gap under
+`POST /api/policy/remediate`, an audit export under `GET
+/api/policy/export?scope=&format=` (a download, not the ordinary envelope —
+see "Policies" above), workflow CRUD under
 `/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
 `POST /api/rpc` for the raw envelope. `GET /ws`

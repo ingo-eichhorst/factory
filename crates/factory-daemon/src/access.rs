@@ -205,6 +205,9 @@ impl Engine {
             // Recording and withdrawing are the same grant, checked against
             // the root scope like `knowledge.write` -- see `in_root_scope`.
             Request::PolicyAttest { .. } | Request::PolicyWithdraw { .. } => Grant::PolicyAttest,
+            // The same grant `TaskCreate` itself needs -- this is not a way
+            // around it, it is the same door (`#83`).
+            Request::PolicyRemediate { .. } => Grant::TaskCreate,
 
             Request::Status
             | Request::Adapters
@@ -224,6 +227,7 @@ impl Engine {
             | Request::BenchRunGet { .. }
             | Request::Policy { .. }
             | Request::PolicyControl { .. }
+            | Request::PolicyExport { .. }
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
@@ -340,6 +344,12 @@ impl Engine {
 
         match request {
             Request::TaskCreate(new) => in_scope(new.scope.as_deref().unwrap_or(scope)),
+            // The same reach rule as `TaskCreate` -- `scope` is required on
+            // this request rather than optional, so there is no caller's-
+            // own-scope fallback to mirror, but the check itself is
+            // identical: a caller may only remediate a control in the one
+            // scope it works in.
+            Request::PolicyRemediate { scope: s, .. } => in_scope(s),
 
             Request::TaskUpdate { id, patch } => {
                 // Handing a task to somebody else is not editing it. A role
@@ -831,6 +841,53 @@ mod tests {
                 }
             )
             .await
+        );
+    }
+
+    /// `policy.remediate` is checked exactly like `TaskCreate` itself: the
+    /// same grant (`task.create`), the same reach (the caller's own scope,
+    /// never a name it does not work in). Unlike `policy.attest`, this is
+    /// not a root-scope-only grant -- a caller with `task.create` may
+    /// remediate in its own scope, same as it may create a task there.
+    /// A positive case is the point here, not just "the owner may" and "no
+    /// grant is refused": those two alone would still pass with the
+    /// `authorize` arm for `PolicyRemediate` missing entirely (the owner
+    /// bypasses `authorize`, and a missing arm still falls through to the
+    /// final `_ => Err(deny("do that"))`), so this also proves a role that
+    /// *does* hold the grant is actually let through.
+    #[tokio::test]
+    async fn policy_remediate_needs_task_create_in_the_callers_own_scope() {
+        let e = engine_with_roles("roles:\n  remediator:\n    grants: [task.create]\n    reach: scope\n");
+
+        let request = |scope: &str| Request::PolicyRemediate {
+            control: "cra/a".parse().unwrap(),
+            scope: scope.into(),
+            agent: None,
+        };
+
+        let in_scope = Caller::Agent {
+            scope: "demo".into(),
+            name: "w".into(),
+            role: Role::new("remediator"),
+            run_id: None,
+        };
+        assert!(
+            allowed(&e, &in_scope, request("demo")).await,
+            "a role holding task.create may remediate in its own scope"
+        );
+        assert!(
+            !allowed(&e, &in_scope, request("other")).await,
+            "the same grant does not reach a scope this caller does not work in"
+        );
+
+        assert!(
+            !allowed(&e, &worker("w"), request("demo")).await,
+            "a role without task.create is refused, the same as TaskCreate itself would be"
+        );
+
+        assert!(
+            allowed(&e, &Caller::Owner, request("demo")).await,
+            "the owner is never subject to any of this"
         );
     }
 

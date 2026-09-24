@@ -261,16 +261,20 @@ textarea { min-height: 84px; resize: vertical; font: 400 12px/1.6 var(--mono); }
 .checkrow { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
 .checkrow input[type="checkbox"] { width: auto; }
 .checkrow span { font-size: 12.5px; color: var(--ink-2); }
-button.btn {
+/* `.btn`, not `button.btn` -- the Policy tab's Export control (`#policy-export`)
+   is an `<a download>` rather than a button, since a plain link with the
+   server's own `Content-Disposition` is what makes a click save the file;
+   everything else here still only ever puts this class on a `<button>`. */
+.btn {
   background: var(--panel); color: var(--ink-2); cursor: pointer;
   border: 1px solid var(--line); border-radius: 3px; padding: 6px 12px;
-  font: 500 11.5px/1 var(--sans);
+  font: 500 11.5px/1 var(--sans); text-decoration: none; display: inline-block;
 }
-button.btn:hover:not(:disabled) { border-color: var(--signal); color: var(--signal); }
-button.btn:disabled { opacity: .38; cursor: default; }
-button.btn.primary { background: var(--signal); border-color: var(--signal); color: var(--on-signal); }
-button.btn.primary:hover:not(:disabled) { filter: brightness(1.12); color: var(--on-signal); }
-button.btn.danger:hover:not(:disabled) { border-color: var(--fault); color: var(--fault); }
+.btn:hover:not(:disabled) { border-color: var(--signal); color: var(--signal); }
+.btn:disabled { opacity: .38; cursor: default; }
+.btn.primary { background: var(--signal); border-color: var(--signal); color: var(--on-signal); }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.12); color: var(--on-signal); }
+.btn.danger:hover:not(:disabled) { border-color: var(--fault); color: var(--fault); }
 .row-btns { display: flex; gap: 6px; flex-wrap: wrap; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
 pre {
@@ -1320,6 +1324,8 @@ button.linklike:hover { color: var(--signal); }
 /* The gap table's own "Close it" links, and the control detail modal's
    reasons and evidence lists. */
 .pol-links { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.pol-remediate { margin-top: 6px; }
+.pol-remediate-err { margin-top: 4px; color: var(--fault); }
 .pol-reasons, .pol-checks { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--ink-2); }
 .pol-reasons li, .pol-checks li { margin: 3px 0; }
 .pol-sub-head { margin: 16px 0 6px; font: 600 9.5px/1 var(--cond); letter-spacing: .13em; text-transform: uppercase; color: var(--faint); }

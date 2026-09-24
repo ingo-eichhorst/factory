@@ -561,6 +561,17 @@ impl Engine {
                 });
                 Ok(Payload::PolicyAttestation { attestation })
             }
+            // An ordinary task in every way but how it was asked for, so it
+            // answers the same way `Request::TaskCreate` itself does --
+            // `Event::TaskCreated` already fired inside `policy_remediate`
+            // (`Engine::create`), not published a second time here.
+            Request::PolicyRemediate { control, scope, agent } => Ok(Payload::Task {
+                task: self.policy_remediate(control, scope, agent).await?,
+            }),
+            Request::PolicyExport { scope, format } => {
+                let (filename, body) = self.policy_export_render(scope.as_deref(), &format).await?;
+                Ok(Payload::PolicyExport { format, filename, body })
+            }
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),
             }),
