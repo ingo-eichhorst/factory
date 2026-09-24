@@ -36,6 +36,9 @@ export const state = {
   occ: null,              // the occupancy answer, as the daemon assembled it
   environment: null,      // last /api/environment answer: { sandboxes, credentials }
   environmentError: null,
+  infrastructure: null,   // last /api/infrastructure answer: { host, daemon, providers, unassigned }
+  infrastructureError: null,
+  infrastructureUnavailable: false, // the daemon predates the endpoint (a bare 404), not a fault
   benchmarks: null,       // last /api/benchmarks answer: { configurations }
   benchmarksError: null,
   knowledge: null,        // last /api/knowledge answer: { root, present, notes, gaps, pages, findings }
