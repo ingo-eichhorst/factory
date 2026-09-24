@@ -373,6 +373,7 @@ mod tests {
                 frameworks: vec!["cra".to_string()],
                 ..Default::default()
             },
+            infrastructure: Default::default(),
             plugins_dir: None,
         };
         config.scopes = vec![
