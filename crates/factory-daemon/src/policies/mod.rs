@@ -3,7 +3,8 @@
 //! *what* a control is (`factory_core::policy`, pure and tested on its
 //! own), re-read on every request; this module only assembles the evidence
 //! that already lives elsewhere in the daemon -- the knowledge index, the
-//! attestations store -- and folds it against them.
+//! attestations store, tasks, workflows and bench runs -- and folds it
+//! against them.
 //!
 //! The one piece of state this module owns is the attestations themselves,
 //! kept in `PolicyStore` (`store.rs`), append-only.
@@ -11,15 +12,41 @@
 mod store;
 pub use store::PolicyStore;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
 use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
 use factory_core::protocol::{CatalogueSummary, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy};
+use factory_core::task::{Task, TaskFilter};
+use factory_core::workflow::WorkflowDefinition;
 
 use crate::access::Caller;
 use crate::engine::Engine;
+
+/// How many of a task's or workflow's most recent runs `task_fact`/
+/// `workflow_fact` fetch, newest first, so `evaluate` can skip past any
+/// still in progress to the newest one that actually finished (`policy::
+/// TaskFact`/`WorkflowFact`'s own doc comments). A task or workflow
+/// ordinarily has at most one run in flight at a time, so this only has to
+/// cover that plus headroom for the unusual case -- not the whole history,
+/// which `TaskStore::runs`/`WorkflowStore::runs` would otherwise have to
+/// load in full.
+const RUN_LOOKBACK: u32 = 20;
+
+/// Every distinct dataset name a `gate` check among `applied`'s controls
+/// names -- what a caller resolving `gate` facts (`Engine::gate_facts_for`)
+/// has to ask about, and no more.
+fn gate_dataset_names(applied: &[policy::Applied]) -> BTreeSet<String> {
+    applied
+        .iter()
+        .flat_map(|a| &a.evidence)
+        .filter_map(|check| match check {
+            policy::Check::Gate { dataset, .. } => Some(dataset.clone()),
+            _ => None,
+        })
+        .collect()
+}
 
 impl Engine {
     /// Every catalogue on disk, and the knowledge vault's tags -- the two
@@ -39,6 +66,200 @@ impl Engine {
         })
         .await
         .map_err(|e| FactoryError::Other(anyhow::anyhow!("policy catalogue/knowledge walk: {e}")))
+    }
+
+    /// Resolve every `task` and `workflow` check name `applied` actually
+    /// references into `Evidence`'s fact maps -- `factory_core::policy`
+    /// stays pure (`#81`), so this is where a check's name becomes a real
+    /// task or workflow run. Both are resolved against `scope` alone, per
+    /// the issue's own rule ("names a task in the evaluated scope"). Never
+    /// looks beyond the names `applied`'s own checks mention -- not every
+    /// task or workflow the scope has. `gate` facts are a separate call
+    /// (`gate_facts_for`): datasets are instance-wide, so a caller looping
+    /// over scopes resolves them once, not once per scope.
+    async fn resolve_task_and_workflow_facts(
+        &self,
+        scope: &str,
+        applied: &[policy::Applied],
+    ) -> Result<(BTreeMap<String, Vec<policy::TaskFact>>, BTreeMap<String, Vec<policy::WorkflowFact>>)> {
+        let mut task_names: BTreeSet<&str> = BTreeSet::new();
+        let mut workflow_names: BTreeSet<&str> = BTreeSet::new();
+        for a in applied {
+            for check in &a.evidence {
+                match check {
+                    policy::Check::Task { task, .. } => {
+                        task_names.insert(task.as_str());
+                    }
+                    policy::Check::Workflow { workflow, .. } => {
+                        workflow_names.insert(workflow.as_str());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut tasks = BTreeMap::new();
+        if !task_names.is_empty() {
+            let scoped = self
+                .store
+                .list(&TaskFilter {
+                    scope: Some(scope.to_string()),
+                    ..Default::default()
+                })
+                .await?;
+            for name in task_names {
+                tasks.insert(name.to_string(), self.task_facts_for(&scoped, name).await?);
+            }
+        }
+
+        let mut workflows = BTreeMap::new();
+        if !workflow_names.is_empty() {
+            let defs = self.workflows.definitions(Some(scope)).await?;
+            for name in workflow_names {
+                workflows.insert(name.to_string(), self.workflow_facts_for(&defs, scope, name).await?);
+            }
+        }
+
+        Ok((tasks, workflows))
+    }
+
+    /// The `gate` fact for every dataset name in `names` that has ever had a
+    /// settled bench run -- one lookup per name, however many scopes end up
+    /// sharing the result. Datasets have no scope of their own, so a caller
+    /// evaluating several scopes in one report calls this once, over the
+    /// union of every scope's `gate` checks, rather than once per scope.
+    async fn gate_facts_for(&self, names: &BTreeSet<String>) -> Result<BTreeMap<String, policy::GateFact>> {
+        let mut gates = BTreeMap::new();
+        for name in names {
+            if let Some(fact) = self.gate_fact_for(name).await? {
+                gates.insert(name.clone(), fact);
+            }
+        }
+        Ok(gates)
+    }
+
+    /// Every task in `scoped` (the evaluated scope's own tasks) that `name`
+    /// -- a `task` check's own string -- could mean: by id first (unique, so
+    /// at most one match), and otherwise by exact title, which may match
+    /// more than one. `evaluate` treats more than one match as an ambiguous
+    /// name (`TaskFact`'s own doc comment), so only the sole unambiguous
+    /// match's runs are worth fetching -- a lookup for every candidate of an
+    /// ambiguous name would cost something nothing ever reads.
+    async fn task_facts_for(&self, scoped: &[Task], name: &str) -> Result<Vec<policy::TaskFact>> {
+        if let Some(task) = scoped.iter().find(|t| t.id == name) {
+            return Ok(vec![self.task_fact(task).await?]);
+        }
+        let matches: Vec<&Task> = scoped.iter().filter(|t| t.title == name).collect();
+        if let [only] = matches.as_slice() {
+            return Ok(vec![self.task_fact(only).await?]);
+        }
+        Ok(matches
+            .into_iter()
+            .map(|t| policy::TaskFact {
+                id: t.id.clone(),
+                title: t.title.clone(),
+                runs: Vec::new(),
+            })
+            .collect())
+    }
+
+    async fn task_fact(&self, task: &Task) -> Result<policy::TaskFact> {
+        // Newest first (`TaskStore::runs`'s own contract), bounded to
+        // `RUN_LOOKBACK` rather than the task's whole history: `evaluate`
+        // only ever needs to walk past however many runs are still in
+        // progress to find the newest *finished* one, and a task normally
+        // has at most one of those at a time.
+        let runs = self
+            .store
+            .runs(&task.id, RUN_LOOKBACK)
+            .await?
+            .into_iter()
+            .map(|r| policy::RunFact {
+                id: r.id,
+                status: r.status,
+                started_at: r.started_at,
+                ended_at: r.ended_at,
+            })
+            .collect();
+        Ok(policy::TaskFact {
+            id: task.id.clone(),
+            title: task.title.clone(),
+            runs,
+        })
+    }
+
+    /// The workflow-side twin of `task_facts_for`.
+    async fn workflow_facts_for(&self, defs: &[WorkflowDefinition], scope: &str, name: &str) -> Result<Vec<policy::WorkflowFact>> {
+        if let Some(def) = defs.iter().find(|d| d.id == name) {
+            return Ok(vec![self.workflow_fact(def, scope).await?]);
+        }
+        let matches: Vec<&WorkflowDefinition> = defs.iter().filter(|d| d.name == name).collect();
+        if let [only] = matches.as_slice() {
+            return Ok(vec![self.workflow_fact(only, scope).await?]);
+        }
+        Ok(matches
+            .into_iter()
+            .map(|d| policy::WorkflowFact {
+                id: d.id.clone(),
+                name: d.name.clone(),
+                runs: Vec::new(),
+            })
+            .collect())
+    }
+
+    /// The workflow-side twin of `task_fact` -- see `RUN_LOOKBACK`.
+    async fn workflow_fact(&self, def: &WorkflowDefinition, scope: &str) -> Result<policy::WorkflowFact> {
+        let runs = self
+            .workflows
+            .runs(Some(&def.id), Some(scope), RUN_LOOKBACK)
+            .await?
+            .into_iter()
+            .map(|r| policy::WorkflowRunFact {
+                id: r.id,
+                status: r.status,
+                updated_at: r.updated_at,
+            })
+            .collect();
+        Ok(policy::WorkflowFact {
+            id: def.id.clone(),
+            name: def.name.clone(),
+            runs,
+        })
+    }
+
+    /// The newest *settled* bench run of `dataset` (`BenchRun::settled`),
+    /// `None` when it has never had one -- `evaluate`'s `gate` check treats
+    /// an entry missing from `Evidence::gates` the same way.
+    async fn gate_fact_for(&self, dataset: &str) -> Result<Option<policy::GateFact>> {
+        // `BenchStore::runs` loads every returned run's attempts eagerly, so
+        // this is bounded rather than "every run this dataset ever had" --
+        // the same 200 `Request::BenchRuns` already asks for, which a
+        // dataset gated often enough to bury its newest settled run past
+        // could still, in principle, outrun; the same edge case that bound
+        // already accepts.
+        let runs = self.bench.runs(Some(dataset), 200).await?;
+        let Some(run) = runs.into_iter().find(|r| r.settled()) else {
+            return Ok(None);
+        };
+        let cases = run
+            .cases
+            .iter()
+            .map(|case| policy::GateCase {
+                id: case.id.clone(),
+                gated: case.gate.is_some(),
+                verdicts: run
+                    .attempts
+                    .iter()
+                    .filter(|a| a.case_id == case.id)
+                    .filter_map(|a| a.verdict)
+                    .collect(),
+            })
+            .collect();
+        Ok(Some(policy::GateFact {
+            run_id: run.id,
+            ended_at: run.ended_at,
+            cases,
+        }))
     }
 
     /// The L6 Policy tab: `Request::Policy`.
@@ -72,6 +293,15 @@ impl Engine {
         let mut per_scope_statuses: Vec<Vec<policy::ControlStatus>> = Vec::new();
         let mut not_applicable: BTreeSet<(ControlRef, String, String)> = BTreeSet::new();
 
+        // First pass: resolve applicability for every scope, and collect
+        // every dataset a `gate` check anywhere in this report names.
+        // Datasets have no scope of their own, so `gate_facts_for` is called
+        // once below over the union, rather than once per scope -- the same
+        // dataset's bench runs would otherwise be walked again for every
+        // scope that happens to name it.
+        let mut per_scope_applied: Vec<(&factory_core::config::Scope, Vec<policy::Applied>)> = Vec::new();
+        let mut dataset_names: BTreeSet<String> = BTreeSet::new();
+
         for t in &target_scopes {
             // `Engine::policy_chain` (#76) is the one place a scope name
             // becomes the chain `applicable` folds -- root first, through
@@ -92,12 +322,23 @@ impl Engine {
                 continue;
             }
 
+            dataset_names.extend(gate_dataset_names(&applied));
+            per_scope_applied.push((t, applied));
+        }
+
+        let gates = self.gate_facts_for(&dataset_names).await?;
+
+        // Second pass: task/workflow resolution is still per scope (they do
+        // have one), but every scope's `Evidence` shares the same `gates`
+        // map resolved above.
+        for (t, applied) in &per_scope_applied {
             let ancestor_names: BTreeSet<&str> = snapshot
                 .config
                 .ancestors_of(t)
                 .iter()
                 .map(|ancestor| ancestor.name.as_str())
                 .collect();
+            let (tasks, workflows) = self.resolve_task_and_workflow_facts(&t.name, applied).await?;
             let evidence = policy::Evidence {
                 tags: tags.clone(),
                 attestations: all_attestations
@@ -105,9 +346,13 @@ impl Engine {
                     .filter(|att| att.scope == t.name || ancestor_names.contains(att.scope.as_str()))
                     .cloned()
                     .collect(),
+                tasks,
+                workflows,
+                gates: gates.clone(),
             };
+            findings.extend(policy::evidence_findings(&evidence, &t.name));
 
-            let statuses = policy::evaluate(&applied, &evidence, now);
+            let statuses = policy::evaluate(applied, &evidence, now);
             let scope_rollup = policy::rollup(&statuses);
             per_scope_statuses.push(statuses.clone());
             rows.push(ScopePolicy {
@@ -178,14 +423,22 @@ impl Engine {
             .collect();
         history.sort_by_key(|a| std::cmp::Reverse(a.attested_at));
 
+        // The full `applied` set, not just `found`, the same as `policy_report`:
+        // a `maps_to` neighbour's own `task`/`workflow`/`gate` check can
+        // still decide this control's status, so its name has to resolve
+        // too, or propagation would see it as wrongly `open`.
+        let (tasks, workflows) = self.resolve_task_and_workflow_facts(&scope_obj.name, &applied).await?;
+        let gates = self.gate_facts_for(&gate_dataset_names(&applied)).await?;
         let evidence = policy::Evidence {
             tags,
             attestations: history.clone(),
+            tasks,
+            workflows,
+            gates,
         };
-        let status = policy::evaluate(&applied, &evidence, Utc::now())
+        let evaluated = policy::evaluate(&applied, &evidence, Utc::now())
             .into_iter()
             .find(|s| s.control == control)
-            .map(|s| s.status)
             .ok_or_else(|| FactoryError::Other(anyhow::anyhow!("{control} evaluated to no status")))?;
 
         Ok(PolicyControlDetail {
@@ -196,7 +449,8 @@ impl Engine {
             maps_to: found.maps_to.clone(),
             max_age: found.max_age,
             not_applicable: found.not_applicable.clone(),
-            status,
+            refs: evaluated.refs,
+            status: evaluated.status,
             attestations: history,
         })
     }
@@ -306,6 +560,7 @@ mod tests {
     use factory_core::adapter::TaskStore;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
     use factory_core::policy::{ControlStatus, StatusKind};
+    use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
     use factory_plugins::{Registry, SqliteStore};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -334,9 +589,12 @@ mod tests {
     ///
     /// The catalogue: `a` is a `knowledge` check whose tag the vault
     /// carries (so it is `satisfied` everywhere), `b` is an `attestation`
-    /// check (so it starts `open` everywhere), and `c` is a `knowledge`
-    /// check whose tag nothing carries (so it is `open` wherever it still
-    /// applies, and `not_applicable` at `demo-app` alone).
+    /// check (so it starts `open` everywhere), `c` is a `knowledge` check
+    /// whose tag nothing carries (so it is `open` wherever it still
+    /// applies, and `not_applicable` at `demo-app` alone), and `d`/`e`/`f`
+    /// are `task`/`workflow`/`gate` checks naming a task, workflow and
+    /// dataset no test creates by default (so they start `open` everywhere
+    /// too -- see the tests below, which create one in the real store).
     fn test_engine() -> Arc<Engine> {
         let root = std::env::temp_dir().join(format!("factory-policies-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
@@ -348,7 +606,10 @@ mod tests {
              controls:\n\
              \x20\x20- id: a\n\x20\x20\x20\x20title: Control A\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: knowledge\n\
              \x20\x20- id: b\n\x20\x20\x20\x20title: Control B\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: attestation\n\
-             \x20\x20- id: c\n\x20\x20\x20\x20title: Control C\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: knowledge\n",
+             \x20\x20- id: c\n\x20\x20\x20\x20title: Control C\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: knowledge\n\
+             \x20\x20- id: d\n\x20\x20\x20\x20title: Control D\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: task\n\x20\x20\x20\x20\x20\x20\x20\x20task: sbom export\n\x20\x20\x20\x20\x20\x20\x20\x20max_age: 7d\n\
+             \x20\x20- id: e\n\x20\x20\x20\x20title: Control E\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: workflow\n\x20\x20\x20\x20\x20\x20\x20\x20workflow: release train\n\x20\x20\x20\x20\x20\x20\x20\x20max_age: 7d\n\
+             \x20\x20- id: f\n\x20\x20\x20\x20title: Control F\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: gate\n\x20\x20\x20\x20\x20\x20\x20\x20dataset: smoke\n\x20\x20\x20\x20\x20\x20\x20\x20max_age: 7d\n",
         )
         .unwrap();
 
@@ -588,5 +849,162 @@ mod tests {
         assert_eq!(detail.attestations.len(), 2, "both attestations, including the withdrawn one");
         assert!(detail.attestations.iter().any(|a| a.id == first.id && a.withdrawn.is_some()));
         assert_eq!(detail.status.kind(), StatusKind::Attested, "the second, unwithdrawn one still covers it");
+    }
+
+    /// `#81`, through the real store: `d`'s `task` check names `sbom export`
+    /// by title. With no such task at all it is `open`; once one exists in
+    /// `engineering` with a fresh `done` run, `resolve_task_and_workflow_facts`
+    /// resolves it, `evaluate` calls it `satisfied`, and both
+    /// `policy_report` and `policy_control` carry a `refs` entry pointing at
+    /// the task and the run -- not just the pure `factory_core::policy`
+    /// logic (covered on its own), but the whole path from a real
+    /// `TaskStore` through the engine.
+    #[tokio::test]
+    async fn a_task_check_resolves_against_a_real_task_and_run_in_the_store() {
+        let engine = test_engine();
+
+        let before = engine.policy_report(Some("engineering")).await.unwrap();
+        let before_engineering = by_id(&before.rows.iter().find(|r| r.scope == "engineering").unwrap().statuses);
+        assert_eq!(
+            before_engineering["d"].status.kind(),
+            StatusKind::Open,
+            "no task named `sbom export` exists yet"
+        );
+
+        let new_task = factory_core::adapter::store::task_from_new(
+            factory_core::task::NewTask {
+                title: "sbom export".to_string(),
+                ..Default::default()
+            },
+            "engineering".to_string(),
+            "assistant".to_string(),
+            "shell".to_string(),
+        );
+        let task = engine.store.create(&new_task).await.unwrap();
+        let run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "assistant".to_string(),
+                adapter: "shell".to_string(),
+                runtime: "shell".to_string(),
+                token: "test-token".to_string(),
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(Utc::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // The whole tree, so `sibling` (which `Some("engineering")` would
+        // exclude) is in the same report to compare against.
+        let report = engine.policy_report(None).await.unwrap();
+        let engineering = by_id(&report.rows.iter().find(|r| r.scope == "engineering").unwrap().statuses);
+        assert_eq!(engineering["d"].status.kind(), StatusKind::Satisfied, "{:?}", engineering["d"].status);
+        assert!(engineering["d"].refs.iter().any(|r| r.id == task.id));
+        assert!(engineering["d"].refs.iter().any(|r| r.id == run.id));
+
+        // A sibling scope's own task list never satisfies `engineering`'s
+        // check -- `task` is resolved per evaluated scope, not instance-wide.
+        let sibling = by_id(&report.rows.iter().find(|r| r.scope == "sibling").unwrap().statuses);
+        assert_eq!(sibling["d"].status.kind(), StatusKind::Open);
+
+        let detail = engine.policy_control("cra/d".parse().unwrap(), "engineering").await.unwrap();
+        assert_eq!(detail.status.kind(), StatusKind::Satisfied);
+        assert!(detail.refs.iter().any(|r| r.id == task.id));
+    }
+
+    /// The same, for `e`'s `workflow` check, through the real
+    /// `WorkflowStore` `Engine::new` already gives a test engine.
+    #[tokio::test]
+    async fn a_workflow_check_resolves_against_a_real_workflow_and_run_in_the_store() {
+        let engine = test_engine();
+
+        let before = engine.policy_report(Some("engineering")).await.unwrap();
+        let before_engineering = by_id(&before.rows.iter().find(|r| r.scope == "engineering").unwrap().statuses);
+        assert_eq!(before_engineering["e"].status.kind(), StatusKind::Open, "no workflow named `release train` exists yet");
+
+        let draft = factory_core::workflow::WorkflowDraft {
+            name: "release train".to_string(),
+            description: "ships things".to_string(),
+            scope: "engineering".to_string(),
+            ..Default::default()
+        };
+        let definition = factory_core::workflow::WorkflowDefinition::from_draft(draft);
+        engine.workflows.put_definition(&definition).await.unwrap();
+
+        let mut run = factory_core::workflow::WorkflowRun::new(definition, factory_core::workflow::WorkflowActor::Owner);
+        run.status = factory_core::workflow::WorkflowRunStatus::Done;
+        engine.workflows.put_run(&run).await.unwrap();
+
+        let report = engine.policy_report(Some("engineering")).await.unwrap();
+        let engineering = by_id(&report.rows.iter().find(|r| r.scope == "engineering").unwrap().statuses);
+        assert_eq!(engineering["e"].status.kind(), StatusKind::Satisfied, "{:?}", engineering["e"].status);
+        assert!(engineering["e"].refs.iter().any(|r| r.id == run.id));
+    }
+
+    /// The same, for `f`'s `gate` check, through the real `BenchStore` --
+    /// `evidence.gates` is resolved once per report (`gate_facts_for`), not
+    /// once per scope, so this also exercises that a scope that never named
+    /// `smoke` still gets a status for it once `engineering` does.
+    #[tokio::test]
+    async fn a_gate_check_resolves_against_a_real_bench_run_in_the_store() {
+        let engine = test_engine();
+
+        let before = engine.policy_report(Some("engineering")).await.unwrap();
+        let before_engineering = by_id(&before.rows.iter().find(|r| r.scope == "engineering").unwrap().statuses);
+        assert_eq!(before_engineering["f"].status.kind(), StatusKind::Open, "no settled bench run of `smoke` exists yet");
+
+        let case = factory_core::dataset::Case {
+            id: "case-1".to_string(),
+            title: "Case 1".to_string(),
+            scope: "engineering".to_string(),
+            instructions: String::new(),
+            base: None,
+            reset: None,
+            gate: Some("exit 0".to_string()),
+            timeout_seconds: None,
+            origin: None,
+        };
+        let run = factory_core::bench::BenchRun {
+            id: "bench-1".to_string(),
+            dataset: "smoke".to_string(),
+            dataset_revision: 1,
+            cases: vec![case],
+            case_bases: BTreeMap::new(),
+            agents: vec!["assistant".to_string()],
+            attempts_per_case: 1,
+            concurrency: 1,
+            status: factory_core::bench::BenchRunStatus::Done,
+            attempts: Vec::new(),
+            started_at: Utc::now() - chrono::Duration::hours(1),
+            ended_at: Some(Utc::now()),
+        };
+        engine.bench.put_run(&run).await.unwrap();
+        let mut attempt =
+            factory_core::bench::BenchAttempt::pending("attempt-1".to_string(), "case-1".to_string(), "assistant".to_string(), 1);
+        attempt.verdict = Some(factory_core::bench::Verdict::Pass);
+        engine.bench.put_attempt(&run.id, &attempt).await.unwrap();
+
+        let report = engine.policy_report(None).await.unwrap();
+        let engineering = by_id(&report.rows.iter().find(|r| r.scope == "engineering").unwrap().statuses);
+        assert_eq!(engineering["f"].status.kind(), StatusKind::Satisfied, "{:?}", engineering["f"].status);
+        assert!(engineering["f"].refs.iter().any(|r| r.id == "bench-1"));
+
+        // `demo-app` names the same dataset -- the shared `gates` resolution
+        // (`gate_facts_for`, called once for the whole report) must answer
+        // it too, not just the scope that happened to trigger the lookup.
+        let demo_app = by_id(&report.rows.iter().find(|r| r.scope == "demo-app").unwrap().statuses);
+        assert_eq!(demo_app["f"].status.kind(), StatusKind::Satisfied, "{:?}", demo_app["f"].status);
     }
 }
