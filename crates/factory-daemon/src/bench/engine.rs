@@ -838,6 +838,7 @@ mod tests {
                 roles: Default::default(),
                 policies: Default::default(),
             }],
+            infrastructure: Default::default(),
             plugins_dir: None,
         };
         let factory = Factory {

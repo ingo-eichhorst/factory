@@ -27,3 +27,5 @@ uuid.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 rusqlite.workspace = true
+# Host facts for L1 Infrastructure: sysctlbyname, statvfs, getloadavg.
+libc = "0.2"

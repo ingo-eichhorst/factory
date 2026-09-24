@@ -325,6 +325,7 @@ mod tests {
             policies: Default::default(),
             scope: None,
             scopes: Vec::new(),
+            infrastructure: Default::default(),
             plugins_dir: None,
         };
         let factory = Factory { root, config };

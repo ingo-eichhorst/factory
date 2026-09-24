@@ -50,6 +50,10 @@ enum Command {
     Adapters,
     /// The scopes, their agents, and what each is doing right now.
     Agents,
+    /// L1 Infrastructure: the host, the daemon on it, and which declared AI
+    /// account each agent's model calls go to. Read-only; never reads a
+    /// credential.
+    Infra,
     /// Start, stop and type at standing agents.
     #[command(subcommand)]
     Agent(AgentCmd),
@@ -508,6 +512,11 @@ async fn main() -> Result<()> {
             })
         }
 
+        Command::Infra => {
+            let payload = client.send(Request::Infrastructure).await?;
+            print(&payload, cli.json, infrastructure_text)
+        }
+
         Command::Adapters => {
             let payload = client.send(Request::Adapters).await?;
             print(&payload, cli.json, |p| match p {
@@ -764,6 +773,144 @@ async fn main() -> Result<()> {
         }
         Command::Bench { cmd: Some(cmd) } => bench_cmd(cli.json, &client, cmd).await,
         Command::Dataset(cmd) => dataset_cmd(cli.json, &client, cmd).await,
+    }
+}
+
+/// `factory infra`, for a person: the host, the daemon on it, then each
+/// declared provider with the agents it serves, then the model agents none
+/// claims. A fact the daemon could not read prints as `--`.
+fn infrastructure_text(payload: &Payload) -> Option<String> {
+    let Payload::Infrastructure { host, daemon, providers, unassigned } = payload else {
+        return None;
+    };
+    const UNKNOWN: &str = "--";
+    let or = |v: Option<String>| v.unwrap_or_else(|| UNKNOWN.to_string());
+    let mut out = String::new();
+
+    out.push_str(&format!("HOST  {}\n", or(host.hostname.clone())));
+    out.push_str(&format!("  model       {}\n", or(host.model.clone())));
+    out.push_str(&format!("  chip        {}\n", or(host.chip.clone())));
+    out.push_str(&format!("  cores       {}\n", or(host.cores.map(|c| c.to_string()))));
+    out.push_str(&format!("  memory      {}\n", or(host.memory_bytes.map(bytes))));
+    out.push_str(&format!(
+        "  os          {} ({})\n",
+        or(host.os.clone()),
+        or(host.arch.clone())
+    ));
+    out.push_str(&format!("  uptime      {}\n", or(host.uptime_seconds.map(duration))));
+    out.push_str(&format!(
+        "  load        {}\n",
+        or(host.load.map(|l| format!("{:.2} {:.2} {:.2}", l[0], l[1], l[2])))
+    ));
+    out.push_str(&format!(
+        "  disk        {}\n",
+        or(host.disk.as_ref().map(|d| {
+            let used = d.total_bytes.saturating_sub(d.free_bytes);
+            let percent = if d.total_bytes == 0 { 0.0 } else { used as f64 * 100.0 / d.total_bytes as f64 };
+            format!(
+                "{}  {} free of {} ({percent:.0}% used)",
+                d.mount,
+                bytes(d.free_bytes),
+                bytes(d.total_bytes)
+            )
+        }))
+    ));
+
+    let uptime = (chrono::Utc::now() - daemon.started_at).num_seconds().max(0) as u64;
+    out.push_str(&format!("\nDAEMON  factory {}  (pid {})\n", daemon.version, daemon.pid));
+    out.push_str(&format!(
+        "  up          {}, since {}\n",
+        duration(uptime),
+        daemon.started_at.format("%Y-%m-%d %H:%M:%S UTC")
+    ));
+    out.push_str(&format!("  root        {}\n", daemon.root));
+    out.push_str(&format!(
+        "  store       {}  {}  {}\n",
+        daemon.store.kind,
+        daemon.store.path,
+        or(daemon.store.size_bytes.map(bytes))
+    ));
+    out.push_str(&format!("  socket      {}\n", daemon.socket));
+    let interfaces: Vec<String> = daemon
+        .interfaces
+        .iter()
+        .map(|i| match &i.bind {
+            Some(bind) => format!("{} {bind}", i.kind),
+            None => i.kind.clone(),
+        })
+        .collect();
+    out.push_str(&format!("  interfaces  {}\n", interfaces.join(", ")));
+    out.push_str(&format!(
+        "  runtime     {}{}\n",
+        daemon.runtime,
+        daemon
+            .herdr_session
+            .as_deref()
+            .map(|s| format!(" (session {s})"))
+            .unwrap_or_default()
+    ));
+
+    out.push_str("\nPROVIDERS\n");
+    if providers.is_empty() {
+        out.push_str(
+            "  none declared -- add them under infrastructure.providers in the root .factory/config.yaml\n",
+        );
+    }
+    for p in providers {
+        let mut badge = p.kind.as_str().to_string();
+        if let Some(env) = &p.env {
+            badge.push_str(&format!(", key in ${env}"));
+        }
+        if let Some(plan) = &p.plan {
+            badge.push_str(&format!(", {plan}"));
+        }
+        out.push_str(&format!("  {}  {}  ({badge})\n", p.name, p.vendor));
+        if p.agents.is_empty() {
+            out.push_str("    no agents\n");
+        }
+        for a in &p.agents {
+            out.push_str(&format!(
+                "    {:<32} {:<14} via {}\n",
+                format!("{}/{}", a.scope, a.agent),
+                a.harness,
+                a.via.as_str()
+            ));
+        }
+    }
+
+    if !unassigned.is_empty() {
+        out.push_str("\nUNASSIGNED  model agents no provider claims\n");
+        for a in unassigned {
+            out.push_str(&format!("    {:<32} {}\n", format!("{}/{}", a.scope, a.agent), a.harness));
+        }
+    }
+    Some(out.trim_end().to_string())
+}
+
+/// Binary units, one decimal: `64.0 GiB`.
+fn bytes(n: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// The two largest units that apply: `10d 4h`, `3h 12m`, `42s`.
+fn duration(seconds: u64) -> String {
+    let (d, h, m, s) = (seconds / 86_400, seconds / 3_600 % 24, seconds / 60 % 60, seconds % 60);
+    match (d, h, m) {
+        (0, 0, 0) => format!("{s}s"),
+        (0, 0, _) => format!("{m}m {s}s"),
+        (0, _, _) => format!("{h}h {m}m"),
+        _ => format!("{d}d {h}h"),
     }
 }
 
@@ -2247,5 +2394,61 @@ mod tests {
             "factory", "task", "edit", "id", "--schedule", "0 9 * * 1", "--timezone", "Europe/Berlin",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn infra_prints_unreadable_facts_as_dashes_and_lists_the_unassigned() {
+        use factory_core::config::{ProviderKind, ProviderVia};
+        use factory_core::protocol::*;
+        let payload = Payload::Infrastructure {
+            host: HostFacts { arch: Some("aarch64".into()), ..Default::default() },
+            daemon: DaemonFacts {
+                version: "0.1.0".into(),
+                pid: 42,
+                started_at: chrono::Utc::now(),
+                root: "/inst".into(),
+                store: StoreFacts { kind: "sqlite".into(), path: ".factory/factory.sqlite".into(), size_bytes: None },
+                socket: ".factory/factory.sock".into(),
+                interfaces: vec![
+                    InterfaceFacts { kind: "cli".into(), bind: None },
+                    InterfaceFacts { kind: "http".into(), bind: Some("127.0.0.1:8787".into()) },
+                ],
+                runtime: "herdr".into(),
+                herdr_session: Some("factory".into()),
+            },
+            providers: vec![ProviderRow {
+                name: "openrouter".into(),
+                vendor: "openrouter".into(),
+                kind: ProviderKind::ApiKey,
+                plan: None,
+                env: Some("OPENROUTER_API_KEY".into()),
+                agents: vec![ProviderAgent {
+                    scope: "lab".into(),
+                    agent: "model-lab".into(),
+                    harness: "opencode".into(),
+                    via: ProviderVia::Agent,
+                }],
+            }],
+            unassigned: vec![UnassignedAgent { scope: "demo".into(), agent: "helper".into(), harness: "codex".into() }],
+        };
+        let text = infrastructure_text(&payload).unwrap();
+        assert!(text.contains("HOST  --"), "{text}");
+        assert!(text.contains("chip        --"), "{text}");
+        assert!(text.contains("-- (aarch64)"), "{text}");
+        assert!(text.contains("cli, http 127.0.0.1:8787"), "{text}");
+        assert!(text.contains("herdr (session factory)"), "{text}");
+        assert!(text.contains("api-key, key in $OPENROUTER_API_KEY"), "{text}");
+        assert!(text.contains("lab/model-lab") && text.contains("via agent"), "{text}");
+        assert!(text.contains("UNASSIGNED") && text.contains("demo/helper"), "{text}");
+    }
+
+    #[test]
+    fn infra_sizes_and_durations_read_like_a_person_wrote_them() {
+        assert_eq!(bytes(512), "512 B");
+        assert_eq!(bytes(68_719_476_736), "64.0 GiB");
+        assert_eq!(bytes(1_995_218_165_760), "1.8 TiB");
+        assert_eq!(duration(42), "42s");
+        assert_eq!(duration(3 * 3600 + 12 * 60), "3h 12m");
+        assert_eq!(duration(864_000 + 4 * 3600), "10d 4h");
     }
 }

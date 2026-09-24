@@ -748,6 +748,14 @@ daemon:
   default_runtime: herdr
   power_assertion: true        # hold the host awake while a run is active
 
+infrastructure:              # optional: the AI accounts behind the agents
+  providers:
+    - name: claude-max
+      vendor: anthropic
+      kind: subscription       # subscription | api-key
+      plan: Max 20x            # free text, optional
+      harnesses: [claude-code] # default binding for every agent on these
+
 scope:                       # optional: make the instance root a scope too
   id: cc23161d-82b9-4e75-8d88-e5195bc6d6e8
   name: root
@@ -812,6 +820,65 @@ a store that is asked something it should not be says so instead of guessing.
 
 The engine a scope uses is shown in the Roster, and is not editable there
 -- see the last section of this file for why.
+
+### The AI accounts behind the agents
+
+An agent declaration says which harness it runs, not which account pays for
+that harness's model calls. The root config says that, in an
+`infrastructure.providers` list, and `factory infra` (or
+`GET /api/infrastructure`, the L1 Infrastructure page) shows it next to the
+host and the daemon: each provider's name, vendor, kind and plan, and every
+agent it serves.
+
+```yaml
+# root .factory/config.yaml
+infrastructure:
+  providers:
+    - name: claude-max
+      vendor: anthropic
+      kind: subscription
+      plan: Max 20x
+      harnesses: [claude-code]
+    - name: openrouter
+      vendor: openrouter
+      kind: api-key
+      env: OPENROUTER_API_KEY    # the variable's NAME; its value is never read
+      harnesses: [pi, opencode]
+```
+
+```yaml
+# any scope's own config
+scope:
+  agents:
+    - name: model-lab
+      harness: claude-code
+      provider: openrouter       # overrides the harness default
+```
+
+**Declared, never discovered.** Factory does not open
+`~/.claude/.credentials.json`, `~/.pi/agent/auth.json`, the Keychain or any
+`.env` to find out which accounts exist, and nothing about a provider is ever a
+secret: `env:` is the *name* of the variable an api-key's key lives in, shown
+as written, and the variable itself is never read.
+
+The binding rule: an agent's own `provider:` wins; otherwise it gets the one
+provider whose `harnesses:` lists its harness. `shell` makes no model call and
+never has a provider. A model agent nothing claims is not an error -- it is
+listed as **unassigned**, which is the answer to what to declare next. The
+synthesized foreman is bound like any other agent, by its harness.
+
+Refused when the config loads, naming what is wrong: a `provider:` that names
+no declared provider (also refused by the Roster before it writes the file), two
+providers claiming the same harness, the same provider name twice, `env:` on a
+`subscription`, a `kind` other than `subscription` or `api-key`, a provider
+claiming `shell` or a shell agent naming one, and an `infrastructure:` block in
+a nested scope's own file -- only the root's is read.
+
+The host half of the page is read live on every request, from `sysctl` and
+`libc` rather than a subprocess per field: model, chip, cores, memory, OS,
+uptime, load and the root filesystem. Any of those that cannot be read is
+`null`, never a failed request, and only macOS answers all of them. Usage and
+spend per provider are not shown: Factory does not record tokens yet.
 
 ## Writing a plugin
 
@@ -879,7 +946,8 @@ echo '{"op":"task.list","params":{}}' | nc -U .factory/factory.sock
 HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`,
 `GET /api/runs/{id}/entries`, `GET /api/runs/{id}/output`, `GET /api/agents`,
-`GET /api/agent-runtime`, `GET /api/environment`, `GET /api/knowledge`,
+`GET /api/agent-runtime`, `GET /api/environment`, `GET /api/infrastructure`,
+`GET /api/knowledge`,
 `GET /api/knowledge/search?q=&tags=&scope=&limit=`,
 `PUT /api/knowledge/files?path=&overwrite=` (raw bytes, its own 50 MiB body
 limit), `GET /api/benchmarks`, dataset CRUD under `/api/datasets` (plus

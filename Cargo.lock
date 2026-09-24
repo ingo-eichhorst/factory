@@ -474,6 +474,7 @@ dependencies = [
  "factory-core",
  "factory-plugins",
  "futures-util",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

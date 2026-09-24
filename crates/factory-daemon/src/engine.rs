@@ -10,12 +10,13 @@ use factory_core::adapter::runtime::{
     RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
 };
 use factory_core::adapter::TaskStore;
-use factory_core::config::{Factory, Sandbox, ScopeAgent};
+use factory_core::config::{Factory, Sandbox, ScopeAgent, SHELL_HARNESS};
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
-    AgentActivity, AgentView, CredentialRow, Envelope, Payload, Request, Response,
-    RuntimeConnectionView, SandboxRow, ScopeView, StatusInfo,
+    AgentActivity, AgentView, CredentialRow, DaemonFacts, Envelope, InterfaceFacts, Payload,
+    ProviderAgent, ProviderRow, Request, Response, RuntimeConnectionView, SandboxRow, ScopeView,
+    StatusInfo, StoreFacts, UnassignedAgent,
 };
 use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
@@ -357,6 +358,7 @@ impl Engine {
                     credentials,
                 })
             }
+            Request::Infrastructure => Ok(self.infrastructure().await),
             Request::Knowledge => {
                 let root = self.factory_snapshot().root;
                 let index = tokio::task::spawn_blocking(move || factory_core::knowledge::index(&root))
@@ -806,6 +808,123 @@ impl Engine {
             }
         }
         Ok((sandboxes, self.credential_inventory().await))
+    }
+
+    /// The L1 Infrastructure page's whole answer. Nothing here can fail the
+    /// request: a host fact that cannot be read is `None`, and everything
+    /// else is the live config snapshot and this process's own state.
+    ///
+    /// Providers are what the root config declares and nothing more -- no
+    /// credential file, Keychain entry or environment variable is read to
+    /// find or confirm one. The agents are every scope's
+    /// `agents_with(foreman)`, the same list the roster, the Environment page
+    /// and Benchmarks are built from, so a synthesized foreman shows up
+    /// under the account its harness bills. `shell` agents make no model
+    /// call and appear in neither list.
+    pub(crate) async fn infrastructure(&self) -> Payload {
+        let host = tokio::task::spawn_blocking(crate::host::collect)
+            .await
+            .unwrap_or_default();
+
+        let factory = self.factory_snapshot();
+        let daemon_config = &factory.config.daemon;
+        let relative = |path: &Path| {
+            path.strip_prefix(&factory.root)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        };
+
+        let database = factory.database_path();
+        let size_bytes = tokio::fs::metadata(&database).await.ok().map(|m| m.len());
+        let interfaces = daemon_config
+            .interfaces
+            .iter()
+            .map(|interface| InterfaceFacts {
+                kind: interface.kind.clone(),
+                bind: match interface.kind.as_str() {
+                    // A socket, shown on its own line, not an address.
+                    "cli" => None,
+                    "http" => Some(
+                        interface
+                            .string("bind")
+                            .unwrap_or_else(|| crate::interfaces::http::DEFAULT_BIND.to_string()),
+                    ),
+                    _ => interface.string("bind"),
+                },
+            })
+            .collect();
+        // The herdr session is the daemon's own operational setting, which
+        // its service definition sets and every herdr call it makes
+        // inherits -- not a credential, and not a provider's `env:`, which is
+        // never read.
+        let herdr_session = (daemon_config.default_runtime == "herdr")
+            .then(|| std::env::var("HERDR_SESSION").ok())
+            .flatten()
+            .filter(|s| !s.is_empty());
+        let started_at = Utc::now()
+            - chrono::Duration::from_std(self.started.elapsed()).unwrap_or_default();
+        let daemon = DaemonFacts {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            pid: std::process::id(),
+            started_at: chrono::SubsecRound::trunc_subsecs(started_at, 0),
+            root: factory.root.display().to_string(),
+            store: StoreFacts {
+                kind: daemon_config.task_store.clone(),
+                path: relative(&database),
+                size_bytes,
+            },
+            socket: relative(&factory.socket_path()),
+            interfaces,
+            runtime: daemon_config.default_runtime.clone(),
+            herdr_session,
+        };
+
+        let infrastructure = &factory.config.infrastructure;
+        let mut providers: Vec<ProviderRow> = infrastructure
+            .providers
+            .iter()
+            .map(|p| ProviderRow {
+                name: p.name.clone(),
+                vendor: p.vendor.clone(),
+                kind: p.kind,
+                plan: p.plan.clone(),
+                env: p.env.clone(),
+                agents: Vec::new(),
+            })
+            .collect();
+        let mut unassigned = Vec::new();
+        for scope in &factory.config.scopes {
+            for agent in scope.agents_with(&daemon_config.foreman) {
+                if agent.harness == SHELL_HARNESS {
+                    continue;
+                }
+                match infrastructure.provider_for(&agent) {
+                    Some((provider, via)) => {
+                        if let Some(row) = providers.iter_mut().find(|row| row.name == provider.name) {
+                            row.agents.push(ProviderAgent {
+                                scope: scope.name.clone(),
+                                agent: agent.name(),
+                                harness: agent.harness.clone(),
+                                via,
+                            });
+                        }
+                    }
+                    None => unassigned.push(UnassignedAgent {
+                        scope: scope.name.clone(),
+                        agent: agent.name(),
+                        harness: agent.harness.clone(),
+                    }),
+                }
+            }
+        }
+
+        Payload::Infrastructure {
+            host,
+            daemon,
+            providers,
+            unassigned,
+        }
     }
 
     /// The honest v1 answer to "what can an agent already reach": a fixed
@@ -2488,6 +2607,7 @@ mod tests {
                 roles: Default::default(),
                 policies: Default::default(),
             }],
+            infrastructure: Default::default(),
             plugins_dir: None,
         };
         let factory = Factory {
@@ -2572,6 +2692,87 @@ mod tests {
         std::fs::remove_dir_all(scope_dir).ok();
     }
 
+    /// `infrastructure()` backs the L1 page: the binding rule applied to
+    /// every agent the roster shows -- the synthesized foreman included --
+    /// with `shell` in neither list, and the daemon's own facts. The host
+    /// facts depend on the machine and are only checked for what every
+    /// platform answers.
+    #[tokio::test]
+    async fn infrastructure_binds_every_model_agent_or_lists_it_unassigned() {
+        let scope_dir = temp_dir("infrastructure");
+        let engine = test_engine(scope_dir.clone());
+        {
+            let mut factory = engine.factory.write().unwrap();
+            factory.config.infrastructure = serde_yaml_ng::from_str(
+                "providers:\n\
+                 \x20 - name: claude-max\n    vendor: anthropic\n    kind: subscription\n    plan: Max 20x\n    harnesses: [claude-code]\n\
+                 \x20 - name: openrouter\n    vendor: openrouter\n    kind: api-key\n    env: OPENROUTER_API_KEY\n    harnesses: [pi]\n",
+            )
+            .unwrap();
+            factory.config.daemon.foreman.enabled = true;
+            factory.config.daemon.foreman.harness = Some("claude-code".into());
+            factory.config.scopes[0].agents = serde_yaml_ng::from_str(
+                "- name: builder\n  harness: claude-code\n\
+                 - name: model-lab\n  harness: opencode\n  provider: openrouter\n\
+                 - name: helper\n  harness: codex\n\
+                 - name: scripted\n  harness: shell\n",
+            )
+            .unwrap();
+        }
+
+        let Payload::Infrastructure { host, daemon, providers, unassigned } = engine.infrastructure().await else {
+            panic!("not an infrastructure payload");
+        };
+
+        let bound: Vec<(&str, Vec<(&str, &str)>)> = providers
+            .iter()
+            .map(|p| {
+                (
+                    p.name.as_str(),
+                    p.agents.iter().map(|a| (a.agent.as_str(), a.via.as_str())).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            bound,
+            vec![
+                ("claude-max", vec![("builder", "harness"), ("foreman", "harness")]),
+                ("openrouter", vec![("model-lab", "agent")]),
+            ]
+        );
+        assert_eq!(providers[1].env.as_deref(), Some("OPENROUTER_API_KEY"));
+        assert_eq!(providers[0].plan.as_deref(), Some("Max 20x"));
+        let unassigned: Vec<(&str, &str)> =
+            unassigned.iter().map(|u| (u.agent.as_str(), u.harness.as_str())).collect();
+        assert_eq!(unassigned, vec![("helper", "codex")], "shell is in neither list");
+
+        assert_eq!(daemon.pid, std::process::id());
+        assert_eq!(daemon.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(daemon.store.kind, "sqlite");
+        assert_eq!(daemon.store.path, ".factory/factory.sqlite", "relative to the root");
+        assert_eq!(daemon.store.size_bytes, None, "a database that is not there is null, not an error");
+        // This test's root is deep enough in the temporary directory that the
+        // socket falls back out of it -- and then the absolute path is shown.
+        let socket = engine.factory_snapshot().socket_path();
+        let root = engine.factory_snapshot().root;
+        match socket.strip_prefix(&root) {
+            Ok(rel) => assert_eq!(daemon.socket, rel.display().to_string()),
+            Err(_) => assert_eq!(daemon.socket, socket.display().to_string()),
+        }
+        assert_eq!(daemon.runtime, "herdr");
+        let interfaces: Vec<(&str, Option<&str>)> =
+            daemon.interfaces.iter().map(|i| (i.kind.as_str(), i.bind.as_deref())).collect();
+        assert_eq!(
+            interfaces,
+            vec![("cli", None), ("http", Some(crate::interfaces::http::DEFAULT_BIND))],
+            "the default interfaces, with the address http falls back to"
+        );
+        assert!(daemon.started_at <= Utc::now());
+        assert_eq!(host.arch.as_deref(), Some(std::env::consts::ARCH));
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
     /// `environment()` backs the L2 page: one sandbox row per scope/agent,
     /// reusing `scope_views()` rather than recomputing it, and one credential
     /// row per scope's `.env`. The ambient rows (`~/.claude/...` and friends)
@@ -2592,6 +2793,7 @@ mod tests {
                 autostart: None,
                 args: Vec::new(),
                 sandbox: Sandbox::Docker,
+                provider: None,
             });
         }
 
@@ -3006,6 +3208,7 @@ mod tests {
                 autostart: None,
                 args: vec!["--model".into(), "opus".into(), "--api-key".into(), "s3cret".into()],
                 sandbox: Sandbox::None,
+                provider: None,
             });
             factory.config.daemon.foreman.enabled = true;
         }

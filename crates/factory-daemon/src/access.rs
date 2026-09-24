@@ -211,6 +211,7 @@ impl Engine {
             | Request::Production { .. }
             | Request::SiteFootprint
             | Request::Environment
+            | Request::Infrastructure
             | Request::Knowledge
             | Request::KnowledgeSearch { .. }
             | Request::Benchmarks
@@ -541,6 +542,7 @@ mod tests {
             ],
             roles: Default::default(),
             policies: Default::default(),
+            infrastructure: Default::default(),
             plugins_dir: None,
         };
         let factory = Factory {

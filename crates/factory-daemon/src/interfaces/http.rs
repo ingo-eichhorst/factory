@@ -120,6 +120,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/production", get(production))
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
+        .route("/api/infrastructure", get(infrastructure))
         .route("/api/knowledge", get(knowledge))
         .route("/api/knowledge/search", get(knowledge_search))
         // Its own body limit, scoped to this one route with a nested router:
@@ -299,6 +300,10 @@ async fn site_footprint(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn environment(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Environment).await
+}
+
+async fn infrastructure(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Infrastructure).await
 }
 
 async fn knowledge(State(engine): State<Arc<Engine>>) -> AxumResponse {
