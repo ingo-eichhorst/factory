@@ -419,6 +419,35 @@ pub enum Request {
         #[serde(default)]
         reason: Option<String>,
     },
+    /// Close a gap: create the task that carries `control`'s own
+    /// `remediation:` guidance and its current missing evidence, in `scope`.
+    /// `#83`. Needs `task.create` in `scope`, under exactly the same reach
+    /// rule `Request::TaskCreate` itself needs (`access.rs` maps both to
+    /// `Grant::TaskCreate` and checks `scope` against the caller's own the
+    /// same way) -- this is not a second door into task creation, it is the
+    /// same one. Refused, naming the existing task, when a non-terminal
+    /// task labelled `policy=<framework>/<id>` is already open in `scope`;
+    /// refused outright when the control is already `satisfied`, `attested`,
+    /// or `n/a` there. Answered with `Payload::Task`, the same as
+    /// `Request::TaskCreate` -- it is an ordinary task in every way but how
+    /// it was asked for.
+    #[serde(rename = "policy.remediate")]
+    PolicyRemediate {
+        control: crate::policy::ControlRef,
+        scope: String,
+        #[serde(default)]
+        agent: Option<String>,
+    },
+    /// A snapshot of `Request::Policy { scope }` for an auditor:
+    /// `policy_export::PolicyExport`, rendered as `format` (`"md"` or
+    /// `"json"`; anything else is refused). `#83`. Read-only, like `Policy`
+    /// itself.
+    #[serde(rename = "policy.export")]
+    PolicyExport {
+        #[serde(default)]
+        scope: Option<String>,
+        format: String,
+    },
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -558,6 +587,16 @@ pub enum Payload {
     /// The answer to `Request::PolicyAttest`/`Request::PolicyWithdraw`: the
     /// attestation as it now stands -- withdrawn, for the latter.
     PolicyAttestation { attestation: crate::policy::Attestation },
+    /// The answer to `Request::PolicyExport`: the rendered body, its
+    /// `format` (echoed back so a caller need not remember what it asked
+    /// for), and the filename `policy_export::export_filename` computed for
+    /// it -- the `http` interface's `Content-Disposition` and the CLI both
+    /// read straight off this rather than re-deriving either.
+    PolicyExport {
+        format: String,
+        filename: String,
+        body: String,
+    },
 }
 
 /// A request plus who is making it.
@@ -877,6 +916,13 @@ pub struct PolicyControlDetail {
     pub max_age: Option<crate::policy::Duration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_applicable: Option<crate::policy::AppliedNotApplicable>,
+    /// The catalogue's own `remediation:` text, if it wrote one --
+    /// `policy::Applied::remediation`, carried through so both the L6 tab's
+    /// control-detail modal and `Engine::policy_remediate` (`#83`) read it
+    /// off this one struct rather than a second lookup against the
+    /// catalogue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
     /// Machine-readable pointers alongside `status`'s reasons -- see
     /// `policy::EvidenceRef`. `ControlStatus` already carries these;
     /// `policy_control` (`factory-daemon`) would otherwise drop them

@@ -320,3 +320,99 @@ export function attestBody(control, scope, values) {
   if (note) body.note = note;
   return body;
 }
+
+// ------------------------------------------------------------- remediation
+
+/// Whether "Create task" belongs on a row or in the control-detail modal --
+/// `open`/`stale` only. A `satisfied`/`attested` control has nothing to
+/// remediate and `POST /api/policy/remediate` refuses it outright; `n/a`
+/// has no gap to begin with. Kept as one pure predicate rather than an
+/// inline `!==`/`!==` at each call site, so a status this file does not
+/// know about yet (a future kind) is refused a button by default instead
+/// of getting one by accident.
+export function canRemediate(statusKind) {
+  return statusKind === "open" || statusKind === "stale";
+}
+
+/// The body `POST /api/policy/remediate` expects.
+export function remediateBody(control, scope) {
+  return { control, scope };
+}
+
+// ------------------------------------------------------------ refs' links
+
+/// `app.js`'s router cuts a view's own tail at the first segment equal to
+/// its `MODAL` marker ("task") to find an open task (`splitTail`/`tailOf`).
+/// Not exported there, so this file keeps its own copy -- the same
+/// duplication `bench-model.js`'s and `knowledge-graph.js`'s own `RESERVED`
+/// already carry, and for the same reason (see either's header comment). A
+/// task id is a UUID, never the literal word `task`, so unlike those two
+/// this never needs their `~` escape -- there is no value here a person
+/// could have named that.
+const TASK_MODAL = "task";
+
+/// A link that opens `taskId` (and `runId`, if given) the way `app.js`'s
+/// own router builds that URL: the Tasks page, then the modal tail
+/// `tailOf` appends when a task is open. A real `href`, not an `openTask`
+/// click handler -- this file stays DOM-free (see the header comment), and
+/// a plain link survives being copied, opened in a new tab, or read back
+/// after a reload the same way every other route here does.
+function taskHref(scope, taskId, runId) {
+  const tail = [TASK_MODAL, taskId, ...(runId ? [runId] : [])].map(encodeURIComponent).join("/");
+  return `${routeHref(scope, "tasks")}/${tail}`;
+}
+
+/// A link to one bench run, in the shape `benchmarksTail`/`readBenchmarksTail`
+/// (`bench-model.js`) already read and write for the Benchmarks tab's own
+/// "Runs" segment: `#<scope>/imp/benchmarks/runs/<id>`.
+function benchRunHref(scope, runId) {
+  return `${routeHref(scope, "benchmarks")}/runs/${encodeURIComponent(runId)}`;
+}
+
+const REF_LABELS = { task: "Task", run: "Run", workflow_run: "Workflow run", bench_run: "Bench run" };
+
+/// One entry per `refs` id worth a direct link, from `ControlStatus.refs`/
+/// `PolicyControlDetail.refs` -- exact, from the id `EvidenceRef` already
+/// carries, never parsed out of a reason string the way `closingLinks` has
+/// to for the check kinds that carry no ref yet. `attestation` is left out
+/// on purpose: the control-detail modal's own Attestations table already
+/// shows that row in full, so a second link to the same place says nothing
+/// a click there does not.
+///
+/// `task`/`run` open the task modal; `bench_run` deep-links to that run in
+/// Benchmarks; `workflow_run` can only reach the Workflows view, not the
+/// one run -- `workflowRouteTail` (`workflow-model.js`) needs the
+/// *definition's* id to route at all, which no check here ever carries
+/// (only the run's own id, `EvidenceRef::workflow_run`).
+///
+/// A `run` ref is paired with a task id only when `refs` carries exactly
+/// one `task` ref -- more than one (a control whose own check and a
+/// `maps_to` neighbour's check both name a task) makes which task a run
+/// belongs to ambiguous from `refs` alone, and a guess is worse than no
+/// link; that run then gets no link, not a wrong one.
+export function refLinks(scope, refs) {
+  const list = refs || [];
+  const taskIds = list.filter((r) => r.kind === "task").map((r) => r.id);
+  const soleTask = taskIds.length === 1 ? taskIds[0] : null;
+
+  const links = [];
+  for (const ref of list) {
+    switch (ref.kind) {
+      case "task":
+        links.push({ kind: "task", id: ref.id, label: REF_LABELS.task, href: taskHref(scope, ref.id) });
+        break;
+      case "run":
+        if (soleTask) links.push({ kind: "run", id: ref.id, label: REF_LABELS.run, href: taskHref(scope, soleTask, ref.id) });
+        break;
+      case "workflow_run":
+        links.push({ kind: "workflow_run", id: ref.id, label: REF_LABELS.workflow_run, href: routeHref(scope, "workflows") });
+        break;
+      case "bench_run":
+        links.push({ kind: "bench_run", id: ref.id, label: REF_LABELS.bench_run, href: benchRunHref(scope, ref.id) });
+        break;
+      default:
+        break; // attestation, or a kind this build does not know yet.
+    }
+  }
+  return links;
+}

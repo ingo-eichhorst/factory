@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   attestBody,
+  canRemediate,
   checkTarget,
   closingLinks,
   defaultKnowledgeTag,
@@ -16,6 +17,8 @@ import {
   looksLikeExpiry,
   notApplicableRows,
   reasonCheckKinds,
+  refLinks,
+  remediateBody,
   statusLabel,
   statusOf,
 } from "../js/policy-model.js";
@@ -272,6 +275,67 @@ test("looksLikeExpiry accepts policy::Duration's grammar and the two absolute fo
   assert.equal(looksLikeExpiry("2027-01-01T00:00:00Z"), true);
   assert.equal(looksLikeExpiry(""), false);
   assert.equal(looksLikeExpiry("soon"), false);
+});
+
+test("canRemediate is true only for open and stale", () => {
+  assert.equal(canRemediate("open"), true);
+  assert.equal(canRemediate("stale"), true);
+  assert.equal(canRemediate("satisfied"), false);
+  assert.equal(canRemediate("attested"), false);
+  assert.equal(canRemediate("not_applicable"), false);
+});
+
+test("remediateBody is the plain {control, scope} pair", () => {
+  assert.deepEqual(remediateBody("cra/annex-i-2-1", "demo"), { control: "cra/annex-i-2-1", scope: "demo" });
+});
+
+test("refLinks opens the task modal for a lone task ref", () => {
+  const links = refLinks("demo", [{ kind: "task", id: "task-1" }]);
+  // No `/proc/` level segment: `routeHref` only inserts one once `initRail`
+  // has told `scopes.js` which level owns which page (`levelForPage`),
+  // which nothing in this Node test ever calls -- the same reason
+  // `closingLinks`'s own tests above match `href` with a regex instead of
+  // asserting the exact string.
+  assert.deepEqual(links, [{ kind: "task", id: "task-1", label: "Task", href: "#demo/tasks/task/task-1" }]);
+});
+
+test("refLinks pairs a run ref with the sole task ref in the same list", () => {
+  const links = refLinks("demo", [
+    { kind: "task", id: "task-1" },
+    { kind: "run", id: "run-1" },
+  ]);
+  assert.deepEqual(links, [
+    { kind: "task", id: "task-1", label: "Task", href: "#demo/tasks/task/task-1" },
+    { kind: "run", id: "run-1", label: "Run", href: "#demo/tasks/task/task-1/run-1" },
+  ]);
+});
+
+test("refLinks drops a run ref when more than one task ref makes the pairing ambiguous", () => {
+  const links = refLinks("demo", [
+    { kind: "task", id: "task-1" },
+    { kind: "task", id: "task-2" },
+    { kind: "run", id: "run-1" },
+  ]);
+  assert.deepEqual(
+    links.map((l) => l.kind),
+    ["task", "task"],
+    "both tasks still get a link; the ambiguous run does not",
+  );
+});
+
+test("refLinks deep-links a bench_run and sends workflow_run to the Workflows view", () => {
+  const links = refLinks("demo", [
+    { kind: "bench_run", id: "bench-1" },
+    { kind: "workflow_run", id: "wfrun-1" },
+  ]);
+  assert.deepEqual(links, [
+    { kind: "bench_run", id: "bench-1", label: "Bench run", href: "#demo/benchmarks/runs/bench-1" },
+    { kind: "workflow_run", id: "wfrun-1", label: "Workflow run", href: "#demo/workflows" },
+  ]);
+});
+
+test("refLinks never links an attestation ref -- the modal's own table already shows it", () => {
+  assert.deepEqual(refLinks("demo", [{ kind: "attestation", id: "att-1" }]), []);
 });
 
 test("attestBody refuses empty evidence or expiry with a sentence, and drops an empty note", () => {

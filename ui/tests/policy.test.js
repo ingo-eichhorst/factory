@@ -46,6 +46,7 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
   const elements = {
     "policy-scope-note": { textContent: "" },
     "policy-error": { textContent: "", hidden: true },
+    "policy-export": { href: "" },
     "policy-cards": { innerHTML: "" },
     "policy-count": { textContent: "" },
     "policy-empty": { hidden: false },
@@ -116,9 +117,15 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
   assert.match(elements["policy-cards"].innerHTML, /not compliant/);
   assert.match(elements["policy-gaps"].innerHTML, /cra\/annex-i-2-1/);
   assert.match(elements["policy-gaps"].innerHTML, />Knowledge</, "an open knowledge check links to the Knowledge tab");
+  assert.match(
+    elements["policy-gaps"].innerHTML,
+    /data-remediate="cra\/annex-i-2-1"[^>]*data-remediate-scope="demo"/,
+    "an open row gets a Create task button, labelled for the same control and scope",
+  );
   assert.match(elements["policy-na"].innerHTML, /covered at the root/);
   assert.match(elements["policy-findings"].innerHTML, /names a control nothing defines/);
   assert.equal(elements["policy-no-gaps"].hidden, true, "one open row on screen -> the 'nothing open' empty state is hidden");
+  assert.equal(elements["policy-export"].href, "/api/policy/export?scope=demo", "the Export link tracks the selected scope");
 
   globalThis.fetch = async () => ({
     status: 400,

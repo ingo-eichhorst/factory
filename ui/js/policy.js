@@ -22,6 +22,7 @@ import { $, api, esc, state } from "./core.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
 import {
   attestBody,
+  canRemediate,
   checkTarget,
   closingLinks,
   describeCheck,
@@ -31,6 +32,8 @@ import {
   gapRows,
   kindLabel,
   notApplicableRows,
+  refLinks,
+  remediateBody,
   statusLabel,
   statusOf,
 } from "./policy-model.js";
@@ -98,9 +101,12 @@ function gapRow(row) {
     <td>${esc(row.scope)}</td>
     <td>${statusBadge(row.status)}</td>
     <td class="sub">${row.reasons.map(esc).join("; ")}</td>
-    <td><div class="pol-links">${links.length
-      ? links.map((l) => `<a href="${esc(l.href)}">${esc(l.label)}</a>`).join("")
-      : `<span class="sub">—</span>`}</div></td>
+    <td>
+      <div class="pol-links">${links.length
+        ? links.map((l) => `<a href="${esc(l.href)}">${esc(l.label)}</a>`).join("")
+        : `<span class="sub">—</span>`}</div>
+      ${canRemediate(row.status) ? remediateButtonHtml(row.control, row.scope) : ""}
+    </td>
   </tr>`;
 }
 
@@ -125,6 +131,58 @@ function findingsHtml(findings) {
     .join("");
 }
 
+// -------------------------------------------------------------- remediate
+//
+// One "Create task" button, in two places -- a gap row and the control-detail
+// modal -- sharing one markup fragment and one click handler rather than two
+// copies: both carry the same `data-remediate`/`data-remediate-scope` pair,
+// and `wireRemediateButtons` is called once per place the markup lands
+// (`renderPolicy` for the gap table, `wireControlBody` for the modal).
+// Never `alert()`/`confirm()` -- a refusal (a control already satisfied, or
+// a task already open) lands as inline text next to the button, the same
+// restraint this page's Withdraw form already takes.
+
+function remediateButtonHtml(control, scope) {
+  return `<div class="pol-remediate" data-remediate-cell>
+    <button type="button" class="btn" data-remediate="${esc(control)}" data-remediate-scope="${esc(scope)}">Create task</button>
+  </div>`;
+}
+
+function wireRemediateButtons(root) {
+  if (!root) return;
+  for (const b of root.querySelectorAll("[data-remediate]")) {
+    b.onclick = () => remediate(b);
+  }
+}
+
+async function remediate(button) {
+  const cell = button.closest("[data-remediate-cell]");
+  const control = button.dataset.remediate;
+  const scope = button.dataset.remediateScope;
+  button.disabled = true;
+  const existingError = cell.querySelector(".pol-remediate-err");
+  if (existingError) existingError.remove();
+  try {
+    const answer = await api("/api/policy/remediate", {
+      method: "POST",
+      body: JSON.stringify(remediateBody(control, scope)),
+    });
+    const task = answer.task;
+    cell.innerHTML = `<a class="pol-task-created" href="${esc(taskLinkHref(scope, task.id))}" title="${esc(task.title)}">Task created →</a>`;
+  } catch (e) {
+    button.disabled = false;
+    cell.insertAdjacentHTML("beforeend", `<div class="sub pol-remediate-err">${esc(e.message)}</div>`);
+  }
+}
+
+/// The one place this file needs a task-modal link built from a bare id
+/// rather than an `EvidenceRef` -- `refLinks` builds the same shape for a
+/// control's own refs; this mirrors it for a task `remediate` itself just
+/// created, which is not a ref on the wire at all.
+function taskLinkHref(scope, taskId) {
+  return refLinks(scope, [{ kind: "task", id: taskId }])[0].href;
+}
+
 // ------------------------------------------------------------------- board
 
 export function renderPolicy() {
@@ -138,6 +196,15 @@ export function renderPolicy() {
   if (failed) {
     failed.textContent = state.policyError || "";
     failed.hidden = !state.policyError;
+  }
+  // Set unconditionally, before the failed-fetch early return below -- a
+  // stale `href` from before a fetch failed would otherwise silently keep
+  // pointing at the last scope that loaded rather than the one now
+  // selected.
+  const exportLink = $("policy-export");
+  if (exportLink) {
+    const query = state.scope === null ? "" : `?scope=${encodeURIComponent(state.scope)}`;
+    exportLink.href = `/api/policy/export${query}`;
   }
 
   const report = state.policyError ? null : state.policy;
@@ -172,6 +239,7 @@ export function renderPolicy() {
     for (const b of gapsBody.querySelectorAll("[data-open-control]")) {
       b.onclick = () => openControlDetail(b.dataset.openScope, b.dataset.openControl);
     }
+    wireRemediateButtons(gapsBody);
   }
   const noGaps = $("policy-no-gaps");
   if (noGaps) noGaps.hidden = gaps.length !== 0;
@@ -260,6 +328,18 @@ function attestFormHtml() {
     </div>`;
 }
 
+/// `refLinks`' own hrefs, direct from `detail.refs`' ids -- alongside the
+/// reasons list, not folded into it: a reason is prose, a ref is a pointer,
+/// and `refLinks` (unlike `closingLinks`, which has to parse a reason's own
+/// text) never needs to.
+function refsHtml(scope, refs) {
+  const links = refLinks(scope, refs);
+  if (!links.length) return "";
+  return `<div class="pol-links">${links
+    .map((l) => `<a href="${esc(l.href)}">${esc(l.label)} <code class="id">${esc(l.id)}</code></a>`)
+    .join("")}</div>`;
+}
+
 function controlBodyHtml(detail) {
   const s = statusOf(detail);
   const na = detail.not_applicable;
@@ -269,10 +349,13 @@ function controlBodyHtml(detail) {
       ${detail.max_age ? `<span class="sub">max_age ${esc(detail.max_age)}</span>` : ""}
     </div>
     <ul class="pol-reasons">${s.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
+    ${refsHtml(openControl.scope, detail.refs)}
     ${na ? `<p class="env-note warn">Not applicable at ${esc(na.scope)}: ${esc(na.rationale)}</p>` : ""}
     ${detail.maps_to && detail.maps_to.length
       ? `<p class="sub">maps_to: ${detail.maps_to.map(esc).join(", ")}</p>`
       : ""}
+    ${detail.remediation ? `<p class="sub">${esc(detail.remediation.trim())}</p>` : ""}
+    ${canRemediate(s.status) ? remediateButtonHtml(detail.control, openControl.scope) : ""}
 
     <h3 class="pol-sub-head">Evidence</h3>
     ${checksHtml(openControl.scope, detail.control, detail.checks)}
@@ -298,6 +381,7 @@ function wireControlBody(detail) {
   }
   const attestButton = $("cd-attest");
   if (attestButton) attestButton.onclick = () => submitAttest(detail.control);
+  wireRemediateButtons(body);
 }
 
 async function refreshControlDetail(mine) {

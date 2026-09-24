@@ -154,6 +154,34 @@ enum PolicyCmd {
     },
     /// The catalogues on disk and their control counts.
     Frameworks,
+    /// Close a gap: create the task that carries the control's own
+    /// `remediation:` guidance and its current missing evidence, in
+    /// `--scope`. Needs `task.create` there, under the same rule
+    /// `factory task create` itself needs -- this is not a way around it.
+    /// Refused, naming the existing task, when a non-terminal task labelled
+    /// `policy=<framework>/<id>` is already open in that scope; refused
+    /// outright when the control is already satisfied, attested, or n/a.
+    Remediate {
+        /// `framework/id`.
+        control: String,
+        #[arg(long)]
+        scope: String,
+        /// Overrides which agent the task runs as; the scope's own default
+        /// otherwise.
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// A snapshot for an auditor: every framework's rollup, then each
+    /// control's status, reasons, evidence pointers and attestation
+    /// history, and every n/a rationale -- printed to stdout.
+    Export {
+        /// Only this scope and its descendants (default: the whole
+        /// instance).
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long, default_value = "md")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -852,9 +880,15 @@ async fn main() -> Result<()> {
                 Some(PolicyCmd::Status { scope: s, framework: f }) => {
                     PolicyCmd::Status { scope: s.or(scope), framework: f.or(framework) }
                 }
+                // `export` takes its own `--scope` too (no `--framework` --
+                // an export is not narrowed by one), so the leading flag
+                // merges the same way `status`'s does.
+                Some(PolicyCmd::Export { scope: s, format }) if framework.is_none() => {
+                    PolicyCmd::Export { scope: s.or(scope), format }
+                }
                 Some(_) if scope.is_some() || framework.is_some() => {
                     return Err(anyhow!(
-                        "--scope/--framework before the subcommand only apply to `status`; \
+                        "--scope/--framework before the subcommand only apply to `status`/`export`; \
                          repeat them after the subcommand name if it takes its own"
                     ));
                 }
@@ -1332,6 +1366,32 @@ async fn policy_cmd(json: bool, client: &Client, cmd: PolicyCmd) -> Result<()> {
                 _ => None,
             })
         }
+
+        PolicyCmd::Remediate { control, scope, agent } => {
+            let control: ControlRef = control.parse().map_err(|e: String| anyhow!(e))?;
+            let payload = client
+                .send(Request::PolicyRemediate { control, scope, agent })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Task { task } => Some(format!(
+                    "created {}  \"{}\"  scope {}  agent {}\n  {}",
+                    task.id,
+                    task.title,
+                    task.scope,
+                    task.agent,
+                    task.instructions.lines().collect::<Vec<_>>().join("\n  "),
+                )),
+                _ => None,
+            })
+        }
+
+        PolicyCmd::Export { scope, format } => {
+            let payload = client.send(Request::PolicyExport { scope, format }).await?;
+            print(&payload, json, |p| match p {
+                Payload::PolicyExport { body, .. } => Some(body.clone()),
+                _ => None,
+            })
+        }
     }
 }
 
@@ -1421,60 +1481,16 @@ fn policy_status_text(report: &PolicyReport, framework: Option<&str>) -> String 
     out.trim_end().to_string()
 }
 
-fn describe_check(check: &factory_core::policy::Check) -> String {
-    use factory_core::policy::Check;
-    match check {
-        Check::Knowledge { tag: Some(tag) } => format!("knowledge: tag `{tag}`"),
-        Check::Knowledge { tag: None } => "knowledge: default tag".to_string(),
-        Check::Attestation => "attestation".to_string(),
-        Check::Task { task, max_age } => format!(
-            "task {task}{}",
-            max_age.map(|a| format!(" (max_age {a})")).unwrap_or_default()
-        ),
-        Check::Workflow { workflow, max_age } => format!(
-            "workflow {workflow}{}",
-            max_age.map(|a| format!(" (max_age {a})")).unwrap_or_default()
-        ),
-        Check::Gate { dataset, case, max_age } => format!(
-            "gate {dataset}{}{}",
-            case.as_deref().map(|c| format!("/{c}")).unwrap_or_default(),
-            max_age.map(|a| format!(" (max_age {a})")).unwrap_or_default()
-        ),
-        Check::Roles { forbid } => format!(
-            "roles: forbid {}",
-            forbid.iter().map(|g| g.as_str()).collect::<Vec<_>>().join(", ")
-        ),
-        Check::Sandbox => "sandbox".to_string(),
-        Check::Secrets { absent } => {
-            if absent.is_empty() {
-                "secrets".to_string()
-            } else {
-                format!("secrets: absent {}", absent.join(", "))
-            }
-        }
-        Check::Daemon { fact } => format!("daemon: {fact}"),
-    }
-}
-
-/// A status as the wire spells it, so `show` and `--json` agree.
-fn policy_status_str(kind: factory_core::policy::StatusKind) -> &'static str {
-    use factory_core::policy::StatusKind;
-    match kind {
-        StatusKind::Satisfied => "satisfied",
-        StatusKind::Attested => "attested",
-        StatusKind::Stale => "stale",
-        StatusKind::Open => "open",
-        StatusKind::NotApplicable => "not_applicable",
-    }
-}
-
 fn policy_control_text(d: &PolicyControlDetail) -> String {
     let mut out = format!(
         "{}  {}  [{}]\n  status: {}\n",
         d.control,
         d.title,
         policy_kind_str(d.kind),
-        policy_status_str(d.status.kind()),
+        // `StatusKind::as_str()` -- moved to `factory_core::policy` (`#83`)
+        // so this and `policy_export::export_markdown` agree on the wire
+        // spelling from one place rather than two copies of the same match.
+        d.status.kind().as_str(),
     );
     for reason in d.status.reasons() {
         out.push_str(&format!("    {reason}\n"));
@@ -1491,9 +1507,16 @@ fn policy_control_text(d: &PolicyControlDetail) -> String {
     if let Some(na) = &d.not_applicable {
         out.push_str(&format!("  not applicable at {}: {}\n", na.scope, na.rationale));
     }
+    if let Some(remediation) = &d.remediation {
+        out.push_str(&format!("\nREMEDIATION\n  {}\n", remediation.trim()));
+    }
     out.push_str("\nEVIDENCE\n");
     for check in &d.checks {
-        out.push_str(&format!("  {}\n", describe_check(check)));
+        // `Check::describe()` -- moved to `factory_core::policy` (`#83`) so
+        // this, a remediation task's own instructions
+        // (`policy::remediation_instructions`), and `policy-model.js`'s
+        // documented port all read the same wording from one place.
+        out.push_str(&format!("  {}\n", check.describe()));
     }
     if !d.attestations.is_empty() {
         out.push_str("\nATTESTATIONS\n");

@@ -142,6 +142,8 @@ fn router(engine: Arc<Engine>) -> Router {
             "/api/policy/attestations/{id}/withdraw",
             post(withdraw_attestation),
         )
+        .route("/api/policy/remediate", post(policy_remediate))
+        .route("/api/policy/export", get(policy_export))
         .route("/api/benchmarks", get(benchmarks))
         .route("/api/datasets", get(list_datasets).post(create_dataset))
         .route("/api/datasets/{name}", get(get_dataset).delete(delete_dataset))
@@ -501,6 +503,99 @@ async fn withdraw_attestation(
     Query(q): Query<WithdrawQuery>,
 ) -> AxumResponse {
     run(&engine, Request::PolicyWithdraw { id, reason: q.reason }).await
+}
+
+#[derive(serde::Deserialize)]
+struct RemediateBody {
+    /// `framework/id`.
+    control: String,
+    scope: String,
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+/// `POST /api/policy/remediate` -- close a gap. Mirrors `create_attestation`'s
+/// own shape: `control` is parsed before the request ever reaches the
+/// engine, the same up-front 400 rather than a round trip through
+/// `authorize` for a string that was never going to parse. Answers the same
+/// way `POST /api/tasks` does, `{"kind":"task","task":{...}}` -- this is an
+/// ordinary task in every way but how it was asked for.
+async fn policy_remediate(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<RemediateBody>,
+) -> AxumResponse {
+    let control: factory_core::policy::ControlRef = match body.control.parse() {
+        Ok(c) => c,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response()
+        }
+    };
+    run(
+        &engine,
+        Request::PolicyRemediate {
+            control,
+            scope: body.scope,
+            agent: body.agent,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct PolicyExportQuery {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// `GET /api/policy/export?scope=&format=` -- a snapshot for an auditor,
+/// downloaded rather than wrapped in the ordinary `{"kind":...}` envelope
+/// every other route here answers with: the body *is* the export (markdown
+/// or JSON), with a `Content-Disposition` naming a file a browser click
+/// saves directly, so this is the one route in this file that calls
+/// `engine.handle` itself rather than going through `run` -- authorization
+/// still runs exactly the same way, only the response shape is bespoke.
+/// `format` defaults to `md`; anything `Request::PolicyExport` does not
+/// recognize comes back as the ordinary JSON error every other refusal
+/// here does.
+async fn policy_export(
+    State(engine): State<Arc<Engine>>,
+    Query(q): Query<PolicyExportQuery>,
+) -> AxumResponse {
+    let format = q.format.unwrap_or_else(|| "md".to_string());
+    let response = engine
+        .handle(Envelope {
+            request: Request::PolicyExport {
+                scope: q.scope,
+                format,
+            },
+            token: None,
+        })
+        .await;
+    match response {
+        Response::Ok {
+            data: Payload::PolicyExport { format, filename, body },
+        } => {
+            let content_type = match format.as_str() {
+                "json" => "application/json; charset=utf-8",
+                _ => "text/markdown; charset=utf-8",
+            };
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, content_type.to_string()),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{filename}\""),
+                    ),
+                ],
+                body,
+            )
+                .into_response()
+        }
+        other => (status_for(&other), Json(other)).into_response(),
+    }
 }
 
 async fn benchmarks(State(engine): State<Arc<Engine>>) -> AxumResponse {
