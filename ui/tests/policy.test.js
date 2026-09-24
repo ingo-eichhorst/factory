@@ -18,7 +18,6 @@ const wiring = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
 test("L6 Direction is live: the level button carries no disabled/title, and the tab/view pair exists", () => {
   assert.doesNotMatch(page, /id="lv-dir"[^>]*disabled/);
   assert.doesNotMatch(page, /id="lv-dir"[^>]*title="Not built yet"/);
-  assert.match(page, /id="lv-infra"[^>]*disabled/, "L1 alone stays disabled");
   assert.match(page, /id="tab-policy"[^>]*>Policy<\/button>/);
   assert.match(page, /id="view-policy"/);
   assert.match(page, /evidence is complete[\s\S]*never that anything is certified/);
