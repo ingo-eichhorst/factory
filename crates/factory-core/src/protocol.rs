@@ -366,6 +366,52 @@ pub enum Request {
     /// still going.
     #[serde(rename = "bench.clean")]
     BenchRunClean { id: String },
+    /// The L6 Policy tab: every applicable control's status for `scope` and
+    /// every scope below it, rolled up per framework over that subtree, plus
+    /// every `n/a`, finding and catalogue -- so nothing is silent. `scope:
+    /// None` means the whole instance. Read-only, like `Knowledge` and
+    /// `Datasets` -- evaluated fresh on every request from the catalogues on
+    /// disk, the knowledge index, and the attestations store, never a status
+    /// table kept in step (ADR 0004).
+    #[serde(rename = "policy")]
+    Policy {
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    /// One control's full detail at `scope`: its catalogue data, its status
+    /// there, and its whole attestation history for that scope and its
+    /// ancestors. Read-only.
+    #[serde(rename = "policy.control")]
+    PolicyControl {
+        control: crate::policy::ControlRef,
+        scope: String,
+    },
+    /// Record an attestation -- the one check kind a person satisfies by
+    /// saying so (ADR 0004). `policy.attest`, checked against the root
+    /// scope like `knowledge.write`: an attestation speaks for the company,
+    /// not for one project, even when it is recorded for a nested scope's
+    /// control. `expires_at` is absolute; a CLI that wants to accept `30d`
+    /// or a bare date converts it before sending this (`#78`).
+    #[serde(rename = "policy.attest")]
+    PolicyAttest {
+        control: crate::policy::ControlRef,
+        scope: String,
+        /// A pointer to the evidence, not the evidence itself.
+        evidence: String,
+        #[serde(default)]
+        note: Option<String>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// Withdraw a previously recorded attestation. Append-only like the rest
+    /// of the store: this writes a new row that references `id`, and never
+    /// touches the one it names. `policy.attest`, the same grant as
+    /// recording one.
+    #[serde(rename = "policy.withdraw")]
+    PolicyWithdraw {
+        id: String,
+        #[serde(default)]
+        reason: Option<String>,
+    },
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -488,6 +534,13 @@ pub enum Payload {
     },
     /// Every bench run, most recently updated first.
     BenchRuns { runs: Vec<crate::bench::BenchRun> },
+    /// The L6 Policy tab -- see `PolicyReport`.
+    Policy { report: PolicyReport },
+    /// The answer to `Request::PolicyControl`.
+    PolicyControl { detail: PolicyControlDetail },
+    /// The answer to `Request::PolicyAttest`/`Request::PolicyWithdraw`: the
+    /// attestation as it now stands -- withdrawn, for the latter.
+    PolicyAttestation { attestation: crate::policy::Attestation },
 }
 
 /// A request plus who is making it.
@@ -724,6 +777,95 @@ pub struct RoleBoard {
     /// Every layer that writes roles: Factory's, the instance root's, then
     /// each scope that defines roles of its own, in path order.
     pub layers: Vec<RoleLayer>,
+}
+
+/// One catalogue, summarized for the L6 tab -- title, kind and how many
+/// controls it defines. A control's own detail already lives in whichever
+/// `ScopePolicy.statuses` names it, so this is only what a catalogue picker
+/// needs, never the controls themselves twice over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogueSummary {
+    pub framework: String,
+    pub title: String,
+    pub kind: crate::policy::Kind,
+    pub controls: usize,
+}
+
+/// Which scope declared a control not applicable, and why -- `Request::Policy`'s
+/// own flattened copy of every `n/a` across the rows it returns, deduplicated,
+/// so a caller that only asked about a leaf scope still sees the rationale an
+/// ancestor wrote down, and none is silent (ADR 0004's Statement of
+/// Applicability).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotApplicableEntry {
+    pub control: crate::policy::ControlRef,
+    /// The scope that declared it -- not necessarily the scope a row is
+    /// about, since a declaration is inherited by everything below it.
+    pub scope: String,
+    pub rationale: String,
+}
+
+/// One scope's own policy status board: every control applicable there, and
+/// this scope's own rollup (its controls alone, not the subtree's -- see
+/// `PolicyReport::rollup` for that). One of `Request::Policy`'s rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopePolicy {
+    pub scope: String,
+    pub statuses: Vec<crate::policy::ControlStatus>,
+    pub rollup: Vec<crate::policy::FrameworkRollup>,
+}
+
+/// The L6 Policy tab's whole answer: every applicable control's status for
+/// the asked scope and every scope below it, a rollup over that whole
+/// subtree, and everything that would otherwise be silent -- `n/a`
+/// declarations, catalogue and applicability findings, and the catalogues
+/// themselves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyReport {
+    /// `None` when the whole instance was asked about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// One row per scope that has at least one applicable control. A scope
+    /// whose whole chain applies no framework is omitted -- there is
+    /// nothing to show, and no silent "0 controls" row to explain.
+    pub rows: Vec<ScopePolicy>,
+    /// Per framework, over every row above: a control counts compliant only
+    /// when it is compliant in every scope it applies to, not merely one --
+    /// see `policy::worst_across_scopes`, which this is built from.
+    pub rollup: Vec<crate::policy::FrameworkRollup>,
+    pub not_applicable: Vec<NotApplicableEntry>,
+    /// Catalogue parse findings (`policy::load_all`) and every row's own
+    /// applicability findings (`policy::applicable`), deduplicated -- the
+    /// same finding reached by walking two different scopes' chains is
+    /// reported once.
+    pub findings: Vec<crate::policy::Finding>,
+    pub catalogues: Vec<CatalogueSummary>,
+}
+
+/// One control's full detail: its catalogue data as it applies at the scope
+/// asked about, its status there, and its whole attestation history --
+/// including withdrawn and expired ones -- for that scope and its ancestors.
+/// `Request::PolicyControl`'s answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyControlDetail {
+    pub control: crate::policy::ControlRef,
+    pub title: String,
+    pub kind: crate::policy::Kind,
+    /// Exactly as the catalogue wrote it -- see `policy::Applied::evidence`.
+    pub checks: Vec<crate::policy::Check>,
+    pub maps_to: Vec<crate::policy::ControlRef>,
+    /// The effective freshness window after folding in every scope's own
+    /// tightening -- `policy::Applied::max_age`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<crate::policy::Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_applicable: Option<crate::policy::AppliedNotApplicable>,
+    pub status: crate::policy::Status,
+    /// Every attestation ever recorded for this control at this scope or an
+    /// ancestor of it, most recent first -- withdrawn and expired ones
+    /// included, since this is the audit trail, not just what currently
+    /// holds.
+    pub attestations: Vec<crate::policy::Attestation>,
 }
 
 /// A scope and everything that runs in it.

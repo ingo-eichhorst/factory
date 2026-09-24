@@ -202,6 +202,9 @@ impl Engine {
             | Request::DatasetDeleteCase { .. }
             | Request::DatasetDelete { .. } => Grant::DatasetEdit,
             Request::BenchRunStart { .. } | Request::BenchRunCancel { .. } => Grant::BenchRun,
+            // Recording and withdrawing are the same grant, checked against
+            // the root scope like `knowledge.write` -- see `in_root_scope`.
+            Request::PolicyAttest { .. } | Request::PolicyWithdraw { .. } => Grant::PolicyAttest,
 
             Request::Status
             | Request::Adapters
@@ -218,6 +221,8 @@ impl Engine {
             | Request::Dataset { .. }
             | Request::BenchRuns { .. }
             | Request::BenchRunGet { .. }
+            | Request::Policy { .. }
+            | Request::PolicyControl { .. }
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
@@ -296,26 +301,27 @@ impl Engine {
             }
         };
 
-        // The subject `knowledge.write`, `dataset.edit` and `bench.run` are
-        // checked against: the knowledge base, datasets and bench runs are
-        // company-wide, not one project's, so
-        // only a caller whose own scope *is* the instance's configured root
-        // scope may hold either -- resolved from the live config, never from
-        // a literal name like "root", which is only ever a convention for
-        // what somebody chose to call theirs. An instance that declares no
-        // root scope at all grants neither to any agent, however it is named.
+        // The subject `knowledge.write`, `dataset.edit`, `bench.run` and
+        // `policy.attest` are checked against: the knowledge base, datasets,
+        // bench runs and policy attestations are company-wide, not one
+        // project's, so only a caller whose own scope *is* the instance's
+        // configured root scope may hold any of them -- resolved from the
+        // live config, never from a literal name like "root", which is only
+        // ever a convention for what somebody chose to call theirs. An
+        // instance that declares no root scope at all grants none of them to
+        // any agent, however it is named.
         let in_root_scope = || -> Result<()> {
             match &self.factory_snapshot().config.scope {
                 Some(root) if root.name == *scope => Ok(()),
                 Some(root) => Err(FactoryError::Denied(format!(
-                    "{} works in {scope}; the knowledge base, datasets and bench runs are \
-                     company-wide and belong to the root scope ({:?}) alone",
+                    "{} works in {scope}; the knowledge base, datasets, bench runs and policy \
+                     attestations are company-wide and belong to the root scope ({:?}) alone",
                     caller.describe(),
                     root.name
                 ))),
                 None => Err(FactoryError::Denied(format!(
-                    "{} may not write knowledge, manage datasets or run benchmarks; this instance \
-                     declares no root scope",
+                    "{} may not write knowledge, manage datasets, run benchmarks or attest to a \
+                     policy control; this instance declares no root scope",
                     caller.describe()
                 ))),
             }
@@ -457,6 +463,10 @@ impl Engine {
             Request::BenchRunStart { .. } | Request::BenchRunCancel { .. } => match def.reach {
                 Reach::Scope => in_root_scope(),
                 Reach::Own => Err(deny("run benchmarks; that requires scope reach")),
+            },
+            Request::PolicyAttest { .. } | Request::PolicyWithdraw { .. } => match def.reach {
+                Reach::Scope => in_root_scope(),
+                Reach::Own => Err(deny("record or withdraw a policy attestation; that requires scope reach")),
             },
 
             // Reads returned above, and anything needing a grant nobody holds
@@ -740,6 +750,88 @@ mod tests {
         assert!(allowed(&e, &Caller::Owner, Request::DatasetCreate { name: "ds4".into(), description: None }).await);
     }
 
+    /// `policy.attest` is checked against the configured root scope exactly
+    /// like `dataset.edit` and `bench.run` above -- the same rule the ADR
+    /// states for attestations, and the same one `access.rs` enforces
+    /// through the same `in_root_scope` closure.
+    #[tokio::test]
+    async fn policy_attest_is_checked_against_the_configured_root_scope() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  attestor:\n    grants: [policy.attest]\n    reach: scope\n",
+        );
+
+        let attest = Request::PolicyAttest {
+            control: "cra/a".parse().unwrap(),
+            scope: "demo".into(),
+            evidence: "https://example.com/policy".into(),
+            note: None,
+            expires_at: Utc::now() + chrono::Duration::days(30),
+        };
+        let withdraw = Request::PolicyWithdraw { id: "att-1".into(), reason: None };
+
+        let in_root = Caller::Agent {
+            scope: "demo".into(),
+            name: "w".into(),
+            role: Role::new("attestor"),
+            run_id: None,
+        };
+        let outside_root = Caller::Agent {
+            scope: "other".into(),
+            name: "w".into(),
+            role: Role::new("attestor"),
+            run_id: None,
+        };
+
+        assert!(
+            allowed(&e, &in_root, attest.clone()).await,
+            "the root scope's own caller, holding the grant, may attest"
+        );
+        assert!(
+            allowed(&e, &in_root, withdraw.clone()).await,
+            "the root scope's own caller, holding the grant, may withdraw"
+        );
+        assert!(
+            !allowed(&e, &outside_root, attest).await,
+            "the same grant held outside the root scope is refused -- the subject is the \
+             root scope, not wherever the caller happens to work"
+        );
+        assert!(!allowed(&e, &outside_root, withdraw).await);
+
+        // A caller in the root scope but without the grant at all is refused
+        // the ordinary way, before the root-scope check is ever reached.
+        assert!(
+            !allowed(
+                &e,
+                &worker("w"),
+                Request::PolicyAttest {
+                    control: "cra/a".parse().unwrap(),
+                    scope: "demo".into(),
+                    evidence: "https://example.com/policy".into(),
+                    note: None,
+                    expires_at: Utc::now() + chrono::Duration::days(30),
+                }
+            )
+            .await
+        );
+
+        // The owner is never subject to any of this.
+        assert!(
+            allowed(
+                &e,
+                &Caller::Owner,
+                Request::PolicyAttest {
+                    control: "cra/a".parse().unwrap(),
+                    scope: "demo".into(),
+                    evidence: "https://example.com/policy".into(),
+                    note: None,
+                    expires_at: Utc::now() + chrono::Duration::days(30),
+                }
+            )
+            .await
+        );
+    }
+
     async fn task_in(engine: &Engine, id: &str, scope: &str, agent: &str) -> Task {
         let now = Utc::now();
         let task = Task {
@@ -879,6 +971,11 @@ mod tests {
                     id: "other/x".into(),
                 },
                 Request::RunScreen { id: "r".into() },
+                Request::Policy { scope: None },
+                Request::PolicyControl {
+                    control: "cra/a".parse().unwrap(),
+                    scope: "demo".into(),
+                },
                 Request::Subscribe,
             ] {
                 assert!(

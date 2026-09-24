@@ -1,5 +1,6 @@
 use crate::adapter::RuntimeStatus;
 use crate::agent::AgentSession;
+use crate::policy::ControlRef;
 use crate::run::Run;
 use crate::task::{Task, TaskEntry};
 use crate::workflow::{WorkflowDefinition, WorkflowRun};
@@ -76,6 +77,13 @@ pub enum Event {
         scope: String,
         name: String,
     },
+    /// An attestation was recorded or withdrawn for one control at one
+    /// scope. Published on both `Request::PolicyAttest` and
+    /// `Request::PolicyWithdraw`, like `RolesChanged` on a role write.
+    PolicyChanged {
+        scope: String,
+        control: ControlRef,
+    },
     /// A push from a runtime, mapped onto whichever standing agent or run's
     /// session it was about. This never moves a task or a run -- only the
     /// agent's own `factory task report` may do that -- so `task_id()` is
@@ -117,7 +125,8 @@ impl Event {
             | Event::AgentRemoved { .. }
             | Event::AgentConfigured { .. }
             | Event::AgentDeleted { .. }
-            | Event::RolesChanged { .. } => None,
+            | Event::RolesChanged { .. }
+            | Event::PolicyChanged { .. } => None,
             Event::WorkflowCreated { .. }
             | Event::WorkflowUpdated { .. }
             | Event::WorkflowDeleted { .. }

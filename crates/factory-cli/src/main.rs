@@ -2004,6 +2004,9 @@ fn describe_event(e: &Event) -> String {
         Event::RolesChanged { scope, name } => {
             format!("role     {name} in {scope}  changed")
         }
+        Event::PolicyChanged { scope, control } => {
+            format!("policy   {control} in {scope}  changed")
+        }
         Event::AgentActivity {
             subject, status, ..
         } => format!("activity {subject}  {}", status.as_str()),
