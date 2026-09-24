@@ -131,6 +131,16 @@ fn router(engine: Arc<Engine>) -> Router {
                 .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
                 .with_state(engine.clone()),
         )
+        // The L6 Policy tab: ADR 0004's catalogue of controls checked
+        // against evidence Factory already has, re-read on every call like
+        // knowledge and datasets above.
+        .route("/api/policy", get(policy))
+        .route("/api/policy/controls/{framework}/{id}", get(policy_control))
+        .route("/api/policy/attestations", post(create_attestation))
+        .route(
+            "/api/policy/attestations/{id}/withdraw",
+            post(withdraw_attestation),
+        )
         .route("/api/benchmarks", get(benchmarks))
         .route("/api/datasets", get(list_datasets).post(create_dataset))
         .route("/api/datasets/{name}", get(get_dataset).delete(delete_dataset))
@@ -370,6 +380,122 @@ async fn knowledge_write_file(
         },
     )
     .await
+}
+
+#[derive(serde::Deserialize)]
+struct PolicyQuery {
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// `GET /api/policy?scope=` -- the L6 status board: `scope` empty or absent
+/// means the whole instance, like `Request::Policy` itself.
+async fn policy(State(engine): State<Arc<Engine>>, Query(q): Query<PolicyQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::Policy {
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct PolicyControlQuery {
+    scope: String,
+}
+
+/// `GET /api/policy/controls/{framework}/{id}?scope=` -- one control's full
+/// detail at `scope`, which is required (unlike `GET /api/policy`): a
+/// control's status and applicability are only meaningful at one scope, not
+/// summed over a subtree. A missing `scope` is refused by the `Query`
+/// extractor itself, the same way `path` is required on the knowledge file
+/// upload above.
+async fn policy_control(
+    State(engine): State<Arc<Engine>>,
+    Path((framework, id)): Path<(String, String)>,
+    Query(q): Query<PolicyControlQuery>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::PolicyControl {
+            control: factory_core::policy::ControlRef::new(framework, id),
+            scope: q.scope,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct AttestBody {
+    /// `framework/id`.
+    control: String,
+    scope: String,
+    /// A pointer to the evidence -- a document, a ticket, a page -- not the
+    /// evidence itself.
+    evidence: String,
+    #[serde(default)]
+    note: Option<String>,
+    /// `30d`/`12w`, a bare date (`2027-01-01`), or a full RFC3339 timestamp
+    /// -- the same three forms `factory policy attest --expires` accepts,
+    /// turned into the wire's absolute `expires_at` by the same
+    /// `policy::parse_expiry` the CLI uses. Chosen over requiring an
+    /// already-absolute `expires_at` in the body so a `curl` caller does not
+    /// have to compute one by hand; an RFC3339 timestamp is still accepted
+    /// here exactly as it is on the CLI's `--expires`.
+    expires: String,
+}
+
+/// `POST /api/policy/attestations` -- record an attestation. `control` and
+/// `expires` are parsed before the request ever reaches the engine, the same
+/// way `agent_input` below refuses a body with no `id` up front; a bad
+/// `framework/id` or an unparseable `expires` becomes a 400 without a round
+/// trip through `authorize`.
+async fn create_attestation(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<AttestBody>,
+) -> AxumResponse {
+    let control: factory_core::policy::ControlRef = match body.control.parse() {
+        Ok(c) => c,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response()
+        }
+    };
+    let expires_at = match factory_core::policy::parse_expiry(&body.expires, chrono::Utc::now()) {
+        Ok(t) => t,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response()
+        }
+    };
+    run(
+        &engine,
+        Request::PolicyAttest {
+            control,
+            scope: body.scope,
+            evidence: body.evidence,
+            note: body.note,
+            expires_at,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct WithdrawQuery {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// `POST /api/policy/attestations/{id}/withdraw?reason=` -- `reason` is a
+/// query parameter rather than a JSON body, since it is the only thing this
+/// call carries and a bare `POST` with no body is otherwise refused before
+/// it reaches here.
+async fn withdraw_attestation(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Query(q): Query<WithdrawQuery>,
+) -> AxumResponse {
+    run(&engine, Request::PolicyWithdraw { id, reason: q.reason }).await
 }
 
 async fn benchmarks(State(engine): State<Arc<Engine>>) -> AxumResponse {

@@ -9,7 +9,8 @@ use factory_core::bench::{BenchResult, BenchRun, Verdict};
 use factory_core::dataset::{Case, Dataset, DatasetFinding, DatasetSummary};
 use factory_core::event::Event;
 use factory_core::knowledge::FindingKind;
-use factory_core::protocol::{Payload, Request, Response};
+use factory_core::policy::{self, ControlRef};
+use factory_core::protocol::{Payload, PolicyControlDetail, PolicyReport, Request, Response};
 use factory_core::run::{Run, RunStatus};
 use factory_core::task::{
     CronSchedule, NewTask, RetryPolicy, Schedule, Task, TaskFilter, TaskPatch, TaskReport, TaskStatus,
@@ -83,6 +84,72 @@ enum Command {
     /// up on the next call.
     #[command(subcommand)]
     Dataset(DatasetCmd),
+    /// The L6 Policy tab: ADR 0004's catalogue of controls checked against
+    /// evidence Factory already has -- `<root>/.factory/policies/<framework>.yaml`,
+    /// re-read on every call, never a status table kept in step. With no
+    /// subcommand, prints the status board: one line per framework with its
+    /// rollup and whether it is compliant, then every open or stale control,
+    /// then findings.
+    Policy {
+        /// Only this scope and its descendants (default: the whole instance).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Only this framework.
+        #[arg(long)]
+        framework: Option<String>,
+        #[command(subcommand)]
+        command: Option<PolicyCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    /// The status board -- the same thing `factory policy` with no
+    /// subcommand prints.
+    Status {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        framework: Option<String>,
+    },
+    /// One control's full detail: its checks, freshness window, status and
+    /// attestation history. Without `--scope`, looked up wherever the whole
+    /// instance's status board shows it applying, as long as that is
+    /// exactly one scope -- name one explicitly if it applies in several.
+    Show {
+        /// `framework/id`, e.g. `cra/annex-i-2-1`.
+        control: String,
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Record an attestation -- the one check a person satisfies by saying
+    /// so, and the only new state ADR 0004 introduces. `policy.attest`,
+    /// owner or a root-scope foreman only.
+    Attest {
+        /// `framework/id`.
+        control: String,
+        #[arg(long)]
+        scope: String,
+        /// A pointer to the evidence -- a document, a ticket, a page --
+        /// not the evidence itself.
+        #[arg(long)]
+        evidence: String,
+        /// `30d`, `12w`, a bare date (`2027-01-01`), or a full RFC3339
+        /// timestamp.
+        #[arg(long)]
+        expires: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Withdraw a previously recorded attestation. Appends a new row; the
+    /// one it names is never edited.
+    Withdraw {
+        id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// The catalogues on disk and their control counts.
+    Frameworks,
 }
 
 #[derive(Subcommand)]
@@ -764,6 +831,28 @@ async fn main() -> Result<()> {
         }
         Command::Bench { cmd: Some(cmd) } => bench_cmd(cli.json, &client, cmd).await,
         Command::Dataset(cmd) => dataset_cmd(cli.json, &client, cmd).await,
+
+        Command::Policy { scope, framework, command } => {
+            // `--scope`/`--framework` before the subcommand name (or with
+            // none at all) are the same flags `status` itself takes after
+            // it -- clap hands each occurrence to whichever level asked for
+            // it, so `factory policy --scope S status` must not let the
+            // leading one quietly vanish under `status`'s own (absent) one.
+            let cmd = match command {
+                None => PolicyCmd::Status { scope, framework },
+                Some(PolicyCmd::Status { scope: s, framework: f }) => {
+                    PolicyCmd::Status { scope: s.or(scope), framework: f.or(framework) }
+                }
+                Some(_) if scope.is_some() || framework.is_some() => {
+                    return Err(anyhow!(
+                        "--scope/--framework before the subcommand only apply to `status`; \
+                         repeat them after the subcommand name if it takes its own"
+                    ));
+                }
+                Some(other) => other,
+            };
+            policy_cmd(cli.json, &client, cmd).await
+        }
     }
 }
 
@@ -998,6 +1087,291 @@ fn dataset_detail(d: &Dataset, findings: &[DatasetFinding]) -> String {
         }
     }
     out.trim_end().to_string()
+}
+
+async fn policy_cmd(json: bool, client: &Client, cmd: PolicyCmd) -> Result<()> {
+    match cmd {
+        PolicyCmd::Status { scope, framework } => {
+            let payload = client.send(Request::Policy { scope }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Policy { report } => Some(policy_status_text(report, framework.as_deref())),
+                _ => None,
+            })
+        }
+
+        PolicyCmd::Show { control, scope } => {
+            let control_ref: ControlRef = control.parse().map_err(|e: String| anyhow!(e))?;
+            let scope = match scope {
+                Some(s) => s,
+                None => {
+                    // Not named: find every scope the whole instance's
+                    // status board shows this control applying in, and use
+                    // it if that is exactly one -- the common case, since
+                    // most controls apply company-wide via the root's own
+                    // `policies:`.
+                    let payload = client.send(Request::Policy { scope: None }).await?;
+                    let Payload::Policy { report } = payload else {
+                        return Err(anyhow!("unexpected answer to policy"));
+                    };
+                    let matches: Vec<String> = report
+                        .rows
+                        .iter()
+                        .filter(|r| r.statuses.iter().any(|s| s.control == control_ref))
+                        .map(|r| r.scope.clone())
+                        .collect();
+                    match matches.as_slice() {
+                        [one] => one.clone(),
+                        [] => return Err(anyhow!("{control_ref} applies in no scope")),
+                        many => {
+                            return Err(anyhow!(
+                                "{control_ref} applies in {} scopes ({}); name one with --scope",
+                                many.len(),
+                                many.join(", ")
+                            ))
+                        }
+                    }
+                }
+            };
+            let payload = client
+                .send(Request::PolicyControl { control: control_ref, scope })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::PolicyControl { detail } => Some(policy_control_text(detail)),
+                _ => None,
+            })
+        }
+
+        PolicyCmd::Attest { control, scope, evidence, expires, note } => {
+            let control: ControlRef = control.parse().map_err(|e: String| anyhow!(e))?;
+            let expires_at = policy::parse_expiry(&expires, chrono::Utc::now()).map_err(|e| anyhow!(e))?;
+            let payload = client
+                .send(Request::PolicyAttest { control, scope, evidence, note, expires_at })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::PolicyAttestation { attestation } => Some(attestation_line(attestation)),
+                _ => None,
+            })
+        }
+
+        PolicyCmd::Withdraw { id, reason } => {
+            let payload = client.send(Request::PolicyWithdraw { id, reason }).await?;
+            print(&payload, json, |p| match p {
+                Payload::PolicyAttestation { attestation } => Some(attestation_line(attestation)),
+                _ => None,
+            })
+        }
+
+        PolicyCmd::Frameworks => {
+            let payload = client.send(Request::Policy { scope: None }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Policy { report } => Some(if report.catalogues.is_empty() {
+                    "no catalogues on disk".to_string()
+                } else {
+                    report
+                        .catalogues
+                        .iter()
+                        .map(|c| {
+                            format!(
+                                "{:<12} {:<12} {:<40} {:>3} control(s)",
+                                c.framework,
+                                policy_kind_str(c.kind),
+                                c.title,
+                                c.controls
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }),
+                _ => None,
+            })
+        }
+    }
+}
+
+fn policy_kind_str(kind: policy::Kind) -> &'static str {
+    match kind {
+        policy::Kind::Regulation => "regulation",
+        policy::Kind::Standard => "standard",
+        policy::Kind::BestPractice => "best-practice",
+    }
+}
+
+/// One line per framework's rollup over the asked scope's subtree, plainly
+/// noting that "compliant" means the evidence is complete, never certified
+/// (ADR 0004); then every open or stale control (the worst status across
+/// every scope it applies to, via the same `policy::worst_across_scopes`
+/// the daemon's own rollup is built from); then every finding.
+fn policy_status_text(report: &PolicyReport, framework: Option<&str>) -> String {
+    let mut out = String::new();
+    let titles: std::collections::BTreeMap<&str, &str> = report
+        .catalogues
+        .iter()
+        .map(|c| (c.framework.as_str(), c.title.as_str()))
+        .collect();
+
+    let rollups: Vec<&factory_core::policy::FrameworkRollup> = report
+        .rollup
+        .iter()
+        .filter(|r| framework.is_none_or(|f| r.framework == f))
+        .collect();
+
+    if rollups.is_empty() {
+        out.push_str("no applicable frameworks\n");
+    }
+    for r in &rollups {
+        let title = titles.get(r.framework.as_str()).copied().unwrap_or("");
+        out.push_str(&format!(
+            "{:<12} {:<32} {} satisfied, {} attested, {} stale, {} open, {} n/a  [{}]\n",
+            r.framework,
+            title,
+            r.counts.satisfied,
+            r.counts.attested,
+            r.counts.stale,
+            r.counts.open,
+            r.counts.not_applicable,
+            if r.compliant { "compliant" } else { "not compliant" },
+        ));
+        let bp = &r.best_practice;
+        if bp.satisfied + bp.attested + bp.stale + bp.open + bp.not_applicable > 0 {
+            out.push_str(&format!(
+                "             best practice (shown, never counted): {} satisfied, {} attested, {} stale, {} open, {} n/a\n",
+                bp.satisfied, bp.attested, bp.stale, bp.open, bp.not_applicable,
+            ));
+        }
+    }
+    out.push_str("\n\"compliant\" means the evidence is complete -- not that anything is certified.\n");
+
+    let per_scope: Vec<Vec<factory_core::policy::ControlStatus>> =
+        report.rows.iter().map(|r| r.statuses.clone()).collect();
+    let mut worst = factory_core::policy::worst_across_scopes(&per_scope);
+    worst.retain(|s| framework.is_none_or(|f| s.control.framework == f));
+    worst.sort_by(|a, b| a.control.cmp(&b.control));
+
+    let mut section = |label: &str, kind: factory_core::policy::StatusKind| {
+        let matching: Vec<&factory_core::policy::ControlStatus> =
+            worst.iter().filter(|s| s.status.kind() == kind).collect();
+        if matching.is_empty() {
+            return;
+        }
+        out.push_str(&format!("\n{label}\n"));
+        for s in matching {
+            out.push_str(&format!("  {:<24} {}\n", s.control.to_string(), s.title));
+            for reason in s.status.reasons() {
+                out.push_str(&format!("      {reason}\n"));
+            }
+        }
+    };
+    section("OPEN", factory_core::policy::StatusKind::Open);
+    section("STALE", factory_core::policy::StatusKind::Stale);
+
+    if !report.findings.is_empty() {
+        out.push_str("\nFINDINGS\n");
+        for f in &report.findings {
+            out.push_str(&format!("  {:?}  {}  {}\n", f.kind, f.subject, f.detail));
+        }
+    }
+
+    out.trim_end().to_string()
+}
+
+fn describe_check(check: &factory_core::policy::Check) -> String {
+    use factory_core::policy::Check;
+    match check {
+        Check::Knowledge { tag: Some(tag) } => format!("knowledge: tag `{tag}`"),
+        Check::Knowledge { tag: None } => "knowledge: default tag".to_string(),
+        Check::Attestation => "attestation".to_string(),
+        Check::Task { task, max_age } => format!(
+            "task {task}{}",
+            max_age.map(|a| format!(" (max_age {a})")).unwrap_or_default()
+        ),
+        Check::Workflow { workflow, max_age } => format!(
+            "workflow {workflow}{}",
+            max_age.map(|a| format!(" (max_age {a})")).unwrap_or_default()
+        ),
+        Check::Gate { dataset, case, max_age } => format!(
+            "gate {dataset}{}{}",
+            case.as_deref().map(|c| format!("/{c}")).unwrap_or_default(),
+            max_age.map(|a| format!(" (max_age {a})")).unwrap_or_default()
+        ),
+        Check::Roles { forbid } => format!(
+            "roles: forbid {}",
+            forbid.iter().map(|g| format!("{g:?}")).collect::<Vec<_>>().join(", ")
+        ),
+        Check::Sandbox => "sandbox".to_string(),
+        Check::Secrets => "secrets".to_string(),
+        Check::Daemon { fact } => format!("daemon: {fact}"),
+    }
+}
+
+/// A status as the wire spells it, so `show` and `--json` agree.
+fn policy_status_str(kind: factory_core::policy::StatusKind) -> &'static str {
+    use factory_core::policy::StatusKind;
+    match kind {
+        StatusKind::Satisfied => "satisfied",
+        StatusKind::Attested => "attested",
+        StatusKind::Stale => "stale",
+        StatusKind::Open => "open",
+        StatusKind::NotApplicable => "not_applicable",
+    }
+}
+
+fn policy_control_text(d: &PolicyControlDetail) -> String {
+    let mut out = format!(
+        "{}  {}  [{}]\n  status: {}\n",
+        d.control,
+        d.title,
+        policy_kind_str(d.kind),
+        policy_status_str(d.status.kind()),
+    );
+    for reason in d.status.reasons() {
+        out.push_str(&format!("    {reason}\n"));
+    }
+    if let Some(age) = d.max_age {
+        out.push_str(&format!("  max_age: {age}\n"));
+    }
+    if !d.maps_to.is_empty() {
+        out.push_str(&format!(
+            "  maps_to: {}\n",
+            d.maps_to.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if let Some(na) = &d.not_applicable {
+        out.push_str(&format!("  not applicable at {}: {}\n", na.scope, na.rationale));
+    }
+    out.push_str("\nEVIDENCE\n");
+    for check in &d.checks {
+        out.push_str(&format!("  {}\n", describe_check(check)));
+    }
+    if !d.attestations.is_empty() {
+        out.push_str("\nATTESTATIONS\n");
+        for a in &d.attestations {
+            out.push_str(&format!("  {}\n", attestation_line(a)));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+fn attestation_line(a: &factory_core::policy::Attestation) -> String {
+    let withdrawn = match &a.withdrawn {
+        Some(w) => format!(
+            "  withdrawn {} by {}{}",
+            w.at.to_rfc3339(),
+            w.by,
+            w.reason.as_deref().map(|r| format!(" ({r})")).unwrap_or_default()
+        ),
+        None => String::new(),
+    };
+    let note = a.note.as_deref().map(|n| format!("  note={n}")).unwrap_or_default();
+    format!(
+        "{}  {} at {}  by {}  evidence={}  attested {} expires {}{note}{withdrawn}",
+        a.id,
+        a.control,
+        a.scope,
+        a.attested_by,
+        a.evidence,
+        a.attested_at.to_rfc3339(),
+        a.expires_at.to_rfc3339(),
+    )
 }
 
 async fn bench_cmd(json: bool, client: &Client, cmd: BenchCmd) -> Result<()> {
