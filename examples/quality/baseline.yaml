@@ -29,4 +29,4 @@ attributes:
         artifact: the task it was working on
         environment: normal operation
         response: the task is retried or recovered rather than scrapped
-        measure: { metric: scrap_rate, below: 0.1, window: 7d }
+        measure: { metric: scrap_rate, below: 0.1, max_age: 7d }

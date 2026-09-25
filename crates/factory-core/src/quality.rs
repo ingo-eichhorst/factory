@@ -60,7 +60,11 @@
 //! is `{ check: task, task: quality-gate, max_age: 7d }`. The example's
 //! short attribute ids (`performance.time-behaviour`) are written out in
 //! full (`performance-efficiency.time-behaviour`), since the catalogue has
-//! exactly one spelling of each.
+//! exactly one spelling of each. And a metric measure's `window: 7d` is
+//! spelled `max_age: 7d`: it is a freshness bound on the value, exactly what
+//! a policy check's `max_age` is, not the period a metric is computed over
+//! (see [`MetricMeasure`]) -- so it takes that name rather than one that
+//! reads as the other thing.
 
 use crate::dataset::is_slug;
 use crate::metrics::{self, MetricError, MetricId, MetricValue};
@@ -259,10 +263,16 @@ pub enum ScenarioKind {
 
 /// A continual response measure: a registry metric held to a threshold.
 /// `above` and `below` are both inclusive -- a value sitting exactly on the
-/// bound still meets it -- and a measure may carry both, a band. `window`
-/// is how old the metric's value (`MetricValue::as_of`) may be before the
-/// scenario reads `stale` rather than `met`; with none, any computed value
-/// is current, the same rule a policy control without `max_age` has.
+/// bound still meets it -- and a measure may carry both, a band (one with
+/// `above` over `below` can never be met, and is a finding).
+///
+/// `max_age` is freshness, the same word and the same rule as a policy
+/// check's: how old the data behind the value (`MetricValue::as_of`) may be
+/// before the scenario reads `stale` rather than `met`; with none, any
+/// computed value is current. It is *not* the period the metric is computed
+/// over -- every registry metric carries its own fixed one
+/// (`first_pass_yield` is always the trailing 28 days), and nothing here can
+/// change it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricMeasure {
@@ -272,7 +282,7 @@ pub struct MetricMeasure {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub below: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub window: Option<Duration>,
+    pub max_age: Option<Duration>,
 }
 
 /// A scenario's response measure: a metric threshold (continual, SRE-style)
@@ -399,6 +409,17 @@ pub enum FindingKind {
     /// A metric measure with neither `above` nor `below`: no response
     /// measure at all, so the scenario can only ever be a draft.
     MissingThreshold,
+    /// A metric measure bound that is not a finite number (`.nan`, `.inf`).
+    /// The measure is dropped, so the scenario reads as the draft it is.
+    NonFiniteThreshold,
+    /// A metric measure whose `above` is over its `below` -- in one file, or
+    /// once a descendant's tightening met an ancestor's. Nothing can be met.
+    ImpossibleBand,
+    /// A `daemon` check names a fact outside `policy::KNOWN_DAEMON_FACTS`.
+    UnknownDaemonFact,
+    /// A `secrets` check names a location outside
+    /// `policy::KNOWN_SECRETS_LOCATIONS`.
+    UnknownSecretsLocation,
     /// A trade-off between an attribute and itself.
     BadTradeoff,
     /// A `knowledge` check with no `tag:` under a dotted attribute id. Its
@@ -410,7 +431,7 @@ pub enum FindingKind {
     /// file failed to parse.
     MissingProfile,
     /// A descendant tried to lower an inherited importance, lower an
-    /// `above`, raise a `below`, or lengthen a `window`/`max_age`. The
+    /// `above`, raise a `below`, or lengthen a `max_age`. The
     /// inherited, stricter value is kept.
     Loosening,
     /// A descendant restated something that is neither an addition nor a
@@ -536,7 +557,7 @@ fn validate_profile(mut profile: Profile, subject: &str, findings: &mut Vec<Find
             }
             true
         });
-        for s in &attr.scenarios {
+        for s in &mut attr.scenarios {
             if !is_slug(&s.id) {
                 findings.push(finding(
                     FindingKind::BadIdShape,
@@ -547,24 +568,38 @@ fn validate_profile(mut profile: Profile, subject: &str, findings: &mut Vec<Find
                     ),
                 ));
             }
+            let what = format!("{}/{}", attr.id, s.id);
             match &s.measure {
-                Some(Measure::Metric(m)) => check_metric(m, subject, &format!("{}/{}", attr.id, s.id), findings),
-                Some(Measure::Check(Check::Knowledge { tag: None })) if attr.id.contains('.') => {
-                    findings.push(finding(
-                        FindingKind::UntaggedKnowledgeCheck,
-                        subject,
-                        format!(
-                            "{}/{}'s knowledge check needs a `tag:`: the default one would contain `.`, \
-                             which a knowledge tag cannot",
-                            attr.id, s.id
-                        ),
-                    ));
+                Some(Measure::Metric(m)) => {
+                    if !check_metric(m, subject, &what, findings) {
+                        s.measure = None;
+                    }
                 }
-                _ => {}
+                Some(Measure::Check(check)) => {
+                    for (kind, detail) in policy::check_vocabulary(check) {
+                        let kind = match kind {
+                            policy::FindingKind::UnknownDaemonFact => FindingKind::UnknownDaemonFact,
+                            _ => FindingKind::UnknownSecretsLocation,
+                        };
+                        findings.push(finding(kind, subject, format!("{what} {detail}")));
+                    }
+                    if matches!(check, Check::Knowledge { tag: None }) && attr.id.contains('.') {
+                        findings.push(finding(
+                            FindingKind::UntaggedKnowledgeCheck,
+                            subject,
+                            format!(
+                                "{what}'s knowledge check needs a `tag:`: the default one would contain `.`, \
+                                 which a knowledge tag cannot"
+                            ),
+                        ));
+                    }
+                }
+                None => {}
             }
         }
         true
     });
+
 
     for t in &profile.tradeoffs {
         for id in &t.between {
@@ -587,7 +622,11 @@ fn validate_profile(mut profile: Profile, subject: &str, findings: &mut Vec<Find
     profile
 }
 
-fn check_metric(m: &MetricMeasure, subject: &str, what: &str, findings: &mut Vec<Finding>) {
+/// A metric measure's own checks. `false` when a bound is not a finite
+/// number -- `.nan` compares false both ways, so it would read as met every
+/// time and could never be told apart from a tightening or a loosening --
+/// and the caller drops the measure, leaving an honest draft.
+fn check_metric(m: &MetricMeasure, subject: &str, what: &str, findings: &mut Vec<Finding>) -> bool {
     match metrics::resolve(&m.metric) {
         Ok(_) => {}
         Err(MetricError::Unknown(_)) => {
@@ -605,6 +644,42 @@ fn check_metric(m: &MetricMeasure, subject: &str, what: &str, findings: &mut Vec
             subject,
             format!("{what}'s measure on {} has neither `above` nor `below`", m.metric),
         ));
+    }
+    if let Some(band) = impossible_band(m) {
+        findings.push(finding(FindingKind::ImpossibleBand, subject, format!("{what}'s measure {band}")));
+    }
+    let finite = bounds_finite(m);
+    if !finite {
+        findings.push(finding(
+            FindingKind::NonFiniteThreshold,
+            subject,
+            format!("{what}'s measure on {} has a bound that is not a finite number; the measure is dropped", m.metric),
+        ));
+    }
+    finite
+}
+
+fn bounds_finite(m: &MetricMeasure) -> bool {
+    m.above.is_none_or(f64::is_finite) && m.below.is_none_or(f64::is_finite)
+}
+
+/// `Some(description)` for a band no value can sit in: `above` over `below`.
+fn impossible_band(m: &MetricMeasure) -> Option<String> {
+    match (m.above, m.below) {
+        (Some(a), Some(b)) if a > b => Some(format!("on {} needs >= {a} and <= {b} at once, which nothing can be", m.metric)),
+        _ => None,
+    }
+}
+
+/// Whether `measure` can ever produce a verdict: any check, or a metric
+/// measure with at least one bound, every bound a finite number. A bound-less
+/// metric measure is written down but judges nothing, so it does not make a
+/// scenario "measured" -- not for [`FindingKind::UnmeasuredHighImportance`],
+/// and not in [`evaluate`], where it stays a draft.
+pub fn is_judgeable(measure: &Measure) -> bool {
+    match measure {
+        Measure::Check(_) => true,
+        Measure::Metric(m) => (m.above.is_some() || m.below.is_some()) && bounds_finite(m),
     }
 }
 
@@ -667,7 +742,7 @@ pub struct QualityTree {
 /// - an attribute or scenario not yet in the tree is **added**;
 /// - an inherited importance may only be **raised**;
 /// - an inherited measure may only be **tightened**: `above` raised, `below`
-///   lowered, `window`/`max_age` shortened, or a bound it lacked added. A
+///   lowered, `max_age` shortened, or a bound it lacked added. A
 ///   field a descendant leaves out is inherited, never cleared;
 /// - an inherited draft scenario may be **given** a measure, or any of the
 ///   six parts it lacks.
@@ -731,11 +806,12 @@ pub fn applicable(catalogue: &QualityCatalogue, scope: &str, chain: &[QualityLay
         ));
     }
     for attr in &tree.attributes {
-        if attr.importance == Level::High && !attr.scenarios.iter().any(|s| s.scenario.measure.is_some()) {
+        let measured = attr.scenarios.iter().any(|s| s.scenario.measure.as_ref().is_some_and(is_judgeable));
+        if attr.importance == Level::High && !measured {
             findings.push(finding(
                 FindingKind::UnmeasuredHighImportance,
                 scope,
-                format!("{} is H importance but none of its scenarios has a response measure", attr.id),
+                format!("{} is H importance but none of its scenarios has a response measure that can be judged", attr.id),
             ));
         }
     }
@@ -846,6 +922,9 @@ fn merge_scenario(have: &mut QualityScenario, new: &QualityScenario, cx: &Contex
 
     match (&mut have.measure, &new.measure) {
         (_, None) => {}
+        (None, Some(Measure::Metric(m))) if !bounds_finite(m) => {
+            cx.conflict(findings, format!("gives {} a bound that is not a finite number", m.metric));
+        }
         (None, Some(m)) => have.measure = Some(m.clone()),
         (Some(old), Some(m)) => merge_measure(old, m, cx, findings),
     }
@@ -864,7 +943,11 @@ fn fill<T: Clone + PartialEq>(have: &mut Option<T>, new: &Option<T>, part: &'sta
 
 fn merge_measure(have: &mut Measure, new: &Measure, cx: &Context, findings: &mut Vec<Finding>) {
     match (&mut *have, new) {
+        (Measure::Metric(_), Measure::Metric(m)) if !bounds_finite(m) => {
+            cx.conflict(findings, format!("gives {} a bound that is not a finite number", m.metric));
+        }
         (Measure::Metric(old), Measure::Metric(m)) if old.metric == m.metric => {
+            let was_possible = impossible_band(old).is_none();
             match (old.above, m.above) {
                 (Some(a), Some(b)) if b < a => cx.loosening(findings, format!("lowers `above` from {a} to {b}")),
                 (_, Some(b)) => old.above = Some(b),
@@ -875,10 +958,17 @@ fn merge_measure(have: &mut Measure, new: &Measure, cx: &Context, findings: &mut
                 (_, Some(b)) => old.below = Some(b),
                 _ => {}
             }
-            match (old.window, m.window) {
-                (Some(a), Some(b)) if b > a => cx.loosening(findings, format!("lengthens `window` from {a} to {b}")),
-                (_, Some(b)) => old.window = Some(b),
+            match (old.max_age, m.max_age) {
+                (Some(a), Some(b)) if b > a => cx.loosening(findings, format!("lengthens `max_age` from {a} to {b}")),
+                (_, Some(b)) => old.max_age = Some(b),
                 _ => {}
+            }
+            if let Some(band) = impossible_band(old).filter(|_| was_possible) {
+                findings.push(finding(
+                    FindingKind::ImpossibleBand,
+                    cx.scope,
+                    format!("{} tightens {} until its measure {band}", cx.from, cx.what),
+                ));
             }
         }
         (Measure::Check(old), Measure::Check(c)) if without_max_age(old) == without_max_age(c) => {
@@ -930,8 +1020,8 @@ pub fn describe_measure(measure: &Measure) -> String {
             if let Some(b) = m.below {
                 parts.push(format!("<= {b}"));
             }
-            if let Some(w) = m.window {
-                parts.push(format!("within {w}"));
+            if let Some(w) = m.max_age {
+                parts.push(format!("(max_age {w})"));
             }
             parts.join(" ")
         }
@@ -1019,7 +1109,7 @@ pub struct ScopeReport {
 ///
 /// - no measure: `draft`;
 /// - a metric measure: `no_data` when the metric is unknown, unavailable or
-///   has no value yet; `stale` when its `as_of` is older than `window`;
+///   has no value yet; `stale` when its `as_of` is older than `max_age`;
 ///   otherwise `met` if every bound holds and `not_met` if one does not;
 /// - a check measure: through `policy::evaluate`, as a one-control
 ///   catalogue. `satisfied`/`attested` is `met`, `stale` is `stale`, and
@@ -1102,9 +1192,9 @@ fn evaluate_metric(m: &MetricMeasure, values: &BTreeMap<MetricId, MetricValue>, 
         }
         Ok(_) => {}
     }
-    if m.above.is_none() && m.below.is_none() {
+    if !is_judgeable(&Measure::Metric(m.clone())) {
         result.status = ScenarioStatus::Draft;
-        result.reasons.push(format!("the measure on {} has no threshold", m.metric));
+        result.reasons.push(format!("the measure on {} has no finite threshold", m.metric));
         return;
     }
     let Some(mv) = values.get(&m.metric) else {
@@ -1113,17 +1203,20 @@ fn evaluate_metric(m: &MetricMeasure, values: &BTreeMap<MetricId, MetricValue>, 
         return;
     };
     result.as_of = Some(mv.as_of);
-    let Some(v) = mv.value else {
+    let Some(v) = mv.value.filter(|v| v.is_finite()) else {
         result.status = ScenarioStatus::NoData;
-        let why = mv.reason.clone().unwrap_or_else(|| "no reason given".to_string());
+        let why = match mv.value {
+            Some(v) => format!("{v} is not a finite number"),
+            None => mv.reason.clone().unwrap_or_else(|| "no reason given".to_string()),
+        };
         result.reasons.push(format!("{} could not be computed: {why}", m.metric));
         return;
     };
     result.value = Some(v);
-    if let Some(window) = m.window {
-        if now - mv.as_of > chrono::Duration::hours(window.as_hours() as i64) {
+    if let Some(max_age) = m.max_age {
+        if now - mv.as_of > max_age.as_time_delta() {
             result.status = ScenarioStatus::Stale;
-            result.reasons.push(format!("{} = {v} as of {}, older than {window}", m.metric, mv.as_of));
+            result.reasons.push(format!("{} = {v} as of {}, older than {max_age}", m.metric, mv.as_of));
             return;
         }
     }
@@ -1196,7 +1289,9 @@ fn evaluate_check(
 /// such task". This only asks what was gathered, never re-judges it; the
 /// verdict is still `policy::evaluate`'s. `knowledge` and `attestation`
 /// always count as gathered -- a missing tag or attestation is itself the
-/// fact.
+/// fact. A `gate` whose run has no gated case to judge counts as not
+/// gathered: a dataset nobody put a gate on is missing evidence, not a
+/// failing product.
 pub fn gathered(check: &Check, evidence: &Evidence) -> bool {
     match check {
         Check::Knowledge { .. } | Check::Attestation => true,
@@ -1208,7 +1303,13 @@ pub fn gathered(check: &Check, evidence: &Evidence) -> bool {
             Some([fact]) => fact.runs.iter().any(|r| r.status.is_terminal()),
             _ => false,
         },
-        Check::Gate { dataset, .. } => evidence.gates.contains_key(dataset),
+        // A settled run with nothing gated to judge -- no gated case at all,
+        // or a named case missing or ungated -- is policy's `open` too, but
+        // it says nothing about the product: no data, not a failure.
+        Check::Gate { dataset, case, .. } => evidence.gates.get(dataset).is_some_and(|fact| match case {
+            Some(id) => fact.cases.iter().any(|c| &c.id == id && c.gated),
+            None => fact.cases.iter().any(|c| c.gated),
+        }),
         Check::Roles { .. } | Check::Sandbox => evidence.agents.is_some(),
         // The same default location `policy::evaluate` reads for an empty
         // `absent`.
@@ -1221,7 +1322,8 @@ pub fn gathered(check: &Check, evidence: &Evidence) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{GateFact, RunFact, TaskFact};
+    use crate::bench::Verdict;
+    use crate::policy::{GateCase, GateFact, RunFact, TaskFact};
     use crate::run::RunStatus;
     use chrono::TimeZone;
 
@@ -1328,8 +1430,8 @@ mod tests {
 
     #[test]
     fn a_measure_is_a_metric_threshold_or_a_policy_check_written_as_policy_writes_it() {
-        let m: Measure = serde_yaml_ng::from_str("{ metric: scrap_rate, below: 0.05, window: 7d }").unwrap();
-        assert!(matches!(&m, Measure::Metric(x) if x.below == Some(0.05) && x.window == Some("7d".parse().unwrap())));
+        let m: Measure = serde_yaml_ng::from_str("{ metric: scrap_rate, below: 0.05, max_age: 7d }").unwrap();
+        assert!(matches!(&m, Measure::Metric(x) if x.below == Some(0.05) && x.max_age == Some("7d".parse().unwrap())));
 
         let c: Measure = serde_yaml_ng::from_str("{ check: task, task: quality-gate, max_age: 7d }").unwrap();
         assert_eq!(
@@ -1454,7 +1556,7 @@ mod tests {
     const ROOT: &str = "attributes:\n\
         \x20 - id: reliability.availability\n    importance: M\n    difficulty: M\n    scenarios:\n\
         \x20     - id: up\n        kind: usage\n        response: the daemon answers\n\
-        \x20       measure: { metric: first_pass_yield, above: 0.8, window: 7d }\n\
+        \x20       measure: { metric: first_pass_yield, above: 0.8, max_age: 7d }\n\
         \x20     - id: gate\n        measure: { check: task, task: quality-gate, max_age: 7d }\n\
         \x20     - id: draft\n        stimulus: something happens\n";
 
@@ -1499,22 +1601,22 @@ mod tests {
     fn a_metric_measure_may_be_tightened_and_given_a_bound_it_lacked() {
         let (tree, findings) = chained(
             "attributes:\n  - id: reliability.availability\n    importance: M\n    difficulty: M\n    scenarios:\n\
-             \x20     - { id: up, measure: { metric: first_pass_yield, above: 0.9, below: 0.99, window: 1d } }\n",
+             \x20     - { id: up, measure: { metric: first_pass_yield, above: 0.9, below: 0.99, max_age: 1d } }\n",
         );
         assert!(findings.is_empty(), "{findings:?}");
         let Some(Measure::Metric(m)) = &scenario(&tree, "reliability.availability", "up").measure else { panic!() };
-        assert_eq!((m.above, m.below, m.window), (Some(0.9), Some(0.99), Some("1d".parse().unwrap())));
+        assert_eq!((m.above, m.below, m.max_age), (Some(0.9), Some(0.99), Some("1d".parse().unwrap())));
     }
 
     #[test]
     fn loosening_a_metric_measure_is_a_finding_and_each_looser_value_is_ignored() {
         let (tree, findings) = chained(
             "attributes:\n  - id: reliability.availability\n    importance: M\n    difficulty: M\n    scenarios:\n\
-             \x20     - { id: up, measure: { metric: first_pass_yield, above: 0.5, window: 30d } }\n",
+             \x20     - { id: up, measure: { metric: first_pass_yield, above: 0.5, max_age: 30d } }\n",
         );
         assert_eq!(kinds(&findings), vec![FindingKind::Loosening, FindingKind::Loosening]);
         let Some(Measure::Metric(m)) = &scenario(&tree, "reliability.availability", "up").measure else { panic!() };
-        assert_eq!((m.above, m.window), (Some(0.8), Some("7d".parse().unwrap())));
+        assert_eq!((m.above, m.max_age), (Some(0.8), Some("7d".parse().unwrap())));
     }
 
     #[test]
@@ -1696,10 +1798,10 @@ mod tests {
     }
 
     #[test]
-    fn a_metric_value_older_than_its_window_is_stale_never_met() {
+    fn a_metric_value_older_than_its_max_age_is_stale_never_met() {
         let tree = tree_with(&[
-            ("fresh", Some("{ metric: first_pass_yield, above: 0.5, window: 7d }")),
-            ("old", Some("{ metric: first_pass_yield, above: 0.5, window: 1d }")),
+            ("fresh", Some("{ metric: first_pass_yield, above: 0.5, max_age: 7d }")),
+            ("old", Some("{ metric: first_pass_yield, above: 0.5, max_age: 1d }")),
         ]);
         let values = BTreeMap::from([metric_value("first_pass_yield", Some(0.9), now() - chrono::Duration::days(3))]);
         let report = evaluate(&tree, &values, &Evidence::default(), now());
@@ -1769,7 +1871,159 @@ mod tests {
         };
         let report = evaluate(&tree, &BTreeMap::new(), &evidence, now());
         assert_eq!(status_of(&report, "sandbox"), ScenarioStatus::Met, "an empty scope has no unsandboxed agent");
-        assert_ne!(status_of(&report, "gate"), ScenarioStatus::NoData);
+        assert_eq!(status_of(&report, "gate"), ScenarioStatus::NoData, "a settled run with nothing gated judges nothing");
+
+        let gate_with = |gated: bool, verdict: Verdict| {
+            let evidence = Evidence {
+                gates: BTreeMap::from([(
+                    "smoke".to_string(),
+                    GateFact {
+                        run_id: "b1".into(),
+                        ended_at: Some(now()),
+                        cases: vec![GateCase { id: "c1".into(), gated, verdicts: vec![verdict] }],
+                    },
+                )]),
+                ..Default::default()
+            };
+            status_of(&evaluate(&tree, &BTreeMap::new(), &evidence, now()), "gate")
+        };
+        assert_eq!(gate_with(false, Verdict::Fail), ScenarioStatus::NoData);
+        assert_eq!(gate_with(true, Verdict::Fail), ScenarioStatus::NotMet);
+        assert_eq!(gate_with(true, Verdict::Pass), ScenarioStatus::Met);
+    }
+
+    #[test]
+    fn a_named_gate_case_that_is_missing_or_ungated_is_no_data() {
+        let tree = tree_with(&[("gate", Some("{ check: gate, dataset: smoke, case: c2 }"))]);
+        let evidence = Evidence {
+            gates: BTreeMap::from([(
+                "smoke".to_string(),
+                GateFact {
+                    run_id: "b1".into(),
+                    ended_at: Some(now()),
+                    cases: vec![GateCase { id: "c1".into(), gated: true, verdicts: vec![Verdict::Pass] }],
+                },
+            )]),
+            ..Default::default()
+        };
+        assert_eq!(status_of(&evaluate(&tree, &BTreeMap::new(), &evidence, now()), "gate"), ScenarioStatus::NoData);
+    }
+
+    // -- review fixes: NaN, bands, judgeability, vocabularies, huge max_age --
+
+    #[test]
+    fn a_non_finite_bound_is_a_finding_at_load_and_the_measure_is_dropped() {
+        let q = catalogue_from(&[(
+            "p.yaml",
+            "attributes:\n  - id: reliability.availability\n    importance: H\n    difficulty: M\n    scenarios:\n\
+             \x20     - { id: nan, measure: { metric: first_pass_yield, above: .nan } }\n\
+             \x20     - { id: inf, measure: { metric: scrap_rate, below: .inf } }\n",
+        )]);
+        assert_eq!(kinds(&q.findings), vec![FindingKind::NonFiniteThreshold, FindingKind::NonFiniteThreshold]);
+        assert!(q.profiles["p"].attributes[0].scenarios.iter().all(|s| s.measure.is_none()));
+        let (_, findings) = applicable(&q, "demo", &[layer("demo", &["p"])]);
+        assert_eq!(kinds(&findings), vec![FindingKind::UnmeasuredHighImportance], "a dropped measure measures nothing");
+    }
+
+    #[test]
+    fn a_non_finite_bound_from_a_descendant_is_a_conflict_never_a_silent_loosening() {
+        let root = catalogue_from(&[("root.yaml", ROOT)]);
+        let mut q = root.clone();
+        let mut child: Profile = serde_yaml_ng::from_str(
+            "attributes:\n  - id: reliability.availability\n    importance: M\n    difficulty: M\n    scenarios:\n\
+             \x20     - { id: up, measure: { metric: first_pass_yield, above: 0.9 } }\n\
+             \x20     - { id: draft, measure: { metric: scrap_rate, below: 0.1 } }\n",
+        )
+        .unwrap();
+        // Built by hand, past `load`'s own guard, to prove the merge holds too.
+        for s in &mut child.attributes[0].scenarios {
+            if let Some(Measure::Metric(m)) = &mut s.measure {
+                m.above = m.above.map(|_| f64::NAN);
+                m.below = m.below.map(|_| f64::NAN);
+            }
+        }
+        q.profiles.insert("child".to_string(), child);
+        let (tree, findings) = applicable(&q, "demo", &[layer("company", &["root"]), layer("demo", &["child"])]);
+        assert_eq!(kinds(&findings), vec![FindingKind::ConflictingOverride, FindingKind::ConflictingOverride]);
+        let Some(Measure::Metric(m)) = &scenario(&tree, "reliability.availability", "up").measure else { panic!() };
+        assert_eq!(m.above, Some(0.8));
+        assert!(scenario(&tree, "reliability.availability", "draft").measure.is_none());
+    }
+
+    #[test]
+    fn a_non_finite_bound_or_value_never_reads_as_met() {
+        let mut tree = tree_with(&[("up", Some("{ metric: first_pass_yield, above: 0.5 }"))]);
+        let values = BTreeMap::from([metric_value("first_pass_yield", Some(f64::NAN), now())]);
+        let report = evaluate(&tree, &values, &Evidence::default(), now());
+        assert_eq!(status_of(&report, "up"), ScenarioStatus::NoData);
+
+        if let Some(Measure::Metric(m)) = &mut tree.attributes[0].scenarios[0].scenario.measure {
+            m.above = Some(f64::NAN);
+        }
+        let values = BTreeMap::from([metric_value("first_pass_yield", Some(0.9), now())]);
+        let report = evaluate(&tree, &values, &Evidence::default(), now());
+        assert_eq!(status_of(&report, "up"), ScenarioStatus::Draft);
+    }
+
+    #[test]
+    fn a_bound_less_measure_does_not_clear_the_unmeasured_h_finding() {
+        let q = catalogue_from(&[
+            ("root.yaml", "attributes:\n  - { id: safety, importance: H, difficulty: L, scenarios: [ { id: s } ] }\n"),
+            (
+                "child.yaml",
+                "attributes:\n  - { id: safety, importance: H, difficulty: L, scenarios: [ { id: s, measure: { metric: scrap_rate } } ] }\n",
+            ),
+        ]);
+        assert_eq!(kinds(&q.findings), vec![FindingKind::MissingThreshold]);
+        let (tree, findings) = applicable(&q, "demo", &[layer("company", &["root"]), layer("demo", &["child"])]);
+        assert_eq!(kinds(&findings), vec![FindingKind::UnmeasuredHighImportance]);
+        assert!(!is_judgeable(tree.attributes[0].scenarios[0].scenario.measure.as_ref().unwrap()));
+        assert!(is_judgeable(&Measure::Check(Check::Sandbox)));
+    }
+
+    #[test]
+    fn a_band_nothing_can_meet_is_a_finding_in_one_file_or_after_a_merge() {
+        let q = catalogue_from(&[(
+            "p.yaml",
+            "attributes:\n  - id: safety\n    importance: L\n    difficulty: L\n    scenarios:\n\
+             \x20     - { id: s, measure: { metric: scrap_rate, above: 0.2, below: 0.1 } }\n",
+        )]);
+        assert_eq!(kinds(&q.findings), vec![FindingKind::ImpossibleBand]);
+
+        let (_, findings) = chained(
+            "attributes:\n  - id: reliability.availability\n    importance: M\n    difficulty: M\n    scenarios:\n\
+             \x20     - { id: up, measure: { metric: first_pass_yield, below: 0.5 } }\n",
+        );
+        assert_eq!(kinds(&findings), vec![FindingKind::ImpossibleBand], "0.8 <= x <= 0.5 is empty");
+    }
+
+    #[test]
+    fn a_mistyped_daemon_fact_or_secrets_location_is_a_finding_at_load() {
+        let q = catalogue_from(&[(
+            "p.yaml",
+            "attributes:\n  - id: security\n    importance: M\n    difficulty: M\n    scenarios:\n\
+             \x20     - { id: loopback, measure: { check: daemon, fact: http_loopback } }\n\
+             \x20     - { id: no-keys, measure: { check: secrets, absent: [github, gitlab] } }\n\
+             \x20     - { id: fine, measure: { check: daemon, fact: http_loopback_only } }\n",
+        )]);
+        assert_eq!(kinds(&q.findings), vec![FindingKind::UnknownDaemonFact, FindingKind::UnknownSecretsLocation]);
+        assert!(q.findings[0].detail.starts_with("security/loopback names daemon fact"), "{}", q.findings[0].detail);
+    }
+
+    #[test]
+    fn an_absurd_max_age_never_panics_and_never_goes_stale() {
+        let tree = tree_with(&[("up", Some("{ metric: first_pass_yield, above: 0.5, max_age: 9999999999999999h }"))]);
+        let values = BTreeMap::from([metric_value("first_pass_yield", Some(0.9), now() - chrono::Duration::days(3650))]);
+        let report = evaluate(&tree, &values, &Evidence::default(), now());
+        assert_eq!(status_of(&report, "up"), ScenarioStatus::Met);
+
+        let tree = tree_with(&[("gate", Some("{ check: task, task: quality-gate, max_age: 9999999999999999h }"))]);
+        let evidence = Evidence {
+            tasks: BTreeMap::from([("quality-gate".to_string(), task("t1", RunStatus::Done, Some(3650)))]),
+            ..Default::default()
+        };
+        let report = evaluate(&tree, &BTreeMap::new(), &evidence, now());
+        assert_eq!(status_of(&report, "gate"), ScenarioStatus::Met);
     }
 
     #[test]

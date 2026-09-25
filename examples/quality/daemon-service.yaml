@@ -22,7 +22,7 @@ attributes:
         measure:                             # the response measure; without it, a draft
           metric: scrap_rate                 # continual: a registry metric and a threshold
           below: 0.05
-          window: 7d
+          max_age: 7d
   - id: maintainability.modifiability
     importance: H
     difficulty: H
