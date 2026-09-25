@@ -13,11 +13,11 @@ import { inScope, scopeLabel } from "./scopes.js";
 import { openTask } from "./tasks.js";
 import {
   rowStyle, laneStyle, concurrency, blockedStretches, blockedNote, waitingShare,
-  OCC_STEPS, tickStep, tickTimes, liveView, resolveWindow, settle, isPreset, zoomAround, panByPixels,
+  tickStep, tickTimes, liveView, resolveWindow, settle, isPreset, zoomAround, panByPixels,
   wheelFactor, fractionAt, buttonAnchor, windowQuery, overlaps,
 } from "./occupancy-model.js";
 
-export { OCC_STEPS };
+export { OCC_STEPS } from "./occupancy-model.js";
 
 export function clockLabel(d, coarse) {
   const hh = String(d.getHours()).padStart(2, "0");
@@ -220,6 +220,15 @@ export function wireOccupancy() {
   syncControls();
 }
 
+/// A row's util column: a percentage of the time it was asked about, `—`
+/// for a window wholly ahead of now or an agent working with no run, else
+/// `idle`.
+function utilisation(r, ahead, elapsed) {
+  if (ahead) return "—";
+  if (r.busy_seconds > 0) return `${Math.min(100, Math.round((r.busy_seconds / elapsed) * 100))}%`;
+  return r.spans.some(s => s.status === "working") ? "—" : "idle";
+}
+
 export function renderOccupancy() {
   const occ = state.occ;
   if (!occ) return;
@@ -318,9 +327,7 @@ export function renderOccupancy() {
       // not whatever the view has been dragged to since.
       const asked = new Date(occ.from).getTime();
       const elapsed = Math.max(1, (Math.min(now, new Date(occ.to).getTime()) - asked) / 1000);
-      const busy = asked > now ? "—" : r.busy_seconds > 0
-        ? `${Math.min(100, Math.round((r.busy_seconds / elapsed) * 100))}%`
-        : (r.spans.some(s => s.status === "working") ? "—" : "idle");
+      const busy = utilisation(r, asked > now, elapsed);
       // Blocked time stays inside busy time (#121 leaves that call open); the
       // share of it spent waiting is marked on the figure, not taken off it.
       const wait = waitingShare(r);

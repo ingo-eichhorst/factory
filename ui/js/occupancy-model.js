@@ -169,9 +169,12 @@ export function pan(win, deltaMs) {
 /// A drag of `dx` pixels over a track `width` pixels wide. Dragging right
 /// pulls the past into view, the way a map moves under a hand.
 export function panByPixels(win, dx, width) {
-  if (!(width > 0)) return win;
+  if (!Number.isFinite(width) || width <= 0) return win;
   return pan(win, (-dx / width) * (win.to - win.from));
 }
+
+/// Pixels in one unit of a wheel event's `deltaMode`: pixels, lines, pages.
+const WHEEL_UNIT_PX = [1, 16, 400];
 
 /// How far one wheel event zooms. A mouse wheel notch is ~100px of delta,
 /// a trackpad sends many small ones, and a pinch arrives as a wheel with
@@ -179,7 +182,7 @@ export function panByPixels(win, dx, width) {
 /// gain. Capped per event so one flick of a free-spinning wheel does not
 /// jump from an hour to a month.
 export function wheelFactor(deltaY, deltaMode = 0, pinch = false) {
-  const px = deltaMode === 1 ? deltaY * 16 : deltaMode === 2 ? deltaY * 400 : deltaY;
+  const px = deltaY * (WHEEL_UNIT_PX[deltaMode] ?? 1);
   return clamp(Math.exp(px * (pinch ? 0.01 : 0.0015)), 0.5, 2);
 }
 
