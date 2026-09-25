@@ -1,0 +1,153 @@
+# The github-issue workflow: one GitHub issue of this repository, from
+# triage to a pull request that is ready for a person to merge.
+#
+#   triage ──► implement ──► review ──► ready
+#                 ▲            │
+#                 └── rework ──┘   at most 5 times
+#
+# A person comes in wherever an agent reports `blocked` (the run waits in
+# the Inbox until someone answers):
+#   * triage: the issue is not ready (needs-info or wontfix) or has an open
+#     question;
+#   * review: an issue the implementer cannot fix alone, a question, or
+#     findings still open after the fifth rework round.
+# If the fifth round's review fails anyway, the engine fails the run with
+# "needs a person" (#140).
+#
+# Stored in the daemon, not read from here. After editing this file, apply it:
+#   factory workflow create --file workflows/github-issue.yaml      # first time
+#   factory workflow update <id> --file workflows/github-issue.yaml
+# Start a run:
+#   factory workflow start <id> --input issue=<number>
+name: github-issue
+description: >-
+  Triage a GitHub issue of ingo-eichhorst/factory, implement it as a WIP
+  draft PR, review it (sending it back up to five times), then mark the PR
+  ready. Anything unclear is escalated to a person as a blocked run.
+scope: factory
+inputs:
+  - name: issue
+    description: GitHub issue number in ingo-eichhorst/factory
+nodes:
+  - id: triage
+    position: { x: 0, y: 0 }
+    task:
+      title: "Triage #{{issue}}"
+      agent: builder
+      # Reads code and runs gh; changes nothing -- no worktree, as intake's
+      # own triage (#119).
+      worktree: false
+      timeout_seconds: 2700
+      labels: { issue: "{{issue}}", workflow: github-issue, step: triage }
+      instructions: |
+        Triage GitHub issue #{{issue}} of ingo-eichhorst/factory. Follow
+        .agents/skills/triage-github-issue/SKILL.md exactly, including its
+        "In a Factory run" section.
+
+        1. First assign the issue to the GitHub user on this machine, and check that it took:
+             gh issue edit {{issue}} --repo ingo-eichhorst/factory --add-assignee @me
+           If the assignment fails, report blocked and say why.
+        2. Triage it: readiness, one design, one testing strategy, complexity, estimate, labels, and one assessment comment.
+        3. Report:
+           - ready-for-agent -> `done`. The --result is the whole brief for the next step: issue number and
+             title, complexity and process, the high-level design, the testing strategy, and the comment URL.
+           - needs-info, wontfix, or any question you cannot settle from the code -> `blocked`, with the exact
+             question and who has to answer it. That escalates it to a person. When they answer, triage again
+             and report again.
+        Do not change code, create branches, or open pull requests.
+
+  - id: implement
+    position: { x: 320, y: 0 }
+    task:
+      title: "Implement #{{issue}}"
+      agent: builder
+      timeout_seconds: 14400
+      labels: { issue: "{{issue}}", workflow: github-issue, step: implement }
+      instructions: |
+        Implement GitHub issue #{{issue}} of ingo-eichhorst/factory. Follow
+        .agents/skills/implement-github-issue/SKILL.md, with these rules for this workflow:
+
+        - The issue must be assigned to the GitHub user on this machine. Check it, and fix it if it is not:
+            gh issue edit {{issue}} --repo ingo-eichhorst/factory --add-assignee @me
+        - Build on the triage result above (design and testing strategy). If you have to depart from it,
+          say so in the PR body.
+        - The branch is named `issue-{{issue}}-<short-slug>`. The next steps find the PR by that prefix.
+        - Open the PR as a draft titled "WIP: <summary> (#{{issue}})":
+            gh pr create --draft --base main --title "WIP: <summary> (#{{issue}})" --body ...
+          It stays a draft. Marking it ready is the last step of this workflow, not yours. Never merge it.
+
+        Rework: if the upstream output includes an entry that says "sent this work back", this is a rework
+        round. Do not open a new PR. Continue the existing one:
+            git fetch origin <branch>
+            git switch -c rework-$(date +%s) origin/<branch>
+            ... address every finding ...
+            git push origin HEAD:<branch>
+        Reply to the review on the PR with what you changed for each finding.
+
+        Report `done` with --result: the PR URL, the branch name, what changed, and the checks you ran and
+        their results. If you are stuck on a question only a person can answer, report `blocked` with it.
+
+  - id: review
+    position: { x: 640, y: 0 }
+    rework: { to: implement, max_rounds: 5 }
+    task:
+      title: "Review #{{issue}}"
+      agent: builder
+      # It detaches HEAD onto the PR branch: never in the primary checkout.
+      worktree: true
+      timeout_seconds: 5400
+      labels: { issue: "{{issue}}", workflow: github-issue, step: review }
+      instructions: |
+        Review the draft PR for GitHub issue #{{issue}} of ingo-eichhorst/factory. The PR URL and branch
+        are in the upstream output. If they are missing, find the PR:
+            gh pr list --repo ingo-eichhorst/factory --state open --json number,url,headRefName \
+              --jq '.[] | select(.headRefName | startswith("issue-{{issue}}-"))'
+
+        1. Read the issue (gh issue view {{issue}} --repo ingo-eichhorst/factory --comments), its triage
+           assessment, and the PR (gh pr view <n> --comments; gh pr diff <n>).
+        2. Check out the PR head without taking its branch (git fetch origin <branch> &&
+           git switch --detach origin/<branch>). Run `cargo build --workspace`, `cargo test --workspace`,
+           and `cd ui && npm test` if ui/ changed. Run all of them with HERDR_SESSION=qa-none and
+           HERDR_SOCKET_PATH unset, so nothing opens panes in the live herdr session.
+        3. Review for correctness against the issue and the triage design, tests that prove the change, the
+           rules in AGENTS.md, and README accuracy. Do not change the code yourself.
+        4. Post the review on the PR (you cannot request changes on your own PR, so comment):
+             gh pr review <n> --repo ingo-eichhorst/factory --comment --body-file review.md
+
+        Then report exactly one of:
+        - `done`: nothing blocking is left. --result: the PR URL and a short summary of the review.
+        - `failed`: there are concrete findings the implementer can fix alone. Put them in --error as a
+          numbered list, each with file:line and what "fixed" looks like, followed by the PR URL and branch.
+          That sends the work back to implementation for another round.
+        - `blocked`: an issue that cannot be fixed without a person (a design or product decision, a
+          conflict with the issue as written, a missing credential), or a question. State it exactly. That
+          escalates it to a person.
+        Last round: if your task title ends in "(rework 5)", the work has been sent back five times. Do not
+        report `failed`. Report `blocked` with the findings still open, so a person decides.
+
+  - id: ready
+    position: { x: 960, y: 0 }
+    task:
+      title: "Mark PR for #{{issue}} ready"
+      agent: shell
+      worktree: false
+      timeout_seconds: 600
+      labels: { issue: "{{issue}}", workflow: github-issue, step: ready }
+      instructions: |
+        set -eu
+        repo=ingo-eichhorst/factory
+        pr=$(gh pr list --repo "$repo" --state open --json number,headRefName \
+          --jq '[.[] | select(.headRefName | startswith("issue-{{issue}}-"))][0].number // empty')
+        if [ -z "$pr" ]; then echo "no open PR on an issue-{{issue}}-* branch" >&2; exit 1; fi
+        title=$(gh pr view "$pr" --repo "$repo" --json title --jq .title)
+        gh pr edit "$pr" --repo "$repo" --title "${title#WIP: }"
+        if [ "$(gh pr view "$pr" --repo "$repo" --json isDraft --jq .isDraft)" = true ]; then
+          gh pr ready "$pr" --repo "$repo"
+        fi
+        url=$(gh pr view "$pr" --repo "$repo" --json url --jq .url)
+        gh issue comment {{issue}} --repo "$repo" --body "Triaged, implemented and reviewed by the github-issue workflow; ready for a person to merge: $url"
+        echo "$url"
+edges:
+  - { id: triage-implement, from: triage, to: implement }
+  - { id: implement-review, from: implement, to: review }
+  - { id: review-ready, from: review, to: ready }
