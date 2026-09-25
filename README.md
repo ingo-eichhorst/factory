@@ -1113,9 +1113,10 @@ store like `/api/production`, with no store of its own:
 It reads runs overlapping the last 60 days (or two windows, if longer) --
 open runs included -- open runs' own journals for their last word and a
 blocked run's reason, `schedule_skipped` entries from the last day, and
-answers over both windows (`TaskStore::entries_of_kinds`, one query rather
-than a walk over every journal; a store that cannot search returns nothing
-and the counts are floors).
+answers and run requests over both windows (`TaskStore::entries_of_kinds`,
+one query rather than a walk over every journal; a store that cannot search
+returns nothing). Triggered signposts are reused for a minute while the
+scenario files are unchanged -- computing them runs the metrics they name.
 
 **Exceptions.** Only what a person can act on:
 
@@ -1146,23 +1147,36 @@ factory run answer <run-id> "text" --reason "..."   # run.answer
 ```
 
 `task.skip_next` moves the schedule to the slot after the next one -- or the
-first one after now, when the next has already passed -- and a queued retry,
-being the next thing that would fire, is what it drops. It is journaled as
+first one after now, when the next has already passed. A queued retry is
+the next thing that would fire, so skipping it ends the streak and brings
+back the regular slot it stood in front of (or the first one after now, if
+that has passed too). An optional `slot` names the firing the caller means
+to skip; if the schedule has moved on since, the skip is refused. Skips and
+the scheduler's firing take one lock and re-read the task under it, so a
+slot is fired or skipped, never both. It is journaled as
 `slot_skipped`, never as `schedule_skipped`: a person's decision is not a
 missed slot. `run.answer` types the text into the blocked run's own session
 and presses enter; it is refused unless the run is `Blocked` and has a
 session, the reason is required, and only the reason is journaled
-(`answer`), not the text. The run stays blocked until its agent reports
-otherwise. Over HTTP: `POST /api/tasks/{id}/run`, `.../cancel` and
-`.../skip-next` take an optional `{"reason": ...}` body, `PATCH
+(`answer`), not the text -- as soon as the text is in the session, so a
+keypress that then fails (journaled as `answer_unsent`) never leaves typed
+text off the record. The run stays blocked until its agent reports
+otherwise; an agent that unblocks itself in the moment between the check
+and the typing gets the answer in whatever it is doing next. Over HTTP: `POST /api/tasks/{id}/run`, `.../cancel` and
+`.../skip-next` take an optional `{"reason": ...}` body (skip-next also
+`slot`), `PATCH
 /api/tasks/{id}` a `reason` beside the patch's fields, and `POST
 /api/runs/{id}/answer` `{text, reason}`. Skipping is `task.edit`, like
 pausing; answering is `run.input`, with the same reach -- no new grants.
 
-**Interventions** are what the record shows a person doing: a manual run of
-a task whose previous attempt failed or was cancelled, a cancel by the
-owner, and an answer. An agent that leaves its token out is the owner, so
-this is a floor.
+**Interventions** are what the record shows the owner doing: a manual run
+of a task whose previous attempt failed or was cancelled, a cancel by the
+owner, and an answer given through `run.answer` by the owner. A run again
+or a cancel an agent asked for is not one -- `task.run` journals who asked,
+and an agent's cancel is `cancelled_by_agent`. An agent that leaves its
+token out *is* the owner to Factory, though, so the count can overstate
+what people did: treat it as a ceiling. (Text typed straight into a run's
+terminal, not through `run.answer`, leaves no record and is not counted.)
 
 **Live updates.** No event of its own: everything the report reads changes
 through `task_updated`, `run_updated`, `task_entry` or `agent_updated`, and
