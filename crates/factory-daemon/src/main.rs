@@ -13,6 +13,7 @@ mod host;
 mod interfaces;
 mod metrics;
 mod occupancy;
+mod operations;
 mod policies;
 mod power;
 mod production;
