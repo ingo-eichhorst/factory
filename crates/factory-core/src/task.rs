@@ -298,6 +298,17 @@ pub struct Task {
     /// outlive the streak it describes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_retry: Option<PendingRetry>,
+    /// A person stopped this task's schedule without losing it -- the
+    /// andon cord. `due()` passes over a paused task, so neither its
+    /// regular slots nor a queued retry fire; the schedule itself, and
+    /// `next_run_at` as it stood, stay put so the task still says what it
+    /// would have done. Resuming recomputes `next_run_at` from the moment
+    /// of resuming (`Engine::update`): the slots that passed while paused
+    /// were paused, not missed, and never fire as a burst of catch-up runs.
+    /// Absent on every task written before this existed, which reads as
+    /// running -- exactly what those tasks were doing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub schedule_paused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,6 +439,11 @@ pub struct TaskPatch {
     pub pending_retry: Option<PendingRetry>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_pending_retry: bool,
+    /// Pause or resume the schedule -- see `Task::schedule_paused`. A plain
+    /// setting like `knowledge_hints`, so `Some(false)` resumes and no
+    /// `clear_` twin is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_paused: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -603,6 +619,7 @@ mod tests {
             task.pending_retry, None,
             "an old row predates retries entirely, so it is certainly not mid-streak"
         );
+        assert!(!task.schedule_paused, "an old row predates pausing, so its schedule is running");
     }
 
     /// `RetryPolicy::None` has to round-trip as the bare string `retry: none`

@@ -3,7 +3,6 @@
 # out in full (`performance-efficiency.time-behaviour`, not
 # `performance.time-behaviour`), and a check measure is written the way a
 # policy catalogue writes one (`{ check: task, task: ..., max_age: ... }`).
-# `fail_rate` is not in the metric registry yet, so `scrap_rate` stands in.
 # Loads with zero findings -- see `examples_quality_load_with_zero_findings`
 # in `quality.rs`.
 title: Daemon service
@@ -20,7 +19,7 @@ attributes:
         environment: normal operation
         response: runs resume reporting; no run is lost or double-dispatched
         measure:                             # the response measure; without it, a draft
-          metric: scrap_rate                 # continual: a registry metric and a threshold
+          metric: fail_rate                  # continual: a registry metric and a threshold
           below: 0.05
           max_age: 7d
   - id: maintainability.modifiability

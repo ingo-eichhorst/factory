@@ -1076,6 +1076,7 @@ mod tests {
             bench_origin: None,
             retry: None,
             pending_retry: None,
+            schedule_paused: false,
         };
         engine.store.create(&task).await.unwrap()
     }
@@ -1090,6 +1091,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: "herdr".into(),
                 token: format!("token-{task_id}"),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap()

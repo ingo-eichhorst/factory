@@ -18,7 +18,7 @@ use factory_core::event::Event;
 use factory_core::occupancy::{
     spans_from, Occupancy, OccupancyBlock, OccupancyPlan, OccupancyRow, OccupancyScope, StatusChange,
 };
-use factory_core::run::{BlockSource, Run, RunPatch, RunStatus};
+use factory_core::run::{BlockSource, FailKind, Run, RunPatch, RunStatus};
 use factory_core::task::{TaskEntry, TurnEndEvent, TurnEnded};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -79,10 +79,7 @@ impl Engine {
         // history says it usually takes.
         let mut planned: BTreeMap<(String, String), Vec<OccupancyPlan>> = BTreeMap::new();
         for task in &tasks {
-            let Some(at) = task.next_run_at else { continue };
-            if at < now || at > to {
-                continue;
-            }
+            let Some(at) = planned_firing(task, now, to) else { continue };
             let historical = if task.estimate_seconds.is_some() {
                 (None, 0)
             } else {
@@ -330,10 +327,10 @@ impl Engine {
             // the run there and then; a `Stop` is only held on the run, and
             // stands here, below, once `settle_turn_end` says it has.
             if turn_ended_action(&report, run.status) == TurnEndedAction::Fail {
-                self.fail_run(&run.id, TURN_ENDED_REASON).await;
+                self.fail_run(&run.id, FailKind::TurnEnded, TURN_ENDED_REASON).await;
             } else if settle_turn_end(run.status, run.turn_ended_at, report.status, Utc::now()) {
                 let why = run.turn_end_reason.as_deref().unwrap_or(TURN_ENDED_REASON);
-                self.fail_run(&run.id, why).await;
+                self.fail_run(&run.id, FailKind::TurnEnded, why).await;
             }
         }
     }
@@ -357,7 +354,7 @@ impl Engine {
         self.check_run_token(&run, turn.token.as_deref(), task_id)?;
         match hook_turn_ended_action(&turn, run.status) {
             HookTurnAction::FailNow => {
-                self.fail_run(&run.id, &hook_turn_ended_reason(&turn)).await;
+                self.fail_run(&run.id, FailKind::StopFailure, &hook_turn_ended_reason(&turn)).await;
             }
             HookTurnAction::Settle => {
                 self.patch_run(
@@ -817,9 +814,40 @@ fn trim_to_window(series: &mut Vec<StatusChange>, from: DateTime<Utc>) {
     }
 }
 
+/// The firing a task's schedule will draw on the chart, if it has one in
+/// `[now, to]`. A paused schedule keeps its slot but will not fire it, so
+/// there is nothing coming to draw.
+fn planned_firing(task: &factory_core::task::Task, now: DateTime<Utc>, to: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let at = task.next_run_at?;
+    (at >= now && at <= to && !task.schedule_paused).then_some(at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paused_schedule_plans_no_firing() {
+        let now = Utc::now();
+        let mut task = factory_core::adapter::store::task_from_new(
+            factory_core::task::NewTask {
+                title: "every ten minutes".into(),
+                schedule: Some(factory_core::task::Schedule::Every { seconds: 600 }),
+                ..Default::default()
+            },
+            "demo".into(),
+            "shell".into(),
+            "herdr".into(),
+        );
+        task.next_run_at = Some(now + Duration::minutes(10));
+        let to = now + Duration::hours(1);
+        assert_eq!(planned_firing(&task, now, to), task.next_run_at, "sanity: drawn while running");
+        task.schedule_paused = true;
+        assert_eq!(planned_firing(&task, now, to), None);
+        task.schedule_paused = false;
+        task.next_run_at = Some(now + Duration::hours(2));
+        assert_eq!(planned_firing(&task, now, to), None, "past the chart's edge");
+    }
 
     fn at(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap()
@@ -876,6 +904,9 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            queued_at: None,
+            scheduled_for: None,
+            fail_kind: None,
         }
     }
 

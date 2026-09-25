@@ -972,8 +972,7 @@ computed once and shared: the metric values any scenario's drivers,
 signposts or goal changes reference; the driver tree's own baseline values
 (a registry-backed driver's current metric value; `capacity_factor`'s
 neutral `1.0`, the same default `evaluate_outcomes` itself falls back to
-when a driver is absent; `rework_rate`'s neutral `0.0`, since nothing
-computes a real baseline for it); the current policy rollup over the asked
+when a driver is absent); the current policy rollup over the asked
 subtree; and a baseline forecast — `forecast_completion` over the same
 throughput history, backlog = every non-terminal task in the subtree right
 now, `Horizon::default()`'s 26 weeks. Chosen over a bare metric trend so it
@@ -981,9 +980,9 @@ is the *same* `Forecast` shape every scenario's own forecast carries, and a
 fan chart can draw the baseline band and a scenario's band on one axis.
 
 **Drivers.** A small, built-in tree tied to the metric registry where one
-exists: `throughput_week`, `first_pass_yield`, `scrap_rate` (registry-backed);
-`rework_rate`, `capacity_factor` (assumptions — no data source, a person's
-own what-if); `unit_cost`, `tokens_per_run` (named, but **unavailable** —
+exists: `throughput_week`, `first_pass_yield`, `scrap_rate`, `rework_rate`
+(registry-backed); `capacity_factor` (an assumption — no data source, a
+person's own what-if); `unit_cost`, `tokens_per_run` (named, but **unavailable** —
 design §12.6, a `Run` records no cost yet; only `=N`, a pure assumption
 needing no baseline, may override one). The one v1 formula:
 `effective_throughput = throughput_week × capacity_factor × first_pass_yield`.
@@ -1124,7 +1123,7 @@ attributes:
         environment: normal operation
         response: runs resume reporting; no run is lost or double-dispatched
         measure:                     # the response measure; without one, a draft
-          metric: scrap_rate         # continual: a registry metric and a threshold
+          metric: fail_rate          # continual: a registry metric and a threshold
           below: 0.05                # above/below, inclusive; both is a band
           max_age: 7d                # how old the value may be before it reads stale
   - id: maintainability.modifiability
@@ -1281,6 +1280,20 @@ the first minute after it, and one in the autumn overlap runs once, not twice.
 and a name Factory does not know is refused when it is set, not discovered
 when it fails to fire. An `every` schedule is an interval and takes no
 timezone.
+
+```sh
+factory task edit <id> --pause-schedule    # keep the schedule, fire nothing
+factory task edit <id> --resume-schedule   # next firing counted from now
+```
+
+A paused schedule keeps its expression and the slot it would have fired, and
+nothing -- neither a slot nor a queued retry -- fires until it is resumed.
+Resuming counts the next firing from the moment of resuming, so the slots
+that passed while paused are not caught up in a burst. The same holds for
+slots that pass while the task's previous run is still going, or while the
+daemon is down: the overdue slot fires once, late, and the journal records the
+ones after it as a single `schedule_skipped` entry with how many, the first
+and the last.
 
 ```sh
 factory task run <id>          # a retry is just another run

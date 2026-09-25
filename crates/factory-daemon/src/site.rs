@@ -726,6 +726,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: task.runtime.clone(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();

@@ -258,6 +258,80 @@ fn scrap_rate_def() -> MetricDef {
     )
 }
 
+/// The operations metrics' shared window: the same trailing 28 days the
+/// production ratios use, so a KR over `fail_rate` and one over
+/// `scrap_rate` are read over the same stretch of work.
+const OPERATIONS_SOURCE: &str =
+    "operations.rs's run facts over runs overlapping the trailing 28 days (TaskStore::runs_between)";
+
+fn cycle_time_def(p: u32) -> MetricDef {
+    fixed(
+        &format!("cycle_time_p{p}"),
+        &format!("Cycle time p{p}"),
+        &format!(
+            "The {p}th percentile (nearest rank) of started_at to ended_at, over runs that \
+             ended done in the trailing 28 days. Done only: a run that failed or was \
+             cancelled did not complete the work, and its length says nothing about how long \
+             the work takes."
+        ),
+        Unit::Seconds,
+        Better::Lower,
+        OPERATIONS_SOURCE,
+    )
+}
+
+fn queue_wait_p95_def() -> MetricDef {
+    fixed(
+        "queue_wait_p95",
+        "Queue wait p95",
+        "The 95th percentile (nearest rank) of queued_at to started_at -- how long a run \
+         waited between becoming due and being dispatched -- over runs started in the \
+         trailing 28 days. Runs from before queued_at was recorded are left out, never \
+         counted as zero.",
+        Unit::Seconds,
+        Better::Lower,
+        OPERATIONS_SOURCE,
+    )
+}
+
+fn fail_rate_def() -> MetricDef {
+    fixed(
+        "fail_rate",
+        "Fail rate",
+        "failed/finished, over the trailing 28 days. Narrower than scrap_rate: a cancelled \
+         run is scrap, not a failure.",
+        Unit::Ratio,
+        Better::Lower,
+        OPERATIONS_SOURCE,
+    )
+}
+
+fn rework_rate_def() -> MetricDef {
+    fixed(
+        "rework_rate",
+        "Rework rate",
+        "reworked/finished, over the trailing 28 days -- production.rs's own reworked \
+         bucket: a retry, or a manual or workflow run of a task whose previous attempt failed \
+         or was cancelled. A scheduled firing is never rework, however many came before it.",
+        Unit::Ratio,
+        Better::Lower,
+        OPERATIONS_SOURCE,
+    )
+}
+
+fn time_to_recover_p50_def() -> MetricDef {
+    fixed(
+        "time_to_recover_p50",
+        "Time to recover p50",
+        "The median (nearest rank) time from the first failed run of a failure streak ending \
+         to the same task's next run ending done, over recoveries that completed in the \
+         trailing 28 days. A streak with no success yet is not a recovery and is left out.",
+        Unit::Seconds,
+        Better::Lower,
+        OPERATIONS_SOURCE,
+    )
+}
+
 fn unit_cost_def() -> MetricDef {
     unavailable("unit_cost", "Unit cost", "Cost per finished unit.", Unit::Ratio, Better::Lower)
 }
@@ -346,6 +420,12 @@ pub fn registry() -> Vec<MetricDef> {
         bench_resolve_rate_def("<dataset>"),
         goal_tasks_done_def("<objective>", "<kr>"),
         quality_def("<characteristic>"),
+        cycle_time_def(50),
+        cycle_time_def(85),
+        queue_wait_p95_def(),
+        fail_rate_def(),
+        rework_rate_def(),
+        time_to_recover_p50_def(),
         unit_cost_def(),
         tokens_per_run_def(),
     ];
@@ -381,6 +461,12 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         ["throughput_week"] => throughput_week_def(),
         ["first_pass_yield"] => first_pass_yield_def(),
         ["scrap_rate"] => scrap_rate_def(),
+        ["cycle_time_p50"] => cycle_time_def(50),
+        ["cycle_time_p85"] => cycle_time_def(85),
+        ["queue_wait_p95"] => queue_wait_p95_def(),
+        ["fail_rate"] => fail_rate_def(),
+        ["rework_rate"] => rework_rate_def(),
+        ["time_to_recover_p50"] => time_to_recover_p50_def(),
         ["unit_cost"] => {
             return Err(MetricError::Unavailable {
                 id: id.clone(),
@@ -532,6 +618,12 @@ mod tests {
             "bench.resolve_rate.<dataset>",
             "goal_tasks_done.<objective>.<kr>",
             "quality.<characteristic>",
+            "cycle_time_p50",
+            "cycle_time_p85",
+            "queue_wait_p95",
+            "fail_rate",
+            "rework_rate",
+            "time_to_recover_p50",
             "unit_cost",
             "tokens_per_run",
         ] {
@@ -545,6 +637,23 @@ mod tests {
             let def = registry().into_iter().find(|d| d.id == id).unwrap();
             assert!(!def.available);
             assert_eq!(def.unavailable_reason, Some(NOT_YET_A_RUN_RECORDS_NO_COST));
+        }
+    }
+
+    #[test]
+    fn the_operations_metrics_are_seconds_or_ratios_and_all_lower_is_better() {
+        for (id, unit) in [
+            ("cycle_time_p50", Unit::Seconds),
+            ("cycle_time_p85", Unit::Seconds),
+            ("queue_wait_p95", Unit::Seconds),
+            ("fail_rate", Unit::Ratio),
+            ("rework_rate", Unit::Ratio),
+            ("time_to_recover_p50", Unit::Seconds),
+        ] {
+            let def = resolve(&MetricId::new(id).unwrap()).unwrap();
+            assert_eq!(def.unit, unit, "{id}");
+            assert_eq!(def.better, Better::Lower, "{id}");
+            assert!(def.available, "{id}");
         }
     }
 

@@ -667,6 +667,14 @@ enum TaskCmd {
         /// Stop handing runs knowledge pages.
         #[arg(long)]
         no_knowledge_hints: bool,
+        /// Stop the schedule firing, keeping it: nothing runs on its own
+        /// until it is resumed.
+        #[arg(long, conflicts_with = "resume_schedule")]
+        pause_schedule: bool,
+        /// Start a paused schedule again, from now -- the slots it passed
+        /// while paused are not caught up.
+        #[arg(long)]
+        resume_schedule: bool,
     },
     /// Show one task.
     Show { id: Option<String> },
@@ -2766,6 +2774,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             labels,
             knowledge_hints,
             no_knowledge_hints,
+            pause_schedule,
+            resume_schedule,
         } => {
             let retry = retry.as_deref().map(parse_retry).transpose()?;
             let patch = TaskPatch {
@@ -2790,6 +2800,11 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 retry,
                 clear_retry: default_retry,
                 knowledge_hints: match (knowledge_hints, no_knowledge_hints) {
+                    (true, _) => Some(true),
+                    (_, true) => Some(false),
+                    _ => None,
+                },
+                schedule_paused: match (pause_schedule, resume_schedule) {
                     (true, _) => Some(true),
                     (_, true) => Some(false),
                     _ => None,
@@ -3253,7 +3268,8 @@ fn detail(t: &Task) -> String {
         t.created_at.to_rfc3339(),
     );
     if let Some(sched) = &t.schedule {
-        s.push_str(&format!("  schedule   {}\n", describe_schedule(sched)));
+        let paused = if t.schedule_paused { " (paused)" } else { "" };
+        s.push_str(&format!("  schedule   {}{paused}\n", describe_schedule(sched)));
         s.push_str(&format!(
             "  retry      {}\n",
             t.retry.map(describe_retry).unwrap_or_else(|| "(daemon default)".into())

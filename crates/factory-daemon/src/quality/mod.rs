@@ -681,6 +681,8 @@ mod tests {
                 adapter: "shell".to_string(),
                 runtime: "shell".to_string(),
                 token: "tok".to_string(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();

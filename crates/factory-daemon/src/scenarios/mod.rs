@@ -123,9 +123,8 @@ fn weekly_throughput_history(daily: &[factory_core::protocol::ProductionBucket],
 /// Every driver's baseline value: a registry-backed driver's current metric
 /// value, when `values` carries one; `capacity_factor`'s neutral `1.0` (no
 /// adjustment -- the same default `scenario::evaluate_outcomes` itself
-/// falls back to when a driver is absent from a map at all); and
-/// `rework_rate`'s neutral `0.0` (no rework). The latter two are this
-/// module's own choice, not registry-derived -- see
+/// falls back to when a driver is absent from a map at all). That one is
+/// this module's own choice, not registry-derived -- see
 /// `ScenarioBaseline::drivers`'s own doc comment. A registry-backed driver
 /// with no current value (metric unavailable, or no data yet) is simply
 /// absent from the result, the same "nothing to be relative to" rule
@@ -143,7 +142,6 @@ fn driver_baseline(values: &BTreeMap<MetricId, MetricValue>) -> BTreeMap<DriverI
         }
     }
     out.insert("capacity_factor".to_string(), 1.0);
-    out.insert("rework_rate".to_string(), 0.0);
     out
 }
 
@@ -871,6 +869,22 @@ mod tests {
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
 
+    /// Since #106 `rework_rate` is the registry metric of that name, not a
+    /// hardcoded `0.0`: its baseline is the metric's value, and absent --
+    /// nothing to be relative to -- when the metric has none.
+    #[test]
+    fn the_rework_rate_driver_takes_its_baseline_from_the_registry_metric() {
+        let id = MetricId::new("rework_rate").unwrap();
+        let mut values = BTreeMap::new();
+        values.insert(
+            id.clone(),
+            MetricValue { id: id.clone(), value: Some(0.2), as_of: chrono::Utc::now(), reason: None },
+        );
+        assert_eq!(driver_baseline(&values).get("rework_rate"), Some(&0.2));
+        assert_eq!(driver_baseline(&BTreeMap::new()).get("rework_rate"), None);
+        assert_eq!(driver_baseline(&BTreeMap::new()).get("capacity_factor"), Some(&1.0));
+    }
+
     fn scope_at(id: &str, name: &str, path: &str) -> Scope {
         let mut scope: Scope = serde_yaml_ng::from_str(&format!("id: {id}\nname: {name}\n")).unwrap();
         scope.path = PathBuf::from(path);
@@ -1156,6 +1170,8 @@ mod tests {
                 adapter: "shell".to_string(),
                 runtime: "shell".to_string(),
                 token: "tok".to_string(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();

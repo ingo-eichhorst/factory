@@ -319,6 +319,7 @@ mod tests {
             bench_origin: None,
             retry: None,
             pending_retry: None,
+            schedule_paused: false,
         }
     }
 
@@ -330,6 +331,8 @@ mod tests {
             adapter: "shell".into(),
             runtime: "shell".into(),
             token: "tok".into(),
+            queued_at: None,
+            scheduled_for: None,
         }
     }
 

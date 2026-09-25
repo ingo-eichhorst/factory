@@ -1588,7 +1588,7 @@ mod tests {
             "p.yaml",
             "attributes:\n  - id: performance-efficiency.resource-utilization\n    importance: M\n    difficulty: M\n    scenarios:\n\
              \x20     - { id: cost, measure: { metric: unit_cost, below: 1.0 } }\n\
-             \x20     - { id: fail, measure: { metric: fail_rate, below: 0.05 } }\n\
+             \x20     - { id: fail, measure: { metric: not_a_metric, below: 0.05 } }\n\
              \x20     - { id: bare, measure: { metric: scrap_rate } }\n",
         )]);
         assert_eq!(
@@ -1856,7 +1856,7 @@ mod tests {
             ("missing", Some("{ metric: throughput_week, above: 5 }")),
             ("uncomputed", Some("{ metric: scrap_rate, below: 0.05 }")),
             ("cost", Some("{ metric: unit_cost, below: 1 }")),
-            ("unknown", Some("{ metric: fail_rate, below: 0.05 }")),
+            ("unknown", Some("{ metric: not_a_metric, below: 0.05 }")),
         ]);
         let values = BTreeMap::from([metric_value("scrap_rate", None, now())]);
         let report = evaluate(&tree, &values, &Evidence::default(), now());

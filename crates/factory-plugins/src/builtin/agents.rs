@@ -457,6 +457,7 @@ mod tests {
             bench_origin: None,
             retry: None,
             pending_retry: None,
+            schedule_paused: false,
         }
     }
 

@@ -173,8 +173,8 @@ test("Create task: always for not_met and stale, for a no_data gap a task could 
   const unavailable = [{ kind: "unavailable_metric", subject: "p.yaml", detail: "attribute a scenario s names metric unit_cost which is not available yet: §12.6" }];
   assert.equal(canRemediate({ status: "no_data", measure: { metric: "unit_cost", below: 1 } }, unavailable), false);
   assert.equal(canRemediate({ status: "no_data", measure: { metric: "unit", below: 1 } }, unavailable), true, "a whole metric id, not a prefix of one");
-  const unknown = [{ kind: "unknown_metric", subject: "p.yaml", detail: "attribute a scenario s names unknown metric fail_rate" }];
-  assert.equal(canRemediate({ status: "no_data", measure: { metric: "fail_rate", below: 1 } }, unknown), false);
+  const unknown = [{ kind: "unknown_metric", subject: "p.yaml", detail: "attribute a scenario s names unknown metric not_a_metric" }];
+  assert.equal(canRemediate({ status: "no_data", measure: { metric: "not_a_metric", below: 1 } }, unknown), false);
 });
 
 test("maxLevel, idTag", () => {
