@@ -729,8 +729,8 @@ impl Engine {
             // No event of its own: every fact it reads changes through
             // `TaskUpdated`, `RunUpdated`, `TaskEntry` or `AgentUpdated`
             // already, and a viewer re-reads on those.
-            Request::Operations { scope, window } => Ok(Payload::Operations {
-                report: Box::new(self.operations_report(scope.as_deref(), window).await?),
+            Request::Operations { scope, window, detail } => Ok(Payload::Operations {
+                report: Box::new(self.operations_report(scope.as_deref(), window, detail).await?),
             }),
             // No event: promote creates ordinary tasks through `Engine::create`,
             // which already publishes `Event::TaskCreated` for each one --
@@ -891,7 +891,7 @@ impl Engine {
                 });
                 Ok(Payload::Ok)
             }
-            Request::TaskCancel { id, reason } => {
+            Request::TaskCancel { id, reason, run } => {
                 // Who asked is the one thing that tells a person's
                 // intervention from an agent tidying up -- see `FailKind`
                 // for the limit of that.
@@ -899,7 +899,7 @@ impl Engine {
                     crate::access::Caller::Owner => FailKind::CancelledByPerson,
                     crate::access::Caller::Agent { .. } => FailKind::CancelledByAgent,
                 };
-                let run = self.cancel_task_run(&id, kind).await?;
+                let run = self.cancel_task_run(&id, run.as_deref(), kind).await?;
                 let asked = crate::operations::Asked::new(caller, reason);
                 self.entry(
                     &id,
@@ -924,8 +924,12 @@ impl Engine {
                 self.sync_bench_for_task(&id).await;
                 Ok(Payload::Ok)
             }
-            Request::TaskEntries { id, limit } => Ok(Payload::Entries {
-                entries: self.store.entries(&id, limit.unwrap_or(200)).await?,
+            Request::TaskEntries { id, limit, task_only } => Ok(Payload::Entries {
+                entries: if task_only {
+                    self.store.task_own_entries(&id, limit.unwrap_or(200)).await?
+                } else {
+                    self.store.entries(&id, limit.unwrap_or(200)).await?
+                },
             }),
             Request::TaskOutput { id, lines } => {
                 let latest = self.store.runs(&id, 1).await?.into_iter().next();
@@ -2314,10 +2318,20 @@ impl Engine {
     /// Cancel a task's active run. `kind` says on whose word -- a person, an
     /// agent, or the workflow or bench run above it -- and is recorded on
     /// the run; the journal line stays the same for all three.
-    pub(crate) async fn cancel_task_run(&self, task_id: &str, kind: FailKind) -> Result<Run> {
+    pub(crate) async fn cancel_task_run(&self, task_id: &str, expected: Option<&str>, kind: FailKind) -> Result<Run> {
         let run = self.store.active_run(task_id).await?.ok_or_else(|| {
             FactoryError::BadRequest(format!("task {task_id} has no run to cancel"))
         })?;
+        // The caller named the attempt it saw. Anything else running now --
+        // a retry that started since, a manual run -- is not what it asked
+        // to end.
+        if let Some(expected) = expected.filter(|e| *e != run.id) {
+            return Err(FactoryError::BadRequest(format!(
+                "run {expected} is no longer the task's active run (attempt {} is, {}); nothing was cancelled",
+                run.attempt,
+                run.status.as_str()
+            )));
+        }
         self.close_session(&run).await;
         self.finish_run(
             &run.id,
@@ -4695,7 +4709,7 @@ mod tests {
         assert_eq!(reported.fail_kind, Some(FailKind::AgentFailed));
 
         let run = run_for(&engine, &task.id, Trigger::Manual).await;
-        let response = engine.handle_request(Request::TaskCancel { id: task.id.clone(), reason: None }).await;
+        let response = engine.handle_request(Request::TaskCancel { id: task.id.clone(), reason: None, run: None }).await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
         let cancelled = engine.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(cancelled.status, RunStatus::Cancelled);

@@ -2024,3 +2024,176 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) {
   .qa-node > summary::before { transition: none; }
 }
+
+/* ------------------------------------------------ L4 process: operations
+   How the line is running (`operations.js`, #106). Exception first, and
+   built from the three state colours the rest of the tool already means:
+   `--fault` is a person has to act, `--wait` is worth a look, `--run` is on
+   pace. A suspicion is words, never a badge -- a screen read may be shown,
+   never asserted -- so `.ops-suspect` is deliberately plain. Charts are
+   inline SVG stretched to their box (`preserveAspectRatio="none"`), which
+   would squash text and circles, so every label and dot is HTML placed by
+   percentage over the SVG instead. */
+.ops-since {
+  margin: 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--panel-2); font-size: 12px; color: var(--ink-2);
+}
+.ops-since b { font: 500 12px/1 var(--mono); color: var(--ink); }
+.ops-card { min-width: 0; }
+.ops-card h3 { flex-wrap: wrap; row-gap: 6px; }
+.ops-card h3 .seg { margin-left: 12px; }
+.ops-bulkrow { margin: -2px 0 8px; }
+.ops-list { display: flex; flex-direction: column; }
+.ops-row {
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 10px;
+  padding: 9px 2px; border-bottom: 1px solid var(--line-soft); cursor: pointer;
+}
+.ops-row:last-child { border-bottom: 0; }
+.ops-row:hover .ops-head b, .ops-row:focus-visible .ops-head b { color: var(--signal); }
+.ops-row:focus-visible { outline: 1px solid var(--signal); outline-offset: -1px; }
+.ops-row .it-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; }
+.ops-main { flex: 1 1 260px; min-width: 0; }
+.ops-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.ops-head b { font-weight: 500; color: var(--ink); overflow-wrap: anywhere; }
+.ops-kind { font: 600 9px/1.3 var(--cond); letter-spacing: .12em; text-transform: uppercase; }
+.ops-kind.k-high { color: var(--fault); }
+.ops-kind.k-medium { color: var(--wait); }
+.ops-kind.k-low { color: var(--muted); }
+.ops-suspect { font: italic 400 10.5px/1.3 var(--sans); color: var(--muted); }
+.ops-reason { color: var(--ink-2); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; white-space: pre-line; }
+.ops-row .it-age { flex: 0 0 auto; color: var(--faint); font: 400 10.5px/1.6 var(--mono); }
+.ops-acts { display: flex; flex-wrap: wrap; gap: 5px; }
+.ops-row .ops-acts { flex: 0 0 auto; }
+.ops-acts .btn { padding: 4px 9px; font-size: 11px; }
+.ops-calm { font-size: 13px; color: var(--ink-2); padding: 14px 2px; }
+.ops-calm .sub { display: block; margin-top: 4px; }
+
+/* Flow now: one stacked bar per scope on a shared scale. */
+.ops-flow { padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+.ops-flow:last-of-type { border-bottom: 0; }
+.ops-flow-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; }
+.ops-flow-top b { font-weight: 500; }
+.ops-stack { position: relative; height: 12px; background: var(--sunk); border-radius: 2px; overflow: hidden; }
+.ops-stack i { position: absolute; top: 0; bottom: 0; }
+.ops-flow-stats { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+.ops-flow-stats b { font: 500 11.5px/1 var(--mono); color: var(--ink); }
+.ops-flow-stats a { color: var(--signal-ink); }
+.ops-flow-stats .warn, .ops-flow-stats .warn b { color: var(--wait); }
+.st-queued { background: var(--idle); }
+.st-dispatching { background: var(--signal); }
+.st-running { background: var(--run); }
+.st-blocked { background: var(--wait); }
+.chleg { flex-wrap: wrap; row-gap: 6px; }
+.chleg .l-cur { background: var(--signal); }
+.chleg .l-ghost { background: var(--faint); opacity: .6; }
+
+/* A chart's table twin, one click away and never in the way. */
+details.ops-table, details.ops-more { margin-top: 10px; }
+details.ops-table > summary, details.ops-more > summary {
+  cursor: pointer; font: 600 9.5px/1.4 var(--cond); letter-spacing: .12em; text-transform: uppercase; color: var(--faint);
+}
+details.ops-more > summary { color: var(--ink-2); padding: 6px 0; border-top: 1px solid var(--line-soft); }
+details.ops-table > summary:hover, details.ops-more > summary:hover { color: var(--signal); }
+.ops-tscroll { overflow-x: auto; max-width: 100%; }
+.ops-tscroll table { font-size: 11.5px; }
+.ops-tscroll td.bad, td.bad { color: var(--fault); }
+td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowrap; }
+
+/* Aging WIP, the scatter and the CFD share one frame: a y axis column, a
+   plot box with the SVG stretched over it, dots and labels on top. */
+.ops-aging { margin-top: 12px; }
+.ops-aging-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 6px; }
+.ops-aging-head b { font-weight: 500; }
+.ops-plot-row { display: flex; gap: 6px; }
+.ops-yaxis { position: relative; flex: 0 0 30px; font: 400 9.5px/1 var(--mono); color: var(--faint); text-align: right; }
+.ops-yaxis span { position: absolute; right: 0; transform: translateY(-50%); white-space: nowrap; }
+.ops-plot { position: relative; flex: 1; min-width: 0; background: var(--sunk); border-radius: 3px; }
+.ops-plot svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.ops-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.ops-pline { stroke-width: 1.2; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
+.ops-p50 { stroke: var(--run); }
+.ops-p70 { stroke: var(--signal); }
+.ops-p85 { stroke: var(--wait); }
+.ops-p95 { stroke: var(--fault); }
+.ops-plabel {
+  position: absolute; right: 4px; transform: translateY(-50%); padding: 0 3px;
+  background: var(--sunk); border-radius: 2px;
+  font: 400 9.5px/1 var(--mono); color: var(--muted); pointer-events: none; white-space: nowrap;
+}
+.ops-xaxis { position: relative; height: 16px; margin: 3px 0 0 36px; font: 400 9.5px/1.4 var(--mono); color: var(--faint); }
+.ops-xaxis span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.ops-dot {
+  position: absolute; width: 11px; height: 11px; margin: 0; padding: 0; border-radius: 50%;
+  transform: translate(-50%, -50%); border: 1.5px solid var(--panel); cursor: pointer;
+  transition: transform .12s ease;
+}
+.ops-dot.sm { width: 7px; height: 7px; border-width: 1px; background: var(--signal); opacity: .85; }
+.ops-dot:hover, .ops-dot:focus-visible { transform: translate(-50%, -50%) scale(1.5); outline: 1px solid var(--ink); z-index: 1; }
+.pace-below_p50 { background: var(--run); }
+.pace-p50_to_p70 { background: color-mix(in srgb, var(--run) 55%, var(--wait)); }
+.pace-p70_to_p85 { background: var(--wait); }
+.pace-p85_to_p95 { background: color-mix(in srgb, var(--wait) 45%, var(--fault)); }
+.pace-above_p95 { background: var(--fault); }
+.pace-none { background: var(--panel); border-color: var(--idle); }
+.chleg i.pace-none { border: 1px solid var(--idle); }
+
+/* Health: small multiples, the previous window as a ghost behind each. */
+.ops-mults { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.ops-mult { border: 1px solid var(--line-soft); border-radius: 3px; padding: 8px 10px; background: var(--panel-2); min-width: 0; }
+.ops-mult .k { font: 600 9px/1.2 var(--cond); letter-spacing: .13em; text-transform: uppercase; color: var(--faint); }
+.ops-mult .v { font: 500 18px/1.3 var(--mono); font-variant-numeric: tabular-nums; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.ops-mult .d { font: 400 10px/1.3 var(--sans); color: var(--muted); }
+.ops-mult .d.up { color: var(--run); }
+.ops-mult .d.down { color: var(--fault); }
+.ops-mult .d.flat { color: var(--faint); }
+.ops-mult svg { display: block; width: 100%; height: 44px; margin-top: 4px; overflow: visible; }
+.ops-mult polyline, .ops-mult circle { fill: none; vector-effect: non-scaling-stroke; }
+.ops-mult .cur { stroke: var(--signal); stroke-width: 1.6; }
+.ops-mult circle.cur { fill: var(--signal); }
+.ops-mult .ghost { stroke: var(--faint); stroke-width: 1.2; stroke-dasharray: 3 3; opacity: .7; }
+.ops-mult circle.ghost { fill: var(--faint); }
+.ops-mult-empty { font-size: 10.5px; color: var(--faint); margin-top: 4px; }
+.ops-card .stn .nm { flex-basis: 170px; }
+.cfd-done { fill: var(--run); opacity: .75; }
+.cfd-progress { fill: var(--wait); opacity: .75; }
+.cfd-waiting { fill: var(--idle); opacity: .6; }
+.chleg i.cfd-done { background: var(--run); }
+.chleg i.cfd-progress { background: var(--wait); }
+.chleg i.cfd-waiting { background: var(--idle); }
+
+/* Schedules. */
+.ops-sched td { vertical-align: top; }
+.ops-sched a, .ops-wf a { color: var(--ink); text-decoration: none; font-weight: 500; }
+.ops-sched a:hover, .ops-wf a:hover { color: var(--signal); }
+.ops-state { font: 600 9px/1.3 var(--cond); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.ops-state.st-late, .ops-state.st-missed { color: var(--wait); background: none; }
+.ops-state.st-paused { color: var(--signal-ink); background: none; }
+.ops-state.st-due { color: var(--muted); background: none; }
+.ops-wf { display: flex; flex-wrap: wrap; gap: 2px 10px; padding: 5px 0; font-size: 12px; }
+.ops-wf .sub a { font-weight: 400; color: var(--signal-ink); }
+
+/* The paused mark on a scheduled task, wherever one is drawn. */
+.tag.paused { color: var(--signal-ink); border-color: var(--signal); margin-left: 4px; }
+
+/* The journal: a person's action, and a slot the daemon passed over. */
+.entry .who[data-source="owner"] { color: var(--signal-ink); }
+.entry.e-ask { border-left: 2px solid var(--signal); padding-left: 8px; }
+.entry.e-missed { border-left: 2px solid var(--wait); padding-left: 8px; }
+.entry.e-fault { border-left: 2px solid var(--fault); padding-left: 8px; }
+
+@media (max-width: 520px) {
+  .ops-row .ops-acts { flex-basis: 100%; padding-left: 17px; }
+  .ops-card .stn .nm { flex-basis: 110px; }
+  .ops-mults { grid-template-columns: 1fr 1fr; }
+}
+/* A six-column schedule table does not fit a narrow screen; each row
+   becomes a small card instead of a strip to scroll sideways. */
+@media (max-width: 720px) {
+  .ops-sched thead { display: none; }
+  .ops-sched tr { display: block; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
+  .ops-sched tr:last-child { border-bottom: 0; }
+  .ops-sched td { display: block; border: 0; padding: 2px 4px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ops-dot { transition: none; }
+}

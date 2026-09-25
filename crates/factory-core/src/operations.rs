@@ -523,9 +523,13 @@ pub struct OperationsInput<'a> {
     /// Every open run, plus the finished history.
     pub runs: &'a [Run],
     pub agents: &'a [AgentSession],
-    /// Narrow everything to one scope, matched by exact name the way
-    /// production.rs matches; `None` is every scope.
-    pub scope: Option<&'a str>,
+    /// Narrow everything to one scope and every scope nested under it --
+    /// the subtree the rail means everywhere else; `None` is every scope.
+    pub scope: Option<ScopeFilter>,
+    /// Hand over [`Health::days`] and [`Health::finished_runs`] -- the
+    /// tab's charts. The Inbox and `factory stats` read the report without
+    /// them, and should not pay for them.
+    pub detail: bool,
     pub window: HealthWindow,
     /// Session capacity per scope, where the config states one. Nothing
     /// enforces `max_sessions` today, so this is shown, never acted on.
@@ -549,6 +553,27 @@ pub struct OperationsInput<'a> {
     /// How long past its slot a due task may wait before it is late;
     /// `None` uses [`DEFAULT_LATE_AFTER_SECONDS`].
     pub late_after_seconds: Option<i64>,
+}
+
+/// The scope a report was asked for, and the subtree it covers: that scope
+/// and every scope nested under it, by name. Which scopes are nested is the
+/// config's to say (`Config::ancestors_of`), so the daemon works it out and
+/// hands the names over.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScopeFilter {
+    pub name: String,
+    pub subtree: BTreeSet<String>,
+}
+
+impl ScopeFilter {
+    /// Just `name` -- a scope with nothing nested under it.
+    pub fn exactly(name: &str) -> Self {
+        Self { name: name.to_string(), subtree: [name.to_string()].into_iter().collect() }
+    }
+
+    pub fn covers(&self, scope: &str) -> bool {
+        self.subtree.contains(scope)
+    }
 }
 
 // ================================================================ report
@@ -761,6 +786,60 @@ pub struct Health {
     pub queue_wait_p95: Figure,
     pub interventions: u32,
     pub interventions_per_100: Figure,
+    /// The window cut into 24-hour steps from its start, oldest first -- the
+    /// small multiples' lines and the cumulative flow diagram. Only with
+    /// [`OperationsInput::detail`]. Steps, not
+    /// calendar days: a window ends now, and each step of it lines up with
+    /// the same step of the window before, which is what a ghost line is
+    /// compared against.
+    #[serde(default)]
+    pub days: Vec<HealthDay>,
+    /// Every run that finished in the window, newest first, at most
+    /// [`FINISHED_RUNS_CAP`] -- the cycle-time scatter's dots. Only the
+    /// current window carries them, and only with
+    /// [`OperationsInput::detail`]; a ghost of a scatter is noise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finished_runs: Vec<FinishedRun>,
+}
+
+/// How many finished runs one report hands over for the scatter.
+pub const FINISHED_RUNS_CAP: usize = 2000;
+
+/// One 24-hour step of a health window. The counts are the same words
+/// [`Health`]'s figures are made of, so a step's line and the window's
+/// number cannot disagree; `waiting` and `in_progress` are how many runs
+/// stood in each state at the step's end -- the two upper bands of a
+/// cumulative flow diagram, over the cumulative `finished` below them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthDay {
+    /// The step's end; it covers the 24 hours before it.
+    pub to: DateTime<Utc>,
+    pub finished: u32,
+    pub done: u32,
+    pub scrapped: u32,
+    pub failed: u32,
+    pub reworked: u32,
+    pub first_pass: u32,
+    /// Queued and not yet started at `to` -- only a run that records
+    /// `queued_at` can say it was. The step ending now counts the queue
+    /// instead ([`Flow::queue_depth`]): a run exists only once dispatched,
+    /// so nothing on record is waiting at this instant.
+    pub waiting: u32,
+    /// Started and not yet ended at `to`.
+    pub in_progress: u32,
+}
+
+/// A run that finished in the window: a dot on the cycle-time scatter when
+/// it ended done, a count in the page's "since you last looked" either way.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FinishedRun {
+    pub run_id: String,
+    pub task_id: String,
+    pub ended_at: DateTime<Utc>,
+    pub status: RunStatus,
+    /// Only for a run that ended done -- see [`cycle_time`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle_s: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -823,7 +902,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
     let tasks: BTreeMap<&str, &Task> = input
         .tasks
         .iter()
-        .filter(|t| input.scope.is_none_or(|s| t.scope == s))
+        .filter(|t| input.scope.as_ref().is_none_or(|s| s.covers(&t.scope)))
         .map(|t| (t.id.as_str(), t))
         .collect();
     // A run carries no scope of its own: it is joined through its task, and
@@ -832,7 +911,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
     let runs: Vec<&Run> = input
         .runs
         .iter()
-        .filter(|r| match input.scope {
+        .filter(|r| match &input.scope {
             None => true,
             Some(_) => tasks.contains_key(r.task_id.as_str()),
         })
@@ -1214,7 +1293,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
         if agent.lifetime != Lifetime::Permanent || agent.state != AgentState::Gone || !agent.declared {
             continue;
         }
-        if input.scope.is_some_and(|s| agent.scope != s) {
+        if input.scope.as_ref().is_some_and(|s| !s.covers(&agent.scope)) {
             continue;
         }
         attention.push(Exception {
@@ -1277,6 +1356,10 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
         f.wait_p95 = Figure::percentile_of(&waits, 0.95, METRIC_EMPTY_NO_WAIT).recorded(&current, since);
     }
 
+    let charts = input.detail;
+    let prev_runs = predecessors(&owned);
+    let queued_now: u32 = flow.iter().map(|f| f.wip.queued).sum();
+
     let percentiles = scope_lines
         .into_iter()
         .map(|(scope, lines)| ScopePercentiles { scope, lines })
@@ -1284,14 +1367,40 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
 
     OperationsReport {
         generated_at: now,
-        scope: input.scope.map(str::to_string),
+        scope: input.scope.as_ref().map(|s| s.name.clone()),
         attention,
         flow,
         aging: Aging { items: aging_items, percentiles },
         health: HealthReport {
             window: input.window,
-            current: health(&owned, &current, since, &input.answers, &input.agent_runs),
-            previous: health(&owned, &current.previous(), since, &input.answers, &input.agent_runs),
+            current: Health {
+                days: if charts {
+                    let mut days = health_days(&owned, &current, &prev_runs);
+                    // The step ending now: a run is only made at dispatch,
+                    // so nothing on record is "queued and not started" at
+                    // this instant -- what is waiting now is the queue,
+                    // tasks due and not dispatched, counted above.
+                    if let Some(last) = days.last_mut() {
+                        last.waiting = queued_now;
+                    }
+                    days
+                } else {
+                    Vec::new()
+                },
+                finished_runs: if charts {
+                    let ended: Vec<&Run> = owned.iter().filter(|r| ended_in(r, &current)).collect();
+                    finished_runs(&ended)
+                } else {
+                    Vec::new()
+                },
+                ..health(&owned, &current, since, &input.answers, &input.agent_runs)
+            },
+            // The ghost gets its steps for the lines; a ghost of a scatter
+            // is noise, so it gets no runs, and none are computed for it.
+            previous: Health {
+                days: if charts { health_days(&owned, &current.previous(), &prev_runs) } else { Vec::new() },
+                ..health(&owned, &current.previous(), since, &input.answers, &input.agent_runs)
+            },
         },
         schedules,
         recorded_since: since,
@@ -1354,7 +1463,59 @@ pub fn health(
             n,
             METRIC_EMPTY_NO_FINISHED,
         ),
+        days: Vec::new(),
+        finished_runs: Vec::new(),
     }
+}
+
+/// [`Health::days`]: `window` in 24-hour steps from its start, the last one
+/// cut short at the window's end when the window is not whole days long.
+pub fn health_days(runs: &[Run], window: &Window, prev: &Predecessors<'_>) -> Vec<HealthDay> {
+    let step = Duration::days(1);
+    let mut out = Vec::new();
+    let mut from = window.from;
+    while from < window.to {
+        let to = (from + step).min(window.to);
+        let slice = Window { from, to };
+        let ended: Vec<&Run> = runs.iter().filter(|r| ended_in(r, &slice)).collect();
+        let count = |hit: &dyn Fn(&Run) -> bool| ended.iter().filter(|&&r| hit(r)).count() as u32;
+        // Standing at `to`: a run is in a state from the moment it entered
+        // it up to, not including, the moment it left.
+        let open_at = |r: &Run| r.ended_at.is_none_or(|end| end > to);
+        out.push(HealthDay {
+            to,
+            finished: ended.len() as u32,
+            done: count(&|r| r.status == RunStatus::Done),
+            scrapped: count(&is_scrapped),
+            failed: count(&is_failed),
+            reworked: count(&|r| is_reworked(r, prev)),
+            first_pass: count(&|r| is_first_pass(r, prev)),
+            waiting: runs
+                .iter()
+                .filter(|r| r.queued_at.is_some_and(|q| q <= to) && r.started_at > to && open_at(r))
+                .count() as u32,
+            in_progress: runs.iter().filter(|r| r.started_at <= to && open_at(r)).count() as u32,
+        });
+        from = to;
+    }
+    out
+}
+
+/// [`Health::finished_runs`], newest first and capped.
+fn finished_runs(finished: &[&Run]) -> Vec<FinishedRun> {
+    let mut out: Vec<FinishedRun> = finished
+        .iter()
+        .map(|r| FinishedRun {
+            run_id: r.id.clone(),
+            task_id: r.task_id.clone(),
+            ended_at: r.ended_at.expect("finished"),
+            status: r.status,
+            cycle_s: cycle_time(r),
+        })
+        .collect();
+    out.sort_by(|a, b| b.ended_at.cmp(&a.ended_at).then_with(|| a.run_id.cmp(&b.run_id)));
+    out.truncate(FINISHED_RUNS_CAP);
+    out
 }
 
 /// Interventions in `window`, as the module doc defines them.
@@ -1910,6 +2071,26 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_scope_covers_work_that_lives_only_in_its_children() {
+        let tasks = vec![task("child-work", "child"), task("elsewhere", "other")];
+        let mut a = run("a", "child-work", 1, RunStatus::Blocked, 10, None);
+        a.blocked_since = Some(ago(5));
+        let mut b = run("b", "elsewhere", 1, RunStatus::Blocked, 10, None);
+        b.blocked_since = Some(ago(5));
+        let runs = vec![a, b];
+        let parent = ScopeFilter {
+            name: "parent".into(),
+            subtree: ["parent".to_string(), "child".to_string()].into_iter().collect(),
+        };
+        let r = report(&OperationsInput { scope: Some(parent), ..input(&tasks, &runs) });
+        assert_eq!(r.scope.as_deref(), Some("parent"));
+        assert_eq!(r.attention.len(), 1);
+        assert_eq!(r.attention[0].scope.as_deref(), Some("child"));
+        assert_eq!(r.flow.iter().map(|f| f.scope.as_str()).collect::<Vec<_>>(), vec!["child"]);
+        assert_eq!(r.aging.items.len(), 1);
+    }
+
+    #[test]
     fn a_scope_filter_keeps_only_that_scopes_work() {
         let tasks = vec![task("here", "demo"), task("there", "other")];
         let mut a = run("a", "here", 1, RunStatus::Blocked, 10, None);
@@ -1919,7 +2100,7 @@ mod tests {
         let orphan = run("c", "deleted", 1, RunStatus::Running, 10, None);
         let runs = vec![a, b, orphan];
         let mut inp = input(&tasks, &runs);
-        inp.scope = Some("demo");
+        inp.scope = Some(ScopeFilter::exactly("demo"));
         let r = report(&inp);
         assert_eq!(r.attention.len(), 1);
         assert_eq!(r.attention[0].scope.as_deref(), Some("demo"));
@@ -2008,6 +2189,64 @@ mod tests {
         assert!((h.throughput_day.value.unwrap() - 4.0 / 7.0).abs() < 1e-9);
         assert_eq!(r.health.previous.finished, 1);
         assert_eq!(r.health.previous.cycle_p50.value, Some(300.0));
+    }
+
+    #[test]
+    fn health_days_step_the_window_and_the_finished_runs_feed_the_scatter() {
+        let tasks = vec![task("t", "demo")];
+        let day = 24 * 60;
+        let mut waiting = run("w", "t", 3, RunStatus::Running, 30, None);
+        // Queued two days ago, started half an hour ago: it stood waiting at
+        // the end of every step in between.
+        waiting.queued_at = Some(ago(2 * day + 30));
+        let runs = vec![
+            run("a", "t", 1, RunStatus::Done, 6 * day + 90, Some(6 * day + 30)),
+            {
+                let mut r = run("b", "t", 2, RunStatus::Failed, 3 * day + 20, Some(3 * day + 10));
+                r.fail_kind = Some(FailKind::AgentFailed);
+                r
+            },
+            waiting,
+            run("prev", "t", 0, RunStatus::Done, 9 * day, Some(9 * day - 5)),
+        ];
+        let r = report(&OperationsInput { detail: true, ..input(&tasks, &runs) });
+        let h = &r.health.current;
+        assert_eq!(h.days.len(), 7);
+        assert_eq!(h.days.last().unwrap().to, now());
+        assert_eq!(h.days.iter().map(|d| d.finished).sum::<u32>(), h.finished, "the steps add up to the window");
+        assert_eq!(h.days[0].done, 1);
+        assert_eq!(h.days[0].first_pass, 1);
+        assert_eq!(h.days[3].failed, 1);
+        assert_eq!(h.days[3].scrapped, 1);
+        assert_eq!(h.days[5].waiting, 1, "queued two days ago and not started by that step's end");
+        assert_eq!(h.days[6].waiting, 0, "the step ending now counts the queue, and nothing is queued");
+        assert_eq!(h.days[6].in_progress, 1, "started before now and not ended");
+        assert_eq!(h.finished_runs.len(), 2);
+        assert_eq!(h.finished_runs[0].run_id, "b", "newest first");
+        assert_eq!(h.finished_runs[0].cycle_s, None, "a failure has no cycle time");
+        assert_eq!(h.finished_runs[1].cycle_s, Some(3600.0));
+        // The ghost window has its steps but hands no dots over.
+        assert_eq!(r.health.previous.days.len(), 7);
+        assert_eq!(r.health.previous.days.iter().map(|d| d.done).sum::<u32>(), 1);
+        assert!(r.health.previous.finished_runs.is_empty());
+        // Without the charts asked for, none of it is computed or sent.
+        let plain = report(&input(&tasks, &runs));
+        assert!(plain.health.current.days.is_empty() && plain.health.current.finished_runs.is_empty());
+        assert!(plain.health.previous.days.is_empty());
+        assert_eq!(plain.health.current.finished, h.finished, "the figures do not depend on it");
+    }
+
+    #[test]
+    fn the_cfd_step_ending_now_counts_the_queue_and_old_open_runs() {
+        let mut due = scheduled(task("due", "demo"), ago(30));
+        due.status = TaskStatus::Pending;
+        let tasks = vec![due, task("long", "demo")];
+        // Started long before either window, still going.
+        let runs = vec![run("old", "long", 1, RunStatus::Running, 90 * 24 * 60, None)];
+        let r = report(&OperationsInput { detail: true, ..input(&tasks, &runs) });
+        let days = &r.health.current.days;
+        assert_eq!(days.last().unwrap().waiting, 1, "the due, undispatched task");
+        assert!(days.iter().all(|d| d.in_progress == 1), "a run older than the history is in progress all along");
     }
 
     #[test]

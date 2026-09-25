@@ -1252,7 +1252,7 @@ impl Engine {
         for task_id in task_ids {
             if self.store.active_run(&task_id).await?.is_some() {
                 let _ = self
-                    .cancel_task_run(&task_id, factory_core::run::FailKind::CancelledWithParent)
+                    .cancel_task_run(&task_id, None, factory_core::run::FailKind::CancelledWithParent)
                     .await;
             }
         }

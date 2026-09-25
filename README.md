@@ -1252,9 +1252,11 @@ lever is that a person can pause a schedule. `factory_core::operations` is
 the pure model -- every word below is defined there, and tested on its own;
 `crates/factory-daemon/src/operations.rs` gathers what it reads.
 
-**The projection.** `GET /api/operations?scope=&window=7d|30d` and
-`factory stats` answer one `OperationsReport`, computed on read from the
-store like `/api/production`, with no store of its own:
+**The projection.** `GET /api/operations?scope=&window=7d|30d[&detail=charts]`
+and `factory stats` answer one `OperationsReport`, computed on read from the
+store like `/api/production`, with no store of its own. A scope means that
+scope and every scope nested under it -- the subtree Policy and Scenarios
+read too -- so a parent shows its children's work:
 
 - `attention` -- what needs a human now, most severe first, then oldest.
 - `flow` -- per scope, work in flight by state (queued, dispatching,
@@ -1271,11 +1273,20 @@ store like `/api/production`, with no store of its own:
   100 runs. A figure that cannot be computed says why instead of reading
   zero, and one read off a fact older runs do not record says from when it
   is on record.
+  With `detail=charts` (the tab asks; the Inbox and `factory stats` do
+  not), each window also carries `days` -- its 24-hour steps, oldest first, with
+  the counts its figures are made of and what stood waiting and in
+  progress at each step's end, the step ending now counting the queue --
+  and the current one `finished_runs`, the
+  newest 2000 runs that finished in it with each done run's cycle time: the
+  tab's small multiples, cumulative flow diagram and cycle-time scatter.
 - `schedules` -- every scheduled task: due, late, missed or paused, with its
   timezone.
 
 It reads runs overlapping the last 60 days (or two windows, if longer) --
-open runs included -- open runs' own journals for their last word and a
+open runs included, plus the newest run of any failed task none of whose
+runs fall in that span, so a task that failed with no retry left stays in
+the queue however long ago it failed -- open runs' own journals for their last word and a
 blocked run's reason, `schedule_skipped` entries from the last day, and
 answers and run requests over both windows (`TaskStore::entries_of_kinds`,
 one query rather than a walk over every journal; a store that cannot search
@@ -1309,6 +1320,11 @@ factory task edit <id> --pause-schedule --reason "stop the line"
 factory task skip-next <id> --reason "..."    # task.skip_next; journals slot_skipped
 factory run answer <run-id> "text" --reason "..."   # run.answer
 ```
+
+`task.cancel` takes an optional `run` (`run_id` over HTTP): the attempt the
+caller was shown. If another run is the task's active one by then -- a
+retry that started in the meantime -- the cancel is refused and nothing is
+ended.
 
 `task.skip_next` moves the schedule to the slot after the next one -- or the
 first one after now, when the next has already passed. A queued retry is
@@ -1345,6 +1361,19 @@ terminal, not through `run.answer`, leaves no record and is not counted.)
 **Live updates.** No event of its own: everything the report reads changes
 through `task_updated`, `run_updated`, `task_entry` or `agent_updated`, and
 a viewer re-reads on those.
+
+**The tab.** Top to bottom: what changed since this browser last looked
+(kept in `localStorage`, a convenience and never a record); the attention
+queue, each row with its allowed actions behind a confirmation that takes a
+reason (required for an answer), and bulk run again / cancel only after a
+preview of every row; flow per scope, with capacity shown as unknown and a
+link to Occupancy; Vacanti's Aging WIP chart per scope; process health
+7d|30d as small multiples over the previous window's ghost, with the
+scatter and the CFD behind toggles; and the schedules. Every chart has a
+table twin. One read per load, narrowed by the daemon to the rail's
+selection and its subtree. The Dashboard's Inbox is the same attention
+list, every scope, less observations, read without the charts' detail. A paused schedule carries a `paused` badge wherever a
+scheduled task is drawn.
 
 `factory stats [summary] [--scope S] [--window 7d|30d] [--json]` prints the
 attention queue's first five rows, flow, aging, health against the previous
@@ -1772,7 +1801,8 @@ echo '{"op":"task.list","params":{}}' | nc -U .factory/factory.sock
 
 HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`,
-`GET /api/runs/{id}/entries`, `GET /api/runs/{id}/output`, `GET /api/agents`,
+`GET /api/runs/{id}/entries`, `GET /api/tasks/{id}/entries` (`?task_only=true`
+for only the task's own lines, none of its runs'), `GET /api/runs/{id}/output`, `GET /api/agents`,
 `GET /api/agent-runtime`, `GET /api/environment`, `GET /api/infrastructure`,
 `GET /api/knowledge`,
 `GET /api/knowledge/search?q=&tags=&scope=&limit=`,

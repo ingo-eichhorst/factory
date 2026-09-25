@@ -753,6 +753,22 @@ impl TaskStore for SqliteStore {
         .await
     }
 
+    async fn task_own_entries(&self, task_id: &str, limit: u32) -> Result<Vec<TaskEntry>> {
+        let task_id = task_id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT data FROM (
+                         SELECT seq, data FROM task_entries WHERE task_id = ?1 AND run_id IS NULL
+                         ORDER BY seq DESC LIMIT ?2
+                     ) ORDER BY seq ASC",
+                )
+                .map_err(adapter_err)?;
+            collect(&mut stmt, params![task_id, limit])
+        })
+        .await
+    }
+
     async fn run_entries(&self, run_id: &str, limit: u32) -> Result<Vec<TaskEntry>> {
         let run_id = run_id.to_string();
         self.with_conn(move |conn| {
@@ -1278,5 +1294,19 @@ mod tests {
             "only the named kinds, only inside the window, oldest first"
         );
         assert!(store.entries_of_kinds(&[], now - chrono::Duration::days(1)).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_tasks_own_entries_are_not_crowded_out_by_its_runs() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.append_entry("t", &TaskEntry::new("owner", "schedule_paused", "paused")).await.unwrap();
+        for i in 0..300 {
+            store.append_entry("t", &TaskEntry::new("agent", "progress", format!("line {i}")).in_run("r")).await.unwrap();
+        }
+        store.append_entry("t", &TaskEntry::new("owner", "schedule_resumed", "resumed")).await.unwrap();
+        assert!(!store.entries("t", 200).await.unwrap().iter().any(|e| e.kind == "schedule_paused"), "the run's lines push it out");
+        let own: Vec<String> = store.task_own_entries("t", 200).await.unwrap().into_iter().map(|e| e.kind).collect();
+        assert_eq!(own, vec!["schedule_paused", "schedule_resumed"], "oldest first, no run's lines");
+        assert_eq!(store.task_own_entries("t", 1).await.unwrap()[0].kind, "schedule_resumed", "the newest when limited");
     }
 }

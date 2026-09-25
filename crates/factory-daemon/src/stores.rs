@@ -255,6 +255,10 @@ impl TaskStore for ScopedStores {
         self.ledger.run_entries(run_id, limit).await
     }
 
+    async fn task_own_entries(&self, task_id: &str, limit: u32) -> Result<Vec<TaskEntry>> {
+        self.ledger.task_own_entries(task_id, limit).await
+    }
+
     async fn entries_of_kinds(
         &self,
         kinds: &[&str],

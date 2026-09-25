@@ -61,10 +61,10 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use factory_core::error::{FactoryError, Result};
 use factory_core::operations::{
-    self, HealthWindow, OperationsInput, OperationsReport, SkippedSlots, TriggeredSignpost,
+    self, HealthWindow, OperationsInput, OperationsReport, ScopeFilter, SkippedSlots, TriggeredSignpost,
 };
 use factory_core::run::RunStatus;
-use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch};
+use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus};
 
 use crate::access::Caller;
 use crate::engine::Engine;
@@ -174,28 +174,57 @@ impl Asked {
 }
 
 impl Engine {
-    /// `Request::Operations`: the whole report for `scope` (by its own name,
-    /// or every scope) over `window`. See the module doc for what is read.
+    /// `Request::Operations`: the whole report for `scope` -- that scope and
+    /// every scope nested under it, or every scope -- over `window`, with
+    /// the charts' per-step and per-run detail only when `detail` asks for
+    /// it. See the module doc for what is read.
     pub(crate) async fn operations_report(
         self: &Arc<Self>,
         scope: Option<&str>,
         window: HealthWindow,
+        detail: bool,
     ) -> Result<OperationsReport> {
         let now = Utc::now();
         let snapshot = self.factory_snapshot();
         // Resolved, so a bare path still finds its scope and a typo is
-        // refused rather than answered with an empty report.
-        let scope = scope.map(|s| snapshot.scope(s).map(|s| s.name.clone())).transpose()?;
+        // refused rather than answered with an empty report; and widened to
+        // the subtree, the same reading of a scope Policy and Scenarios use.
+        let scope = match scope {
+            None => None,
+            Some(name) => {
+                let (asked, subtree) = crate::policies::subtree_scopes(&snapshot, Some(name))?;
+                let asked = asked.expect("a named scope resolves or errors");
+                let mut members: BTreeSet<String> = subtree.into_iter().map(|s| s.name).collect();
+                members.insert(asked.name.clone());
+                Some(ScopeFilter { name: asked.name, subtree: members })
+            }
+        };
 
         let history = Duration::days(HISTORY_DAYS.max(2 * window.days()));
-        let runs = self.store.runs_between(now - history, now).await?;
+        let mut runs = self.store.runs_between(now - history, now).await?;
         let tasks = self.store.list(&TaskFilter::default()).await?;
         let agents = self.store.agents().await?;
         let scope_of: BTreeMap<&str, &str> = tasks.iter().map(|t| (t.id.as_str(), t.scope.as_str())).collect();
         let in_scope = |task_id: &str| match &scope {
             None => true,
-            Some(s) => scope_of.get(task_id) == Some(&s.as_str()),
+            Some(s) => scope_of.get(task_id).is_some_and(|name| s.covers(name)),
         };
+
+        // A task that failed with no retry left stays in the queue until
+        // someone deals with it, however long ago that was -- not only while
+        // its run is inside the history read above. Its newest run is the
+        // one the task mirrors; if none of its runs overlapped the window,
+        // that run is older than all of it, so fetch that one alone.
+        let seen: BTreeSet<&str> = runs.iter().map(|r| r.task_id.as_str()).collect();
+        let stale: Vec<String> = tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Failed && t.bench_origin.is_none() && !seen.contains(t.id.as_str()))
+            .filter(|t| in_scope(&t.id))
+            .map(|t| t.id.clone())
+            .collect();
+        for id in stale {
+            runs.extend(self.store.runs(&id, 1).await?);
+        }
 
         let mut block_reasons = BTreeMap::new();
         let mut last_progress = BTreeMap::new();
@@ -260,7 +289,8 @@ impl Engine {
             tasks: &tasks,
             runs: &runs,
             agents: &agents,
-            scope: scope.as_deref(),
+            scope,
+            detail,
             window,
             capacity: BTreeMap::new(),
             block_reasons,
@@ -559,11 +589,18 @@ mod tests {
         scope
     }
 
-    /// Two scopes, `demo` and `other`, on a store in memory, with
+    /// Three scopes -- `demo`, `child` nested under it, and `other` -- on a
+    /// store in memory, with
     /// [`TypingRuntime`] as the runtime every run's session belongs to.
     fn test_engine() -> (Arc<Engine>, Arc<TypingRuntime>, PathBuf) {
+        test_engine_with(|_| Arc::new(SqliteStore::in_memory().unwrap()))
+    }
+
+    /// [`test_engine`] on a store of the caller's making -- a file, when a
+    /// test has to reach under the store to backdate a row.
+    fn test_engine_with(store: impl FnOnce(&PathBuf) -> Arc<dyn TaskStore>) -> (Arc<Engine>, Arc<TypingRuntime>, PathBuf) {
         let root = std::env::temp_dir().join(format!("factory-operations-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(root.join("projects/demo")).unwrap();
+        std::fs::create_dir_all(root.join("projects/demo/child")).unwrap();
         std::fs::create_dir_all(root.join("projects/other")).unwrap();
         let config = Config {
             version: 1,
@@ -572,6 +609,7 @@ mod tests {
             scope: None,
             scopes: vec![
                 scope("demo-id", "demo", root.join("projects/demo")),
+                scope("child-id", "child", root.join("projects/demo/child")),
                 scope("other-id", "other", root.join("projects/other")),
             ],
             roles: Default::default(),
@@ -583,7 +621,7 @@ mod tests {
         let runtime = Arc::new(TypingRuntime::default());
         let mut registry = Registry::with_builtins();
         registry.add_runtime(runtime.clone(), "test");
-        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let store: Arc<dyn TaskStore> = store(&root);
         let engine = Arc::new(Engine::new(Factory { root: root.clone(), config }, registry, store, PathBuf::from("factory"), Vec::new()));
         (engine, runtime, root)
     }
@@ -660,7 +698,7 @@ mod tests {
         let task = task_in(&engine, "demo", "needs a key", None).await;
         let run = blocked_run(&engine, &task.id, "I need the staging API key").await;
 
-        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         let e = report.attention.iter().find(|e| e.kind == ExceptionKind::Blocked).expect("blocked");
         assert_eq!(e.run_id.as_deref(), Some(run.id.as_str()));
         assert_eq!(e.reason, "I need the staging API key");
@@ -687,7 +725,7 @@ mod tests {
             .await
             .unwrap();
 
-        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         let e = report.attention.iter().find(|e| e.kind == ExceptionKind::SuspectedStuck).expect("suspected");
         assert!(e.suspicion);
         std::fs::remove_dir_all(root).ok();
@@ -700,7 +738,7 @@ mod tests {
         let run = run_of(&engine, &task.id).await;
         engine.fail_run(&run.id, FailKind::AgentFailed, "exit 1").await;
 
-        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         let e = report.attention.iter().find(|e| e.kind == ExceptionKind::FailedExhausted).expect("exhausted");
         assert!(e.reason.contains("exit 1"), "{}", e.reason);
         assert_eq!(e.actions, vec![operations::Action::RunAgain]);
@@ -732,7 +770,7 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         let e = report.attention.iter().find(|e| e.run_id.as_deref() == Some(open.id.as_str())).expect("the open run");
         assert_eq!(e.kind, ExceptionKind::Aging);
         let item = report.aging.items.iter().find(|i| i.run_id.as_deref() == Some(open.id.as_str())).unwrap();
@@ -760,7 +798,7 @@ mod tests {
             .unwrap();
         engine.advance_schedule(&missed).await.unwrap();
 
-        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         let of = |id: &str| report.attention.iter().filter(|e| e.task_id.as_deref() == Some(id)).map(|e| e.kind).collect::<Vec<_>>();
         assert_eq!(of(&late.id), vec![ExceptionKind::ScheduleLate]);
         assert_eq!(of(&missed.id), vec![ExceptionKind::ScheduleMissed]);
@@ -794,7 +832,7 @@ mod tests {
         engine.store.put_agent(&agent("temp", Lifetime::Temporary, AgentState::Gone)).await.unwrap();
         engine.store.put_agent(&agent("fine", Lifetime::Permanent, AgentState::Ready)).await.unwrap();
 
-        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         let lost: Vec<&str> = report
             .attention
             .iter()
@@ -815,7 +853,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         let e = report.attention.iter().find(|e| e.kind == ExceptionKind::TriggeredSignpost).expect("signpost");
         assert!(e.observation);
         assert_eq!(e.title.as_deref(), Some("slow-year"));
@@ -823,8 +861,103 @@ mod tests {
         let full = engine.scenarios_report(None).await.unwrap();
         assert_eq!(full.triggered.len(), 1);
 
-        let scoped = engine.operations_report(Some("demo"), HealthWindow::Week).await.unwrap();
+        let scoped = engine.operations_report(Some("demo"), HealthWindow::Week, false).await.unwrap();
         assert!(!kinds(&scoped).contains(&ExceptionKind::TriggeredSignpost));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_parent_scope_reports_the_work_of_the_scopes_nested_under_it() {
+        let (engine, _, root) = test_engine();
+        // The parent itself has no work at all; its child does.
+        let nested = task_in(&engine, "child", "nested", None).await;
+        let there = task_in(&engine, "other", "there", None).await;
+        blocked_run(&engine, &nested.id, "nested needs a hand").await;
+        blocked_run(&engine, &there.id, "not ours").await;
+        engine.entry(&nested.id, TaskEntry::new("owner", ANSWER_KIND, "answered").with_data(serde_json::json!({}))).await;
+
+        let report = engine.operations_report(Some("demo"), HealthWindow::Week, true).await.unwrap();
+        assert_eq!(report.scope.as_deref(), Some("demo"));
+        let e = report.attention.iter().find(|e| e.kind == ExceptionKind::Blocked).expect("the child's block");
+        assert_eq!(e.scope.as_deref(), Some("child"));
+        assert_eq!(e.reason, "nested needs a hand", "the block reason is read for a nested scope's run too");
+        assert!(report.attention.iter().all(|e| e.scope.as_deref() == Some("child")), "{:?}", report.attention);
+        assert_eq!(report.flow.iter().map(|f| f.scope.as_str()).collect::<Vec<_>>(), vec!["child"]);
+        assert_eq!(report.health.current.interventions, 1, "the child's answer counts under the parent");
+        assert_eq!(report.health.current.days.len(), 7, "the charts' detail, asked for");
+
+        // The child alone does not reach up to its parent's other work.
+        let child = engine.operations_report(Some("child"), HealthWindow::Week, false).await.unwrap();
+        assert_eq!(child.attention.len(), 1);
+        assert!(child.health.current.days.is_empty(), "no detail unless asked");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_that_failed_long_ago_stays_in_the_queue() {
+        let (engine, _, root) = test_engine_with(|root| {
+            Arc::new(SqliteStore::open(&root.join(".factory/ops-test.sqlite")).unwrap())
+        });
+        let task = task_in(&engine, "demo", "failed in spring", None).await;
+        let run = run_of(&engine, &task.id).await;
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch { status: Some(RunStatus::Failed), ended_at: Some(Utc::now()), error: Some("gave up".into()), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        engine
+            .store
+            .update(&task.id, &TaskPatch { status: Some(TaskStatus::Failed), ..Default::default() })
+            .await
+            .unwrap();
+        // Well before any history the report reads.
+        let then = (Utc::now() - Duration::days(200)).to_rfc3339();
+        let conn = rusqlite::Connection::open(root.join(".factory/ops-test.sqlite")).unwrap();
+        conn.execute(
+            "UPDATE runs SET started_at = ?1, ended_at = ?1,
+               data = json_set(data, '$.started_at', ?1, '$.ended_at', ?1) WHERE id = ?2",
+            rusqlite::params![then, run.id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
+        let e = report.attention.iter().find(|e| e.kind == ExceptionKind::FailedExhausted).expect("still exhausted");
+        assert_eq!(e.run_id.as_deref(), Some(run.id.as_str()));
+        assert_eq!(report.health.current.finished, 0, "fetched for the queue, not counted as this week's work");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_cancel_that_names_its_run_never_ends_a_different_one() {
+        let (engine, _, root) = test_engine();
+        let task = task_in(&engine, "demo", "retried meanwhile", None).await;
+        let first = run_of(&engine, &task.id).await;
+        engine
+            .store
+            .update_run(&first.id, &RunPatch { status: Some(RunStatus::Failed), ended_at: Some(Utc::now()), ..Default::default() })
+            .await
+            .unwrap();
+        // A retry started after the person was shown the first attempt.
+        let retry = run_of(&engine, &task.id).await;
+
+        let response = engine
+            .handle_request(Request::TaskCancel { id: task.id.clone(), reason: None, run: Some(first.id.clone()) })
+            .await;
+        match response {
+            Response::Error { message, .. } => assert!(message.contains("no longer the task's active run"), "{message}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let still = engine.store.get_run(&retry.id).await.unwrap().unwrap();
+        assert!(!still.status.is_terminal(), "the retry is untouched");
+
+        let response = engine
+            .handle_request(Request::TaskCancel { id: task.id.clone(), reason: None, run: Some(retry.id.clone()) })
+            .await;
+        assert!(matches!(response, Response::Ok { .. }), "{response:?}");
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -836,14 +969,14 @@ mod tests {
         blocked_run(&engine, &here.id, "here").await;
         blocked_run(&engine, &there.id, "there").await;
 
-        let report = engine.operations_report(Some("demo"), HealthWindow::Month).await.unwrap();
+        let report = engine.operations_report(Some("demo"), HealthWindow::Month, false).await.unwrap();
         assert_eq!(report.scope.as_deref(), Some("demo"));
         assert!(report.attention.iter().all(|e| e.scope.as_deref() == Some("demo")), "{:?}", report.attention);
         assert_eq!(report.flow.len(), 1);
         assert_eq!(report.health.window, HealthWindow::Month);
         assert_eq!(report.flow[0].sessions_max, None, "no limit is declared anywhere, so none is shown");
 
-        assert!(engine.operations_report(Some("nowhere"), HealthWindow::Week).await.is_err());
+        assert!(engine.operations_report(Some("nowhere"), HealthWindow::Week, false).await.is_err());
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -922,7 +1055,7 @@ mod tests {
             "whether it is unblocked is the agent's to say"
         );
 
-        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         assert_eq!(report.health.current.interventions, 1, "an answer is an intervention");
         std::fs::remove_dir_all(root).ok();
     }
@@ -953,7 +1086,7 @@ mod tests {
 
         let run = run_of(&engine, &task.id).await;
         let response = engine
-            .handle_request(Request::TaskCancel { id: task.id.clone(), reason: Some("wrong branch".into()) })
+            .handle_request(Request::TaskCancel { id: task.id.clone(), reason: Some("wrong branch".into()), run: None })
             .await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
         let entries = engine.store.run_entries(&run.id, 50).await.unwrap();
@@ -1017,12 +1150,12 @@ mod tests {
         let blocked = blocked_run(&engine, &other.id, "?").await;
         engine.entry(&other.id, agent.entry(ANSWER_KIND, "answered".into(), serde_json::json!({})).in_run(&blocked.id)).await;
 
-        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         assert_eq!(report.health.current.interventions, 0, "nothing here was the owner's doing");
 
         // The owner's answer is.
         engine.answer_run(&blocked.id, "yes", &owner("it asked")).await.unwrap();
-        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         assert_eq!(report.health.current.interventions, 1);
         std::fs::remove_dir_all(root).ok();
     }

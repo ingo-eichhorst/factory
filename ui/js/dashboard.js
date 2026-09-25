@@ -35,18 +35,15 @@
 //! carrying its own "not an archive" banner (`activity.js`) -- and a second
 //! copy on the dashboard would either repeat it one click away or have to
 //! become the event store this prototype does not have. Needs-attention has its
-//! own Inbox view, where blocked/failed/cancelled/overdue work is collected.
-//! A task the agent cannot finish alone is an operational fact. `blocked` is a
-//! real, first-class status -- "the agent needs a human before it can go on"
-//! (`task.rs`) -- set the only way a status ever is, by the agent calling
-//! `factory task report`. It sits beside failures and cancellations, newest
-//! first. What Factory does not record is the *question*: only that an agent
-//! is waiting, not what it asked. The closest thing to an answer is the
-//! journal entry the agent wrote when it blocked, if it wrote one, and that is
-//! what is shown -- never an invented prompt.
+//! own Inbox view, which reads the daemon's attention list (`GET
+//! /api/operations`, `#106`): blocked runs with the agent's own words, runs
+//! out of retries, lost standing agents, late and missed schedules -- the
+//! same exceptions the L4 Operations tab shows per scope. Nothing here
+//! decides what needs a person any more; `operations.rs` does, once.
 
-import { $, esc, api, state, since } from "./core.js";
-import { inScope, scopeLabel } from "./scopes.js";
+import { $, esc, api, state } from "./core.js";
+import { inScope, routeHref, scopeLabel } from "./scopes.js";
+import { fmtAge, inboxItems } from "./operations-model.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 
@@ -471,67 +468,67 @@ function byScopeTable(tasks, scopes) {
 
 // --------------------------------------------------------------------- inbox
 
-/// Every reason an item is in front of a person, in one list: the daemon has
-/// no single "needs attention" query, so this reads the same `state.tasks`
-/// every other view already has and sorts what it finds by recency.
-function inboxItems(tasks) {
-  const out = [];
-  for (const t of tasks) {
-    if (t.status === "blocked") out.push({ t, kind: "blocked", when: t.updated_at, colour: "wait" });
-    else if (t.status === "failed") out.push({ t, kind: "failed", when: t.updated_at, colour: "fault" });
-    else if (t.status === "cancelled") out.push({ t, kind: "cancelled", when: t.updated_at, colour: "idle" });
-    if (t.schedule && t.next_run_at && new Date(t.next_run_at).getTime() < Date.now()) {
-      out.push({ t, kind: "overdue", when: t.next_run_at, colour: "wait" });
-    }
+/// The last `/api/operations` answer the Inbox drew from. `undefined` until
+/// the first fetch, `null` when it failed -- kept apart so "loading", "not
+/// available" and "nothing waiting" read as three different things.
+let inboxReport;
+let inboxAsked = 0;
+let inboxReceivedAt = 0; // when it arrived, on this browser's clock -- ages grow from there
+
+/// The Inbox is the daemon's attention list (`#106`), every scope, minus
+/// the observations: the same exceptions the Operations tab shows per scope
+/// with flow context around them. It used to be derived here from
+/// `state.tasks` -- blocked, failed, cancelled, overdue -- which counted a
+/// failure a retry was about to fix and missed a lost standing agent; the
+/// daemon now decides once what needs a person, and both pages read it.
+export async function loadInbox() {
+  // Two refetches can overlap; only the newest one's answer is drawn, or a
+  // slow old read could land last and bring back what was just resolved.
+  const mine = ++inboxAsked;
+  let answer;
+  try {
+    answer = (await api("/api/operations")).report;
+  } catch {
+    answer = null;
   }
-  out.sort((a, b) => b.when.localeCompare(a.when));
-  return out;
+  if (mine !== inboxAsked) return;
+  inboxReport = answer;
+  inboxReceivedAt = Date.now();
+  renderInbox();
 }
 
-export function renderInbox(tasks) {
+export function renderInbox() {
   const host = $("inbox");
   if (!host) return;
-  const items = inboxItems(tasks);
+  if (inboxReport === undefined) { host.innerHTML = "loading…"; return; }
+  if (inboxReport === null) {
+    host.innerHTML = `<div class="err">What needs a person is not available right now.</div>`;
+    return;
+  }
+  const items = inboxItems(inboxReport, (Date.now() - inboxReceivedAt) / 1000);
   if (!items.length) {
     host.innerHTML = `<div class="empty">Nothing waiting on a person right now.</div>`;
     return;
   }
-  host.innerHTML = items.map((it, i) => {
-    const label = {
-      blocked: "needs a human",
-      failed: "failed",
-      cancelled: "cancelled",
-      overdue: "schedule overdue",
-    }[it.kind];
-    return `<div class="inbox-item" data-task="${esc(it.t.id)}" data-i="${i}">
-      <span class="it-dot" style="background:var(--${it.colour})"></span>
-      <span class="it-t"><b>${esc(it.t.title)}</b> — ${esc(label)}
-        <span class="sub" data-reason="${esc(it.t.id)}-${i}">${
-          it.kind === "blocked" ? "checking what it needs…" : esc(it.t.scope)
-        }</span>
+  host.innerHTML = items.map((it) => {
+    const href = it.task_id ? "" : it.kind === "liveness_lost" ? routeHref(null, "roster") : "";
+    // The reason is the agent's own words when it gave any -- a blocked
+    // run's question, a failure's last error -- and the daemon's otherwise.
+    return `<div class="inbox-item"${it.task_id ? ` data-task="${esc(it.task_id)}"` : ""}${it.run_id ? ` data-run="${esc(it.run_id)}"` : ""}${href ? ` data-href="${esc(href)}"` : ""}>
+      <span class="it-dot" style="background:var(--${it.tone})"></span>
+      <span class="it-t"><b>${esc(it.title || it.agent || "")}</b> — ${esc(it.label)}${it.suspicion ? ` <span class="ops-suspect">suspicion</span>` : ""}
+        <span class="sub">${esc(it.reason)}${it.scope ? ` · ${esc(it.scope)}` : ""}</span>
       </span>
-      <span class="it-age">${since(it.when)}</span>
+      <span class="it-age">${esc(fmtAge(it.age))}</span>
     </div>`;
   }).join("");
 
   for (const row of host.querySelectorAll(".inbox-item")) {
-    row.onclick = () => openTask(row.dataset.task);
+    row.onclick = () => {
+      if (row.dataset.task) openTask(row.dataset.task, row.dataset.run);
+      else if (row.dataset.href) location.hash = row.dataset.href;
+    };
   }
-
-  // Progressive: a blocked task's reason, if the agent sent one, lives in its
-  // journal. Fetched after the list paints so the dashboard is not waiting on
-  // N requests before it shows anything.
-  items.forEach((it, i) => {
-    if (it.kind !== "blocked") return;
-    api(`/api/tasks/${it.t.id}/entries?limit=20`)
-      .then((data) => {
-        const entries = data.entries || [];
-        const reason = entries.slice().reverse().find((e) => e.kind === "blocked" && e.source === "agent");
-        const el = host.querySelector(`[data-reason="${it.t.id}-${i}"]`);
-        if (el) el.textContent = reason ? reason.message : "blocked — what it needs is not recorded";
-      })
-      .catch(() => {});
-  });
 }
 
 // -------------------------------------------------------------------- wiring
