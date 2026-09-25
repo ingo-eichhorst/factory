@@ -561,8 +561,14 @@
   <div id="view-occupancy" hidden>
     <div class="bar">
       <h2>Occupancy</h2>
+      <span class="sub" id="occ-range"></span>
       <span class="sp"></span>
-      <select id="occ-window" title="how far back the chart looks">
+      <div class="seg occ-zoom" role="group" aria-label="zoom the timeline">
+        <button id="occ-zoom-out" title="zoom out — or scroll over the chart; drag it to move in time" aria-label="zoom out">−</button>
+        <button id="occ-zoom-in" title="zoom in — or scroll over the chart; drag it to move in time" aria-label="zoom in">+</button>
+        <button id="occ-now" title="back to the live window that follows now" disabled>now</button>
+      </div>
+      <select id="occ-window" title="how far back the chart looks — choosing one also returns to now">
         <option value="60">last hour</option>
         <option value="360">last 6 hours</option>
         <option value="720" selected>last 12 hours</option>
