@@ -588,7 +588,6 @@ fieldset.seg { margin: 0; padding: 0; min-width: 0; }
    stays the page's; everything sideways, and a pinch, is the chart's. */
 .occ-axis, .occ-body { touch-action: pan-y; }
 .occ.panning, .occ.panning .occ-track, .occ.panning .blk { cursor: grabbing; user-select: none; }
-fieldset.occ-zoom { margin: 0; padding: 0; min-width: 0; }
 .occ-zoom button { min-width: 30px; }
 .occ-zoom button:disabled { opacity: .38; cursor: default; }
 .occ-grp {
