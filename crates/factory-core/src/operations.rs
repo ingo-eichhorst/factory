@@ -727,6 +727,56 @@ pub struct Health {
     pub queue_wait_p95: Figure,
     pub interventions: u32,
     pub interventions_per_100: Figure,
+    /// The window cut into 24-hour steps from its start, oldest first -- the
+    /// small multiples' lines and the cumulative flow diagram. Steps, not
+    /// calendar days: a window ends now, and each step of it lines up with
+    /// the same step of the window before, which is what a ghost line is
+    /// compared against.
+    #[serde(default)]
+    pub days: Vec<HealthDay>,
+    /// Every run that finished in the window, newest first, at most
+    /// [`FINISHED_RUNS_CAP`] -- the cycle-time scatter's dots. Only the
+    /// current window carries them; a ghost of a scatter is noise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finished_runs: Vec<FinishedRun>,
+}
+
+/// How many finished runs one report hands over for the scatter.
+pub const FINISHED_RUNS_CAP: usize = 2000;
+
+/// One 24-hour step of a health window. The counts are the same words
+/// [`Health`]'s figures are made of, so a step's line and the window's
+/// number cannot disagree; `waiting` and `in_progress` are how many runs
+/// stood in each state at the step's end -- the two upper bands of a
+/// cumulative flow diagram, over the cumulative `finished` below them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthDay {
+    /// The step's end; it covers the 24 hours before it.
+    pub to: DateTime<Utc>,
+    pub finished: u32,
+    pub done: u32,
+    pub scrapped: u32,
+    pub failed: u32,
+    pub reworked: u32,
+    pub first_pass: u32,
+    /// Queued and not yet started at `to` -- only a run that records
+    /// `queued_at` can say it was.
+    pub waiting: u32,
+    /// Started and not yet ended at `to`.
+    pub in_progress: u32,
+}
+
+/// A run that finished in the window: a dot on the cycle-time scatter when
+/// it ended done, a count in the page's "since you last looked" either way.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FinishedRun {
+    pub run_id: String,
+    pub task_id: String,
+    pub ended_at: DateTime<Utc>,
+    pub status: RunStatus,
+    /// Only for a run that ended done -- see [`cycle_time`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle_s: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1257,7 +1307,10 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
         health: HealthReport {
             window: input.window,
             current: health(&owned, &current, since, &input.answers, &input.agent_runs),
-            previous: health(&owned, &current.previous(), since, &input.answers, &input.agent_runs),
+            previous: Health {
+                finished_runs: Vec::new(),
+                ..health(&owned, &current.previous(), since, &input.answers, &input.agent_runs)
+            },
         },
         schedules,
         recorded_since: since,
@@ -1320,7 +1373,59 @@ pub fn health(
             n,
             METRIC_EMPTY_NO_FINISHED,
         ),
+        days: health_days(runs, window, &prev),
+        finished_runs: finished_runs(&finished),
     }
+}
+
+/// [`Health::days`]: `window` in 24-hour steps from its start, the last one
+/// cut short at the window's end when the window is not whole days long.
+pub fn health_days(runs: &[Run], window: &Window, prev: &Predecessors<'_>) -> Vec<HealthDay> {
+    let step = Duration::days(1);
+    let mut out = Vec::new();
+    let mut from = window.from;
+    while from < window.to {
+        let to = (from + step).min(window.to);
+        let slice = Window { from, to };
+        let ended: Vec<&Run> = runs.iter().filter(|r| ended_in(r, &slice)).collect();
+        let count = |hit: &dyn Fn(&Run) -> bool| ended.iter().filter(|&&r| hit(r)).count() as u32;
+        // Standing at `to`: a run is in a state from the moment it entered
+        // it up to, not including, the moment it left.
+        let open_at = |r: &Run| r.ended_at.is_none_or(|end| end > to);
+        out.push(HealthDay {
+            to,
+            finished: ended.len() as u32,
+            done: count(&|r| r.status == RunStatus::Done),
+            scrapped: count(&is_scrapped),
+            failed: count(&is_failed),
+            reworked: count(&|r| is_reworked(r, prev)),
+            first_pass: count(&|r| is_first_pass(r, prev)),
+            waiting: runs
+                .iter()
+                .filter(|r| r.queued_at.is_some_and(|q| q <= to) && r.started_at > to && open_at(r))
+                .count() as u32,
+            in_progress: runs.iter().filter(|r| r.started_at <= to && open_at(r)).count() as u32,
+        });
+        from = to;
+    }
+    out
+}
+
+/// [`Health::finished_runs`], newest first and capped.
+fn finished_runs(finished: &[&Run]) -> Vec<FinishedRun> {
+    let mut out: Vec<FinishedRun> = finished
+        .iter()
+        .map(|r| FinishedRun {
+            run_id: r.id.clone(),
+            task_id: r.task_id.clone(),
+            ended_at: r.ended_at.expect("finished"),
+            status: r.status,
+            cycle_s: cycle_time(r),
+        })
+        .collect();
+    out.sort_by(|a, b| b.ended_at.cmp(&a.ended_at).then_with(|| a.run_id.cmp(&b.run_id)));
+    out.truncate(FINISHED_RUNS_CAP);
+    out
 }
 
 /// Interventions in `window`, as the module doc defines them.
@@ -1974,6 +2079,46 @@ mod tests {
         assert!((h.throughput_day.value.unwrap() - 4.0 / 7.0).abs() < 1e-9);
         assert_eq!(r.health.previous.finished, 1);
         assert_eq!(r.health.previous.cycle_p50.value, Some(300.0));
+    }
+
+    #[test]
+    fn health_days_step_the_window_and_the_finished_runs_feed_the_scatter() {
+        let tasks = vec![task("t", "demo")];
+        let day = 24 * 60;
+        let mut waiting = run("w", "t", 3, RunStatus::Running, 30, None);
+        // Queued two days ago, started half an hour ago: it stood waiting at
+        // the end of every step in between.
+        waiting.queued_at = Some(ago(2 * day + 30));
+        let runs = vec![
+            run("a", "t", 1, RunStatus::Done, 6 * day + 90, Some(6 * day + 30)),
+            {
+                let mut r = run("b", "t", 2, RunStatus::Failed, 3 * day + 20, Some(3 * day + 10));
+                r.fail_kind = Some(FailKind::AgentFailed);
+                r
+            },
+            waiting,
+            run("prev", "t", 0, RunStatus::Done, 9 * day, Some(9 * day - 5)),
+        ];
+        let r = report(&input(&tasks, &runs));
+        let h = &r.health.current;
+        assert_eq!(h.days.len(), 7);
+        assert_eq!(h.days.last().unwrap().to, now());
+        assert_eq!(h.days.iter().map(|d| d.finished).sum::<u32>(), h.finished, "the steps add up to the window");
+        assert_eq!(h.days[0].done, 1);
+        assert_eq!(h.days[0].first_pass, 1);
+        assert_eq!(h.days[3].failed, 1);
+        assert_eq!(h.days[3].scrapped, 1);
+        assert_eq!(h.days[5].waiting, 1, "queued two days ago and not started by that step's end");
+        assert_eq!(h.days[6].waiting, 0);
+        assert_eq!(h.days[6].in_progress, 1, "started before now and not ended");
+        assert_eq!(h.finished_runs.len(), 2);
+        assert_eq!(h.finished_runs[0].run_id, "b", "newest first");
+        assert_eq!(h.finished_runs[0].cycle_s, None, "a failure has no cycle time");
+        assert_eq!(h.finished_runs[1].cycle_s, Some(3600.0));
+        // The ghost window has its steps but hands no dots over.
+        assert_eq!(r.health.previous.days.len(), 7);
+        assert_eq!(r.health.previous.days.iter().map(|d| d.done).sum::<u32>(), 1);
+        assert!(r.health.previous.finished_runs.is_empty());
     }
 
     #[test]
