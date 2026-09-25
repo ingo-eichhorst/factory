@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 
 import {
   DRIVER_DEFS,
+  THROUGHPUT_HISTORY_WEEKS,
   complianceSummary,
+  completionSummary,
   controlReason,
   deltaTable,
   deltaTone,
@@ -326,6 +328,50 @@ test("fanGeometry: a realistic widening band, origin at (0,height), p50 marker o
   // point *strings* -- `bandPoints`/`medianPoints` -- are rounded to one
   // decimal for a shorter `points=` attribute).
   assert.equal(geo.p90Marker.y, 100 - (7 / 12) * 100);
+  // Axis scaffolding: yMax is the same 12 the band itself scales against;
+  // xTicks is "now" (week 0), a midpoint (week 2, rounded from 3/2), and
+  // the horizon's own last week (3) -- three ticks, never more.
+  assert.equal(geo.yMax, 12);
+  assert.deepEqual(geo.xTicks, [
+    { x: 0, label: "now" },
+    { x: 200, week: 2, label: "week 2" },
+    { x: 300, week: 3, label: "week 3" },
+  ]);
+  assert.equal(geo.noSignal, false);
+  assert.equal(geo.clearedAlready, false);
+});
+
+test("fanGeometry: xTicks skips the midpoint on a one- or two-week horizon rather than colliding with 'now' or the last week", () => {
+  const oneWeek = fanGeometry({ per_week: [{ p10: 0, p50: 0, p90: 1 }], completion_week: { p10: null, p50: null, p90: null } });
+  assert.deepEqual(
+    oneWeek.xTicks.map((t) => t.label),
+    ["now", "week 1"],
+  );
+  const twoWeek = fanGeometry({ per_week: [{ p10: 0, p50: 0, p90: 1 }, { p10: 0, p50: 0, p90: 1 }], completion_week: { p10: null, p50: null, p90: null } });
+  assert.deepEqual(
+    twoWeek.xTicks.map((t) => t.label),
+    ["now", "week 1", "week 2"],
+  );
+});
+
+test("fanGeometry: noSignal is true only when every week's own p90 is exactly zero", () => {
+  const flat = { per_week: [{ p10: 0, p50: 0, p90: 0 }, { p10: 0, p50: 0, p90: 0 }], completion_week: { p10: null, p50: null, p90: null } };
+  assert.equal(fanGeometry(flat, {}).noSignal, true);
+  const oneNonZero = { per_week: [{ p10: 0, p50: 0, p90: 0 }, { p10: 0, p50: 1, p90: 2 }], completion_week: { p10: null, p50: null, p90: null } };
+  assert.equal(fanGeometry(oneNonZero, {}).noSignal, false);
+});
+
+test("fanGeometry: clearedAlready is true exactly when completion_week.p50 is 0 -- forecast_completion's own proof that backlog <= 0", () => {
+  // `forecast_completion` only ever sets `completed_at = Some(0)` when
+  // `backlog <= 0.0`, for every sample identically -- a real backlog > 0
+  // can complete no earlier than week 1. So p50 === 0 is unambiguous, and
+  // this holds even when the week's own throughput was real (non-zero).
+  const cleared = { per_week: [{ p10: 3, p50: 5, p90: 9 }], completion_week: { p10: 0, p50: 0, p90: 0 } };
+  assert.equal(fanGeometry(cleared, {}).clearedAlready, true);
+  const notCleared = { per_week: [{ p10: 0, p50: 0, p90: 0 }], completion_week: { p10: null, p50: null, p90: null } };
+  assert.equal(fanGeometry(notCleared, {}).clearedAlready, false);
+  const clearsLater = { per_week: [{ p10: 0, p50: 1, p90: 2 }], completion_week: { p10: null, p50: 1, p90: null } };
+  assert.equal(fanGeometry(clearsLater, {}).clearedAlready, false);
 });
 
 test("fanGeometry: a completion week outside 1..weeks (0, or past the horizon) yields no marker", () => {
@@ -348,6 +394,27 @@ test("formatWeek: null/undefined reads as never, otherwise 'week N'", () => {
   assert.equal(formatWeek(undefined), "never within the horizon");
   assert.equal(formatWeek(0), "week 0");
   assert.equal(formatWeek(7), "week 7");
+});
+
+test("THROUGHPUT_HISTORY_WEEKS mirrors the daemon's own compiled-in constant", () => {
+  assert.equal(THROUGHPUT_HISTORY_WEEKS, 26);
+});
+
+test("completionSummary: a known backlog <= 0 reads 'nothing to clear', regardless of what completion_week itself says", () => {
+  const fc = { p50: 3, p90: 5 }; // even a real-looking forecast
+  assert.equal(completionSummary(fc, 0), "nothing in the backlog to clear");
+  assert.equal(completionSummary(fc, -1), "nothing in the backlog to clear");
+});
+
+test("completionSummary: a known backlog > 0 reads the p50/p90 band, never 'week 0' by itself", () => {
+  const fc = { p50: 3, p90: 8 };
+  assert.equal(completionSummary(fc, 5), "p50 week 3 · p90 week 8");
+});
+
+test("completionSummary: no known backlog (the baseline card) falls back to completion_week.p50 === 0 as the only proof it has", () => {
+  assert.equal(completionSummary({ p50: 0, p90: 0 }, undefined), "nothing in the backlog to clear");
+  assert.equal(completionSummary({ p50: 0, p90: 0 }, null), "nothing in the backlog to clear");
+  assert.equal(completionSummary({ p50: 4, p90: 9 }, undefined), "p50 week 4 · p90 week 9");
 });
 
 // -------------------------------------------------------------- delta tone

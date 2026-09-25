@@ -19,7 +19,9 @@ import { scrim, closeModal, dropModal } from "./modal.js";
 import { refLinks } from "./policy-model.js";
 import {
   DRIVER_DEFS,
+  THROUGHPUT_HISTORY_WEEKS,
   complianceSummary,
+  completionSummary,
   controlReason,
   deltaTable,
   deltaTone,
@@ -65,8 +67,55 @@ let matrixScenario = null;
 
 // -------------------------------------------------------------- fan charts
 
+/// A fixed-height placeholder standing in for the chart, so a card whose
+/// forecast has nothing to draw does not shrink and shuffle the layout
+/// around it -- `.scn-fan-empty` is sized to roughly what `.scn-fan` itself
+/// occupies.
+function fanEmptyState(text) {
+  return `<div class="scn-fan-empty">${esc(text)}</div>`;
+}
+
+/// The y-axis column (top = `yMax`, bottom = 0, "in items") -- a flex sibling
+/// of `.scn-fan-plot`, not text drawn inside the SVG: that viewBox is
+/// stretched non-uniformly by `preserveAspectRatio="none"` (600×160 squashed
+/// to whatever width a card gives it), which would distort glyphs along
+/// with the geometry. Plain HTML beside the SVG scales with the card
+/// without any of that.
+function fanYAxisHtml(geo) {
+  const yMaxLabel = Number.isInteger(geo.yMax) ? String(geo.yMax) : geo.yMax.toFixed(1);
+  return `<div class="scn-fan-yaxis"><span>${esc(yMaxLabel)} items</span><span>0</span></div>`;
+}
+
+/// The x-axis row ("now" … "week N") and the p50/p90 completion-marker
+/// callouts -- percentage-positioned against `.scn-fan-plot`/`.scn-fan-xaxis`,
+/// which are exactly as wide as `.scn-fan` itself (both plain flex children
+/// of the same row the y-axis occupies, so a percentage of one is a
+/// percentage of the other -- see the CSS's own comment on why this is a
+/// flex row rather than an absolutely-positioned overlay).
+function fanXAxisHtml(geo) {
+  const pct = (px) => (geo.width ? (px / geo.width) * 100 : 0);
+  const xTicks = geo.xTicks
+    .map((t, i) => {
+      // The first tick left-aligns, the last right-aligns, anything between
+      // centres on its own point -- so "now" and the final week both stay
+      // inside the chart's own width instead of hanging off the edge.
+      const align = i === 0 ? "left" : i === geo.xTicks.length - 1 ? "right" : "center";
+      return `<span class="scn-fan-xtick scn-fan-xtick-${align}" style="left:${pct(t.x).toFixed(1)}%">${esc(t.label)}</span>`;
+    })
+    .join("");
+  return `<div class="scn-fan-xaxis-row"><div class="scn-fan-xaxis-spacer"></div><div class="scn-fan-xaxis">${xTicks}</div></div>`;
+}
+
+function fanMarkerLabelsHtml(geo) {
+  const pct = (px) => (geo.width ? (px / geo.width) * 100 : 0);
+  const label = (marker, cls, text) => (marker ? `<span class="scn-fan-mlabel ${cls}" style="left:${pct(marker.x).toFixed(1)}%">${esc(text)}</span>` : "");
+  return `${label(geo.p50Marker, "scn-fan-mlabel-p50", "p50")}${label(geo.p90Marker, "scn-fan-mlabel-p90", "p90")}`;
+}
+
 function fanChartSvg(geo, label) {
-  if (geo.empty) return `<div class="empty">${esc(geo.reason)}</div>`;
+  if (geo.empty) return fanEmptyState(geo.reason);
+  if (geo.clearedAlready) return fanEmptyState("Nothing in the backlog to clear.");
+  if (geo.noSignal) return fanEmptyState(`No finished runs in the last ${THROUGHPUT_HISTORY_WEEKS} weeks — nothing to forecast from yet.`);
   // A vertical line the full height of the chart, not a dot: under
   // `preserveAspectRatio="none"` the viewBox (600×160) is squashed to
   // whatever a card's own width gives it, so a small-radius circle can
@@ -88,13 +137,20 @@ function fanChartSvg(geo, label) {
     geo.backlogY !== null
       ? `<line class="scn-fan-backlog" x1="0" y1="${geo.backlogY.toFixed(1)}" x2="${geo.width}" y2="${geo.backlogY.toFixed(1)}"><title>backlog</title></line>`
       : "";
-  return `<svg class="scn-fan" viewBox="0 0 ${geo.width} ${geo.height}" preserveAspectRatio="none" role="img"
-      aria-label="Forecast fan chart for ${esc(label)}: p10 to p90 band with the p50 line, never a single line.">
-    <polygon class="scn-fan-band" points="${geo.bandPoints}"/>
-    <polyline class="scn-fan-median" points="${geo.medianPoints}" fill="none"/>
-    ${backlogLine}
-    ${markers.join("")}
-  </svg>
+  return `<div class="scn-fan-row">
+    ${fanYAxisHtml(geo)}
+    <div class="scn-fan-plot">
+      <svg class="scn-fan" viewBox="0 0 ${geo.width} ${geo.height}" preserveAspectRatio="none" role="img"
+          aria-label="Forecast fan chart for ${esc(label)}: p10 to p90 band with the p50 line, never a single line.">
+        <polygon class="scn-fan-band" points="${geo.bandPoints}"/>
+        <polyline class="scn-fan-median" points="${geo.medianPoints}" fill="none"/>
+        ${backlogLine}
+        ${markers.join("")}
+      </svg>
+      ${fanMarkerLabelsHtml(geo)}
+    </div>
+  </div>
+  ${fanXAxisHtml(geo)}
   <div class="chleg"><span><i class="scn-leg-band"></i>p10–p90</span><span><i class="scn-leg-median"></i>p50</span>${
     geo.backlogY !== null ? `<span><i class="scn-leg-backlog"></i>backlog</span>` : ""
   }</div>`;
@@ -127,7 +183,7 @@ function baselineCardHtml() {
   return `<article class="scn-card scn-card-baseline">
     <div class="scn-card-head"><h3>Baseline</h3><span class="sub">today, no overlay</span></div>
     ${fanChartSvg(geo, "the baseline")}
-    <div class="sub">completion, from the p10–p90 band: p50 ${esc(formatWeek(fc.p50))} · p90 ${esc(formatWeek(fc.p90))}</div>
+    <div class="sub">completion, from the p10–p90 band: ${esc(completionSummary(fc))}</div>
   </article>`;
 }
 
@@ -150,7 +206,11 @@ function driverOverrideChipsHtml(s) {
       const text = isText ? raw : `${raw} — unquoted, a finding`;
       const dropped = isText && !(id in applied);
       const hint = dropped ? `No baseline value for ${id} here -- this override is silently ignored; use =N to set it outright.` : "";
-      return `<span class="scn-chip${dropped ? " scn-chip-dropped" : ""}"${hint ? ` title="${esc(hint)}"` : ""}>${esc(id)}: ${esc(text)}</span>`;
+      // The full reason lives in `title`, for a hover; a short version is
+      // inline too (build item 7) -- a struck-through chip alone does not
+      // say *why* it has no effect, and not everyone reading this hovers.
+      const inline = dropped ? ` <span class="scn-chip-reason">(no baseline yet)</span>` : "";
+      return `<span class="scn-chip${dropped ? " scn-chip-dropped" : ""}"${hint ? ` title="${esc(hint)}"` : ""}>${esc(id)}: ${esc(text)}${inline}</span>`;
     })
     .join("")}</div>`;
 }
@@ -160,14 +220,19 @@ function scenarioCardHtml(s) {
   const fc = s.forecast.completion_week;
   const kindChips = (s.scenario.kind || []).map((k) => `<span class="scn-chip">${esc(k)}</span>`).join("");
   const signposts = signpostRows(s);
+  // A short label next to each light -- metric title + state -- not a bare
+  // dot: a tooltip/title alone is a mouse-only affordance, and a card is
+  // meant to be scanned without hovering every one of them.
   const lights = signposts
     .map((sp) => {
-      const text = `${metricTitle(sp.metric, metricDefs)} ${sp.threshold} — ${sp.label}: ${sp.reason}`;
-      // `title` alone is a mouse-only affordance; `tabindex`/`role="img"`/
-      // `aria-label` give the same text to a keyboard or screen-reader user
-      // (build item 10) -- the strip above needs none of this, since its
-      // own title text is already visible, not hidden behind a hover.
-      return `<span class="scn-light ${sp.cls}" tabindex="0" role="img" aria-label="${esc(text)}" title="${esc(text)}"></span>`;
+      const title = metricTitle(sp.metric, metricDefs);
+      const full = `${title} ${sp.threshold} — ${sp.label}: ${sp.reason}`;
+      // The state class rides the dot (`.scn-light`), the same element it
+      // decorates in the signpost strip -- so the strip's own colour rules
+      // (`.scn-sp-triggered` etc.) apply unchanged; the chip around it is a
+      // plain, neutral pill, with the state name already spelled out in the
+      // visible text.
+      return `<span class="scn-signpost-chip" title="${esc(full)}"><i class="scn-light ${sp.cls}" aria-hidden="true"></i>${esc(title)}: ${esc(sp.label)}</span>`;
     })
     .join("");
   const goalsChips = (s.goals || [])
@@ -180,10 +245,10 @@ function scenarioCardHtml(s) {
     ${s.scenario.assumptions ? `<details class="scn-assumptions"><summary>Assumptions</summary><p>${esc(s.scenario.assumptions.trim())}</p></details>` : ""}
     ${driverOverrideChipsHtml(s)}
     ${fanChartSvg(geo, s.scenario.title)}
-    <div class="sub">completion: p50 ${esc(formatWeek(fc.p50))} · p90 ${esc(formatWeek(fc.p90))} · backlog ${esc(String(s.backlog.total))}</div>
+    <div class="sub">completion: ${esc(completionSummary(fc, s.backlog.total))} · backlog ${esc(String(s.backlog.total))}</div>
     <div class="sub">${esc(complianceSummary(s))}</div>
     ${goalsChips ? `<div class="scn-chips">${goalsChips}</div>` : ""}
-    ${lights ? `<div class="scn-lights">${lights}</div>` : ""}
+    ${lights ? `<div class="scn-card-signposts">${lights}</div>` : ""}
     <div class="row-btns" style="margin-top:8px">
       <button type="button" class="btn" data-select-driver="${esc(s.scenario.name)}">Drivers</button>
       <button type="button" class="btn primary" data-promote="${esc(s.scenario.name)}">Promote…</button>
@@ -253,7 +318,7 @@ function deltaTableHtml() {
   </tr>`,
     )
     .join("");
-  return `<div class="role-matrix"><table class="scn-delta-table"><thead>${head}</thead><tbody>${rows}</tbody></table></div>`;
+  return `<div class="scn-table"><table class="scn-delta-table"><thead>${head}</thead><tbody>${rows}</tbody></table></div>`;
 }
 
 // ------------------------------------------------------------- driver panel
@@ -292,6 +357,14 @@ function outcomeHtml() {
   if (!whatifResult) return `<div class="sub">Move a slider to see outcomes.</div>`;
   const before = whatifResult.drivers.outcomes_before.effective_throughput;
   const after = whatifResult.drivers.outcomes_after.effective_throughput;
+  // `effective_throughput = throughput_week × capacity_factor × first_pass_yield`
+  // -- zero on both sides means `throughput_week` itself is zero (a fresh
+  // instance, or a slider that has not moved it yet), which no amount of
+  // `capacity_factor`/`first_pass_yield` swinging can change. A note, not a
+  // "0.00 → 0.00" line that reads as though nothing happened.
+  if (before === 0 && after === 0) {
+    return `<div class="empty">Effective throughput is 0 -- move "Throughput per week" above to explore a hypothetical rate.</div>`;
+  }
   const tone = deltaTone(before, after, "higher");
   const fc = whatifResult.forecast.completion_week;
   return `<div class="scn-outcome scn-tone-${tone.tone}">Effective throughput: ${before.toFixed(2)} → ${after.toFixed(2)} / week</div>
@@ -302,6 +375,12 @@ function tornadoSvg() {
   if (!whatifResult) return "";
   const layout = tornadoLayout(whatifResult.drivers.tornado);
   if (!layout.bars.length) return `<div class="empty">No drivers to compare.</div>`;
+  // Every bar spans zero exactly when `effective_throughput` itself is zero
+  // on both sides (`outcomeHtml`'s own note covers why) -- three empty
+  // hairlines say nothing a person can act on; one line does.
+  if (layout.bars.every((b) => b.span === 0)) {
+    return `<div class="empty">No driver moves effective throughput right now -- see the note above.</div>`;
+  }
   const rowH = 24;
   const gap = 8;
   const labelW = 130;
@@ -448,7 +527,7 @@ function matrixTableHtml(result) {
       return `<tr><td>${esc(scope)}</td>${cells}</tr>`;
     })
     .join("");
-  return `<div class="role-matrix"><table class="scn-matrix-table"><thead>${head}</thead><tbody>${rows}</tbody></table></div>`;
+  return `<div class="scn-table"><table class="scn-matrix-table"><thead>${head}</thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function matrixSectionHtml() {

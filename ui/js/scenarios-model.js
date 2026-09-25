@@ -172,6 +172,14 @@ export function signpostStrip(report) {
 
 // -------------------------------------------------------------- fan charts
 
+/// `THROUGHPUT_HISTORY_WEEKS` in `factory_core::scenario` -- 26
+/// non-overlapping weekly sums, chosen to match `Horizon::default()`'s own
+/// 26 weeks (README, "Throughput history"). Fixed, compiled-in vocabulary,
+/// mirrored here the same way `DRIVER_DEFS` mirrors `driver_defs()`, so the
+/// no-signal empty state can name the real window without a value the wire
+/// never sends.
+export const THROUGHPUT_HISTORY_WEEKS = 26;
+
 /// A fan chart's geometry for one `Forecast` -- p10/p90 band polygon, the
 /// p50 polyline, and (when the caller passes a completion week) a marker on
 /// each line at the week it lands on. Deliberately reads the marker's `y`
@@ -182,6 +190,14 @@ export function signpostStrip(report) {
 /// reaches the wire at all) exactly the way it works for a scenario's own
 /// card. `backlog`, when given, only draws the dashed reference line a
 /// scenario's own `ScenarioBacklog.total` places on its band.
+///
+/// Two states are worth drawing as an explicit empty message instead of a
+/// flat, empty-looking chart (`scenarios.js`'s own job, this file only says
+/// which applies): `clearedAlready` -- `completion_week.p50 === 0`, which
+/// `forecast_completion` only ever produces when `backlog <= 0.0` (every
+/// sample completes at week 0 identically; a real backlog can only clear at
+/// week 1 or later) -- and `noSignal` -- every week's own p90 is exactly
+/// zero, meaning the throughput history sampled from had nothing in it.
 export function fanGeometry(forecast, opts = {}) {
   const width = opts.width ?? 600;
   const height = opts.height ?? 160;
@@ -206,11 +222,24 @@ export function fanGeometry(forecast, opts = {}) {
     return { week, x: mx, y: my };
   };
 
+  // A handful of x ticks -- "now" (week 0), a midpoint, and the horizon's
+  // last week -- never more: the issue's own "keep it light" for this
+  // chart. `midWeek` is skipped when it would land on "now" or the last
+  // week itself (a one- or two-week horizon), so two ticks never collide.
+  const midWeek = Math.round(n / 2);
+  const xTicks = [{ x: 0, label: "now" }];
+  if (midWeek > 0 && midWeek < n) xTicks.push({ x: x(midWeek), week: midWeek, label: `week ${midWeek}` });
+  xTicks.push({ x: width, week: n, label: `week ${n}` });
+
   return {
     empty: false,
+    noSignal: forecast.per_week.every((p) => p.p90 === 0),
+    clearedAlready: forecast.completion_week.p50 === 0,
     width,
     height,
     weeks: n,
+    yMax: maxY,
+    xTicks,
     bandPoints: fmt(p10Line.concat([...p90Line].reverse())),
     medianPoints: fmt(medianLine),
     p50Marker: markerFor(forecast.completion_week.p50, medianLine),
@@ -221,6 +250,18 @@ export function fanGeometry(forecast, opts = {}) {
 
 export function formatWeek(w) {
   return w === null || w === undefined ? "never within the horizon" : `week ${w}`;
+}
+
+/// The card's one-line completion summary -- "nothing in the backlog to
+/// clear" when there is nothing to clear, `p50 …  p90 …` otherwise. Prefers
+/// a known `backlogTotal` (a scenario's own `ScenarioBacklog.total`, always
+/// on the wire) when the caller has one; falls back to the same
+/// `completion_week.p50 === 0` proof `fanGeometry`'s own `clearedAlready`
+/// uses for the baseline card, which carries no backlog of its own at all.
+export function completionSummary(fc, backlogTotal) {
+  const cleared = backlogTotal !== null && backlogTotal !== undefined ? backlogTotal <= 0 : fc.p50 === 0;
+  if (cleared) return "nothing in the backlog to clear";
+  return `p50 ${formatWeek(fc.p50)} · p90 ${formatWeek(fc.p90)}`;
 }
 
 // -------------------------------------------------------------- delta table

@@ -190,7 +190,14 @@ test("loading asks for the selected scope, then renders the board, delta table, 
   assert.equal(elements["scn-count"].textContent, "1 scenario");
   assert.match(elements["scn-board"].innerHTML, /EU AI Act applies to our agents from 2027/);
   assert.match(elements["scn-board"].innerHTML, /Baseline/);
-  assert.match(elements["scn-board"].innerHTML, /class="scn-fan"/, "a fan chart is drawn for both the baseline and the scenario card");
+  // This fixture is the honest degenerate case (no finished runs at all):
+  // the baseline's own backlog is already clear (`completion_week.p50 === 0`)
+  // and the scenario's own forecast has no throughput signal (`per_week`
+  // all zero) -- both correctly draw an explicit empty state rather than an
+  // empty-looking `<svg>` (fan-chart geometry itself, with a real widening
+  // band, is covered directly in scenarios-model.test.js).
+  assert.match(elements["scn-board"].innerHTML, /Nothing in the backlog to clear\./);
+  assert.match(elements["scn-board"].innerHTML, /No finished runs in the last 26 weeks/);
   assert.match(elements["scn-signposts"].innerHTML, /scn-sp-triggered/, "the triggered throughput signpost lights up");
   assert.match(elements["scn-delta"].innerHTML, /Effective throughput/);
   assert.match(elements["scn-drivers"].innerHTML, /Capacity factor/);

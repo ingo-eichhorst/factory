@@ -1599,8 +1599,19 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
   flex: 0 0 auto; width: 10px; height: 10px; margin-top: 3px; border-radius: 50%;
   background: var(--sunk); border: 1.5px solid var(--line);
 }
-.scn-lights { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
-.scn-lights .scn-light { margin-top: 0; }
+/* A card's own signposts: a short label next to each light -- metric title
+   + state -- not a bare dot a mouse has to find and hover (visual QA). The
+   state colour still rides `.scn-light` itself (the dot), the same element
+   the strip above colours; the chip around it is a plain, wrapping pill so
+   a long metric title never pushes the card wider (`white-space: normal`,
+   matching `.scn-chip`'s own fix just below). */
+.scn-card-signposts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.scn-signpost-chip {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%; white-space: normal;
+  font: 500 10.5px/1.4 var(--sans); padding: 2px 8px 2px 6px; border-radius: 10px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2);
+}
+.scn-signpost-chip .scn-light { margin-top: 0; }
 .scn-sp-quiet { background: var(--run); border-color: var(--run); }
 .scn-sp-not_yet_active { background: transparent; border-color: var(--faint); border-style: dashed; }
 .scn-sp-no_data { background: transparent; border-color: var(--muted); border-style: dotted; }
@@ -1623,8 +1634,14 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
 .scn-card-head h3 { margin: 0; font: 600 14px/1.3 var(--cond); color: var(--ink); }
 .scn-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .scn-chip {
-  font: 500 10px/1.6 var(--sans); padding: 1px 8px; border-radius: 10px; background: var(--panel-2);
-  border: 1px solid var(--line); color: var(--ink-2); white-space: nowrap;
+  display: inline-block; max-width: 100%; font: 500 10px/1.6 var(--sans); padding: 1px 8px; border-radius: 10px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2);
+  /* A KR-probability chip's reason text ("not modelled -- ratio key
+     results...") is a sentence, not a word -- `nowrap` pushed it past the
+     card's own edge (visual QA). Wrapping needs `max-width` to have
+     anything to wrap against; `inline-block` (not the row's own
+     `inline-flex`) is what makes that width apply at all. */
+  white-space: normal; word-break: break-word;
 }
 .scn-chip.scn-assumption { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
 /* An authored driver override with no baseline value to be relative to --
@@ -1632,6 +1649,11 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
    so; a dashed border is this page's one honest flag for it (see
    `driverOverrideChipsHtml`'s own doc comment in `scenarios.js`). */
 .scn-chip.scn-chip-dropped { border-style: dashed; border-color: var(--faint); color: var(--faint); text-decoration: line-through; }
+/* The short inline reason on a dropped chip -- not struck through itself
+   (it is the explanation, not the ignored value), and not part of the
+   `title` tooltip alone, which a mouse-only affordance leaves a keyboard or
+   touch user without. */
+.scn-chip-reason { text-decoration: none; opacity: .85; }
 .scn-assumptions { margin-top: 8px; font-size: 12px; }
 .scn-assumptions summary { cursor: pointer; color: var(--ink-2); font-weight: 500; }
 .scn-assumptions p { margin: 6px 0 0; color: var(--ink-2); }
@@ -1640,8 +1662,53 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
    (`scenarios-model.js`) -- this file only paints what that function
    already laid out. The band is never a single line (the issue's own
    guardrail); the backlog line and the two completion markers are each
-   optional per `fanGeometry`'s own doc comment. */
-.scn-fan { width: 100%; height: 140px; display: block; margin-top: 8px; }
+   optional per `fanGeometry`'s own doc comment.
+
+   A fixed-height placeholder for the two states worth saying in words
+   rather than drawing a flat, empty-looking chart: `clearedAlready`
+   (nothing left in the backlog) and `noSignal` (no throughput history to
+   sample from) -- see `fanGeometry`'s own doc comment on how each is told
+   apart, and `fanChartSvg`'s in `scenarios.js`. */
+.scn-fan-empty {
+  height: 140px; margin-top: 8px; display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: 10px 16px; color: var(--muted); font-size: 11.5px; line-height: 1.4;
+  background: var(--sunk); border: 1px dashed var(--line-soft); border-radius: 4px;
+}
+
+/* The y-axis (max at top, 0 at bottom) and the plot are flex siblings in
+   one row, not an axis absolutely positioned over the plot: a percentage
+   `left`/`top` on an absolutely-positioned element resolves against its
+   nearest positioned ancestor's *padding* box, which would put a marker
+   label's `left: 50%` under the y-axis column instead of the chart's own
+   midpoint. Two plain flex children of equal, adjoining widths need no such
+   arithmetic -- `.scn-fan-plot` *is* exactly as wide as `.scn-fan` itself,
+   so a percentage of one is a percentage of the other. `.scn-fan-xaxis-row`
+   repeats the same `36px` y-axis width as an empty spacer so its own ticks
+   land under the plot, not under where the y-axis labels are. */
+.scn-fan-row { display: flex; align-items: stretch; gap: 6px; margin-top: 8px; }
+.scn-fan-yaxis {
+  flex: 0 0 36px; display: flex; flex-direction: column; justify-content: space-between;
+  font: 400 9px/1.15 var(--mono); color: var(--faint); text-align: right; padding: 1px 0;
+}
+/* "N items" wraps onto its own second line rather than overflowing the
+   36px column; "0" alone never needs to. */
+.scn-fan-yaxis span:first-child { white-space: normal; }
+.scn-fan-plot { position: relative; flex: 1 1 auto; min-width: 0; }
+.scn-fan { width: 100%; height: 140px; display: block; }
+.scn-fan-mlabel {
+  position: absolute; top: 2px; transform: translateX(-50%); white-space: nowrap; pointer-events: none;
+  font: 600 9px/1 var(--mono); padding: 1px 3px; border-radius: 2px; background: var(--canvas);
+}
+.scn-fan-mlabel-p50 { color: var(--signal); }
+.scn-fan-mlabel-p90 { color: var(--faint); }
+.scn-fan-xaxis-row { display: flex; gap: 6px; margin-top: 3px; }
+.scn-fan-xaxis-spacer { flex: 0 0 36px; }
+.scn-fan-xaxis { position: relative; flex: 1 1 auto; min-width: 0; height: 11px; font: 400 9.5px/1 var(--mono); color: var(--faint); }
+.scn-fan-xtick { position: absolute; top: 0; white-space: nowrap; }
+.scn-fan-xtick-left { transform: translateX(0); }
+.scn-fan-xtick-center { transform: translateX(-50%); }
+.scn-fan-xtick-right { transform: translateX(-100%); }
+
 .scn-fan-band { fill: var(--signal-wash); stroke: none; }
 .scn-fan-median { stroke: var(--signal); stroke-width: 1.6; }
 .scn-fan-backlog { stroke: var(--wait); stroke-width: 1.2; stroke-dasharray: 4 3; }
@@ -1663,6 +1730,18 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
   background: var(--sunk); border: 1px solid var(--line-soft); border-radius: 4px; padding: 10px 12px; margin: 8px 0;
   overflow-x: auto; font: 400 11.5px/1.6 var(--mono); color: var(--ink-2); white-space: pre;
 }
+
+/* The delta table and the policy matrix's own scroll wrapper -- deliberately
+   its own class, not `.role-matrix`: that one is the Roles tab's grant
+   matrix, whose `thead th { height: 96px }` makes room for a rotated
+   column-header label (`writing-mode: vertical-rl` on a `<span>` neither of
+   these tables wraps its header text in). Reusing it left a tall, empty
+   block above two plain horizontal header rows (visual QA) -- this table
+   never rotates anything, so its own header gets an ordinary height. */
+.scn-table { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+.scn-table table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.scn-table th, .scn-table td { padding: 6px 9px; border-bottom: 1px solid var(--line-soft); text-align: left; }
+.scn-table thead th { vertical-align: bottom; font: 600 9.5px/1.3 var(--cond); letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
 
 /* -------------------------------------------------------------- delta table
    `exact: true` (a driver, the one v1 outcome, a framework's open+stale
@@ -1688,7 +1767,10 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
 }
 .scn-driver-disabled { opacity: .7; flex-direction: column; align-items: flex-start; gap: 3px; }
 .scn-driver-label { flex: 1 1 auto; font: 500 12px/1.3 var(--sans); color: var(--ink); min-width: 0; }
-.scn-driver-row input[type=range] { flex: 1 1 100px; }
+/* The browser's own default is blue in both themes, which clashes with
+   `--fault` red in light theme's own palette and matches neither theme's
+   `--signal` on purpose otherwise (visual QA). */
+.scn-driver-row input[type=range] { flex: 1 1 100px; accent-color: var(--signal); }
 .scn-driver-row output { font: 600 12px/1 var(--mono); color: var(--ink); min-width: 42px; text-align: right; }
 .scn-outcome { font: 500 13px/1.4 var(--sans); }
 .scn-outcome.scn-tone-good { color: var(--run); }
