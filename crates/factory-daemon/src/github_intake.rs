@@ -92,8 +92,7 @@ async fn poll_once(engine: &Engine, gh: &Path) {
             }
         };
         for issue in issues {
-            let reference = format!("https://github.com/{repo}/issues/{}", issue.number);
-            if issue.url.trim_end_matches('/') != reference {
+            let Some(reference) = github_issue_reference(&issue.url, issue.number) else {
                 tracing::warn!(
                     scope = %scope.name,
                     repository = %repo,
@@ -102,7 +101,7 @@ async fn poll_once(engine: &Engine, gh: &Path) {
                     "GitHub returned a non-canonical issue URL; skipping it"
                 );
                 continue;
-            }
+            };
             if received.contains(&reference) {
                 continue;
             }
@@ -202,6 +201,30 @@ fn github_repo(remote: &str) -> Option<String> {
         return None;
     }
     Some(format!("{owner}/{repo}"))
+}
+
+/// Validate the canonical public issue URL returned by GitHub without tying
+/// it to the spelling of the configured remote. Repository names are
+/// case-insensitive and old remote names may redirect, while `gh` returns the
+/// repository's current canonical URL.
+fn github_issue_reference(url: &str, number: u64) -> Option<String> {
+    let path = url.strip_prefix("https://github.com/")?;
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    let issues = parts.next()?;
+    let url_number = parts.next()?;
+    if owner.is_empty()
+        || repo.is_empty()
+        || issues != "issues"
+        || url_number.parse::<u64>().ok()? != number
+        || parts.next().is_some()
+        || owner.chars().any(char::is_whitespace)
+        || repo.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(url.to_owned())
 }
 
 #[cfg(test)]
@@ -349,6 +372,26 @@ mod tests {
         assert_eq!(github_repo("main"), None);
     }
 
+    #[test]
+    fn github_intake_validates_returned_public_issue_urls() {
+        assert_eq!(
+            github_issue_reference("https://github.com/acme/widgets/issues/17", 17),
+            Some("https://github.com/acme/widgets/issues/17".into())
+        );
+        assert_eq!(
+            github_issue_reference("https://github.com/acme/widgets/issues/18", 17),
+            None
+        );
+        assert_eq!(
+            github_issue_reference("https://example.com/acme/widgets/issues/17", 17),
+            None
+        );
+        assert_eq!(
+            github_issue_reference("https://github.com/acme/widgets/pulls/17", 17),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn github_intake_uses_the_read_only_labelled_command_and_receives_once() {
         let scratch = Scratch::new();
@@ -389,16 +432,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_intake_deduplicates_persisted_state_after_restart() {
+    async fn github_intake_uses_canonical_url_across_mixed_case_remote_and_restart() {
         let scratch = Scratch::new();
         let log = scratch.0.join("args");
         let output = issue("acme/widgets", 17, "Widget fails");
-        let gh = scratch.fixture(&script(&log, &[("acme/widgets", &output, 0)]));
+        let gh = scratch.fixture(&script(&log, &[("ACME/Widgets", &output, 0)]));
         let shared = store();
-        let configured = factory(vec![scope("web", "https://github.com/acme/widgets.git")]);
+        let configured = factory(vec![scope("web", "https://github.com/ACME/Widgets.git")]);
+        let running = engine(configured.clone(), shared.clone());
+        poll_once(&running, &gh).await;
+        poll_once(&running, &gh).await;
         poll_once(&engine(configured.clone(), shared.clone()), &gh).await;
-        poll_once(&engine(configured, shared.clone()), &gh).await;
-        assert_eq!(shared.list(&TaskFilter::default()).await.unwrap().len(), 1);
+        let tasks = shared.list(&TaskFilter::default()).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0]
+                .intake
+                .as_ref()
+                .and_then(|intake| intake.source.reference.as_deref()),
+            Some("https://github.com/acme/widgets/issues/17")
+        );
     }
 
     #[tokio::test]
