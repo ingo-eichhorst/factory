@@ -424,6 +424,12 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.result {
                 task.result = Some(v);
             }
+            if patch.clear_routed_to {
+                task.routed_to = None;
+            }
+            if let Some(v) = patch.routed_to {
+                task.routed_to = Some(v);
+            }
             if patch.clear_error {
                 task.error = None;
             }
@@ -537,6 +543,7 @@ impl TaskStore for SqliteStore {
                 session: None,
                 token: Some(new.token.clone()),
                 result: None,
+                routed_to: None,
                 error: None,
                 started_at,
                 ended_at: None,
@@ -569,6 +576,7 @@ impl TaskStore for SqliteStore {
                 // task before it (`#122`): neither mirror may outlive it.
                 task.failure = None;
                 task.closure = None;
+                task.routed_to = None;
                 task.updated_at = Utc::now();
                 write_task(&tx, &task)?;
             }
@@ -614,6 +622,12 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.result {
                 run.result = Some(v);
+            }
+            if patch.clear_routed_to {
+                run.routed_to = None;
+            }
+            if let Some(v) = patch.routed_to {
+                run.routed_to = Some(v);
             }
             if let Some(v) = patch.error {
                 run.error = Some(v);
@@ -1034,6 +1048,7 @@ mod tests {
             schedule: None,
             estimate_seconds: None,
             result: None,
+            routed_to: None,
             error: None,
             runs: 0,
             ack_timeout_seconds: None,

@@ -242,6 +242,9 @@ pub struct Run {
     pub token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
+    /// The workflow route selected by this run's terminal `done` report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -371,6 +374,10 @@ pub struct RunPatch {
     pub clear_session: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_to: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_routed_to: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// A finished run has no more use for its token.

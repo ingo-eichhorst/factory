@@ -12,7 +12,7 @@ pub struct CanvasPoint {
     pub y: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WorkflowNode {
     pub id: String,
     #[serde(default)]
@@ -26,22 +26,79 @@ pub struct WorkflowNode {
     /// What a `Gate` node checks. `None` on every `Task` node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateSpec>,
-    /// A task node that may send the work back (`#140`): when the agent
-    /// itself reports this node's run `failed`, the path from `to` down to
-    /// this node runs again, up to `max_rounds` times. The one edge that
-    /// points backwards, kept off `edges` so the graph stays acyclic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rework: Option<ReworkSpec>,
+    /// Ordered conditional exits, checked after this task reports `done`.
+    /// The first condition that holds selects its target exclusively; when
+    /// none holds the node's ordinary outgoing edges remain the default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exits: Vec<WorkflowExit>,
 }
 
-/// See [`WorkflowNode::rework`].
+/// One ordered conditional route out of a task node (`#149`). Exactly one of
+/// `check` and `agent` is present. A backwards exit also carries its bounded
+/// number of rounds; a forwards exit is backed by an ordinary graph edge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReworkSpec {
-    /// The task node, an ancestor of this one, that the work goes back to.
+pub struct WorkflowExit {
     pub to: String,
-    /// How many times the work may go back. Once they are used up, a
-    /// `failed` report fails the run like any other.
-    pub max_rounds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<u32>,
+}
+
+/// The old on-disk shape. Kept only at the serde boundary: definitions and
+/// workflow-run snapshots written before #149 load as one `agent:` exit and
+/// are serialized in the new shape the next time they are stored.
+#[derive(Debug, Clone, Deserialize)]
+struct WorkflowNodeWire {
+    pub id: String,
+    #[serde(default)]
+    pub position: CanvasPoint,
+    #[serde(default)]
+    pub kind: WorkflowNodeKind,
+    pub task: NewTask,
+    #[serde(default)]
+    pub gate: Option<GateSpec>,
+    #[serde(default)]
+    pub exits: Vec<WorkflowExit>,
+    #[serde(default)]
+    pub rework: Option<LegacyReworkSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyReworkSpec {
+    to: String,
+    max_rounds: u32,
+}
+
+impl<'de> Deserialize<'de> for WorkflowNode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut wire = WorkflowNodeWire::deserialize(deserializer)?;
+        if wire.exits.is_empty() {
+            if let Some(rework) = wire.rework {
+                wire.exits.push(WorkflowExit {
+                    to: rework.to,
+                    check: None,
+                    agent: Some(
+                        "work needs changes this node can describe for the target agent".into(),
+                    ),
+                    max_rounds: Some(rework.max_rounds),
+                });
+            }
+        }
+        Ok(Self {
+            id: wire.id,
+            position: wire.position,
+            kind: wire.kind,
+            task: wire.task,
+            gate: wire.gate,
+            exits: wire.exits,
+        })
+    }
 }
 
 /// A value a run is started with (`#140`), written `{{name}}` in a task
@@ -334,8 +391,12 @@ impl WorkflowDefinition {
             return Err(format!("workflow contains a cycle involving {cyclic}"));
         }
         self.validate_inputs()?;
-        self.validate_rework()?;
-        for node in self.nodes.iter().filter(|n| n.kind == WorkflowNodeKind::Gate) {
+        self.validate_exits()?;
+        for node in self
+            .nodes
+            .iter()
+            .filter(|n| n.kind == WorkflowNodeKind::Gate)
+        {
             if self.gate_subject(&node.id).is_none() {
                 return Err(format!(
                     "gate node {:?} ({}) must verify exactly one task node: name it as the gate's subject, \
@@ -386,45 +447,87 @@ impl WorkflowDefinition {
         Ok(())
     }
 
-    /// A node's `rework` sends work back to one of its own ancestors, and
-    /// only from a task node: anything else would be a cycle, or a gate
-    /// deciding something it can only mirror.
-    fn validate_rework(&self) -> Result<(), String> {
+    /// Exits are ordered conditions on task nodes. A forward target must be
+    /// an explicit edge; a backward target must be an ancestor task and is
+    /// bounded. The backwards link stays out of `edges`, keeping the graph
+    /// acyclic.
+    fn validate_exits(&self) -> Result<(), String> {
         for node in &self.nodes {
-            let Some(rework) = &node.rework else { continue };
-            if node.kind != WorkflowNodeKind::Task {
-                return Err(format!("gate node {:?} cannot send work back; only a task node can", node.id));
-            }
-            if rework.max_rounds == 0 {
-                return Err(format!("node {:?} sends work back at most zero times; use at least one round", node.id));
-            }
-            match self.node(&rework.to) {
-                None => return Err(format!("node {:?} sends work back to missing node {:?}", node.id, rework.to)),
-                Some(target) if target.kind != WorkflowNodeKind::Task => {
-                    return Err(format!("node {:?} sends work back to gate node {:?}; name a task node", node.id, rework.to))
-                }
-                Some(_) => {}
-            }
-            if !self.ancestors(&node.id).contains(&rework.to) {
+            if !node.exits.is_empty() && node.kind != WorkflowNodeKind::Task {
                 return Err(format!(
-                    "node {:?} sends work back to {:?}, which does not come before it",
-                    node.id, rework.to
+                    "gate node {:?} cannot declare exits; only a task node can",
+                    node.id
                 ));
+            }
+            for (index, exit) in node.exits.iter().enumerate() {
+                let ordinal = index + 1;
+                if exit.check.is_some() == exit.agent.is_some() {
+                    return Err(format!(
+                        "node {:?} exit {ordinal} must declare exactly one of check or agent",
+                        node.id
+                    ));
+                }
+                if exit.check.as_deref().is_some_and(|c| c.trim().is_empty())
+                    || exit.agent.as_deref().is_some_and(|a| a.trim().is_empty())
+                {
+                    return Err(format!(
+                        "node {:?} exit {ordinal} has an empty condition",
+                        node.id
+                    ));
+            }
+                let target = self.node(&exit.to).ok_or_else(|| {
+                    format!(
+                        "node {:?} exit {ordinal} targets missing node {:?}",
+                        node.id, exit.to
+                    )
+                })?;
+                let backwards = self.ancestors(&node.id).contains(&exit.to);
+                if backwards {
+                    if target.kind != WorkflowNodeKind::Task {
+                        return Err(format!(
+                            "node {:?} exit {ordinal} points back to gate node {:?}; name a task node",
+                            node.id, exit.to
+                        ));
+            }
+                    if exit.max_rounds.unwrap_or(0) == 0 {
+                        return Err(format!(
+                            "node {:?} exit {ordinal} points backward and needs max_rounds of at least one",
+                            node.id
+                        ));
+                }
+                } else {
+                    if !self
+                        .edges
+                        .iter()
+                        .any(|edge| edge.from == node.id && edge.to == exit.to)
+                    {
+                        return Err(format!(
+                            "node {:?} exit {ordinal} points forward to {:?} without an explicit edge",
+                            node.id, exit.to
+                        ));
+            }
+                    if exit.max_rounds.is_some() {
+                return Err(format!(
+                            "node {:?} exit {ordinal} points forward and must not declare max_rounds",
+                            node.id
+                ));
+            }
+        }
             }
         }
         Ok(())
     }
 
-    /// What runs again when `from` sends its work back (`#140`): every node
-    /// on a path from its rework target down to `from`, both included, and
+    /// What runs again when `from` routes work back to `to`: every node
+    /// on a path from the target down to `from`, both included, and
     /// everything downstream of `from` -- none of which can have started,
     /// since it all waits on `from`. In the definition's own order. Empty
-    /// when `from` has no `rework`.
-    pub fn rework_body(&self, from: &str) -> Vec<String> {
-        let Some(to) = self.node(from).and_then(|n| n.rework.as_ref()).map(|r| r.to.clone()) else {
+    /// when `to` is not an ancestor of `from`.
+    pub fn route_back_body(&self, from: &str, to: &str) -> Vec<String> {
+        if !self.ancestors(from).contains(to) {
             return Vec::new();
-        };
-        let below_to = self.descendants(&to);
+        }
+        let below_to = self.descendants(to);
         let above_from = self.ancestors(from);
         let below_from = self.descendants(from);
         let in_body = |id: &str| {
@@ -463,6 +566,11 @@ impl WorkflowDefinition {
             node.task.instructions = substitute(&node.task.instructions, given);
             for value in node.task.labels.values_mut() {
                 *value = substitute(value, given);
+            }
+            for exit in &mut node.exits {
+                if let Some(check) = &mut exit.check {
+                    *check = substitute(check, given);
+                }
             }
         }
         Ok(out)
@@ -568,7 +676,7 @@ impl WorkflowDefinition {
                     ..Default::default()
                 },
                 gate: None,
-                rework: None,
+                exits: Vec::new(),
             }],
             edges: Vec::new(),
             revision: 1,
@@ -670,7 +778,7 @@ impl WorkflowDefinition {
                         required_by: step.required_by.clone(),
                         locked: true,
                     }),
-                    rework: None,
+                    exits: Vec::new(),
                 });
                 chain_edges.push(WorkflowEdge {
                     id: fresh(format!("{previous}->{gate_id}"), &mut edge_ids),
@@ -747,7 +855,7 @@ impl WorkflowDefinition {
         seen
     }
 
-    fn ancestors(&self, id: &str) -> BTreeSet<String> {
+    pub fn ancestors(&self, id: &str) -> BTreeSet<String> {
         let mut seen = BTreeSet::new();
         let mut stack = vec![id.to_string()];
         while let Some(current) = stack.pop() {
@@ -860,6 +968,10 @@ pub enum WorkflowNodeStatus {
     Done,
     Failed,
     Cancelled,
+    /// Bypassed because an earlier node took a conditional exit around it.
+    /// Unlike `Skipped`, this is a successful, finished route decision.
+    SkippedByRoute,
+    /// Never started because the workflow ended first.
     Skipped,
 }
 
@@ -867,7 +979,7 @@ impl WorkflowNodeStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Done | Self::Failed | Self::Cancelled | Self::Skipped
+            Self::Done | Self::Failed | Self::Cancelled | Self::SkippedByRoute | Self::Skipped
         )
     }
 }
@@ -880,8 +992,8 @@ pub struct WorkflowNodeRun {
     pub task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// How many times work was sent back through this node (`#140`): 0 on
-    /// its first pass. On a node with `rework`, the rounds it has used.
+    /// How many times work was sent back through this node: 0 on its first
+    /// pass; otherwise the backwards-exit rounds it has used.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub round: u32,
     /// The tasks earlier rounds spawned here, oldest first. Kept so their
@@ -892,6 +1004,16 @@ pub struct WorkflowNodeRun {
     /// next task is dispatched with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rework_request: Option<ReworkRequest>,
+    /// Set once this node's ordered exits have been evaluated. Necessary so
+    /// a later reconciliation does not run a `check:` command twice.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exits_evaluated: bool,
+    /// The exclusive target selected by an exit, if one held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_to: Option<String>,
+    /// Human-readable route reason for `SkippedByRoute` nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
 }
 
 /// Why a node is running again -- see [`WorkflowNodeRun::rework_request`].
@@ -971,6 +1093,9 @@ impl WorkflowRun {
                     round: 0,
                     superseded_task_ids: Vec::new(),
                     rework_request: None,
+                    exits_evaluated: false,
+                    routed_to: None,
+                    skip_reason: None,
                 })
                 .collect(),
             definition,
@@ -988,37 +1113,51 @@ impl WorkflowRun {
 /// What [`WorkflowRun::send_back`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendBack {
-    /// The node has no `rework`: its failure is the run's.
-    NoRework,
+    /// The requested target is not a bounded backwards exit of this node.
+    NoExit,
     /// The path runs again; this is round `round` of `max_rounds`.
     Sent { round: u32, max_rounds: u32 },
-    /// Every round is used up: the failure stands.
+    /// Every round is used up: the route request must be refused.
     Exhausted { max_rounds: u32 },
 }
 
 impl WorkflowRun {
-    /// Send `from`'s work back to its rework target (`#140`), if it has one
+    /// Send `from`'s work back through its declared backwards exit, if it has one
     /// and a round is left: every node on the path from the target down to
     /// `from` goes back to `unstarted` with its task moved to
     /// `superseded_task_ids` and its round counted up, the target is told
     /// who sent it back, and the not-yet-started nodes below `from` (a gate
     /// mirrored `skipped` off the failed run, say) are `unstarted` again.
     /// Nothing is spawned here; the next advance does that.
-    pub fn send_back(&mut self, from: &str) -> SendBack {
-        let Some(spec) = self.definition.nodes.iter().find(|n| n.id == from).and_then(|n| n.rework.clone()) else {
-            return SendBack::NoRework;
+    pub fn send_back(&mut self, from: &str, to: &str) -> SendBack {
+        let Some(spec) = self
+            .definition
+            .nodes
+            .iter()
+            .find(|n| n.id == from)
+            .and_then(|n| {
+                n.exits
+                    .iter()
+                    .find(|exit| exit.to == to && exit.max_rounds.is_some())
+            })
+            .cloned()
+        else {
+            return SendBack::NoExit;
         };
         let Some(used) = self.nodes.iter().find(|n| n.node_id == from).map(|n| n.round) else {
-            return SendBack::NoRework;
+            return SendBack::NoExit;
         };
-        if used >= spec.max_rounds {
-            return SendBack::Exhausted { max_rounds: spec.max_rounds };
+        let max_rounds = spec.max_rounds.unwrap_or(0);
+        if used >= max_rounds {
+            return SendBack::Exhausted { max_rounds };
         }
         let from_task = self.nodes.iter().find(|n| n.node_id == from).and_then(|n| n.task_id.clone()).unwrap_or_default();
         let downstream = self.definition.descendants(from);
         let round = used + 1;
-        for id in self.definition.rework_body(from) {
-            let Some(node) = self.nodes.iter_mut().find(|n| n.node_id == id) else { continue };
+        for id in self.definition.route_back_body(from, to) {
+            let Some(node) = self.nodes.iter_mut().find(|n| n.node_id == id) else {
+                continue;
+            };
             if downstream.contains(&id) {
                 // Waits on `from`, so it never started -- only a mirror
                 // may have marked it.
@@ -1034,15 +1173,39 @@ impl WorkflowRun {
             node.status = WorkflowNodeStatus::Unstarted;
             node.error = None;
             node.round = round;
+            node.exits_evaluated = false;
+            node.routed_to = None;
+            node.skip_reason = None;
             node.rework_request = (id == spec.to).then(|| ReworkRequest {
                 from_node: from.to_string(),
                 from_task: from_task.clone(),
                 round,
-                max_rounds: spec.max_rounds,
+                max_rounds,
             });
         }
         self.updated_at = Utc::now();
-        SendBack::Sent { round, max_rounds: spec.max_rounds }
+        SendBack::Sent { round, max_rounds }
+    }
+
+    /// Take a forward exit exclusively. Nodes downstream of `from` that are
+    /// not the target or downstream of it are bypassed by this route.
+    pub fn route_forward(&mut self, from: &str, to: &str) {
+        let below_from = self.definition.descendants(from);
+        let mut kept = self.definition.descendants(to);
+        kept.insert(to.to_string());
+        for node in &mut self.nodes {
+            if below_from.contains(&node.node_id)
+                && !kept.contains(&node.node_id)
+                && node.status == WorkflowNodeStatus::Unstarted
+            {
+                node.status = WorkflowNodeStatus::SkippedByRoute;
+                node.skip_reason = Some(format!("skipped ({from} -> {to})"));
+            }
+        }
+        if let Some(node) = self.nodes.iter_mut().find(|node| node.node_id == from) {
+            node.routed_to = Some(to.to_string());
+        }
+        self.updated_at = Utc::now();
     }
 }
 
@@ -1060,7 +1223,7 @@ mod tests {
                 ..Default::default()
             },
             gate: None,
-            rework: None,
+            exits: Vec::new(),
         }
     }
 
@@ -1247,9 +1410,16 @@ mod tests {
             id: id.into(),
             position: CanvasPoint::default(),
             kind: WorkflowNodeKind::Gate,
-            task: NewTask { title: format!("gate {step}"), ..Default::default() },
-            gate: Some(GateSpec { step: step.into(), command: Some("true".into()), ..Default::default() }),
-            rework: None,
+            task: NewTask {
+                title: format!("gate {step}"),
+                ..Default::default()
+            },
+            gate: Some(GateSpec {
+                step: step.into(),
+                command: Some("true".into()),
+                ..Default::default()
+            }),
+            exits: Vec::new(),
         }
     }
 
@@ -1384,7 +1554,12 @@ mod tests {
 
     fn reviewing(max_rounds: u32) -> WorkflowDefinition {
         let mut review = node("review");
-        review.rework = Some(ReworkSpec { to: "implement".into(), max_rounds });
+        review.exits = vec![WorkflowExit {
+            to: "implement".into(),
+            check: None,
+            agent: Some("findings the implementer can fix".into()),
+            max_rounds: Some(max_rounds),
+        }];
         definition(
             vec![node("triage"), node("implement"), gate_node("implement.tests", "tests"), review, node("finalize")],
             vec![
@@ -1397,27 +1572,117 @@ mod tests {
     }
 
     #[test]
-    fn rework_must_point_back_at_an_ancestor_task_node() {
+    fn exits_validate_topology_conditions_and_rounds() {
         assert!(reviewing(5).validate().is_ok());
 
         let mut forward = reviewing(5);
-        forward.nodes[1].rework = Some(ReworkSpec { to: "review".into(), max_rounds: 1 });
-        assert!(forward.validate().unwrap_err().contains("does not come before it"));
+        forward.nodes[1].exits = vec![WorkflowExit {
+            to: "review".into(),
+            check: None,
+            agent: Some("skip".into()),
+            max_rounds: None,
+        }];
+        assert!(forward
+            .validate()
+            .unwrap_err()
+            .contains("without an explicit edge"));
 
         let mut to_gate = reviewing(5);
-        to_gate.nodes[3].rework = Some(ReworkSpec { to: "implement.tests".into(), max_rounds: 1 });
+        to_gate.nodes[3].exits = vec![WorkflowExit {
+            to: "implement.tests".into(),
+            check: None,
+            agent: Some("retry".into()),
+            max_rounds: Some(1),
+        }];
         assert!(to_gate.validate().unwrap_err().contains("gate node"));
 
-        assert!(reviewing(0).validate().unwrap_err().contains("zero times"));
+        assert!(reviewing(0)
+            .validate()
+            .unwrap_err()
+            .contains("at least one"));
+
+        let mut both = reviewing(1);
+        both.nodes[3].exits[0].check = Some("true".into());
+        assert!(both.validate().unwrap_err().contains("exactly one"));
+
+        let mut neither = reviewing(1);
+        neither.nodes[3].exits[0].agent = None;
+        assert!(neither.validate().unwrap_err().contains("exactly one"));
+    }
+
+    #[test]
+    fn legacy_rework_loads_as_one_agent_exit_in_definitions_and_in_flight_runs() {
+        let node: WorkflowNode = serde_yaml_ng::from_str(
+            "id: review\ntask: { title: Review }\nrework: { to: implement, max_rounds: 5 }\n",
+        )
+        .unwrap();
+        assert_eq!(node.exits.len(), 1);
+        assert_eq!(node.exits[0].to, "implement");
+        assert!(node.exits[0].agent.is_some());
+        assert_eq!(node.exits[0].max_rounds, Some(5));
+
+        let mut run = WorkflowRun::new(reviewing(2), WorkflowActor::Owner);
+        let review_index = run
+            .definition
+            .nodes
+            .iter()
+            .position(|node| node.id == "review")
+            .unwrap();
+        run.nodes
+            .iter_mut()
+            .find(|node| node.node_id == "review")
+            .unwrap()
+            .round = 1;
+        let mut stored = serde_json::to_value(&run).unwrap();
+        let review = &mut stored["definition"]["nodes"][review_index];
+        review.as_object_mut().unwrap().remove("exits");
+        review["rework"] = serde_json::json!({ "to": "implement", "max_rounds": 2 });
+        let mut loaded: WorkflowRun = serde_json::from_value(stored).unwrap();
+        assert_eq!(
+            loaded.definition.nodes[review_index].exits[0].to,
+            "implement"
+        );
+        assert_eq!(
+            loaded.send_back("review", "implement"),
+            SendBack::Sent {
+                round: 2,
+                max_rounds: 2
+            },
+            "a run already one round into legacy rework keeps its remaining round"
+        );
+    }
+
+    #[test]
+    fn a_forward_route_skips_the_default_path_and_skipped_by_route_is_terminal() {
+        let mut run = WorkflowRun::new(
+            definition(
+                vec![node("a"), node("b"), node("c")],
+                vec![e("a", "b"), e("b", "c"), e("a", "c")],
+            ),
+            WorkflowActor::Owner,
+        );
+        ran(&mut run, "a", WorkflowNodeStatus::Done, "a1");
+        run.route_forward("a", "c");
+        assert_eq!(
+            run.nodes.iter().find(|n| n.node_id == "b").unwrap().status,
+            WorkflowNodeStatus::SkippedByRoute
+        );
+        assert!(WorkflowNodeStatus::SkippedByRoute.is_terminal());
+        assert_eq!(
+            run.nodes.iter().find(|n| n.node_id == "c").unwrap().status,
+            WorkflowNodeStatus::Unstarted
+        );
     }
 
     #[test]
     fn the_rework_body_is_the_path_back_and_everything_below_it() {
         assert_eq!(
-            reviewing(5).rework_body("review"),
+            reviewing(5).route_back_body("review", "implement"),
             vec!["implement", "implement.tests", "review", "finalize"]
         );
-        assert!(reviewing(5).rework_body("implement").is_empty());
+        assert!(reviewing(5)
+            .route_back_body("implement", "review")
+            .is_empty());
     }
 
     fn ran(run: &mut WorkflowRun, id: &str, status: WorkflowNodeStatus, task: &str) {
@@ -1435,9 +1700,21 @@ mod tests {
         ran(&mut run, "review", WorkflowNodeStatus::Failed, "r1");
         ran(&mut run, "finalize", WorkflowNodeStatus::Skipped, "");
 
-        assert_eq!(run.send_back("review"), SendBack::Sent { round: 1, max_rounds: 2 });
-        let node = |run: &WorkflowRun, id: &str| run.nodes.iter().find(|n| n.node_id == id).unwrap().clone();
-        assert_eq!(node(&run, "triage").status, WorkflowNodeStatus::Done, "above the target is untouched");
+        assert_eq!(
+            run.send_back("review", "implement"),
+            SendBack::Sent {
+                round: 1,
+                max_rounds: 2
+            }
+        );
+        let node = |run: &WorkflowRun, id: &str| {
+            run.nodes.iter().find(|n| n.node_id == id).unwrap().clone()
+        };
+        assert_eq!(
+            node(&run, "triage").status,
+            WorkflowNodeStatus::Done,
+            "above the target is untouched"
+        );
         let implement = node(&run, "implement");
         assert_eq!(implement.status, WorkflowNodeStatus::Unstarted);
         assert_eq!(implement.task_id, None);
@@ -1451,12 +1728,29 @@ mod tests {
         assert_eq!(node(&run, "finalize").status, WorkflowNodeStatus::Unstarted);
 
         ran(&mut run, "review", WorkflowNodeStatus::Failed, "r2");
-        assert_eq!(run.send_back("review"), SendBack::Sent { round: 2, max_rounds: 2 });
-        assert_eq!(node(&run, "implement").superseded_task_ids, vec!["i1"], "i2 never existed here");
+        assert_eq!(
+            run.send_back("review", "implement"),
+            SendBack::Sent {
+                round: 2,
+                max_rounds: 2
+            }
+        );
+        assert_eq!(
+            node(&run, "implement").superseded_task_ids,
+            vec!["i1"],
+            "i2 never existed here"
+        );
         ran(&mut run, "review", WorkflowNodeStatus::Failed, "r3");
-        assert_eq!(run.send_back("review"), SendBack::Exhausted { max_rounds: 2 });
-        assert_eq!(node(&run, "review").task_id.as_deref(), Some("r3"), "an exhausted budget changes nothing");
-        assert_eq!(run.send_back("triage"), SendBack::NoRework);
+        assert_eq!(
+            run.send_back("review", "implement"),
+            SendBack::Exhausted { max_rounds: 2 }
+        );
+        assert_eq!(
+            node(&run, "review").task_id.as_deref(),
+            Some("r3"),
+            "an exhausted budget changes nothing"
+        );
+        assert_eq!(run.send_back("triage", "implement"), SendBack::NoExit);
     }
 
     #[test]

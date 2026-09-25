@@ -204,6 +204,7 @@ export const NODE_STATUSES = [
   "done",
   "failed",
   "cancelled",
+  "skipped_by_route",
   "skipped",
 ];
 

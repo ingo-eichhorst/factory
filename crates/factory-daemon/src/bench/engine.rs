@@ -1467,6 +1467,7 @@ mod tests {
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some("command exited 0".into()),
+                    send_to: None,
                     error: None,
                     token: Some("tok".into()),
                 },

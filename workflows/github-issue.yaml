@@ -3,7 +3,7 @@
 #
 #   triage ──► implement ──► review ──► ready
 #                 ▲            │
-#                 └── rework ──┘   at most 5 times
+#                 └── agent exit ┘   at most 5 times
 #
 # A person comes in wherever an agent reports `blocked` (the run waits in
 # the Inbox until someone answers):
@@ -11,8 +11,8 @@
 #     question;
 #   * review: an issue the implementer cannot fix alone, a question, or
 #     findings still open after the fifth rework round.
-# If the fifth round's review fails anyway, the engine fails the run with
-# "needs a person" (#140).
+# Once all five rounds are used, `done --send-to implement` is refused and
+# the reviewer reports blocked with the remaining findings.
 #
 # Stored in the daemon, not read from here. After editing this file, apply it:
 #   factory workflow create --file workflows/github-issue.yaml      # first time
@@ -89,7 +89,10 @@ nodes:
 
   - id: review
     position: { x: 640, y: 0 }
-    rework: { to: implement, max_rounds: 5 }
+    exits:
+      - to: implement
+        agent: concrete findings the implementer can fix alone
+        max_rounds: 5
     task:
       title: "Review #{{issue}}"
       agent: builder
@@ -116,14 +119,14 @@ nodes:
 
         Then report exactly one of:
         - `done`: nothing blocking is left. --result: the PR URL and a short summary of the review.
-        - `failed`: there are concrete findings the implementer can fix alone. Put them in --error as a
+        - `done --send-to implement`: there are concrete findings the implementer can fix alone. Put them in --result as a
           numbered list, each with file:line and what "fixed" looks like, followed by the PR URL and branch.
           That sends the work back to implementation for another round.
         - `blocked`: an issue that cannot be fixed without a person (a design or product decision, a
           conflict with the issue as written, a missing credential), or a question. State it exactly. That
           escalates it to a person.
-        Last round: if your task title ends in "(rework 5)", the work has been sent back five times. Do not
-        report `failed`. Report `blocked` with the findings still open, so a person decides.
+        If `--send-to implement` is refused because no rounds remain, report `blocked` with the findings still
+        open, so a person decides.
 
   - id: ready
     position: { x: 960, y: 0 }

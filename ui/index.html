@@ -529,12 +529,12 @@
             <label>Acknowledgement timeout (seconds)<input id="workflow-node-ack" type="number" min="1"></label>
             <label>Run timeout (seconds)<input id="workflow-node-timeout" type="number" min="1"></label>
             <label>Blocked timeout (seconds)<input id="workflow-node-blocked" type="number" min="1"></label>
-            <!-- `#140`/`#143`: the one link that points backwards, kept on
-                 the node rather than among the edges. -->
+            <!-- `#149`: ordered conditional exits, kept on the node rather
+                 than among the graph's default edges. -->
             <div class="wf-rework" id="workflow-node-rework" role="group" aria-labelledby="workflow-node-rework-h">
-              <h3 id="workflow-node-rework-h">Rework</h3>
-              <label>Sends work back to<select id="workflow-node-rework-to"></select></label>
-              <label>At most (rounds)<input id="workflow-node-rework-max" type="number" min="1" step="1"></label>
+              <h3 id="workflow-node-rework-h">Ordered exits</h3>
+              <div id="workflow-node-exits-list"></div>
+              <button type="button" class="small" id="workflow-node-exit-add">Add exit</button>
               <p class="wf-uses" id="workflow-node-rework-note"></p>
             </div>
           </div>

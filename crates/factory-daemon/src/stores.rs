@@ -181,6 +181,7 @@ impl TaskStore for ScopedStores {
                     last_run_at: Some(run.started_at),
                     clear_failure: true,
                     clear_closure: true,
+                    clear_routed_to: true,
                     ..Default::default()
                 };
                 // Best effort: the run itself is already durable on the
@@ -328,6 +329,7 @@ mod tests {
             schedule: None,
             estimate_seconds: None,
             result: None,
+            routed_to: None,
             error: None,
             runs: 0,
             ack_timeout_seconds: None,

@@ -371,6 +371,10 @@ pub struct Task {
     /// every run. `Run` is where it actually lives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
+    /// The workflow node this task selected with `done --send-to`, if any.
+    /// Mirrored from its newest run like `result` and cleared on a new run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// How many times this task has been run.
@@ -584,11 +588,15 @@ pub struct TaskPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// `None` means "leave alone" here, so a run that succeeded needs a way to
     /// say the previous attempt's error no longer describes this task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_result: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_routed_to: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_error: bool,
     /// Set when a run is created, so `runs` counts without a second query.
@@ -735,6 +743,10 @@ pub struct TaskReport {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
+    /// Select one of this workflow node's declared `agent:` exits. Valid
+    /// only together with `status: done`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Presented by the agent, checked against `Task::token`.
