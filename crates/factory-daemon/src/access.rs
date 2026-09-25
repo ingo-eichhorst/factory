@@ -1274,7 +1274,7 @@ mod tests {
                 Request::Adapters,
                 Request::RuntimeConnections,
                 Request::Agents,
-                Request::Occupancy { minutes: None },
+                Request::Occupancy { minutes: None, from: None, to: None },
                 Request::Production { minutes: None, bin: None, scope: None },
                 Request::TaskGet { id: "t".into() },
                 Request::TaskList(Default::default()),

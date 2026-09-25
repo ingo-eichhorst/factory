@@ -13,7 +13,7 @@
 use chrono::{DateTime, Duration, Utc};
 use factory_core::adapter::agent::truncate_tail;
 use factory_core::adapter::{RuntimeStatus, StatusReport, StatusSource};
-use factory_core::error::Result;
+use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
 use factory_core::occupancy::{
     spans_from, Occupancy, OccupancyBlock, OccupancyPlan, OccupancyRow, OccupancyScope, OccupancySegment,
@@ -25,11 +25,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::engine::Engine;
+use crate::schedule;
 
 /// How far back the chart looks when nobody says.
 const DEFAULT_MINUTES: u32 = 12 * 60;
 /// A window wider than this is a different tool than a chart of today.
 const MAX_MINUTES: u32 = 30 * 24 * 60;
+/// Nor is one narrower than this: a run is at least a pixel or two wide.
+const MIN_MINUTES: u32 = 5;
+/// How many firings of one schedule a window draws. An every-minute task
+/// across a month is tens of thousands of bars nobody can tell apart; this
+/// many already fills a wide chart edge to edge.
+const MAX_FIRINGS: usize = 500;
 /// The journal kinds that move a run into or out of `blocked`: `blocked`
 /// itself, the daemon's `unblocked`, and every other run status an agent's
 /// report is journalled under. Anything that ends the run without one of these
@@ -46,16 +53,29 @@ const TRANSITION_KINDS: &[&str] = &[
 ];
 
 impl Engine {
-    pub async fn occupancy(self: &Arc<Self>, minutes: Option<u32>) -> Result<Occupancy> {
+    /// The chart over a window. With neither `from` nor `to` it is the one
+    /// it has always been: `minutes` back from now and a quarter of that
+    /// ahead. With both it is that window -- past, future, or across now --
+    /// which is what lets a person pan and zoom. See [`window_bounds`].
+    pub async fn occupancy(
+        self: &Arc<Self>,
+        minutes: Option<u32>,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+    ) -> Result<Occupancy> {
         let now = Utc::now();
-        let minutes = minutes.unwrap_or(DEFAULT_MINUTES).clamp(5, MAX_MINUTES);
-        let from = now - Duration::minutes(minutes as i64);
-        // A quarter of the window is kept ahead of now. Without it the next
-        // scheduled run is drawn on the right-hand edge, where it is a pixel
-        // rather than a plan.
-        let to = now + Duration::minutes((minutes / 4).max(1) as i64);
+        let (from, to) = window_bounds(minutes, from, to, now)?;
+        // What has happened stops at now, whichever side of it the window
+        // is on. A window wholly in the future has no runs in it; asking the
+        // store anyway would hand back every open run, drawn to a now that
+        // is off the left-hand edge.
+        let past_end = now.min(to);
 
-        let runs = self.store.runs_between(from, now).await?;
+        let runs = if from <= now {
+            self.store.runs_between(from, past_end).await?
+        } else {
+            Vec::new()
+        };
         let tasks = self.store.list(&Default::default()).await?;
         let factory = self.factory_snapshot();
         let titles: BTreeMap<&str, &str> = tasks
@@ -115,7 +135,10 @@ impl Engine {
         // history says it usually takes.
         let mut planned: BTreeMap<(String, String), Vec<OccupancyPlan>> = BTreeMap::new();
         for task in &tasks {
-            let Some(at) = planned_firing(task, now, to) else { continue };
+            let firings = planned_firings(task, now, from, to);
+            if firings.is_empty() {
+                continue;
+            }
             let historical = if task.estimate_seconds.is_some() {
                 (None, 0)
             } else {
@@ -127,14 +150,14 @@ impl Engine {
             planned
                 .entry((scope, task.agent.clone()))
                 .or_default()
-                .push(OccupancyPlan {
+                .extend(firings.into_iter().map(|at| OccupancyPlan {
                     task_id: task.id.clone(),
                     title: task.title.clone(),
                     at,
                     estimate_seconds: estimate,
                     samples,
                     user_estimate,
-                });
+                }));
         }
 
         // Liveness, grouped by the session it was observed on -- by subject,
@@ -172,7 +195,7 @@ impl Engine {
                     .remove(&format!("{}/{}", view.name, agent.name))
                     .map(|series| spans_from(&series, now))
                     .unwrap_or_default();
-                let (busy_seconds, blocked_seconds, lanes, live) = lay_out(&mut blocks, from, now);
+                let (busy_seconds, blocked_seconds, lanes, live) = lay_out(&mut blocks, from, past_end);
                 rows.push(OccupancyRow {
                     agent: agent.name.clone(),
                     adapter: agent.adapter.clone(),
@@ -199,7 +222,7 @@ impl Engine {
         // it a row rather than dropping it: a chart that hides work because
         // somebody edited a config is worse than one with an extra line.
         for ((scope, agent), mut blocks) in blocks {
-            let (busy_seconds, blocked_seconds, lanes, live) = lay_out(&mut blocks, from, now);
+            let (busy_seconds, blocked_seconds, lanes, live) = lay_out(&mut blocks, from, past_end);
             let row = OccupancyRow {
                 agent,
                 adapter: String::new(),
@@ -992,9 +1015,70 @@ fn trim_to_window(series: &mut Vec<StatusChange>, from: DateTime<Utc>) {
 /// The firing a task's schedule will draw on the chart, if it has one in
 /// `[now, to]`. A paused schedule keeps its slot but will not fire it, so
 /// there is nothing coming to draw.
-fn planned_firing(task: &factory_core::task::Task, now: DateTime<Utc>, to: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let at = task.next_run_at?;
-    (at >= now && at <= to && !task.schedule_paused).then_some(at)
+/// The chart's window, from what the request asked for.
+///
+/// Neither `from` nor `to`: `minutes` back from now (twelve hours when that
+/// is absent too), and a quarter of it kept ahead of now -- without it the
+/// next scheduled run is drawn on the right-hand edge, where it is a pixel
+/// rather than a plan. This is the window the chart has always had.
+///
+/// Both: that window, as long as it is the right way round. Its width is
+/// held between [`MIN_MINUTES`] and [`MAX_MINUTES`] by moving `from`, so the
+/// right-hand edge a person dragged to stays where they put it. One without
+/// the other is the fixed-width window beside it, `minutes` wide.
+fn window_bounds(
+    minutes: Option<u32>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+    let minutes = minutes.unwrap_or(DEFAULT_MINUTES).clamp(MIN_MINUTES, MAX_MINUTES) as i64;
+    let (from, to) = match (from, to) {
+        (None, None) => {
+            let ahead = (minutes / 4).max(1);
+            return Ok((now - Duration::minutes(minutes), now + Duration::minutes(ahead)));
+        }
+        (Some(from), None) => (from, from + Duration::minutes(minutes)),
+        (None, Some(to)) => (to - Duration::minutes(minutes), to),
+        (Some(from), Some(to)) => (from, to),
+    };
+    if to <= from {
+        return Err(FactoryError::BadRequest(format!(
+            "an occupancy window ends after it begins; got from {} and to {}",
+            from.to_rfc3339(),
+            to.to_rfc3339()
+        )));
+    }
+    let span = (to - from).clamp(
+        Duration::minutes(MIN_MINUTES as i64),
+        Duration::minutes(MAX_MINUTES as i64),
+    );
+    Ok((to - span, to))
+}
+
+/// Every firing of a task's schedule in the future part of the window. The
+/// first is its `next_run_at`, the one firing the scheduler has actually
+/// committed to; the rest follow from the schedule, so a person panning a
+/// week ahead sees the week's runs and not just the next one. A paused
+/// schedule plans nothing, and neither does one whose next firing is
+/// already overdue -- that one is about to be a block, not a plan. A
+/// `next_run_at` with no schedule behind it (a queued retry) is the one
+/// firing it says and nothing after.
+fn planned_firings(
+    task: &factory_core::task::Task,
+    now: DateTime<Utc>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Vec<DateTime<Utc>> {
+    let Some(next) = task.next_run_at else { return Vec::new() };
+    if task.schedule_paused || next < now {
+        return Vec::new();
+    }
+    let from = from.max(now);
+    match &task.schedule {
+        Some(schedule) => schedule::firings_between(schedule, next, from, to, MAX_FIRINGS),
+        None => (next >= from && next <= to).then_some(next).into_iter().collect(),
+    }
 }
 
 #[cfg(test)]
@@ -1004,6 +1088,18 @@ mod tests {
     #[test]
     fn a_paused_schedule_plans_no_firing() {
         let now = Utc::now();
+        let mut task = every_ten_minutes(now + Duration::minutes(10));
+        let to = now + Duration::hours(1);
+        let drawn = planned_firings(&task, now, now - Duration::hours(1), to);
+        assert_eq!(drawn.first().copied(), task.next_run_at, "sanity: drawn while running");
+        task.schedule_paused = true;
+        assert!(planned_firings(&task, now, now - Duration::hours(1), to).is_empty());
+        task.schedule_paused = false;
+        task.next_run_at = Some(now + Duration::hours(2));
+        assert!(planned_firings(&task, now, now - Duration::hours(1), to).is_empty(), "past the chart's edge");
+    }
+
+    fn every_ten_minutes(next: DateTime<Utc>) -> factory_core::task::Task {
         let mut task = factory_core::adapter::store::task_from_new(
             factory_core::task::NewTask {
                 title: "every ten minutes".into(),
@@ -1014,14 +1110,82 @@ mod tests {
             "shell".into(),
             "herdr".into(),
         );
-        task.next_run_at = Some(now + Duration::minutes(10));
-        let to = now + Duration::hours(1);
-        assert_eq!(planned_firing(&task, now, to), task.next_run_at, "sanity: drawn while running");
-        task.schedule_paused = true;
-        assert_eq!(planned_firing(&task, now, to), None);
-        task.schedule_paused = false;
-        task.next_run_at = Some(now + Duration::hours(2));
-        assert_eq!(planned_firing(&task, now, to), None, "past the chart's edge");
+        task.next_run_at = Some(next);
+        task
+    }
+
+    #[test]
+    fn every_firing_in_the_future_part_of_the_window_is_planned_not_just_the_next() {
+        let now = at(0);
+        let task = every_ten_minutes(at(300));
+        // An hour either side of now: 5, 15, 25, 35, 45 and 55 minutes ahead.
+        let firings = planned_firings(&task, now, at(-3600), at(3600));
+        assert_eq!(firings.len(), 6);
+        assert_eq!(firings[0], at(300));
+        assert_eq!(firings[5], at(3300));
+        // Panned a day ahead, the same grid carries on.
+        let tomorrow = planned_firings(&task, now, at(86_400), at(86_400 + 1800));
+        assert_eq!(tomorrow, vec![at(86_700), at(87_300), at(87_900)]);
+        // Panned into the past, nothing is scheduled: that is what blocks are for.
+        assert!(planned_firings(&task, now, at(-7200), at(-3600)).is_empty());
+    }
+
+    #[test]
+    fn an_overdue_or_unscheduled_next_run_is_drawn_as_it_always_was() {
+        let now = at(0);
+        let overdue = every_ten_minutes(at(-60));
+        assert!(planned_firings(&overdue, now, at(-3600), at(3600)).is_empty(), "about to be a block");
+        let mut retry = every_ten_minutes(at(900));
+        retry.schedule = None;
+        assert_eq!(planned_firings(&retry, now, at(-3600), at(3600)), vec![at(900)]);
+        assert!(planned_firings(&retry, now, at(1000), at(3600)).is_empty());
+    }
+
+    #[test]
+    fn with_no_window_given_the_chart_is_the_one_it_always_was() {
+        let now = at(0);
+        assert_eq!(window_bounds(Some(60), None, None, now).unwrap(), (at(-3600), at(900)));
+        assert_eq!(
+            window_bounds(None, None, None, now).unwrap(),
+            (at(-12 * 3600), at(3 * 3600)),
+            "twelve hours back, a quarter of that ahead"
+        );
+        assert_eq!(
+            window_bounds(Some(1), None, None, now).unwrap(),
+            (at(-300), at(60)),
+            "minutes are still clamped"
+        );
+    }
+
+    #[test]
+    fn an_explicit_window_is_taken_as_given_past_future_or_across_now() {
+        let now = at(0);
+        let past = (at(-86_400 * 3), at(-86_400 * 2));
+        assert_eq!(window_bounds(None, Some(past.0), Some(past.1), now).unwrap(), past);
+        let future = (at(86_400), at(86_400 * 2));
+        assert_eq!(window_bounds(Some(60), Some(future.0), Some(future.1), now).unwrap(), future, "minutes is ignored");
+        // One edge alone is the other edge `minutes` away.
+        assert_eq!(window_bounds(Some(60), Some(at(0)), None, now).unwrap(), (at(0), at(3600)));
+        assert_eq!(window_bounds(Some(60), None, Some(at(0)), now).unwrap(), (at(-3600), at(0)));
+    }
+
+    #[test]
+    fn an_explicit_window_is_clamped_by_moving_its_start() {
+        let now = at(0);
+        let (from, to) = window_bounds(None, Some(at(-86_400 * 90)), Some(at(3600)), now).unwrap();
+        assert_eq!(to, at(3600), "the edge a person dragged to stays put");
+        assert_eq!((to - from).num_minutes(), MAX_MINUTES as i64);
+        let (from, to) = window_bounds(None, Some(at(0)), Some(at(10)), now).unwrap();
+        assert_eq!((from, to), (at(10 - 300), at(10)), "never narrower than five minutes");
+    }
+
+    #[test]
+    fn a_window_that_ends_before_it_begins_is_refused() {
+        let now = at(0);
+        for (from, to) in [(at(60), at(0)), (at(0), at(0))] {
+            let err = window_bounds(None, Some(from), Some(to), now).unwrap_err();
+            assert!(matches!(err, FactoryError::BadRequest(_)), "{err:?}");
+        }
     }
 
     fn at(secs: i64) -> DateTime<Utc> {

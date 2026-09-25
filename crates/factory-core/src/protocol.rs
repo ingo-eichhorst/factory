@@ -286,9 +286,18 @@ pub enum Request {
     /// scheduled to hold it next, and what the runtime saw in between.
     #[serde(rename = "occupancy")]
     Occupancy {
-        /// How far back to look. Defaults to the last twelve hours.
+        /// How far back to look. Defaults to the last twelve hours. The
+        /// width of the window when only one of `from` and `to` is given,
+        /// and ignored when both are.
         #[serde(default)]
         minutes: Option<u32>,
+        /// An explicit window, for a chart that has been panned or zoomed
+        /// away from the one that ends a little after now. Either side of
+        /// now, or across it; its width is still clamped.
+        #[serde(default)]
+        from: Option<chrono::DateTime<chrono::Utc>>,
+        #[serde(default)]
+        to: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// The run history the dashboard's window, sparklines, throughput chart
     /// and production-year grid all read from one request -- not one per

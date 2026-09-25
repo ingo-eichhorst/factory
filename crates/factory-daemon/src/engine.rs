@@ -524,8 +524,8 @@ impl Engine {
                 self.bus.publish(Event::RolesChanged { scope, name });
                 Ok(Payload::Deleted { deleted: true })
             }
-            Request::Occupancy { minutes } => Ok(Payload::Occupancy {
-                occupancy: self.occupancy(minutes).await?,
+            Request::Occupancy { minutes, from, to } => Ok(Payload::Occupancy {
+                occupancy: self.occupancy(minutes, from, to).await?,
             }),
             Request::Production { minutes, bin, scope } => Ok(Payload::Production {
                 production: self.production(minutes, bin, scope).await?,

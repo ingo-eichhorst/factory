@@ -7,7 +7,7 @@ import { initRail, writeHash, setRouter, readHash, applyRoute } from "./scopes.j
 import { closeModal, dropModal } from "./modal.js";
 import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyTasksView, currentTasksView, setTasksView, loadTaskUsage } from "./tasks.js";
 import { loadAgents, renderAgents } from "./agents.js";
-import { loadOccupancy, renderOccupancy } from "./occupancy.js";
+import { loadOccupancy, renderOccupancy, wireOccupancy } from "./occupancy.js";
 import { legacyAgentRoute, loadRuntimeConnections, renderRuntimeConnections } from "./agent-runtime.js";
 import { loadRoles, wireRoles } from "./roles.js";
 import { openCreate } from "./task-form.js";
@@ -589,7 +589,7 @@ async function boot() {
   $("knowledge-refresh").onclick = () => loadKnowledge();
   $("infrastructure-refresh").onclick = () => refreshInfrastructure();
   wireBackup();
-  $("occ-window").onchange = () => loadOccupancy();
+  wireOccupancy();
   $("newTask").onclick = () => openCreate();
   wireDashboard();
   wireWorkflows();

@@ -584,6 +584,12 @@ fieldset.seg { margin: 0; padding: 0; min-width: 0; }
 }
 .occ-axis span::after { content: ""; position: absolute; left: 50%; bottom: -5px; width: 1px; height: 5px; background: var(--line); }
 .occ-body { position: relative; }
+/* The tracks move under a drag, a wheel or a pinch. Vertical touch scrolling
+   stays the page's; everything sideways, and a pinch, is the chart's. */
+.occ-axis, .occ-body { touch-action: pan-y; }
+.occ.panning, .occ.panning .occ-track, .occ.panning .blk { cursor: grabbing; user-select: none; }
+.occ-zoom button { min-width: 30px; }
+.occ-zoom button:disabled { opacity: .38; cursor: default; }
 .occ-grp {
   display: flex; align-items: baseline; gap: 9px; margin: 14px 0 4px; padding-top: 9px;
   border-top: 1px solid var(--line-soft); font: 600 9px/1 var(--cond);
@@ -606,6 +612,7 @@ fieldset.seg { margin: 0; padding: 0; min-width: 0; }
 .occ-lab.free b { color: var(--faint); font-weight: 400; }
 .occ-track {
   flex: 1; position: relative; height: calc(var(--lanes, 1) * var(--lane-h) + 2px); min-width: 0; border-radius: 2px; background: var(--sunk);
+  cursor: grab;
 }
 .occ-util {
   flex: 0 0 58px; text-align: right; padding-left: 10px; font: 500 10px/1 var(--mono);
