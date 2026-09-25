@@ -211,6 +211,9 @@ impl Engine {
             // Checked against the root scope for the same reason
             // `policy.attest` is -- see `in_root_scope`.
             Request::GoalsCheckIn { .. } => Grant::GoalsCheckIn,
+            // The same door `TaskCreate`/`PolicyRemediate` already open --
+            // this is not a second one (`#100`).
+            Request::ScenarioPromote { .. } => Grant::TaskCreate,
 
             Request::Status
             | Request::Adapters
@@ -233,6 +236,11 @@ impl Engine {
             | Request::PolicyExport { .. }
             | Request::Metrics { .. }
             | Request::Goals { .. }
+            // Recomputed server-side over authored files and computed
+            // metrics alone -- nothing written, whatever `scenario` or
+            // `drivers` say (`#100`).
+            | Request::ScenarioWhatIf { .. }
+            | Request::Scenarios { .. }
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
@@ -357,6 +365,9 @@ impl Engine {
             // identical: a caller may only remediate a control in the one
             // scope it works in.
             Request::PolicyRemediate { scope: s, .. } => in_scope(s),
+            // Same reach rule as `PolicyRemediate` -- a scenario is
+            // promoted into the one scope the caller works in (`#100`).
+            Request::ScenarioPromote { scope: s, .. } => in_scope(s),
 
             Request::TaskUpdate { id, patch } => {
                 // Handing a task to somebody else is not editing it. A role
@@ -947,6 +958,48 @@ mod tests {
         );
     }
 
+    /// `scenario.promote` (`#100`) is the same door `policy.remediate`
+    /// already is: `Grant::TaskCreate`, the caller's own scope, never a
+    /// wildcard. Mirrors `policy_remediate_needs_task_create_in_the_callers_own_scope`
+    /// exactly, for the same reason that test states its own purpose: a
+    /// positive case proves the `authorize` arm is actually wired, not just
+    /// absent and falling through to the owner-only default.
+    #[tokio::test]
+    async fn scenario_promote_needs_task_create_in_the_callers_own_scope() {
+        let e = engine_with_roles("roles:\n  remediator:\n    grants: [task.create]\n    reach: scope\n");
+
+        let request = |scope: &str| Request::ScenarioPromote {
+            scenario: "s".into(),
+            scope: scope.into(),
+            agent: None,
+        };
+
+        let in_scope = Caller::Agent {
+            scope: "demo".into(),
+            name: "w".into(),
+            role: Role::new("remediator"),
+            run_id: None,
+        };
+        assert!(
+            allowed(&e, &in_scope, request("demo")).await,
+            "a role holding task.create may promote a scenario in its own scope"
+        );
+        assert!(
+            !allowed(&e, &in_scope, request("other")).await,
+            "the same grant does not reach a scope this caller does not work in"
+        );
+
+        assert!(
+            !allowed(&e, &worker("w"), request("demo")).await,
+            "a role without task.create is refused, the same as TaskCreate itself would be"
+        );
+
+        assert!(
+            allowed(&e, &Caller::Owner, request("demo")).await,
+            "the owner is never subject to any of this"
+        );
+    }
+
     async fn task_in(engine: &Engine, id: &str, scope: &str, agent: &str) -> Task {
         let now = Utc::now();
         let task = Task {
@@ -1090,6 +1143,11 @@ mod tests {
                 Request::PolicyControl {
                     control: "cra/a".parse().unwrap(),
                     scope: "demo".into(),
+                },
+                Request::Scenarios { scope: None },
+                Request::ScenarioWhatIf {
+                    scenario: None,
+                    drivers: Default::default(),
                 },
                 Request::Subscribe,
             ] {

@@ -17,6 +17,7 @@ mod policies;
 mod power;
 mod production;
 mod roles;
+mod scenarios;
 mod scheduler;
 mod schedule;
 mod site;

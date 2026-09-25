@@ -23,6 +23,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/bench-model.js                                         pure helpers for the Benchmarks tab's three segments
     ui/js/{policy,policy-model}.js                               the L6 Policy tab and its pure shaping logic
     ui/js/{goals,goals-model}.js                                 the L6 Goals tab and its pure shaping logic
+    ui/js/{scenarios,scenarios-model}.js                         the L6 Scenarios tab and its pure shaping logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
 
@@ -127,12 +128,14 @@ something impossible.
 - A scope owns only its `.factory/config.yaml`. Runtime state stays in the
   instance root's `.factory/`; never put the database, socket, worktrees, or
   other daemon-owned state inside a scope. `.factory/knowledge/`,
-  `.factory/datasets/`, `.factory/policies/` and `.factory/goals/` are the
-  one exception: authored content -- pages, dataset YAML, policy catalogues
-  and the goals direction/cycle files a person or an agent wrote by hand --
-  that nothing in Factory ever deletes or regenerates, and that is worth
-  backing up like a scope's own files, even though it sits under the
-  instance root's `.factory/` alongside everything the daemon does own.
+  `.factory/datasets/`, `.factory/policies/` (including its `drafts/`
+  subdirectory), `.factory/goals/` and `.factory/scenarios/` are the one
+  exception: authored content -- pages, dataset YAML, policy catalogues
+  (real and draft), the goals direction/cycle files, and scenario files a
+  person or an agent wrote by hand -- that nothing in Factory ever deletes
+  or regenerates, and that is worth backing up like a scope's own files,
+  even though it sits under the instance root's `.factory/` alongside
+  everything the daemon does own.
 - A plugin that fails must never take the daemon down with it.
 - Roles bound what an agent does by accident, not what it could do. Every agent
   runs as the owner and can reach the socket; one that omits its token is the
