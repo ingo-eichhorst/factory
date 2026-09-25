@@ -9,7 +9,7 @@ export function shapeFindings(findings) {
     (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9) ||
     (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9) ||
     String(a.id).localeCompare(String(b.id)) ||
-    String(a.affected && a.affected.name).localeCompare(String(b.affected && b.affected.name))
+    String(a.affected?.name).localeCompare(String(b.affected?.name))
   );
 }
 
@@ -27,11 +27,11 @@ export function affectedLabel(affected) {
 }
 
 export function pathLabel(affected) {
-  return affected && affected.path && affected.path.length ? affected.path.join(" → ") : affectedLabel(affected);
+  return affected?.path?.length ? affected.path.join(" → ") : affectedLabel(affected);
 }
 
 export function scanLabel(scan) {
-  if (!scan || !scan.attachment) return "—";
+  if (!scan?.attachment) return "—";
   const tool = [scan.tool, scan.tool_version].filter(Boolean).join(" ");
   const at = scan.scan_time || scan.attachment.attached_at;
   return [tool, `attempt ${scan.attachment.attempt}`, at].filter(Boolean).join(" · ");
@@ -39,20 +39,20 @@ export function scanLabel(scan) {
 
 export function exploitSignals(finding) {
   const signals = [];
-  if (finding && finding.kev) signals.push("KEV");
-  if (finding && finding.euvd) signals.push("EUVD");
-  if (finding && finding.epss !== null && finding.epss !== undefined) signals.push(`EPSS ${finding.epss}`);
+  if (finding?.kev) signals.push("KEV");
+  if (finding?.euvd) signals.push("EUVD");
+  if (finding?.epss !== null && finding?.epss !== undefined) signals.push(`EPSS ${finding.epss}`);
   return signals;
 }
 
 export function serviceTarget(service) {
   if (!service) return "—";
-  if (service.endpoints && service.endpoints.length) return service.endpoints.join(", ");
+  if (service.endpoints?.length) return service.endpoints.join(", ");
   return service.path || "—";
 }
 
 export function credentialState(row) {
-  if (!row || !row.credential) return "none";
+  if (!row?.credential) return "none";
   if (row.credential_present === true) return "present";
   if (row.credential_present === false) return "absent";
   return "unchecked";

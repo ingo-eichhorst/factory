@@ -20,7 +20,7 @@ import { initActivity, recordEvent, markWatching, renderActivity, activityFilter
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 import { loadEnvironment, renderSandboxes } from "./sandboxes.js";
 import { renderSecrets } from "./secrets.js";
-import { loadDependencies, renderDependencies, wireDependencies } from "./dependencies.js";
+import { loadDependencies, wireDependencies } from "./dependencies.js";
 import { benchTail, loadBenchmarks, readBenchTail, renderBenchmarks, wireBenchmarkSegments } from "./benchmarks.js";
 import { loadDatasets, renderDatasetsSegment, wireDatasets } from "./datasets.js";
 import { acceptBenchRunEvent, loadBenchRuns, renderBenchRunsSegment, wireBenchRuns } from "./bench-runs.js";

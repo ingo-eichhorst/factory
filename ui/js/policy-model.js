@@ -265,6 +265,20 @@ export function checkTarget(scope, control, check) {
   return target ? { label: target.label, href: routeHref(scope, target.page) } : null;
 }
 
+/// A `dependencies` check's line: the SBOM's age limit, each severity's cap
+/// on open findings, and the cap on exploited ones -- whichever it sets.
+function describeDependencies(check) {
+  const terms = [];
+  if (check.sbom_max_age) terms.push(`SBOM max_age ${check.sbom_max_age}`);
+  for (const [severity, limit] of Object.entries(check.max_open || {})) {
+    terms.push(`${severity} <= ${limit}`);
+  }
+  if (check.exploited_open !== null && check.exploited_open !== undefined) {
+    terms.push(`exploited <= ${check.exploited_open}`);
+  }
+  return `dependencies: ${terms.join(", ")}`;
+}
+
 /// The evidence list's own line for one check -- `describe_check` in
 /// `factory-cli/src/main.rs`, ported rather than duplicated by accident: the
 /// CLI's `factory policy show` and this page should read the same check the
@@ -289,17 +303,8 @@ export function describeCheck(check) {
       return check.absent && check.absent.length ? `secrets: absent ${check.absent.join(", ")}` : "secrets";
     case "daemon":
       return `daemon: ${check.fact}`;
-    case "dependencies": {
-      const terms = [];
-      if (check.sbom_max_age) terms.push(`SBOM max_age ${check.sbom_max_age}`);
-      for (const [severity, limit] of Object.entries(check.max_open || {})) {
-        terms.push(`${severity} <= ${limit}`);
-      }
-      if (check.exploited_open !== null && check.exploited_open !== undefined) {
-        terms.push(`exploited <= ${check.exploited_open}`);
-      }
-      return `dependencies: ${terms.join(", ")}`;
-    }
+    case "dependencies":
+      return describeDependencies(check);
     default:
       return check.check;
   }

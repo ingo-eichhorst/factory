@@ -41,14 +41,20 @@ function ratingLabel(rating) {
   return [rating.source, rating.method, rating.score, rating.vector].filter((v) => v !== null && v !== undefined && v !== "").join(" · ");
 }
 
+/// A finding's authored VEX, escaped: state, justification and response, or
+/// `none` when nobody has assessed it.
+function vexLabel(finding) {
+  if (!finding.vex_state) return "none";
+  const response = (finding.vex_response || []).join(", ");
+  return [finding.vex_state, finding.vex_justification, response].filter(Boolean).map(esc).join(" · ");
+}
+
 function findingCard(finding) {
   const signals = exploitSignals(finding);
   const ratings = (finding.ratings || []).map((rating) =>
-    `<li>${esc(rating.severity)}${ratingLabel(rating) ? ` · ${esc(ratingLabel(rating))}` : ""}</li>`
+    `<li>${[rating.severity, ratingLabel(rating)].filter(Boolean).map(esc).join(" · ")}</li>`
   ).join("");
-  const vex = finding.vex_state
-    ? `${esc(finding.vex_state)}${finding.vex_justification ? ` · ${esc(finding.vex_justification)}` : ""}${(finding.vex_response || []).length ? ` · ${esc(finding.vex_response.join(", "))}` : ""}`
-    : "none";
+  const vex = vexLabel(finding);
   return `<details class="dep-finding">
     <summary>
       ${statusBadge(finding.status)}
@@ -69,6 +75,12 @@ function findingCard(finding) {
   </details>`;
 }
 
+function credentialCell(name, credential) {
+  if (!name) return "—";
+  const tone = credential === "present" ? "warn" : "";
+  return `<code>${esc(name)}</code> <span class="tag ${tone}">${esc(credential)}</span>`;
+}
+
 function serviceRow(row) {
   const credential = credentialState(row);
   const scope = (row.agents || []).length ? row.agents.join(", ") : "every declared agent";
@@ -79,7 +91,7 @@ function serviceRow(row) {
     <td><code>${esc(serviceTarget(row))}</code></td>
     <td>${esc(access)}</td>
     <td>${(row.data || []).map((d) => `<span class="tag">${esc(d)}</span>`).join(" ") || "—"}</td>
-    <td>${row.credential ? `<code>${esc(row.credential)}</code> <span class="tag ${credential === "present" ? "warn" : ""}">${esc(credential)}</span>` : "—"}</td>
+    <td>${credentialCell(row.credential, credential)}</td>
   </tr>`;
 }
 
@@ -104,17 +116,17 @@ export function renderDependencies() {
   error.hidden = !state.dependenciesError;
   const report = state.dependenciesError ? null : state.dependencies;
 
-  const documents = report && report.documents || [];
+  const documents = report?.documents || [];
   $("dependencies-documents").innerHTML = documents.map(documentCard).join("");
   $("no-dependency-documents").hidden = documents.length !== 0 || !!state.dependenciesError;
 
-  const findings = shapeFindings(report && report.findings);
+  const findings = shapeFindings(report?.findings);
   const counts = findingCounts(findings);
   $("dependencies-counts").textContent = `${counts.open} open · ${counts.assessed} assessed · ${counts.resolved} resolved · ${counts.stale} stale`;
   $("dependencies-findings").innerHTML = findings.map(findingCard).join("");
   $("no-dependency-findings").hidden = findings.length !== 0 || !!state.dependenciesError;
 
-  const services = report && report.services || [];
+  const services = report?.services || [];
   $("dependencies-services").innerHTML = services.map(serviceRow).join("");
   $("no-dependency-services").hidden = services.length !== 0 || !!state.dependenciesError;
 }
