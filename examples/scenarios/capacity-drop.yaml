@@ -1,0 +1,15 @@
+# A small, realistic drivers + goals scenario. Loads with zero findings --
+# see `examples_scenarios_load_with_zero_findings` in `scenario.rs`.
+name: capacity-drop
+title: Capacity drops 20% next quarter
+kind: [drivers, goals]
+assumptions: |
+  A senior reviewer goes part-time; throughput and first-pass yield both dip
+  until the backlog of in-flight reviews clears.
+from: 2026-10-01
+horizon: 13w
+drivers:
+  capacity_factor: "-20%"
+  scrap_rate: "+5%"
+goals:
+  - { kr: ship-compliant/cra-open-zero, by: 2027-03-31 }

@@ -20,6 +20,7 @@ pub mod policy_export;
 pub mod protocol;
 pub mod role;
 pub mod run;
+pub mod scenario;
 pub mod task;
 pub mod workflow;
 
