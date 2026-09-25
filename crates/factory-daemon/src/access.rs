@@ -219,6 +219,9 @@ impl Engine {
             // The same door `TaskCreate`/`PolicyRemediate` already open --
             // this is not a second one (`#100`).
             Request::ScenarioPromote { .. } => Grant::TaskCreate,
+            // And the same door again (`#107`): a remediation task is an
+            // ordinary task in every way but how it was asked for.
+            Request::QualityRemediate { .. } => Grant::TaskCreate,
 
             Request::Status
             | Request::Adapters
@@ -241,6 +244,9 @@ impl Engine {
             | Request::PolicyExport { .. }
             | Request::Metrics { .. }
             | Request::Goals { .. }
+            // Read like `Goals`: authored profiles and evidence folded
+            // fresh, nothing written (`#107`).
+            | Request::Quality { .. }
             // Recomputed server-side over authored files and computed
             // metrics alone -- nothing written, whatever `scenario` or
             // `drivers` say (`#100`).
@@ -375,6 +381,8 @@ impl Engine {
             // Same reach rule as `PolicyRemediate` -- a scenario is
             // promoted into the one scope the caller works in (`#100`).
             Request::ScenarioPromote { scope: s, .. } => in_scope(s),
+            // And for a quality scenario's remediation task (`#107`).
+            Request::QualityRemediate { scope: s, .. } => in_scope(s),
 
             Request::TaskUpdate { id, patch, .. } => {
                 // Handing a task to somebody else is not editing it. A role
@@ -595,6 +603,7 @@ mod tests {
             ],
             roles: Default::default(),
             policies: Default::default(),
+            quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
         };
@@ -1011,6 +1020,44 @@ mod tests {
         );
     }
 
+    /// `quality.remediate` (`#107`) is the same door once more -- mirrors
+    /// `scenario_promote_needs_task_create_in_the_callers_own_scope`, for
+    /// the same reason: the positive case proves the arm is wired.
+    #[tokio::test]
+    async fn quality_remediate_needs_task_create_in_the_callers_own_scope() {
+        let e = engine_with_roles("roles:\n  remediator:\n    grants: [task.create]\n    reach: scope\n");
+
+        let request = |scope: &str| Request::QualityRemediate {
+            scope: scope.into(),
+            attribute: "reliability".into(),
+            scenario: "s".into(),
+            agent: None,
+        };
+
+        let in_scope = Caller::Agent {
+            scope: "demo".into(),
+            name: "w".into(),
+            role: Role::new("remediator"),
+            run_id: None,
+        };
+        assert!(
+            allowed(&e, &in_scope, request("demo")).await,
+            "a role holding task.create may remediate a quality scenario in its own scope"
+        );
+        assert!(
+            !allowed(&e, &in_scope, request("other")).await,
+            "the same grant does not reach a scope this caller does not work in"
+        );
+        assert!(
+            !allowed(&e, &worker("w"), request("demo")).await,
+            "a role without task.create is refused, the same as TaskCreate itself would be"
+        );
+        assert!(
+            allowed(&e, &Caller::Owner, request("demo")).await,
+            "the owner is never subject to any of this"
+        );
+    }
+
     async fn task_in(engine: &Engine, id: &str, scope: &str, agent: &str) -> Task {
         let now = Utc::now();
         let task = Task {
@@ -1159,6 +1206,7 @@ mod tests {
                     scope: "demo".into(),
                 },
                 Request::Scenarios { scope: None },
+                Request::Quality { scope: None },
                 Request::ScenarioWhatIf {
                     scenario: None,
                     drivers: Default::default(),

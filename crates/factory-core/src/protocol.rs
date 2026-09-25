@@ -578,6 +578,35 @@ pub enum Request {
         #[serde(default)]
         drivers: std::collections::BTreeMap<crate::scenario::DriverId, String>,
     },
+    /// `#107`: the L6 Quality attributes tab. Every scope's merged utility
+    /// tree (`.factory/quality/` profiles bound by the root's `quality:` and
+    /// each scope's `scope.quality`), every scenario judged against the
+    /// same metric registry Goals reads and the same policy evidence the
+    /// Policy tab gathers. `scope: None` is the whole instance; a scope
+    /// narrows to it and its descendants, the "roll up the subtree" rule
+    /// `Request::Policy` follows. Read-only, evaluated fresh on every call.
+    #[serde(rename = "quality")]
+    Quality {
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    /// Create the task that closes one quality scenario's gap in `scope`,
+    /// labelled `quality=<scope>/<attribute>/<scenario>` -- the same door
+    /// `Request::PolicyRemediate` opens, through `Engine::create`, needing
+    /// `task.create` in `scope` under the same reach rule. Refused when the
+    /// scenario is already `met`, or a `draft` (with no measure there is no
+    /// gap to close, only a measure to write). When a non-terminal task
+    /// with that label is already open in `scope`, answers *that* task,
+    /// `created: false`, and creates nothing (`#98`).
+    #[serde(rename = "quality.remediate")]
+    QualityRemediate {
+        scope: String,
+        /// The attribute id, `characteristic[.sub-characteristic]`.
+        attribute: String,
+        scenario: String,
+        #[serde(default)]
+        agent: Option<String>,
+    },
     /// `#106`: the L4 Operations tab and `factory stats` -- what needs a
     /// human now, where work is stuck, and how the line has been running
     /// over `window`. A read projection over tasks, runs, standing agents
@@ -763,6 +792,10 @@ pub enum Payload {
     ScenarioPromote { result: ScenarioPromoteResult },
     /// The answer to `Request::ScenarioWhatIf` -- see `ScenarioWhatIfResult`.
     ScenarioWhatIf { result: ScenarioWhatIfResult },
+    /// The L6 Quality attributes tab -- see `QualityReport`.
+    Quality { report: QualityReport },
+    /// The answer to `Request::QualityRemediate` -- see `QualityRemediation`.
+    QualityRemediate { result: QualityRemediation },
     /// The L4 Operations tab -- see `factory_core::operations::OperationsReport`.
     /// Boxed: the report is several times the size of every other payload,
     /// and would otherwise set the size of every `Response` (serde writes a
@@ -1407,6 +1440,89 @@ pub struct ScenarioWhatIfResult {
     pub scenario: Option<String>,
     pub drivers: ScenarioDrivers,
     pub forecast: crate::scenario::Forecast,
+}
+
+/// One ISO 25010 characteristic as `QualityReport::catalogue` carries it:
+/// `quality::CATALOGUE`'s entry, owned so it can be read back off the wire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CharacteristicView {
+    pub id: String,
+    pub title: String,
+    pub subs: Vec<SubCharacteristicView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubCharacteristicView {
+    pub id: String,
+    pub title: String,
+    pub standard: crate::quality::Standard,
+}
+
+impl From<&crate::quality::Characteristic> for CharacteristicView {
+    fn from(c: &crate::quality::Characteristic) -> Self {
+        CharacteristicView {
+            id: c.id.to_string(),
+            title: c.title.to_string(),
+            subs: c
+                .subs
+                .iter()
+                .map(|s| SubCharacteristicView { id: s.id.to_string(), title: s.title.to_string(), standard: s.standard })
+                .collect(),
+        }
+    }
+}
+
+/// One scope's row in `QualityReport`: its evaluated utility tree, plus the
+/// remediation task already open for any of its scenarios, so a reader can
+/// show that task instead of offering to create another (`#98`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScopeQuality {
+    #[serde(flatten)]
+    pub report: crate::quality::ScopeReport,
+    /// `<attribute>/<scenario>` to the id of the non-terminal task in this
+    /// scope labelled `quality=<scope>/<attribute>/<scenario>`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub open_tasks: std::collections::BTreeMap<String, String>,
+}
+
+/// The L6 Quality attributes tab's whole answer: `Request::Quality`'s
+/// response. `#107`. Nothing here is stored -- the profiles are re-read,
+/// the chains re-resolved and every scenario re-judged on each call.
+/// There is deliberately no score anywhere, per scope or overall: an
+/// attribute is the worst of its scenarios, and that is as far as any
+/// rollup goes (`quality.rs`'s module doc comment).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QualityReport {
+    /// `None` when the whole instance was asked about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Every scope in the asked subtree whose chain binds at least one
+    /// profile, in config order. A scope binding none is omitted, not
+    /// shown empty: an undeclared attribute is "not a stated concern",
+    /// never "failing".
+    pub scopes: Vec<ScopeQuality>,
+    /// `quality::load`'s findings (subject: the profile file) and every
+    /// listed scope's `quality::applicable` findings (subject: the scope),
+    /// sorted and deduplicated.
+    pub findings: Vec<crate::quality::Finding>,
+    /// The nine ISO 25010 characteristics in the standard's own order, each
+    /// with its sub-characteristics -- every column a heatmap draws, whether
+    /// or not any scope declares it.
+    pub catalogue: Vec<CharacteristicView>,
+    /// The history of every metric a listed scenario measures by that has
+    /// one (today the three production metrics), for a sparkline beside
+    /// the scenario. A metric appears once however many scenarios read it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series: Vec<crate::metrics::MetricSeries>,
+}
+
+/// The answer to `Request::QualityRemediate`: the task that now carries the
+/// scenario's gap, and whether this call created it (`false`: one was
+/// already open, and that one is returned instead).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QualityRemediation {
+    pub task: Task,
+    pub created: bool,
 }
 
 /// A scope and everything that runs in it.

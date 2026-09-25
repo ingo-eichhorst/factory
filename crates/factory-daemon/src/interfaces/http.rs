@@ -150,6 +150,9 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/scenarios", get(scenarios))
         .route("/api/scenarios/promote", post(scenario_promote))
         .route("/api/scenarios/whatif", post(scenario_whatif))
+        // The L6 Quality attributes tab (`#107`).
+        .route("/api/quality", get(quality))
+        .route("/api/quality/remediate", post(quality_remediate))
         .route("/api/operations", get(operations))
         .route("/api/benchmarks", get(benchmarks))
         .route("/api/datasets", get(list_datasets).post(create_dataset))
@@ -772,6 +775,51 @@ async fn scenario_whatif(State(engine): State<Arc<Engine>>, Json(body): Json<Sce
         Request::ScenarioWhatIf {
             scenario: body.scenario,
             drivers: body.drivers,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct QualityQuery {
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// `GET /api/quality?scope=` -- the L6 Quality attributes tab's whole
+/// answer. Read-only; an empty `scope` is the whole instance, the same as
+/// leaving it out, like `/api/goals`.
+async fn quality(State(engine): State<Arc<Engine>>, Query(q): Query<QualityQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::Quality {
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct QualityRemediateBody {
+    scope: String,
+    attribute: String,
+    scenario: String,
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+/// `POST /api/quality/remediate` -- the task that closes one scenario's gap.
+/// Answers `{"kind":"quality_remediate","result":{task,created}}`;
+/// `created: false` is the already-open task, returned rather than a
+/// second one made (`#98`).
+async fn quality_remediate(State(engine): State<Arc<Engine>>, Json(body): Json<QualityRemediateBody>) -> AxumResponse {
+    run(
+        &engine,
+        Request::QualityRemediate {
+            scope: body.scope,
+            attribute: body.attribute,
+            scenario: body.scenario,
+            agent: body.agent,
         },
     )
     .await
@@ -1566,16 +1614,94 @@ async fn ws_stream(engine: Arc<Engine>, socket: WebSocket) {
 
 #[cfg(test)]
 mod tests {
-    //! The Operations routes over a real socket: the query string and the
-    //! optional reason body are what this file adds, so they are what is
-    //! checked here -- the report itself is `operations.rs`'s to test.
+    //! The routes themselves, over a real socket: the router served on an
+    //! ephemeral loopback port and spoken to in plain HTTP/1.1, so a route
+    //! test needs no client crate beyond tokio. For the Operations routes
+    //! the query string and the optional reason body are what this file
+    //! adds, so they are what is checked here -- the report itself is
+    //! `operations.rs`'s to test.
 
     use super::*;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance};
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn engine_with_quality() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-http-test-{}", uuid::Uuid::new_v4()));
+        let dir = root.join(".factory").join("quality");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("baseline.yaml"),
+            "attributes:\n  - id: reliability\n    importance: H\n    difficulty: M\n    scenarios:\n\
+             \x20     - { id: sandboxed, measure: { check: sandbox } }\n",
+        )
+        .unwrap();
+        let mut company: Scope = serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            policies: PolicyDeclaration::default(),
+            quality: vec!["baseline".into()],
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    /// Serve `router(engine)` once on an ephemeral port and send it one
+    /// request; the status code and the JSON body back.
+    async fn request(engine: Arc<Engine>, method: &str, path: &str, body: Option<&str>) -> (u16, serde_json::Value) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(engine)).await.unwrap() });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let body = body.unwrap_or("");
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8(raw).unwrap();
+        let status: u16 = text.split(' ').nth(1).unwrap().parse().unwrap();
+        let (_, payload) = text.split_once("\r\n\r\n").unwrap();
+        (status, serde_json::from_str(payload).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn get_api_quality_answers_the_report_and_an_unknown_scope_is_a_404() {
+        let engine = engine_with_quality();
+        let (status, json) = request(engine.clone(), "GET", "/api/quality", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["kind"], "quality");
+        let report = &json["data"]["report"];
+        assert_eq!(report["catalogue"].as_array().unwrap().len(), 9, "every column, declared or not");
+        assert_eq!(report["scopes"][0]["scope"], "company");
+        assert_eq!(report["scopes"][0]["attributes"][0]["scenarios"][0]["status"], "met", "no agent is unsandboxed");
+
+        let (status, _) = request(engine, "GET", "/api/quality?scope=nope", None).await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn post_api_quality_remediate_refuses_a_met_scenario_with_a_400() {
+        let engine = engine_with_quality();
+        let body = r#"{"scope":"company","attribute":"reliability","scenario":"sandboxed"}"#;
+        let (status, json) = request(engine, "POST", "/api/quality/remediate", Some(body)).await;
+        assert_eq!(status, 400, "{json}");
+        assert!(json["message"].as_str().unwrap_or_default().contains("already met"), "{json}");
+    }
 
     async fn serve() -> std::net::SocketAddr {
         let root = std::env::temp_dir().join(format!("factory-http-test-{}", uuid::Uuid::new_v4()));
@@ -1588,6 +1714,7 @@ mod tests {
             scopes: vec![serde_yaml_ng::from_str("id: demo-id\nname: demo\npath: .\n").unwrap()],
             roles: Default::default(),
             policies: Default::default(),
+            quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
         };

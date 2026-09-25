@@ -260,6 +260,11 @@ impl Engine {
             role,
             policy_frameworks,
             goal: None,
+            // The quality block is a task run's: judging a scope's
+            // scenarios reads metrics and evidence as of the dispatch, and a
+            // standing agent's guide is written once and kept for its whole
+            // life, so any status in it would soon be a stale claim.
+            quality: Vec::new(),
         };
 
         let mut launch = match adapter.launch_spec(&ctx).await {
@@ -810,6 +815,7 @@ mod tests {
             scopes: vec![serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap()],
             roles: Default::default(),
             policies: Default::default(),
+            quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
         };
@@ -1121,6 +1127,7 @@ mod tests {
             scopes: vec![serde_yaml_ng::from_str(scope_yaml).unwrap()],
             roles: Default::default(),
             policies: Default::default(),
+            quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
         };

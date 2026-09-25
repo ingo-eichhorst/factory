@@ -25,7 +25,7 @@ test("L6 Direction's Scenarios tab exists, is ordered after Policy, and is wired
   // Not anchored at the closing bracket: `dir` may grow another tab after
   // this one, the same restraint `goals.test.js`/`policy.test.js` now take
   // on their own copies of this assertion.
-  assert.match(wiring, /dir:\s*\["goals",\s*"policy",\s*"scenarios"/);
+  assert.match(wiring, /dir:\s*\["goals",\s*"quality",\s*"policy",\s*"scenarios"/);
   assert.match(wiring, /scenarios:\s*\{\s*onShow:\s*loadScenarios\s*\}/);
   // Never mixed into one number, in the page's own words (the issue's
   // guardrail, restated where a person actually reads the tab).

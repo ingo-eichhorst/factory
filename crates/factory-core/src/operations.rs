@@ -319,6 +319,12 @@ pub fn rework_rate(runs: &[Run], window: &Window) -> Option<f64> {
 /// passed in is measured from the earliest failure the caller handed over;
 /// the daemon passes enough history for that to be rare.
 pub fn recovery_times(runs: &[Run], window: &Window) -> Vec<f64> {
+    recoveries(runs, window).into_iter().map(|(_, secs)| secs).collect()
+}
+
+/// [`recovery_times`] with the moment each recovery completed -- the done
+/// run's end -- beside it, for [`registry_metric_as_of`].
+fn recoveries(runs: &[Run], window: &Window) -> Vec<(DateTime<Utc>, f64)> {
     let mut by_task: BTreeMap<&str, Vec<&Run>> = BTreeMap::new();
     for run in runs.iter().filter(|r| is_finished(r)) {
         by_task.entry(run.task_id.as_str()).or_default().push(run);
@@ -336,7 +342,7 @@ pub fn recovery_times(runs: &[Run], window: &Window) -> Vec<f64> {
                 RunStatus::Done => {
                     if let Some(start) = streak_start.take() {
                         if window.contains(end) {
-                            out.push(seconds(end - start));
+                            out.push((end, seconds(end - start)));
                         }
                     }
                 }
@@ -420,6 +426,34 @@ pub fn registry_metric(id: &str, runs: &[Run], window: &Window) -> Option<Figure
         }
         _ => return None,
     })
+}
+
+/// When the data behind [`registry_metric`]'s value for `id` is from: the
+/// newest moment among the runs that value is computed from -- the end of
+/// the newest run a cycle time, fail or rework rate counts, the start of the
+/// newest run a queue wait counts (a wait is known once the run starts),
+/// the end of the newest recovery. `None` when nothing in `window`
+/// contributes, which is exactly when the value is `None` too, and for an
+/// id that is not one of ours. The daemon sets `MetricValue::as_of` from
+/// this, the rule the production ratios follow: a value is as old as the
+/// data behind it, so a freshness window (a quality scenario's `max_age`)
+/// can read a figure nothing has moved in weeks as stale.
+pub fn registry_metric_as_of(id: &str, runs: &[Run], window: &Window) -> Option<DateTime<Utc>> {
+    match id {
+        "cycle_time_p50" | "cycle_time_p85" => runs
+            .iter()
+            .filter(|r| ended_in(r, window) && cycle_time(r).is_some())
+            .filter_map(|r| r.ended_at)
+            .max(),
+        "queue_wait_p95" => runs
+            .iter()
+            .filter(|r| window.contains(r.started_at) && queue_wait(r).is_some())
+            .map(|r| r.started_at)
+            .max(),
+        "fail_rate" | "rework_rate" => runs.iter().filter(|r| ended_in(r, window)).filter_map(|r| r.ended_at).max(),
+        "time_to_recover_p50" => recoveries(runs, window).into_iter().map(|(end, _)| end).max(),
+        _ => None,
+    }
 }
 
 fn finished_in(runs: &[Run], window: &Window) -> usize {
@@ -2068,6 +2102,24 @@ mod tests {
         assert_eq!(fig("rework_rate").value, Some(1.0 / 7.0));
         assert_eq!(fig("time_to_recover_p50").value, Some(120.0 * 60.0));
         assert!(registry_metric("scrap_rate", &runs, &window).is_none(), "not one of ours");
+    }
+
+    #[test]
+    fn a_registry_metric_is_as_of_the_newest_run_behind_it() {
+        let window = Window::trailing(now(), 28);
+        let mut runs = history("t", 5, &[10, 20, 30, 40, 50]);
+        runs.push(run("f", "u", 1, RunStatus::Failed, 500, Some(490)));
+        runs.push(run("ok", "u", 2, RunStatus::Done, 400, Some(370)));
+        // Started later than anything else, still going: a queue wait, not
+        // a finished run.
+        runs.push(run("live", "v", 1, RunStatus::Running, 300, None));
+        let as_of = |id| registry_metric_as_of(id, &runs, &window);
+        for id in ["cycle_time_p50", "cycle_time_p85", "fail_rate", "rework_rate", "time_to_recover_p50"] {
+            assert_eq!(as_of(id), Some(ago(370)), "{id}: the newest run it counts ended then");
+        }
+        assert_eq!(as_of("queue_wait_p95"), Some(ago(300)), "a wait is known once the run starts");
+        assert_eq!(as_of("scrap_rate"), None, "not one of ours");
+        assert_eq!(registry_metric_as_of("fail_rate", &[], &window), None, "nothing behind it");
     }
 
     #[test]
