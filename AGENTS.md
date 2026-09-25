@@ -94,6 +94,16 @@ level again. A `--ff-only` that refuses is information: it means `main` has
 something local that never went through a review, and that is the thing to fix
 rather than force through.
 
+**A task that changed code ends with an open pull request.** That holds for
+every run Factory dispatches here: commit, push the branch, `gh pr create`, and
+put the pull request's URL in the `--result` of `factory task report --status
+done`. A branch left only in a run's worktree is work nobody reviews, and the
+worktree is not where anyone looks for it. If the checks cannot be made green,
+open it as a draft and say what fails. Merging is the step that waits for a
+person -- never merge, approve or enable auto-merge on your own pull request.
+Whoever writes a task says so too, and never writes "do not push".
+`.agents/skills/implement-github-issue` is the whole procedure for an issue.
+
 **The hook is the enforcement, and it is weaker than it looks.** GitHub cannot
 do this for us: the repository is private on a free plan, where rulesets and
 branch protection are both paid. So `.githooks/pre-push` refuses the push, and
