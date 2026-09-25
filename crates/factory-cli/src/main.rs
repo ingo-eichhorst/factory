@@ -2421,21 +2421,24 @@ fn stats_text(report: &OperationsReport) -> String {
     let days = h.window.days();
     out.push_str(&format!("\nHEALTH  last {days}d  (the {days}d before it)\n"));
     let row = |name: &str, now: String, before: String| format!("  {name:<20} {now:<36} ({before})\n");
+    // The window before only needs its number: why the current one has
+    // none is said once, beside it.
+    let was = |f: &ops::Figure, fmt: &dyn Fn(f64) -> String| f.value.map(fmt).unwrap_or_else(|| "--".into());
     let (c, p) = (&h.current, &h.previous);
     out.push_str(&row("finished", c.finished.to_string(), p.finished.to_string()));
-    out.push_str(&row("throughput / day", figure(&c.throughput_day, |v| format!("{v:.1}")), figure(&p.throughput_day, |v| format!("{v:.1}"))));
-    out.push_str(&row("cycle time p50", figure(&c.cycle_p50, secs), figure(&p.cycle_p50, secs)));
-    out.push_str(&row("cycle time p85", figure(&c.cycle_p85, secs), figure(&p.cycle_p85, secs)));
-    out.push_str(&row("first-pass yield", figure(&c.first_pass_yield, pct), figure(&p.first_pass_yield, pct)));
-    out.push_str(&row("rework rate", figure(&c.rework_rate, pct), figure(&p.rework_rate, pct)));
-    out.push_str(&row("scrap rate", figure(&c.scrap_rate, pct), figure(&p.scrap_rate, pct)));
-    out.push_str(&row("fail rate", figure(&c.fail_rate, pct), figure(&p.fail_rate, pct)));
-    out.push_str(&row("time to recover p50", figure(&c.recover_p50, secs), figure(&p.recover_p50, secs)));
-    out.push_str(&row("queue wait p95", figure(&c.queue_wait_p95, secs), figure(&p.queue_wait_p95, secs)));
+    out.push_str(&row("throughput / day", figure(&c.throughput_day, |v| format!("{v:.1}")), was(&p.throughput_day, &|v| format!("{v:.1}"))));
+    out.push_str(&row("cycle time p50", figure(&c.cycle_p50, secs), was(&p.cycle_p50, &secs)));
+    out.push_str(&row("cycle time p85", figure(&c.cycle_p85, secs), was(&p.cycle_p85, &secs)));
+    out.push_str(&row("first-pass yield", figure(&c.first_pass_yield, pct), was(&p.first_pass_yield, &pct)));
+    out.push_str(&row("rework rate", figure(&c.rework_rate, pct), was(&p.rework_rate, &pct)));
+    out.push_str(&row("scrap rate", figure(&c.scrap_rate, pct), was(&p.scrap_rate, &pct)));
+    out.push_str(&row("fail rate", figure(&c.fail_rate, pct), was(&p.fail_rate, &pct)));
+    out.push_str(&row("time to recover p50", figure(&c.recover_p50, secs), was(&p.recover_p50, &secs)));
+    out.push_str(&row("queue wait p95", figure(&c.queue_wait_p95, secs), was(&p.queue_wait_p95, &secs)));
     out.push_str(&row(
         "interventions / 100",
         figure(&c.interventions_per_100, |v| format!("{v:.1} ({} in all)", c.interventions)),
-        figure(&p.interventions_per_100, |v| format!("{v:.1}")),
+        was(&p.interventions_per_100, &|v| format!("{v:.1}")),
     ));
     if !c.fail_by_kind.is_empty() || c.unclassified > 0 {
         let mut kinds: Vec<String> = c
