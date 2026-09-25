@@ -1186,7 +1186,8 @@ pub fn driver_defs() -> Vec<DriverDef> {
         DriverDef {
             id: "first_pass_yield",
             title: "First-pass yield",
-            description: "1 minus reworked/finished, over the trailing 28 days -- the same registry metric of the same name.",
+            description: "Finished runs that ended done on attempt 1, over finished, over the trailing 28 days \
+                           -- the same registry metric of the same name.",
             unit: "ratio",
             assumption: false,
             metric: Some("first_pass_yield"),
@@ -1202,10 +1203,10 @@ pub fn driver_defs() -> Vec<DriverDef> {
         DriverDef {
             id: "rework_rate",
             title: "Rework rate",
-            description: "No registry metric backs this one directly: `first_pass_yield` is already \
-                           `1 - reworked/finished`, so a `rework_rate` driver is a deliberately separate, \
-                           author-supplied assumption rather than a second computation of the same \
-                           underlying fraction -- never confused with a registry-derived number.",
+            description: "No registry metric backs this one directly: `first_pass_yield` is `first_pass/finished` \
+                           (done on attempt 1), a different count from `reworked` (attempt > 1, any outcome), so \
+                           `rework_rate` is a deliberately separate, author-supplied assumption rather than a \
+                           computation off either -- never confused with a registry-derived number.",
             unit: "ratio",
             assumption: true,
             metric: None,

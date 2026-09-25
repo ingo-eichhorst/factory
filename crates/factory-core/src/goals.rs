@@ -879,6 +879,19 @@ pub struct KrResult {
     pub kr: KrRef,
     pub title: String,
     pub kind: KrKind,
+    /// Whether this key result is checked in by a person rather than read
+    /// off a metric -- carried onto the wire so a reader of `evaluate`'s
+    /// output (the L6 Goals tab, `#99` slice 3) can tell the two apart
+    /// without re-deriving it from `report.checkins`' own keys.
+    pub manual: bool,
+    /// The concrete metric this key result reads from -- `KeyResult::bound_metric`'s
+    /// own answer, so `goal_tasks_done` already carries this key result's
+    /// bound id rather than the unbound family name an author wrote.
+    /// `None` for a manual key result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<MetricId>,
+    pub baseline: f64,
+    pub target: f64,
     pub value: Option<f64>,
     /// `None` means unscored -- no metric value or check-in yet -- never a
     /// manufactured `0.0`; see the module doc comment.
@@ -904,6 +917,17 @@ pub struct KrResult {
 pub struct ObjectiveResult {
     pub objective: String,
     pub title: String,
+    /// `Objective::scope`, carried through unchanged -- `None` means the
+    /// root, same as the authored field. The L6 Goals tab's strategy map
+    /// (`#99` slice 3) needs this to draw an objective filtered out of the
+    /// asked scope as a chip rather than silently dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// `Objective::aligns_to`, carried through unchanged -- the strategy
+    /// map's own cascade edges are drawn from this, same cycle only (see
+    /// the module doc comment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aligns_to: Option<String>,
     /// The mean of every scored key result's `score`; `None` if none of
     /// them are.
     pub score: Option<f64>,
@@ -943,6 +967,8 @@ pub fn evaluate(cycle: &Cycle, values: &BTreeMap<MetricId, MetricValue>, checkin
             ObjectiveResult {
                 objective: objective.id.clone(),
                 title: objective.title.clone(),
+                scope: objective.scope.clone(),
+                aligns_to: objective.aligns_to.clone(),
                 score,
                 key_results,
             }
@@ -1005,6 +1031,10 @@ fn evaluate_kr(
         kr: kr_ref,
         title: kr.title.clone(),
         kind: kr.kind,
+        manual: kr.manual,
+        metric: kr.bound_metric(&objective.id),
+        baseline: kr.baseline,
+        target: kr.target,
         value,
         score,
         band,
@@ -1954,12 +1984,18 @@ mod tests {
             objectives: vec![ObjectiveResult {
                 objective: "obj".into(),
                 title: "Objective".into(),
+                scope: None,
+                aligns_to: None,
                 score: Some(0.6),
                 key_results: vec![
                     KrResult {
                         kr: KrRef::new("obj", "a"),
                         title: "A".into(),
                         kind: KrKind::Committed,
+                        manual: false,
+                        metric: Some(MetricId::new("a").unwrap()),
+                        baseline: 0.0,
+                        target: 1.0,
                         value: Some(1.0),
                         score: Some(1.0),
                         band: Some(Band::Green),
@@ -1972,6 +2008,10 @@ mod tests {
                         kr: KrRef::new("obj", "b"),
                         title: "B".into(),
                         kind: KrKind::Aspirational,
+                        manual: true,
+                        metric: None,
+                        baseline: 0.0,
+                        target: 1.0,
                         value: None,
                         score: None,
                         band: None,

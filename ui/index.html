@@ -46,7 +46,7 @@
     <span class="lv-n">Overview</span><span class="lv-name">Dashboard</span><span class="lv-sub">Site, activity and inbox</span>
   </button>
   <button id="lv-dir" class="lvl" data-level="dir" data-lv="6">
-    <span class="lv-n">L6</span><span class="lv-name">Direction</span><span class="lv-sub">Policy, goals, budget</span>
+    <span class="lv-n">L6</span><span class="lv-name">Direction</span><span class="lv-sub">Goals, policy, budget</span>
   </button>
   <button id="lv-imp" class="lvl" data-level="imp" data-lv="5">
     <span class="lv-n">L5</span><span class="lv-name">Improvement</span><span class="lv-sub">Benchmarks and knowledge</span>
@@ -74,6 +74,7 @@
   <button id="tab-site">Site plan</button>
   <button id="tab-activity">Activity</button>
   <button id="tab-inbox">Inbox</button>
+  <button id="tab-goals" hidden>Goals</button>
   <button id="tab-policy" hidden>Policy</button>
   <button id="tab-tasks" hidden>Tasks</button>
   <button id="tab-workflows" hidden>Workflows</button>
@@ -115,6 +116,76 @@
       <span class="sub">Work waiting for a person</span>
     </div>
     <section><div class="inbox-list" id="inbox">loading…</div></section>
+  </div>
+
+  <div id="view-goals" hidden>
+    <div class="bar">
+      <h2>Goals</h2>
+      <span class="sub" id="goals-cycle-note"></span>
+      <span class="sp"></span>
+      <button class="btn" id="goals-refresh">Refresh</button>
+    </div>
+    <p class="env-note" id="goals-scope-note"></p>
+    <p class="env-note bad" id="goals-error" hidden></p>
+    <div class="empty" id="goals-empty" hidden>No direction authored yet. Write
+      <code class="id">.factory/goals/direction.yaml</code> (vision, mission, values, an optional
+      north star and its inputs) and at least one cycle file, e.g.
+      <code class="id">.factory/goals/2026-q4.yaml</code> (objectives, key results, a roadmap) --
+      see the README's "Goals" section for the shape. Nothing here enforces anything; it only shows
+      what is authored and what the data already says about it.</div>
+
+    <div id="goals-body" hidden>
+      <!-- A `<div>`, not `<header>`: a bare `header` element selector (the
+           page's own title bar, above) would otherwise bleed `align-items:
+           center`/`flex-wrap`/`background` into this one too -- every
+           property `.goal-header` does not itself override. -->
+      <div class="goal-header">
+        <div class="goal-vision" id="goal-vision"></div>
+        <div class="goal-mission" id="goal-mission"></div>
+        <div class="goal-values" id="goal-values"></div>
+        <div class="goal-cycle-row">
+          <label for="goal-cycle-select" style="margin:0">Cycle</label>
+          <select id="goal-cycle-select" aria-label="Cycle"></select>
+          <div class="goal-progress" id="goal-progress"></div>
+        </div>
+      </div>
+
+      <div class="seg" id="goal-view-seg" role="tablist" aria-label="Goals view">
+        <button type="button" data-view="map">Map</button>
+        <button type="button" data-view="roadmap">Roadmap</button>
+        <button type="button" data-view="orbit">Orbit</button>
+        <button type="button" data-view="table">Table</button>
+      </div>
+
+      <section id="goal-view-map">
+        <div class="goal-map" id="goal-map"></div>
+        <div class="goal-legend" id="goal-legend"></div>
+      </section>
+
+      <section id="goal-view-roadmap" hidden>
+        <div class="goal-lanes" id="goal-roadmap"></div>
+      </section>
+
+      <section id="goal-view-orbit" hidden>
+        <div id="goal-orbit"></div>
+      </section>
+
+      <section id="goal-view-table" hidden>
+        <table>
+          <thead><tr>
+            <th>Objective</th><th>Key result</th><th>Kind</th><th>Value</th><th>Target</th>
+            <th>Score</th><th>Band</th><th>Source</th>
+          </tr></thead>
+          <tbody id="goal-table"></tbody>
+        </table>
+      </section>
+
+      <section style="margin-top:14px">
+        <h3>Findings</h3>
+        <div id="goal-findings"></div>
+        <div class="empty" id="goal-no-findings" hidden>No findings.</div>
+      </section>
+    </div>
   </div>
 
   <div id="view-policy" hidden>

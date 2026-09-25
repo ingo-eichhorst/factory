@@ -46,6 +46,12 @@ export const state = {
   policy: null,           // last /api/policy answer's report -- see PolicyReport in protocol.rs
   policyError: null,
 
+  // L6 Direction, Goals tab (#99 slice 3) -- see GoalsReport in protocol.rs.
+  goals: null,             // last /api/goals answer's report
+  goalsError: null,
+  goalsCycle: null,        // the cycle id the rail/switcher asked for; null defers to the daemon's own default (the current cycle)
+  goalsMetrics: null,      // last /api/metrics?ids=... answer: { values, series, registry } -- registry (unit) and series, for the ids goals-model.js's metricIdsForReport names
+
   // L5 Improvement, Benchmarks tab -- three segments over one shared state
   // object, the same pattern `sandboxes.js`/`secrets.js` already share for
   // L2's two tabs. `benchSegment` is which of the three is showing;

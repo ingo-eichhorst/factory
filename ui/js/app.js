@@ -23,6 +23,7 @@ import { acceptBenchRunEvent, loadBenchRuns, renderBenchRunsSegment, wireBenchRu
 import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from "./knowledge.js";
 import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
 import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
+import { loadGoals, reloadGoals, wireGoals } from "./goals.js";
 
 // ------------------------------------------------------------------ views
 //
@@ -47,6 +48,10 @@ const VIEWS = {
   // `policy_changed` (`onEvent` below), the same no-poll rule `roles.js`
   // already follows for the same reason.
   policy: { onShow: loadPolicy },
+  // Same reasoning as Policy: two small YAML files and a handful of already-
+  // cached metric computations, re-read on every request, and a change only
+  // ever arrives as `goals_changed` (a check-in), not on a clock.
+  goals: { onShow: loadGoals },
   activity: {
     onShow: () => { if (!activityStarted) { initActivity(); activityStarted = true; } },
     tail: { write: activityFilter, read: ([f]) => setActivityFilter(f || "all") },
@@ -171,7 +176,10 @@ function applyModal([taskId, runId]) {
 // fallback in `scopes.js`.
 const LEVEL_VIEWS = {
   dash: ["dashboard", "site", "activity", "inbox"],
-  dir: ["policy"],
+  // Goals first, then Policy: Direction reads vision through rules -- the
+  // long-term frame and this cycle's objectives before the control
+  // catalogue that holds the company to what it already committed to.
+  dir: ["goals", "policy"],
   proc: ["tasks", "workflows"],
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets"],
@@ -269,6 +277,9 @@ function rerender(route) {
   // the daemon folds the chain itself (`GET /api/policy?scope=`), so a rail
   // change refetches rather than narrowing what is already on screen.
   else if (state.tab === "policy") loadPolicy();
+  // Same reason again: which objectives and roadmap items belong to a scope
+  // is the daemon's own filter (`GET /api/goals?scope=`).
+  else if (state.tab === "goals") loadGoals();
   // Both L2 tabs answer to the rail. Secrets narrows only the rows that
   // belong to a scope: a credential in the owner's home belongs to none of
   // them and is reachable from all of them, so it survives every selection.
@@ -496,6 +507,7 @@ async function boot() {
   $("runtime-refresh").onclick = () => loadRuntimeConnections();
   wireRoles();
   wirePolicy();
+  wireGoals();
   $("environment-refresh").onclick = () => refreshEnvironment();
   $("secrets-refresh").onclick = () => refreshEnvironment();
   $("benchmarks-refresh").onclick = () => {
@@ -630,6 +642,11 @@ function onEvent(ev) {
   // change a descendant's rollup too, and `reloadPolicy` also refreshes the
   // control detail modal, if one happens to be open.
   if (ev.type === "policy_changed" && state.tab === "policy") reloadPolicy();
+  // A check-in recorded against a manual key result -- see `Event::GoalsChanged`.
+  // Reload whenever the tab is open: `reloadGoals` also refreshes the key
+  // result detail modal, if one happens to be open on the checked-in key
+  // result.
+  if (ev.type === "goals_changed" && state.tab === "goals") reloadGoals();
 }
 
 /// The site's halls are built from `state.scopes`, which only the Roster view

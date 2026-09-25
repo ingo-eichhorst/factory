@@ -237,10 +237,12 @@ fn first_pass_yield_def() -> MetricDef {
     fixed(
         "first_pass_yield",
         "First-pass yield",
-        "1 minus reworked/finished, over the trailing 28 days.",
+        "Finished runs that ended done on their first attempt, over finished, over the \
+         trailing 28 days. Not `1 - reworked/finished`: a run scrapped on every attempt is \
+         `0.0` here, whatever `reworked` says.",
         Unit::Ratio,
         Better::Higher,
-        "production.rs's daily grid (/api/production): finished and reworked, trailing 28 days",
+        "production.rs's daily grid (/api/production): finished and first_pass, trailing 28 days",
     )
 }
 
