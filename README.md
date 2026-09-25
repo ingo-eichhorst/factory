@@ -1107,6 +1107,11 @@ store like `/api/production`, with no store of its own:
   100 runs. A figure that cannot be computed says why instead of reading
   zero, and one read off a fact older runs do not record says from when it
   is on record.
+  Each window also carries `days` -- its 24-hour steps, oldest first, with
+  the counts its figures are made of and what stood waiting and in
+  progress at each step's end -- and the current one `finished_runs`, the
+  newest 2000 runs that finished in it with each done run's cycle time: the
+  tab's small multiples, cumulative flow diagram and cycle-time scatter.
 - `schedules` -- every scheduled task: due, late, missed or paused, with its
   timezone.
 
@@ -1181,6 +1186,20 @@ terminal, not through `run.answer`, leaves no record and is not counted.)
 **Live updates.** No event of its own: everything the report reads changes
 through `task_updated`, `run_updated`, `task_entry` or `agent_updated`, and
 a viewer re-reads on those.
+
+**The tab.** Top to bottom: what changed since this browser last looked
+(kept in `localStorage`, a convenience and never a record); the attention
+queue, each row with its allowed actions behind a confirmation that takes a
+reason (required for an answer), and bulk run again / cancel only after a
+preview of every row; flow per scope, with capacity shown as unknown and a
+link to Occupancy; Vacanti's Aging WIP chart per scope; process health
+7d|30d as small multiples over the previous window's ghost, with the
+scatter and the CFD behind toggles; and the schedules. Every chart has a
+table twin. The rail narrows attention, flow, aging and schedules to the
+selected subtree; health is the selected scope alone, as the daemon
+computes it. The Dashboard's Inbox is the same attention list, every scope,
+less observations. A paused schedule carries a `paused` badge wherever a
+scheduled task is drawn.
 
 `factory stats [summary] [--scope S] [--window 7d|30d] [--json]` prints the
 attention queue's first five rows, flow, aging, health against the previous
