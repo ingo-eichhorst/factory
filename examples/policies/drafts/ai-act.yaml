@@ -1,0 +1,42 @@
+# A DRAFT catalogue for a possible future "ai-act" framework -- own wording,
+# not a copy of the regulation (same discipline `../cra.yaml` follows for the
+# real one). Deliberately kept in policies/drafts/, never policies/ itself:
+# `factory_core::policy::load_all` does not recurse into subdirectories, so
+# this framework never affects the real compliance report unless a scenario's
+# own `policy.add_frameworks` names it and a caller explicitly reads this
+# directory with `factory_core::scenario::load_drafts` -- see
+# `examples/scenarios/ai-act-2027.yaml`, and the test in `scenario.rs` that
+# pins load_all's non-recursion directly.
+framework: ai-act
+title: EU AI Act (draft, high-risk classification)
+kind: regulation
+controls:
+  - id: annex-iii-1
+    title: A risk management system is documented and kept current
+    evidence:
+      - check: knowledge
+      - check: attestation
+
+  - id: annex-iii-2
+    title: Training, validation and testing data quality is documented
+    evidence:
+      - check: knowledge
+
+  - id: annex-iii-3
+    title: Technical documentation is maintained
+    max_age: 90d
+    evidence:
+      - check: task
+        task: ai-act-doc-refresh
+        max_age: 90d
+
+  - id: annex-iii-4
+    title: Automatic logging of the system's operation is enabled
+    evidence:
+      - check: attestation
+
+  - id: annex-iii-5
+    title: Human oversight measures are in place
+    evidence:
+      - check: knowledge
+      - check: attestation

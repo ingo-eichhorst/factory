@@ -1,0 +1,24 @@
+# A small, realistic policy + drivers + signposts scenario. Loads with zero
+# findings -- see `examples_scenarios_load_with_zero_findings` in
+# `scenario.rs`. `add_frameworks: [ai-act]` names the draft catalogue at
+# `../policies/drafts/ai-act.yaml`; `scenario::overlay_chain`/`load_drafts`
+# are what actually resolve it against a policy chain, which this loader
+# does not need to know exists to load the file itself without findings.
+name: ai-act-2027
+title: EU AI Act applies to our agents from 2027
+kind: [policy, drivers]
+assumptions: |
+  High-risk classification for the customer-facing product; human oversight
+  required from the 2027 deadline.
+from: 2026-09-01
+horizon: 26w
+policy:
+  add_frameworks: [ai-act]
+  tighten:
+    cra/annex-i-2-1: { max_age: 14d }
+drivers:
+  capacity_factor: "×0.8"
+  first_pass_yield: "-10%"
+signposts:
+  - { metric: compliance.ai-act, below: 0.5, from: 2027-01-01 }
+  - { metric: throughput_week, below: 8 }
