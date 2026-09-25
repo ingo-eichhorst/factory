@@ -311,8 +311,8 @@ fn rework_rate_def() -> MetricDef {
         "rework_rate",
         "Rework rate",
         "reworked/finished, over the trailing 28 days -- production.rs's own reworked \
-         bucket: a finished run with attempt > 1, which says the task was tried again, not \
-         that anyone rejected anything.",
+         bucket: a retry, or a manual or workflow run of a task whose previous attempt failed \
+         or was cancelled. A scheduled firing is never rework, however many came before it.",
         Unit::Ratio,
         Better::Lower,
         OPERATIONS_SOURCE,

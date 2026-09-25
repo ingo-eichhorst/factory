@@ -597,9 +597,9 @@ mod tests {
     #[tokio::test]
     async fn the_operations_metrics_are_computed_from_real_runs() {
         let engine = test_engine(Vec::new());
-        finished_run(&engine, "clean", RunStatus::Done, chrono::Duration::hours(1)).await;
-        finished_run(&engine, "flaky", RunStatus::Failed, chrono::Duration::hours(3)).await;
-        finished_run(&engine, "flaky", RunStatus::Done, chrono::Duration::hours(1)).await;
+        finished_run(&engine, "clean", RunStatus::Done, Trigger::Manual, chrono::Duration::hours(1)).await;
+        finished_run(&engine, "flaky", RunStatus::Failed, Trigger::Manual, chrono::Duration::hours(3)).await;
+        finished_run(&engine, "flaky", RunStatus::Done, Trigger::Manual, chrono::Duration::hours(1)).await;
 
         let ids: Vec<MetricId> = ["fail_rate", "rework_rate", "time_to_recover_p50", "queue_wait_p95", "cycle_time_p50"]
             .into_iter()

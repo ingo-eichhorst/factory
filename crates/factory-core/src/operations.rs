@@ -14,7 +14,10 @@
 //! calls fixed there and nowhere else. They are restated below as
 //! predicates ([`is_finished`] and its neighbours) only because this crate
 //! cannot reach the daemon's; production.rs stays the source of truth, and
-//! a test here pins the same edge cases its own tests do.
+//! a test here pins the same edge cases its own tests do. Rework in
+//! particular is not `attempt > 1` -- a scheduled task's every firing bumps
+//! `attempt` -- but a `retry`, or a `manual`/`workflow` run whose task's
+//! previous attempt failed or was cancelled ([`is_rework`]).
 //!
 //! * **cycle time** -- `started_at` to `ended_at` of a run that ended
 //!   `done`. Done only: a failed or cancelled run did not complete the
@@ -99,16 +102,39 @@ pub fn is_scrapped(run: &Run) -> bool {
     is_finished(run) && matches!(run.status, RunStatus::Failed | RunStatus::Cancelled)
 }
 
-/// Finished with `attempt > 1`: the task was tried again, which is all the
-/// domain can say about rework. production.rs's *reworked*.
-pub fn is_reworked(run: &Run) -> bool {
-    is_finished(run) && run.attempt > 1
+/// `(task_id, attempt) -> status` over `runs` -- where [`is_rework`] looks
+/// a run's own predecessor up, built once rather than per run.
+pub type Predecessors<'a> = BTreeMap<(&'a str, u32), RunStatus>;
+
+pub fn predecessors(runs: &[Run]) -> Predecessors<'_> {
+    runs.iter().map(|r| ((r.task_id.as_str(), r.attempt), r.status)).collect()
 }
 
-/// Finished `done` on attempt 1. production.rs's *first_pass* -- not
-/// `!reworked`: a run scrapped on attempt 1 is neither.
-pub fn is_first_pass(run: &Run) -> bool {
-    is_finished(run) && run.status == RunStatus::Done && run.attempt == 1
+/// production.rs's `is_rework`: a re-attempt of work that did not succeed.
+/// A `retry` always is; a `manual` or `workflow` run is when the same
+/// task's previous attempt ended failed or cancelled; a `schedule`, `bench`
+/// or `agent` run never is -- each is the next occurrence of standing work.
+/// A predecessor older than the runs handed over reads as "did not fail".
+pub fn is_rework(run: &Run, prev: &Predecessors<'_>) -> bool {
+    match run.trigger {
+        Trigger::Retry => true,
+        Trigger::Manual | Trigger::Workflow if run.attempt > 1 => matches!(
+            prev.get(&(run.task_id.as_str(), run.attempt - 1)),
+            Some(RunStatus::Failed | RunStatus::Cancelled)
+        ),
+        _ => false,
+    }
+}
+
+/// Finished and rework. production.rs's *reworked*.
+pub fn is_reworked(run: &Run, prev: &Predecessors<'_>) -> bool {
+    is_finished(run) && is_rework(run, prev)
+}
+
+/// Finished `done` and not rework. production.rs's *first_pass* -- not
+/// `!reworked`: a run scrapped first time round is neither.
+pub fn is_first_pass(run: &Run, prev: &Predecessors<'_>) -> bool {
+    is_finished(run) && run.status == RunStatus::Done && !is_rework(run, prev)
 }
 
 /// Finished `failed` -- narrower than scrapped: a cancel is not a failure.
@@ -259,7 +285,7 @@ pub fn queue_waits(runs: &[Run], window: &Window) -> Vec<f64> {
     runs.iter().filter(|r| window.contains(r.started_at)).filter_map(queue_wait).collect()
 }
 
-fn ratio(runs: &[Run], window: &Window, hit: fn(&Run) -> bool) -> Option<f64> {
+fn ratio(runs: &[Run], window: &Window, hit: impl Fn(&Run) -> bool) -> Option<f64> {
     let finished: Vec<&Run> = runs.iter().filter(|r| ended_in(r, window)).collect();
     if finished.is_empty() {
         return None;
@@ -274,7 +300,8 @@ pub fn fail_rate(runs: &[Run], window: &Window) -> Option<f64> {
 
 /// reworked/finished over `window`; `None` with nothing finished.
 pub fn rework_rate(runs: &[Run], window: &Window) -> Option<f64> {
-    ratio(runs, window, is_reworked)
+    let prev = predecessors(runs);
+    ratio(runs, window, |r| is_reworked(r, &prev))
 }
 
 /// Every recovery that completed in `window`, in seconds -- see the module
@@ -1205,7 +1232,8 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
 pub fn health(runs: &[Run], window: &Window, since: Option<DateTime<Utc>>, answers: &[DateTime<Utc>]) -> Health {
     let finished: Vec<&Run> = runs.iter().filter(|r| ended_in(r, window)).collect();
     let n = finished.len();
-    let share = |hit: fn(&Run) -> bool| {
+    let prev = predecessors(runs);
+    let share = |hit: &dyn Fn(&Run) -> bool| {
         Figure::of(
             (n > 0).then(|| finished.iter().filter(|&&r| hit(r)).count() as f64 / n as f64),
             n,
@@ -1235,10 +1263,10 @@ pub fn health(runs: &[Run], window: &Window, since: Option<DateTime<Utc>>, answe
         },
         cycle_p50: Figure::percentile_of(&cycles, 0.50, METRIC_EMPTY_NO_DONE),
         cycle_p85: Figure::percentile_of(&cycles, 0.85, METRIC_EMPTY_NO_DONE),
-        first_pass_yield: share(is_first_pass),
-        rework_rate: share(is_reworked),
-        scrap_rate: share(is_scrapped),
-        fail_rate: share(is_failed),
+        first_pass_yield: share(&|r| is_first_pass(r, &prev)),
+        rework_rate: share(&|r| is_reworked(r, &prev)),
+        scrap_rate: share(&is_scrapped),
+        fail_rate: share(&is_failed),
         fail_by_kind,
         unclassified,
         recover_p50: Figure::percentile_of(&recovery_times(runs, window), 0.50, METRIC_EMPTY_NO_RECOVERY),
@@ -1255,16 +1283,11 @@ pub fn health(runs: &[Run], window: &Window, since: Option<DateTime<Utc>>, answe
 
 /// Interventions in `window`, as the module doc defines them.
 pub fn interventions(runs: &[Run], window: &Window, answers: &[DateTime<Utc>]) -> u32 {
-    let by_attempt: BTreeMap<(&str, u32), &Run> =
-        runs.iter().map(|r| ((r.task_id.as_str(), r.attempt), r)).collect();
+    // A person's "run again" is exactly production.rs's manual rework.
+    let prev = predecessors(runs);
     let run_again = runs
         .iter()
-        .filter(|r| r.trigger == Trigger::Manual && r.attempt > 1 && window.contains(r.started_at))
-        .filter(|r| {
-            by_attempt
-                .get(&(r.task_id.as_str(), r.attempt - 1))
-                .is_some_and(|prev| matches!(prev.status, RunStatus::Failed | RunStatus::Cancelled))
-        })
+        .filter(|r| r.trigger == Trigger::Manual && window.contains(r.started_at) && is_rework(r, &prev))
         .count();
     let cancels = runs
         .iter()
@@ -1441,16 +1464,36 @@ mod tests {
 
     #[test]
     fn the_production_words_hold_their_edge_cases() {
-        // production.rs's own: scrapped on attempt 1 is neither reworked
-        // nor first pass; done on attempt 2 is reworked and not first pass.
-        let scrapped = run("a", "t", 1, RunStatus::Failed, 10, Some(5));
-        assert!(is_scrapped(&scrapped) && !is_reworked(&scrapped) && !is_first_pass(&scrapped));
-        let retried = run("b", "t", 2, RunStatus::Done, 10, Some(5));
-        assert!(is_reworked(&retried) && !is_first_pass(&retried) && !is_scrapped(&retried));
+        // production.rs's own: scrapped first time round is neither
+        // reworked nor first pass; a manual re-run after it is reworked.
+        let scrapped = run("a", "t", 1, RunStatus::Failed, 20, Some(15));
+        let rerun = run("b", "t", 2, RunStatus::Done, 10, Some(5));
+        let runs = vec![scrapped.clone(), rerun.clone()];
+        let prev = predecessors(&runs);
+        assert!(is_scrapped(&scrapped) && !is_reworked(&scrapped, &prev) && !is_first_pass(&scrapped, &prev));
+        assert!(is_reworked(&rerun, &prev) && !is_first_pass(&rerun, &prev) && !is_scrapped(&rerun));
         let cancelled = run("c", "t", 1, RunStatus::Cancelled, 10, Some(5));
         assert!(is_scrapped(&cancelled) && !is_failed(&cancelled), "a cancel is scrap, not a failure");
         let open = run("d", "t", 1, RunStatus::Running, 10, None);
         assert!(!is_finished(&open) && !is_scrapped(&open));
+    }
+
+    #[test]
+    fn a_scheduled_firing_is_never_rework_and_a_retry_always_is() {
+        // attempt counts firings of standing work, not corrections: the
+        // hundredth scheduled firing after a failure, done clean, is a
+        // first pass (the fix production.rs made in #110).
+        let failed = run("a", "t", 99, RunStatus::Failed, 20, Some(15));
+        let mut firing = run("b", "t", 100, RunStatus::Done, 10, Some(5));
+        firing.trigger = Trigger::Schedule;
+        let mut retry = run("c", "u", 2, RunStatus::Done, 10, Some(5));
+        retry.trigger = Trigger::Retry;
+        let runs = vec![failed, firing.clone(), retry.clone()];
+        let prev = predecessors(&runs);
+        assert!(!is_reworked(&firing, &prev) && is_first_pass(&firing, &prev));
+        assert!(is_reworked(&retry, &prev), "a retry is rework even with no predecessor in view");
+        let again = run("d", "v", 7, RunStatus::Done, 10, Some(5));
+        assert!(!is_reworked(&again, &predecessors(std::slice::from_ref(&again))), "a predecessor out of view did not fail");
     }
 
     #[test]
@@ -1939,7 +1982,8 @@ mod tests {
         assert_eq!(fig("cycle_time_p85").value, Some(40.0 * 60.0));
         assert_eq!(fig("queue_wait_p95").value, Some(90.0));
         assert_eq!(fig("fail_rate").value, Some(1.0 / 7.0));
-        assert_eq!(fig("rework_rate").value, Some(5.0 / 7.0));
+        // The history's re-runs followed successes; only "ok" re-ran a failure.
+        assert_eq!(fig("rework_rate").value, Some(1.0 / 7.0));
         assert_eq!(fig("time_to_recover_p50").value, Some(120.0 * 60.0));
         assert!(registry_metric("scrap_rate", &runs, &window).is_none(), "not one of ours");
     }
