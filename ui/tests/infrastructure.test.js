@@ -16,9 +16,12 @@ import {
   fmtRuntime,
   fmtUptime,
   groupAgentsByScope,
+  harnessDetail,
+  harnessStateLabel,
   infraFailure,
   isEmptyProviders,
   kindBadge,
+  sortHarnesses,
   visibleAgents,
 } from "../js/infra-model.js";
 
@@ -227,4 +230,46 @@ test("a bare 404 is a daemon that predates the endpoint, not an error", () => {
   assert.equal(infraFailure(new Error("Failed to fetch")), "error");
   assert.equal(infraFailure(new Error("permission denied: 404 of them")), "error");
   assert.equal(infraFailure(undefined), "error");
+});
+
+// -- harnesses (#131) --------------------------------------------------------
+
+const STUCK = {
+  harness: "codex",
+  binary: "/opt/homebrew/bin/codex",
+  state: "unhealthy",
+  reason: "`/opt/homebrew/bin/codex --version` did not answer in 10s",
+  repair: "scripts/repair-harness codex",
+  held: [{ task_id: "t1", scope: "demo", title: "fix it" }],
+};
+
+test("a harness says whether it starts, and never calls an unprobed one broken", () => {
+  assert.equal(harnessStateLabel("healthy"), "starts");
+  assert.equal(harnessStateLabel("unhealthy"), "does not start");
+  assert.equal(harnessStateLabel("unprobed"), "not checked yet");
+  assert.equal(harnessStateLabel("something-new"), "something-new");
+  assert.equal(harnessStateLabel(null), MISSING);
+});
+
+test("a harness's detail is its version, its reason, or a promise to check", () => {
+  assert.equal(harnessDetail({ state: "healthy", version: "codex-cli 0.157.0" }), "codex-cli 0.157.0");
+  assert.match(harnessDetail(STUCK), /did not answer in 10s/);
+  assert.match(harnessDetail({ state: "unprobed" }), /before the next dispatch/);
+  assert.equal(harnessDetail(null), MISSING);
+});
+
+test("an unhealthy harness sorts first, the rest keep the daemon's order", () => {
+  const rows = [
+    { harness: "claude", state: "healthy" },
+    { harness: "pi", state: "unprobed" },
+    STUCK,
+  ];
+  assert.deepEqual(sortHarnesses(rows).map(r => r.harness), ["codex", "claude", "pi"]);
+  assert.deepEqual(sortHarnesses(undefined), []);
+});
+
+test("the page draws the harness layer from the payload's harnesses", () => {
+  const view = readFileSync(new URL("../js/infrastructure.js", import.meta.url), "utf8");
+  assert.match(view, /data\.harnesses/);
+  assert.match(view, /h\.repair/);
 });

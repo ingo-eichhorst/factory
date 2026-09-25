@@ -26,6 +26,31 @@ pub struct WorkflowNode {
     /// What a `Gate` node checks. `None` on every `Task` node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateSpec>,
+    /// A task node that may send the work back (`#140`): when the agent
+    /// itself reports this node's run `failed`, the path from `to` down to
+    /// this node runs again, up to `max_rounds` times. The one edge that
+    /// points backwards, kept off `edges` so the graph stays acyclic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rework: Option<ReworkSpec>,
+}
+
+/// See [`WorkflowNode::rework`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReworkSpec {
+    /// The task node, an ancestor of this one, that the work goes back to.
+    pub to: String,
+    /// How many times the work may go back. Once they are used up, a
+    /// `failed` report fails the run like any other.
+    pub max_rounds: u32,
+}
+
+/// A value a run is started with (`#140`), written `{{name}}` in a task
+/// node's title, instructions or label values and in a gate's command.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowInput {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +126,9 @@ pub struct WorkflowDraft {
     /// (`#118`). Absent is the default category.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// What a run of it must be started with (`#140`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<WorkflowInput>,
     #[serde(default)]
     pub nodes: Vec<WorkflowNode>,
     #[serde(default)]
@@ -116,6 +144,9 @@ pub struct WorkflowDefinition {
     /// See `WorkflowDraft::category`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// See `WorkflowDraft::inputs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<WorkflowInput>,
     pub nodes: Vec<WorkflowNode>,
     pub edges: Vec<WorkflowEdge>,
     pub revision: u64,
@@ -132,6 +163,7 @@ impl WorkflowDefinition {
             description: draft.description,
             scope: draft.scope,
             category: draft.category,
+            inputs: draft.inputs,
             nodes: draft.nodes,
             edges: draft.edges,
             revision: 1,
@@ -145,6 +177,7 @@ impl WorkflowDefinition {
         self.description = draft.description;
         self.scope = draft.scope;
         self.category = draft.category;
+        self.inputs = draft.inputs;
         self.nodes = draft.nodes;
         self.edges = draft.edges;
         self.revision += 1;
@@ -300,6 +333,8 @@ impl WorkflowDefinition {
                 .join(", ");
             return Err(format!("workflow contains a cycle involving {cyclic}"));
         }
+        self.validate_inputs()?;
+        self.validate_rework()?;
         for node in self.nodes.iter().filter(|n| n.kind == WorkflowNodeKind::Gate) {
             if self.gate_subject(&node.id).is_none() {
                 return Err(format!(
@@ -314,6 +349,123 @@ impl WorkflowDefinition {
 
     fn node(&self, id: &str) -> Option<&WorkflowNode> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// Declared inputs have names and are declared once, and -- once a
+    /// definition declares any -- every `{{name}}` in a task node names one
+    /// of them, so a typo is refused here rather than reaching an agent as
+    /// literal braces. A definition with no inputs leaves braces alone: it
+    /// may well carry `{{.Names}}`-style text meant for some other tool.
+    fn validate_inputs(&self) -> Result<(), String> {
+        let mut declared = BTreeSet::new();
+        for input in &self.inputs {
+            if !is_input_name(&input.name) {
+                return Err(format!(
+                    "input {:?} is not a name: use letters, digits, `_` or `-`, starting with a letter or `_`",
+                    input.name
+                ));
+            }
+            if !declared.insert(input.name.as_str()) {
+                return Err(format!("input {:?} is declared twice", input.name));
+            }
+        }
+        if declared.is_empty() {
+            return Ok(());
+        }
+        for node in self.nodes.iter().filter(|n| n.kind == WorkflowNodeKind::Task) {
+            let texts = [&node.task.title, &node.task.instructions].into_iter().chain(node.task.labels.values());
+            for text in texts {
+                if let Some(unknown) = placeholders(text).into_iter().find(|name| !declared.contains(name)) {
+                    return Err(format!(
+                        "node {:?} uses {{{{{unknown}}}}}, but the workflow declares no input {unknown:?}",
+                        node.id
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A node's `rework` sends work back to one of its own ancestors, and
+    /// only from a task node: anything else would be a cycle, or a gate
+    /// deciding something it can only mirror.
+    fn validate_rework(&self) -> Result<(), String> {
+        for node in &self.nodes {
+            let Some(rework) = &node.rework else { continue };
+            if node.kind != WorkflowNodeKind::Task {
+                return Err(format!("gate node {:?} cannot send work back; only a task node can", node.id));
+            }
+            if rework.max_rounds == 0 {
+                return Err(format!("node {:?} sends work back at most zero times; use at least one round", node.id));
+            }
+            match self.node(&rework.to) {
+                None => return Err(format!("node {:?} sends work back to missing node {:?}", node.id, rework.to)),
+                Some(target) if target.kind != WorkflowNodeKind::Task => {
+                    return Err(format!("node {:?} sends work back to gate node {:?}; name a task node", node.id, rework.to))
+                }
+                Some(_) => {}
+            }
+            if !self.ancestors(&node.id).contains(&rework.to) {
+                return Err(format!(
+                    "node {:?} sends work back to {:?}, which does not come before it",
+                    node.id, rework.to
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// What runs again when `from` sends its work back (`#140`): every node
+    /// on a path from its rework target down to `from`, both included, and
+    /// everything downstream of `from` -- none of which can have started,
+    /// since it all waits on `from`. In the definition's own order. Empty
+    /// when `from` has no `rework`.
+    pub fn rework_body(&self, from: &str) -> Vec<String> {
+        let Some(to) = self.node(from).and_then(|n| n.rework.as_ref()).map(|r| r.to.clone()) else {
+            return Vec::new();
+        };
+        let below_to = self.descendants(&to);
+        let above_from = self.ancestors(from);
+        let below_from = self.descendants(from);
+        let in_body = |id: &str| {
+            id == to || id == from || (below_to.contains(id) && above_from.contains(id)) || below_from.contains(id)
+        };
+        let order = self.validate().unwrap_or_else(|_| self.nodes.iter().map(|n| n.id.clone()).collect());
+        order.into_iter().filter(|id| in_body(id)).collect()
+    }
+
+    /// This definition with a run's inputs written in (`#140`): every
+    /// declared input must be given, nothing undeclared may be, and each
+    /// `{{name}}` in a task node's title, instructions and label values is
+    /// replaced verbatim. A gate's command is left as it is -- it is a
+    /// command the daemon itself runs, and a value typed at start time is
+    /// not something to splice into one.
+    pub fn with_inputs(&self, given: &BTreeMap<String, String>) -> Result<WorkflowDefinition, String> {
+        let declared: BTreeSet<&str> = self.inputs.iter().map(|i| i.name.as_str()).collect();
+        if let Some(extra) = given.keys().find(|k| !declared.contains(k.as_str())) {
+            return Err(format!("this workflow takes no input {extra:?}"));
+        }
+        let missing: Vec<&str> = self
+            .inputs
+            .iter()
+            .filter(|i| given.get(&i.name).is_none_or(|v| v.trim().is_empty()))
+            .map(|i| i.name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!("a run of this workflow needs {}", missing.join(", ")));
+        }
+        let mut out = self.clone();
+        if given.is_empty() {
+            return Ok(out);
+        }
+        for node in out.nodes.iter_mut().filter(|n| n.kind == WorkflowNodeKind::Task) {
+            node.task.title = substitute(&node.task.title, given);
+            node.task.instructions = substitute(&node.task.instructions, given);
+            for value in node.task.labels.values_mut() {
+                *value = substitute(value, given);
+            }
+        }
+        Ok(out)
     }
 
     /// The category a task node is planned as: its own, the workflow's, or
@@ -403,6 +555,7 @@ impl WorkflowDefinition {
             description: String::new(),
             scope: task.scope.clone(),
             category: task.category.clone(),
+            inputs: Vec::new(),
             nodes: vec![WorkflowNode {
                 id: IMPLICIT_NODE.into(),
                 position: CanvasPoint::default(),
@@ -415,6 +568,7 @@ impl WorkflowDefinition {
                     ..Default::default()
                 },
                 gate: None,
+                rework: None,
             }],
             edges: Vec::new(),
             revision: 1,
@@ -516,6 +670,7 @@ impl WorkflowDefinition {
                         required_by: step.required_by.clone(),
                         locked: true,
                     }),
+                    rework: None,
                 });
                 chain_edges.push(WorkflowEdge {
                     id: fresh(format!("{previous}->{gate_id}"), &mut edge_ids),
@@ -579,6 +734,19 @@ impl WorkflowDefinition {
         out.into_iter().collect()
     }
 
+    fn descendants(&self, id: &str) -> BTreeSet<String> {
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![id.to_string()];
+        while let Some(current) = stack.pop() {
+            for edge in self.edges.iter().filter(|e| e.from == current) {
+                if seen.insert(edge.to.clone()) {
+                    stack.push(edge.to.clone());
+                }
+            }
+        }
+        seen
+    }
+
     fn ancestors(&self, id: &str) -> BTreeSet<String> {
         let mut seen = BTreeSet::new();
         let mut stack = vec![id.to_string()];
@@ -591,6 +759,51 @@ impl WorkflowDefinition {
         }
         seen
     }
+}
+
+/// An input's name: `[A-Za-z_][A-Za-z0-9_-]*`.
+fn is_input_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Every `{{name}}` in `text` (spaces inside the braces allowed), in order.
+/// Braces around anything that is not a name -- `{{.Names}}`, `{{}}` -- are
+/// not placeholders and are left to whatever they were meant for.
+pub fn placeholders(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        let name = after[..close].trim();
+        if is_input_name(name) {
+            out.push(name);
+        }
+        rest = &after[close + 2..];
+    }
+    out
+}
+
+/// `text` with each `{{name}}` whose name is in `values` replaced.
+fn substitute(text: &str, values: &BTreeMap<String, String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        match values.get(after[..close].trim()) {
+            Some(value) => {
+                out.push_str(&rest[..open]);
+                out.push_str(value);
+            }
+            None => out.push_str(&rest[..open + 2 + close + 2]),
+        }
+        rest = &after[close + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `factory workflow lint`'s answer (`#118`): the effective plan for each
@@ -667,6 +880,33 @@ pub struct WorkflowNodeRun {
     pub task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// How many times work was sent back through this node (`#140`): 0 on
+    /// its first pass. On a node with `rework`, the rounds it has used.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub round: u32,
+    /// The tasks earlier rounds spawned here, oldest first. Kept so their
+    /// history stays findable; never mirrored, never recreated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_task_ids: Vec<String>,
+    /// On the node work was sent back to: who sent it and why, which its
+    /// next task is dispatched with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rework_request: Option<ReworkRequest>,
+}
+
+/// Why a node is running again -- see [`WorkflowNodeRun::rework_request`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReworkRequest {
+    /// The node that sent the work back, and the task that did.
+    pub from_node: String,
+    pub from_task: String,
+    /// This round, counted from 1, and how many there may be.
+    pub round: u32,
+    pub max_rounds: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Who started a workflow run, recorded well enough to re-derive their
@@ -704,6 +944,10 @@ pub struct WorkflowRun {
     /// even long after the click that started it.
     #[serde(default)]
     pub started_by: WorkflowActor,
+    /// What it was started with (`#140`), already written into
+    /// `definition`; kept to say so.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -724,6 +968,9 @@ impl WorkflowRun {
                     status: WorkflowNodeStatus::Unstarted,
                     task_id: None,
                     error: None,
+                    round: 0,
+                    superseded_task_ids: Vec::new(),
+                    rework_request: None,
                 })
                 .collect(),
             definition,
@@ -731,9 +978,71 @@ impl WorkflowRun {
             failure_node_id: None,
             error: None,
             started_by,
+            inputs: BTreeMap::new(),
             created_at: now,
             updated_at: now,
         }
+    }
+}
+
+/// What [`WorkflowRun::send_back`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendBack {
+    /// The node has no `rework`: its failure is the run's.
+    NoRework,
+    /// The path runs again; this is round `round` of `max_rounds`.
+    Sent { round: u32, max_rounds: u32 },
+    /// Every round is used up: the failure stands.
+    Exhausted { max_rounds: u32 },
+}
+
+impl WorkflowRun {
+    /// Send `from`'s work back to its rework target (`#140`), if it has one
+    /// and a round is left: every node on the path from the target down to
+    /// `from` goes back to `unstarted` with its task moved to
+    /// `superseded_task_ids` and its round counted up, the target is told
+    /// who sent it back, and the not-yet-started nodes below `from` (a gate
+    /// mirrored `skipped` off the failed run, say) are `unstarted` again.
+    /// Nothing is spawned here; the next advance does that.
+    pub fn send_back(&mut self, from: &str) -> SendBack {
+        let Some(spec) = self.definition.nodes.iter().find(|n| n.id == from).and_then(|n| n.rework.clone()) else {
+            return SendBack::NoRework;
+        };
+        let Some(used) = self.nodes.iter().find(|n| n.node_id == from).map(|n| n.round) else {
+            return SendBack::NoRework;
+        };
+        if used >= spec.max_rounds {
+            return SendBack::Exhausted { max_rounds: spec.max_rounds };
+        }
+        let from_task = self.nodes.iter().find(|n| n.node_id == from).and_then(|n| n.task_id.clone()).unwrap_or_default();
+        let downstream = self.definition.descendants(from);
+        let round = used + 1;
+        for id in self.definition.rework_body(from) {
+            let Some(node) = self.nodes.iter_mut().find(|n| n.node_id == id) else { continue };
+            if downstream.contains(&id) {
+                // Waits on `from`, so it never started -- only a mirror
+                // may have marked it.
+                if node.task_id.is_none() {
+                    node.status = WorkflowNodeStatus::Unstarted;
+                    node.error = None;
+                }
+                continue;
+            }
+            if let Some(task) = node.task_id.take() {
+                node.superseded_task_ids.push(task);
+            }
+            node.status = WorkflowNodeStatus::Unstarted;
+            node.error = None;
+            node.round = round;
+            node.rework_request = (id == spec.to).then(|| ReworkRequest {
+                from_node: from.to_string(),
+                from_task: from_task.clone(),
+                round,
+                max_rounds: spec.max_rounds,
+            });
+        }
+        self.updated_at = Utc::now();
+        SendBack::Sent { round, max_rounds: spec.max_rounds }
     }
 }
 
@@ -751,6 +1060,7 @@ mod tests {
                 ..Default::default()
             },
             gate: None,
+            rework: None,
         }
     }
 
@@ -939,6 +1249,7 @@ mod tests {
             kind: WorkflowNodeKind::Gate,
             task: NewTask { title: format!("gate {step}"), ..Default::default() },
             gate: Some(GateSpec { step: step.into(), command: Some("true".into()), ..Default::default() }),
+            rework: None,
         }
     }
 
@@ -1069,5 +1380,111 @@ mod tests {
         a.task.schedule = Some(crate::task::Schedule::Cron("* * * * *".into()));
         let error = definition(vec![a], vec![]).validate().unwrap_err();
         assert!(error.contains("schedule"), "{error}");
+    }
+
+    fn reviewing(max_rounds: u32) -> WorkflowDefinition {
+        let mut review = node("review");
+        review.rework = Some(ReworkSpec { to: "implement".into(), max_rounds });
+        definition(
+            vec![node("triage"), node("implement"), gate_node("implement.tests", "tests"), review, node("finalize")],
+            vec![
+                e("triage", "implement"),
+                e("implement", "implement.tests"),
+                e("implement.tests", "review"),
+                e("review", "finalize"),
+            ],
+        )
+    }
+
+    #[test]
+    fn rework_must_point_back_at_an_ancestor_task_node() {
+        assert!(reviewing(5).validate().is_ok());
+
+        let mut forward = reviewing(5);
+        forward.nodes[1].rework = Some(ReworkSpec { to: "review".into(), max_rounds: 1 });
+        assert!(forward.validate().unwrap_err().contains("does not come before it"));
+
+        let mut to_gate = reviewing(5);
+        to_gate.nodes[3].rework = Some(ReworkSpec { to: "implement.tests".into(), max_rounds: 1 });
+        assert!(to_gate.validate().unwrap_err().contains("gate node"));
+
+        assert!(reviewing(0).validate().unwrap_err().contains("zero times"));
+    }
+
+    #[test]
+    fn the_rework_body_is_the_path_back_and_everything_below_it() {
+        assert_eq!(
+            reviewing(5).rework_body("review"),
+            vec!["implement", "implement.tests", "review", "finalize"]
+        );
+        assert!(reviewing(5).rework_body("implement").is_empty());
+    }
+
+    fn ran(run: &mut WorkflowRun, id: &str, status: WorkflowNodeStatus, task: &str) {
+        let node = run.nodes.iter_mut().find(|n| n.node_id == id).unwrap();
+        node.status = status;
+        node.task_id = (!task.is_empty()).then(|| task.to_string());
+    }
+
+    #[test]
+    fn sending_back_resets_the_path_keeps_history_and_stops_at_the_budget() {
+        let mut run = WorkflowRun::new(reviewing(2), WorkflowActor::Owner);
+        ran(&mut run, "triage", WorkflowNodeStatus::Done, "t1");
+        ran(&mut run, "implement", WorkflowNodeStatus::Done, "i1");
+        ran(&mut run, "implement.tests", WorkflowNodeStatus::Done, "");
+        ran(&mut run, "review", WorkflowNodeStatus::Failed, "r1");
+        ran(&mut run, "finalize", WorkflowNodeStatus::Skipped, "");
+
+        assert_eq!(run.send_back("review"), SendBack::Sent { round: 1, max_rounds: 2 });
+        let node = |run: &WorkflowRun, id: &str| run.nodes.iter().find(|n| n.node_id == id).unwrap().clone();
+        assert_eq!(node(&run, "triage").status, WorkflowNodeStatus::Done, "above the target is untouched");
+        let implement = node(&run, "implement");
+        assert_eq!(implement.status, WorkflowNodeStatus::Unstarted);
+        assert_eq!(implement.task_id, None);
+        assert_eq!(implement.superseded_task_ids, vec!["i1"]);
+        assert_eq!(
+            implement.rework_request,
+            Some(ReworkRequest { from_node: "review".into(), from_task: "r1".into(), round: 1, max_rounds: 2 })
+        );
+        assert_eq!(node(&run, "review").round, 1);
+        assert_eq!(node(&run, "review").rework_request, None);
+        assert_eq!(node(&run, "finalize").status, WorkflowNodeStatus::Unstarted);
+
+        ran(&mut run, "review", WorkflowNodeStatus::Failed, "r2");
+        assert_eq!(run.send_back("review"), SendBack::Sent { round: 2, max_rounds: 2 });
+        assert_eq!(node(&run, "implement").superseded_task_ids, vec!["i1"], "i2 never existed here");
+        ran(&mut run, "review", WorkflowNodeStatus::Failed, "r3");
+        assert_eq!(run.send_back("review"), SendBack::Exhausted { max_rounds: 2 });
+        assert_eq!(node(&run, "review").task_id.as_deref(), Some("r3"), "an exhausted budget changes nothing");
+        assert_eq!(run.send_back("triage"), SendBack::NoRework);
+    }
+
+    #[test]
+    fn inputs_are_required_substituted_and_typos_refused() {
+        let mut def = definition(vec![node("work")], Vec::new());
+        def.inputs = vec![WorkflowInput { name: "issue".into(), description: "the issue".into() }];
+        def.nodes[0].task.title = "Triage #{{ issue }}".into();
+        def.nodes[0].task.instructions = "gh issue view {{issue}} --json title --jq '{{.title}}'".into();
+        def.nodes[0].task.labels.insert("issue".into(), "{{issue}}".into());
+        def.validate().unwrap();
+
+        let given = BTreeMap::from([("issue".to_string(), "42".to_string())]);
+        let out = def.with_inputs(&given).unwrap();
+        assert_eq!(out.nodes[0].task.title, "Triage #42");
+        assert_eq!(out.nodes[0].task.instructions, "gh issue view 42 --json title --jq '{{.title}}'");
+        assert_eq!(out.nodes[0].task.labels["issue"], "42");
+
+        assert!(def.with_inputs(&BTreeMap::new()).unwrap_err().contains("needs issue"));
+        let extra = BTreeMap::from([("issue".to_string(), "1".to_string()), ("pr".to_string(), "2".to_string())]);
+        assert!(def.with_inputs(&extra).unwrap_err().contains("no input \"pr\""));
+
+        def.nodes[0].task.instructions = "{{isue}}".into();
+        assert!(def.validate().unwrap_err().contains("no input \"isue\""));
+
+        // With no inputs declared, braces are nobody's business.
+        let mut plain = definition(vec![node("work")], Vec::new());
+        plain.nodes[0].task.instructions = "docker ps --format '{{Names}}'".into();
+        plain.validate().unwrap();
+        assert_eq!(plain.with_inputs(&BTreeMap::new()).unwrap().nodes[0].task.instructions, "docker ps --format '{{Names}}'");
     }
 }

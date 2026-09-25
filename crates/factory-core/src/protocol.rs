@@ -7,6 +7,7 @@ use crate::benchmark::Configuration;
 use crate::building::{Activity, Cues, RepoMetrics, Shape};
 use crate::agent::AgentSession;
 use crate::config::ScopeAgent;
+use crate::dependencies::{Attachment, AttachmentKind, DependenciesReport};
 use crate::event::Event;
 use crate::knowledge::{Document, Finding, Gap, Page, Refusal, Tag};
 use crate::occupancy::Occupancy;
@@ -202,6 +203,14 @@ pub enum Request {
     },
     #[serde(rename = "task.report")]
     TaskReport { id: String, report: TaskReport },
+    #[serde(rename = "task.attach")]
+    TaskAttach {
+        id: String,
+        token: String,
+        kind: AttachmentKind,
+        filename: String,
+        bytes: Vec<u8>,
+    },
     /// A harness's lifecycle hook saying the agent's turn ended. Its own
     /// request rather than a kind of `TaskReport`, so nothing can mistake the
     /// harness speaking for the agent reporting.
@@ -238,7 +247,12 @@ pub enum Request {
     #[serde(rename = "workflow.delete")]
     WorkflowDelete { id: String },
     #[serde(rename = "workflow.run")]
-    WorkflowStart { id: String },
+    WorkflowStart {
+        id: String,
+        /// The values its declared inputs are started with (`#140`).
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        inputs: std::collections::BTreeMap<String, String>,
+    },
     #[serde(rename = "workflow_run.get")]
     WorkflowRunGet { id: String },
     #[serde(rename = "workflow_run.list")]
@@ -296,9 +310,18 @@ pub enum Request {
     /// scheduled to hold it next, and what the runtime saw in between.
     #[serde(rename = "occupancy")]
     Occupancy {
-        /// How far back to look. Defaults to the last twelve hours.
+        /// How far back to look. Defaults to the last twelve hours. The
+        /// width of the window when only one of `from` and `to` is given,
+        /// and ignored when both are.
         #[serde(default)]
         minutes: Option<u32>,
+        /// An explicit window, for a chart that has been panned or zoomed
+        /// away from the one that ends a little after now. Either side of
+        /// now, or across it; its width is still clamped.
+        #[serde(default)]
+        from: Option<chrono::DateTime<chrono::Utc>>,
+        #[serde(default)]
+        to: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// The run history the dashboard's window, sparklines, throughput chart
     /// and production-year grid all read from one request -- not one per
@@ -330,6 +353,10 @@ pub enum Request {
     /// changing anything.
     #[serde(rename = "environment")]
     Environment,
+    #[serde(rename = "dependencies")]
+    Dependencies { scope: String },
+    #[serde(rename = "dependencies.vex")]
+    DependenciesVex { scope: String },
     /// The L1 Infrastructure page: what everything runs on -- the host and
     /// the daemon on it, read live on every request, and the AI accounts the
     /// root config declares with the agents each one pays for. Read-only,
@@ -837,6 +864,8 @@ pub enum Payload {
         sandboxes: Vec<SandboxRow>,
         credentials: Vec<CredentialRow>,
     },
+    Attachment { attachment: Attachment },
+    Dependencies { report: DependenciesReport },
     /// The L1 Infrastructure page, read from the bottom up: the host, the
     /// daemon on it, the declared AI accounts above that with the agents
     /// each one serves, and the model agents no account claims yet. A host
@@ -846,6 +875,12 @@ pub enum Payload {
         daemon: DaemonFacts,
         providers: Vec<ProviderRow>,
         unassigned: Vec<UnassignedAgent>,
+        /// Whether each harness the config names starts (`#131`), as its
+        /// last probe before a dispatch found it. Read from the daemon's
+        /// cache: showing the page never probes anything. Left out when
+        /// the config names no harness with a probe.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        harnesses: Vec<crate::harness::HarnessRow>,
     },
     /// The L1 Backup page -- see `backup::BackupReport`. Boxed for the same
     /// reason `Operations` is.
@@ -1240,6 +1275,13 @@ pub struct ScopePolicy {
     pub scope: String,
     pub statuses: Vec<crate::policy::ControlStatus>,
     pub rollup: Vec<crate::policy::FrameworkRollup>,
+    /// A control's `framework/id` to the id of the non-terminal task in this
+    /// scope labelled `policy=<framework>/<id>` -- the one
+    /// `Request::PolicyRemediate` would refuse a second call naming -- so a
+    /// reader can show that task instead of offering to create another
+    /// (`#98`, the same field `ScopeQuality` carries).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub open_tasks: std::collections::BTreeMap<String, String>,
 }
 
 /// The L6 Policy tab's whole answer: every applicable control's status for
@@ -1301,6 +1343,11 @@ pub struct PolicyControlDetail {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<crate::policy::EvidenceRef>,
     pub status: crate::policy::Status,
+    /// The id of the non-terminal task in this scope labelled
+    /// `policy=<framework>/<id>` for this control, if one is open -- the
+    /// same lookup as `ScopePolicy::open_tasks` (`#98`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_task: Option<String>,
     /// Every attestation ever recorded for this control at this scope or an
     /// ancestor of it, most recent first -- withdrawn and expired ones
     /// included, since this is the audit trail, not just what currently
@@ -2514,6 +2561,7 @@ mod tests {
                 agent: "model-lab".into(),
                 harness: "opencode".into(),
             }],
+            harnesses: vec![],
         }
     }
 
@@ -2553,6 +2601,7 @@ mod tests {
                 agents: vec![],
             }],
             unassigned: vec![],
+            harnesses: vec![],
         };
         let json = serde_json::to_value(&payload).unwrap();
         for field in [

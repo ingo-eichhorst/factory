@@ -1125,8 +1125,18 @@ mod tests {
                 name: "test".into(),
             },
             // Same reason as `engine()`/`engine_with` above: off, so a real
-            // run dispatched here never forks a real `caffeinate`.
-            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+            // run dispatched here never forks a real `caffeinate`. The
+            // harness probe off as well: these dispatch `pi` to a stub
+            // runtime, and must not depend on `pi` being installed where
+            // the tests run (#131).
+            daemon: DaemonConfig {
+                power_assertion: false,
+                harness_health: factory_core::config::HarnessHealthConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..DaemonConfig::default()
+            },
             scope: None,
             scopes: vec![serde_yaml_ng::from_str(scope_yaml).unwrap()],
             roles: Default::default(),

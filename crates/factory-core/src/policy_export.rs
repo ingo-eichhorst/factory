@@ -235,6 +235,7 @@ mod tests {
                 scope: "demo".to_string(),
                 statuses: vec![status],
                 rollup: vec![],
+                open_tasks: Default::default(),
             }],
             rollup: vec![FrameworkRollup {
                 framework: "cra".to_string(),

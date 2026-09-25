@@ -1,7 +1,7 @@
 //! Intake (`#119`): the inbound quality gate at the line's commitment point.
 //!
 //! Work that arrives through intake is a task in `TaskStatus::Intake` -- held
-//! outside the dispatchable queue, with no run -- carrying an [`Intake`]
+//! back from dispatch, with no run -- carrying an [`Intake`]
 //! record: where it came from, who asked, and how far triage has got. Triage
 //! is Irrlicht's `ir:triage` skill generalised: seven readiness axes, each
 //! pass or fail with an evidence sentence; a category; a priority from impact

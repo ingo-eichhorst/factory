@@ -324,3 +324,17 @@ test("the journal names the new kinds and marks who asked", () => {
   assert.equal(entryTone({ kind: "answer_unsent" }), "fault");
   assert.equal(entryTone({ kind: "blocked" }), "");
 });
+
+test("a harness that does not start has its own label and journal lines (#131)", () => {
+  assert.equal(kindLabel("harness_unhealthy"), "harness does not start");
+  assert.equal(entryKindLabel("harness_unhealthy"), "harness does not start");
+  assert.equal(entryKindLabel("harness_recovered"), "harness answers again");
+  assert.equal(entryTone({ kind: "harness_unhealthy" }), "fault");
+  const rows = attentionRows({
+    attention: [
+      { kind: "harness_unhealthy", severity: "high", agent: "codex", title: "/opt/homebrew/bin/codex", since: "2026-09-25T12:00:00Z", age_s: 60, reason: "codex does not start", actions: [] },
+    ],
+  });
+  assert.equal(rows[0].label, "harness does not start");
+  assert.equal(rows[0].key, "harness_unhealthy|codex|2026-09-25T12:00:00Z");
+});

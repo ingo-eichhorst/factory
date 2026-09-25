@@ -120,6 +120,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/production", get(production))
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
+        .route("/api/dependencies", get(dependencies))
         .route("/api/infrastructure", get(infrastructure))
         .route("/api/backup", get(backup))
         .route("/api/backup/run", post(backup_run))
@@ -296,6 +297,10 @@ async fn agents(State(engine): State<Arc<Engine>>) -> AxumResponse {
 #[derive(serde::Deserialize)]
 struct Window {
     minutes: Option<u32>,
+    /// RFC 3339. A `+01:00` offset has to be written `%2B01:00` in a query
+    /// string, where a bare `+` is a space; the UI sends `Z`.
+    from: Option<chrono::DateTime<chrono::Utc>>,
+    to: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 async fn occupancy(
@@ -306,6 +311,8 @@ async fn occupancy(
         &engine,
         Request::Occupancy {
             minutes: window.minutes,
+            from: window.from,
+            to: window.to,
         },
     )
     .await
@@ -339,6 +346,16 @@ async fn site_footprint(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn environment(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Environment).await
+}
+
+#[derive(serde::Deserialize)]
+struct DependenciesQuery { scope: String }
+
+async fn dependencies(
+    State(engine): State<Arc<Engine>>,
+    Query(query): Query<DependenciesQuery>,
+) -> AxumResponse {
+    run(&engine, Request::Dependencies { scope: query.scope }).await
 }
 
 async fn infrastructure(State(engine): State<Arc<Engine>>) -> AxumResponse {
@@ -1413,8 +1430,29 @@ async fn delete_workflow(
     run(&engine, Request::WorkflowDelete { id }).await
 }
 
-async fn start_workflow(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
-    run(&engine, Request::WorkflowStart { id }).await
+/// `POST /api/workflows/{id}/run`, with an optional `{"inputs": {...}}`
+/// body (`#140`). An empty body starts a workflow that declares no inputs.
+async fn start_workflow(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> AxumResponse {
+    #[derive(serde::Deserialize, Default)]
+    struct Start {
+        #[serde(default)]
+        inputs: std::collections::BTreeMap<String, String>,
+    }
+    let start = if body.iter().all(u8::is_ascii_whitespace) {
+        Start::default()
+    } else {
+        match serde_json::from_slice::<Start>(&body) {
+            Ok(start) => start,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e.to_string()))).into_response()
+            }
+        }
+    };
+    run(&engine, Request::WorkflowStart { id, inputs: start.inputs }).await
 }
 
 async fn workflow_runs(
@@ -2045,6 +2083,74 @@ mod tests {
         assert_eq!(code, 400, "only `charts` is a detail");
         let (code, _) = call(addr, "GET", "/api/operations?scope=nowhere", false, "").await;
         assert_eq!(code, 404, "an unknown scope is not an empty report");
+    }
+
+    #[tokio::test]
+    async fn the_occupancy_route_takes_an_explicit_window_and_projects_schedules_across_it() {
+        let root = std::env::temp_dir().join(format!("factory-http-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+            scope: None,
+            scopes: vec![serde_yaml_ng::from_str(
+                "id: demo-id\nname: demo\npath: .\nagents:\n  - name: builder\n    harness: shell\n",
+            )
+            .unwrap()],
+            roles: Default::default(),
+            policies: Default::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()));
+        // Whole seconds, so the window read back compares equal to the one sent.
+        let now = chrono::SubsecRound::trunc_subsecs(chrono::Utc::now(), 0);
+        let mut task = factory_core::adapter::store::task_from_new(
+            factory_core::task::NewTask {
+                title: "hourly".into(),
+                schedule: Some(factory_core::task::Schedule::Every { seconds: 3600 }),
+                ..Default::default()
+            },
+            "demo".into(),
+            "builder".into(),
+            "herdr".into(),
+        );
+        task.next_run_at = Some(now + chrono::Duration::minutes(30));
+        engine.store.create(&task).await.unwrap();
+        let iso = |t: chrono::DateTime<chrono::Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+        // A day ahead, well beyond the quarter the live window keeps: the
+        // window comes back as asked, and the hourly task is in it six times.
+        let (from, to) = (now + chrono::Duration::days(1), now + chrono::Duration::days(1) + chrono::Duration::hours(6));
+        let path = format!("/api/occupancy?from={}&to={}", iso(from), iso(to));
+        let (status, json) = request(engine.clone(), "GET", &path, None).await;
+        assert_eq!(status, 200, "{json}");
+        let occ = &json["data"]["occupancy"];
+        assert_eq!(occ["from"].as_str().unwrap().parse::<chrono::DateTime<chrono::Utc>>().unwrap(), from);
+        assert_eq!(occ["to"].as_str().unwrap().parse::<chrono::DateTime<chrono::Utc>>().unwrap(), to);
+        let planned = |json: &serde_json::Value| {
+            let rows = json["data"]["occupancy"]["scopes"][0]["rows"].as_array().unwrap().clone();
+            let row = rows.into_iter().find(|r| r["agent"] == "builder").expect("the builder's row");
+            row["planned"].as_array().unwrap().len()
+        };
+        assert_eq!(planned(&json), 6, "{json}");
+
+        // The live window still has only the next firing in its quarter ahead.
+        let (status, json) = request(engine.clone(), "GET", "/api/occupancy?minutes=60", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(planned(&json), 0, "fifteen minutes ahead does not reach it");
+        let (_, json) = request(engine.clone(), "GET", "/api/occupancy?minutes=240", None).await;
+        assert_eq!(planned(&json), 1, "an hour ahead reaches the next firing only");
+
+        // Backwards is refused by the engine; nonsense by the query parser.
+        let path = format!("/api/occupancy?from={}&to={}", iso(to), iso(from));
+        let (status, json) = request(engine.clone(), "GET", &path, None).await;
+        assert_eq!(status, 400, "{json}");
+        let (status, _) = request(engine, "GET", "/api/occupancy?from=yesterday&to=today", None).await;
+        assert_eq!(status, 400);
     }
 
     #[tokio::test]

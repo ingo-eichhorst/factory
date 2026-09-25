@@ -553,6 +553,9 @@ pub struct OperationsInput<'a> {
     /// How long past its slot a due task may wait before it is late;
     /// `None` uses [`DEFAULT_LATE_AFTER_SECONDS`].
     pub late_after_seconds: Option<i64>,
+    /// Every harness binary the daemon knows about (`#131`); the unhealthy
+    /// ones are exceptions.
+    pub harnesses: Vec<crate::harness::HarnessRow>,
 }
 
 /// The scope a report was asked for, and the subtree it covers: that scope
@@ -627,6 +630,9 @@ pub enum ExceptionKind {
     LivenessLost,
     /// A scenario signpost triggered -- an observation, not a fault.
     TriggeredSignpost,
+    /// A harness binary does not start (`#131`): one per binary, however
+    /// many tasks are held on it, naming the repair command.
+    HarnessUnhealthy,
 }
 
 impl ExceptionKind {
@@ -640,6 +646,7 @@ impl ExceptionKind {
             Self::ScheduleMissed => "schedule_missed",
             Self::LivenessLost => "liveness_lost",
             Self::TriggeredSignpost => "triggered_signpost",
+            Self::HarnessUnhealthy => "harness_unhealthy",
         }
     }
 }
@@ -1310,6 +1317,50 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 .error
                 .clone()
                 .unwrap_or_else(|| "the permanent agent's session is gone".into()),
+            actions: Vec::new(),
+            suspicion: false,
+            observation: false,
+            also: Vec::new(),
+        });
+    }
+
+    // -- harnesses that do not start: one per binary (#131) ----------------
+    // Host-wide, so a scope filter keeps one only when a task it holds is in
+    // that scope's subtree.
+    for h in input.harnesses.iter().filter(|h| h.state == crate::harness::HarnessState::Unhealthy) {
+        if input
+            .scope
+            .as_ref()
+            .is_some_and(|s| !h.held.iter().any(|t| s.covers(&t.scope)))
+        {
+            continue;
+        }
+        let since = h.unhealthy_since.or(h.checked_at).unwrap_or(now);
+        let mut reason = format!(
+            "{} does not start: {}",
+            h.harness,
+            h.reason.as_deref().unwrap_or("its probe failed")
+        );
+        if let Some(repair) = &h.repair {
+            reason.push_str(&format!(". Repair: `{repair}`"));
+        }
+        match h.held.len() {
+            0 => {}
+            1 => reason.push_str(". 1 task is held on it"),
+            n => reason.push_str(&format!(". {n} tasks are held on it")),
+        }
+        attention.push(Exception {
+            kind: ExceptionKind::HarnessUnhealthy,
+            severity: Severity::High,
+            scope: None,
+            // The one task, when there is only one: something to click.
+            task_id: (h.held.len() == 1).then(|| h.held[0].task_id.clone()),
+            title: Some(h.binary.clone()),
+            run_id: None,
+            agent: Some(h.harness.clone()),
+            since,
+            age_s: seconds(now - since),
+            reason,
             actions: Vec::new(),
             suspicion: false,
             observation: false,
@@ -2027,6 +2078,46 @@ mod tests {
         assert_eq!(r.attention[0].kind, ExceptionKind::LivenessLost);
         assert_eq!(r.attention[0].agent.as_deref(), Some("keeper"));
         assert_eq!(r.attention[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn an_unhealthy_harness_is_one_high_exception_naming_its_repair() {
+        use crate::harness::{HarnessRow, HarnessState, HeldTask};
+        let row = |binary: &str, state, held: Vec<HeldTask>| HarnessRow {
+            harness: "codex".into(),
+            binary: binary.into(),
+            state,
+            checked_at: Some(ago(1)),
+            unhealthy_since: (state == HarnessState::Unhealthy).then(|| ago(2)),
+            version: None,
+            reason: (state == HarnessState::Unhealthy)
+                .then(|| "`/opt/homebrew/bin/codex --version` did not answer in 10s".into()),
+            repair: (state == HarnessState::Unhealthy).then(|| "scripts/repair-harness codex".into()),
+            held,
+            auto_repair: None,
+        };
+        let held = |id: &str, scope: &str| HeldTask { task_id: id.into(), scope: scope.into(), title: id.into() };
+        let harnesses = vec![
+            row("/opt/homebrew/bin/codex", HarnessState::Unhealthy, vec![held("a", "web"), held("b", "web"), held("c", "api")]),
+            row("/usr/local/bin/claude", HarnessState::Healthy, vec![]),
+        ];
+        let inp = OperationsInput { now: now(), harnesses: harnesses.clone(), ..Default::default() };
+        let r = report(&inp);
+        assert_eq!(r.attention.len(), 1, "one per binary, not one per held task");
+        let e = &r.attention[0];
+        assert_eq!(e.kind, ExceptionKind::HarnessUnhealthy);
+        assert_eq!(e.severity, Severity::High);
+        assert_eq!(e.title.as_deref(), Some("/opt/homebrew/bin/codex"));
+        assert!(e.reason.contains("did not answer in 10s"), "{}", e.reason);
+        assert!(e.reason.contains("Repair: `scripts/repair-harness codex`"), "{}", e.reason);
+        assert!(e.reason.contains("3 tasks are held"), "{}", e.reason);
+        assert_eq!(e.age_s, 120.0);
+
+        let only = ScopeFilter::exactly;
+        let r = report(&OperationsInput { now: now(), harnesses: harnesses.clone(), scope: Some(only("api")), ..Default::default() });
+        assert_eq!(r.attention.len(), 1, "a task it holds is in this scope");
+        let r = report(&OperationsInput { now: now(), harnesses, scope: Some(only("docs")), ..Default::default() });
+        assert!(r.attention.is_empty(), "nothing it holds is in this scope");
     }
 
     #[test]

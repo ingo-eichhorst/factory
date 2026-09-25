@@ -7,7 +7,7 @@ import { initRail, writeHash, setRouter, readHash, applyRoute } from "./scopes.j
 import { closeModal, dropModal } from "./modal.js";
 import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyTasksView, currentTasksView, setTasksView, loadTaskUsage } from "./tasks.js";
 import { loadAgents, renderAgents } from "./agents.js";
-import { loadOccupancy, renderOccupancy } from "./occupancy.js";
+import { loadOccupancy, renderOccupancy, wireOccupancy } from "./occupancy.js";
 import { legacyAgentRoute, loadRuntimeConnections, renderRuntimeConnections } from "./agent-runtime.js";
 import { loadRoles, wireRoles } from "./roles.js";
 import { openCreate } from "./task-form.js";
@@ -20,6 +20,7 @@ import { initActivity, recordEvent, markWatching, renderActivity, activityFilter
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 import { loadEnvironment, renderSandboxes } from "./sandboxes.js";
 import { renderSecrets } from "./secrets.js";
+import { loadDependencies, wireDependencies } from "./dependencies.js";
 import { benchTail, loadBenchmarks, readBenchTail, renderBenchmarks, wireBenchmarkSegments } from "./benchmarks.js";
 import { loadDatasets, renderDatasetsSegment, wireDatasets } from "./datasets.js";
 import { acceptBenchRunEvent, loadBenchRuns, renderBenchRunsSegment, wireBenchRuns } from "./bench-runs.js";
@@ -102,6 +103,7 @@ const VIEWS = {
   roles: { onShow: startRoles, onHide: stopAgentPoll },
   sandboxes: { onShow: startEnvironment, onHide: stopAgentPoll },
   secrets: { onShow: startEnvironment, onHide: stopAgentPoll },
+  dependencies: { onShow: startDependencies, onHide: stopAgentPoll },
   benchmarks: {
     onShow: startBenchmarks,
     onHide: stopAgentPoll,
@@ -216,7 +218,7 @@ const LEVEL_VIEWS = {
   // is the queue in front of them (`#119`).
   proc: ["tasks", "intake", "workflows", "operations"],
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
-  env: ["sandboxes", "secrets"],
+  env: ["sandboxes", "secrets", "dependencies"],
   imp: ["benchmarks", "knowledge"],
   infra: ["infrastructure", "backup"],
 };
@@ -333,6 +335,7 @@ function rerender(route) {
   // them and is reachable from all of them, so it survives every selection.
   else if (state.tab === "sandboxes") renderSandboxes();
   else if (state.tab === "secrets") renderSecrets();
+  else if (state.tab === "dependencies") loadDependencies();
   else if (state.tab === "benchmarks") {
     // The rail narrows a selected dataset's cases and a selected run's
     // attempts matrix; Configurations narrows its agents the same way it
@@ -449,6 +452,12 @@ function startEnvironment() {
   stopAgentPoll();
   refreshEnvironment();
   state.agentPoll = setInterval(refreshEnvironment, 30000);
+}
+
+function startDependencies() {
+  stopAgentPoll();
+  loadDependencies();
+  state.agentPoll = setInterval(loadDependencies, 30000);
 }
 
 // L5's two tabs each read their own answer and neither needs a poll: a
@@ -568,6 +577,7 @@ async function boot() {
   wireScenarios();
   $("environment-refresh").onclick = () => refreshEnvironment();
   $("secrets-refresh").onclick = () => refreshEnvironment();
+  wireDependencies();
   $("benchmarks-refresh").onclick = () => {
     loadBenchmarks();
     loadDatasets();
@@ -579,7 +589,7 @@ async function boot() {
   $("knowledge-refresh").onclick = () => loadKnowledge();
   $("infrastructure-refresh").onclick = () => refreshInfrastructure();
   wireBackup();
-  $("occ-window").onchange = () => loadOccupancy();
+  wireOccupancy();
   $("newTask").onclick = () => openCreate();
   wireDashboard();
   wireWorkflows();
@@ -711,6 +721,16 @@ function onEvent(ev) {
   // change a descendant's rollup too, and `reloadPolicy` also refreshes the
   // control detail modal, if one happens to be open.
   if (ev.type === "policy_changed" && state.tab === "policy") reloadPolicy();
+  // And a task carrying a `policy=` label appearing, changing status or going
+  // away, which is `open_tasks` changing under a gap's "Create task"/"Task
+  // open" (#98) -- the same rule, and the same restraint, as the Quality
+  // tab's `quality=` label below.
+  const policyTask = ev.task && ev.task.labels && ev.task.labels.policy;
+  if (state.tab === "policy" && ((ev.type === "task_created" && policyTask)
+      || (ev.type === "task_updated" && policyTask && (!priorTask || priorTask.status !== ev.task.status))
+      || ev.type === "task_deleted")) {
+    reloadPolicy();
+  }
   // A check-in recorded against a manual key result -- see `Event::GoalsChanged`.
   // Reload whenever the tab is open: `reloadGoals` also refreshes the key
   // result detail modal, if one happens to be open on the checked-in key
@@ -752,6 +772,9 @@ function onEvent(ev) {
   }
   // An item handed in, triaged, decided or deleted; a triage run moving.
   if (touchesIntake(ev)) refreshIntake();
+  if (state.tab === "dependencies" && (ev.type === "task_entry" || ev.type === "run_updated")) {
+    loadDependencies();
+  }
 }
 
 /// One refetch of `/api/operations` for a burst of events, at most one per

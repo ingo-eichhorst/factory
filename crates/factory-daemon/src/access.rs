@@ -190,6 +190,7 @@ impl Engine {
             // The harness saying a turn ended is a report on the run in
             // everything but who is speaking: same token, same authority.
             Request::TaskReport { .. } | Request::TaskTurnEnded { .. } => Grant::TaskReport,
+            Request::TaskAttach { .. } => Grant::TaskAttach,
             Request::AgentStart { .. } => Grant::AgentStart,
             Request::AgentConfigure { .. } | Request::AgentDelete { .. } => Grant::AgentConfigure,
             Request::AgentStop { .. } => Grant::AgentStop,
@@ -242,6 +243,8 @@ impl Engine {
             | Request::Production { .. }
             | Request::SiteFootprint
             | Request::Environment
+            | Request::Dependencies { .. }
+            | Request::DependenciesVex { .. }
             | Request::Infrastructure
             // Lists the destination and reads the history; writes nothing.
             | Request::Backup
@@ -480,7 +483,9 @@ impl Engine {
                 }
             }
 
-            Request::TaskReport { id, .. } | Request::TaskTurnEnded { id, .. } => {
+            Request::TaskReport { id, .. }
+            | Request::TaskTurnEnded { id, .. }
+            | Request::TaskAttach { id, .. } => {
                 let Some(task) = self.store.get(id).await? else {
                     return Ok(());
                 };
@@ -543,7 +548,7 @@ impl Engine {
                 }
                 Reach::Own => Err(deny("manage workflows; that requires scope reach")),
             },
-            Request::WorkflowDelete { id } | Request::WorkflowStart { id } => match def.reach {
+            Request::WorkflowDelete { id } | Request::WorkflowStart { id, .. } => match def.reach {
                 Reach::Scope => match self.workflows.get_definition(id).await? {
                     Some(found) => in_scope(&found.scope),
                     None => Ok(()),
@@ -791,7 +796,7 @@ mod tests {
             !allowed(
                 &own_reach,
                 &wearing("workflow-author"),
-                Request::WorkflowStart { id: "missing".into() }
+                Request::WorkflowStart { id: "missing".into(), inputs: Default::default() }
             )
             .await,
             "starting a workflow is refused for reach alone, before any id is even looked up"
@@ -1276,7 +1281,7 @@ mod tests {
                 Request::Adapters,
                 Request::RuntimeConnections,
                 Request::Agents,
-                Request::Occupancy { minutes: None },
+                Request::Occupancy { minutes: None, from: None, to: None },
                 Request::Production { minutes: None, bin: None, scope: None },
                 Request::TaskGet { id: "t".into() },
                 Request::TaskList(Default::default()),

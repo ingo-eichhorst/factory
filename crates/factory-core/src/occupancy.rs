@@ -75,8 +75,29 @@ pub struct OccupancyRow {
     pub planned: Vec<OccupancyPlan>,
     /// Liveness as the runtime reported it. Weaker evidence than a block.
     pub spans: Vec<OccupancySpan>,
-    /// Seconds of the window covered by a run.
+    /// Seconds of the window covered by at least one run. The union of the
+    /// blocks, not their sum: three runs side by side for a minute are one
+    /// busy minute, never three.
     pub busy_seconds: i64,
+    /// How many lanes the row's blocks need so no two overlap: 1 for an agent
+    /// that ran one thing at a time. Taken from the blocks, never from
+    /// config -- nothing caps how many sessions one agent runs at once.
+    #[serde(default = "one_lane")]
+    pub lanes: u32,
+    /// Runs of this agent still open at `now`. More than one is an agent
+    /// doing several things at once, which the chart says in so many words.
+    #[serde(default)]
+    pub live: u32,
+    /// Seconds of the window at least one run spent blocked, waiting for a
+    /// human: the union of the blocks' `segments`, clipped like
+    /// `busy_seconds`. Reported beside it, never taken out of it -- whether a
+    /// held slot that does no work counts as busy is the owner's call (#121).
+    #[serde(default)]
+    pub blocked_seconds: i64,
+}
+
+fn one_lane() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +117,28 @@ pub struct OccupancyBlock {
     /// is open. It is a projection for the chart, never a completion signal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_seconds: Option<u64>,
+    /// Which of the row's lanes the block is drawn in, from 0 at the top. Its
+    /// estimate outline is drawn in the same one.
+    #[serde(default)]
+    pub lane: u32,
+    /// The stretches of the run spent blocked, from its journal. The block's
+    /// `status` is how the run ended; these say what it waited on on the way,
+    /// which the run record forgets once it ends. Empty for a run that never
+    /// blocked, and then left out of the payload altogether.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<OccupancySegment>,
+}
+
+/// Part of a run, by what it was doing then. Only `blocked` is recorded so far:
+/// the rest of the run is its block, in the block's own status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OccupancySegment {
+    pub status: String,
+    pub from: DateTime<Utc>,
+    /// Absent while the run is still blocked -- it runs to now, the same
+    /// convention as the block's own `to`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<DateTime<Utc>>,
 }
 
 /// A run that has not happened yet. The width is the median of what this task

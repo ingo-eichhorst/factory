@@ -13,34 +13,69 @@
 use chrono::{DateTime, Duration, Utc};
 use factory_core::adapter::agent::truncate_tail;
 use factory_core::adapter::{RuntimeStatus, StatusReport, StatusSource};
-use factory_core::error::Result;
+use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
 use factory_core::occupancy::{
-    spans_from, Occupancy, OccupancyBlock, OccupancyPlan, OccupancyRow, OccupancyScope, StatusChange,
+    spans_from, Occupancy, OccupancyBlock, OccupancyPlan, OccupancyRow, OccupancyScope, OccupancySegment,
+    StatusChange,
 };
 use factory_core::run::{BlockSource, FailKind, Run, RunPatch, RunStatus};
 use factory_core::task::{TaskEntry, TurnEndEvent, TurnEnded};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::engine::Engine;
+use crate::schedule;
 
 /// How far back the chart looks when nobody says.
 const DEFAULT_MINUTES: u32 = 12 * 60;
 /// A window wider than this is a different tool than a chart of today.
 const MAX_MINUTES: u32 = 30 * 24 * 60;
+/// Nor is one narrower than this: a run is at least a pixel or two wide.
+const MIN_MINUTES: u32 = 5;
+/// How many firings of one schedule a window draws. An every-minute task
+/// across a month is tens of thousands of bars nobody can tell apart; this
+/// many already fills a wide chart edge to edge.
+const MAX_FIRINGS: usize = 500;
+/// The journal kinds that move a run into or out of `blocked`: `blocked`
+/// itself, the daemon's `unblocked`, and every other run status an agent's
+/// report is journalled under. Anything that ends the run without one of these
+/// is covered by the run's `ended_at`.
+const TRANSITION_KINDS: &[&str] = &[
+    "blocked",
+    "unblocked",
+    "dispatching",
+    "running",
+    "verifying",
+    "done",
+    "failed",
+    "cancelled",
+];
 
 impl Engine {
-    pub async fn occupancy(self: &Arc<Self>, minutes: Option<u32>) -> Result<Occupancy> {
+    /// The chart over a window. With neither `from` nor `to` it is the one
+    /// it has always been: `minutes` back from now and a quarter of that
+    /// ahead. With both it is that window -- past, future, or across now --
+    /// which is what lets a person pan and zoom. See [`window_bounds`].
+    pub async fn occupancy(
+        self: &Arc<Self>,
+        minutes: Option<u32>,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+    ) -> Result<Occupancy> {
         let now = Utc::now();
-        let minutes = minutes.unwrap_or(DEFAULT_MINUTES).clamp(5, MAX_MINUTES);
-        let from = now - Duration::minutes(minutes as i64);
-        // A quarter of the window is kept ahead of now. Without it the next
-        // scheduled run is drawn on the right-hand edge, where it is a pixel
-        // rather than a plan.
-        let to = now + Duration::minutes((minutes / 4).max(1) as i64);
+        let (from, to) = window_bounds(minutes, from, to, now)?;
+        // What has happened stops at now, whichever side of it the window
+        // is on. A window wholly in the future has no runs in it; asking the
+        // store anyway would hand back every open run, drawn to a now that
+        // is off the left-hand edge.
+        let past_end = now.min(to);
 
-        let runs = self.store.runs_between(from, now).await?;
+        let runs = if from <= now {
+            self.store.runs_between(from, past_end).await?
+        } else {
+            Vec::new()
+        };
         let tasks = self.store.list(&Default::default()).await?;
         let factory = self.factory_snapshot();
         let titles: BTreeMap<&str, &str> = tasks
@@ -62,6 +97,23 @@ impl Engine {
             .iter()
             .map(|t| (t.id.as_str(), factory.canonical_scope_name(&t.scope)))
             .collect();
+        // What each run waited on. The run record cannot say: `blocked_since`
+        // is cleared the moment a run ends, so the journal is the only place a
+        // finished run's blocked stretch survives (#121). One query for every
+        // run on the chart, reaching back to the oldest one's start -- a run
+        // open since before the window may have blocked before it, too.
+        let on_chart: BTreeSet<&str> = runs.iter().map(|r| r.id.as_str()).collect();
+        let mut transitions: BTreeMap<String, Vec<TaskEntry>> = BTreeMap::new();
+        if let Some(earliest) = runs.iter().map(|r| r.started_at).min() {
+            let since = earliest - Duration::seconds(1);
+            for (_, entry) in self.store.entries_of_kinds(TRANSITION_KINDS, since).await? {
+                let Some(run_id) = entry.run_id.as_deref() else { continue };
+                if on_chart.contains(run_id) {
+                    transitions.entry(run_id.to_string()).or_default().push(entry);
+                }
+            }
+        }
+
         let mut blocks: BTreeMap<(String, String), Vec<OccupancyBlock>> = BTreeMap::new();
         for run in &runs {
             let scope = scope_of.get(run.task_id.as_str()).cloned().unwrap_or_default();
@@ -72,6 +124,10 @@ impl Engine {
                     run,
                     titles.get(run.task_id.as_str()).copied(),
                     estimates.get(run.task_id.as_str()).copied(),
+                    blocked_segments(
+                        transitions.get(&run.id).map(Vec::as_slice).unwrap_or_default(),
+                        run.ended_at,
+                    ),
                 ));
         }
 
@@ -79,7 +135,10 @@ impl Engine {
         // history says it usually takes.
         let mut planned: BTreeMap<(String, String), Vec<OccupancyPlan>> = BTreeMap::new();
         for task in &tasks {
-            let Some(at) = planned_firing(task, now, to) else { continue };
+            let firings = planned_firings(task, now, from, to);
+            if firings.is_empty() {
+                continue;
+            }
             let historical = if task.estimate_seconds.is_some() {
                 (None, 0)
             } else {
@@ -91,14 +150,14 @@ impl Engine {
             planned
                 .entry((scope, task.agent.clone()))
                 .or_default()
-                .push(OccupancyPlan {
+                .extend(firings.into_iter().map(|at| OccupancyPlan {
                     task_id: task.id.clone(),
                     title: task.title.clone(),
                     at,
                     estimate_seconds: estimate,
                     samples,
                     user_estimate,
-                });
+                }));
         }
 
         // Liveness, grouped by the session it was observed on -- by subject,
@@ -127,7 +186,7 @@ impl Engine {
             let mut rows = Vec::new();
             for agent in &view.agents {
                 let key = (view.name.clone(), agent.name.clone());
-                let blocks = blocks.remove(&key).unwrap_or_default();
+                let mut blocks = blocks.remove(&key).unwrap_or_default();
                 let planned = planned.remove(&key).unwrap_or_default();
                 // A row draws the standing agent's own session and nothing
                 // else. A run's liveness is recorded too, but the run already
@@ -136,7 +195,7 @@ impl Engine {
                     .remove(&format!("{}/{}", view.name, agent.name))
                     .map(|series| spans_from(&series, now))
                     .unwrap_or_default();
-                let busy_seconds = busy_seconds(&blocks, from, now);
+                let (busy_seconds, blocked_seconds, lanes, live) = lay_out(&mut blocks, from, past_end);
                 rows.push(OccupancyRow {
                     agent: agent.name.clone(),
                     adapter: agent.adapter.clone(),
@@ -147,6 +206,9 @@ impl Engine {
                     planned,
                     spans,
                     busy_seconds,
+                    blocked_seconds,
+                    lanes,
+                    live,
                 });
             }
             out.push(OccupancyScope {
@@ -159,8 +221,8 @@ impl Engine {
         // A run whose agent the config no longer declares still happened. Give
         // it a row rather than dropping it: a chart that hides work because
         // somebody edited a config is worse than one with an extra line.
-        for ((scope, agent), blocks) in blocks {
-            let busy_seconds = busy_seconds(&blocks, from, now);
+        for ((scope, agent), mut blocks) in blocks {
+            let (busy_seconds, blocked_seconds, lanes, live) = lay_out(&mut blocks, from, past_end);
             let row = OccupancyRow {
                 agent,
                 adapter: String::new(),
@@ -171,6 +233,9 @@ impl Engine {
                 planned: Vec::new(),
                 spans: Vec::new(),
                 busy_seconds,
+                blocked_seconds,
+                lanes,
+                live,
             };
             match out.iter_mut().find(|s| s.name == scope) {
                 Some(existing) => existing.rows.push(row),
@@ -776,7 +841,12 @@ fn hook_turn_ended_reason(turn: &TurnEnded) -> String {
 /// this is what bounds the run's `error` field.
 const LAST_MESSAGE_BYTE_CAP: usize = 2048;
 
-fn block_of(run: &Run, title: Option<&str>, estimate_seconds: Option<u64>) -> OccupancyBlock {
+fn block_of(
+    run: &Run,
+    title: Option<&str>,
+    estimate_seconds: Option<u64>,
+    segments: Vec<OccupancySegment>,
+) -> OccupancyBlock {
     OccupancyBlock {
         run_id: run.id.clone(),
         task_id: run.task_id.clone(),
@@ -791,20 +861,140 @@ fn block_of(run: &Run, title: Option<&str>, estimate_seconds: Option<u64>) -> Oc
         } else {
             None
         },
+        // Settled once the whole row is known, by `pack_lanes`. A run's
+        // segments are part of its block, so they share its lane.
+        lane: 0,
+        segments,
     }
 }
 
-/// Seconds of the window a run held. Clipped to the window at both ends, so a
-/// run that started yesterday counts only the part that is on the chart.
+/// The stretches a run spent blocked, from its journal entries in journal
+/// order. `blocked` opens one -- a second `blocked` while one is open is the
+/// same wait, not a new one -- and whatever moves the run on closes it: the
+/// daemon's `unblocked`, or any other status the agent reports. One still
+/// open when the run ended closes at `ended_at`, whatever kind of entry the
+/// ending wrote, and nothing reaches past it; one open on a run that has not
+/// ended runs to now, and is sent without a `to`.
+fn blocked_segments(entries: &[TaskEntry], ended_at: Option<DateTime<Utc>>) -> Vec<OccupancySegment> {
+    let mut out: Vec<OccupancySegment> = Vec::new();
+    let mut open: Option<DateTime<Utc>> = None;
+    for entry in entries {
+        match entry.kind.as_str() {
+            "blocked" => {
+                open.get_or_insert(entry.at);
+            }
+            kind if TRANSITION_KINDS.contains(&kind) => {
+                if let Some(from) = open.take() {
+                    out.push(OccupancySegment {
+                        status: "blocked".into(),
+                        from,
+                        to: Some(entry.at),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(from) = open {
+        out.push(OccupancySegment {
+            status: "blocked".into(),
+            from,
+            to: ended_at,
+        });
+    }
+    if let Some(end) = ended_at {
+        for segment in &mut out {
+            segment.to = segment.to.map(|to| to.min(end));
+        }
+    }
+    // A block lifted in the same instant it was set held nothing up.
+    out.retain(|s| s.to.map(|to| to > s.from).unwrap_or(true));
+    out
+}
+
+/// Everything a row says about its blocks as a whole: how busy it was, how
+/// much of that was spent blocked, how many lanes it needs, and how many runs
+/// are still open. One call, so neither place that builds a row can lay its
+/// blocks out and forget the rest.
+fn lay_out(blocks: &mut [OccupancyBlock], from: DateTime<Utc>, now: DateTime<Utc>) -> (i64, i64, u32, u32) {
+    let lanes = pack_lanes(blocks, now);
+    let live = blocks.iter().filter(|b| b.to.is_none()).count() as u32;
+    (busy_seconds(blocks, from, now), blocked_seconds(blocks, from, now), lanes, live)
+}
+
+/// Give every block a lane so that no two in one lane overlap, and say how many
+/// lanes that took. Greedy interval packing: in start order, each block goes
+/// into the first lane whose last block has ended by the time it starts -- a
+/// run that begins the moment another ends shares its lane. An open run holds
+/// its lane up to `now`. The blocks are left in start order.
+///
+/// The count comes from the blocks alone. An agent's `max_sessions` is parsed
+/// and not enforced, so config cannot say how many runs will overlap.
+fn pack_lanes(blocks: &mut [OccupancyBlock], now: DateTime<Utc>) -> u32 {
+    blocks.sort_by(|a, b| a.from.cmp(&b.from).then_with(|| a.run_id.cmp(&b.run_id)));
+    let mut ends: Vec<DateTime<Utc>> = Vec::new();
+    for block in blocks.iter_mut() {
+        let end = block.to.unwrap_or(now).max(block.from);
+        let lane = match ends.iter().position(|&e| e <= block.from) {
+            Some(free) => free,
+            None => {
+                ends.push(end);
+                ends.len() - 1
+            }
+        };
+        ends[lane] = end;
+        block.lane = lane as u32;
+    }
+    ends.len().max(1) as u32
+}
+
+/// Seconds of the window at least one run held: the union of the blocks, so
+/// runs side by side never count the same wall-clock second twice. Clipped to
+/// the window at both ends, so a run that started yesterday counts only the
+/// part that is on the chart.
 fn busy_seconds(blocks: &[OccupancyBlock], from: DateTime<Utc>, to: DateTime<Utc>) -> i64 {
-    blocks
-        .iter()
-        .map(|b| {
-            let start = b.from.max(from);
-            let end = b.to.unwrap_or(to).min(to);
-            (end - start).num_seconds().max(0)
-        })
-        .sum()
+    union_seconds(blocks.iter().map(|b| (b.from, b.to)), from, to)
+}
+
+/// Seconds of the window at least one run was blocked, counted the way
+/// `busy_seconds` counts runs: two runs waiting side by side wait one minute a
+/// minute. A part of `busy_seconds`, never taken out of it.
+fn blocked_seconds(blocks: &[OccupancyBlock], from: DateTime<Utc>, to: DateTime<Utc>) -> i64 {
+    union_seconds(
+        blocks.iter().flat_map(|b| b.segments.iter()).map(|s| (s.from, s.to)),
+        from,
+        to,
+    )
+}
+
+/// The union of some intervals, clipped to `from..to`, in whole seconds. An
+/// interval with no end runs to `to`.
+fn union_seconds(
+    intervals: impl Iterator<Item = (DateTime<Utc>, Option<DateTime<Utc>>)>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> i64 {
+    let mut spans: Vec<(DateTime<Utc>, DateTime<Utc>)> = intervals
+        .map(|(start, end)| (start.max(from), end.unwrap_or(to).min(to)))
+        .filter(|(start, end)| end > start)
+        .collect();
+    spans.sort();
+    let mut total = Duration::zero();
+    let mut open: Option<(DateTime<Utc>, DateTime<Utc>)> = None;
+    for (start, end) in spans {
+        open = match open {
+            Some((s, e)) if start <= e => Some((s, e.max(end))),
+            Some((s, e)) => {
+                total += e - s;
+                Some((start, end))
+            }
+            None => Some((start, end)),
+        };
+    }
+    if let Some((s, e)) = open {
+        total += e - s;
+    }
+    total.num_seconds()
 }
 
 /// Drop everything before the window except the last state it was in, moved to
@@ -825,9 +1015,70 @@ fn trim_to_window(series: &mut Vec<StatusChange>, from: DateTime<Utc>) {
 /// The firing a task's schedule will draw on the chart, if it has one in
 /// `[now, to]`. A paused schedule keeps its slot but will not fire it, so
 /// there is nothing coming to draw.
-fn planned_firing(task: &factory_core::task::Task, now: DateTime<Utc>, to: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let at = task.next_run_at?;
-    (at >= now && at <= to && !task.schedule_paused).then_some(at)
+/// The chart's window, from what the request asked for.
+///
+/// Neither `from` nor `to`: `minutes` back from now (twelve hours when that
+/// is absent too), and a quarter of it kept ahead of now -- without it the
+/// next scheduled run is drawn on the right-hand edge, where it is a pixel
+/// rather than a plan. This is the window the chart has always had.
+///
+/// Both: that window, as long as it is the right way round. Its width is
+/// held between [`MIN_MINUTES`] and [`MAX_MINUTES`] by moving `from`, so the
+/// right-hand edge a person dragged to stays where they put it. One without
+/// the other is the fixed-width window beside it, `minutes` wide.
+fn window_bounds(
+    minutes: Option<u32>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+    let minutes = minutes.unwrap_or(DEFAULT_MINUTES).clamp(MIN_MINUTES, MAX_MINUTES) as i64;
+    let (from, to) = match (from, to) {
+        (None, None) => {
+            let ahead = (minutes / 4).max(1);
+            return Ok((now - Duration::minutes(minutes), now + Duration::minutes(ahead)));
+        }
+        (Some(from), None) => (from, from + Duration::minutes(minutes)),
+        (None, Some(to)) => (to - Duration::minutes(minutes), to),
+        (Some(from), Some(to)) => (from, to),
+    };
+    if to <= from {
+        return Err(FactoryError::BadRequest(format!(
+            "an occupancy window ends after it begins; got from {} and to {}",
+            from.to_rfc3339(),
+            to.to_rfc3339()
+        )));
+    }
+    let span = (to - from).clamp(
+        Duration::minutes(MIN_MINUTES as i64),
+        Duration::minutes(MAX_MINUTES as i64),
+    );
+    Ok((to - span, to))
+}
+
+/// Every firing of a task's schedule in the future part of the window. The
+/// first is its `next_run_at`, the one firing the scheduler has actually
+/// committed to; the rest follow from the schedule, so a person panning a
+/// week ahead sees the week's runs and not just the next one. A paused
+/// schedule plans nothing, and neither does one whose next firing is
+/// already overdue -- that one is about to be a block, not a plan. A
+/// `next_run_at` with no schedule behind it (a queued retry) is the one
+/// firing it says and nothing after.
+fn planned_firings(
+    task: &factory_core::task::Task,
+    now: DateTime<Utc>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Vec<DateTime<Utc>> {
+    let Some(next) = task.next_run_at else { return Vec::new() };
+    if task.schedule_paused || next < now {
+        return Vec::new();
+    }
+    let from = from.max(now);
+    match &task.schedule {
+        Some(schedule) => schedule::firings_between(schedule, next, from, to, MAX_FIRINGS),
+        None => (next >= from && next <= to).then_some(next).into_iter().collect(),
+    }
 }
 
 #[cfg(test)]
@@ -837,6 +1088,18 @@ mod tests {
     #[test]
     fn a_paused_schedule_plans_no_firing() {
         let now = Utc::now();
+        let mut task = every_ten_minutes(now + Duration::minutes(10));
+        let to = now + Duration::hours(1);
+        let drawn = planned_firings(&task, now, now - Duration::hours(1), to);
+        assert_eq!(drawn.first().copied(), task.next_run_at, "sanity: drawn while running");
+        task.schedule_paused = true;
+        assert!(planned_firings(&task, now, now - Duration::hours(1), to).is_empty());
+        task.schedule_paused = false;
+        task.next_run_at = Some(now + Duration::hours(2));
+        assert!(planned_firings(&task, now, now - Duration::hours(1), to).is_empty(), "past the chart's edge");
+    }
+
+    fn every_ten_minutes(next: DateTime<Utc>) -> factory_core::task::Task {
         let mut task = factory_core::adapter::store::task_from_new(
             factory_core::task::NewTask {
                 title: "every ten minutes".into(),
@@ -847,14 +1110,82 @@ mod tests {
             "shell".into(),
             "herdr".into(),
         );
-        task.next_run_at = Some(now + Duration::minutes(10));
-        let to = now + Duration::hours(1);
-        assert_eq!(planned_firing(&task, now, to), task.next_run_at, "sanity: drawn while running");
-        task.schedule_paused = true;
-        assert_eq!(planned_firing(&task, now, to), None);
-        task.schedule_paused = false;
-        task.next_run_at = Some(now + Duration::hours(2));
-        assert_eq!(planned_firing(&task, now, to), None, "past the chart's edge");
+        task.next_run_at = Some(next);
+        task
+    }
+
+    #[test]
+    fn every_firing_in_the_future_part_of_the_window_is_planned_not_just_the_next() {
+        let now = at(0);
+        let task = every_ten_minutes(at(300));
+        // An hour either side of now: 5, 15, 25, 35, 45 and 55 minutes ahead.
+        let firings = planned_firings(&task, now, at(-3600), at(3600));
+        assert_eq!(firings.len(), 6);
+        assert_eq!(firings[0], at(300));
+        assert_eq!(firings[5], at(3300));
+        // Panned a day ahead, the same grid carries on.
+        let tomorrow = planned_firings(&task, now, at(86_400), at(86_400 + 1800));
+        assert_eq!(tomorrow, vec![at(86_700), at(87_300), at(87_900)]);
+        // Panned into the past, nothing is scheduled: that is what blocks are for.
+        assert!(planned_firings(&task, now, at(-7200), at(-3600)).is_empty());
+    }
+
+    #[test]
+    fn an_overdue_or_unscheduled_next_run_is_drawn_as_it_always_was() {
+        let now = at(0);
+        let overdue = every_ten_minutes(at(-60));
+        assert!(planned_firings(&overdue, now, at(-3600), at(3600)).is_empty(), "about to be a block");
+        let mut retry = every_ten_minutes(at(900));
+        retry.schedule = None;
+        assert_eq!(planned_firings(&retry, now, at(-3600), at(3600)), vec![at(900)]);
+        assert!(planned_firings(&retry, now, at(1000), at(3600)).is_empty());
+    }
+
+    #[test]
+    fn with_no_window_given_the_chart_is_the_one_it_always_was() {
+        let now = at(0);
+        assert_eq!(window_bounds(Some(60), None, None, now).unwrap(), (at(-3600), at(900)));
+        assert_eq!(
+            window_bounds(None, None, None, now).unwrap(),
+            (at(-12 * 3600), at(3 * 3600)),
+            "twelve hours back, a quarter of that ahead"
+        );
+        assert_eq!(
+            window_bounds(Some(1), None, None, now).unwrap(),
+            (at(-300), at(60)),
+            "minutes are still clamped"
+        );
+    }
+
+    #[test]
+    fn an_explicit_window_is_taken_as_given_past_future_or_across_now() {
+        let now = at(0);
+        let past = (at(-86_400 * 3), at(-86_400 * 2));
+        assert_eq!(window_bounds(None, Some(past.0), Some(past.1), now).unwrap(), past);
+        let future = (at(86_400), at(86_400 * 2));
+        assert_eq!(window_bounds(Some(60), Some(future.0), Some(future.1), now).unwrap(), future, "minutes is ignored");
+        // One edge alone is the other edge `minutes` away.
+        assert_eq!(window_bounds(Some(60), Some(at(0)), None, now).unwrap(), (at(0), at(3600)));
+        assert_eq!(window_bounds(Some(60), None, Some(at(0)), now).unwrap(), (at(-3600), at(0)));
+    }
+
+    #[test]
+    fn an_explicit_window_is_clamped_by_moving_its_start() {
+        let now = at(0);
+        let (from, to) = window_bounds(None, Some(at(-86_400 * 90)), Some(at(3600)), now).unwrap();
+        assert_eq!(to, at(3600), "the edge a person dragged to stays put");
+        assert_eq!((to - from).num_minutes(), MAX_MINUTES as i64);
+        let (from, to) = window_bounds(None, Some(at(0)), Some(at(10)), now).unwrap();
+        assert_eq!((from, to), (at(10 - 300), at(10)), "never narrower than five minutes");
+    }
+
+    #[test]
+    fn a_window_that_ends_before_it_begins_is_refused() {
+        let now = at(0);
+        for (from, to) in [(at(60), at(0)), (at(0), at(0))] {
+            let err = window_bounds(None, Some(from), Some(to), now).unwrap_err();
+            assert!(matches!(err, FactoryError::BadRequest(_)), "{err:?}");
+        }
     }
 
     fn at(secs: i64) -> DateTime<Utc> {
@@ -882,7 +1213,20 @@ mod tests {
             from: at(from),
             to: to.map(at),
             estimate_seconds: None,
+            lane: 0,
+            segments: Vec::new(),
         }
+    }
+
+    fn named(id: &str, from: i64, to: Option<i64>) -> OccupancyBlock {
+        OccupancyBlock {
+            run_id: id.into(),
+            ..block(from, to)
+        }
+    }
+
+    fn lanes_of(blocks: &[OccupancyBlock]) -> Vec<(String, u32)> {
+        blocks.iter().map(|b| (b.run_id.clone(), b.lane)).collect()
     }
 
     fn run(to: Option<i64>) -> Run {
@@ -923,18 +1267,18 @@ mod tests {
     #[test]
     fn an_open_run_carries_the_tasks_estimate_but_a_finished_one_does_not() {
         assert_eq!(
-            block_of(&run(None), Some("estimated"), Some(900)).estimate_seconds,
+            block_of(&run(None), Some("estimated"), Some(900), Vec::new()).estimate_seconds,
             Some(900)
         );
         assert_eq!(
-            block_of(&run(Some(60)), Some("finished"), Some(900)).estimate_seconds,
+            block_of(&run(Some(60)), Some("finished"), Some(900), Vec::new()).estimate_seconds,
             None
         );
     }
 
     #[test]
     fn an_exceeded_estimate_stays_fixed_instead_of_following_now() {
-        let projected = block_of(&run(None), Some("slow"), Some(60));
+        let projected = block_of(&run(None), Some("slow"), Some(60), Vec::new());
         let expected_end =
             projected.from + Duration::seconds(projected.estimate_seconds.unwrap() as i64);
         assert!(expected_end < at(120));
@@ -982,6 +1326,234 @@ mod tests {
     #[test]
     fn an_open_run_counts_up_to_now() {
         assert_eq!(busy_seconds(&[block(10, None)], at(0), at(60)), 50);
+    }
+
+    #[test]
+    fn three_runs_side_by_side_are_one_busy_stretch_not_three() {
+        // The #120 shape: three dispatched together and still going, after an
+        // earlier run that finished on its own.
+        let blocks = [
+            block(0, Some(100)),
+            block(200, None),
+            block(200, None),
+            block(201, None),
+        ];
+        assert_eq!(busy_seconds(&blocks, at(0), at(300)), 100 + 100);
+    }
+
+    #[test]
+    fn overlapping_and_nested_runs_count_each_second_once() {
+        // 0..50 and 30..80 overlap into 0..80; 10..20 sits inside it; 90..100
+        // is apart. 80 + 10.
+        let blocks = [
+            block(30, Some(80)),
+            block(0, Some(50)),
+            block(10, Some(20)),
+            block(90, Some(100)),
+        ];
+        assert_eq!(busy_seconds(&blocks, at(0), at(200)), 90);
+        // And the window still clips the union.
+        assert_eq!(busy_seconds(&blocks, at(40), at(95)), 40 + 5);
+    }
+
+    #[test]
+    fn runs_one_after_another_all_share_the_first_lane() {
+        let mut blocks = vec![
+            named("c", 60, None),
+            named("a", 0, Some(30)),
+            // Starts the moment `a` ends: that is not an overlap.
+            named("b", 30, Some(60)),
+        ];
+        assert_eq!(pack_lanes(&mut blocks, at(100)), 1);
+        assert_eq!(
+            lanes_of(&blocks),
+            vec![("a".into(), 0), ("b".into(), 0), ("c".into(), 0)],
+            "a row without overlap is drawn exactly as before, in start order"
+        );
+    }
+
+    #[test]
+    fn three_concurrent_runs_get_three_lanes() {
+        let mut blocks = vec![
+            named("r119", 2, None),
+            named("r116", -100, Some(-10)),
+            named("r117", 0, None),
+            named("r118", 1, None),
+        ];
+        assert_eq!(pack_lanes(&mut blocks, at(60)), 3);
+        assert_eq!(
+            lanes_of(&blocks),
+            vec![
+                ("r116".into(), 0),
+                ("r117".into(), 0),
+                ("r118".into(), 1),
+                ("r119".into(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_freed_lane_is_reused_before_a_new_one_is_opened() {
+        let mut blocks = vec![
+            named("long", 0, Some(100)),
+            named("short", 10, Some(20)),
+            // Lane 1 is free again at 30; lane 0 is still taken.
+            named("next", 30, Some(40)),
+            // Both taken at 35 -- `next` holds lane 1 until 40.
+            named("third", 35, Some(50)),
+        ];
+        assert_eq!(pack_lanes(&mut blocks, at(200)), 3);
+        assert_eq!(
+            lanes_of(&blocks),
+            vec![
+                ("long".into(), 0),
+                ("short".into(), 1),
+                ("next".into(), 1),
+                ("third".into(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_open_run_holds_its_lane_up_to_now() {
+        // Still running at 50, so a run that started at 40 cannot share it.
+        let mut blocks = vec![named("open", 0, None), named("later", 40, Some(45))];
+        assert_eq!(pack_lanes(&mut blocks, at(50)), 2);
+        assert_eq!(blocks[1].lane, 1);
+    }
+
+    #[test]
+    fn a_row_with_no_runs_still_has_one_lane() {
+        assert_eq!(pack_lanes(&mut [], at(0)), 1);
+    }
+
+    #[test]
+    fn a_rows_layout_counts_what_is_still_open() {
+        let mut blocks = vec![
+            named("done", 0, Some(10)),
+            named("a", 20, None),
+            named("b", 20, None),
+        ];
+        let (busy, blocked, lanes, live) = lay_out(&mut blocks, at(0), at(30));
+        assert_eq!((busy, blocked, lanes, live), (10 + 10, 0, 2, 2));
+    }
+
+    // -- blocked segments (#121) --------------------------------------------
+
+    fn entry(source: &str, kind: &str, secs: i64) -> TaskEntry {
+        let mut e = TaskEntry::new(source, kind, kind).in_run("r");
+        e.at = at(secs);
+        e
+    }
+
+    fn blocked(from: i64, to: Option<i64>) -> OccupancySegment {
+        OccupancySegment {
+            status: "blocked".into(),
+            from: at(from),
+            to: to.map(at),
+        }
+    }
+
+    #[test]
+    fn a_run_that_blocked_until_it_was_done_keeps_the_wait_after_it_ends() {
+        // #121's own run: 4m28s of a 4m39s run spent waiting on a human.
+        let journal = [
+            entry("daemon", "dispatched", 0),
+            entry("agent", "running", 8),
+            entry("agent", "blocked", 11),
+            entry("agent", "done", 279),
+        ];
+        assert_eq!(blocked_segments(&journal, Some(at(279))), vec![blocked(11, Some(279))]);
+    }
+
+    #[test]
+    fn each_block_and_resume_is_its_own_segment() {
+        let journal = [
+            entry("agent", "running", 0),
+            entry("agent", "blocked", 10),
+            entry("agent", "running", 40),
+            entry("agent", "blocked", 60),
+            entry("agent", "running", 70),
+            entry("agent", "done", 100),
+        ];
+        assert_eq!(
+            blocked_segments(&journal, Some(at(100))),
+            vec![blocked(10, Some(40)), blocked(60, Some(70))]
+        );
+    }
+
+    #[test]
+    fn a_block_the_daemon_set_is_closed_by_the_daemon_lifting_it() {
+        let journal = [
+            entry("agent", "running", 0),
+            entry("daemon", "blocked", 5),
+            entry("daemon", "unblocked", 25),
+            entry("agent", "done", 30),
+        ];
+        assert_eq!(blocked_segments(&journal, Some(at(30))), vec![blocked(5, Some(25))]);
+    }
+
+    #[test]
+    fn a_run_still_blocked_has_a_segment_open_to_now() {
+        let journal = [entry("agent", "running", 0), entry("agent", "blocked", 5)];
+        assert_eq!(blocked_segments(&journal, None), vec![blocked(5, None)]);
+        // ...and the row counts it up to now, as it counts the run.
+        let mut blocks = vec![OccupancyBlock {
+            segments: blocked_segments(&journal, None),
+            ..block(0, None)
+        }];
+        let (busy, blocked_secs, _, _) = lay_out(&mut blocks, at(0), at(30));
+        assert_eq!((busy, blocked_secs), (30, 25));
+    }
+
+    #[test]
+    fn a_run_with_no_transitions_has_no_segments() {
+        assert!(blocked_segments(&[], Some(at(60))).is_empty());
+        let journal = [entry("agent", "running", 0), entry("agent", "note", 5), entry("agent", "done", 9)];
+        assert!(blocked_segments(&journal, Some(at(9))).is_empty());
+        // Nothing in the payload either: the block is exactly what it was.
+        let json = serde_json::to_value(block(0, Some(9))).unwrap();
+        assert!(json.get("segments").is_none());
+    }
+
+    #[test]
+    fn a_second_blocked_report_is_the_same_wait_not_a_new_one() {
+        let journal = [
+            entry("agent", "blocked", 5),
+            entry("agent", "note", 8),
+            entry("agent", "blocked", 12),
+            entry("agent", "running", 20),
+        ];
+        assert_eq!(blocked_segments(&journal, None), vec![blocked(5, Some(20))]);
+    }
+
+    #[test]
+    fn a_run_that_ended_while_blocked_stops_waiting_when_it_ended() {
+        // Cancelled, timed out, or failed by the daemon -- whatever the
+        // ending journalled, `ended_at` closes the wait, and nothing written
+        // afterwards stretches it.
+        let journal = [entry("agent", "blocked", 5), entry("daemon", "failed", 95)];
+        assert_eq!(blocked_segments(&journal, Some(at(90))), vec![blocked(5, Some(90))]);
+        assert_eq!(
+            blocked_segments(&[entry("agent", "blocked", 5)], Some(at(90))),
+            vec![blocked(5, Some(90))]
+        );
+    }
+
+    #[test]
+    fn blocked_time_is_reported_beside_busy_time_not_taken_out_of_it() {
+        let mut waiting = named("a", 0, Some(100));
+        waiting.segments = vec![blocked(10, Some(60))];
+        let mut also_waiting = named("b", 50, Some(100));
+        also_waiting.segments = vec![blocked(50, Some(80))];
+        let mut blocks = vec![waiting, also_waiting];
+        let (busy, blocked_secs, lanes, _) = lay_out(&mut blocks, at(0), at(200));
+        // Busy is unchanged by the waits; two runs waiting at once wait once.
+        assert_eq!(busy, 100);
+        assert_eq!(blocked_secs, 70);
+        assert_eq!(lanes, 2);
+        // Clipped to the window like busy time.
+        assert_eq!(blocked_seconds(&blocks, at(20), at(70)), 50);
     }
 
     fn report(status: RuntimeStatus, source: StatusSource) -> StatusReport {

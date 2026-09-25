@@ -91,6 +91,10 @@ export function frameworkCards(report) {
 /// (unlike `GET /api/policy`, its `scope` query is required). Showing one
 /// row per scope also says plainly when a control is open in three project
 /// scopes and satisfied at the root -- three places to go fix it, not one.
+///
+/// `openTask` is the remediation task already open for that control in that
+/// scope (`ScopePolicy.open_tasks`, `#98`), or `null` -- read off the report
+/// so a reload still knows, not only the click that created it.
 export function gapRows(report) {
   const rows = [];
   for (const row of report.rows || []) {
@@ -104,6 +108,7 @@ export function gapRows(report) {
         kind: status.kind,
         status: s.status,
         reasons: s.reasons,
+        openTask: openTaskFor(row, status.control),
       });
     }
   }
@@ -216,6 +221,7 @@ const REMEDIATION = {
   roles: { page: "roles", label: "Roles" },
   sandbox: { page: "sandboxes", label: "Sandboxes" },
   secrets: { page: "secrets", label: "Secrets" },
+  dependencies: { page: "dependencies", label: "Dependencies" },
   daemon: { page: "infrastructure", label: "Infrastructure" },
 };
 
@@ -259,6 +265,20 @@ export function checkTarget(scope, control, check) {
   return target ? { label: target.label, href: routeHref(scope, target.page) } : null;
 }
 
+/// A `dependencies` check's line: the SBOM's age limit, each severity's cap
+/// on open findings, and the cap on exploited ones -- whichever it sets.
+function describeDependencies(check) {
+  const terms = [];
+  if (check.sbom_max_age) terms.push(`SBOM max_age ${check.sbom_max_age}`);
+  for (const [severity, limit] of Object.entries(check.max_open || {})) {
+    terms.push(`${severity} <= ${limit}`);
+  }
+  if (check.exploited_open !== null && check.exploited_open !== undefined) {
+    terms.push(`exploited <= ${check.exploited_open}`);
+  }
+  return `dependencies: ${terms.join(", ")}`;
+}
+
 /// The evidence list's own line for one check -- `describe_check` in
 /// `factory-cli/src/main.rs`, ported rather than duplicated by accident: the
 /// CLI's `factory policy show` and this page should read the same check the
@@ -283,6 +303,8 @@ export function describeCheck(check) {
       return check.absent && check.absent.length ? `secrets: absent ${check.absent.join(", ")}` : "secrets";
     case "daemon":
       return `daemon: ${check.fact}`;
+    case "dependencies":
+      return describeDependencies(check);
     default:
       return check.check;
   }
@@ -339,6 +361,23 @@ export function remediateBody(control, scope) {
   return { control, scope };
 }
 
+/// The remediation task already open for `control` in one report row, by
+/// the daemon's own `framework/id` key (`ScopePolicy.open_tasks`), or
+/// `null`. Absent on the wire when nothing is open, hence the fallback.
+export function openTaskFor(scopePolicy, control) {
+  const map = (scopePolicy && scopePolicy.open_tasks) || {};
+  return map[control] || null;
+}
+
+/// What stands where "Create task" would: nothing when the status has no
+/// gap (`canRemediate`), a link to the task already open for it, or the
+/// button. The daemon still refuses a second task on its own
+/// (`policy_remediate`); this only saves a person the click that finds out.
+export function remediateAction(statusKind, openTask) {
+  if (!canRemediate(statusKind)) return null;
+  return openTask ? { kind: "open", task: openTask } : { kind: "create" };
+}
+
 // ------------------------------------------------------------ refs' links
 
 /// `app.js`'s router cuts a view's own tail at the first segment equal to
@@ -357,7 +396,7 @@ const TASK_MODAL = "task";
 /// click handler -- this file stays DOM-free (see the header comment), and
 /// a plain link survives being copied, opened in a new tab, or read back
 /// after a reload the same way every other route here does.
-function taskHref(scope, taskId, runId) {
+function taskModalHref(scope, taskId, runId) {
   const tail = [TASK_MODAL, taskId, ...(runId ? [runId] : [])].map(encodeURIComponent).join("/");
   return `${routeHref(scope, "tasks")}/${tail}`;
 }
@@ -367,6 +406,13 @@ function taskHref(scope, taskId, runId) {
 /// "Runs" segment: `#<scope>/imp/benchmarks/runs/<id>`.
 function benchRunHref(scope, runId) {
   return `${routeHref(scope, "benchmarks")}/runs/${encodeURIComponent(runId)}`;
+}
+
+/// A task-modal link for a bare task id -- one `remediate` just created, or
+/// one `open_tasks` names -- built by `refLinks` itself so the two can never
+/// drift apart (`quality-model.js` exports the same helper).
+export function taskHref(scope, taskId) {
+  return refLinks(scope, [{ kind: "task", id: taskId }])[0].href;
 }
 
 const REF_LABELS = { task: "Task", run: "Run", workflow_run: "Workflow run", bench_run: "Bench run" };
@@ -399,10 +445,10 @@ export function refLinks(scope, refs) {
   for (const ref of list) {
     switch (ref.kind) {
       case "task":
-        links.push({ kind: "task", id: ref.id, label: REF_LABELS.task, href: taskHref(scope, ref.id) });
+        links.push({ kind: "task", id: ref.id, label: REF_LABELS.task, href: taskModalHref(scope, ref.id) });
         break;
       case "run":
-        if (soleTask) links.push({ kind: "run", id: ref.id, label: REF_LABELS.run, href: taskHref(scope, soleTask, ref.id) });
+        if (soleTask) links.push({ kind: "run", id: ref.id, label: REF_LABELS.run, href: taskModalHref(scope, soleTask, ref.id) });
         break;
       case "workflow_run":
         links.push({ kind: "workflow_run", id: ref.id, label: REF_LABELS.workflow_run, href: routeHref(scope, "workflows") });

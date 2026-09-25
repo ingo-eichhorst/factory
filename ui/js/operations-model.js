@@ -32,6 +32,7 @@ export const KIND_LABELS = {
   schedule_missed: "slots missed",
   liveness_lost: "session gone",
   triggered_signpost: "signpost triggered",
+  harness_unhealthy: "harness does not start",
 };
 
 export const ACTION_LABELS = {
@@ -677,6 +678,8 @@ export const ENTRY_KINDS = {
   reopened: "reopened",
   blocked_on_failure: "blocked on failure",
   migrated: "moved to blocked",
+  harness_unhealthy: "harness does not start",
+  harness_recovered: "harness answers again",
 };
 
 export function entryKindLabel(kind) {
@@ -689,7 +692,7 @@ export function entryKindLabel(kind) {
 /// sitting on half a line.
 export function entryTone(entry) {
   if (entry.kind === "schedule_skipped") return "missed";
-  if (entry.kind === "answer_unsent") return "fault";
+  if (entry.kind === "answer_unsent" || entry.kind === "harness_unhealthy") return "fault";
   // The daemon's own lines about a failure (#122), not somebody's ask.
   if (entry.kind === "blocked_on_failure") return "fault";
   if (entry.kind === "migrated") return "";

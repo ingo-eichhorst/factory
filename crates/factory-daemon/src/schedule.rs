@@ -105,6 +105,49 @@ pub fn skipped_between(schedule: &Schedule, fired: DateTime<Utc>, now: DateTime<
     found
 }
 
+/// The firings a schedule will make in `[from, to]`, given that the next
+/// one is `next` -- the task's own `next_run_at`, which is the only firing
+/// that is a fact rather than a projection. At most `cap` of them, earliest
+/// first; an every-minute task across a month-wide chart is tens of
+/// thousands of slots, and nobody reads a bar that thin.
+///
+/// Neither kind of schedule is walked from `next` to `from` one slot at a
+/// time: an interval's slots are `next` plus whole intervals, so the first
+/// one at or after `from` is arithmetic, and a cron expression's slots are
+/// its own grid whatever it fired last, so the search starts at `from`.
+pub fn firings_between(
+    schedule: &Schedule,
+    next: DateTime<Utc>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    cap: usize,
+) -> Vec<DateTime<Utc>> {
+    let mut out = Vec::new();
+    let Ok(parsed) = Parsed::new(schedule) else { return out };
+    let mut cursor = if next >= from {
+        next
+    } else {
+        match &parsed {
+            Parsed::Every(seconds) => {
+                let behind = (from - next).num_seconds();
+                next + Duration::seconds((behind + seconds - 1) / seconds * seconds)
+            }
+            Parsed::Cron { .. } => match parsed.next_after(from - Duration::milliseconds(1)) {
+                Ok(first) => first,
+                Err(_) => return out,
+            },
+        }
+    };
+    while cursor <= to && out.len() < cap {
+        out.push(cursor);
+        match parsed.next_after(cursor) {
+            Ok(later) if later > cursor => cursor = later,
+            _ => break,
+        }
+    }
+    out
+}
+
 /// `skipped_between`, less what the scheduler's own tick could never have
 /// fired: an `Every` schedule shorter than the tick passes a slot or two
 /// between any two ticks, however healthy the daemon is, and journalling
@@ -152,6 +195,47 @@ mod tests {
 
     fn t(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn an_every_schedule_projects_whole_intervals_from_its_next_firing() {
+        let every = Schedule::Every { seconds: 600 };
+        let next = t("2026-09-11T10:05:00Z");
+        // From the next firing on: 10:05, 10:15, ... 10:55.
+        let all = firings_between(&every, next, t("2026-09-11T10:00:00Z"), t("2026-09-11T11:00:00Z"), 100);
+        assert_eq!(all.len(), 6);
+        assert_eq!(all[0], next);
+        assert_eq!(all[5], t("2026-09-11T10:55:00Z"));
+        // A window further out starts on the same grid, not on its own edge.
+        let later = firings_between(&every, next, t("2026-09-12T00:00:00Z"), t("2026-09-12T00:30:00Z"), 100);
+        assert_eq!(later, vec![t("2026-09-12T00:05:00Z"), t("2026-09-12T00:15:00Z"), t("2026-09-12T00:25:00Z")]);
+        // A slot exactly on the window's edge is inside it.
+        let edge = firings_between(&every, next, t("2026-09-11T10:15:00Z"), t("2026-09-11T10:25:00Z"), 100);
+        assert_eq!(edge, vec![t("2026-09-11T10:15:00Z"), t("2026-09-11T10:25:00Z")]);
+    }
+
+    #[test]
+    fn a_cron_schedule_projects_its_own_grid_across_a_window() {
+        let hourly = Schedule::Cron("0 * * * *".into());
+        let got = firings_between(
+            &hourly,
+            t("2026-09-11T10:00:00Z"),
+            t("2026-09-13T08:30:00Z"),
+            t("2026-09-13T11:00:00Z"),
+            100,
+        );
+        assert_eq!(got, vec![t("2026-09-13T09:00:00Z"), t("2026-09-13T10:00:00Z"), t("2026-09-13T11:00:00Z")]);
+    }
+
+    #[test]
+    fn a_projection_stops_at_its_cap_and_before_its_next_firing_draws_nothing() {
+        let every_minute = Schedule::Every { seconds: 60 };
+        let next = t("2026-09-11T10:00:00Z");
+        let capped = firings_between(&every_minute, next, next, next + Duration::days(30), 25);
+        assert_eq!(capped.len(), 25);
+        assert_eq!(capped[24], next + Duration::minutes(24));
+        let before = firings_between(&every_minute, next, next - Duration::hours(2), next - Duration::hours(1), 25);
+        assert!(before.is_empty(), "a window wholly before the next firing has nothing scheduled in it");
     }
 
     #[test]

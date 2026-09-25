@@ -46,6 +46,11 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../../ui/js/usage-model.js"),
     ),
     (
+        "js/pending-model.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/pending-model.js"),
+    ),
+    (
         "js/workflows.js",
         "text/javascript; charset=utf-8",
         include_str!("../../../ui/js/workflows.js"),
@@ -86,6 +91,11 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../../ui/js/occupancy.js"),
     ),
     (
+        "js/occupancy-model.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/occupancy-model.js"),
+    ),
+    (
         "js/agent-runtime.js",
         "text/javascript; charset=utf-8",
         include_str!("../../../ui/js/agent-runtime.js"),
@@ -104,6 +114,16 @@ const ASSETS: &[(&str, &str, &str)] = &[
         "js/secrets.js",
         "text/javascript; charset=utf-8",
         include_str!("../../../ui/js/secrets.js"),
+    ),
+    (
+        "js/dependencies-model.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/dependencies-model.js"),
+    ),
+    (
+        "js/dependencies.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/dependencies.js"),
     ),
     (
         "js/benchmarks.js",

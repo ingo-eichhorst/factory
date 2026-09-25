@@ -16,11 +16,14 @@ import {
   kindLabel,
   looksLikeExpiry,
   notApplicableRows,
+  openTaskFor,
   reasonCheckKinds,
   refLinks,
+  remediateAction,
   remediateBody,
   statusLabel,
   statusOf,
+  taskHref,
 } from "../js/policy-model.js";
 
 // A trimmed version of a real `GET /api/policy?scope=demo` answer, captured
@@ -186,6 +189,50 @@ test("gapRows is one row per (scope, control) that is open or stale, sorted by c
   assert.deepEqual(rows[0].reasons, report.rows[0].statuses[0].reasons);
 });
 
+test("gapRows carries no open task when the row's open_tasks is absent from the wire", () => {
+  // `ScopePolicy.open_tasks` is skipped when empty, so the captured answer
+  // above has none at all.
+  assert.deepEqual(gapRows(report).map((r) => r.openTask), [null, null, null]);
+});
+
+test("gapRows names the open remediation task per (scope, control), from that row's own open_tasks", () => {
+  // #98: two scopes with the same gap, a task open in only one of them --
+  // the other still gets "Create task". A satisfied control's stray entry
+  // makes no row of its own.
+  const two = {
+    rows: [
+      {
+        scope: "demo",
+        statuses: [
+          { control: "cra/a", title: "A", kind: "regulation", status: "open", reasons: [] },
+          { control: "cra/b", title: "B", kind: "regulation", status: "stale", reasons: [] },
+          { control: "cra/c", title: "C", kind: "regulation", status: "satisfied", reasons: [] },
+        ],
+        open_tasks: { "cra/a": "task-demo-a", "cra/c": "task-demo-c" },
+      },
+      {
+        scope: "other",
+        statuses: [{ control: "cra/a", title: "A", kind: "regulation", status: "open", reasons: [] }],
+      },
+    ],
+  };
+  assert.deepEqual(
+    gapRows(two).map((r) => [r.control, r.scope, r.openTask]),
+    [
+      ["cra/a", "demo", "task-demo-a"],
+      ["cra/a", "other", null],
+      ["cra/b", "demo", null],
+    ],
+  );
+});
+
+test("openTaskFor reads the daemon's framework/id key and falls back to null", () => {
+  assert.equal(openTaskFor({ open_tasks: { "cra/a": "t1" } }, "cra/a"), "t1");
+  assert.equal(openTaskFor({ open_tasks: { "cra/a": "t1" } }, "cra/b"), null);
+  assert.equal(openTaskFor({ scope: "demo" }, "cra/a"), null);
+  assert.equal(openTaskFor(null, "cra/a"), null);
+});
+
 test("notApplicableRows recovers the title from any row's own ControlStatus", () => {
   const rows = notApplicableRows(report);
   assert.equal(rows.length, 1);
@@ -251,6 +298,7 @@ test("checkTarget is exact, from the Check itself, not parsed out of a reason", 
   assert.equal(daemon.label, "Infrastructure");
   assert.match(daemon.href, /^#demo\/infrastructure$/);
   assert.equal(checkTarget("demo", "cra/annex-i-2-1", { check: "gate", dataset: "d" }).label, "Benchmarks");
+  assert.equal(checkTarget("demo", "cra/annex-i-2-1", { check: "dependencies" }).label, "Dependencies");
 });
 
 test("describeCheck matches the CLI's own describe_check, one line per check kind", () => {
@@ -265,6 +313,10 @@ test("describeCheck matches the CLI's own describe_check, one line per check kin
   assert.equal(describeCheck({ check: "secrets" }), "secrets");
   assert.equal(describeCheck({ check: "secrets", absent: ["anthropic", "scope_env"] }), "secrets: absent anthropic, scope_env");
   assert.equal(describeCheck({ check: "daemon", fact: "power_assertion" }), "daemon: power_assertion");
+  assert.equal(
+    describeCheck({ check: "dependencies", sbom_max_age: "30d", max_open: { critical: 0, high: 1 }, exploited_open: 0 }),
+    "dependencies: SBOM max_age 30d, critical <= 0, high <= 1, exploited <= 0",
+  );
 });
 
 test("looksLikeExpiry accepts policy::Duration's grammar and the two absolute forms, softly", () => {
@@ -287,6 +339,22 @@ test("canRemediate is true only for open and stale", () => {
 
 test("remediateBody is the plain {control, scope} pair", () => {
   assert.deepEqual(remediateBody("cra/annex-i-2-1", "demo"), { control: "cra/annex-i-2-1", scope: "demo" });
+});
+
+test("remediateAction links an open task instead of offering Create task, and offers nothing without a gap", () => {
+  assert.deepEqual(remediateAction("open", "task-1"), { kind: "open", task: "task-1" });
+  assert.deepEqual(remediateAction("stale", "task-1"), { kind: "open", task: "task-1" });
+  assert.deepEqual(remediateAction("open", null), { kind: "create" });
+  assert.deepEqual(remediateAction("stale", undefined), { kind: "create" });
+  // No gap, no action -- even if a task somehow still carries the label.
+  assert.equal(remediateAction("satisfied", "task-1"), null);
+  assert.equal(remediateAction("attested", null), null);
+  assert.equal(remediateAction("not_applicable", null), null);
+});
+
+test("taskHref is refLinks' own task link, so the two cannot drift apart", () => {
+  assert.equal(taskHref("demo", "task-1"), refLinks("demo", [{ kind: "task", id: "task-1" }])[0].href);
+  assert.equal(taskHref("demo", "task-1"), "#demo/tasks/task/task-1");
 });
 
 test("refLinks opens the task modal for a lone task ref", () => {

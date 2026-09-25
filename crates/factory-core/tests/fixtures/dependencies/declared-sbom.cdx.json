@@ -1,0 +1,19 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:11111111-1111-4111-8111-111111111111",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-09-25T12:00:00Z",
+    "lifecycles": [{ "phase": "pre-build" }],
+    "tools": { "components": [{ "name": "syft", "version": "1.30.0" }] },
+    "component": { "type": "application", "name": "demo", "bom-ref": "pkg:generic/demo@1" }
+  },
+  "components": [
+    { "type": "library", "name": "demo-lib", "version": "1.2.3", "bom-ref": "pkg:cargo/demo-lib@1.2.3" }
+  ],
+  "dependencies": [
+    { "ref": "pkg:generic/demo@1", "dependsOn": ["pkg:cargo/demo-lib@1.2.3"] },
+    { "ref": "pkg:cargo/demo-lib@1.2.3", "dependsOn": [] }
+  ]
+}

@@ -298,6 +298,7 @@ impl AgentContext {
                 checks.concat()
             )
         };
+        let scope = &self.scope;
         let contract = format!(
             "Report progress by running these commands in your shell. They are how \
              this task is tracked; nothing watches your terminal to guess.\n\
@@ -307,6 +308,9 @@ impl AgentContext {
              - Need a human:    {bin} task report {id} --status blocked --message \"<what you need>\"\n\
              - Finished:        {bin} task report {id} --status done --result \"<what you did>\"\n\
              - Gave up:         {bin} task report {id} --status failed --error \"<why>\"\n\
+             \n\
+             Dependency scans attach CycloneDX documents with `{bin} task attach --kind sbom|vulnerabilities <file>`. \
+             Authored VEX is available with `{bin} dependencies vex {scope}`.\n\
              \n\
              Report running first, then finish with exactly one of done, failed, or \
              blocked -- before your turn ends. When your harness says a turn ended \
@@ -334,7 +338,10 @@ impl AgentContext {
              task is the standing intent: what to do, and with which agent; \
              a run is one attempt at it, with its own session and outcome. \
              Status comes only from an agent calling `task report`, never \
-             from what a terminal looks like.\n\n",
+             from what a terminal looks like. Creating a task does not \
+             start it, and there is no queue that will: an unscheduled task \
+             stays pending until someone runs it with `task run <id>`, and a \
+             scheduled one waits for its slot.\n\n",
         );
 
         match &self.task {
@@ -492,6 +499,8 @@ impl AgentContext {
             lines.push(match grant {
                 Grant::TaskCreate => format!(
                     "task.create -> {bin} task create \"<title>\" -i \"<instructions>\" --scope {scope} --agent <agent>; \
+                     that creates it and nothing more -- it is not dispatched until `task run <id>` \
+                     (or `task create --run`, which does both) or its schedule fires; \
                      or, for work that is not yet clear, tested or known to be ours, hand it in through the \
                      intake gate instead: {bin} intake add \"<title>\" -i \"<what is asked>\" --scope {scope} \
                      (it is triaged before it can run; {bin} intake info <id> \"...\" answers a needs-info)"
@@ -519,6 +528,9 @@ impl AgentContext {
                         "task.report -> {bin} task report <id> --status <running|done|failed|blocked> --message/--result/--error \"...\", once you are given a task to report on"
                     ),
                 },
+                Grant::TaskAttach => format!(
+                    "task.attach -> {bin} task attach --kind sbom|vulnerabilities <file>"
+                ),
                 Grant::AgentStart => format!("agent.start -> {bin} agent start {scope} <name>"),
                 Grant::AgentConfigure => {
                     "agent.configure -> add, edit or delete a standing agent's declaration in its scope; today that is the web UI's Roster, not this CLI".to_string()
@@ -746,6 +758,16 @@ pub trait Agent: Send + Sync {
     /// The text submitted to the agent once it is up. Only called when there
     /// is a task: a standing agent is started and then left alone.
     async fn prompt(&self, ctx: &AgentContext) -> Result<String>;
+
+    /// How the daemon checks, before a task is handed over, that the program
+    /// this agent starts starts at all (`#131`). Declared, never run, by the
+    /// adapter: the daemon runs it, with a timeout, so a harness that hangs
+    /// cannot stall a dispatch and an adapter has nothing it could panic
+    /// in. `None` -- the default, and what a plugin gets -- means there is
+    /// nothing to check, and the task is dispatched as it always was.
+    fn health_probe(&self) -> Option<crate::harness::HealthProbe> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -890,6 +912,27 @@ mod tests {
             assert!(guide.contains("knowledge search <words>"), "{guide}");
             assert!(guide.contains("never prints a page's text"), "{guide}");
         }
+    }
+
+    #[test]
+    fn every_agent_is_told_a_created_task_is_not_started_and_there_is_no_queue() {
+        // `#124`: an agent that creates a task and expects the daemon to pick
+        // it up once an agent is free waits forever. Whatever the role --
+        // one that can only read may still be asked why a task never ran.
+        for role in [Some(worker()), Some(custom(&[], Reach::Own)), None] {
+            let guide = base(role).factory_guide();
+            assert!(guide.contains("Creating a task does not start it"), "{guide}");
+            assert!(guide.contains("there is no queue"), "{guide}");
+            assert!(guide.contains("`task run <id>`"), "{guide}");
+        }
+    }
+
+    #[test]
+    fn the_task_create_line_says_creating_is_not_dispatching() {
+        let guide = base(Some(custom(&[Grant::TaskCreate], Reach::Scope))).factory_guide();
+        let line = guide.lines().find(|l| l.starts_with("- task.create")).expect(&guide);
+        assert!(line.contains("it is not dispatched until `task run <id>`"), "{line}");
+        assert!(line.contains("`task create --run`"), "{line}");
     }
 
     #[test]

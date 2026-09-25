@@ -7,6 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use factory_core::bench::{BenchResult, BenchRun, Verdict};
 use factory_core::dataset::{Case, Dataset, DatasetFinding, DatasetSummary};
+use factory_core::dependencies::{AttachmentKind, DependenciesReport};
 use factory_core::event::Event;
 use factory_core::goals::{self as goals_core, Band, CycleStatus, KrRef};
 use factory_core::knowledge::FindingKind;
@@ -81,9 +82,16 @@ enum Command {
     /// Create, run, and report on tasks.
     #[command(subcommand)]
     Task(TaskCmd),
-    /// Workflows: `lint` previews the control plan a run is held to.
+    /// Workflows: define, start (with `--input`), follow and cancel runs;
+    /// `lint` previews the control plan a run is held to.
     #[command(subcommand)]
     Workflow(WorkflowCmd),
+    /// Read one scope's dependency inventory, or merge its authored VEX.
+    Dependencies {
+        /// `<scope>`, or `vex <scope>`.
+        #[arg(num_args = 1..=2)]
+        args: Vec<String>,
+    },
     /// The L5 Knowledge tab: an index of the instance's knowledge vault,
     /// rebuilt from the files on every call. With no subcommand, prints the
     /// index; `import`/`add` are the only way anything is ever written --
@@ -718,6 +726,42 @@ enum WorkflowCmd {
         #[arg(long)]
         category: Option<String>,
     },
+    /// Every workflow definition, or a scope's.
+    List {
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// One definition: its inputs, nodes, edges and rework loops.
+    Show { id: String },
+    /// Create a workflow from a YAML or JSON file shaped like
+    /// `WorkflowDraft` -- `name`, `scope`, `inputs`, `nodes`, `edges`.
+    Create {
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    /// Replace a workflow's definition with a file's. A run already going
+    /// keeps the revision it started with.
+    Update {
+        id: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    /// Start a run. Each input the workflow declares is `--input name=value`.
+    Start {
+        id: String,
+        #[arg(long = "input", value_name = "NAME=VALUE")]
+        inputs: Vec<String>,
+    },
+    /// A workflow's runs, newest first -- or every run, without an id.
+    Runs {
+        id: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// One run: every node's status, task, and rework round.
+    Run { run_id: String },
+    /// Cancel a run and every task of it still going.
+    Cancel { run_id: String },
 }
 
 #[derive(Subcommand)]
@@ -773,7 +817,9 @@ enum TaskCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
-    /// Create a task.
+    /// Create a task. Creating does not start it: nothing dispatches a
+    /// pending task on its own, so pass `--run`, give it a `--schedule`, or
+    /// run it later with `factory task run <id>`.
     Create {
         title: String,
         /// What the agent is being asked to do.
@@ -996,6 +1042,17 @@ enum TaskCmd {
         #[arg(long = "run-token", env = "FACTORY_TASK_TOKEN")]
         token: Option<String>,
     },
+    /// Attach an immutable CycloneDX scan document to this run.
+    Attach {
+        #[arg(long)]
+        kind: AttachmentKind,
+        file: PathBuf,
+        /// Defaults to FACTORY_TASK_ID.
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long = "run-token", env = "FACTORY_TASK_TOKEN")]
+        token: Option<String>,
+    },
     /// What a harness's turn-end hook runs -- Claude Code's `Stop` and
     /// `StopFailure`, from the settings file Factory generates for a run.
     /// Not for agents: it reads the hook's JSON from stdin, prints nothing,
@@ -1205,6 +1262,19 @@ async fn main() -> Result<()> {
         Command::Run(cmd) => run_cmd(cli.json, &client, cmd).await,
         Command::Task(cmd) => task(cli.json, &client, cmd).await,
         Command::Workflow(cmd) => workflow_cmd(cli.json, &client, cmd).await,
+        Command::Dependencies { args } => {
+            let request = match args.as_slice() {
+                [scope] => Request::Dependencies { scope: scope.clone() },
+                [verb, scope] if verb == "vex" => Request::DependenciesVex { scope: scope.clone() },
+                _ => return Err(anyhow!("use `factory dependencies <scope>` or `factory dependencies vex <scope>`")),
+            };
+            let payload = client.send(request).await?;
+            print(&payload, cli.json, |p| match p {
+                Payload::Dependencies { report } => Some(dependencies_text(report)),
+                Payload::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+        }
 
         Command::Knowledge { command: None } => {
             let payload = client.send(Request::Knowledge).await?;
@@ -1663,7 +1733,7 @@ fn intake_item_text(task: &Task) -> String {
 /// declared provider with the agents it serves, then the model agents none
 /// claims. A fact the daemon could not read prints as `--`.
 fn infrastructure_text(payload: &Payload) -> Option<String> {
-    let Payload::Infrastructure { host, daemon, providers, unassigned } = payload else {
+    let Payload::Infrastructure { host, daemon, providers, unassigned, harnesses } = payload else {
         return None;
     };
     const UNKNOWN: &str = "--";
@@ -1765,6 +1835,30 @@ fn infrastructure_text(payload: &Payload) -> Option<String> {
         out.push_str("\nUNASSIGNED  model agents no provider claims\n");
         for a in unassigned {
             out.push_str(&format!("    {:<32} {}\n", format!("{}/{}", a.scope, a.agent), a.harness));
+        }
+    }
+
+    // #131: whether each harness starts, as the last probe before a
+    // dispatch found it. Nothing is probed to print this.
+    if !harnesses.is_empty() {
+        out.push_str("\nHARNESSES  checked with --version before a dispatch\n");
+        for h in harnesses {
+            let said = match h.state {
+                factory_core::harness::HarnessState::Healthy => h.version.clone().unwrap_or_default(),
+                factory_core::harness::HarnessState::Unprobed => "not probed since the daemon started".into(),
+                factory_core::harness::HarnessState::Unhealthy => h.reason.clone().unwrap_or_default(),
+            };
+            out.push_str(&format!("  {:<10} {:<10} {:<40} {said}\n", h.harness, h.state.as_str(), h.binary));
+            if let Some(repair) = &h.repair {
+                out.push_str(&format!("    repair: {repair}\n"));
+            }
+            if !h.held.is_empty() {
+                let held: Vec<String> = h.held.iter().map(|t| format!("{} ({})", t.task_id, t.title)).collect();
+                out.push_str(&format!("    held: {} task(s) -- {}\n", held.len(), held.join(", ")));
+            }
+            if let Some(auto) = &h.auto_repair {
+                out.push_str(&format!("    automatic repair: {auto}\n"));
+            }
         }
     }
     Some(out.trim_end().to_string())
@@ -3728,9 +3822,10 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             }
             print(&payload, json, |p| match p {
                 Payload::Task { task } => Some(format!(
-                    "{}\n{}",
+                    "{}\n{}\n{}",
                     task.id,
-                    one_line(task)
+                    one_line(task),
+                    created_note(task, run)
                 )),
                 _ => None,
             })
@@ -3969,6 +4064,24 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             })
         }
 
+        TaskCmd::Attach { id, kind, file, token } => {
+            let token = token.ok_or_else(|| anyhow!(
+                "task attach needs the run callback token in FACTORY_TASK_TOKEN or --run-token"
+            ))?;
+            let bytes = std::fs::read(&file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            let filename = file.file_name().and_then(|n| n.to_str()).unwrap_or("attachment.cdx.json").to_string();
+            let payload = client.send(Request::TaskAttach {
+                id: need_id(id)?, token, kind, filename, bytes,
+            }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Attachment { attachment } => Some(format!(
+                    "attached {} for run {} attempt {}", attachment.kind, attachment.run_id, attachment.attempt
+                )),
+                _ => None,
+            })
+        }
+
         // Every failure is written to stderr (Claude Code keeps an async
         // hook's in its debug log) and swallowed: nothing this can say would
         // be seen by anyone who could act on it mid-turn, and the daemon's
@@ -3986,6 +4099,40 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn dependencies_text(report: &DependenciesReport) -> String {
+    let mut out = format!("{} dependencies\n", report.scope);
+    if report.documents.is_empty() { out.push_str("  no scans\n"); }
+    for document in &report.documents {
+        out.push_str(&format!(
+            "  {:<8} {}{}\n", document.state, document.sbom.attachment.attached_at,
+            if document.vulnerabilities.is_some() { " + vulnerabilities" } else { "" }
+        ));
+    }
+    if !report.findings.is_empty() {
+        out.push_str("findings\n");
+        for finding in &report.findings {
+            out.push_str(&format!(
+                "  {:<10} {:<8} {} {} {}\n",
+                format!("{:?}", finding.status).to_ascii_lowercase(),
+                finding.severity.as_str(), finding.id, finding.affected.name, finding.state
+            ));
+        }
+    }
+    if !report.services.is_empty() {
+        out.push_str("services\n");
+        for service in &report.services {
+            out.push_str(&format!("  {} ({:?})", service.service.name, service.service.transport));
+            if let Some(credential) = &service.service.credential {
+                out.push_str(&format!(" credential {credential}: {}", match service.credential_present {
+                    Some(true) => "present", Some(false) => "absent", None => "unknown",
+                }));
+            }
+            out.push('\n');
+        }
+    }
+    out.trim_end().to_string()
 }
 
 /// The JSON a hook is handed on stdin, or `Null` when there is none to read
@@ -4134,12 +4281,16 @@ fn tail_lossy(bytes: &[u8], max_bytes: usize) -> String {
 }
 
 fn parse_labels(pairs: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    parse_pairs(pairs, "labels")
+}
+
+fn parse_pairs(pairs: &[String], what: &str) -> Result<std::collections::BTreeMap<String, String>> {
     pairs
         .iter()
         .map(|p| {
             p.split_once('=')
                 .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-                .ok_or_else(|| anyhow!("labels look like key=value, not {p:?}"))
+                .ok_or_else(|| anyhow!("{what} look like key=value, not {p:?}"))
         })
         .collect()
 }
@@ -4262,6 +4413,28 @@ fn standing(t: &Task) -> Option<String> {
     })
 }
 
+/// What `task create` says after the task line: whether anything will start
+/// it. Nothing dispatches a pending task on its own -- there is no queue
+/// (`#124`) -- so a task created without `--run` or a schedule sits there
+/// until someone runs it, and the output has to say so rather than let
+/// `pending` read as "waiting its turn".
+fn created_note(t: &Task, dispatched: bool) -> String {
+    if dispatched {
+        return format!("dispatched; `factory task show {}` follows it", t.id);
+    }
+    match (&t.schedule, t.next_run_at) {
+        (Some(_), Some(next)) => format!(
+            "created, not dispatched; its schedule first fires it at {} -- `factory task run {}` runs it now",
+            next.to_rfc3339(),
+            t.id
+        ),
+        _ => format!(
+            "created, not dispatched; run it with `factory task run {}` -- nothing starts it on its own",
+            t.id
+        ),
+    }
+}
+
 fn one_line(t: &Task) -> String {
     let runs = match t.runs {
         0 => "         ".to_string(),
@@ -4300,7 +4473,144 @@ async fn workflow_cmd(json: bool, client: &Client, cmd: WorkflowCmd) -> Result<(
                 _ => None,
             })
         }
+        WorkflowCmd::List { scope } => {
+            let payload = client.send(Request::WorkflowList { scope }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Workflows { workflows } => Some(
+                    workflows
+                        .iter()
+                        .map(|w| format!("{}  {}  r{}  {} nodes  ({})", w.id, w.name, w.revision, w.nodes.len(), w.scope))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Show { id } => {
+            let payload = client.send(Request::WorkflowGet { id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Workflow { workflow } => Some(workflow_text(workflow)),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Create { file } => {
+            let draft = read_workflow_file(&file)?;
+            let payload = client.send(Request::WorkflowCreate(draft)).await?;
+            print(&payload, json, |p| match p {
+                Payload::Workflow { workflow } => Some(format!("created {}\n\n{}", workflow.id, workflow_text(workflow))),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Update { id, file } => {
+            let workflow = read_workflow_file(&file)?;
+            let payload = client.send(Request::WorkflowUpdate { id, workflow }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Workflow { workflow } => Some(format!("updated to r{}\n\n{}", workflow.revision, workflow_text(workflow))),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Start { id, inputs } => {
+            let inputs = parse_pairs(&inputs, "inputs")?;
+            let payload = client.send(Request::WorkflowStart { id, inputs }).await?;
+            print(&payload, json, |p| match p {
+                Payload::WorkflowRun { run } => Some(workflow_run_text(run)),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Runs { id, limit } => {
+            let payload =
+                client.send(Request::WorkflowRunList { workflow_id: id, scope: None, limit: Some(limit) }).await?;
+            print(&payload, json, |p| match p {
+                Payload::WorkflowRuns { runs } => Some(
+                    runs.iter()
+                        .map(|r| {
+                            format!(
+                                "{}  {:?}  {}  r{}  {}",
+                                r.id,
+                                r.status,
+                                r.definition.name,
+                                r.revision,
+                                r.created_at.to_rfc3339()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Run { run_id } => {
+            let payload = client.send(Request::WorkflowRunGet { id: run_id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::WorkflowRun { run } => Some(workflow_run_text(run)),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Cancel { run_id } => {
+            let payload = client.send(Request::WorkflowRunCancel { id: run_id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::WorkflowRun { run } => Some(workflow_run_text(run)),
+                _ => None,
+            })
+        }
     }
+}
+
+/// A workflow file: YAML, which JSON also is.
+fn read_workflow_file(path: &std::path::Path) -> Result<factory_core::workflow::WorkflowDraft> {
+    let text = std::fs::read_to_string(path).map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
+    serde_yaml_ng::from_str(&text).map_err(|e| anyhow!("{} is not a workflow: {e}", path.display()))
+}
+
+fn workflow_text(w: &factory_core::workflow::WorkflowDefinition) -> String {
+    let mut s = format!("{}  {}  r{}  (scope {})\n", w.id, w.name, w.revision, w.scope);
+    if !w.description.trim().is_empty() {
+        s.push_str(&format!("{}\n", w.description.trim()));
+    }
+    for input in &w.inputs {
+        s.push_str(&format!("input {}  {}\n", input.name, input.description));
+    }
+    let order = w.validate().unwrap_or_else(|_| w.nodes.iter().map(|n| n.id.clone()).collect());
+    for id in order {
+        let Some(node) = w.nodes.iter().find(|n| n.id == id) else { continue };
+        let after: Vec<&str> = w.edges.iter().filter(|e| e.to == id).map(|e| e.from.as_str()).collect();
+        s.push_str(&format!("  {}  {}", node.id, node.task.title));
+        if let Some(agent) = &node.task.agent {
+            s.push_str(&format!("  [{agent}]"));
+        }
+        if !after.is_empty() {
+            s.push_str(&format!("  after {}", after.join(", ")));
+        }
+        if let Some(rework) = &node.rework {
+            s.push_str(&format!("  sends work back to {} (at most {}x)", rework.to, rework.max_rounds));
+        }
+        s.push('\n');
+    }
+    s
+}
+
+fn workflow_run_text(r: &factory_core::workflow::WorkflowRun) -> String {
+    let mut s = format!("{}  {:?}  {}  r{}\n", r.id, r.status, r.definition.name, r.revision);
+    for (name, value) in &r.inputs {
+        s.push_str(&format!("input {name}={value}\n"));
+    }
+    if let Some(error) = &r.error {
+        s.push_str(&format!("error: {error}\n"));
+    }
+    for node in &r.nodes {
+        s.push_str(&format!("  {}  {:?}", node.node_id, node.status));
+        if let Some(task) = &node.task_id {
+            s.push_str(&format!("  task {task}"));
+        }
+        if node.round > 0 {
+            s.push_str(&format!("  rework {}", node.round));
+        }
+        if let Some(error) = &node.error {
+            s.push_str(&format!("  -- {error}"));
+        }
+        s.push('\n');
+    }
+    s
 }
 
 /// `factory workflow lint`, for a person: each category's plan, then what a
@@ -4892,6 +5202,41 @@ mod tests {
         path
     }
 
+    fn created(schedule: Option<factory_core::task::Schedule>) -> Task {
+        let mut t = factory_core::adapter::store::task_from_new(
+            NewTask { title: "t".into(), schedule, ..Default::default() },
+            "demo".into(),
+            "shell".into(),
+            "herdr".into(),
+        );
+        t.id = "abc123".into();
+        t
+    }
+
+    #[test]
+    fn creating_an_unscheduled_task_says_it_is_not_dispatched_and_how_to_run_it() {
+        let note = created_note(&created(None), false);
+        assert!(note.starts_with("created, not dispatched"), "{note}");
+        assert!(note.contains("`factory task run abc123`"), "{note}");
+    }
+
+    #[test]
+    fn creating_a_scheduled_task_names_its_first_firing() {
+        let mut t = created(Some(factory_core::task::Schedule::Every { seconds: 300 }));
+        let at = chrono::DateTime::parse_from_rfc3339("2026-09-25T18:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        t.next_run_at = Some(at);
+        let note = created_note(&t, false);
+        assert!(note.contains("first fires it at 2026-09-25T18:00:00+00:00"), "{note}");
+        assert!(note.contains("`factory task run abc123`"), "{note}");
+    }
+
+    #[test]
+    fn creating_with_run_says_it_was_dispatched() {
+        let note = created_note(&created(None), true);
+        assert!(note.starts_with("dispatched"), "{note}");
+        assert!(!note.contains("not dispatched"), "{note}");
+    }
+
     #[test]
     fn result_file_alone_becomes_the_result() {
         let path = write_temp(b"hello from the command\n");
@@ -5097,6 +5442,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dependency_commands_parse_in_the_documented_forms() {
+        let attach = Cli::try_parse_from([
+            "factory", "task", "attach", "--kind", "sbom", "scan.cdx.json",
+        ]).unwrap();
+        assert!(matches!(attach.command, Command::Task(TaskCmd::Attach {
+            kind: AttachmentKind::Sbom, ref file, id: None, ..
+        }) if file == Path::new("scan.cdx.json")));
+
+        let read = Cli::try_parse_from(["factory", "dependencies", "demo"]).unwrap();
+        assert!(matches!(read.command, Command::Dependencies { ref args } if args == &["demo"]));
+        let vex = Cli::try_parse_from(["factory", "dependencies", "vex", "demo"]).unwrap();
+        assert!(matches!(vex.command, Command::Dependencies { ref args } if args == &["vex", "demo"]));
+    }
+
     // -- --timezone ----------------------------------------------------------
 
     #[test]
@@ -5167,8 +5527,27 @@ mod tests {
                 }],
             }],
             unassigned: vec![UnassignedAgent { scope: "demo".into(), agent: "helper".into(), harness: "codex".into() }],
+            harnesses: vec![factory_core::harness::HarnessRow {
+                harness: "codex".into(),
+                binary: "/opt/homebrew/bin/codex".into(),
+                state: factory_core::harness::HarnessState::Unhealthy,
+                checked_at: Some(chrono::Utc::now()),
+                unhealthy_since: Some(chrono::Utc::now()),
+                version: None,
+                reason: Some("`/opt/homebrew/bin/codex --version` did not answer in 10s".into()),
+                repair: Some("scripts/repair-harness codex".into()),
+                held: vec![factory_core::harness::HeldTask {
+                    task_id: "t1".into(),
+                    scope: "demo".into(),
+                    title: "fix it".into(),
+                }],
+                auto_repair: None,
+            }],
         };
         let text = infrastructure_text(&payload).unwrap();
+        assert!(text.contains("HARNESSES") && text.contains("unhealthy"), "{text}");
+        assert!(text.contains("repair: scripts/repair-harness codex"), "{text}");
+        assert!(text.contains("held: 1 task(s) -- t1 (fix it)"), "{text}");
         assert!(text.contains("HOST  --"), "{text}");
         assert!(text.contains("chip        --"), "{text}");
         assert!(text.contains("-- (aarch64)"), "{text}");

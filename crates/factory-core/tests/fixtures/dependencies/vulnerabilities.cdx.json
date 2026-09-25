@@ -1,0 +1,23 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:22222222-2222-4222-8222-222222222222",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-09-25T12:01:00Z",
+    "tools": { "components": [{ "name": "grype", "version": "0.100.0" }] }
+  },
+  "vulnerabilities": [{
+    "id": "CVE-2026-1234",
+    "ratings": [{ "source": { "name": "NVD" }, "score": 9.8, "severity": "critical", "method": "CVSSv31", "vector": "CVSS:3.1/AV:N" }],
+    "affects": [{
+      "ref": "pkg:cargo/demo-lib@1.2.3",
+      "versions": [{ "version": "1.2.4", "status": "unaffected" }]
+    }],
+    "properties": [
+      { "name": "factory:kev", "value": "true" },
+      { "name": "factory:euvd", "value": "false" },
+      { "name": "factory:epss", "value": "0.91" }
+    ]
+  }]
+}

@@ -591,7 +591,7 @@ function queueMarks() {
       poly([[qx - 0.3, qy - 0.3, 0.3], [qx + 0.3, qy - 0.3, 0.3], [qx + 0.3, qy + 0.3, 0.3], [qx - 0.3, qy + 0.3, 0.3]], C.idle, null);
     });
     if (layers.labels && cam.z > 1.0) {
-      text("waiting to run", b.x + 0.2 + b.queued.length * 0.45, y + 0.5, 0.02,
+      text("not started", b.x + 0.2 + b.queued.length * 0.45, y + 0.5, 0.02,
         '500 ' + Math.max(8, 6.5 * cam.z + 2.5).toFixed(0) + 'px "IBM Plex Mono", monospace', C.faint);
     }
   });

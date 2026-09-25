@@ -8,6 +8,7 @@ use factory_core::adapter::agent::{
 };
 use factory_core::adapter::KnowledgeHints;
 use factory_core::error::{FactoryError, Result};
+use factory_core::harness::HealthProbe;
 
 /// An interactive coding agent the runtime can start by name.
 pub struct HarnessAgent {
@@ -127,6 +128,12 @@ impl Agent for HarnessAgent {
             args,
             env,
         })
+    }
+
+    /// `<harness> --version`: the one flag every harness this build ships
+    /// answers without starting a session, a model call, or an update.
+    fn health_probe(&self) -> Option<HealthProbe> {
+        Some(HealthProbe::version(self.harness.clone()))
     }
 
     async fn prompt(&self, ctx: &AgentContext) -> Result<String> {

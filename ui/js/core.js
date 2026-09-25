@@ -36,6 +36,9 @@ export const state = {
   occ: null,              // the occupancy answer, as the daemon assembled it
   environment: null,      // last /api/environment answer: { sandboxes, credentials }
   environmentError: null,
+  dependencies: null,       // selected scope's /api/dependencies report
+  dependenciesError: null,
+  dependenciesSegment: "sbom",
   infrastructure: null,   // last /api/infrastructure answer: { host, daemon, providers, unassigned }
   infrastructureError: null,
   infrastructureUnavailable: false, // the daemon predates the endpoint (a bare 404), not a fault

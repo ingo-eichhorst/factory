@@ -15,11 +15,14 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
-    /// Handed in through intake (`#119`) and not yet released: held outside
-    /// the dispatchable queue, with no run, until triage decides. Never due,
-    /// and `task run` refuses it -- see `crate::intake`.
+    /// Handed in through intake (`#119`) and not yet released: held back
+    /// from dispatch, with no run, until triage decides. Never due, and
+    /// `task run` refuses it -- see `crate::intake`.
     Intake,
-    /// Created, waiting for a trigger (manual, schedule, or another agent).
+    /// Created and not started. Nothing dispatches it on its own -- there is
+    /// no queue and no capacity to wait on (`#124`): an unscheduled task stays
+    /// here until someone calls `task run`, and a scheduled one until its
+    /// slot (or a queued retry) comes due.
     Pending,
     /// The daemon has a runtime session and is handing the prompt over.
     Dispatching,

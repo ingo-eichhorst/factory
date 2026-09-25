@@ -26,9 +26,12 @@ import {
   fmtRuntime,
   fmtUptime,
   groupAgentsByScope,
+  harnessDetail,
+  harnessStateLabel,
   infraFailure,
   isEmptyProviders,
   kindBadge,
+  sortHarnesses,
   visibleAgents,
 } from "./infra-model.js";
 
@@ -179,6 +182,36 @@ function unassignedBlock(rows) {
   </article>`;
 }
 
+function harnessCard(h) {
+  const held = h.held || [];
+  const heldList = held.length
+    ? `<div class="infra-fact"><dt>Held</dt><dd>${held.length} task${held.length === 1 ? "" : "s"} blocked before a run
+        <span class="sub">${held.map(t => esc(t.title || t.task_id)).join(" · ")}</span></dd></div>`
+    : "";
+  return `<article class="infra-card infra-harness" data-state="${esc(h.state)}">
+    <header class="infra-card-head">
+      <h3>${esc(h.harness)}</h3>
+      <span class="tag infra-harness-state" data-state="${esc(h.state)}">${esc(harnessStateLabel(h.state))}</span>
+    </header>
+    <dl class="infra-facts">
+      ${row("Binary", fact(h.binary), true)}
+      ${row(h.state === "unhealthy" ? "Why" : "Answered", harnessDetail(h))}
+      ${h.repair
+        ? `<div class="infra-fact"><dt>Repair</dt><dd><code>${esc(h.repair)}</code>
+            <span class="sub">run by a person: it swaps in a fresh, signature-checked copy</span></dd></div>`
+        : ""}
+      ${heldList}
+      ${h.auto_repair ? row("Automatic repair", h.auto_repair) : ""}
+    </dl>
+  </article>`;
+}
+
+function harnesses(rows) {
+  const list = sortHarnesses(rows);
+  if (!list.length) return "";
+  return `<div class="infra-providers">${list.map(harnessCard).join("")}</div>`;
+}
+
 function emptyProviders() {
   return `<article class="infra-card infra-empty">
     <header class="infra-card-head"><h3>No AI accounts declared</h3></header>
@@ -227,9 +260,13 @@ export function renderInfrastructure() {
   // agents pay through, then the daemon that runs them, then the machine
   // under it. The DOM follows the same order, so a screen reader and the tab
   // key meet the cards in the order they are drawn.
+  const programs = harnesses(data.harnesses);
   stack.innerHTML = [
     layer("AI accounts", "what the agents' harnesses pay through", accounts),
     RUNS_ON,
+    ...(programs
+      ? [layer("Harnesses", "checked with --version before a dispatch", programs), RUNS_ON]
+      : []),
     layer("Daemon", "Factory, and its store", daemonCard(data.daemon)),
     RUNS_ON,
     layer("Host", "the machine underneath", hostCard(data.host)),

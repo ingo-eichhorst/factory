@@ -47,6 +47,7 @@ import { fmtAge, inboxItems } from "./operations-model.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 import { hasFailed } from "./task-model.js";
+import { notStarted } from "./pending-model.js";
 
 /// The three presets the window selector offers. `bin` travels with every
 /// request rather than being guessed from `minutes` server-side, so a caller
@@ -158,7 +159,7 @@ function sum(buckets, field) {
 }
 
 /// A small trend line under a KPI. Deliberately not drawn for a KPI with no
-/// historical series of its own -- "in flight" and "queued" are what is true
+/// historical series of its own -- "in flight" and "due" are what is true
 /// this instant, and the daemon keeps no series of what that number was an
 /// hour ago, so a sparkline there would have to be invented.
 function sparkline(values, colour) {
@@ -175,7 +176,7 @@ function sparkline(values, colour) {
 function kpis(tasks, scopes, prod, everFinished) {
   const holding = tasks.filter((t) => t.status === "running" || t.status === "dispatching");
   const blocked = tasks.filter((t) => t.status === "blocked");
-  const pending = tasks.filter((t) => t.status === "pending");
+  const waiting = notStarted(tasks, Date.now());
   const agentCount = scopes.reduce((n, s) => n + s.agents.length, 0);
   const standingUp = scopes.reduce(
     (n, s) => n + s.agents.filter((a) => a.state === "ready" || a.state === "starting").length,
@@ -196,12 +197,23 @@ function kpis(tasks, scopes, prod, everFinished) {
 
   return [
     kpi("In flight", holding.length + blocked.length, `${holding.length} holding an agent · ${blocked.length} blocked`),
-    kpi("Queued", pending.length, "waiting at a door, no agent yet"),
+    // Due, not "queued": there is no queue behind a pending task (`#124`).
+    // This is the count Operations calls `flow.queue_depth` -- a scheduled
+    // slot that has come and not been dispatched yet -- and the manual tasks
+    // that nothing will ever start on its own are named beside it, not
+    // added into it.
+    kpi("Due", waiting.due.length, notStartedSub(waiting)),
     kpi("Finished", finished, `${winLabel}${scrapped ? ` · ${scrapped} scrapped` : ""}`, { spark: finishedSpark }),
     kpi("Scrap rate", finished ? round1(scrapped / finished * 100) : "—", finished ? `of finished, ${winLabel}` : "nothing finished yet", { unit: finished ? "%" : "", spark: scrapSpark }),
     kpi("Reworked", finished ? round1(reworked / finished * 100) : "—", finished ? `of finished, ${winLabel}` : "nothing finished yet", { unit: finished ? "%" : "", spark: reworkSpark }),
     kpi("Scopes · agents", `${scopes.length} · ${agentCount}`, `${standingUp} standing agent${standingUp === 1 ? "" : "s"} up`),
   ];
+}
+
+function notStartedSub(w) {
+  const parts = [`${w.manual.length} manual, not run`];
+  if (w.later.length) parts.push(`${w.later.length} scheduled later`);
+  return parts.join(" · ");
 }
 
 function round1(n) {
@@ -296,12 +308,13 @@ function stnRow(label, count, total, colour) {
 
 /// "On the line": the same live task figures the KPI row counts, broken into
 /// where the work is, plus what left the line today. Groups one and two are
-/// not a second tally -- they are the In flight and Queued KPIs, split out
+/// not a second tally -- they are the In flight and Due KPIs, split out
 /// and explained, so the two can never quietly drift apart.
 function onTheLine(tasks, prod, everFinished) {
   const running = tasks.filter((t) => t.status === "running" || t.status === "dispatching");
   const blocked = tasks.filter((t) => t.status === "blocked");
-  const pending = tasks.filter((t) => t.status === "pending");
+  const waiting = notStarted(tasks, Date.now());
+  const pending = waiting.due.length + waiting.later.length + waiting.manual.length;
   const holding = running.length + blocked.length;
 
   const today = prod && prod.daily.length ? prod.daily[prod.daily.length - 1] : null;
@@ -330,12 +343,16 @@ function onTheLine(tasks, prod, everFinished) {
     ${stnGroup("Holding an agent")}
     ${stnRow("Running", running.length, holding || 1, "run")}
     ${stnRow("Blocked", blocked.length, holding || 1, "wait")}
-    ${stnGroup("Waiting at a door · assigned, no agent yet")}
-    ${stnRow("Queued", pending.length, pending.length || 1, "idle")}
+    ${stnGroup("Not started · no run yet")}
+    ${stnRow("Due", waiting.due.length, pending || 1, "idle")}
+    ${stnRow("Scheduled later", waiting.later.length, pending || 1, "idle")}
+    ${stnRow("Manual, not run", waiting.manual.length, pending || 1, "idle")}
     ${stnGroup(`Left the line today${today ? ` · against ${today.finished} finished` : ""}`)}
     ${todayRows}
-    <p class="dnote">${holding} above hold an agent -- the same count the In flight KPI shows. ${pending.length} more
-      ${pending.length === 1 ? "is" : "are"} queued at a door -- the Queued KPI.${todayNote}</p>
+    <p class="dnote">${holding} above hold an agent -- the same count the In flight KPI shows. ${pending} more
+      ${pending === 1 ? "has" : "have"} not started: ${waiting.due.length} due, which the scheduler will fire -- the Due KPI
+      and the Operations queue. Nothing starts a manual task on its own; run it with
+      <code>factory task run &lt;id&gt;</code> or its Run button.${todayNote}</p>
   </section>`;
 }
 

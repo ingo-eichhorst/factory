@@ -17,7 +17,7 @@ the daemon cannot tell a built-in implementation from a plugin:
 
 | Adapter | What it decides | Ships with |
 | --- | --- | --- |
-| **Agent** | how a harness is started, and what a task sounds like to it | `claude-code`, `pi`, `codex`, `opencode`, `shell` |
+| **Agent** | how a harness is started, what a task sounds like to it, and how to check it starts | `claude-code`, `pi`, `codex`, `opencode`, `shell` |
 | **Agent runtime** | where agents actually run | `herdr` |
 | **Task store** | where tasks live — the CRUD contract, chosen per scope | `sqlite` |
 | **Interface** | how the outside reaches the daemon | `cli` (unix socket), `http` (REST + WebSocket + UI) |
@@ -371,6 +371,83 @@ more: for each known location, whether a file is there. No value is ever
 opened, held, logged, or returned — `present` is the entire result of each
 check, and there is no write path, in the UI or over the socket.
 
+## Dependencies
+
+The L2 Environment page's **Dependencies** tab keeps two different facts
+together without confusing them: components shipped in a scope's product, and
+services its agents are expected to reach. It always shows one scope at a
+time. The SBOM segment shows the newest document per lifecycle state and every
+finding a scan reported; the Services segment shows declarations from that
+scope's own config, including whether a credential location matches a row the
+Secrets inventory knows is present.
+
+A scope opts in with a strict `dependencies:` block (unknown fields are
+refused). An `agents:` filter may name only an agent that same scope declares:
+
+```yaml
+scope:
+  name: assistant
+  dependencies:
+    scan_workflow: dependency-scan
+    max_age: 30d
+    services:
+      - name: bank-main
+        transport: network          # network | socket | file
+        endpoints: [fints.example-bank.de:443]
+        effects: read               # read | write
+        data: [financial, personal]
+        credential: keychain:fints-bank-main  # a location, never a value
+        agents: [assistant-finance]  # absent means every declared agent
+      - name: bank-exports
+        transport: file
+        path: ~/Documents/Bank/Exports
+        direction: in               # in | out | both
+```
+
+Scanning is an ordinary workflow, not an adapter. A scan task produces two
+CycloneDX JSON documents (version 1.6 or newer) and sends their bytes through
+its authenticated callback:
+
+```sh
+factory task attach --kind sbom sbom.cdx.json
+factory task attach --kind vulnerabilities vulnerabilities.cdx.json
+```
+
+The daemon never follows the task's path. It validates the bytes and stores an
+immutable raw copy plus run/attempt/time metadata under
+`<root>/.factory/dependencies/<scope>/<run-id>/`; another attachment always
+creates another file. The SBOM must declare `metadata.lifecycles` (`pre-build`
+for declared, `build` for built, `operations` for running) and must not contain
+a `vulnerabilities` field. Vulnerability documents carry `vulnerabilities[]`
+whose `affects[].ref` values point into the SBOM by `bom-ref`. See
+`examples/dependency-scan.sh` for a declared-state Syft/Grype example; tests
+use checked-in CycloneDX fixtures and require neither tool.
+
+`factory dependencies <scope>` and `GET /api/dependencies?scope=` read the
+same projection. A finding is `open` when the newest scan still reports it,
+`assessed` when that scan carries CycloneDX `analysis`, `resolved` when a newer
+scan of the same lifecycle no longer reports it, and `stale` when the newest
+scan is older than the scope's `max_age`. These are derived statuses: there is
+no write API for them. `factory:` properties on a vulnerability carry KEV,
+EUVD and EPSS signals.
+
+VEX judgments are authored content at
+`<root>/.factory/vex/<scope>/*.cdx.json`, separate from every SBOM. `factory
+dependencies vex <scope>` validates them and prints one merged CycloneDX VEX
+document for a scan workflow to consume. Factory never edits those files.
+
+Policy catalogues may read the same evidence:
+
+```yaml
+- check: dependencies
+  sbom_max_age: 30d
+  max_open: { critical: 0, high: 0 }
+  exploited_open: 0
+```
+
+`built_sbom`, installed-binary scanning, observed services, reachability and
+the CRA Article 14 clock are later phases; v1 makes no claim about them.
+
 ## Knowledge
 
 `<root>/.factory/knowledge/` is a vault Factory keeps — one Obsidian-compatible
@@ -601,7 +678,7 @@ empty one is a finding and the control stays applicable — and every `n/a`, at
 whichever scope declared it, is always listed rather than left silent: ISO
 27001 calls this a Statement of Applicability, and ADR 0004 keeps the name.
 
-**Checks and statuses.** Evidence is evaluated per check kind, and all nine
+**Checks and statuses.** Evidence is evaluated per check kind, and all ten
 are evaluated for real: `knowledge` (a vault page tagged
 `control/<framework>/<id>`, or a check's own `tag`), `attestation` (an
 unexpired, unwithdrawn attestation recorded for the control), `task` and
@@ -652,12 +729,16 @@ the live config snapshot rather than a store:
   address is left undetermined rather than guessed at with a DNS lookup),
   and `power_assertion` (`daemon.power_assertion`). A `fact` outside this
   set is a finding at catalogue load time and stays `open`.
+- **`dependencies`** — satisfied when the newest declared SBOM is within
+  `sbom_max_age`, open findings do not exceed each `max_open` severity limit,
+  and KEV/EUVD findings do not exceed `exploited_open`. It reads the same
+  derived projection as L2 Dependencies; no policy-specific copy is stored.
 
-Neither `roles`/`sandbox`/`secrets`/`daemon` carries a `refs` entry: nothing
+Neither `roles`/`sandbox`/`secrets`/`daemon`/`dependencies` carries a `refs` entry: nothing
 behind them is an id a UI could link to yet (an agent name is not one of
 `EvidenceRefKind`'s kinds, and a daemon/secrets fact is not tied to any one
 record at all) — the L6 Policy tab instead links a gap in one of these to
-the level that can close it (Roles, Sandboxes, Secrets, or L1
+the level that can close it (Roles, Sandboxes, Secrets, Dependencies, or L1
 Infrastructure). A control's status is `satisfied` (a check found current
 evidence), `attested` (an unexpired attestation covers it), `stale`
 (evidence or an attestation existed but is older than `max_age`, or the
@@ -1396,6 +1477,15 @@ kept with their own journal, their own outcome, and their own terminal
 transcript. The task itself mirrors the newest run, so a list stays cheap to
 read; the history lives on the runs.
 
+Creating a task does not start it. There is no queue behind `pending` and no
+capacity for a task to wait on: the scheduler starts only a scheduled slot
+that has come due (or a queued retry), so an unscheduled task stays `pending`
+until someone runs it -- `--run` on create, `factory task run <id>` later, or
+the Run button. `task create` says which it is, the task's page says so while
+nothing has started it, and the dashboard's **Due** figure counts only what
+the scheduler will actually fire -- the same number as Operations'
+`flow.queue_depth` -- with manual tasks named beside it, not in it (`#124`).
+
 ### A failure is Blocked; closing is a person's act (#122)
 
 A run that fails stays `failed` -- the attempt really did fail, and every
@@ -1601,6 +1691,65 @@ parents said — the acceptance bar is that literal command. Either way, each
 parent's result is tail-truncated to a byte budget first, so one noisy
 upstream step can't blow up every prompt downstream of it.
 
+### Inputs and rework loops (#140)
+
+A workflow can be told what to work on, and a review step can send work back.
+
+```yaml
+# factory workflow create --file ticket.yaml
+name: ticket
+scope: factory
+inputs:
+  - { name: issue, description: "GitHub issue number" }
+nodes:
+  - id: implement
+    task: { title: "Implement #{{issue}}", instructions: "...", labels: { issue: "{{issue}}" } }
+  - id: review
+    task: { title: "Review #{{issue}}", instructions: "..." }
+    rework: { to: implement, max_rounds: 5 }
+edges:
+  - { id: e1, from: implement, to: review }
+```
+
+- **Inputs.** A definition declares `inputs:`; a run is started with a value
+  for each (`factory workflow start <id> --input issue=42`, or
+  `POST /api/workflows/{id}/run` with `{"inputs": {"issue": "42"}}`, or the
+  form the UI's Run button opens). A missing or undeclared one refuses the
+  start. `{{name}}` in a task node's title, instructions and label values is
+  replaced verbatim in the run's snapshot, so the run shows what actually ran
+  and the stored definition keeps its placeholders. Once a definition
+  declares any input, a `{{name}}` it does not declare is refused as a typo;
+  with none declared, braces are left alone (`{{.Names}}` belongs to some
+  other tool). A gate's command is never substituted -- the daemon runs it
+  itself. A label `issue={{issue}}` is what `factory cost --by issue` groups
+  by.
+- **Rework.** `rework: { to, max_rounds }` on a task node is the one edge that
+  points backwards, kept off `edges` so the graph stays acyclic; `to` must be
+  a task node before it. When that node's run ends `failed` **because its own
+  agent reported it** (`FailKind::AgentFailed` -- a timeout, a session that
+  went away or a failed dispatch is not a verdict), and rounds are left, the
+  path from `to` down to it -- gates included -- goes back to `unstarted` and
+  runs again; whatever waited below it waits on. Each re-spawned task is
+  titled `(... rework k)`, the node run keeps its earlier tasks in
+  `superseded_task_ids`, and `to`'s new task is dispatched with the sender's
+  error and result as an extra upstream entry, "... sent this work back --
+  rework round k of N". Once every round is used, the next agent-reported
+  failure fails the run with an error that says it needs a person. A
+  superseded task's late state changes are ignored.
+- **Escalating to a person** is what it always was: the agent reports
+  `blocked`. The node, and so the run, waits, and the block shows in the
+  Inbox until someone answers.
+
+```sh
+factory workflow list
+factory workflow show <id>
+factory workflow update <id> --file ticket.yaml
+factory workflow start <id> --input issue=42
+factory workflow runs <id>
+factory workflow run <run-id>        # nodes, tasks, rework rounds
+factory workflow cancel <run-id>
+```
+
 ## Compliant workflows
 
 A run used to be `done` the moment its own agent said so. Policy controls and
@@ -1697,8 +1846,9 @@ conformance metrics are v3.
 1. `task.create` resolves the scope, agent, and runtime — from the request, then
    the scope's local config, then the instance defaults — and refuses right away
    if any of them names an adapter that does not exist.
-2. `task.run` opens a run, mints a callback token for it, and asks the runtime
-   for a session in the scope's directory.
+2. `task.run` checks the agent's harness starts (see "Harness health" below),
+   then opens a run, mints a callback token for it, and asks the runtime for a
+   session in the scope's directory.
 3. The agent adapter produces the prompt and, through the harness's own
    system-prompt mechanism, injects a short guide to Factory itself — what it
    is, who this agent is, and which commands its role allows. The prompt
@@ -1749,7 +1899,9 @@ Three timeouts catch the rest:
 
 - `ack_timeout_seconds` (180 by default) — the agent is up but has not said a
   word. This is what an agent sitting on a first-run trust prompt or a login
-  looks like.
+  looks like. A harness that never started at all is caught before this, by
+  the probe below; an acknowledgement timeout also makes the next dispatch to
+  that harness probe it again rather than trust an earlier answer.
 - `task_timeout_seconds` (3600 by default) — a cap on the whole run, counted
   from `started_at`: the run has not finished within this many seconds,
   however often it has reported in between.
@@ -1767,6 +1919,72 @@ active, released the moment the last one ends. macOS only for now
 no-ops); the host-level power settings that let this happen in the first
 place are a separate fix, and this is only ever the defence-in-depth for the
 moments that one does not reach.
+
+### Harness health (#131)
+
+A harness binary can stop starting without anything changing in Factory: on
+2026-09-25 a freshly installed codex hung in `_dyld_start` on `codex
+--version`, and every task handed to it sat in `dispatching` for three minutes
+and then failed as an `ack_timeout` that blamed the agent. So before a
+dispatch, the daemon checks the harness starts.
+
+- **The probe is declared, not run, by the adapter.** `Agent::health_probe()`
+  (a default method on the Agent seam, `None` unless overridden) names a
+  command; every built-in harness answers `<harness> --version`, `shell` and
+  plugins declare none. The daemon runs it -- its own process group, no stdin,
+  `SIGKILL`ed with its group at the timeout, in a task of its own so a panic is
+  a logged `JoinError` -- so a probe that hangs or panics cannot stall or take
+  down the daemon.
+- **Cached per binary, one probe at a time.** The program is resolved on the
+  daemon's `PATH` (a name with a `/` is used as it is), and the answer is kept
+  per resolved path: a healthy one for `cache_seconds`, an unhealthy one for
+  `retry_seconds`. Five dispatches in one tick probe once.
+- **A harness that does not answer, or exits non-zero, blocks the task before
+  a run exists.** No run row, no session, nothing failed: the task goes to
+  `blocked` with a reason naming the binary and the repair, e.g. ``codex does
+  not start: `/opt/homebrew/bin/codex --version` did not answer in 10s. A
+  person can repair it with `scripts/repair-harness codex` ``, and a
+  `harness_unhealthy` journal entry. Other tasks for it are held the same way,
+  not failed one by one. It is one `harness_unhealthy` exception per binary in
+  the Operations "needs a human" list, and a row under `HARNESSES` in `factory
+  infra` (and on the L1 Infrastructure page), with every task it holds.
+- **Held tasks are released on their own.** At most every `retry_seconds` the
+  daemon looks at every task `blocked` with no run whose newest journal entry
+  is a hold from the last seven days, probes its harness once, and releases
+  the ones that answer: dispatched with the trigger they were held with, or --
+  for a scheduled task held past its slot -- set back to `pending` for the
+  scheduler to fire, so it never starts twice. The journal is the
+  whole record of a hold, so a restart loses nothing. A person's own `task
+  run` never trusts a cached failure -- it probes again, since that is what
+  they do right after repairing it.
+- **Repair is a script a person runs.** `scripts/repair-harness <name>`
+  resolves the binary to its Homebrew cask folder, verifies the code signature
+  and the expected developer team (OpenAI `2DC432GLL2` for codex, Anthropic
+  `Q6L2SF6YDW` for Claude Code) and refuses on any mismatch, copies the folder
+  beside itself without extended attributes, checks the copy answers
+  `--version`, and swaps it in by rename, keeping the old folder as
+  `<version>.stuck`. It never deletes anything. It overrides a decision macOS
+  is holding, so the daemon runs it only when the owner sets `auto_repair:
+  true` with a `repair_script` -- once per unhealthy stretch, bounded, the
+  signature check applying all the same. v1 supports cask installs only:
+  Claude Code's own installer, npm packages and ad-hoc signed formulas are
+  refused with the reason.
+
+```yaml
+daemon:
+  harness_health:
+    enabled: true            # the default
+    timeout_seconds: 10      # how long `--version` may take
+    cache_seconds: 180       # how long a healthy answer is trusted
+    retry_seconds: 60        # how often an unhealthy one is probed again
+    repair_script: /Users/me/factory/scripts/repair-harness   # named in the reason
+    auto_repair: false       # opt-in: run it without a person
+```
+
+The probe runs with the daemon's own environment. A daemon started by launchd
+sees launchd's `PATH`, not a login shell's, so a harness a pane can find but
+the daemon cannot is reported as not found -- give the service the same `PATH`
+the panes have.
 
 ## Configuration
 
@@ -1793,6 +2011,9 @@ daemon:
   default_agent: claude-code
   default_runtime: herdr
   power_assertion: true        # hold the host awake while a run is active
+  harness_health:              # check a harness starts before a dispatch (#131)
+    enabled: true
+    timeout_seconds: 10
 
 infrastructure:              # optional: the AI accounts behind the agents, and backups
   providers:
@@ -2348,7 +2569,8 @@ unchanged.
     ui/js/app.js               the wiring: which page shows, what an event means
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
     ui/js/{dashboard,activity,site,site-render}.js               the new views
-    ui/js/{sandboxes,secrets}.js                                 L2's two tabs
+    ui/js/{sandboxes,secrets,dependencies}.js                    L2's three tabs
+    ui/js/dependencies-model.js                                  Dependencies' pure shaping logic
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
