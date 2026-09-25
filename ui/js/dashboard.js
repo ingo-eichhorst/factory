@@ -9,10 +9,14 @@
 //! Two fixed calendar facts decided once in the endpoint and never re-decided
 //! here: a run is **finished** when `ended_at` is set, bucketed by
 //! `ended_at`; a finished run is **scrapped** if it ended `failed` or
-//! `cancelled`, and **reworked** if `attempt > 1`. A run started again is not
-//! evidence anyone rejected the first attempt -- only that it was tried
-//! again -- so reworked and scrapped are read separately and neither implies
-//! the other.
+//! `cancelled`, and **reworked** if it re-attempts work that did not succeed
+//! -- a retry, or a manual/workflow re-run of a task whose previous run
+//! failed or was cancelled. Not `attempt > 1`: a scheduled task's every
+//! firing bumps its own `attempt`, so that alone would read a healthy
+//! recurring task as almost entirely rework -- see `production.rs`'s module
+//! doc comment for the real rule (`is_rework`). Reworked and scrapped are
+//! read separately and neither implies the other: a run started again is not
+//! evidence anyone rejected the one before, only that it was tried again.
 //!
 //! What this page will not draw, because the domain does not record it:
 //! cost, unit cost, or a euro figure of any kind (a `Run` carries no model,

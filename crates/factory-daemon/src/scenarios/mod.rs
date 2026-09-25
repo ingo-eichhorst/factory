@@ -415,6 +415,7 @@ impl Engine {
                     acc.finished += d.finished;
                     acc.scrapped += d.scrapped;
                     acc.reworked += d.reworked;
+                    acc.first_pass += d.first_pass;
                 }
             }
         }
