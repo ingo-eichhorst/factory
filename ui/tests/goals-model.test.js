@@ -19,6 +19,7 @@ import {
   formatUnitValue,
   hasDirection,
   krHistoryValues,
+  krScoredCount,
   krSourceLink,
   metricIdsForReport,
   metricUnavailableNote,
@@ -250,24 +251,37 @@ test("defaultCycleId prefers current, then the soonest future, then the most rec
 });
 
 test("cycleOptionLabel names id, status and a rounded percent score, or unscored", () => {
-  assert.equal(cycleOptionLabel({ id: "2026-q3", status: "current", score: 0.479 }), "2026-q3 — current — 48%");
+  assert.equal(cycleOptionLabel({ id: "2026-q3", status: "current", score: 0.479 }), "2026-q3 — current — 48% score");
   assert.equal(cycleOptionLabel({ id: "2026-q5", status: "future", score: null }), "2026-q5 — future — unscored");
 });
 
-test("cycleProgress reads elapsed as a percent and scores as the mean of every scored key result, unscored excluded", () => {
+test("cycleProgress reads elapsed as a percent, and scores as the mean of every objective's own score -- the same formula and the same field the cycle switcher's own CycleSummary.score already carries, so the two can never disagree", () => {
   const progress = cycleProgress(report.report);
   assert.equal(progress.elapsedPct, 93.9);
-  // Scores: 0.0, 0.5833..., 1.0, 0.0, 1.0 -- mean 0.5166...
-  assert.equal(progress.scorePct, 51.7);
+  // Objective scores: 0.2916666666666667 (ship-compliant), 0.6666666666666666
+  // (raise-quality) -- mean 0.47916666666666663, exactly `report.cycles`'
+  // own "2026-q3" entry in the real fixture this file's header comment
+  // describes, confirming this reads the identical number the switcher does.
+  assert.equal(progress.scorePct, 47.9);
 });
 
 test("cycleProgress is null with no report", () => {
   assert.equal(cycleProgress(null), null);
 });
 
-test("cycleProgress reads null scorePct when every key result is unscored", () => {
-  const cr = { elapsed: 0, objectives: [{ key_results: [{ score: null }, { score: null }] }] };
+test("cycleProgress reads null scorePct when every objective is unscored", () => {
+  const cr = { elapsed: 0, objectives: [{ score: null, key_results: [{ score: null }, { score: null }] }] };
   assert.deepEqual(cycleProgress(cr), { elapsedPct: 0, scorePct: null });
+});
+
+test("krScoredCount counts scored key results against every key result, independent of cycleProgress's own aggregate", () => {
+  // Every key result in the fixture carries a score (the manual one has a
+  // check-in), so this is 5 of 5; a fixture with an unscored manual key
+  // result (no check-in yet) is covered by the empty-objective case below.
+  assert.deepEqual(krScoredCount(report.report), { scored: 5, total: 5 });
+  const partial = { objectives: [{ score: null, key_results: [{ score: 0.5 }, { score: null }] }] };
+  assert.deepEqual(krScoredCount(partial), { scored: 1, total: 2 });
+  assert.deepEqual(krScoredCount(null), { scored: 0, total: 0 });
 });
 
 // ---------------------------------------------------------------- bands

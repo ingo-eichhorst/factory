@@ -135,7 +135,11 @@
       what is authored and what the data already says about it.</div>
 
     <div id="goals-body" hidden>
-      <header class="goal-header">
+      <!-- A `<div>`, not `<header>`: a bare `header` element selector (the
+           page's own title bar, above) would otherwise bleed `align-items:
+           center`/`flex-wrap`/`background` into this one too -- every
+           property `.goal-header` does not itself override. -->
+      <div class="goal-header">
         <div class="goal-vision" id="goal-vision"></div>
         <div class="goal-mission" id="goal-mission"></div>
         <div class="goal-values" id="goal-values"></div>
@@ -144,7 +148,7 @@
           <select id="goal-cycle-select" aria-label="Cycle"></select>
           <div class="goal-progress" id="goal-progress"></div>
         </div>
-      </header>
+      </div>
 
       <div class="seg" id="goal-view-seg" role="tablist" aria-label="Goals view">
         <button type="button" data-view="map">Map</button>

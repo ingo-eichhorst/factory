@@ -58,17 +58,32 @@ export function defaultCycleId(cycles) {
 
 /// The cycle switcher's own option label -- id, status and score in one
 /// line, so a person can tell past/current/future and how it is doing apart
-/// without opening it first.
+/// without opening it first. `score` reads `cycleSummary.score` verbatim --
+/// see `cycleProgress`'s own header comment for why that, and not a
+/// client-recomputed figure, is the one definition this page uses
+/// everywhere a cycle's score is shown.
 export function cycleOptionLabel(cycleSummary) {
-  const score = cycleSummary.score === null || cycleSummary.score === undefined ? "unscored" : `${Math.round(cycleSummary.score * 100)}%`;
+  const score = cycleSummary.score === null || cycleSummary.score === undefined ? "unscored" : `${Math.round(cycleSummary.score * 100)}% score`;
   return `${cycleSummary.id} — ${cycleSummary.status} — ${score}`;
 }
 
 /// The cycle progress bar's two figures: how much of the calendar window has
-/// elapsed, and the mean score across every scored key result (committed and
-/// aspirational together -- the same "unscored, not zero" mean
-/// `goals::ObjectiveResult::score` itself already takes per objective, one
-/// level up). The bar draws `scorePct` as its fill and `elapsedPct` as a thin
+/// elapsed, and the cycle's own score -- the mean of every *objective's*
+/// own score (each already a mean of that objective's own key results),
+/// never a flat mean across every key result directly. That is deliberate,
+/// not an arbitrary choice: it is the exact formula the daemon's own
+/// `mean_score` uses to fill `CycleSummary.score` (`GoalsReport.cycles`,
+/// the cycle switcher's own numbers, via `cycleOptionLabel`) -- computing it
+/// the same way here, from the same `objectives` array the switcher's
+/// selected cycle already carries, guarantees the switcher and this bar
+/// can never disagree, rather than hoping two independently-computed
+/// aggregates happen to match. A flat key-result mean is a different,
+/// equally defensible number, but it cannot be computed for the *other*
+/// cycles the switcher lists (`GoalsReport.report` only ever evaluates the
+/// one asked-about cycle), so it can never be the one consistent
+/// definition across the whole switcher.
+///
+/// The bar draws `scorePct` as its fill and `elapsedPct` as a thin
 /// "expected by now" marker: a committed key result is meant to close
 /// linearly over the cycle (`KrResult::on_pace`'s own rule), so the marker
 /// says where the fill would sit if every key result were exactly on pace.
@@ -77,14 +92,29 @@ export function cycleOptionLabel(cycleSummary) {
 export function cycleProgress(cycleReport) {
   if (!cycleReport) return null;
   const elapsedPct = pct(cycleReport.elapsed);
-  const scores = [];
-  for (const o of cycleReport.objectives || []) {
+  const objectiveScores = (cycleReport.objectives || [])
+    .map((o) => o.score)
+    .filter((s) => s !== null && s !== undefined);
+  const scorePct = objectiveScores.length ? pct(objectiveScores.reduce((a, b) => a + b, 0) / objectiveScores.length) : null;
+  return { elapsedPct, scorePct };
+}
+
+/// How many of the cycle's own key results carry a score at all -- a plain
+/// count, deliberately kept apart from `cycleProgress`'s own `scorePct`
+/// (an aggregate of the *scored* ones): "48% score" and "3 of 5 KRs scored"
+/// are two different facts, and folding the second into the first's own
+/// wording is what read as inconsistent before this file settled on one
+/// score definition.
+export function krScoredCount(cycleReport) {
+  let scored = 0;
+  let total = 0;
+  for (const o of (cycleReport && cycleReport.objectives) || []) {
     for (const kr of o.key_results || []) {
-      if (kr.score !== null && kr.score !== undefined) scores.push(kr.score);
+      total += 1;
+      if (kr.score !== null && kr.score !== undefined) scored += 1;
     }
   }
-  const scorePct = scores.length ? pct(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
-  return { elapsedPct, scorePct };
+  return { scored, total };
 }
 
 function pct(fraction) {
@@ -108,8 +138,11 @@ export function bandBadgeClass(band) {
 // ----------------------------------------------------------------- rings
 
 /// A key result's progress ring is drawn at this radius unless a caller
-/// needs a different one (the detail modal draws a bigger copy).
-export const KR_RING_RADIUS = 22;
+/// needs a different one -- 28, so a 6px stroke fits a ~64px card ring
+/// (the design pass's own number) with a hair of padding; an objective's
+/// own smaller aggregate ring (`goals.js`'s `objectiveRingSvg`) passes its
+/// own radius instead.
+export const KR_RING_RADIUS = 28;
 
 /// `{radius, circumference, offset}` for an SVG `<circle>` progress ring:
 /// `stroke-dasharray: circumference`, `stroke-dashoffset: offset`, drawn

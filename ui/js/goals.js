@@ -19,7 +19,6 @@
 
 import { $, api, esc, state } from "./core.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
-import { routeHref } from "./scopes.js";
 import {
   KR_RING_RADIUS,
   alignsToEdges,
@@ -36,6 +35,7 @@ import {
   formatUnitValue,
   hasDirection,
   krHistoryValues,
+  krScoredCount,
   krSourceLink,
   metricIdsForReport,
   metricUnavailableNote,
@@ -219,18 +219,25 @@ function renderHeader(report) {
   }
 
   const progressEl = $("goal-progress");
-  if (progressEl) progressEl.innerHTML = report.report ? progressBarHtml(cycleProgress(report.report)) : "";
+  if (progressEl) progressEl.innerHTML = report.report ? progressBarHtml(cycleProgress(report.report), krScoredCount(report.report)) : "";
 }
 
-function progressBarHtml(progress) {
+/// `progress.scorePct` (the mean of every objective's own score -- see
+/// `cycleProgress`'s header comment) is the one "score" this whole tab ever
+/// shows, so the cycle switcher and this bar can never read two different
+/// numbers for the same cycle again. `counted` ("n of m KRs scored") is a
+/// plain count, not another score, and is labelled as one on purpose.
+function progressBarHtml(progress, counted) {
   if (!progress) return "";
   const fill = progress.scorePct === null ? 0 : progress.scorePct;
-  const scoreLabel = progress.scorePct === null ? "not scored yet" : `${progress.scorePct}% scored`;
+  const scoreLabel = progress.scorePct === null ? "not scored yet" : `${progress.scorePct}% score`;
+  const countedLabel = `${counted.scored} of ${counted.total} KRs scored`;
   return `<div class="goal-bar-label"><span>${esc(scoreLabel)}</span><span>${progress.elapsedPct}% of the cycle elapsed</span></div>
     <div class="goal-bar" role="img" aria-label="${esc(scoreLabel)}, ${progress.elapsedPct}% of the cycle elapsed">
       <div class="goal-bar-fill" style="width:${fill}%"></div>
       <div class="goal-bar-marker" style="left:${progress.elapsedPct}%" title="expected by now"></div>
-    </div>`;
+    </div>
+    <div class="sub goal-bar-counted">${esc(countedLabel)}</div>`;
 }
 
 // --------------------------------------------------------- segmented control
@@ -257,61 +264,150 @@ function bandColorVar(band) {
   return BAND_COLOR[band] || "var(--idle)";
 }
 
-function ringSvg(kr) {
-  const { radius, circumference, offset } = ringGeometry(kr.score, KR_RING_RADIUS);
-  const dash = ringDashArray(kr.kind, circumference);
-  const size = radius * 2 + 8;
+// A key result's own ring: ~64px (`RING_SIZE`), the size the design pass
+// asked for -- bigger than a glance-only indicator, small enough that a
+// `minmax(260px,1fr)` card still reads as compact. `OBJ_RING_SIZE` is the
+// same picture at a third the size, for an objective's own aggregate score
+// beside its title.
+const RING_SIZE = 64;
+const RING_R = KR_RING_RADIUS;
+const OBJ_RING_SIZE = 40;
+const OBJ_RING_R = 16;
+
+/// The one ring renderer both a key result's and an objective's own ring
+/// call into -- three states, never two: a scored ring (committed solid /
+/// aspirational dashed, coloured by band, the score centred as text) and an
+/// *unscored* ring, which is not "a ring at score 0" (that already exists
+/// and looks different: a fully closed, coloured circle) but a distinct
+/// picture entirely -- a faint dashed outline with no fill arc at all and
+/// "—" centred, so "no evidence yet" can never be mistaken for "scored
+/// zero" at a glance. The faint track circle is drawn underneath every
+/// state, scored or not.
+function ringSvgCore({ size, radius, score, dashArray, color, outerClass, textClass }) {
   const c = size / 2;
-  const color = bandColorVar(kr.band);
-  return `<svg class="goal-ring-svg" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" aria-hidden="true">
-    <circle class="goal-ring-track" cx="${c}" cy="${c}" r="${radius}"></circle>
-    <circle class="goal-ring-fill" cx="${c}" cy="${c}" r="${radius}" stroke="${color}"
-      stroke-dasharray="${dash || circumference}" stroke-dashoffset="${circumference}"
-      data-target-offset="${offset}" transform="rotate(-90 ${c} ${c})"></circle>
+  const unscored = score === null || score === undefined;
+  const centerText = unscored ? "—" : `${Math.round(score * 100)}%`;
+  const textClasses = ["goal-ring-text", textClass, unscored ? "goal-ring-text-unscored" : ""].filter(Boolean).join(" ");
+  const track = `<circle class="goal-ring-track" cx="${c}" cy="${c}" r="${radius}"></circle>`;
+  const text = `<text class="${textClasses}" x="${c}" y="${c}" dy="0.32em" text-anchor="middle">${centerText}</text>`;
+  let body;
+  if (unscored) {
+    body = `<circle class="goal-ring-unscored" cx="${c}" cy="${c}" r="${radius}"></circle>`;
+  } else {
+    const { circumference, offset } = ringGeometry(score, radius);
+    body = `<circle class="goal-ring-fill" cx="${c}" cy="${c}" r="${radius}" stroke="${color}"
+      stroke-dasharray="${dashArray || circumference}" stroke-dashoffset="${circumference}"
+      data-target-offset="${offset}" transform="rotate(-90 ${c} ${c})"></circle>`;
+  }
+  return `<svg class="goal-ring-svg${outerClass ? ` ${outerClass}` : ""}" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" aria-hidden="true">
+    ${track}${body}${text}
+  </svg>`;
+}
+
+function ringSvg(kr) {
+  const { circumference } = ringGeometry(kr.score, RING_R);
+  const dash = ringDashArray(kr.kind, circumference);
+  return ringSvgCore({ size: RING_SIZE, radius: RING_R, score: kr.score, dashArray: dash, color: bandColorVar(kr.band) });
+}
+
+/// An objective's own score has no band (committed/aspirational is a key
+/// result's own distinction, not something a mean of several has), so this
+/// always draws solid, in the signal colour rather than a band colour --
+/// visually reads as "an aggregate", not "another key result".
+function objectiveRingSvg(score) {
+  return ringSvgCore({
+    size: OBJ_RING_SIZE,
+    radius: OBJ_RING_R,
+    score,
+    dashArray: null,
+    color: "var(--signal)",
+    outerClass: "goal-obj-ring-svg",
+    textClass: "goal-obj-ring-text",
+  });
+}
+
+function sparklineSvg(values, color, extraClass) {
+  const pts = sparklinePointsAttr(values);
+  if (!pts) return `<span class="sub goal-no-history">no history yet</span>`;
+  return `<svg class="goal-spark${extraClass ? ` ${extraClass}` : ""}" viewBox="0 0 100 26" preserveAspectRatio="none">
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2"></polyline>
   </svg>`;
 }
 
 function sparkSvg(kr) {
   const values = krHistoryValues(kr, state.goals.checkins, seriesIndex(state.goalsMetrics || {}));
-  const pts = sparklinePointsAttr(values);
-  if (!pts) return `<span class="sub goal-no-history">no history yet</span>`;
-  return `<svg class="goal-spark" viewBox="0 0 100 26" preserveAspectRatio="none">
-    <polyline points="${pts}" fill="none" stroke="${bandColorVar(kr.band)}" stroke-width="2"></polyline>
-  </svg>`;
+  return sparklineSvg(values, bandColorVar(kr.band));
 }
 
+/// A metric's own daily series (only ever present for the three production
+/// metrics -- see `goals-model.js`'s header comment), read straight off
+/// `/api/metrics`' `series`, never invented for a metric with none.
+function metricSparkSvg(metricId, color, extraClass) {
+  const series = seriesIndex(state.goalsMetrics || {})[metricId];
+  const values = series ? series.points.map(([, v]) => v) : null;
+  return sparklineSvg(values, color, extraClass);
+}
+
+/// A compact card: the ring on the left, everything else in a column on the
+/// right -- one row for the band badge and the kind (neither stretched to
+/// the card's own width; both are wrapped in their own flex row rather than
+/// left as bare flex children of a column, which is what was stretching the
+/// badge full-width before), then value → target, the source (a real link
+/// when `krSourceLink` finds one to route to, so a click does not also open
+/// this card's own detail modal -- see `wireMapClicks`), then the sparkline.
 function krCardHtml(kr) {
   const registry = registryIndex(state.goalsMetrics || {});
   const unit = kr.metric && registry[kr.metric] ? registry[kr.metric].unit : null;
   const valueLabel = formatUnitValue(kr.value, unit);
   const targetLabel = formatUnitValue(kr.target, unit);
-  return `<button type="button" class="goal-kr" data-kr="${esc(kr.kr)}">
+  const link = krSourceLink(kr, state.scope);
+  const sourceHtml = kr.manual
+    ? `<span class="goal-kr-source sub">manual</span>`
+    : link
+      ? `<a class="goal-kr-source" href="${esc(link.href)}" data-stop-card>${esc(kr.metric)} → ${esc(link.label)}</a>`
+      : `<span class="goal-kr-source sub">${esc(kr.metric || "")}</span>`;
+  return `<div class="goal-kr" data-kr="${esc(kr.kr)}" role="button" tabindex="0">
     <div class="goal-kr-ring">${ringSvg(kr)}</div>
     <div class="goal-kr-body">
       <div class="goal-kr-title">${esc(kr.title)}</div>
-      <span class="badge ${bandBadgeClass(kr.band)}">${esc(bandLabel(kr.band))}</span>
-      <span class="sub">${esc(kr.kind)}${kr.onPace === false ? " · behind pace" : ""}</span>
-      <div class="sub">${valueLabel} / target ${targetLabel}</div>
-      <div class="sub goal-kr-source">${esc(kr.manual ? "manual" : kr.metric || "")}</div>
-      ${kr.confidence !== null && kr.confidence !== undefined ? `<div class="sub">confidence ${kr.confidence}/10</div>` : ""}
+      <div class="goal-kr-badges">
+        <span class="badge ${bandBadgeClass(kr.band)}">${esc(bandLabel(kr.band))}</span>
+        <span class="goal-kr-kind">${esc(kr.kind)}${kr.onPace === false ? " · behind pace" : ""}</span>
+        ${kr.confidence !== null && kr.confidence !== undefined ? `<span class="goal-kr-kind">confidence ${kr.confidence}/10</span>` : ""}
+      </div>
+      <div class="sub">${valueLabel} → ${targetLabel}</div>
+      ${sourceHtml}
       ${sparkSvg(kr)}
     </div>
-  </button>`;
+  </div>`;
 }
 
 function objectiveCardHtml(o, index, objectivesOnScreen) {
   const dangling = danglingAlignsTo(objectivesOnScreen).find((d) => d.objective === o.objective);
   return `<article class="goal-obj" data-objective="${esc(o.objective)}" style="--obj-color:${objectiveColorVar(index)}">
     <header class="goal-obj-head">
-      <h4>${esc(o.title)}</h4>
-      <span class="sub">${o.score === null || o.score === undefined ? "unscored" : `${Math.round(o.score * 100)}% score`}</span>
+      <div class="goal-obj-ring">${objectiveRingSvg(o.score)}</div>
+      <div class="goal-obj-head-text">
+        <h4>${esc(o.title)}</h4>
+        <div class="goal-obj-head-meta">
+          ${o.scope ? `<span class="goal-chip goal-obj-scope">${esc(o.scope)}</span>` : ""}
+          ${dangling ? `<span class="sub goal-dangling">aligns to ${esc(dangling.alignsTo)} — outside this scope</span>` : ""}
+        </div>
+      </div>
     </header>
-    ${o.scope ? `<div class="sub">scope: ${esc(o.scope)}</div>` : ""}
-    ${dangling ? `<div class="sub goal-dangling">aligns to ${esc(dangling.alignsTo)} — outside this scope</div>` : ""}
     <div class="goal-krs">${(o.key_results || []).map(krCardHtml).join("")}</div>
   </article>`;
 }
 
+/// The North Star as a hero: a large value (and its own sparkline, when the
+/// metric behind it is one of the three the daemon computes a series for --
+/// `first_pass_yield` always is), the "why" prose beside it, no gauge
+/// against a target since `NorthStar` (`direction.yaml`) carries no
+/// `target` field to gauge against -- only ever "just the value", which is
+/// this function's only path, not a fallback branch of a missing one.
+/// Inputs read their titles from the metrics registry (falling back to the
+/// bare id before the registry has answered), each with its own sparkline
+/// where one exists.
 function northStarRowHtml(report) {
   if (!report.north_star) return "";
   const registry = registryIndex(state.goalsMetrics || {});
@@ -320,18 +416,26 @@ function northStarRowHtml(report) {
   const nsValue = nsNote ? nsNote : formatUnitValue(report.north_star.value.value, nsUnit);
   const inputs = (report.inputs || [])
     .map((i) => {
-      const unit = registry[i.metric] ? registry[i.metric].unit : null;
+      const def = registry[i.metric];
+      const title = def ? def.title : i.metric;
+      const unit = def ? def.unit : null;
       const note = metricUnavailableNote(i.value);
       const value = note ? note : formatUnitValue(i.value.value, unit);
-      return `<div class="goal-input-box"><div class="goal-input-id">${esc(i.metric)}</div><div class="goal-input-value">${esc(value)}</div></div>`;
+      return `<div class="goal-input-box">
+        <div class="goal-input-title">${esc(title)}</div>
+        <div class="goal-input-id">${esc(i.metric)}</div>
+        <div class="goal-input-value">${esc(value)}</div>
+        ${metricSparkSvg(i.metric, "var(--signal-ink)")}
+      </div>`;
     })
     .join("");
   return `<div class="goal-northstar-row">
-    <div class="goal-ns-box">
+    <div class="goal-ns-hero">
       <div class="sub">North star</div>
       <div class="goal-ns-value">${esc(nsValue)}</div>
       <div class="goal-ns-id">${esc(report.north_star.metric)}</div>
-      <div class="sub goal-ns-why">${esc(report.north_star.why)}</div>
+      ${metricSparkSvg(report.north_star.metric, "var(--signal)", "goal-ns-spark")}
+      <p class="sub goal-ns-why">${esc(report.north_star.why)}</p>
     </div>
     ${inputs ? `<div class="goal-ns-arrow" aria-hidden="true">→</div><div class="goal-inputs">${inputs}</div>` : ""}
   </div>`;
@@ -340,7 +444,20 @@ function northStarRowHtml(report) {
 function legendHtml() {
   return `<span class="goal-legend-item"><span class="goal-legend-ring goal-legend-solid"></span>committed (solid ring, green only once met)</span>
     <span class="goal-legend-item"><span class="goal-legend-ring goal-legend-dashed"></span>aspirational (dashed ring, green once clearly winning)</span>
+    <span class="goal-legend-item"><span class="goal-legend-ring goal-legend-unscored"></span>unscored (no evidence yet)</span>
     <span class="goal-legend-item"><span class="badge s-green">green</span><span class="badge s-yellow">yellow</span><span class="badge s-red">red</span><span class="badge s-unscored">unscored</span></span>`;
+}
+
+/// A thin vertical line with a dot per section -- North Star, Inputs (when
+/// there are any) and one per cascade layer of objectives -- so the map
+/// reads top to bottom as one line of descent rather than a stack of
+/// unrelated boxes. Evenly spaced (`justify-content: space-between` in CSS)
+/// rather than measured against each section's real position: a spine that
+/// approximates the cascade is worth having, and re-measuring it on every
+/// resize alongside the `aligns_to` connectors is not.
+function spineHtml(sectionCount) {
+  const dots = Array.from({ length: Math.max(sectionCount, 1) }, () => `<span class="goal-spine-dot"></span>`).join("");
+  return `<div class="goal-spine" aria-hidden="true"><span class="goal-spine-line"></span>${dots}</div>`;
 }
 
 function renderMap(report) {
@@ -351,19 +468,45 @@ function renderMap(report) {
   const layersHtml = layers
     .map((layer) => `<div class="goal-layer">${layer.map((o) => objectiveCardHtml(o, objectives.indexOf(o), objectives)).join("")}</div>`)
     .join("");
-  mapEl.innerHTML = `${northStarRowHtml(report)}
-    <div class="goal-layers-wrap" id="goal-layers-wrap">
-      <svg class="goal-connectors" id="goal-connectors"></svg>
-      ${layersHtml}
-    </div>`;
+  const sectionCount = (report.north_star ? 1 : 0) + ((report.inputs || []).length ? 1 : 0) + layers.length;
+  mapEl.innerHTML = `<div class="goal-map-flow">
+    ${spineHtml(sectionCount)}
+    <div class="goal-map-content">
+      ${northStarRowHtml(report)}
+      <div class="goal-layers-wrap" id="goal-layers-wrap">
+        <svg class="goal-connectors" id="goal-connectors"></svg>
+        ${layersHtml}
+      </div>
+    </div>
+  </div>`;
   const legendEl = $("goal-legend");
   if (legendEl) legendEl.innerHTML = legendHtml();
 
-  for (const b of mapEl.querySelectorAll("[data-kr]")) {
-    b.onclick = () => openKrDetail(b.dataset.kr);
-  }
+  wireMapClicks(mapEl);
   animateRings(mapEl);
   drawMapConnectors(objectives);
+}
+
+/// A `.goal-kr` card is a `div[role=button]`, not a real `<button>`, because
+/// it carries its own source link (`krCardHtml`) and interactive content
+/// cannot nest inside a `<button>` -- the same reason the orbit view's own
+/// key-result circles (`renderOrbit`) are focusable SVG shapes rather than
+/// buttons. The embedded link stops the click from bubbling to the card's
+/// own handler, so following it does not also pop the detail modal open
+/// behind the navigation.
+function wireMapClicks(root) {
+  for (const el of root.querySelectorAll("[data-kr]")) {
+    el.onclick = () => openKrDetail(el.dataset.kr);
+    el.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openKrDetail(el.dataset.kr);
+      }
+    };
+  }
+  for (const a of root.querySelectorAll("[data-stop-card]")) {
+    a.onclick = (e) => e.stopPropagation();
+  }
 }
 
 /// Rings are drawn fully empty (`stroke-dashoffset` at the full
