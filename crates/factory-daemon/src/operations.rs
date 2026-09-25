@@ -1065,9 +1065,16 @@ mod tests {
             )
             .await
             .unwrap();
+        // Blocked on that failure, as a failed run leaves its task (`#122`).
+        let failed = factory_core::task::TaskFailure {
+            kind: Some(factory_core::run::FailKind::AgentFailed),
+            run_id: Some(run.id.clone()),
+            attempt: Some(run.attempt),
+            at: Utc::now(),
+        };
         engine
             .store
-            .update(&task.id, &TaskPatch { status: Some(TaskStatus::Failed), ..Default::default() })
+            .update(&task.id, &TaskPatch { status: Some(TaskStatus::Blocked), failure: Some(failed), ..Default::default() })
             .await
             .unwrap();
         // Well before any history the report reads.

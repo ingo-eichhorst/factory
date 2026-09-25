@@ -1069,6 +1069,52 @@ mod tests {
         assert_eq!(attempt.verdict, Some(Verdict::Error), "{attempt:?}");
     }
 
+    /// `#122`: a dispatch refused before any run row existed leaves the task
+    /// blocked on that failure, not closed -- and that is still the end of
+    /// the attempt, judged `Error`, never left waiting forever.
+    #[tokio::test]
+    async fn a_dispatch_refused_before_any_run_is_judged_an_error_though_the_task_is_only_blocked() {
+        let scope_dir = temp_dir("refused");
+        let engine = test_engine(scope_dir);
+        let case = Case {
+            id: "case-1".into(),
+            title: "case one".into(),
+            scope: "demo".into(),
+            instructions: "do the thing".into(),
+            gate: None,
+            reset: None,
+            base: None,
+            timeout_seconds: None,
+            origin: None,
+        };
+        let (origin, task) = seed(&engine, "refused", case, "shell").await;
+        engine
+            .store
+            .update(
+                &task.id,
+                &factory_core::task::TaskPatch {
+                    status: Some(factory_core::task::TaskStatus::Blocked),
+                    error: Some("dispatch failed: no such agent".into()),
+                    failure: Some(factory_core::task::TaskFailure {
+                        kind: Some(factory_core::run::FailKind::DispatchFailed),
+                        run_id: None,
+                        attempt: None,
+                        at: Utc::now(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        engine.record_bench_task_state(&task.id).await;
+
+        let settled = wait_for_settled(&engine, &origin.bench_run_id).await;
+        let attempt = &settled.attempts[0];
+        assert_eq!(attempt.verdict, Some(Verdict::Error), "{attempt:?}");
+        assert!(attempt.reason.as_deref().unwrap_or_default().contains("no such agent"), "{attempt:?}");
+    }
+
     /// The gate is the judge, never the agent's own word: a run the agent
     /// itself reported `failed` on must still be handed to the case's gate,
     /// not folded into `Error` as if the daemon had merely given up. This is

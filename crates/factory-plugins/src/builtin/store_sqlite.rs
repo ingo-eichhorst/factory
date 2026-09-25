@@ -1358,6 +1358,56 @@ mod tests {
         assert_eq!(store.due(Utc::now()).await.unwrap().len(), 2);
     }
 
+    /// `#122`: a scheduled task blocked by a failure keeps firing; one
+    /// blocked on a question (it has a run) and a closed one do not. A new
+    /// run clears the failure and any close record with it.
+    #[tokio::test]
+    async fn a_task_blocked_by_a_failure_is_due_and_a_new_run_clears_the_mirror() {
+        let store = SqliteStore::in_memory().unwrap();
+        let past = Utc::now() - chrono::Duration::minutes(1);
+        for (id, status) in [
+            ("failed", TaskStatus::Blocked),
+            ("asking", TaskStatus::Blocked),
+            ("closed", TaskStatus::Cancelled),
+        ] {
+            let mut task = sample_task(id);
+            task.schedule = Some(factory_core::task::Schedule::Every { seconds: 60 });
+            task.next_run_at = Some(past);
+            task.status = status;
+            store.create(&task).await.unwrap();
+        }
+        let failure = factory_core::task::TaskFailure {
+            kind: Some(factory_core::run::FailKind::AgentFailed),
+            run_id: Some("r0".into()),
+            attempt: Some(1),
+            at: Utc::now(),
+        };
+        let marked = store
+            .update("failed", &TaskPatch { failure: Some(failure), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(marked.blocked_by_failure(), "the failure round-trips");
+        let due: Vec<String> = store.due(Utc::now()).await.unwrap().into_iter().map(|t| t.id).collect();
+        assert_eq!(due, vec!["failed".to_string()]);
+
+        store
+            .create_run(&NewRun {
+                task_id: "failed".into(),
+                trigger: Trigger::Schedule,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "herdr".into(),
+                token: "t".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        let task = store.get("failed").await.unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Dispatching);
+        assert!(task.failure.is_none(), "a new attempt is newer than the failure");
+    }
+
     #[tokio::test]
     async fn usage_snapshots_are_kept_in_order_and_an_existing_database_gains_the_table() {
         use factory_core::usage::{SnapshotPoint, UsageSnapshot};

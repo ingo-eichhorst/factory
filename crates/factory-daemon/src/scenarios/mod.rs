@@ -398,6 +398,15 @@ fn open_goal_task_count(tasks: &[Task], goal_changes: &[scenario::GoalChange]) -
         .count()
 }
 
+/// Open tasks in the target scopes: the backlog a forecast burns down. A
+/// task blocked by a failure is open work (`#122`); a closed one is not.
+fn open_backlog(tasks: &[Task], target_names: &BTreeSet<&str>) -> f64 {
+    tasks
+        .iter()
+        .filter(|t| !t.status.is_terminal() && target_names.contains(t.scope.as_str()))
+        .count() as f64
+}
+
 impl Engine {
     /// The subtree-wide daily production grid `scenarios_report` samples
     /// throughput history from. `Engine::production`'s own `scope` filter is
@@ -549,10 +558,7 @@ impl Engine {
         let baseline_rollup = policy::rollup(&policy::worst_across_scopes(&baseline_statuses.values().cloned().collect::<Vec<_>>()));
 
         let target_names: BTreeSet<&str> = target_scopes.iter().map(|s| s.name.as_str()).collect();
-        let baseline_backlog = tasks
-            .iter()
-            .filter(|t| !t.status.is_terminal() && target_names.contains(t.scope.as_str()))
-            .count() as f64;
+        let baseline_backlog = open_backlog(&tasks, &target_names);
         let daily = self.subtree_daily(&target_scopes, asked.as_ref().map(|s| s.name.as_str())).await?;
         let history = weekly_throughput_history(&daily, THROUGHPUT_HISTORY_WEEKS);
         let baseline_forecast = scenario::forecast_completion(
@@ -1178,6 +1184,59 @@ mod tests {
         assert_eq!(again.skipped.len(), 1);
         assert_eq!(again.skipped[0].control.to_string(), "ai-act/oversight");
         assert_eq!(again.skipped[0].existing_task, created.task.id);
+    }
+
+    /// `#122`: a promoted task whose run failed is blocked, not closed, so
+    /// the next promote still skips it rather than making a duplicate.
+    #[tokio::test]
+    async fn promote_skips_a_failed_task_rather_than_creating_a_duplicate() {
+        let engine = test_engine();
+        let result = engine.scenario_promote("ai-act-2027".to_string(), "company".to_string(), None).await.unwrap();
+        let created = &result.created[0];
+        engine.fail_task_for_test(&created.task.id, factory_core::run::FailKind::RunTimeout).await;
+
+        let again = engine.scenario_promote("ai-act-2027".to_string(), "company".to_string(), None).await.unwrap();
+        assert!(again.created.is_empty(), "{:#?}", again.created);
+        assert_eq!(again.skipped.len(), 1);
+        assert_eq!(again.skipped[0].existing_task, created.task.id);
+    }
+
+    /// `#122`: the goal-task count and the baseline backlog both count a
+    /// task blocked by a failure as open work -- it is -- and a closed one
+    /// as not.
+    #[test]
+    fn open_work_counts_a_failed_task_and_not_a_closed_one() {
+        use factory_core::task::TaskStatus;
+        let task = |id: &str, status: TaskStatus, failed: bool| {
+            let mut t = factory_core::adapter::store::task_from_new(
+                factory_core::task::NewTask { title: id.into(), ..Default::default() },
+                "demo".into(),
+                "shell".into(),
+                "herdr".into(),
+            );
+            t.id = id.into();
+            t.status = status;
+            t.labels.insert("goal".into(), "ship/kr1".into());
+            if failed {
+                t.failure = Some(factory_core::task::TaskFailure {
+                    kind: Some(factory_core::run::FailKind::AgentFailed),
+                    run_id: Some("r".into()),
+                    attempt: Some(1),
+                    at: chrono::Utc::now(),
+                });
+            }
+            t
+        };
+        let tasks = vec![
+            task("failed", TaskStatus::Blocked, true),
+            task("done", TaskStatus::Done, false),
+            task("wont", TaskStatus::Cancelled, false),
+            task("pending", TaskStatus::Pending, false),
+        ];
+        let change = scenario::GoalChange { kr: "ship/kr1".parse().unwrap(), target: None, by: None };
+        assert_eq!(open_goal_task_count(&tasks, &[change]), 2);
+        let targets = BTreeSet::from(["demo"]);
+        assert_eq!(open_backlog(&tasks, &targets), 2.0);
     }
 
     #[tokio::test]

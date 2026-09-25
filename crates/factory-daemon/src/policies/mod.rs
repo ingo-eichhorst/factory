@@ -1586,6 +1586,24 @@ mod tests {
         );
     }
 
+    /// `#122`: a failed remediation task is blocked, not closed, so it is
+    /// still the open one and no duplicate is made.
+    #[tokio::test]
+    async fn policy_remediate_treats_a_failed_remediation_task_as_still_open() {
+        let engine = test_engine();
+        let first = engine
+            .policy_remediate("cra/b".parse().unwrap(), "engineering".to_string(), None)
+            .await
+            .unwrap();
+        engine.fail_task_for_test(&first.id, factory_core::run::FailKind::SessionGone).await;
+
+        let err = engine
+            .policy_remediate("cra/b".parse().unwrap(), "engineering".to_string(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already open") && err.to_string().contains(&first.id), "{err}");
+    }
+
     #[tokio::test]
     async fn policy_remediate_refuses_for_satisfied_attested_and_not_applicable_controls() {
         let engine = test_engine();

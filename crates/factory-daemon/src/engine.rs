@@ -3410,6 +3410,33 @@ fn knowledge_write_payload(result: factory_core::knowledge::WriteResult) -> Payl
     }
 }
 
+/// For tests anywhere in the daemon that need a task whose newest run
+/// failed (`#122`), without a runtime to fail one for real: a run row as
+/// dispatch makes it, ended the way the watchdog or a report ends one.
+#[cfg(test)]
+impl Engine {
+    pub(crate) async fn fail_task_for_test(self: &Arc<Self>, task_id: &str, kind: FailKind) -> Task {
+        let run = self
+            .store
+            .create_run(&NewRun {
+                task_id: task_id.to_string(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "herdr".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        self.fail_run(&run.id, kind, "the remediation run failed").await;
+        let task = self.require(task_id).await.unwrap();
+        assert!(task.blocked_by_failure(), "sanity: {:?}", task.status);
+        task
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

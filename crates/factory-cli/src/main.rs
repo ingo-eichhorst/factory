@@ -5267,6 +5267,32 @@ mod tests {
             _ => panic!("answer"),
         }
         assert!(Cli::try_parse_from(["factory", "run", "answer", "r1", "yes"]).is_err(), "no reason, no answer");
+        match parse(&["task", "close", "t1", "--reason", "not_planned", "--note", "the client dropped it"]).command {
+            Command::Task(TaskCmd::Close { id: Some(id), reason: CloseReason::NotPlanned, duplicate_of: None, note: Some(note) }) => {
+                assert_eq!((id.as_str(), note.as_str()), ("t1", "the client dropped it"));
+            }
+            _ => panic!("close"),
+        }
+        match parse(&["task", "close", "t1", "--reason", "duplicate", "--duplicate-of", "t0"]).command {
+            Command::Task(TaskCmd::Close { reason: CloseReason::Duplicate, duplicate_of: Some(of), .. }) => assert_eq!(of, "t0"),
+            _ => panic!("close duplicate"),
+        }
+        assert!(Cli::try_parse_from(["factory", "task", "close", "t1"]).is_err(), "no reason, no close");
+        assert!(Cli::try_parse_from(["factory", "task", "close", "t1", "--reason", "meh"]).is_err());
+        match parse(&["task", "reopen", "t1"]).command {
+            Command::Task(TaskCmd::Reopen { id: Some(_), reason: None }) => {}
+            _ => panic!("reopen"),
+        }
+    }
+
+    #[test]
+    fn task_list_status_takes_failed_and_closed_as_well_as_a_stored_status() {
+        assert_eq!("failed".parse::<StatusFilter>().unwrap(), StatusFilter::Failed);
+        assert_eq!("closed".parse::<StatusFilter>().unwrap(), StatusFilter::Closed);
+        assert_eq!("pending".parse::<StatusFilter>().unwrap(), StatusFilter::Is(TaskStatus::Pending));
+        assert!("nonsense".parse::<StatusFilter>().is_err());
+        assert_eq!(StatusFilter::Failed.wire(), Some(TaskStatus::Blocked));
+        assert_eq!(StatusFilter::Closed.wire(), None);
     }
 
     #[test]
