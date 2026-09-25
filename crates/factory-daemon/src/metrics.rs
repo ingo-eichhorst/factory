@@ -309,7 +309,7 @@ pub(crate) fn goals_metric_ids(catalogue: &GoalsCatalogue) -> Vec<MetricId> {
     ids
 }
 
-fn push_if_known(ids: &mut Vec<MetricId>, id: &MetricId) {
+pub(crate) fn push_if_known(ids: &mut Vec<MetricId>, id: &MetricId) {
     if !matches!(metrics::resolve(id), Err(MetricError::Unknown(_))) {
         ids.push(id.clone());
     }

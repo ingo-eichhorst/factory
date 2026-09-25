@@ -12,7 +12,10 @@ use factory_core::goals::{self as goals_core, Band, CycleStatus, KrRef};
 use factory_core::knowledge::FindingKind;
 use factory_core::metrics::MetricId;
 use factory_core::policy::{self, ControlRef};
-use factory_core::protocol::{GoalsReport, Payload, PolicyControlDetail, PolicyReport, Request, Response};
+use factory_core::protocol::{
+    GoalsReport, Payload, PolicyControlDetail, PolicyReport, Request, Response, ScenarioPromoteResult, ScenarioResult, ScenariosReport,
+};
+use factory_core::scenario;
 use factory_core::run::{Run, RunStatus};
 use factory_core::task::{
     CronSchedule, NewTask, RetryPolicy, Schedule, Task, TaskFilter, TaskPatch, TaskReport, TaskStatus,
@@ -127,6 +130,56 @@ enum Command {
         cycle: Option<String>,
         #[command(subcommand)]
         command: Option<GoalsCmd>,
+    },
+    /// The L6 Scenarios tab (`#100`): every scenario at
+    /// `<root>/.factory/scenarios/`, played against the exact policy
+    /// evaluator, a seeded Monte Carlo forecast, the driver tree and
+    /// signposts -- alongside the baseline they are compared against. A
+    /// scenario file never changes the real config; everything here is
+    /// recomputed on every call. With no subcommand, prints the board --
+    /// the same thing `factory scenario list` prints.
+    Scenario {
+        /// Only this scope and its descendants (default: the whole instance).
+        #[arg(long)]
+        scope: Option<String>,
+        #[command(subcommand)]
+        command: Option<ScenarioCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScenarioCmd {
+    /// The scenario board: the baseline (its own forecast and policy
+    /// rollup), then one summary line per scenario, then every currently
+    /// triggered signpost, then findings.
+    List {
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// One scenario's full detail: its exact policy delta (subtree and per
+    /// scope), driver outcomes and tornado, forecast, goal-scenario
+    /// probabilities, and signposts.
+    Show {
+        name: String,
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Turn a scenario into real work: one task per newly-open control in
+    /// `--scope`'s own slice of the scenario's policy delta, through the
+    /// exact path `factory task create`/`factory policy remediate`
+    /// themselves use. Skips a control that already has a non-terminal
+    /// task labelled `policy=<framework>/<id>` there. Needs `task.create`
+    /// in `--scope`, the same reach rule `factory task create` itself is
+    /// checked against. A scenario itself never writes anything -- this is
+    /// always an explicit, named action.
+    Promote {
+        name: String,
+        #[arg(long)]
+        scope: String,
+        /// Overrides which agent every created task runs as; each scope's
+        /// own default otherwise.
+        #[arg(long)]
+        agent: Option<String>,
     },
 }
 
@@ -980,6 +1033,24 @@ async fn main() -> Result<()> {
             };
             goals_cmd(cli.json, &client, cmd).await
         }
+
+        Command::Scenario { scope, command } => {
+            // `--scope` before the subcommand name (or with none at all) is
+            // the same flag `list` itself takes after it -- the same merge
+            // `Command::Policy`/`Command::Goals` do above.
+            let cmd = match command {
+                None => ScenarioCmd::List { scope },
+                Some(ScenarioCmd::List { scope: s }) => ScenarioCmd::List { scope: s.or(scope) },
+                Some(_) if scope.is_some() => {
+                    return Err(anyhow!(
+                        "--scope before the subcommand only applies to `list`; repeat it after \
+                         the subcommand name if it takes its own"
+                    ));
+                }
+                Some(other) => other,
+            };
+            scenario_cmd(cli.json, &client, cmd).await
+        }
     }
 }
 
@@ -1821,6 +1892,250 @@ fn goals_cycles_text(report: &GoalsReport) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// ============================================================= scenarios
+
+async fn scenario_cmd(json: bool, client: &Client, cmd: ScenarioCmd) -> Result<()> {
+    match cmd {
+        ScenarioCmd::List { scope } => {
+            let payload = client.send(Request::Scenarios { scope }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Scenarios { report } => Some(scenarios_list_text(report)),
+                _ => None,
+            })
+        }
+
+        ScenarioCmd::Show { name, scope } => {
+            let payload = client.send(Request::Scenarios { scope }).await?;
+            let Payload::Scenarios { report } = &payload else {
+                return Err(anyhow!("unexpected answer to scenarios"));
+            };
+            if !report.scenarios.iter().any(|s| s.scenario.name == name) {
+                return Err(anyhow!("no such scenario: {name:?}"));
+            }
+            // `--json` prints the whole report, not just this one scenario:
+            // a scenario's numbers (its delta, its forecast) only mean
+            // something read next to `baseline`, which a lone
+            // `ScenarioResult` would not carry.
+            print(&payload, json, |p| match p {
+                Payload::Scenarios { report } => report.scenarios.iter().find(|s| s.scenario.name == name).map(|s| scenario_detail_text(report, s)),
+                _ => None,
+            })
+        }
+
+        ScenarioCmd::Promote { name, scope, agent } => {
+            let payload = client.send(Request::ScenarioPromote { scenario: name, scope, agent }).await?;
+            print(&payload, json, |p| match p {
+                Payload::ScenarioPromote { result } => Some(scenario_promote_text(result)),
+                _ => None,
+            })
+        }
+    }
+}
+
+fn signpost_state_str(state: scenario::SignpostState) -> &'static str {
+    match state {
+        scenario::SignpostState::Quiet => "quiet",
+        scenario::SignpostState::Triggered => "TRIGGERED",
+        scenario::SignpostState::NotYetActive => "not yet active",
+        scenario::SignpostState::NoData => "no data",
+    }
+}
+
+/// `p10=..w p50=..w p90=..w (N samples)`, `"never"` for a percentile that
+/// never clears the backlog within the horizon, or the forecast's own
+/// `reason` when there was nothing to sample from at all.
+fn forecast_summary(f: &scenario::Forecast) -> String {
+    match &f.reason {
+        Some(reason) => format!("n/a ({reason})"),
+        None => {
+            let week = |w: Option<u32>| w.map(|w| format!("{w}w")).unwrap_or_else(|| "never".to_string());
+            format!(
+                "p10={} p50={} p90={}  ({} samples, seed {})",
+                week(f.completion_week.p10),
+                week(f.completion_week.p50),
+                week(f.completion_week.p90),
+                f.samples,
+                f.seed
+            )
+        }
+    }
+}
+
+fn policy_delta_line(d: &scenario::PolicyDelta) -> String {
+    let mut out = format!(
+        "{} newly open, {} newly stale, {} newly applicable (already covered), {} unchanged",
+        d.newly_open.len(),
+        d.newly_stale.len(),
+        d.newly_applicable_but_covered.len(),
+        d.unchanged,
+    );
+    if !d.missing_from_scenario.is_empty() {
+        out.push_str(&format!(", {} missing from the scenario (!)", d.missing_from_scenario.len()));
+    }
+    out
+}
+
+/// `factory scenario [list] [--scope S] [--json]`: the baseline, one
+/// summary line per scenario, every currently triggered signpost, then
+/// findings.
+fn scenarios_list_text(report: &ScenariosReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("BASELINE{}\n", report.scope.as_ref().map(|s| format!(" ({s})")).unwrap_or_default()));
+    out.push_str(&format!("  forecast: {}\n", forecast_summary(&report.baseline.forecast)));
+    for r in &report.baseline.policy {
+        out.push_str(&format!(
+            "  policy {:<12} {} satisfied, {} attested, {} stale, {} open, {} n/a  [{}]\n",
+            r.framework,
+            r.counts.satisfied,
+            r.counts.attested,
+            r.counts.stale,
+            r.counts.open,
+            r.counts.not_applicable,
+            if r.compliant { "compliant" } else { "not compliant" },
+        ));
+    }
+
+    if report.scenarios.is_empty() {
+        out.push_str("\nno scenarios on disk\n");
+    } else {
+        out.push_str("\nSCENARIOS\n");
+        for s in &report.scenarios {
+            let triggered = s.signposts.iter().filter(|sp| sp.state == scenario::SignpostState::Triggered).count();
+            out.push_str(&format!(
+                "  {:<20} {:<40} backlog={:<5} {}{}\n",
+                s.scenario.name,
+                s.scenario.title,
+                s.backlog.total,
+                forecast_summary(&s.forecast),
+                if triggered > 0 { format!("  [{triggered} signpost(s) triggered]") } else { String::new() },
+            ));
+        }
+    }
+
+    if !report.triggered.is_empty() {
+        out.push_str("\nTRIGGERED SIGNPOSTS (observation only -- no automatic consequence)\n");
+        for t in &report.triggered {
+            out.push_str(&format!("  {:<20} {:<20} {}\n", t.scenario, t.metric, t.reason));
+        }
+    }
+
+    if !report.findings.is_empty() {
+        out.push_str("\nFINDINGS\n");
+        for f in &report.findings {
+            out.push_str(&format!("  {:?}  {}  {}\n", f.kind, f.subject, f.detail));
+        }
+    }
+    if !report.policy_findings.is_empty() {
+        out.push_str("\nPOLICY FINDINGS\n");
+        for f in &report.policy_findings {
+            out.push_str(&format!("  {:?}  {}  {}\n", f.kind, f.subject, f.detail));
+        }
+    }
+
+    out.trim_end().to_string()
+}
+
+/// `factory scenario show <name> [--scope S] [--json]`: one scenario's
+/// whole computed answer, laid out in the order the issue's own display
+/// section lists it -- forecast, drivers, policy delta, goal scenarios,
+/// signposts.
+fn scenario_detail_text(report: &ScenariosReport, s: &ScenarioResult) -> String {
+    let mut out = format!("{}  {}\n", s.scenario.name, s.scenario.title);
+    if let Some(a) = &s.scenario.assumptions {
+        out.push_str(&format!("  {}\n", a.trim()));
+    }
+    out.push_str(&format!("  kind: {}   horizon: {}\n", s.scenario.kind.join(", "), s.scenario.horizon));
+
+    out.push_str("\nFORECAST\n");
+    out.push_str(&format!(
+        "  backlog: {} (newly-open controls: {}, open goal tasks: {})\n",
+        s.backlog.total, s.backlog.newly_open_controls, s.backlog.open_goal_tasks
+    ));
+    out.push_str(&format!("  scenario: {}\n", forecast_summary(&s.forecast)));
+    out.push_str(&format!("  baseline: {}\n", forecast_summary(&report.baseline.forecast)));
+
+    out.push_str("\nDRIVERS\n");
+    let mut ids: Vec<&String> = report.baseline.drivers.keys().chain(s.drivers.overridden.keys()).collect();
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        let base = report.baseline.drivers.get(id).map(|v| format!("{v:.3}")).unwrap_or_else(|| "--".to_string());
+        let over = s.drivers.overridden.get(id).map(|v| format!("{v:.3}")).unwrap_or_else(|| "--".to_string());
+        out.push_str(&format!("  {id:<20} baseline={base:<10} scenario={over:<10}\n"));
+    }
+    out.push_str("  outcomes:\n");
+    for (id, after) in &s.drivers.outcomes_after {
+        let before = s.drivers.outcomes_before.get(id).copied().unwrap_or(0.0);
+        out.push_str(&format!("    {id:<24} {before:.3} -> {after:.3}\n"));
+    }
+    if !s.drivers.tornado.is_empty() {
+        out.push_str("  tornado:\n");
+        for bar in &s.drivers.tornado {
+            out.push_str(&format!(
+                "    {:<20} {:.3} .. {:.3}  (span {:.3})\n",
+                bar.driver, bar.low_outcome, bar.high_outcome, bar.span
+            ));
+        }
+    }
+
+    if !s.policy.is_empty() || s.policy_subtree.unchanged > 0 || !s.policy_subtree.newly_open.is_empty() {
+        out.push_str("\nPOLICY DELTA\n");
+        out.push_str(&format!("  subtree: {}\n", policy_delta_line(&s.policy_subtree)));
+        for row in &s.policy {
+            out.push_str(&format!("  {:<20} {}\n", row.scope, policy_delta_line(&row.delta)));
+        }
+    }
+
+    if !s.goals.is_empty() {
+        out.push_str("\nGOAL SCENARIOS\n");
+        for g in &s.goals {
+            let p = match g.probability.probability {
+                Some(p) => format!("p={p:.2}"),
+                None => "p=n/a".to_string(),
+            };
+            let target = g.target.map(|t| format!("{t}")).unwrap_or_else(|| "--".to_string());
+            let by = g.by.map(|b| b.to_string()).unwrap_or_else(|| "--".to_string());
+            let reason = g.probability.reason.as_deref().map(|r| format!("  ({r})")).unwrap_or_default();
+            out.push_str(&format!("  {:<20} target={target} by={by}  {p}{reason}\n", g.kr.to_string()));
+        }
+    }
+
+    if !s.signposts.is_empty() {
+        out.push_str("\nSIGNPOSTS\n");
+        for (status, def) in s.signposts.iter().zip(&s.scenario.signposts) {
+            out.push_str(&format!("  {:<20} [{}]  {}\n", def.metric, signpost_state_str(status.state), status.reason));
+        }
+    }
+
+    if !s.findings.is_empty() {
+        out.push_str("\nFINDINGS\n");
+        for f in &s.findings {
+            out.push_str(&format!("  {:?}  {}\n", f.kind, f.detail));
+        }
+    }
+
+    out.trim_end().to_string()
+}
+
+fn scenario_promote_text(r: &ScenarioPromoteResult) -> String {
+    let mut out = format!("scenario {} -> scope {}\n", r.scenario, r.scope);
+    if r.created.is_empty() {
+        out.push_str("  created: none\n");
+    } else {
+        out.push_str("  created:\n");
+        for c in &r.created {
+            out.push_str(&format!("    {}  {}  \"{}\"\n", c.control, c.task.id, c.task.title));
+        }
+    }
+    if !r.skipped.is_empty() {
+        out.push_str("  skipped (already an open task for it):\n");
+        for sk in &r.skipped {
+            out.push_str(&format!("    {}  existing task {}\n", sk.control, sk.existing_task));
+        }
+    }
+    out.trim_end().to_string()
 }
 
 async fn bench_cmd(json: bool, client: &Client, cmd: BenchCmd) -> Result<()> {

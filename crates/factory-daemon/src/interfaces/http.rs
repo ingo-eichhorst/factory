@@ -147,6 +147,9 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/metrics", get(metrics))
         .route("/api/goals", get(goals))
         .route("/api/goals/checkins", post(create_goals_checkin))
+        .route("/api/scenarios", get(scenarios))
+        .route("/api/scenarios/promote", post(scenario_promote))
+        .route("/api/scenarios/whatif", post(scenario_whatif))
         .route("/api/benchmarks", get(benchmarks))
         .route("/api/datasets", get(list_datasets).post(create_dataset))
         .route("/api/datasets/{name}", get(get_dataset).delete(delete_dataset))
@@ -673,6 +676,78 @@ async fn create_goals_checkin(
             value: body.value,
             confidence: body.confidence,
             note: body.note,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct ScenariosQuery {
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// `GET /api/scenarios?scope=` -- the L6 Scenarios tab's whole answer
+/// (`#100`), the same "empty or absent `scope` is the whole instance" rule
+/// `GET /api/policy`/`GET /api/goals` already follow.
+async fn scenarios(State(engine): State<Arc<Engine>>, Query(q): Query<ScenariosQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::Scenarios {
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct ScenarioPromoteBody {
+    scenario: String,
+    scope: String,
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+/// `POST /api/scenarios/promote` -- turn a scenario into real work. Answers
+/// `{"kind":"scenario_promote","result":{...}}`; `result.created` is the
+/// same task shape `POST /api/tasks`/`POST /api/policy/remediate` answer
+/// with, one per newly-open control, and `result.skipped` names every
+/// control a non-terminal task already covers.
+async fn scenario_promote(State(engine): State<Arc<Engine>>, Json(body): Json<ScenarioPromoteBody>) -> AxumResponse {
+    run(
+        &engine,
+        Request::ScenarioPromote {
+            scenario: body.scenario,
+            scope: body.scope,
+            agent: body.agent,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct ScenarioWhatIfBody {
+    #[serde(default)]
+    scenario: Option<String>,
+    /// Driver id to its raw, as-authored override (`×2`, `+20%`, `+5`,
+    /// `=0.9`) -- the same syntax a scenario file's own `drivers:` map uses,
+    /// parsed the same way (`scenario::parse_override`). A JSON object, not
+    /// a query string, since a slider panel already holds this as a map in
+    /// memory and the driver count is open-ended.
+    #[serde(default)]
+    drivers: std::collections::BTreeMap<String, String>,
+}
+
+/// `POST /api/scenarios/whatif` -- recompute driver outcomes, tornado and
+/// forecast with slider overrides applied server-side. Pure and read-only;
+/// the UI's driver panel is expected to call this on every slider change,
+/// debounced client-side.
+async fn scenario_whatif(State(engine): State<Arc<Engine>>, Json(body): Json<ScenarioWhatIfBody>) -> AxumResponse {
+    run(
+        &engine,
+        Request::ScenarioWhatIf {
+            scenario: body.scenario,
+            drivers: body.drivers,
         },
     )
     .await

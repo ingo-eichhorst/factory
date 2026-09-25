@@ -395,6 +395,13 @@ pub enum FindingKind {
     /// never marked not-applicable anywhere in the chain it was applied to
     /// -- see [`overlay_chain`], deviation 2 in the module doc comment.
     DropNotApplicableHasNoEffect,
+    /// A draft catalogue in `.factory/policies/drafts/` names the same
+    /// `framework` as an already-loaded real one -- see [`merge_catalogues`].
+    /// The real catalogue wins; the draft is dropped from that request's
+    /// merged set entirely, not merged control-by-control, since a draft
+    /// framework name is only ever meant to stand in for one that does not
+    /// exist in `.factory/policies/` yet.
+    DraftCollidesWithReal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -694,7 +701,7 @@ pub fn overlay_chain(chain: &[PolicyLayer], scenario: &Scenario) -> (Vec<PolicyL
 /// side means the framework did not appear in that side's statuses at all
 /// (e.g. a framework the scenario's `add_frameworks` introduced has no
 /// `before`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameworkDelta {
     pub framework: String,
     pub before: Option<policy::FrameworkRollup>,
@@ -704,7 +711,7 @@ pub struct FrameworkDelta {
 /// What a policy what-if changes, control by control, plus the same
 /// before/after rollup the real L6 tab already shows. See
 /// [`policy_delta`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyDelta {
     /// A control absent, not-applicable, or otherwise not open in `baseline`
     /// that is `open` in `scenario`.
@@ -809,6 +816,43 @@ pub fn load_drafts(dir: &Path) -> (Vec<policy::Catalogue>, Vec<policy::Finding>)
     policy::load_all(dir)
 }
 
+/// `real` plus every `draft` whose `framework` names none of `real`'s own --
+/// what a scenario's `add_frameworks` resolves against (see the "Storage"
+/// section of the module doc comment), since a draft is a framework not yet
+/// real enough for `.factory/policies/`, never a second, competing
+/// definition of one that already is. A draft colliding with a real
+/// catalogue is dropped whole, not merged control-by-control -- there is no
+/// principled way to decide which of two same-named frameworks' controls
+/// "wins" per control, and a scenario author who meant to extend the real
+/// one should edit it directly, not shadow it from `drafts/`. Reported as
+/// [`FindingKind::DraftCollidesWithReal`] rather than silently dropped.
+/// `real` is never mutated or reordered by this -- the collision check is
+/// one-directional, and `policy_report`'s own real-only evaluation is
+/// unaffected by anything under `drafts/` (a test in this module pins that
+/// too, see [`load_drafts`]'s own doc comment).
+pub fn merge_catalogues(real: &[policy::Catalogue], drafts: Vec<policy::Catalogue>) -> (Vec<policy::Catalogue>, Vec<Finding>) {
+    let real_names: BTreeSet<&str> = real.iter().map(|c| c.framework.as_str()).collect();
+    let mut findings = Vec::new();
+    let mut merged: Vec<policy::Catalogue> = real.to_vec();
+    for draft in drafts {
+        if real_names.contains(draft.framework.as_str()) {
+            findings.push(finding(
+                FindingKind::DraftCollidesWithReal,
+                format!("{}.yaml", draft.framework),
+                format!(
+                    "draft catalogue {:?} names the same framework as an already-loaded real one; \
+                     the real catalogue is used and this draft is dropped from the merge",
+                    draft.framework
+                ),
+            ));
+            continue;
+        }
+        merged.push(draft);
+    }
+    sort_findings(&mut findings);
+    (merged, findings)
+}
+
 // ============================================================== forecast
 
 /// A tiny, deterministic, non-cryptographic PRNG -- splitmix64 (Vigna &
@@ -895,7 +939,7 @@ fn percentile_week(raw: &[Option<u32>], p: f64) -> Option<u32> {
 
 /// p10/p50/p90 of some quantity -- never a single number, the issue's own
 /// guardrail against a forecast reading as false precision.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Percentiles<T> {
     pub p10: T,
     pub p50: T,
@@ -906,7 +950,7 @@ pub struct Percentiles<T> {
 /// `weekly_throughput_history` (Magennis's own method: draw one historical
 /// week's throughput, with replacement, per simulated week) -- see
 /// [`forecast_completion`].
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Forecast {
     /// One entry per week of the horizon (`per_week[0]` is week 1): the
     /// cumulative amount of backlog done by that week, as percentiles
@@ -1318,7 +1362,7 @@ pub fn weeks_to_clear(effective_throughput: f64, backlog: f64) -> Option<f64> {
 
 /// One driver's swing in a tornado chart: the outcome at `low`/`high` and
 /// the span between them.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TornadoBar {
     pub driver: DriverId,
     pub low_outcome: f64,
@@ -1390,7 +1434,7 @@ impl KrShape {
 /// deadline -- see [`goal_probability`]. `probability: None` is always
 /// paired with a `reason`; the issue's own rule ("no fake numbers") means
 /// this is never guessed.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GoalProbability {
     pub probability: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1451,7 +1495,7 @@ pub fn goal_probability(
 
 // ================================================================ signposts
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignpostState {
     /// Active and within bounds.
@@ -1464,7 +1508,7 @@ pub enum SignpostState {
     NoData,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignpostStatus {
     pub metric: MetricId,
     pub state: SignpostState,
@@ -2331,6 +2375,39 @@ mod tests {
         assert_eq!(applied.len(), 1);
         let statuses = policy::evaluate(&applied, &Evidence::default(), dt(2026, 9, 25));
         assert_eq!(statuses[0].status.kind(), policy::StatusKind::Open);
+    }
+
+    // -- merge_catalogues ----------------------------------------------------
+
+    #[test]
+    fn merge_catalogues_adds_a_non_colliding_draft() {
+        let (merged, findings) = merge_catalogues(&[cra_catalogue()], vec![ai_act_catalogue()]);
+        assert!(findings.is_empty());
+        let names: Vec<&str> = merged.iter().map(|c| c.framework.as_str()).collect();
+        assert_eq!(names, vec!["cra", "ai-act"]);
+    }
+
+    #[test]
+    fn merge_catalogues_drops_a_colliding_draft_and_reports_it_the_real_one_wins() {
+        let mut fake_cra_draft = cra_catalogue();
+        fake_cra_draft.title = "A draft pretending to be the real CRA".to_string();
+        let (merged, findings) = merge_catalogues(&[cra_catalogue()], vec![fake_cra_draft, ai_act_catalogue()]);
+
+        assert_eq!(merged.len(), 2, "{:?}", merged.iter().map(|c| &c.framework).collect::<Vec<_>>());
+        let cra = merged.iter().find(|c| c.framework == "cra").unwrap();
+        assert_eq!(cra.title, "CRA", "the real catalogue's own title, not the draft's");
+        assert!(merged.iter().any(|c| c.framework == "ai-act"), "a non-colliding draft still merges in");
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::DraftCollidesWithReal);
+        assert_eq!(findings[0].subject, "cra.yaml");
+    }
+
+    #[test]
+    fn merge_catalogues_with_no_drafts_is_the_real_set_unchanged() {
+        let (merged, findings) = merge_catalogues(&[cra_catalogue()], Vec::new());
+        assert_eq!(merged, vec![cra_catalogue()]);
+        assert!(findings.is_empty());
     }
 
     // -- Everything Serialize: a smoke test over the computed report types --

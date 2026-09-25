@@ -16,7 +16,7 @@ pub use store::PolicyStore;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
-use factory_core::config::{ForemanConfig, Scope};
+use factory_core::config::{Factory, ForemanConfig, Scope};
 use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
 use factory_core::policy_export;
@@ -135,11 +135,42 @@ fn secrets_fact_map(rows: &[CredentialRow], scope: &str) -> BTreeMap<String, boo
     map
 }
 
+/// Every scope in `snapshot.config.scopes` that is `scope` itself or a
+/// descendant of it (`Config::ancestors_of`), or every configured scope when
+/// `scope` is `None` -- the "roll up the subtree" resolution `policy_report`
+/// and `scenarios::Engine::scenarios_report` both need, extracted here since
+/// `policy_report` was its first caller but no longer its only one. A free
+/// function, not an `Engine` method: it is a pure read of an already-cloned
+/// `Factory` snapshot, nothing a caller could not do itself, just done once
+/// rather than twice. Refuses an unknown scope name the same way
+/// `Factory::scope` itself does.
+pub(crate) fn subtree_scopes(snapshot: &Factory, scope: Option<&str>) -> Result<(Option<Scope>, Vec<Scope>)> {
+    let asked = scope.map(|name| snapshot.scope(name)).transpose()?.cloned();
+    let target_scopes: Vec<Scope> = match &asked {
+        Some(asked) => snapshot
+            .config
+            .scopes
+            .iter()
+            .filter(|s| {
+                s.name == asked.name
+                    || snapshot
+                        .config
+                        .ancestors_of(s)
+                        .iter()
+                        .any(|ancestor| ancestor.name == asked.name)
+            })
+            .cloned()
+            .collect(),
+        None => snapshot.config.scopes.clone(),
+    };
+    Ok((asked, target_scopes))
+}
+
 impl Engine {
     /// Every catalogue on disk, and the knowledge vault's tags -- the two
     /// blocking filesystem walks every policy request needs, done together
     /// in one `spawn_blocking` rather than one each.
-    async fn load_catalogues_and_tags(
+    pub(crate) async fn load_catalogues_and_tags(
         &self,
     ) -> Result<(Vec<policy::Catalogue>, Vec<policy::Finding>, BTreeSet<String>)> {
         let snapshot = self.factory_snapshot();
@@ -391,29 +422,98 @@ impl Engine {
         }))
     }
 
+    /// The facts every scope in a report's subtree shares, resolved once
+    /// over the whole subtree rather than once per scope: every dataset a
+    /// `gate` check anywhere in `per_scope_applied` names (datasets have no
+    /// scope of their own, so a dataset named by two scopes' catalogues is
+    /// still only walked once), the `daemon` fact (the same for every scope,
+    /// resolved only when some scope's catalogue actually asks a `daemon`
+    /// question), and the credential inventory behind `secrets` (the one
+    /// part of this that touches the filesystem, gated the same way).
+    /// Shared by `policy_report` and `scenarios::Engine::scenarios_report`
+    /// (`#100`), which calls this once for the baseline `Applied` sets and
+    /// again for each scenario's own -- a scenario's overlay can name a
+    /// `gate`/`daemon`/`secrets` check the baseline never did (an
+    /// `add_frameworks` draft, say), and this is what picks up the extra
+    /// fact lazily rather than the caller having to know in advance.
+    pub(crate) async fn dataset_level_facts(
+        &self,
+        per_scope_applied: &[(&Scope, Vec<policy::Applied>)],
+    ) -> Result<(BTreeMap<String, policy::GateFact>, Option<policy::DaemonFact>, Vec<CredentialRow>)> {
+        let mut dataset_names: BTreeSet<String> = BTreeSet::new();
+        for (_, applied) in per_scope_applied {
+            dataset_names.extend(gate_dataset_names(applied));
+        }
+        let gates = self.gate_facts_for(&dataset_names).await?;
+        let daemon_fact = per_scope_applied
+            .iter()
+            .any(|(_, applied)| needs_daemon_facts(applied))
+            .then(|| self.daemon_facts());
+        let credential_rows = if per_scope_applied.iter().any(|(_, applied)| needs_secrets_facts(applied)) {
+            self.credential_inventory().await
+        } else {
+            Vec::new()
+        };
+        Ok((gates, daemon_fact, credential_rows))
+    }
+
+    /// One scope's own `Evidence`, built from `applied` (its own applicable
+    /// controls) plus the subtree-wide facts `dataset_level_facts` already
+    /// resolved -- task/workflow resolution and the `agents`/`secrets` facts
+    /// stay per scope, since a scope's own roster and its own `.env` are its
+    /// own, gathered only when `applied`'s own checks actually ask for them.
+    /// The body of `policy_report`'s former second pass, unchanged, so its
+    /// own tests (and `scenarios::Engine::scenarios_report`'s, `#100`) see
+    /// exactly the evidence a real request would.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn evidence_for_scope(
+        &self,
+        snapshot: &Factory,
+        t: &Scope,
+        applied: &[policy::Applied],
+        tags: &BTreeSet<String>,
+        all_attestations: &[Attestation],
+        gates: &BTreeMap<String, policy::GateFact>,
+        daemon_fact: Option<policy::DaemonFact>,
+        credential_rows: &[CredentialRow],
+    ) -> Result<policy::Evidence> {
+        let ancestor_names: BTreeSet<&str> = snapshot
+            .config
+            .ancestors_of(t)
+            .iter()
+            .map(|ancestor| ancestor.name.as_str())
+            .collect();
+        let (tasks, workflows) = self.resolve_task_and_workflow_facts(&t.name, applied).await?;
+        let agents = needs_agent_facts(applied).then(|| {
+            let roles = self.roles_for(&t.name);
+            agent_facts_for(t, &snapshot.config.daemon.foreman, &roles)
+        });
+        let secrets = if needs_secrets_facts(applied) {
+            secrets_fact_map(credential_rows, &t.name)
+        } else {
+            BTreeMap::new()
+        };
+        Ok(policy::Evidence {
+            tags: tags.clone(),
+            attestations: all_attestations
+                .iter()
+                .filter(|att| att.scope == t.name || ancestor_names.contains(att.scope.as_str()))
+                .cloned()
+                .collect(),
+            tasks,
+            workflows,
+            gates: gates.clone(),
+            agents,
+            secrets,
+            daemon: daemon_fact,
+        })
+    }
+
     /// The L6 Policy tab: `Request::Policy`.
     pub(crate) async fn policy_report(&self, scope: Option<&str>) -> Result<PolicyReport> {
         let snapshot = self.factory_snapshot();
         let (catalogues, mut findings, tags) = self.load_catalogues_and_tags().await?;
-
-        let asked = scope.map(|name| snapshot.scope(name)).transpose()?.cloned();
-        let target_scopes: Vec<factory_core::config::Scope> = match &asked {
-            Some(asked) => snapshot
-                .config
-                .scopes
-                .iter()
-                .filter(|s| {
-                    s.name == asked.name
-                        || snapshot
-                            .config
-                            .ancestors_of(s)
-                            .iter()
-                            .any(|ancestor| ancestor.name == asked.name)
-                })
-                .cloned()
-                .collect(),
-            None => snapshot.config.scopes.clone(),
-        };
+        let (asked, target_scopes) = subtree_scopes(&snapshot, scope)?;
 
         let all_attestations = self.policies.all().await?;
         let now = Utc::now();
@@ -422,15 +522,10 @@ impl Engine {
         let mut per_scope_statuses: Vec<Vec<policy::ControlStatus>> = Vec::new();
         let mut not_applicable: BTreeSet<(ControlRef, String, String)> = BTreeSet::new();
 
-        // First pass: resolve applicability for every scope, and collect
-        // every dataset a `gate` check anywhere in this report names.
-        // Datasets have no scope of their own, so `gate_facts_for` is called
-        // once below over the union, rather than once per scope -- the same
-        // dataset's bench runs would otherwise be walked again for every
-        // scope that happens to name it.
+        // First pass: resolve applicability for every scope. A scope whose
+        // whole chain applies no framework has nothing to show -- omitted
+        // rather than an empty row nobody asked to see.
         let mut per_scope_applied: Vec<(&factory_core::config::Scope, Vec<policy::Applied>)> = Vec::new();
-        let mut dataset_names: BTreeSet<String> = BTreeSet::new();
-
         for t in &target_scopes {
             // `Engine::policy_chain` (#76) is the one place a scope name
             // becomes the chain `applicable` folds -- root first, through
@@ -445,69 +540,26 @@ impl Engine {
                 }
             }
 
-            // A scope whose whole chain applies no framework has nothing to
-            // show -- omitted rather than an empty row nobody asked to see.
             if applied.is_empty() {
                 continue;
             }
-
-            dataset_names.extend(gate_dataset_names(&applied));
             per_scope_applied.push((t, applied));
         }
 
-        let gates = self.gate_facts_for(&dataset_names).await?;
-
-        // `daemon` is the same fact set for every scope, so it is resolved
-        // once, only when some scope's catalogue actually asks a `daemon`
-        // question. `secrets`' credential inventory is the one part of this
-        // that touches the filesystem, so it gets the same "only if named"
-        // treatment `gate_facts_for`'s own dataset union already follows.
-        let daemon_fact = per_scope_applied
-            .iter()
-            .any(|(_, applied)| needs_daemon_facts(applied))
-            .then(|| self.daemon_facts());
-        let credential_rows = if per_scope_applied.iter().any(|(_, applied)| needs_secrets_facts(applied)) {
-            self.credential_inventory().await
-        } else {
-            Vec::new()
-        };
-
-        // Second pass: task/workflow resolution is still per scope (they do
-        // have one), but every scope's `Evidence` shares the `gates`/`daemon`
-        // facts resolved above, and `agents`/`secrets` -- resolved per scope,
-        // since a scope's own roster and its own `.env` are its own -- only
-        // when that scope's applicable checks actually ask for them.
+        // Second pass: `dataset_level_facts` resolves what every scope
+        // shares (gate datasets, the daemon fact, the credential inventory)
+        // in one pass over the whole subtree, and `evidence_for_scope`
+        // builds each scope's own `Evidence` from those plus its own
+        // per-scope facts (tasks, workflows, agents, secrets) -- the same
+        // two calls `scenarios::Engine::scenarios_report` (`#100`) makes
+        // against its own, larger `applied` sets, so a policy fact is
+        // gathered by exactly one function regardless of which report is
+        // asking for it.
+        let (gates, daemon_fact, credential_rows) = self.dataset_level_facts(&per_scope_applied).await?;
         for (t, applied) in &per_scope_applied {
-            let ancestor_names: BTreeSet<&str> = snapshot
-                .config
-                .ancestors_of(t)
-                .iter()
-                .map(|ancestor| ancestor.name.as_str())
-                .collect();
-            let (tasks, workflows) = self.resolve_task_and_workflow_facts(&t.name, applied).await?;
-            let agents = needs_agent_facts(applied).then(|| {
-                let roles = self.roles_for(&t.name);
-                agent_facts_for(t, &snapshot.config.daemon.foreman, &roles)
-            });
-            let secrets = if needs_secrets_facts(applied) {
-                secrets_fact_map(&credential_rows, &t.name)
-            } else {
-                BTreeMap::new()
-            };
-            let evidence = policy::Evidence {
-                tags: tags.clone(),
-                attestations: all_attestations
-                    .iter()
-                    .filter(|att| att.scope == t.name || ancestor_names.contains(att.scope.as_str()))
-                    .cloned()
-                    .collect(),
-                tasks,
-                workflows,
-                gates: gates.clone(),
-                agents,
-                secrets,
-                daemon: daemon_fact,
-            };
+            let evidence = self
+                .evidence_for_scope(&snapshot, t, applied, &tags, &all_attestations, &gates, daemon_fact, &credential_rows)
+                .await?;
             findings.extend(policy::evidence_findings(&evidence, &t.name));
 
             let statuses = policy::evaluate(applied, &evidence, now);

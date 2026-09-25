@@ -602,6 +602,19 @@ impl Engine {
                 self.bus.publish(Event::GoalsChanged { kr: checkin.kr.clone() });
                 Ok(Payload::GoalsCheckIn { checkin })
             }
+            Request::Scenarios { scope } => Ok(Payload::Scenarios {
+                report: self.scenarios_report(scope.as_deref()).await?,
+            }),
+            // No event: promote creates ordinary tasks through `Engine::create`,
+            // which already publishes `Event::TaskCreated` for each one --
+            // the same "not published a second time here" rule
+            // `PolicyRemediate` follows just above.
+            Request::ScenarioPromote { scenario, scope, agent } => Ok(Payload::ScenarioPromote {
+                result: self.scenario_promote(scenario, scope, agent).await?,
+            }),
+            Request::ScenarioWhatIf { scenario, drivers } => Ok(Payload::ScenarioWhatIf {
+                result: self.scenario_whatif(scenario, drivers).await?,
+            }),
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),
             }),

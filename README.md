@@ -757,7 +757,7 @@ possible rather than self-reported. **Goals enforce nothing** — the same
 deferral policies rest on (design §8): nothing here starts, stops, or gates
 any work. `factory_core::goals` (the catalogue loader, findings, scoring,
 evaluation) and `factory_core::metrics` (the shared registry, also read by
-the future Scenarios tab, `#100`) are pure and tested on their own; this
+the Scenarios tab below, `#100`) are pure and tested on their own; this
 section is what `factory-daemon` builds on top of them.
 
 **The catalogue.** `<root>/.factory/goals/` — authored content, the same
@@ -852,6 +852,233 @@ objective its key results (value, target, score, band), then the roadmap
 by lane, then findings. `factory goals cycles` lists every cycle on disk
 with its own status and score. `GET /api/goals?scope=&cycle=` answers the
 same `GoalsReport`.
+
+## Scenarios
+
+L6 Direction's third tab (`#100`): play out a what-if — a goal changes, a
+regulation tightens, capacity drops — without ever touching the real
+config. A **scenario** is an overlay, evaluated in memory against the same
+policy evaluator, metric registry and goals catalogue Policy and Goals
+themselves read; it never writes a scope's `.factory/config.yaml`, a real
+policy catalogue, or the goals catalogue. `factory_core::scenario` (the
+loader, the policy overlay, the seeded Monte Carlo forecast, the driver
+tree, signposts) is pure and tested on its own; this section is what
+`factory-daemon` builds on top of it, the same relationship `policies/mod.rs`
+and `goals/mod.rs` have to their own pure modules.
+
+**The catalogue.** `<root>/.factory/scenarios/<name>.yaml` — authored
+content, hand-written, re-read on every request, never written by Factory,
+the file's own `name` must equal its stem. See `examples/scenarios/` for
+two complete ones and `crates/factory-core/src/scenario.rs` for every
+field:
+
+```yaml
+# .factory/scenarios/ai-act-2027.yaml
+name: ai-act-2027
+title: EU AI Act applies to our agents from 2027
+kind: [policy, drivers, goals, narrative]   # which sections this scenario uses
+assumptions: |
+  High-risk classification for the customer-facing product; human oversight
+  required from the 2027 deadline.
+from: 2026-09-01        # when the horizon below is measured from -- see "Staleness"
+horizon: 26w             # Nd/Nh/Nw; defaults to 26 weeks
+policy:                  # an overlay on the real chain -- add or tighten only
+  add_frameworks: [ai-act]      # a real catalogue's framework, or a draft's (below)
+  tighten: { cra/annex-i-2-1: { max_age: 14d } }
+  drop_not_applicable: []       # controls whose n/a no longer holds in this scenario
+drivers:                 # overrides on the built-in driver tree -- see "Drivers"
+  capacity_factor: "×0.8"        # quoted: an unquoted +N/-N is a finding, not a guess
+goals:                   # KR changes -- see "Goal scenarios"
+  - { kr: ship-compliant/cra-open-zero, by: 2027-06-30 }
+signposts:                # thresholds on registry metrics -- see "Signposts"
+  - { metric: compliance.ai-act, below: 0.5, from: 2027-01-01 }
+narrative:                # the qualitative workshop layer -- carried verbatim, never scored
+  axes: [regulatory pressure, market demand]
+  quadrant: tightening-fast
+  drivers: [EU AI Act enforcement date, customer contract renewals]
+  premortem: [We under-resourced human oversight and missed the deadline]
+```
+
+**Drafts.** `<root>/.factory/policies/drafts/<framework>.yaml` — a
+framework not yet real enough for `.factory/policies/`, only for a
+scenario's own `add_frameworks` to name (`policy::load_all`'s own
+non-recursion into subdirectories keeps a draft from ever affecting the
+real Policy tab by accident — see `examples/policies/drafts/ai-act.yaml`).
+A draft whose `framework` collides with an already-loaded real one is
+dropped whole from the merge and reported as a
+`FindingKind::DraftCollidesWithReal` finding — a draft is a stand-in for a
+framework that does not exist yet, never a second, competing definition of
+one that already does; the real catalogue always wins.
+
+**Three layers, never mixed into one number** (`scenario.rs`'s own module
+doc comment, the issue's own guardrail):
+
+- **Exact:** the policy delta. `overlay_chain` builds the overlaid chain
+  from the real one (`Engine::policy_chain`, root through every ancestor);
+  `policy::applicable`/`evaluate` run against it exactly the way the real
+  Policy tab's own evaluation does — same evidence-gathering
+  (`policies::Engine::dataset_level_facts`/`evidence_for_scope`, extracted
+  from `policy_report` for exactly this reuse, so a scenario's overlay
+  asking a check kind the baseline never needed — an `add_frameworks`
+  draft, say — still gets its facts gathered lazily), same `Evidence`
+  shape. Deterministic: a control is open or it is not.
+- **Probabilistic:** the forecast, goal-scenario probabilities, and the
+  tornado — always a p10/p50/p90 band or a ranked swing, never a single
+  number, and always the same band for the same seed and inputs (see
+  "Determinism").
+- **Qualitative:** `narrative` — a 2×2's axes, PESTLE drivers, a
+  pre-mortem — carried through verbatim. Nothing here scores or evaluates
+  it; turning a pre-mortem point into a real signpost or driver override is
+  an edit to the YAML, done by a person, not a computation.
+
+**Determinism.** Every forecast and goal-probability call seeds a
+from-scratch splitmix64 PRNG (`scenario::seed_from`, the first 8 bytes of
+SHA-256 over the scenario's own name plus whatever it is projecting — a KR
+reference, `"forecast"` — joined with a NUL separator) — never `now`, and
+never `std`'s `DefaultHasher`, whose algorithm is unspecified and could
+change between Rust releases. The same scenario file and the same
+production history always produce the same bands.
+
+**Throughput history.** The forecast bootstrap-samples
+(Magennis's method — draw one historical week's throughput, with
+replacement, per simulated week) from **26 non-overlapping weekly sums**
+off `production.rs`'s own 53-week daily grid, ending today —
+`THROUGHPUT_HISTORY_WEEKS`, chosen to match `Horizon::default()`'s own 26
+weeks, so a scenario with no explicit `horizon:` draws from a history
+exactly as long as what it projects forward. Deliberately *not* a bootstrap
+sample of the `throughput_week` registry metric's own series: that series
+is a *rolling* 7-day sum taken once per day, so any two points within six
+days of each other share up to six of their seven days: resampling that
+with replacement draws heavily autocorrelated "weeks" and understates real
+week-to-week variance, producing bands that read falsely tight. A request
+scoped to an ancestor still sees a descendant's own throughput:
+`Engine::production`'s own scope filter is exact-match only, so
+`Engine::subtree_daily` sums every scope in the asked subtree's own daily
+grid, element-wise, rather than asking `production` once for the ancestor
+alone.
+
+**Baseline.** What every scenario in a report is compared against,
+computed once and shared: the metric values any scenario's drivers,
+signposts or goal changes reference; the driver tree's own baseline values
+(a registry-backed driver's current metric value; `capacity_factor`'s
+neutral `1.0`, the same default `evaluate_outcomes` itself falls back to
+when a driver is absent; `rework_rate`'s neutral `0.0`, since nothing
+computes a real baseline for it); the current policy rollup over the asked
+subtree; and a baseline forecast — `forecast_completion` over the same
+throughput history, backlog = every non-terminal task in the subtree right
+now, `Horizon::default()`'s 26 weeks. Chosen over a bare metric trend so it
+is the *same* `Forecast` shape every scenario's own forecast carries, and a
+fan chart can draw the baseline band and a scenario's band on one axis.
+
+**Drivers.** A small, built-in tree tied to the metric registry where one
+exists: `throughput_week`, `first_pass_yield`, `scrap_rate` (registry-backed);
+`rework_rate`, `capacity_factor` (assumptions — no data source, a person's
+own what-if); `unit_cost`, `tokens_per_run` (named, but **unavailable** —
+design §12.6, a `Run` records no cost yet; only `=N`, a pure assumption
+needing no baseline, may override one). The one v1 formula:
+`effective_throughput = throughput_week × capacity_factor × first_pass_yield`.
+An override is authored `×2`/`x2` (multiply), `+20%`/`-20%` (percent
+change), `+5`/`-5` **quoted** (delta — YAML reads a bare `+5` as an
+integer, losing whether it means a delta or an absolute assumption, so an
+unquoted one is a finding, not a guess), or `=0.9` (set, the only variant
+that needs no baseline). The tornado varies each driver ±20% one at a time
+and ranks the effect on `effective_throughput` — v1's only computed
+outcome, so "the scenario's key outcome" has nothing else to name yet.
+Driver overrides reach the forecast by scaling, not by replacing, the
+throughput history: `effective_throughput` after ÷ before is the factor
+every point in the history is multiplied by, so the forecast's bands keep
+the real history's own week-to-week shape, just scaled.
+
+**Backlog.** A scenario's own backlog — what its forecast has to clear —
+is `newly_open` controls from its subtree-wide policy delta (one
+remediation item each) plus every non-terminal task labelled
+`goal=<objective>/<kr>` for one of its own `goals:` entries.
+`newly_stale` is deliberately excluded: stale evidence needs refreshing,
+real work, but a different kind from a from-scratch remediation, and
+folding it into the same count would make "backlog" mean two different
+sizes of thing at once — `newly_stale` is still visible in the delta
+itself.
+
+**Goal scenarios.** Each `goals:` entry re-scores a key result against a
+changed `target` and/or `by` (whichever the entry itself sets; left
+unset, the key result's own authored `target` or its cycle's own end date)
+using the same scaled throughput history the scenario's own forecast uses.
+Only a **count-like** key result (`KrShape::CountLike` — a `Unit::Count`
+metric whose changed target is *above* the current value, a backlog to
+clear) ever gets a probability; a **ratio** key result (every
+`compliance.*`, `first_pass_yield`, …) has no rate model to project a
+ratio's future value from a throughput history, so it always comes back
+`probability: None` with a reason — never a fabricated number. A manual
+key result (no bound metric) is always treated as `Ratio` for the same
+reason: there is no metric id to read a direction from.
+
+**Signposts.** A threshold (`below`/`above`, either or both) on a registry
+metric, evaluated on every read against the same values the baseline
+reads — `Quiet`, `Triggered`, `NotYetActive` (before its own `from`), or
+`NoData`. Never itself starts, stops, or gates anything (design §8). A
+triggered signpost is meant to be visible outside the Scenarios tab too —
+on the dashboard, in the inbox, as an **observation**, never an automatic
+consequence. The Inbox (`ui/js/dashboard.js`'s `inboxItems`) is built
+entirely client-side, off the task list alone, with no daemon-side inbox
+aggregate to add to; instead, `ScenariosReport::triggered` flattens every
+currently-`Triggered` signpost across every scenario, named alongside the
+scenario it belongs to, so a dashboard or inbox reader does not have to
+walk every card itself. The L6 Scenarios UI slice
+(`ui/js/{scenarios,scenarios-model}.js`, not part of this slice) is
+expected to read this field and render it on the dashboard.
+
+**Promote.** `factory scenario promote <name> --scope S [--agent A]`
+creates one ordinary task per newly-open control in `S`'s own slice of the
+scenario's policy delta, through the exact path `factory task create`/
+`factory policy remediate` themselves use (`Engine::create`) — never a
+second, hand-rolled door. Titled `Prepare <fw>/<id> for scenario <name>:
+<control title>`, labelled both `scenario=<name>` and `policy=<fw>/<id>`,
+instructions from the control's own `remediation:` text plus its missing
+evidence (`policy::remediation_instructions`, the same text `policy
+remediate` itself writes). Skips — never refuses — a control that already
+has a non-terminal task carrying that `policy=` label in `S`: a promote
+names many controls at once, and one of them already having an open task
+is the ordinary case, not a mistake to stop the whole action over. Needs
+`task.create` in `S`, the exact reach rule `factory task create` itself is
+checked against. `POST /api/scenarios/promote` answers
+`{"kind":"scenario_promote","result":{scenario,scope,created,skipped}}`.
+
+**What-if.** `POST /api/scenarios/whatif` (`{scenario?, drivers}`)
+recomputes driver outcomes, the tornado and the forecast with slider
+overrides applied server-side — pure and read-only, meant for a driver
+panel to call on every slider change, debounced client-side. Layering: the
+named scenario's own `drivers:` overrides (none, with `scenario` absent),
+then the request's own `drivers` on top, request wins driver by driver, so
+a slider can override one driver a scenario also names without resending
+its other overrides. Each entry parses with the same authored syntax
+(`×2`, `+20%`, `+5`, `=0.9`); a value that does not parse is refused
+outright (typed input from a live request, not an authored file `load`
+can leave partly wrong and still serve the rest of). Backlog: with
+`scenario` named, the same subtree-wide policy-delta and goal-task backlog
+the report itself computes for that scenario, over the whole instance
+(this request carries no `scope`) — which means this endpoint recomputes
+the policy delta on every call even though backlog genuinely does not
+depend on which driver moved; the UI is expected to debounce rather than
+this pretending backlog is free. With no `scenario` at all, backlog is
+`0.0` and the forecast is honestly a bare throughput projection with
+nothing to clear.
+
+**Never writes config.** `factory scenarios`, `factory scenario show` and
+`POST /api/scenarios/whatif` are fully read-only. `factory scenario
+promote` writes ordinary tasks and nothing else — never a scope's own
+`.factory/config.yaml`, never a scenario file, never a real policy
+catalogue. A scenario is data a person authored and Factory only ever
+reads; turning one into real work is always the one explicit,
+owner/agent-driven `promote` action (design §8).
+
+`factory scenario [list] [--scope S] [--json]` prints the board: the
+baseline (forecast, policy rollup), one summary line per scenario
+(backlog, forecast, triggered signposts), every currently triggered
+signpost, then findings. `factory scenario show <name> [--scope S]
+[--json]` is one scenario's full detail: forecast, drivers (baseline vs.
+overridden, outcomes, tornado), policy delta (subtree and per scope), goal
+scenarios, signposts. `GET /api/scenarios?scope=` answers the same
+`ScenariosReport` both read from.
 
 ## Tasks and runs
 
@@ -1280,7 +1507,11 @@ see "Policies" above), computed metrics under `GET /api/metrics?ids=a,b`
 (empty `ids` is every non-parameterised metric plus whatever the loaded
 goals and policy catalogues imply), the L6 Goals tab under
 `GET /api/goals?scope=&cycle=`, check-ins under
-`POST /api/goals/checkins` (see "Goals" above), workflow CRUD under
+`POST /api/goals/checkins` (see "Goals" above), the L6 Scenarios tab under
+`GET /api/scenarios?scope=`, turning one into real work under
+`POST /api/scenarios/promote`, and recomputing driver outcomes and the
+forecast under `POST /api/scenarios/whatif` (see "Scenarios" above),
+workflow CRUD under
 `/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
 `POST /api/rpc` for the raw envelope. `GET /ws`
