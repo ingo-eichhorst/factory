@@ -1604,13 +1604,16 @@ daemon:
   default_runtime: herdr
   power_assertion: true        # hold the host awake while a run is active
 
-infrastructure:              # optional: the AI accounts behind the agents
+infrastructure:              # optional: the AI accounts behind the agents, and backups
   providers:
     - name: claude-max
       vendor: anthropic
       kind: subscription       # subscription | api-key
       plan: Max 20x            # free text, optional
       harnesses: [claude-code] # default binding for every agent on these
+  backup:                    # see "Backup" below
+    destination: /Volumes/Backup/factory
+    schedule: { cron: "0 3 * * *", timezone: Europe/Berlin }
 
 scope:                       # optional: make the instance root a scope too
   id: cc23161d-82b9-4e75-8d88-e5195bc6d6e8
@@ -1736,6 +1739,96 @@ uptime, load and the root filesystem. Any of those that cannot be read is
 `null`, never a failed request, and only macOS answers all of them. Usage and
 spend per provider are not shown: Factory does not record tokens yet.
 
+### Backup
+
+`.factory/` holds the only copy of the company's operating history -- the
+database, the knowledge vault, the policies, goals, scenarios and quality
+profiles -- and git tracks none of it. The root config names where a copy
+goes, and the daemon takes one on a schedule:
+
+```yaml
+# root .factory/config.yaml
+infrastructure:
+  backup:
+    destination: /Volumes/Backup/factory     # an external disk, NAS mount or synced folder
+    schedule: { cron: "0 3 * * *", timezone: Europe/Berlin }
+    keep: { daily: 7, weekly: 4, monthly: 6 } # grandfather-father-son
+    include_logs: false                       # also .factory/guides/ and .factory/logs/
+```
+
+A snapshot is one `factory-backup-<instance>-<utc>.tar.zst` holding:
+
+- `.factory/factory.sqlite`, copied with `VACUUM INTO` on a connection of its
+  own -- one read transaction, so the copy is consistent while the daemon
+  writes, and never a file copy, which WAL would make torn -- then checked with
+  `PRAGMA integrity_check` before anything is archived;
+- the root `.factory/config.yaml` and every registered scope's own;
+- `.factory/{knowledge,datasets,policies,goals,scenarios,quality}/`, whole;
+- a `manifest.json`, written last: instance, daemon version (there is no
+  build commit compiled in, so none is claimed), the database's
+  `user_version`, tables and integrity result, and the path, size and sha256
+  of every other file.
+
+Never in it: `.factory/secrets.yaml` or anything under a `secrets/`
+directory (not even opened), `.env` files, symbolic links (not followed --
+each is named in the manifest instead), the `-wal`/`-shm` files, the socket,
+`.factory/worktrees/`, and scope source code, which is backed up by pushing
+it to its git remote. Each file is read once and hashed and archived from the
+same bytes, so the manifest cannot disagree with the archive. The archive is
+written as a hidden `.partial` and renamed into place only when complete and
+synced.
+
+    factory backup [status]          the hero: age against the schedule, destination, last verify, warnings
+    factory backup list              every snapshot, verified or not, and the rule that keeps it
+    factory backup run               take one now, then apply retention
+    factory backup verify [<name>]   prove one would restore; exits non-zero on a failed check
+
+`GET /api/backup`, `POST /api/backup/run` and
+`POST /api/backup/verify?snapshot=` are the same three over HTTP, and the
+**L1 › Backup** page draws them. `run` and `verify` need `backup.run`, which
+only an agent in the root scope may hold, like `policy.attest`; reading is
+open to every agent.
+
+**Verify** unpacks a snapshot into a temporary directory -- never over the
+instance -- refusing any entry that would land outside it, then checks every
+sha256 against the manifest (a file missing, changed or unlisted fails it),
+runs `integrity_check` on the database copy and compares its schema version,
+loads the root config, and loads every authored-content directory with the
+loader the daemon uses: policies and drafts, goals, scenarios, quality
+profiles, datasets and the knowledge index. A file one of those loaders
+cannot parse is a warning, not a failure: the checksums have already proved
+it is byte for byte what was backed up, so it is broken in the live
+instance too. Every verification is recorded; the page's "last verified"
+only counts snapshots still in the destination.
+
+**The job.** Once a minute the daemon looks whether the schedule's next slot
+after the later of the last attempt and the newest archive has passed, so a
+daemon that was down at 03:00 takes that night's backup as soon as it is
+back, once. **Retention** runs only after a backup succeeded, only on file
+names that are this instance's archives -- nothing else in a shared folder is
+ever listed or deleted -- and never deletes the newest. Each rule keeps the
+newest snapshot of each of its most recent days, ISO weeks or months (in the
+schedule's timezone) that have one.
+
+**Warnings are facts, not guesses:** no backup configured; the last attempt
+failed, with its reason; the destination missing (only its last component is
+ever created -- a missing parent is most likely an unmounted disk, and
+creating `/Volumes/Backup/factory` on the system disk would be the backup that
+looks fine and is not); the destination on the **same device** as the
+instance (same `st_dev`), which is a copy, not a backup; the newest backup
+stale (one slot missed, plus two hours' grace) or overdue (two); no schedule;
+and no snapshot in the destination verified, or the last verification
+failed. A destination inside the instance's own `.factory/` is refused.
+
+Every backup and verification is an event -- `backup_completed`,
+`backup_failed`, `backup_verified` -- and a row in an append-only
+`backup_events` table. A failure is never a crash: a full disk or an
+unmounted volume is a `backup_failed` with the reason, a warning on the page
+and a line in the log. Not yet: `age` encryption (a config asking for
+`encrypt_to` is refused at load rather than given plaintext it thinks is
+encrypted), `restore --into`, the policy facts and metrics, the scope-repo
+remote report and the Time Machine fact are the issue's v2.
+
 ## Writing a plugin
 
 A plugin is any program that reads one JSON object per line on stdin and writes
@@ -1804,6 +1897,7 @@ HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `GET /api/runs/{id}/entries`, `GET /api/tasks/{id}/entries` (`?task_only=true`
 for only the task's own lines, none of its runs'), `GET /api/runs/{id}/output`, `GET /api/agents`,
 `GET /api/agent-runtime`, `GET /api/environment`, `GET /api/infrastructure`,
+`GET /api/backup`, `POST /api/backup/run`, `POST /api/backup/verify?snapshot=`,
 `GET /api/knowledge`,
 `GET /api/knowledge/search?q=&tags=&scope=&limit=`,
 `PUT /api/knowledge/files?path=&overwrite=` (raw bytes, its own 50 MiB body
@@ -2065,5 +2159,6 @@ unchanged.
     ui/js/{sandboxes,secrets}.js                                 L2's two tabs
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
+    ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter

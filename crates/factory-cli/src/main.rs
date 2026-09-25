@@ -61,6 +61,14 @@ enum Command {
     /// account each agent's model calls go to. Read-only; never reads a
     /// credential.
     Infra,
+    /// L1 Backup: whether the instance's own state -- the database, the
+    /// authored content, the configs -- is backed up, how recently, and
+    /// whether a backup has been proved to restore. With no subcommand,
+    /// prints the status.
+    Backup {
+        #[command(subcommand)]
+        command: Option<BackupCmd>,
+    },
     /// Start, stop and type at standing agents.
     #[command(subcommand)]
     Agent(AgentCmd),
@@ -295,6 +303,28 @@ enum GoalsCmd {
         confidence: u8,
         #[arg(long)]
         note: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupCmd {
+    /// The status: the newest backup's age against its schedule, the
+    /// destination, the last verification and every warning -- the same
+    /// thing `factory backup` with no subcommand prints.
+    Status,
+    /// Take a backup now, the same one the schedule takes, then apply
+    /// retention. `backup.run`: the owner, or a root-scope agent holding it.
+    Run,
+    /// Every snapshot of this instance in the destination, newest first,
+    /// with whether each was verified and which retention rule keeps it.
+    List,
+    /// Unpack a snapshot into a temporary directory and prove it would
+    /// restore: its checksums, the database's integrity_check and every
+    /// authored-content loader. Exits non-zero when a check fails.
+    Verify {
+        /// The snapshot's file name, as `list` shows it. The newest when
+        /// left out.
+        snapshot: Option<String>,
     },
 }
 
@@ -842,6 +872,31 @@ async fn main() -> Result<()> {
             print(&payload, cli.json, infrastructure_text)
         }
 
+        Command::Backup { command } => match command.unwrap_or(BackupCmd::Status) {
+            BackupCmd::Status => {
+                let payload = client.send(Request::Backup).await?;
+                print(&payload, cli.json, backup_status_text)
+            }
+            BackupCmd::List => {
+                let payload = client.send(Request::Backup).await?;
+                print(&payload, cli.json, backup_list_text)
+            }
+            BackupCmd::Run => {
+                let payload = client.send(Request::BackupRun).await?;
+                print(&payload, cli.json, backup_run_text)
+            }
+            BackupCmd::Verify { snapshot } => {
+                let payload = client.send(Request::BackupVerify { snapshot }).await?;
+                print(&payload, cli.json, backup_verify_text)?;
+                match payload {
+                    Payload::BackupVerify { verification } if !verification.ok => {
+                        Err(anyhow!("verification of {} failed", verification.snapshot))
+                    }
+                    _ => Ok(()),
+                }
+            }
+        },
+
         Command::Adapters => {
             let payload = client.send(Request::Adapters).await?;
             print(&payload, cli.json, |p| match p {
@@ -1313,6 +1368,168 @@ fn infrastructure_text(payload: &Payload) -> Option<String> {
         for a in unassigned {
             out.push_str(&format!("    {:<32} {}\n", format!("{}/{}", a.scope, a.agent), a.harness));
         }
+    }
+    Some(out.trim_end().to_string())
+}
+
+fn utc(t: &chrono::DateTime<chrono::Utc>) -> String {
+    t.format("%Y-%m-%d %H:%M UTC").to_string()
+}
+
+/// How long ago `then` was, against the daemon's own clock.
+fn ago(now: chrono::DateTime<chrono::Utc>, then: chrono::DateTime<chrono::Utc>) -> String {
+    format!("{} ago", duration((now - then).num_seconds().max(0) as u64))
+}
+
+fn kept_by_text(kept: &[factory_core::backup::KeptBy]) -> String {
+    use factory_core::backup::KeptBy;
+    if kept.is_empty() {
+        return "deleted at the next backup".into();
+    }
+    kept.iter()
+        .map(|k| match k {
+            KeptBy::Newest => "newest",
+            KeptBy::Daily => "daily",
+            KeptBy::Weekly => "weekly",
+            KeptBy::Monthly => "monthly",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `factory backup status`, for a person: the hero line, the facts under
+/// it, then every warning.
+fn backup_status_text(payload: &Payload) -> Option<String> {
+    use factory_core::backup::{AgeLevel, WarningLevel};
+    let Payload::Backup { report } = payload else { return None };
+    let mut out = String::new();
+    let level = match report.age {
+        AgeLevel::Fresh => "fresh",
+        AgeLevel::Stale => "STALE",
+        AgeLevel::Overdue => "OVERDUE",
+        AgeLevel::None => "NO BACKUP",
+    };
+    match report.snapshots.first() {
+        Some(newest) => out.push_str(&format!(
+            "BACKUP  {level}  newest {} ({}), {}\n",
+            ago(report.now, newest.at),
+            utc(&newest.at),
+            bytes(newest.size_bytes)
+        )),
+        None => out.push_str(&format!("BACKUP  {level}\n")),
+    }
+    if let Some(config) = &report.config {
+        if let Some(d) = &report.destination {
+            let device = match d.same_device {
+                Some(true) => "SAME DEVICE as the instance",
+                Some(false) => "another device",
+                None => "device unknown",
+            };
+            let free = d.free_bytes.map(|b| format!(", {} free", bytes(b))).unwrap_or_default();
+            let state = if d.exists { format!("{device}{free}") } else { "MISSING".into() };
+            out.push_str(&format!("  destination  {}  ({state})\n", d.path));
+        }
+        out.push_str(&format!(
+            "  schedule     {}\n",
+            config.schedule.as_ref().map(|s| s.describe()).unwrap_or_else(|| "none -- only when someone runs one".into())
+        ));
+        if let Some(next) = &report.next_run {
+            out.push_str(&format!("  next         {}\n", utc(next)));
+        }
+        out.push_str(&format!(
+            "  keep         {} daily, {} weekly, {} monthly{}\n",
+            config.keep.daily,
+            config.keep.weekly,
+            config.keep.monthly,
+            if config.include_logs { "; logs included" } else { "" }
+        ));
+        out.push_str(&format!("  snapshots    {}\n", report.snapshots.len()));
+        out.push_str(&format!(
+            "  verified     {}\n",
+            match &report.last_verified {
+                Some(v) => format!("{}  {}  {}", utc(&v.at), if v.ok { "ok" } else { "FAILED" }, v.snapshot),
+                None => "never".into(),
+            }
+        ));
+        out.push_str("  encrypted    no (v1 writes plaintext archives)\n");
+        if report.running {
+            out.push_str("  running      a backup or verification is in progress\n");
+        }
+    }
+    if !report.warnings.is_empty() {
+        out.push_str("\nWARNINGS\n");
+        for w in &report.warnings {
+            let mark = match w.level {
+                WarningLevel::Bad => "!!",
+                WarningLevel::Warn => "! ",
+            };
+            out.push_str(&format!("  {mark} {}\n", w.message));
+        }
+    }
+    Some(out.trim_end().to_string())
+}
+
+/// `factory backup list`: one line per snapshot, newest first.
+fn backup_list_text(payload: &Payload) -> Option<String> {
+    let Payload::Backup { report } = payload else { return None };
+    let Some(config) = &report.config else {
+        return Some("no backup is configured -- add infrastructure.backup to the root .factory/config.yaml".into());
+    };
+    if report.snapshots.is_empty() {
+        return Some(format!("no snapshots in {}", config.destination.display()));
+    }
+    let mut out = format!("{:<58} {:>10} {:>6}  {:<22} KEPT BY\n", "SNAPSHOT", "SIZE", "FILES", "VERIFIED");
+    for s in &report.snapshots {
+        let verified = match &s.verified {
+            Some(v) => format!("{} {}", if v.ok { "ok" } else { "FAILED" }, v.at.format("%Y-%m-%d %H:%M")),
+            None => "--".into(),
+        };
+        out.push_str(&format!(
+            "{:<58} {:>10} {:>6}  {:<22} {}\n",
+            s.name,
+            bytes(s.size_bytes),
+            s.files.map(|n| n.to_string()).unwrap_or_else(|| "--".into()),
+            verified,
+            kept_by_text(&s.kept_by)
+        ));
+    }
+    Some(out.trim_end().to_string())
+}
+
+fn backup_run_text(payload: &Payload) -> Option<String> {
+    let Payload::BackupRun { snapshot } = payload else { return None };
+    let mut out = format!(
+        "backed up to {}\n  {} files, {} archived ({} database), in {:.1}s\n",
+        snapshot.path,
+        snapshot.files,
+        bytes(snapshot.size_bytes),
+        bytes(snapshot.database_bytes),
+        snapshot.duration_ms as f64 / 1000.0
+    );
+    if snapshot.pruned.is_empty() {
+        out.push_str("  retention deleted nothing");
+    } else {
+        out.push_str(&format!("  retention deleted {}: {}", snapshot.pruned.len(), snapshot.pruned.join(", ")));
+    }
+    Some(out)
+}
+
+fn backup_verify_text(payload: &Payload) -> Option<String> {
+    use factory_core::backup::CheckStatus;
+    let Payload::BackupVerify { verification } = payload else { return None };
+    let mut out = format!(
+        "{}  {}  in {:.1}s\n",
+        if verification.ok { "VERIFIED" } else { "FAILED" },
+        verification.snapshot,
+        verification.duration_ms as f64 / 1000.0
+    );
+    for c in &verification.checks {
+        let status = match c.status {
+            CheckStatus::Ok => "ok  ",
+            CheckStatus::Warn => "warn",
+            CheckStatus::Fail => "FAIL",
+        };
+        out.push_str(&format!("  {status}  {:<10} {}\n", c.name, c.detail));
     }
     Some(out.trim_end().to_string())
 }
@@ -3746,6 +3963,15 @@ fn describe_event(e: &Event) -> String {
         Event::QualityChanged { profiles } => {
             format!("quality  profiles changed ({})", profiles.join(", "))
         }
+        Event::BackupCompleted { snapshot } => {
+            format!("backup   {}  completed ({} files)", snapshot.name, snapshot.files)
+        }
+        Event::BackupFailed { reason, .. } => format!("backup   failed: {reason}"),
+        Event::BackupVerified { verification } => format!(
+            "backup   {}  verified {}",
+            verification.snapshot,
+            if verification.ok { "ok" } else { "FAILED" }
+        ),
         Event::AgentActivity {
             subject, status, ..
         } => format!("activity {subject}  {}", status.as_str()),

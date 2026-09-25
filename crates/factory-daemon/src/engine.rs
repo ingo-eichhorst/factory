@@ -158,6 +158,13 @@ pub struct Engine {
     /// a goals request is stateful: the direction and cycle catalogues are
     /// read fresh off disk on every call, like the policy catalogues.
     pub(crate) goals: crate::goals::GoalsStore,
+    /// What happened to backups -- see `backup::BackupStore`. The archives
+    /// themselves are the destination's, listed fresh on every request.
+    pub(crate) backups: crate::backup::BackupStore,
+    /// Held for the whole of a backup or a verification, so the job and a
+    /// person can never run two at once over one destination. Taken with
+    /// `try_lock`: a second request is refused, never queued.
+    pub(crate) backup_busy: tokio::sync::Mutex<()>,
     /// Serializes a bench run's own read-modify-write: choosing which
     /// pending attempts to start, and recomputing the run's own status once
     /// every attempt has settled. Coarse -- one lock for every run, the same
@@ -283,6 +290,9 @@ impl Engine {
                 .expect("an in-memory policy store should open"),
             goals: crate::goals::GoalsStore::in_memory()
                 .expect("an in-memory goals store should open"),
+            backups: crate::backup::BackupStore::in_memory()
+                .expect("an in-memory backup store should open"),
+            backup_busy: tokio::sync::Mutex::new(()),
             bench_edit: tokio::sync::Mutex::new(()),
             bench_judging: Default::default(),
             bench_judge_tx,
@@ -328,6 +338,12 @@ impl Engine {
     /// The same, for goals check-ins.
     pub fn with_goals_store(mut self, goals: crate::goals::GoalsStore) -> Self {
         self.goals = goals;
+        self
+    }
+
+    /// The same, for the backup history.
+    pub fn with_backup_store(mut self, backups: crate::backup::BackupStore) -> Self {
+        self.backups = backups;
         self
     }
 
@@ -503,6 +519,24 @@ impl Engine {
                 })
             }
             Request::Infrastructure => Ok(self.infrastructure().await),
+            Request::Backup => Ok(Payload::Backup {
+                report: Box::new(self.backup_report().await?),
+            }),
+            // `backup_completed`/`backup_failed`/`backup_verified` are
+            // published inside, where the job's own backups publish them too.
+            Request::BackupRun => Ok(Payload::BackupRun {
+                snapshot: self
+                    .backup_run(
+                        factory_core::backup::BackupTrigger::Manual,
+                        crate::policies::caller_name(caller),
+                    )
+                    .await?,
+            }),
+            Request::BackupVerify { snapshot } => Ok(Payload::BackupVerify {
+                verification: self
+                    .backup_verify(snapshot, crate::policies::caller_name(caller))
+                    .await?,
+            }),
             Request::Knowledge => {
                 let root = self.factory_snapshot().root;
                 let index = tokio::task::spawn_blocking(move || factory_core::knowledge::index(&root))

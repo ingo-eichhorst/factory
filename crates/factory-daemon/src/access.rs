@@ -216,6 +216,9 @@ impl Engine {
             // Checked against the root scope for the same reason
             // `policy.attest` is -- see `in_root_scope`.
             Request::GoalsCheckIn { .. } => Grant::GoalsCheckIn,
+            // Checked against the root scope too: a backup is of the whole
+            // instance's state (`#116`).
+            Request::BackupRun | Request::BackupVerify { .. } => Grant::BackupRun,
             // The same door `TaskCreate`/`PolicyRemediate` already open --
             // this is not a second one (`#100`).
             Request::ScenarioPromote { .. } => Grant::TaskCreate,
@@ -232,6 +235,8 @@ impl Engine {
             | Request::SiteFootprint
             | Request::Environment
             | Request::Infrastructure
+            // Lists the destination and reads the history; writes nothing.
+            | Request::Backup
             | Request::Knowledge
             | Request::KnowledgeSearch { .. }
             | Request::Benchmarks
@@ -347,14 +352,15 @@ impl Engine {
                 Some(root) if root.name == *scope => Ok(()),
                 Some(root) => Err(FactoryError::Denied(format!(
                     "{} works in {scope}; the knowledge base, datasets, bench runs, policy \
-                     attestations and goals check-ins are company-wide and belong to the root \
-                     scope ({:?}) alone",
+                     attestations, goals check-ins and backups are company-wide and belong to the \
+                     root scope ({:?}) alone",
                     caller.describe(),
                     root.name
                 ))),
                 None => Err(FactoryError::Denied(format!(
                     "{} may not write knowledge, manage datasets, run benchmarks, attest to a \
-                     policy control, or check in a goal; this instance declares no root scope",
+                     policy control, check in a goal, or take a backup; this instance declares no \
+                     root scope",
                     caller.describe()
                 ))),
             }
@@ -518,6 +524,10 @@ impl Engine {
             Request::GoalsCheckIn { .. } => match def.reach {
                 Reach::Scope => in_root_scope(),
                 Reach::Own => Err(deny("record a goals check-in; that requires scope reach")),
+            },
+            Request::BackupRun | Request::BackupVerify { .. } => match def.reach {
+                Reach::Scope => in_root_scope(),
+                Reach::Own => Err(deny("take or verify a backup; that requires scope reach")),
             },
 
             // Reads returned above, and anything needing a grant nobody holds
@@ -884,6 +894,39 @@ mod tests {
             )
             .await
         );
+    }
+
+    /// `backup.run` covers taking and verifying a backup, and is checked
+    /// against the configured root scope exactly like `policy.attest`;
+    /// reading the backup status is open to every agent (`#116`).
+    #[tokio::test]
+    async fn backup_run_is_checked_against_the_configured_root_scope_and_reading_is_open() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  keeper:\n    grants: [backup.run]\n    reach: scope\n  \
+             own-keeper:\n    grants: [backup.run]\n    reach: own\n",
+        );
+        let caller = |scope: &str, role: &str| Caller::Agent {
+            scope: scope.into(),
+            name: "w".into(),
+            role: Role::new(role),
+            run_id: None,
+        };
+        let verify = Request::BackupVerify { snapshot: None };
+
+        assert!(allowed(&e, &caller("demo", "keeper"), Request::BackupRun).await);
+        assert!(allowed(&e, &caller("demo", "keeper"), verify.clone()).await);
+        assert!(
+            !allowed(&e, &caller("other", "keeper"), Request::BackupRun).await,
+            "the same grant outside the root scope is refused"
+        );
+        assert!(
+            !allowed(&e, &caller("demo", "own-keeper"), Request::BackupRun).await,
+            "own reach never covers the whole instance"
+        );
+        assert!(!allowed(&e, &worker("w"), verify).await, "a worker holds no backup.run");
+        assert!(allowed(&e, &worker("w"), Request::Backup).await, "reading the status is open to every agent");
+        assert!(allowed(&e, &Caller::Owner, Request::BackupRun).await);
     }
 
     /// `goals.checkin` is checked against the configured root scope exactly

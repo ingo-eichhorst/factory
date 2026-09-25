@@ -4,6 +4,7 @@
 
 pub mod adapter;
 pub mod agent;
+pub mod backup;
 pub mod bench;
 pub mod benchmark;
 pub mod building;
