@@ -371,6 +371,83 @@ more: for each known location, whether a file is there. No value is ever
 opened, held, logged, or returned — `present` is the entire result of each
 check, and there is no write path, in the UI or over the socket.
 
+## Dependencies
+
+The L2 Environment page's **Dependencies** tab keeps two different facts
+together without confusing them: components shipped in a scope's product, and
+services its agents are expected to reach. It always shows one scope at a
+time. The SBOM segment shows the newest document per lifecycle state and every
+finding a scan reported; the Services segment shows declarations from that
+scope's own config, including whether a credential location matches a row the
+Secrets inventory knows is present.
+
+A scope opts in with a strict `dependencies:` block (unknown fields are
+refused). An `agents:` filter may name only an agent that same scope declares:
+
+```yaml
+scope:
+  name: assistant
+  dependencies:
+    scan_workflow: dependency-scan
+    max_age: 30d
+    services:
+      - name: bank-main
+        transport: network          # network | socket | file
+        endpoints: [fints.example-bank.de:443]
+        effects: read               # read | write
+        data: [financial, personal]
+        credential: keychain:fints-bank-main  # a location, never a value
+        agents: [assistant-finance]  # absent means every declared agent
+      - name: bank-exports
+        transport: file
+        path: ~/Documents/Bank/Exports
+        direction: in               # in | out | both
+```
+
+Scanning is an ordinary workflow, not an adapter. A scan task produces two
+CycloneDX JSON documents (version 1.6 or newer) and sends their bytes through
+its authenticated callback:
+
+```sh
+factory task attach --kind sbom sbom.cdx.json
+factory task attach --kind vulnerabilities vulnerabilities.cdx.json
+```
+
+The daemon never follows the task's path. It validates the bytes and stores an
+immutable raw copy plus run/attempt/time metadata under
+`<root>/.factory/dependencies/<scope>/<run-id>/`; another attachment always
+creates another file. The SBOM must declare `metadata.lifecycles` (`pre-build`
+for declared, `build` for built, `operations` for running) and must not contain
+a `vulnerabilities` field. Vulnerability documents carry `vulnerabilities[]`
+whose `affects[].ref` values point into the SBOM by `bom-ref`. See
+`examples/dependency-scan.sh` for a declared-state Syft/Grype example; tests
+use checked-in CycloneDX fixtures and require neither tool.
+
+`factory dependencies <scope>` and `GET /api/dependencies?scope=` read the
+same projection. A finding is `open` when the newest scan still reports it,
+`assessed` when that scan carries CycloneDX `analysis`, `resolved` when a newer
+scan of the same lifecycle no longer reports it, and `stale` when the newest
+scan is older than the scope's `max_age`. These are derived statuses: there is
+no write API for them. `factory:` properties on a vulnerability carry KEV,
+EUVD and EPSS signals.
+
+VEX judgments are authored content at
+`<root>/.factory/vex/<scope>/*.cdx.json`, separate from every SBOM. `factory
+dependencies vex <scope>` validates them and prints one merged CycloneDX VEX
+document for a scan workflow to consume. Factory never edits those files.
+
+Policy catalogues may read the same evidence:
+
+```yaml
+- check: dependencies
+  sbom_max_age: 30d
+  max_open: { critical: 0, high: 0 }
+  exploited_open: 0
+```
+
+`built_sbom`, installed-binary scanning, observed services, reachability and
+the CRA Article 14 clock are later phases; v1 makes no claim about them.
+
 ## Knowledge
 
 `<root>/.factory/knowledge/` is a vault Factory keeps — one Obsidian-compatible
@@ -601,7 +678,7 @@ empty one is a finding and the control stays applicable — and every `n/a`, at
 whichever scope declared it, is always listed rather than left silent: ISO
 27001 calls this a Statement of Applicability, and ADR 0004 keeps the name.
 
-**Checks and statuses.** Evidence is evaluated per check kind, and all nine
+**Checks and statuses.** Evidence is evaluated per check kind, and all ten
 are evaluated for real: `knowledge` (a vault page tagged
 `control/<framework>/<id>`, or a check's own `tag`), `attestation` (an
 unexpired, unwithdrawn attestation recorded for the control), `task` and
@@ -652,12 +729,16 @@ the live config snapshot rather than a store:
   address is left undetermined rather than guessed at with a DNS lookup),
   and `power_assertion` (`daemon.power_assertion`). A `fact` outside this
   set is a finding at catalogue load time and stays `open`.
+- **`dependencies`** — satisfied when the newest declared SBOM is within
+  `sbom_max_age`, open findings do not exceed each `max_open` severity limit,
+  and KEV/EUVD findings do not exceed `exploited_open`. It reads the same
+  derived projection as L2 Dependencies; no policy-specific copy is stored.
 
-Neither `roles`/`sandbox`/`secrets`/`daemon` carries a `refs` entry: nothing
+Neither `roles`/`sandbox`/`secrets`/`daemon`/`dependencies` carries a `refs` entry: nothing
 behind them is an id a UI could link to yet (an agent name is not one of
 `EvidenceRefKind`'s kinds, and a daemon/secrets fact is not tied to any one
 record at all) — the L6 Policy tab instead links a gap in one of these to
-the level that can close it (Roles, Sandboxes, Secrets, or L1
+the level that can close it (Roles, Sandboxes, Secrets, Dependencies, or L1
 Infrastructure). A control's status is `satisfied` (a check found current
 evidence), `attested` (an unexpired attestation covers it), `stale`
 (evidence or an attestation existed but is older than `max_age`, or the
@@ -2388,7 +2469,8 @@ unchanged.
     ui/js/app.js               the wiring: which page shows, what an event means
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
     ui/js/{dashboard,activity,site,site-render}.js               the new views
-    ui/js/{sandboxes,secrets}.js                                 L2's two tabs
+    ui/js/{sandboxes,secrets,dependencies}.js                    L2's three tabs
+    ui/js/dependencies-model.js                                  Dependencies' pure shaping logic
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic

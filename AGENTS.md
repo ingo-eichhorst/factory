@@ -16,7 +16,8 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
     ui/js/schedule.js          a task's schedule between the wire and the form, pure
     ui/js/{dashboard,activity,site,site-render}.js               the new views
-    ui/js/{sandboxes,secrets}.js                                 L2's two tabs
+    ui/js/{sandboxes,secrets,dependencies}.js                    L2's three tabs
+    ui/js/dependencies-model.js                                  Dependencies' pure shaping logic
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/js/{datasets,bench-runs}.js                               Benchmarks' Datasets and Runs segments
@@ -144,10 +145,11 @@ something impossible.
   other daemon-owned state inside a scope. `.factory/knowledge/`,
   `.factory/datasets/`, `.factory/policies/` (including its `drafts/`
   subdirectory), `.factory/goals/`, `.factory/scenarios/` and
-  `.factory/quality/` are the one exception: authored content -- pages,
+  `.factory/quality/` and `.factory/vex/` are the one exception: authored
+  content -- pages,
   dataset YAML, policy catalogues (real and draft), the goals
-  direction/cycle files, scenario files and quality profiles a person or an
-  agent wrote by hand -- that nothing in Factory ever deletes
+  direction/cycle files, scenario files, quality profiles and VEX judgments a
+  person or an agent wrote by hand -- that nothing in Factory ever deletes
   or regenerates, and that is worth backing up like a scope's own files,
   even though it sits under the instance root's `.factory/` alongside
   everything the daemon does own.

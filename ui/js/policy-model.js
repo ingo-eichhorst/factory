@@ -221,6 +221,7 @@ const REMEDIATION = {
   roles: { page: "roles", label: "Roles" },
   sandbox: { page: "sandboxes", label: "Sandboxes" },
   secrets: { page: "secrets", label: "Secrets" },
+  dependencies: { page: "dependencies", label: "Dependencies" },
   daemon: { page: "infrastructure", label: "Infrastructure" },
 };
 
@@ -288,6 +289,17 @@ export function describeCheck(check) {
       return check.absent && check.absent.length ? `secrets: absent ${check.absent.join(", ")}` : "secrets";
     case "daemon":
       return `daemon: ${check.fact}`;
+    case "dependencies": {
+      const terms = [];
+      if (check.sbom_max_age) terms.push(`SBOM max_age ${check.sbom_max_age}`);
+      for (const [severity, limit] of Object.entries(check.max_open || {})) {
+        terms.push(`${severity} <= ${limit}`);
+      }
+      if (check.exploited_open !== null && check.exploited_open !== undefined) {
+        terms.push(`exploited <= ${check.exploited_open}`);
+      }
+      return `dependencies: ${terms.join(", ")}`;
+    }
     default:
       return check.check;
   }

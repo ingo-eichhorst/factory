@@ -58,7 +58,7 @@
     <span class="lv-n">L3</span><span class="lv-name">Agent</span><span class="lv-sub">Who may work</span>
   </button>
   <button id="lv-env" class="lvl" data-level="env" data-lv="2">
-    <span class="lv-n">L2</span><span class="lv-name">Environment</span><span class="lv-sub">Sandboxes and secrets</span>
+    <span class="lv-n">L2</span><span class="lv-name">Environment</span><span class="lv-sub">Sandboxes, secrets and dependencies</span>
   </button>
   <button id="lv-infra" class="lvl" data-level="infra" data-lv="1">
     <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Host, daemon, AI accounts and backup</span>
@@ -88,6 +88,7 @@
   <button id="tab-roles" hidden>Roles</button>
   <button id="tab-sandboxes" hidden>Sandboxes</button>
   <button id="tab-secrets" hidden>Secrets</button>
+  <button id="tab-dependencies" hidden>Dependencies</button>
   <button id="tab-benchmarks" hidden>Benchmarks</button>
   <button id="tab-knowledge" hidden>Knowledge</button>
   <button id="tab-infrastructure" hidden>Infrastructure</button>
@@ -644,6 +645,41 @@
       </table>
       <div class="empty" id="noSecrets" hidden>No credential locations to report.</div>
     </section>
+  </div>
+
+  <div id="view-dependencies" hidden>
+    <div class="bar">
+      <h2>Dependencies</h2>
+      <span class="sub" id="dependencies-counts"></span>
+      <span class="sp"></span>
+      <div class="seg" id="dependencies-seg" role="group" aria-label="SBOM or services">
+        <button type="button" data-seg="sbom" class="on">SBOM</button>
+        <button type="button" data-seg="services">Services</button>
+      </div>
+      <button class="btn" id="dependencies-refresh">Refresh</button>
+    </div>
+    <p class="env-note" id="dependencies-note"></p>
+    <p class="env-note bad" id="dependencies-error" hidden></p>
+
+    <div id="dependencies-pane-sbom">
+      <h3 class="dep-heading">Newest documents by lifecycle</h3>
+      <div class="dep-documents" id="dependencies-documents"></div>
+      <div class="empty" id="no-dependency-documents" hidden>No SBOM has been attached for this scope.</div>
+
+      <h3 class="dep-heading">Findings</h3>
+      <div class="dep-findings" id="dependencies-findings"></div>
+      <div class="empty" id="no-dependency-findings" hidden>No findings.</div>
+    </div>
+
+    <div id="dependencies-pane-services" hidden>
+      <section>
+        <table>
+          <thead><tr><th>Service</th><th>Transport</th><th>Endpoint / path</th><th>Access</th><th>Data</th><th>Credential location</th></tr></thead>
+          <tbody id="dependencies-services"></tbody>
+        </table>
+        <div class="empty" id="no-dependency-services" hidden>No services declared in this scope.</div>
+      </section>
+    </div>
   </div>
 
   <div id="view-benchmarks" hidden>

@@ -437,6 +437,24 @@ a.role-origin:hover { color: var(--signal); border-color: var(--signal); }
 .grant.yes span[aria-hidden] { color: var(--run); }
 .grant.no { color: var(--faint); }
 .grant.no span[aria-hidden] { color: var(--fault); }
+
+/* ----------------------------------------------------- L2 dependencies */
+.dep-heading { margin: 15px 14px 8px; font: 600 11px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.dep-documents { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; padding: 0 14px; }
+.dep-doc { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--signal); border-radius: 4px; padding: 11px 12px; display: grid; gap: 5px; font-size: 12px; }
+.dep-doc code, .dep-finding code { overflow-wrap: anywhere; }
+.dep-findings { display: grid; gap: 7px; padding: 0 14px 14px; }
+.dep-finding { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+.dep-finding > summary { cursor: pointer; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 9px 11px; }
+.dep-finding > summary:hover { background: var(--panel-2); }
+.dep-finding > summary::marker { color: var(--faint); }
+.dep-finding dl { display: grid; grid-template-columns: minmax(110px, 150px) minmax(0, 1fr); gap: 7px 12px; margin: 0; padding: 10px 14px 13px; border-top: 1px solid var(--line-soft); font-size: 12px; }
+.dep-finding dt { color: var(--faint); font: 600 9px/1.4 var(--cond); letter-spacing: .09em; text-transform: uppercase; }
+.dep-finding dd { margin: 0; color: var(--ink-2); min-width: 0; }
+.dep-finding dd ul { margin: 0; padding-left: 17px; }
+.dep-severity { font: 600 9px/1 var(--cond); letter-spacing: .08em; text-transform: uppercase; }
+.dep-severity.sev-critical, .dep-severity.sev-high { color: var(--fault); }
+.dep-severity.sev-medium { color: var(--wait); }
 .role-holders { display: flex; gap: 10px; flex-wrap: wrap; }
 .role-holder { font-weight: 500; }
 .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
