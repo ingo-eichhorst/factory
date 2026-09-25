@@ -1119,6 +1119,20 @@ when it fails to fire. An `every` schedule is an interval and takes no
 timezone.
 
 ```sh
+factory task edit <id> --pause-schedule    # keep the schedule, fire nothing
+factory task edit <id> --resume-schedule   # next firing counted from now
+```
+
+A paused schedule keeps its expression and the slot it would have fired, and
+nothing -- neither a slot nor a queued retry -- fires until it is resumed.
+Resuming counts the next firing from the moment of resuming, so the slots
+that passed while paused are not caught up in a burst. The same holds for
+slots that pass while the task's previous run is still going, or while the
+daemon is down: the overdue slot fires once, late, and the journal records the
+ones after it as a single `schedule_skipped` entry with how many, the first
+and the last.
+
+```sh
 factory task run <id>          # a retry is just another run
 factory run list <id>          # every attempt, newest first
 factory run show <run-id>

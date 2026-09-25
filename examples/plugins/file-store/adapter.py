@@ -251,6 +251,8 @@ def task_update(params):
         task["next_run_at"] = patch["next_run_at"]
     if patch.get("labels") is not None:
         task["labels"] = patch["labels"]
+    if patch.get("schedule_paused") is not None:
+        task["schedule_paused"] = patch["schedule_paused"]
     task["updated_at"] = now_iso()
 
     data["tasks"][task_id] = task
@@ -274,6 +276,9 @@ def task_due(params):
         # not waiting for the scheduler a second time just because its old
         # `next_run_at` is still sitting there in the past.
         if task.get("status") != "pending":
+            continue
+        # A paused schedule keeps its slot but does not fire.
+        if task.get("schedule_paused"):
             continue
         next_run_at = task.get("next_run_at")
         if not next_run_at:
