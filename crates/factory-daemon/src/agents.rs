@@ -879,6 +879,7 @@ mod tests {
             retry: None,
             pending_retry: None,
             schedule_paused: false,
+            category: None,
         };
         let task = engine.store.create(&task).await.unwrap();
         let run = engine
@@ -1288,6 +1289,7 @@ mod tests {
             retry: None,
             pending_retry: None,
             schedule_paused: false,
+            category: None,
         };
         engine.store.create(&task).await.unwrap();
 

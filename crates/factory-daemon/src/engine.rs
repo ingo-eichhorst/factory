@@ -4848,6 +4848,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            required_steps: Vec::new(),
         };
         let first = t0 + chrono::Duration::minutes(5);
         assert_eq!(skip_reason_of(Some(&run), first), SkipReason::StillActive);
@@ -5009,6 +5010,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            required_steps: Vec::new(),
         };
         let slot = t(60);
         let booted = t(1000);
