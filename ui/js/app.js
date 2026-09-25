@@ -2,7 +2,7 @@
 //! for it. Every module below is a view or a piece of one; this is the only
 //! file that knows about all of them.
 
-import { $, api, state, connect, setTheme, currentTheme, toggleTheme } from "./core.js";
+import { $, api, state, connect, setTheme, currentTheme, toggleTheme, TERMINAL } from "./core.js";
 import { initRail, writeHash, setRouter, readHash, applyRoute } from "./scopes.js";
 import { closeModal, dropModal } from "./modal.js";
 import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyTasksView, currentTasksView, setTasksView } from "./tasks.js";
@@ -25,6 +25,7 @@ import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from
 import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
 import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
 import { loadGoals, reloadGoals, wireGoals } from "./goals.js";
+import { loadQuality, reloadQuality, wireQuality } from "./quality.js";
 import { loadScenarios, reloadScenarios, wireScenarios } from "./scenarios.js";
 
 // ------------------------------------------------------------------ views
@@ -57,6 +58,10 @@ const VIEWS = {
   // cached metric computations, re-read on every request, and a change only
   // ever arrives as `goals_changed` (a check-in), not on a clock.
   goals: { onShow: loadGoals },
+  // Same again: the profiles are small YAML files re-read on every request,
+  // and every value a scenario is judged on is already computed elsewhere.
+  // What can change it arrives on the socket (`onEvent` below).
+  quality: { onShow: loadQuality },
   // Not poll-free the same way: `loadScenarios` itself makes a second fetch
   // (`GET /api/metrics?ids=…`, for the titles a signpost strip needs) and
   // seeds the driver panel with one `POST /api/scenarios/whatif` call, so
@@ -191,10 +196,11 @@ function applyModal([taskId, runId]) {
 // fallback in `scopes.js`.
 const LEVEL_VIEWS = {
   dash: ["dashboard", "site", "activity", "inbox"],
-  // Goals first, then Policy: Direction reads vision through rules -- the
-  // long-term frame and this cycle's objectives before the control
+  // Goals first, then Quality, then Policy: Direction reads vision, then
+  // quality, then rules -- the long-term frame and this cycle's objectives,
+  // how good the work has to be on the way, and only then the control
   // catalogue that holds the company to what it already committed to.
-  dir: ["goals", "policy", "scenarios"],
+  dir: ["goals", "quality", "policy", "scenarios"],
   // The work first, then how it is running.
   proc: ["tasks", "workflows", "operations"],
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
@@ -300,6 +306,9 @@ function rerender(route) {
   // Same reason again: which objectives and roadmap items belong to a scope
   // is the daemon's own filter (`GET /api/goals?scope=`).
   else if (state.tab === "goals") loadGoals();
+  // Same reason again: which profiles bind a scope is its chain, folded by
+  // the daemon (`GET /api/quality?scope=`).
+  else if (state.tab === "quality") loadQuality();
   // Same reason again: `GET /api/scenarios?scope=` narrows the baseline and
   // every scenario's own policy delta to the asked subtree -- the one
   // exception is the driver panel's own `POST /api/scenarios/whatif`, which
@@ -533,6 +542,7 @@ async function boot() {
   wireRoles();
   wirePolicy();
   wireGoals();
+  wireQuality();
   wireScenarios();
   $("environment-refresh").onclick = () => refreshEnvironment();
   $("secrets-refresh").onclick = () => refreshEnvironment();
@@ -593,6 +603,9 @@ boot();
 /// What an event means for what is on screen. This is the one place that knows
 /// every view, which is why it lives in the wiring and not in the transport.
 function onEvent(ev) {
+  // Read before the switch below overwrites it: the Quality tab reloads on a
+  // `quality=` task's status *changing*, not on every progress update.
+  const priorTask = ev.task ? state.tasks.get(ev.task.id) : null;
   recordEvent(ev);
   if (ev.type.startsWith("workflow_")) acceptWorkflowEvent(ev);
 
@@ -683,6 +696,24 @@ function onEvent(ev) {
   // Refresh covers those, the same restraint the Scenarios tab's own `onShow`
   // comment explains.
   if ((ev.type === "policy_changed" || ev.type === "goals_changed") && state.tab === "scenarios") reloadScenarios();
+  // Three things move the Quality tab, and only while it is open:
+  // `quality_changed` (a profile or a chain changed -- noticed on some read,
+  // see `Event::QualityChanged`); a run reaching a terminal state, which is
+  // when a fitness function's verdict lands and a production metric moves
+  // (not every `run_updated` -- a run reporting progress changes nothing a
+  // scenario reads); and a task carrying a `quality=` label appearing,
+  // changing status or going away, which is `open_tasks` changing under a
+  // scenario's "Create task" -- not every `task_updated` it sends, most of
+  // which are progress. A deleted task's event carries only its id, so any
+  // deletion reloads -- rare enough not to be worth telling apart.
+  const qualityTask = ev.task && ev.task.labels && ev.task.labels.quality;
+  if (state.tab === "quality" && (ev.type === "quality_changed"
+      || (ev.type === "run_updated" && TERMINAL.includes(ev.run.status))
+      || (ev.type === "task_created" && qualityTask)
+      || (ev.type === "task_updated" && qualityTask && (!priorTask || priorTask.status !== ev.task.status))
+      || ev.type === "task_deleted")) {
+    reloadQuality();
+  }
   // Every fact `/api/operations` reads arrives as one of these (PR #113 adds
   // no event of its own). Not `agent_activity`, a runtime saying an agent is
   // busy several times a minute, which changes nothing the report says.

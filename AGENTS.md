@@ -129,10 +129,11 @@ something impossible.
   instance root's `.factory/`; never put the database, socket, worktrees, or
   other daemon-owned state inside a scope. `.factory/knowledge/`,
   `.factory/datasets/`, `.factory/policies/` (including its `drafts/`
-  subdirectory), `.factory/goals/` and `.factory/scenarios/` are the one
-  exception: authored content -- pages, dataset YAML, policy catalogues
-  (real and draft), the goals direction/cycle files, and scenario files a
-  person or an agent wrote by hand -- that nothing in Factory ever deletes
+  subdirectory), `.factory/goals/`, `.factory/scenarios/` and
+  `.factory/quality/` are the one exception: authored content -- pages,
+  dataset YAML, policy catalogues (real and draft), the goals
+  direction/cycle files, scenario files and quality profiles a person or an
+  agent wrote by hand -- that nothing in Factory ever deletes
   or regenerates, and that is worth backing up like a scope's own files,
   even though it sits under the instance root's `.factory/` alongside
   everything the daemon does own.

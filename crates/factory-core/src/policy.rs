@@ -142,6 +142,19 @@ impl Duration {
     pub fn as_hours(&self) -> u64 {
         self.hours
     }
+
+    /// This window as a `chrono::TimeDelta`, capped at `TimeDelta::MAX`
+    /// rather than panicking. The grammar happily parses `9999999999999999h`,
+    /// which is far past what a `TimeDelta` holds, and `TimeDelta::hours`
+    /// panics on that; a window that long means "never stale" either way.
+    /// The one conversion every freshness check here and in `quality.rs`
+    /// goes through.
+    pub fn as_time_delta(&self) -> chrono::TimeDelta {
+        i64::try_from(self.hours)
+            .ok()
+            .and_then(chrono::TimeDelta::try_hours)
+            .unwrap_or(chrono::TimeDelta::MAX)
+    }
 }
 
 impl std::str::FromStr for Duration {
@@ -497,6 +510,37 @@ pub fn policies_dir(root: &Path) -> PathBuf {
     root.join(".factory").join("policies")
 }
 
+/// Whatever in `check` names something outside a fixed vocabulary -- a
+/// `daemon` fact not in [`KNOWN_DAEMON_FACTS`], a `secrets` location not in
+/// [`KNOWN_SECRETS_LOCATIONS`] -- as a finding kind and a detail that reads
+/// on after the name of whatever holds the check ("<control> names daemon
+/// fact ..."). Neither vocabulary depends on live evidence, so a caller can
+/// catch the mistake when the file loads rather than only once a report is
+/// evaluated: [`load_all`] for a catalogue, `quality::load` for a quality
+/// profile's check measures.
+pub fn check_vocabulary(check: &Check) -> Vec<(FindingKind, String)> {
+    match check {
+        Check::Daemon { fact } if !KNOWN_DAEMON_FACTS.contains(&fact.as_str()) => vec![(
+            FindingKind::UnknownDaemonFact,
+            format!("names daemon fact {fact:?}, which is not one of: {}", KNOWN_DAEMON_FACTS.join(", ")),
+        )],
+        Check::Secrets { absent } => absent
+            .iter()
+            .filter(|loc| !KNOWN_SECRETS_LOCATIONS.contains(&loc.as_str()))
+            .map(|loc| {
+                (
+                    FindingKind::UnknownSecretsLocation,
+                    format!(
+                        "names secrets location {loc:?}, which is not one of: {}",
+                        KNOWN_SECRETS_LOCATIONS.join(", ")
+                    ),
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Load every `<framework>.yaml` in `dir`. A missing directory is empty, not
 /// an error. Each file is independent: one that fails to parse, names a
 /// `framework` other than its own file stem, or repeats a control `id` is a
@@ -578,36 +622,12 @@ pub fn load_all(dir: &Path) -> (Vec<Catalogue>, Vec<Finding>) {
             // caught here, at parse time, rather than only once a report is
             // evaluated.
             for check in &control.evidence {
-                match check {
-                    Check::Daemon { fact } if !KNOWN_DAEMON_FACTS.contains(&fact.as_str()) => {
-                        findings.push(Finding {
-                            kind: FindingKind::UnknownDaemonFact,
-                            subject: file_name.clone(),
-                            detail: format!(
-                                "{}/{} names daemon fact {fact:?}, which is not one of: {}",
-                                catalogue.framework,
-                                control.id,
-                                KNOWN_DAEMON_FACTS.join(", ")
-                            ),
-                        });
-                    }
-                    Check::Secrets { absent } => {
-                        for loc in absent {
-                            if !KNOWN_SECRETS_LOCATIONS.contains(&loc.as_str()) {
-                                findings.push(Finding {
-                                    kind: FindingKind::UnknownSecretsLocation,
-                                    subject: file_name.clone(),
-                                    detail: format!(
-                                        "{}/{} names secrets location {loc:?}, which is not one of: {}",
-                                        catalogue.framework,
-                                        control.id,
-                                        KNOWN_SECRETS_LOCATIONS.join(", ")
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                    _ => {}
+                for (kind, detail) in check_vocabulary(check) {
+                    findings.push(Finding {
+                        kind,
+                        subject: file_name.clone(),
+                        detail: format!("{}/{} {detail}", catalogue.framework, control.id),
+                    });
                 }
             }
             controls.push(control);
@@ -954,7 +974,9 @@ pub fn parse_expiry(s: &str, now: DateTime<Utc>) -> std::result::Result<DateTime
         )
     };
     if let Ok(d) = s.parse::<Duration>() {
-        return Ok(now + chrono::Duration::hours(d.as_hours() as i64));
+        return now
+            .checked_add_signed(d.as_time_delta())
+            .ok_or_else(|| format!("{s:?} is too far in the future to be an expiry"));
     }
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Ok(dt.with_timezone(&Utc));
@@ -1349,7 +1371,7 @@ pub struct ControlStatus {
 fn within_max_age(max_age: Option<Duration>, since: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     match max_age {
         None => true,
-        Some(max_age) => now - since <= chrono::Duration::hours(max_age.as_hours() as i64),
+        Some(max_age) => now - since <= max_age.as_time_delta(),
     }
 }
 
@@ -2074,6 +2096,32 @@ mod tests {
         assert_eq!("30d".parse::<Duration>().unwrap().as_hours(), 30 * 24);
         assert_eq!("12h".parse::<Duration>().unwrap().as_hours(), 12);
         assert_eq!("2w".parse::<Duration>().unwrap().as_hours(), 2 * 24 * 7);
+    }
+
+    #[test]
+    fn an_absurdly_long_duration_caps_instead_of_panicking() {
+        let huge: Duration = "9999999999999999h".parse().unwrap();
+        assert_eq!(huge.as_time_delta(), chrono::TimeDelta::MAX);
+        assert_eq!("2d".parse::<Duration>().unwrap().as_time_delta(), chrono::TimeDelta::hours(48));
+        let now = Utc::now();
+        assert!(within_max_age(Some(huge), now - chrono::TimeDelta::days(10_000), now), "never stale");
+        let e = parse_expiry("9999999999999999h", now).unwrap_err();
+        assert!(e.contains("too far"), "{e}");
+    }
+
+    #[test]
+    fn check_vocabulary_names_an_unknown_daemon_fact_or_secrets_location() {
+        assert!(check_vocabulary(&Check::Sandbox).is_empty());
+        assert!(check_vocabulary(&Check::Daemon { fact: "power_assertion".into() }).is_empty());
+        let found = check_vocabulary(&Check::Daemon { fact: "power_asertion".into() });
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, FindingKind::UnknownDaemonFact);
+        let found = check_vocabulary(&Check::Secrets { absent: vec!["github".into(), "gitlab".into(), "nope".into()] });
+        assert_eq!(
+            found.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            vec![FindingKind::UnknownSecretsLocation, FindingKind::UnknownSecretsLocation]
+        );
+        assert!(found[0].1.contains("gitlab"), "{}", found[0].1);
     }
 
     #[test]

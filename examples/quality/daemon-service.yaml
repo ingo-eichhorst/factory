@@ -1,0 +1,73 @@
+# The issue's own example (#107), bound by `quality: [daemon-service]` on the
+# factory scope. Two changes from the issue text: attribute ids are spelled
+# out in full (`performance-efficiency.time-behaviour`, not
+# `performance.time-behaviour`), and a check measure is written the way a
+# policy catalogue writes one (`{ check: task, task: ..., max_age: ... }`).
+# Loads with zero findings -- see `examples_quality_load_with_zero_findings`
+# in `quality.rs`.
+title: Daemon service
+attributes:
+  - id: reliability.recoverability          # 25010 characteristic[.sub-characteristic]
+    importance: H                            # H | M | L -- raised from the baseline's M
+    difficulty: M
+    scenarios:
+      - id: daemon-restart
+        kind: usage                          # usage | change
+        source: launchd
+        stimulus: daemon restarted while 3 runs are active
+        artifact: factory-daemon
+        environment: normal operation
+        response: runs resume reporting; no run is lost or double-dispatched
+        measure:                             # the response measure; without it, a draft
+          metric: fail_rate                  # continual: a registry metric and a threshold
+          below: 0.05
+          max_age: 7d
+  - id: maintainability.modifiability
+    importance: H
+    difficulty: H
+    scenarios:
+      - id: agent-diff-health
+        kind: change
+        source: a coding agent
+        stimulus: an agent's change lands on main
+        artifact: the Rust workspace
+        environment: normal development
+        response: no new clippy warnings, duplication does not rise
+        measure: { check: task, task: quality-gate, max_age: 7d }   # triggered: a Policy check, reused as-is
+      - id: right-first-time
+        kind: change
+        stimulus: an agent is handed a change to make
+        response: it lands on the first attempt
+        measure: { metric: first_pass_yield, above: 0.8 }
+  - id: performance-efficiency.time-behaviour
+    importance: M
+    difficulty: L
+    scenarios:
+      - id: bench-latency
+        measure: { metric: bench.resolve_rate.smoke, above: 0.9 }
+  - id: security.confidentiality
+    importance: H
+    difficulty: M
+    scenarios:
+      - id: agents-sandboxed
+        kind: usage
+        source: any agent
+        stimulus: an agent is dispatched
+        artifact: the agent's session
+        environment: normal operation
+        response: it runs inside a sandbox, never on the bare host
+        measure: { check: sandbox }
+  - id: interaction-capability.transparency  # from the ISO/IEC 25059 AI pack
+    importance: M
+    difficulty: M
+    scenarios:
+      - id: failure-explained                # no measure yet: a draft, never met
+        kind: usage
+        source: an operator
+        stimulus: a run fails
+        artifact: the run's report
+        response: the report says why, in one sentence a person can act on
+tradeoffs:
+  - between: [security.confidentiality, performance-efficiency.time-behaviour]
+    point: every agent runs in a sandbox; start-up cost accepted
+    decision: knowledge/adr-sandbox.md

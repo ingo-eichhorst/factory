@@ -46,7 +46,7 @@
     <span class="lv-n">Overview</span><span class="lv-name">Dashboard</span><span class="lv-sub">Site, activity and inbox</span>
   </button>
   <button id="lv-dir" class="lvl" data-level="dir" data-lv="6">
-    <span class="lv-n">L6</span><span class="lv-name">Direction</span><span class="lv-sub">Goals, policy, scenarios</span>
+    <span class="lv-n">L6</span><span class="lv-name">Direction</span><span class="lv-sub">Goals, quality, policy, scenarios</span>
   </button>
   <button id="lv-imp" class="lvl" data-level="imp" data-lv="5">
     <span class="lv-n">L5</span><span class="lv-name">Improvement</span><span class="lv-sub">Benchmarks and knowledge</span>
@@ -75,6 +75,7 @@
   <button id="tab-activity">Activity</button>
   <button id="tab-inbox">Inbox</button>
   <button id="tab-goals" hidden>Goals</button>
+  <button id="tab-quality" hidden>Quality</button>
   <button id="tab-policy" hidden>Policy</button>
   <button id="tab-scenarios" hidden>Scenarios</button>
   <button id="tab-tasks" hidden>Tasks</button>
@@ -188,6 +189,77 @@
         <div class="empty" id="goal-no-findings" hidden>No findings.</div>
       </section>
     </div>
+  </div>
+
+  <div id="view-quality" hidden>
+    <div class="bar">
+      <h2>Quality attributes</h2>
+      <span class="sub" id="qa-count"></span>
+      <span class="sp"></span>
+      <button class="btn" id="qa-refresh">Refresh</button>
+    </div>
+    <p class="env-note" id="qa-scope-note"></p>
+    <!-- In the markup, not the fetched answer, so it survives a failed fetch:
+         the tab's two guardrails, said where a person reads it. -->
+    <p class="env-note">Measured, never claimed: a scenario is met only when its response measure holds on fresh
+      evidence. A blank cell is not declared -- not a stated concern, never failing. There is no overall quality score.</p>
+    <p class="env-note bad" id="qa-error" hidden></p>
+    <div class="empty" id="qa-empty" hidden>No quality profile is bound anywhere yet. Write a utility tree to
+      <code class="id">.factory/quality/&lt;profile&gt;.yaml</code>, then bind it with
+      <code class="id">quality: [&lt;profile&gt;]</code> in the root config (or <code class="id">scope.quality</code> in a scope's own).<br>
+      See <a href="https://github.com/ingo-eichhorst/factory/blob/main/README.md#quality-attributes" target="_blank" rel="noopener">README.md, "Quality attributes"</a>
+      for the shape, and <code class="id">examples/quality/</code> for two to start from.</div>
+
+    <div id="qa-body" hidden>
+      <div class="qa-toolbar">
+        <div class="seg" id="qa-view-seg" role="tablist" aria-label="Quality view">
+          <button type="button" data-view="heatmap">Heatmap</button>
+          <button type="button" data-view="tree">Utility tree</button>
+          <button type="button" data-view="tradeoffs">Trade-offs</button>
+          <button type="button" data-view="grid">Importance × difficulty</button>
+          <button type="button" data-view="table">Table</button>
+        </div>
+        <div class="qa-scope-pick" id="qa-scope-pick" hidden>
+          <label for="qa-scope-select">Scope</label>
+          <select id="qa-scope-select"></select>
+        </div>
+      </div>
+
+      <section id="qa-view-heatmap" class="qa-section">
+        <div id="qa-heatmap"></div>
+        <div class="qa-legend" id="qa-legend"></div>
+      </section>
+
+      <section id="qa-view-tree" class="qa-section" hidden>
+        <div id="qa-tree"></div>
+      </section>
+
+      <section id="qa-view-tradeoffs" class="qa-section" hidden>
+        <div id="qa-tradeoffs"></div>
+      </section>
+
+      <section id="qa-view-grid" class="qa-section" hidden>
+        <div id="qa-grid"></div>
+      </section>
+
+      <section id="qa-view-table" hidden>
+        <div class="qa-scroll">
+          <table class="qa-table">
+            <thead><tr>
+              <th>Scope</th><th>Attribute</th><th>(I,D)</th><th>Scenario</th><th>Status</th>
+              <th>Response measure</th><th>Value</th><th>Reasons</th>
+            </tr></thead>
+            <tbody id="qa-table"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <section style="margin-top:14px">
+      <h3>Findings</h3>
+      <div id="qa-findings"></div>
+      <div class="empty" id="qa-no-findings" hidden>No findings.</div>
+    </section>
   </div>
 
   <div id="view-policy" hidden>

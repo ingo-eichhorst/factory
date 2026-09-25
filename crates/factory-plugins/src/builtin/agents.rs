@@ -488,6 +488,7 @@ mod tests {
             role: None,
             policy_frameworks: Vec::new(),
             goal: None,
+            quality: Vec::new(),
         }
     }
 
