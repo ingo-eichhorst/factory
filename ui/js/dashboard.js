@@ -472,6 +472,8 @@ function byScopeTable(tasks, scopes) {
 /// the first fetch, `null` when it failed -- kept apart so "loading", "not
 /// available" and "nothing waiting" read as three different things.
 let inboxReport;
+let inboxAsked = 0;
+let inboxReceivedAt = 0; // when it arrived, on this browser's clock -- ages grow from there
 
 /// The Inbox is the daemon's attention list (`#106`), every scope, minus
 /// the observations: the same exceptions the Operations tab shows per scope
@@ -480,11 +482,18 @@ let inboxReport;
 /// failure a retry was about to fix and missed a lost standing agent; the
 /// daemon now decides once what needs a person, and both pages read it.
 export async function loadInbox() {
+  // Two refetches can overlap; only the newest one's answer is drawn, or a
+  // slow old read could land last and bring back what was just resolved.
+  const mine = ++inboxAsked;
+  let answer;
   try {
-    inboxReport = (await api("/api/operations")).report;
+    answer = (await api("/api/operations")).report;
   } catch {
-    inboxReport = null;
+    answer = null;
   }
+  if (mine !== inboxAsked) return;
+  inboxReport = answer;
+  inboxReceivedAt = Date.now();
   renderInbox();
 }
 
@@ -496,7 +505,7 @@ export function renderInbox() {
     host.innerHTML = `<div class="err">What needs a person is not available right now.</div>`;
     return;
   }
-  const items = inboxItems(inboxReport, Date.now());
+  const items = inboxItems(inboxReport, (Date.now() - inboxReceivedAt) / 1000);
   if (!items.length) {
     host.innerHTML = `<div class="empty">Nothing waiting on a person right now.</div>`;
     return;

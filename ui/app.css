@@ -1970,8 +1970,10 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
   .ops-row .ops-acts { flex-basis: 100%; padding-left: 17px; }
   .ops-card .stn .nm { flex-basis: 110px; }
   .ops-mults { grid-template-columns: 1fr 1fr; }
-  /* A five-column schedule table does not fit a phone; each row becomes a
-     small card instead of a strip to scroll sideways. */
+}
+/* A six-column schedule table does not fit a narrow screen; each row
+   becomes a small card instead of a strip to scroll sideways. */
+@media (max-width: 720px) {
   .ops-sched thead { display: none; }
   .ops-sched tr { display: block; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
   .ops-sched tr:last-child { border-bottom: 0; }

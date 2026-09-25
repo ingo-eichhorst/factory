@@ -277,9 +277,8 @@ function rerender(route) {
   if (state.tab === "dashboard") { loadDashboard(); return; }
   // The Inbox is every scope's, whatever the rail says -- nothing to redo.
   if (state.tab === "inbox") { renderInbox(); return; }
-  // Attention, flow and aging are narrowed here from what is on hand, but
-  // health is a scoped read (`operations.js`'s header), so a rail change
-  // refetches.
+  // The daemon narrows the report to the selected subtree (`operations.js`'s
+  // header), so a rail change refetches.
   if (state.tab === "operations") { loadOperations(); return; }
   // Everything already in the tail is still there; a scope change only
   // changes how much of it is drawn, the same re-render `renderTasks` does

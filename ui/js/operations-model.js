@@ -101,13 +101,25 @@ export function fmtAge(secs) {
   return `${(s / 86400).toFixed(s < 10 * 86400 ? 1 : 0)}d`;
 }
 
-/// How old something is at `nowMs`, from when it began -- recomputed at each
-/// render rather than trusting the report's `age_s`, which was true when
-/// the daemon answered and goes on getting older on screen.
-export function ageOf(sinceIso, nowMs) {
-  const t = Date.parse(sinceIso);
-  if (!Number.isFinite(t)) return null;
-  return Math.max(0, (nowMs - t) / 1000);
+/// How old something is now: the age the daemon measured on its own clock,
+/// plus how long ago its answer arrived on this one. Never the browser's
+/// clock minus the server's timestamp -- two machines' clocks disagree, and
+/// the difference would show up as age.
+export function ageNow(ageS, elapsedS) {
+  return Math.max(0, (ageS || 0) + Math.max(0, elapsedS || 0));
+}
+
+/// The server's time now, read the same way: when it answered, plus how
+/// long ago that was here. What "since you last looked" is stamped with, so
+/// it compares against run end times on the same clock.
+export function serverNow(generatedAt, elapsedS) {
+  return new Date(Date.parse(generatedAt) + Math.max(0, elapsedS || 0) * 1000).toISOString();
+}
+
+/// Timestamps compared as instants, never as strings: two RFC 3339 texts
+/// with different fractional digits or offsets sort wrongly as text.
+export function later(a, b) {
+  return Date.parse(a) > Date.parse(b);
 }
 
 /// `2026-09-25 11:10 UTC` -- fixed, never the browser's locale, the same
@@ -140,21 +152,20 @@ export function exceptionKey(e) {
   return `${e.kind}|${who}|${e.since}`;
 }
 
-/// The attention queue as the page draws it: narrowed by the rail, ages
-/// recomputed, and sorted the way the daemon sorted it (severity, then
-/// oldest) so a re-render between two fetches does not reshuffle rows.
-/// `inScope` is the rail's predicate; a row with no scope (a signpost)
-/// only shows when nothing is selected, which `inScope(undefined)` says.
-export function attentionRows(report, inScope, nowMs) {
+/// The attention queue as the page draws it: ages carried forward by
+/// `elapsedS` (how long ago the answer arrived), and sorted the way the
+/// daemon sorted it (severity, then oldest) so a re-render between two
+/// fetches does not reshuffle rows. The daemon has already narrowed the
+/// report to the selected scope and its subtree.
+export function attentionRows(report, elapsedS = 0) {
   const list = (report && report.attention) || [];
   return list
-    .filter((e) => (inScope ? inScope(e.scope) : true))
     .map((e) => ({
       ...e,
       key: exceptionKey(e),
       label: kindLabel(e.kind),
       tone: SEVERITY_TONE[e.severity] || "idle",
-      age: ageOf(e.since, nowMs) ?? e.age_s,
+      age: ageNow(e.age_s, elapsedS),
       alsoLabels: (e.also || []).map(kindLabel),
     }))
     .sort((a, b) => (SEVERITY_RANK[b.severity] || 0) - (SEVERITY_RANK[a.severity] || 0) || b.age - a.age || a.key.localeCompare(b.key));
@@ -164,8 +175,8 @@ export function attentionRows(report, inScope, nowMs) {
 /// act on. A triggered signpost is an observation -- something noticed,
 /// not something wrong -- so it stays on the Operations tab and the
 /// Scenarios tab, never in a person's to-do list.
-export function inboxItems(report, nowMs) {
-  return attentionRows(report, null, nowMs).filter((e) => !e.observation);
+export function inboxItems(report, elapsedS = 0) {
+  return attentionRows(report, elapsedS).filter((e) => !e.observation);
 }
 
 // ------------------------------------------------- since you last looked
@@ -176,11 +187,19 @@ export function inboxItems(report, nowMs) {
 
 export const SEEN_KEY = "factory-ops-seen";
 
-/// What to remember when the page stops being looked at.
-export function seenSnapshot(rows, nowMs, previous) {
-  const newest = rows.reduce((m, r) => (r.since > m ? r.since : m), "");
+/// One snapshot per rail selection: a report is the selected subtree's, so
+/// a snapshot taken under one selection and compared under another would
+/// call the other scopes' trouble new or resolved.
+export function seenKey(scope) {
+  return `${SEEN_KEY}:${scope === null || scope === undefined ? "*" : scope}`;
+}
+
+/// What to remember when the page stops being looked at. `at` is the
+/// server's time (`serverNow`), so it compares with run end times.
+export function seenSnapshot(rows, at, previous) {
+  const newest = rows.reduce((m, r) => (!m || later(r.since, m) ? r.since : m), "");
   return {
-    at: new Date(nowMs).toISOString(),
+    at,
     keys: rows.map((r) => r.key),
     // "Nothing needs you." says when the last exception was, and the report
     // cannot: an empty queue carries no dates. So the newest one this
@@ -213,14 +232,14 @@ export function sinceLastLooked(seen, rows, finishedRuns, windowFrom) {
   const now = new Set(rows.map((r) => r.key));
   const fresh = rows.filter((r) => !before.has(r.key)).length;
   const resolved = [...before].filter((k) => !now.has(k)).length;
-  const finished = (finishedRuns || []).filter((r) => r.ended_at > seen.at).length;
+  const finished = (finishedRuns || []).filter((r) => later(r.ended_at, seen.at)).length;
   return {
     first: false,
     at: seen.at,
     fresh,
     resolved,
     finished,
-    beyondWindow: !!(windowFrom && seen.at < windowFrom),
+    beyondWindow: !!(windowFrom && later(windowFrom, seen.at)),
   };
 }
 
@@ -240,7 +259,9 @@ export function actionRequest(action, row, { reason, text } = {}) {
     case "run_now":
       return { path: `/api/tasks/${task}/run`, method: "POST", body: withReason };
     case "cancel":
-      return { path: `/api/tasks/${task}/cancel`, method: "POST", body: withReason };
+      // The attempt the person was shown: a retry that started since is
+      // refused rather than ended (`Request::TaskCancel::run`).
+      return { path: `/api/tasks/${task}/cancel`, method: "POST", body: { ...withReason, ...(row.run_id ? { run_id: row.run_id } : {}) } };
     case "skip_next":
       // The firing the person was shown, so a schedule that moved on in the
       // meantime is refused rather than skipping a slot nobody chose.

@@ -293,12 +293,14 @@ export async function loadJournal() {
       // a schedule paused or resumed, a slot skipped, a run asked for before
       // it existed. Without the second read those never show once the task
       // has run, since a run is always selected then.
+      // `task_only` reads those alone, so a chatty run elsewhere in the
+      // task's journal cannot crowd them out of the newest two hundred.
       const [run, task] = await Promise.all([
         api(`/api/runs/${state.run}/entries?limit=200`),
-        api(`/api/tasks/${state.open}/entries?limit=200`).catch(() => ({ entries: [] })),
+        api(`/api/tasks/${state.open}/entries?limit=200&task_only=true`).catch(() => ({ entries: [] })),
       ]);
       entries = [...run.entries, ...(task.entries || []).filter(e => !e.run_id)]
-        .sort((a, b) => a.at.localeCompare(b.at));
+        .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     } else {
       entries = (await api(`/api/tasks/${state.open}/entries?limit=200`)).entries;
     }

@@ -9,15 +9,12 @@
 //! is still running (Vacanti's Aging WIP), whether the last 7 or 30 days
 //! were healthy, and the schedules. A normal day is almost empty at the top.
 //!
-//! Rail semantics, and why there are two reads. The daemon narrows a report
-//! to one scope by exact name, not to the subtree the rail means everywhere
-//! else. Attention, flow, aging and schedules are per-scope rows the
-//! unscoped report already carries, so they are narrowed here with the
-//! rail's own `inScope` -- a parent scope shows its children's trouble, as
-//! it does on every other tab. Health is a set of window-wide figures that
-//! cannot be added up across scopes afterwards, so with a scope selected it
-//! comes from a second, scoped read and says it covers that scope alone --
-//! the same caveat `production.rs` makes for the dashboard's history cards.
+//! Rail semantics: one read. The daemon narrows the report to the selected
+//! scope and every scope nested under it -- the subtree the rail means on
+//! every other tab, and the one Policy and Scenarios read -- so a parent
+//! scope shows its children's trouble and its health covers them too. The
+//! charts' per-step and per-run detail is asked for (`detail=charts`); the
+//! Inbox reads the same report without it.
 //!
 //! Every action goes through a confirmation in the app's own modal (never
 //! `confirm()`), carries an optional reason -- a required one for an answer
@@ -34,7 +31,6 @@ import {
   MULTIPLES,
   PACES,
   PACE_LABELS,
-  SEEN_KEY,
   STAGES,
   TILES,
   actionConsequence,
@@ -61,7 +57,9 @@ import {
   scatterGeometry,
   scheduleActions,
   scheduleRows,
+  seenKey,
   seenSnapshot,
+  serverNow,
   sinceLastLooked,
   trend,
   utcStamp,
@@ -71,10 +69,10 @@ import {
 //
 // Module-private, like `scenarios.js`: nothing else reads it.
 
-let report = null;       // the unscoped report: attention, flow, aging, schedules
-let health = null;       // the report health is read from -- `report`, or the scoped one
+let report = null;       // the selected subtree's report, with the charts' detail
 let reportError = null;
-let healthError = null;
+let receivedAt = 0;      // when `report` arrived, on this browser's clock
+let reportScope = null;  // the rail selection `report` was asked for
 let asked = 0;
 let windowKey = "7d";    // "7d" | "30d"
 let showScatter = false;
@@ -86,12 +84,18 @@ let showCfd = false;
 let seenBaseline = null;
 let visible = false;
 
-function storageRead() {
-  try { return readSeen(localStorage.getItem(SEEN_KEY)); } catch { return null; }
+function storageRead(scope) {
+  try { return readSeen(localStorage.getItem(seenKey(scope))); } catch { return null; }
 }
 
-function storageWrite(snapshot) {
-  try { localStorage.setItem(SEEN_KEY, JSON.stringify(snapshot)); } catch { /* private window */ }
+function storageWrite(scope, snapshot) {
+  try { localStorage.setItem(seenKey(scope), JSON.stringify(snapshot)); } catch { /* private window */ }
+}
+
+/// Seconds since the report arrived -- what every age on the page adds to
+/// the age the daemon measured.
+function elapsed() {
+  return receivedAt ? (Date.now() - receivedAt) / 1000 : 0;
 }
 
 /// Remember what is on screen as "last looked". Only once a report has
@@ -99,38 +103,37 @@ function storageWrite(snapshot) {
 /// shown nothing, and writing that would read as everything resolved.
 function rememberSeen() {
   if (!report) return;
-  storageWrite(seenSnapshot(currentRows(), Date.now(), storageRead()));
-}
-
-/// Every scope's rows, whatever the rail says: the handover is about the
-/// whole line, and a snapshot taken under one selection and compared under
-/// another would call the other scopes' trouble new.
-function currentRows() {
-  return attentionRows(report, null, Date.now());
+  storageWrite(reportScope, seenSnapshot(attentionRows(report, elapsed()), serverNow(report.generated_at, elapsed()), storageRead(reportScope)));
 }
 
 // ------------------------------------------------------------------ loading
 
 export async function loadOperations() {
   const mine = ++asked;
-  const unscoped = api(`/api/operations?window=${windowKey}`);
-  const scoped = state.scope === null
-    ? null
-    : api(`/api/operations?window=${windowKey}&scope=${encodeURIComponent(state.scope)}`);
-  const [all, one] = await Promise.allSettled([unscoped, scoped || Promise.resolve(null)]);
+  const scope = state.scope;
+  const query = `window=${windowKey}&detail=charts${scope === null ? "" : `&scope=${encodeURIComponent(scope)}`}`;
+  let answer = null;
+  let error = null;
+  try { answer = await api(`/api/operations?${query}`); } catch (e) { error = e.message; }
   if (mine !== asked) return;
-  if (all.status === "fulfilled") { report = all.value.report; reportError = null; }
-  else { report = null; reportError = all.reason.message; }
-  if (state.scope === null) { health = report; healthError = reportError; }
-  else if (one.status === "fulfilled") { health = one.value.report; healthError = null; }
-  else { health = null; healthError = one.reason.message; }
+  // The rail moved to another scope: what was seen under the old one is
+  // that scope's handover, written down before this one is read.
+  if (scope !== reportScope) {
+    if (visible && report) rememberSeen();
+    reportScope = scope;
+    seenBaseline = storageRead(scope);
+  }
+  report = answer ? answer.report : null;
+  reportError = error;
+  receivedAt = Date.now();
   renderOperations();
 }
 
 /// `onShow`: read what this browser saw last, then fetch.
 export function showOperations() {
   visible = true;
-  seenBaseline = storageRead();
+  reportScope = state.scope;
+  seenBaseline = storageRead(reportScope);
   loadOperations();
 }
 
@@ -153,8 +156,8 @@ export function renderOperations() {
     host.innerHTML = reportError ? "" : `<div class="empty">loading…</div>`;
     return;
   }
-  const now = Date.now();
-  const rows = attentionRows(report, inScope, now);
+  const rows = attentionRows(report, elapsed());
+  const focus = focusedKey(host);
   // A live refetch redraws the whole tab; a table twin someone opened stays
   // open across it (the scatter and the CFD keep their own flags, since
   // they are only drawn once opened).
@@ -163,25 +166,26 @@ export function renderOperations() {
     ${sinceStripHtml()}
     ${attentionHtml(rows)}
     ${flowHtml()}
-    ${agingHtml(now)}
+    ${agingHtml()}
     ${healthHtml()}
     ${schedulesHtml()}`;
   for (const s of host.querySelectorAll("details.ops-table > summary")) {
     if (openTables.has(s.textContent)) s.parentElement.open = true;
   }
   wire(host, rows);
+  restoreFocus(host, focus);
 }
 
 // --------------------------------------------------- since you last looked
 
 function sinceStripHtml() {
   const finishedRuns = (report.health && report.health.current.finished_runs) || [];
-  const d = sinceLastLooked(seenBaseline, currentRows(), finishedRuns, report.health && report.health.current.window.from);
+  const d = sinceLastLooked(seenBaseline, attentionRows(report, elapsed()), finishedRuns, report.health && report.health.current.window.from);
   if (d.first) {
     return `<p class="ops-since">First look from this browser -- from the next visit this line says what changed since.</p>`;
   }
   const part = (n, one, many) => `<b>${n}</b> ${n === 1 ? one : many}`;
-  return `<p class="ops-since" title="Every scope, whatever the rail selects. Kept in this browser only; another browser or a private window starts fresh.">
+  return `<p class="ops-since" title="Kept per scope selection, in this browser only; another browser or a private window starts fresh.">
     Since you last looked (${esc(utcStamp(d.at))}): ${part(d.fresh, "new exception", "new exceptions")},
     ${part(d.resolved, "resolved", "resolved")}, ${part(d.finished, "run finished", "runs finished")}${d.beyondWindow ? ` <span class="sub">(finished counts only reach back ${esc(windowKey)})</span>` : ""}.</p>`;
 }
@@ -215,7 +219,7 @@ function attentionRowHtml(r) {
   const open = target === "task"
     ? `data-task="${esc(r.task_id)}"${r.run_id ? ` data-run="${esc(r.run_id)}"` : ""}`
     : target ? `data-href="${esc(target)}"` : "";
-  return `<div class="ops-row" ${open} tabindex="0" role="button" aria-label="${esc(`${r.label}: ${who}`)}">
+  return `<div class="ops-row" data-key="${esc(r.key)}" ${open} tabindex="0" role="button" aria-label="${esc(`${r.label}: ${who}`)}">
     <span class="it-dot" style="background:var(--${r.tone})"></span>
     <div class="ops-main">
       <div class="ops-head"><span class="ops-kind k-${esc(r.severity)}">${esc(r.label)}</span>${flag}
@@ -265,7 +269,7 @@ function figureCell(fig) {
 }
 
 function flowHtml() {
-  const bars = flowBars(report.flow, inScope);
+  const bars = flowBars(report.flow);
   const occ = routeHref(state.scope, "occupancy");
   if (!bars.length) {
     return `<section class="dcard ops-card"><h3>Flow now<span class="r">nothing in flight, queued or retrying</span></h3>
@@ -327,17 +331,17 @@ function agingChartHtml(group, elapsed) {
   </div>`;
 }
 
-function agingHtml(now) {
-  const groups = agingByScope(report.aging, inScope);
-  const elapsed = (now - Date.parse(report.generated_at)) / 1000;
+function agingHtml() {
+  const groups = agingByScope(report.aging);
+  const since = elapsed();
   const legend = PACES.map((p) => `<span><i class="pace-${p}"></i>${esc(PACE_LABELS[p])}</span>`).join("")
     + `<span><i class="pace-none"></i>no pace</span>`;
   const all = groups.flatMap((g) => g.items);
   const table = tableBlock("Aging WIP as a table", ["Task", "Scope", "Stage", "Age", "Pace", "Judged"],
-    all.map((it) => [esc(it.title), esc(it.scope), esc(it.stage), esc(fmtAge(it.age_s + Math.max(0, elapsed))), esc(it.pace ? PACE_LABELS[it.pace] : "—"), esc(basisText(it.basis))]));
+    all.map((it) => [esc(it.title), esc(it.scope), esc(it.stage), esc(fmtAge(it.age_s + since)), esc(it.pace ? PACE_LABELS[it.pace] : "—"), esc(basisText(it.basis))]));
   return `<section class="dcard ops-card">
     <h3>Aging WIP<span class="r">age of work still in progress against past cycle times · log scale</span></h3>
-    ${groups.length ? `<div class="chleg">${legend}</div>${groups.map((g) => agingChartHtml(g, elapsed)).join("")}` : `<div class="empty">Nothing is in progress.</div>`}
+    ${groups.length ? `<div class="chleg">${legend}</div>${groups.map((g) => agingChartHtml(g, since)).join("")}` : `<div class="empty">Nothing is in progress.</div>`}
     ${groups.length ? `<p class="dnote">Dashed lines are the scope's p50, p70, p85 and p95 cycle times. A dot's colour is judged against
       its own task's history when it has five finished runs, else its scope's -- hover a dot to see which. Click one to open its run.</p>` : ""}
     ${table}
@@ -412,25 +416,18 @@ function cfdHtml(cur) {
       <div class="ops-plot" style="height:180px"><svg viewBox="0 0 100 180" preserveAspectRatio="none" role="img"
         aria-label="Cumulative flow: finished, in progress and waiting at the end of each day of the window">${bands}</svg></div></div>
     <div class="ops-xaxis"><span style="left:0;transform:none">${esc(dayLabel(cur.window.from))}</span><span style="left:100%;transform:translateX(-100%)">now</span></div>
-    <p class="dnote">Finished counts from the window's start. Waiting only shows runs that record when they were queued; a task due
-      and not yet dispatched has no run and is not in it.</p>
+    <p class="dnote">Finished counts from the window's start. Waiting is the runs that were queued and not yet started at each day's
+      end, and at the last point, now, the queue itself -- tasks due and not yet dispatched.</p>
     ${table}`;
 }
 
 function healthHtml() {
   const seg = `<span class="seg" id="ops-window">${["7d", "30d"].map((w) => `<button type="button" data-w="${w}" class="${w === windowKey ? "on" : ""}">${w}</button>`).join("")}</span>`;
   const head = `<h3>Process health<span class="r">${esc(windowKey)} against the ${esc(windowKey)} before it</span>${seg}</h3>`;
-  if (!health) {
-    return `<section class="dcard ops-card">${head}<div class="err">${esc(healthError || "Health is not available right now.")}</div></section>`;
-  }
-  const cur = health.health.current;
-  const prev = health.health.previous;
-  const scopeNote = state.scope !== null
-    ? `<p class="dnote">Health covers ${esc(scopeLabel())} itself, not the scopes nested under it -- a window's percentiles and rates
-        cannot be added up across scopes, so the daemon computes them for exactly one.</p>`
-    : "";
-  const since = health.recorded_since
-    ? `<p class="dnote">Queue waits and fail kinds are recorded from ${esc(utcStamp(health.recorded_since))} on; a figure over a window reaching
+  const cur = report.health.current;
+  const prev = report.health.previous;
+  const since = report.recorded_since
+    ? `<p class="dnote">Queue waits and fail kinds are recorded from ${esc(utcStamp(report.recorded_since))} on; a figure over a window reaching
         back before that says so rather than reading the missing runs as zeros.</p>`
     : `<p class="dnote">No run records queue waits or fail kinds yet; those figures read "unknown", never zero.</p>`;
   const kinds = failKindRows(cur);
@@ -441,7 +438,6 @@ function healthHtml() {
     [...MULTIPLES, ...TILES].map((m) => [esc(m.title), esc(figureText(cur[m.fig], m.fmt)), esc(figureText(prev[m.fig], m.fmt))]));
   return `<section class="dcard ops-card">
     ${head}
-    ${scopeNote}
     <div class="ops-mults">${MULTIPLES.map((m) => multipleHtml(m, cur, prev)).join("")}${TILES.map((t) => tileHtml(t, cur, prev)).join("")}</div>
     <div class="chleg"><span><i class="l-cur"></i>this ${esc(windowKey)}</span><span><i class="l-ghost"></i>the ${esc(windowKey)} before</span>
       <span>${cur.finished} finished · ${cur.interventions} intervention${cur.interventions === 1 ? "" : "s"} by a person</span></div>
@@ -457,7 +453,7 @@ function healthHtml() {
 // --------------------------------------------------------------- schedules
 
 function schedulesHtml() {
-  const rows = scheduleRows(report.schedules, inScope);
+  const rows = scheduleRows(report.schedules);
   const nodes = blockedWorkflowNodes([...state.tasks.values()], inScope);
   const body = rows.length ? `<div class="ops-tscroll"><table class="ops-sched">
       <thead><tr><th>Task</th><th>State</th><th>Schedule</th><th>Next</th><th>Last start</th><th></th></tr></thead>
@@ -484,6 +480,29 @@ function schedulesHtml() {
   </section>`;
 }
 
+// ------------------------------------------------------------------ focus
+//
+// A live refetch redraws everything, which would drop keyboard focus onto
+// the page. What had focus is named by stable data attributes -- the
+// exception's key, the action, the run -- and found again afterwards.
+
+const FOCUS_ATTRS = ["key", "act", "run", "task", "bulk", "w"];
+
+function focusedKey(host) {
+  const el = typeof document !== "undefined" ? document.activeElement : null;
+  if (!el || !host.contains || !host.contains(el)) return null;
+  const attrs = FOCUS_ATTRS.filter((a) => el.dataset && el.dataset[a] !== undefined).map((a) => [a, el.dataset[a]]);
+  return attrs.length ? { cls: el.classList[0], attrs } : null;
+}
+
+function restoreFocus(host, focus) {
+  if (!focus) return;
+  const q = (v) => (typeof CSS !== "undefined" && CSS.escape ? CSS.escape(v) : String(v).replace(/["\\]/g, "\\$&"));
+  const selector = `.${focus.cls}` + focus.attrs.map(([a, v]) => `[data-${a}="${q(v)}"]`).join("");
+  const el = host.querySelector && host.querySelector(selector);
+  if (el && el.focus) el.focus({ preventScroll: true });
+}
+
 // ------------------------------------------------------------------ wiring
 
 /// The slot a row's schedule is next due -- what "skip next" names, so the
@@ -498,7 +517,7 @@ function nextSlotOf(taskId) {
 
 function wire(host, rows) {
   const byKey = new Map(rows.map((r) => [r.key, { ...r, next_run_at: r.task_id ? nextSlotOf(r.task_id) : undefined }]));
-  for (const r of scheduleRows(report.schedules, inScope)) byKey.set(`sched|${r.task_id}`, { ...r, key: `sched|${r.task_id}` });
+  for (const r of scheduleRows(report.schedules)) byKey.set(`sched|${r.task_id}`, { ...r, key: `sched|${r.task_id}` });
 
   for (const el of host.querySelectorAll(".ops-row")) {
     const go = () => {
@@ -573,7 +592,10 @@ export function openActionDialog(action, row) {
     </div>`);
   const values = () => ({ reason: $("oa-reason").value, text: needsText ? $("oa-text").value : "" });
   const go = $("oa-confirm");
-  const sync = () => { go.disabled = !actionReady(action, values()); };
+  // While a request is out the button stays off, whatever is typed: an
+  // answer sent twice is typed into the agent's session twice.
+  let inFlight = false;
+  const sync = () => { go.disabled = inFlight || !actionReady(action, values()); };
   for (const id of ["oa-reason", "oa-text"]) { const el = $(id); if (el) el.oninput = sync; }
   sync();
   $("oa-close").onclick = closeModal;
@@ -582,14 +604,17 @@ export function openActionDialog(action, row) {
   go.onclick = async () => {
     const req = actionRequest(action, row, values());
     if (!req) return;
+    if (inFlight) return;
+    inFlight = true;
     $("oa-err").textContent = "";
-    go.disabled = true;
+    sync();
     try {
       await api(req.path, { method: req.method, body: JSON.stringify(req.body) });
       closeModal();
       loadOperations();
     } catch (e) {
       $("oa-err").textContent = e.message;
+      inFlight = false;
       sync();
     }
   };
@@ -622,7 +647,10 @@ function openBulkDialog(preview) {
     </div>`);
   $("ob-close").onclick = closeModal;
   $("ob-cancel").onclick = closeModal;
+  let inFlight = false;
   $("ob-confirm").onclick = async () => {
+    if (inFlight) return;
+    inFlight = true;
     const button = $("ob-confirm");
     button.disabled = true;
     const reason = $("ob-reason").value;

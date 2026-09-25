@@ -9,7 +9,7 @@ import { state } from "../js/core.js";
 // imported, the same requirement `scenarios.test.js` documents.
 const bare = { addEventListener() {}, getElementById: () => null };
 globalThis.document = bare;
-const { loadOperations, showOperations, hideOperations } = await import("../js/operations.js");
+const { loadOperations, showOperations, hideOperations, openActionDialog } = await import("../js/operations.js");
 const { loadInbox } = await import("../js/dashboard.js");
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
@@ -78,7 +78,7 @@ function answering(report, requested) {
   };
 }
 
-test("the tab renders every section from one unscoped read", async () => {
+test("the tab renders every section from one read that asks for the charts", async () => {
   const el = stubPage(["ops", "ops-error", "ops-generated"]);
   const requested = [];
   globalThis.fetch = answering(REPORT, requested);
@@ -86,7 +86,7 @@ test("the tab renders every section from one unscoped read", async () => {
   state.tasks = new Map();
   showOperations();
   await loadOperations();
-  assert.deepEqual([...new Set(requested)], ["/api/operations?window=7d"], "no scope selected: health comes from the same read");
+  assert.deepEqual([...new Set(requested)], ["/api/operations?window=7d&detail=charts"]);
   const html = el.ops.innerHTML;
   for (const heading of ["Needs attention", "Flow now", "Aging WIP", "Process health", "Schedules"]) {
     assert.ok(html.includes(heading), heading);
@@ -101,16 +101,18 @@ test("the tab renders every section from one unscoped read", async () => {
   hideOperations();
 });
 
-test("a selected scope adds a scoped read for health and says what it covers", async () => {
+test("a selected scope is one scoped read: the daemon narrows to its subtree, the page does not", async () => {
   const el = stubPage(["ops", "ops-error", "ops-generated"]);
   const requested = [];
   globalThis.fetch = answering(REPORT, requested);
   state.scope = "alpha";
   state.scopes = [];
   await loadOperations();
-  assert.ok(requested.includes("/api/operations?window=7d"));
-  assert.ok(requested.includes("/api/operations?window=7d&scope=alpha"));
-  assert.match(el.ops.innerHTML, /Health covers alpha itself, not the scopes nested under it/);
+  assert.deepEqual(requested, ["/api/operations?window=7d&detail=charts&scope=alpha"]);
+  // Whatever the daemon answered is drawn -- a gamma row included -- since
+  // the page no longer second-guesses which scopes are under the selection.
+  assert.match(el.ops.innerHTML, /tidy stale branches/);
+  assert.doesNotMatch(el.ops.innerHTML, /not the scopes nested under it/);
   state.scope = null;
 });
 
@@ -164,4 +166,49 @@ test("the Inbox says when there is nothing, and when it could not ask", async ()
   globalThis.fetch = async () => { throw new Error("offline"); };
   await loadInbox();
   assert.match(el.inbox.innerHTML, /not available right now/);
+});
+
+// --------------------------------------------------------------- dialogs
+
+/// Just enough document for `scrim` and the dialog's own fields: every id
+/// the dialog asks for is a stub that remembers its value and handlers.
+function stubDialogPage() {
+  const elements = {};
+  const el = () => ({ value: "", textContent: "", disabled: false, hidden: false, focus() {}, classList: { add() {} } });
+  globalThis.document = {
+    ...bare,
+    body: { appendChild() {} },
+    createElement: () => ({ set innerHTML(_) {}, onclick: null }),
+    querySelectorAll: () => [],
+    getElementById: (id) => (elements[id] ||= el()),
+  };
+  return elements;
+}
+
+test("an answer cannot be sent twice while the first is still on its way", async () => {
+  const el = stubDialogPage();
+  let calls = 0;
+  let fail;
+  globalThis.fetch = () => {
+    calls += 1;
+    return new Promise((_, reject) => { fail = reject; });
+  };
+  openActionDialog("answer", { task_id: "t", run_id: "r1", title: "needs a key", reason: "which key?", actions: ["answer"] });
+  const go = el["oa-confirm"];
+  assert.equal(go.disabled, true, "nothing typed yet");
+  el["oa-text"].value = "use the staging key";
+  el["oa-reason"].value = "it asked";
+  el["oa-reason"].oninput();
+  assert.equal(go.disabled, false);
+
+  const first = go.onclick();
+  go.onclick();
+  el["oa-text"].oninput(); // typing while it is out must not re-arm the button
+  assert.equal(calls, 1, "one request, however often it is pressed");
+  assert.equal(go.disabled, true, "held off while the request is out");
+
+  fail(new Error("run r1 has no session to answer into"));
+  await first;
+  assert.equal(el["oa-err"].textContent, "run r1 has no session to answer into", "the daemon's refusal, in the dialog");
+  assert.equal(go.disabled, false, "a refusal gives the button back");
 });

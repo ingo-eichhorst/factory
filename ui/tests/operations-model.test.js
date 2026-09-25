@@ -28,6 +28,10 @@ import {
   multipleGeometry,
   MULTIPLES,
   readSeen,
+  seenKey,
+  serverNow,
+  ageNow,
+  later,
   scatterGeometry,
   scheduleActions,
   scheduleRows,
@@ -43,35 +47,35 @@ import {
 // runs; the herdr binary pointed at /usr/bin/false so nothing could reach a
 // live session). Trimmed: one exception per kind, three finished runs.
 const REPORT = JSON.parse(readFileSync(new URL("./fixtures/operations-report.json", import.meta.url), "utf8"));
-const NOW = Date.parse(REPORT.generated_at);
 const all = () => true;
 
 // ------------------------------------------------------------ attention
 
-test("attention keeps the daemon's order and recomputes ages from `since`", () => {
-  const rows = attentionRows(REPORT, all, NOW + 60_000);
+test("attention keeps the daemon's order and carries ages forward from when the answer arrived", () => {
+  const rows = attentionRows(REPORT, 60);
   assert.deepEqual(rows.map((r) => r.kind), ["aging", "failed_exhausted", "blocked", "schedule_missed"]);
   const blocked = rows.find((r) => r.kind === "blocked");
-  assert.equal(Math.round(blocked.age), Math.round(blocked.age_s + 60), "a minute older than when the daemon answered");
+  assert.equal(blocked.age, blocked.age_s + 60, "a minute older than when the daemon answered, by the daemon's own clock");
   assert.equal(blocked.tone, "fault");
   assert.equal(rows.find((r) => r.kind === "schedule_missed").tone, "wait");
   assert.equal(blocked.label, "blocked");
 });
 
-test("the rail narrows attention; a row with no scope only shows unfiltered", () => {
-  const inAlpha = (s) => s === "alpha" || s === "beta";
-  assert.ok(attentionRows(REPORT, inAlpha, NOW).every((r) => r.scope === "alpha"));
-  const withSignpost = { attention: [...REPORT.attention, { kind: "triggered_signpost", severity: "low", since: REPORT.generated_at, age_s: 0, reason: "throughput below 3", actions: [], observation: true, title: "slow-year" }] };
-  assert.equal(attentionRows(withSignpost, inAlpha, NOW).some((r) => r.kind === "triggered_signpost"), false);
-  assert.equal(attentionRows(withSignpost, all, NOW).some((r) => r.kind === "triggered_signpost"), true);
+test("ages never read the browser's clock against the server's timestamps", () => {
+  // The same answer, read on a browser whose clock is a day off: nothing
+  // but the elapsed time since arrival moves an age.
+  const rows = attentionRows(REPORT, 0);
+  for (const r of rows) assert.equal(r.age, r.age_s);
+  assert.equal(ageNow(100, -5), 100, "a negative elapsed time (clock stepped back) never makes it younger");
+  assert.equal(serverNow("2026-09-25T12:00:00Z", 90), "2026-09-25T12:01:30.000Z");
 });
 
 test("the Inbox is every exception a person must act on, observations left out", () => {
   const withSignpost = { attention: [...REPORT.attention, { kind: "triggered_signpost", severity: "low", since: REPORT.generated_at, age_s: 0, reason: "r", actions: [], observation: true }] };
-  const items = inboxItems(withSignpost, NOW);
+  const items = inboxItems(withSignpost, 0);
   assert.equal(items.length, REPORT.attention.length);
   assert.ok(items.every((i) => !i.observation));
-  assert.deepEqual(inboxItems(null, NOW), []);
+  assert.deepEqual(inboxItems(null, 0), []);
 });
 
 test("an unknown kind reads as its own id, spaced, not as nothing", () => {
@@ -82,10 +86,14 @@ test("an unknown kind reads as its own id, spaced, not as nothing", () => {
 // ------------------------------------------------- since you last looked
 
 test("since you last looked counts new, resolved and finished against the stored snapshot", () => {
-  const rows = attentionRows(REPORT, all, NOW);
+  const rows = attentionRows(REPORT, 0);
   const earlier = { at: "2026-09-25T12:00:00.000Z", keys: [rows[0].key, "aging|gone-run|2026-09-25T09:00:00Z"], last_exception_at: null };
   const finished = [{ ended_at: "2026-09-25T12:30:00Z" }, { ended_at: "2026-09-25T11:00:00Z" }];
   const d = sinceLastLooked(earlier, rows, finished, REPORT.health.current.window.from);
+  // Compared as instants: a stamp with an offset and no fraction is the
+  // same moment as its Z twin, and text order would say otherwise.
+  assert.equal(sinceLastLooked({ ...earlier, at: "2026-09-25T14:29:59+02:00" }, rows, [{ ended_at: "2026-09-25T12:30:00.5Z" }], null).finished, 1);
+  assert.equal(later("2026-09-25T12:00:00.9Z", "2026-09-25T12:00:00.10Z"), true);
   assert.equal(d.first, false);
   assert.equal(d.fresh, rows.length - 1);
   assert.equal(d.resolved, 1);
@@ -96,16 +104,21 @@ test("since you last looked counts new, resolved and finished against the stored
 });
 
 test("the snapshot remembers the newest exception, and keeps the last one when the queue is empty", () => {
-  const rows = attentionRows(REPORT, all, NOW);
-  const snap = seenSnapshot(rows, NOW, null);
+  const rows = attentionRows(REPORT, 0);
+  const snap = seenSnapshot(rows, REPORT.generated_at, null);
   assert.equal(snap.keys.length, rows.length);
   assert.equal(snap.last_exception_at, "2026-09-25T12:08:15.983734Z");
-  const quiet = seenSnapshot([], NOW + 1000, snap);
+  const quiet = seenSnapshot([], serverNow(REPORT.generated_at, 1), snap);
   assert.equal(quiet.last_exception_at, snap.last_exception_at, "an empty queue carries no dates, so the old one stays");
   assert.deepEqual(readSeen(JSON.stringify(snap)), snap);
   assert.equal(readSeen("not json"), null);
   assert.equal(readSeen(JSON.stringify({ at: 5 })), null);
   assert.equal(readSeen(null), null);
+});
+
+test("each rail selection keeps its own snapshot", () => {
+  assert.equal(seenKey(null), "factory-ops-seen:*");
+  assert.equal(seenKey("alpha"), "factory-ops-seen:alpha");
 });
 
 test("an exception's key is its kind, its subject and when it began", () => {
@@ -119,7 +132,9 @@ test("each action goes to its slice-2 route with the reason in the body", () => 
   const row = { task_id: "t 1", run_id: "r1", next_run_at: "2026-09-26T00:00:00Z" };
   assert.deepEqual(actionRequest("run_again", row, { reason: "  " }), { path: "/api/tasks/t%201/run", method: "POST", body: {} });
   assert.deepEqual(actionRequest("run_now", row, { reason: "ahead" }).body, { reason: "ahead" });
-  assert.deepEqual(actionRequest("cancel", row, { reason: "stuck" }), { path: "/api/tasks/t%201/cancel", method: "POST", body: { reason: "stuck" } });
+  assert.deepEqual(actionRequest("cancel", row, { reason: "stuck" }), { path: "/api/tasks/t%201/cancel", method: "POST", body: { reason: "stuck", run_id: "r1" } },
+    "the attempt the person was shown, so a retry started since is not the one ended");
+  assert.deepEqual(actionRequest("cancel", { task_id: "t" }, {}).body, {});
   assert.deepEqual(actionRequest("skip_next", row, {}), { path: "/api/tasks/t%201/skip-next", method: "POST", body: { slot: "2026-09-26T00:00:00Z" } },
     "the slot the person was shown, so a schedule that moved on is refused");
   assert.deepEqual(actionRequest("skip_next", { task_id: "t" }, { reason: "x" }).body, { reason: "x" });
@@ -137,7 +152,7 @@ test("an answer needs both its text and a reason before it can be confirmed; not
 });
 
 test("a bulk preview lists every row that offers the action, once per task", () => {
-  const rows = attentionRows(REPORT, all, NOW);
+  const rows = attentionRows(REPORT, 0);
   const cancel = bulkPreview(rows, "cancel");
   assert.equal(cancel.count, 2);
   assert.deepEqual(cancel.rows.map((r) => r.title), ["tidy stale branches", "summarise support inbox"]);
