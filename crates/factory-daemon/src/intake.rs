@@ -150,6 +150,12 @@ impl Engine {
                 scope: Some(item.scope.clone()),
                 agent,
                 labels: [(TRIAGE_LABEL.to_string(), item.id.clone())].into_iter().collect(),
+                // Triage reads and changes no file, so a fresh worktree is
+                // pure cost -- and would refuse a scope that is not a git
+                // repository. The one workspace rule this bends, never two
+                // live sessions in one tree, is about writers; a read-only
+                // run beside one is the tolerable case.
+                worktree: Some(false),
                 ..Default::default()
             })
             .await?;
@@ -834,6 +840,7 @@ mod tests {
         assert_eq!(triage.status, TaskStatus::Pending);
         assert_eq!(triage.labels[TRIAGE_LABEL], item.id);
         assert_eq!(triage.scope, "demo");
+        assert!(!triage.worktree, "triage reads; it gets no worktree of its own");
         assert!(triage.instructions.contains(&format!("/bin/factory intake assess {} --file", item.id)));
         let record = engine.require(&item.id).await.unwrap().intake.unwrap();
         assert_eq!(record.stage, IntakeStage::Triaging);
