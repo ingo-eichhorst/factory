@@ -381,6 +381,12 @@ pub enum FindingKind {
     BadOverride,
     /// A `goals:` entry names neither `target` nor `by`.
     NoOpGoalChange,
+    /// A `drivers:` entry names a driver whose own metric
+    /// [`metrics::resolve`] knows but cannot compute yet (a cost driver --
+    /// design §12.6), with a *relative* override -- there is no baseline to
+    /// be relative to. Only `=N`, a pure assumption needing no baseline,
+    /// survives this check.
+    UnavailableDriver,
     /// More scenarios are loaded than the cap the issue sets.
     TooManyScenarios,
     /// A scenario's horizon has passed -- see [`stale_findings`].
@@ -513,19 +519,23 @@ fn validate_scenario(scenario: &Scenario, findings: &mut Vec<Finding>) {
     }
 
     for (driver_id, raw) in &scenario.drivers {
-        if !driver_defs().iter().any(|d| d.id == driver_id) {
+        let def = driver_defs().into_iter().find(|d| d.id == driver_id);
+        if def.is_none() {
             findings.push(finding(
                 FindingKind::UnknownDriver,
                 &subject,
                 format!("driver {driver_id:?} is not one of the built-in drivers"),
             ));
         }
-        match raw {
-            RawOverride::Text(s) => {
-                if let Err(e) = parse_override(s) {
+
+        let parsed = match raw {
+            RawOverride::Text(s) => match parse_override(s) {
+                Ok(ov) => Some(ov),
+                Err(e) => {
                     findings.push(finding(FindingKind::BadOverride, &subject, format!("driver {driver_id:?}: {e}")));
+                    None
                 }
-            }
+            },
             RawOverride::Number(_) => {
                 findings.push(finding(
                     FindingKind::BadOverride,
@@ -536,6 +546,27 @@ fn validate_scenario(scenario: &Scenario, findings: &mut Vec<Finding>) {
                          e.g. \"+5\" or \"=5\""
                     ),
                 ));
+                None
+            }
+        };
+
+        // A driver named §12.6's own unavailable metric (unit_cost,
+        // tokens_per_run) has no baseline to be relative to -- only `=N`, a
+        // pure assumption, can stand alone for it.
+        if let Some(metric_name) = def.and_then(|d| d.metric) {
+            if let Ok(mid) = MetricId::new(metric_name) {
+                if let Err(MetricError::Unavailable { reason, .. }) = metrics::resolve(&mid) {
+                    if !matches!(parsed, Some(Override::Set(_))) {
+                        findings.push(finding(
+                            FindingKind::UnavailableDriver,
+                            &subject,
+                            format!(
+                                "driver {driver_id:?} sources metric {metric_name} which is not available yet: \
+                                 {reason}; only \"=N\" can stand alone as a pure assumption for it"
+                            ),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1145,6 +1176,30 @@ pub fn driver_defs() -> Vec<DriverDef> {
             assumption: true,
             metric: None,
         },
+        // Cost drivers: listed, per the issue, but unavailable -- a Run
+        // records no model, tokens or cost yet (design §12.6), exactly
+        // `metrics::resolve`'s own `unit_cost`/`tokens_per_run` entries.
+        // `assumption: false`, not `true`: these *do* name a registry
+        // metric, unlike `rework_rate`/`capacity_factor` -- they are simply
+        // not computable from it yet. `validate_scenario` refuses a
+        // relative override against either (`FindingKind::UnavailableDriver`);
+        // only `=N`, a pure assumption needing no baseline, survives.
+        DriverDef {
+            id: "unit_cost",
+            title: "Unit cost",
+            description: "Cost per finished unit -- named by the registry but not yet computable (design §12.6).",
+            unit: "ratio",
+            assumption: false,
+            metric: Some("unit_cost"),
+        },
+        DriverDef {
+            id: "tokens_per_run",
+            title: "Tokens per run",
+            description: "Tokens spent per run -- same §12.6 unavailability as `unit_cost`.",
+            unit: "count",
+            assumption: false,
+            metric: Some("tokens_per_run"),
+        },
     ]
 }
 
@@ -1311,6 +1366,24 @@ pub fn tornado(baseline: &BTreeMap<DriverId, f64>, outcome_id: &str, swing: f64)
 pub enum KrShape {
     CountLike,
     Ratio,
+}
+
+impl KrShape {
+    /// Which shape a key result's own metric implies, so a caller does not
+    /// have to duplicate this rule against `crate::metrics`'s registry
+    /// itself. `CountLike` only when [`metrics::resolve`] names the metric
+    /// `Unit::Count` *and* the changed `target` is greater than
+    /// `current_value` (a lower-is-better count, e.g.
+    /// `open_controls.<framework>`, is not a backlog to clear either).
+    /// Everything else -- a ratio metric, or one `metrics::resolve` refuses
+    /// outright -- is `Ratio`, the conservative default: `Ratio` never
+    /// fabricates a probability, while `CountLike` would if picked wrongly.
+    pub fn for_metric(id: &MetricId, current_value: f64, target: f64) -> KrShape {
+        match metrics::resolve(id) {
+            Ok(def) if def.unit == metrics::Unit::Count && target > current_value => KrShape::CountLike,
+            _ => KrShape::Ratio,
+        }
+    }
 }
 
 /// A key result's probability of reaching a changed target by a changed
@@ -1613,14 +1686,22 @@ mod tests {
             ("throughput_week".to_string(), 10.0),
             ("capacity_factor".to_string(), 1.0),
             ("first_pass_yield".to_string(), 1.0),
+            // Not read by `evaluate_outcomes`'s `effective_throughput`
+            // formula at all -- its span must be exactly 0 and sort last,
+            // so the ordering assertion below is actually exercised rather
+            // than trivially true over an all-tied set.
+            ("scrap_rate".to_string(), 0.1),
         ]
         .into_iter()
         .collect();
         let bars = tornado(&baseline, "effective_throughput", 0.2);
-        assert_eq!(bars.len(), 3);
+        assert_eq!(bars.len(), 4);
         for w in bars.windows(2) {
             assert!(w[0].span >= w[1].span, "{bars:?} is not sorted by span descending");
         }
+        assert_eq!(bars.last().unwrap().driver, "scrap_rate");
+        assert_eq!(bars.last().unwrap().span, 0.0);
+
         // throughput_week and first_pass_yield both swing the outcome by the
         // same ±20% off the same baseline (10.0 * 1.0 * 1.0) -- a tie, broken
         // by driver id ascending.
@@ -1628,6 +1709,17 @@ mod tests {
         assert!(tied.contains(&"first_pass_yield") && tied.contains(&"throughput_week"));
         let names: Vec<&str> = bars.iter().map(|b| b.driver.as_str()).collect();
         assert!(names.iter().position(|n| *n == "first_pass_yield") < names.iter().position(|n| *n == "throughput_week"));
+    }
+
+    #[test]
+    fn tornado_skips_a_driver_absent_from_the_outcome_gracefully() {
+        // capacity_factor is a multiplier the formula reads, but a lone
+        // unrelated driver in `baseline` (e.g. an outcome id typo, or a
+        // driver the chosen outcome simply never uses) must not panic --
+        // its span is 0, like scrap_rate's.
+        let baseline: BTreeMap<DriverId, f64> = [("capacity_factor".to_string(), 1.0)].into_iter().collect();
+        let bars = tornado(&baseline, "not_a_real_outcome", 0.2);
+        assert_eq!(bars, vec![TornadoBar { driver: "capacity_factor".to_string(), low_outcome: 0.0, high_outcome: 0.0, span: 0.0 }]);
     }
 
     // -- signposts ---------------------------------------------------------------
@@ -1979,6 +2071,50 @@ mod tests {
         let names: Vec<&str> = scenarios.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"ai-act-2027"));
         assert!(names.contains(&"capacity-drop"));
+        assert_eq!(stale_findings(&scenarios, dt(2026, 9, 25)), Vec::new(), "both examples are anchored in the future of this date");
+    }
+
+    // -- unavailable driver (cost, design §12.6) ------------------------------
+
+    #[test]
+    fn a_relative_override_on_an_unavailable_driver_is_a_finding_but_set_is_not() {
+        let dir = tempdir("unavailable-driver");
+        write(&dir, "s.yaml", "name: s\ntitle: X\ndrivers:\n  unit_cost: \"\u{d7}2\"\n");
+        let (_scenarios, findings) = load(&dir);
+        assert!(findings.iter().any(|f| f.kind == FindingKind::UnavailableDriver), "{findings:?}");
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = tempdir("unavailable-driver-set");
+        write(&dir, "s.yaml", "name: s\ntitle: X\ndrivers:\n  unit_cost: \"=3\"\n");
+        let (_scenarios, findings) = load(&dir);
+        assert!(!findings.iter().any(|f| f.kind == FindingKind::UnavailableDriver), "{findings:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn driver_defs_lists_cost_drivers_as_unavailable_not_assumption() {
+        for id in ["unit_cost", "tokens_per_run"] {
+            let def = driver_defs().into_iter().find(|d| d.id == id).unwrap();
+            assert!(!def.assumption, "{id} has a named metric source, it just isn't computable yet");
+            assert!(def.metric.is_some());
+        }
+    }
+
+    // -- KrShape::for_metric --------------------------------------------------
+
+    #[test]
+    fn kr_shape_for_metric_reads_count_direction_and_defaults_to_ratio() {
+        let goal_tasks_done = MetricId::new("goal_tasks_done.ship-compliant.cra-open-zero").unwrap();
+        assert_eq!(KrShape::for_metric(&goal_tasks_done, 0.0, 5.0), KrShape::CountLike);
+        // Same metric, but the "target" does not grow the count -- not a
+        // backlog to clear.
+        assert_eq!(KrShape::for_metric(&goal_tasks_done, 5.0, 0.0), KrShape::Ratio);
+
+        let compliance = MetricId::new("compliance.cra").unwrap();
+        assert_eq!(KrShape::for_metric(&compliance, 0.2, 1.0), KrShape::Ratio);
+
+        let unknown = MetricId::new("not_a_real_metric").unwrap();
+        assert_eq!(KrShape::for_metric(&unknown, 0.0, 5.0), KrShape::Ratio);
     }
 
     #[test]
