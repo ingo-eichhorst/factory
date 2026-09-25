@@ -482,11 +482,21 @@ mod tests {
         Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()))
     }
 
-    /// A finished run for a fresh task in `root`: `attempt`-th attempt (so a
-    /// second call for the same `label` is the rework signal), `status`,
-    /// ended `ended_ago` before now. Returns the task so a caller can patch
-    /// its own status afterward (`goal_tasks_done`'s own tests).
-    async fn finished_run(engine: &Arc<Engine>, label: &str, status: RunStatus, ended_ago: chrono::Duration) -> factory_core::task::Task {
+    /// A finished run for a fresh task in `root` (or the next attempt of an
+    /// existing one with the same `label` -- the store assigns the attempt
+    /// number), `status`, `trigger`, ended `ended_ago` before now. `trigger`
+    /// is not the rework signal by itself any more than `attempt` is --
+    /// `production.rs`'s `is_rework` also reads the *previous* attempt's own
+    /// status, which a second call with the same `label` supplies for free.
+    /// Returns the task so a caller can patch its own status afterward
+    /// (`goal_tasks_done`'s own tests).
+    async fn finished_run(
+        engine: &Arc<Engine>,
+        label: &str,
+        status: RunStatus,
+        trigger: Trigger,
+        ended_ago: chrono::Duration,
+    ) -> factory_core::task::Task {
         let existing = engine
             .store
             .list(&Default::default())
@@ -510,7 +520,7 @@ mod tests {
             .store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
-                trigger: Trigger::Manual,
+                trigger,
                 agent: "assistant".to_string(),
                 adapter: "shell".to_string(),
                 runtime: "shell".to_string(),
@@ -538,16 +548,24 @@ mod tests {
     #[tokio::test]
     async fn throughput_yield_and_scrap_are_computed_from_real_runs() {
         let engine = test_engine(Vec::new());
-        // One clean finish (done, attempt 1 -- first-pass), one task reworked
-        // then done (attempt 1 done, attempt 2 also done -- attempt 1 is
-        // still first-pass, attempt 2 is reworked but not first-pass since
-        // its own attempt is 2), one scrapped finish (failed, attempt 1 --
-        // not first-pass, never reached done) -- four finished runs total,
-        // two first-pass, one reworked, one scrapped.
-        finished_run(&engine, "clean", RunStatus::Done, chrono::Duration::hours(1)).await;
-        finished_run(&engine, "reworked", RunStatus::Done, chrono::Duration::hours(2)).await;
-        finished_run(&engine, "reworked", RunStatus::Done, chrono::Duration::hours(1)).await;
-        finished_run(&engine, "scrapped", RunStatus::Failed, chrono::Duration::hours(1)).await;
+        // "clean": done, attempt 1, no predecessor -- first-pass.
+        // "retried": attempt 1 failed (scrapped, not first-pass), attempt 2
+        // done -- its predecessor failed, so it is rework, not first-pass.
+        // "requeued": attempt 1 done (first-pass), attempt 2 also done --
+        // its predecessor already finished `done`, so re-running it is new
+        // work, not rework, and attempt 2 is first-pass too (the bug this
+        // module's `production.rs` counterpart exists to fix: a task run
+        // again after succeeding is not a correction just because its own
+        // `attempt` climbed).
+        // "scrapped": failed, attempt 1, no predecessor -- scrapped only.
+        // Six finished runs total: three first-pass, one reworked, two
+        // scrapped.
+        finished_run(&engine, "clean", RunStatus::Done, Trigger::Manual, chrono::Duration::hours(1)).await;
+        finished_run(&engine, "retried", RunStatus::Failed, Trigger::Manual, chrono::Duration::hours(3)).await;
+        finished_run(&engine, "retried", RunStatus::Done, Trigger::Manual, chrono::Duration::hours(2)).await;
+        finished_run(&engine, "requeued", RunStatus::Done, Trigger::Manual, chrono::Duration::hours(3)).await;
+        finished_run(&engine, "requeued", RunStatus::Done, Trigger::Manual, chrono::Duration::hours(1)).await;
+        finished_run(&engine, "scrapped", RunStatus::Failed, Trigger::Manual, chrono::Duration::hours(1)).await;
 
         let now = Utc::now();
         let ids = vec![
@@ -558,9 +576,9 @@ mod tests {
         let computed = engine.metrics(&ids, now).await.unwrap();
 
         let get = |id: &str| computed.values.iter().find(|v| v.id.as_str() == id).unwrap().clone();
-        assert_eq!(get("throughput_week").value, Some(4.0), "four finished runs in the trailing week");
-        assert_eq!(get("first_pass_yield").value, Some(2.0 / 4.0), "two of four finished runs were done on attempt 1");
-        assert_eq!(get("scrap_rate").value, Some(1.0 / 4.0), "one of four finished was scrapped");
+        assert_eq!(get("throughput_week").value, Some(6.0), "six finished runs in the trailing week");
+        assert_eq!(get("first_pass_yield").value, Some(3.0 / 6.0), "clean and both of requeued's runs are first-pass");
+        assert_eq!(get("scrap_rate").value, Some(2.0 / 6.0), "retried's own first attempt and scrapped were both scrap");
 
         // The series' own last point always equals the metric's value.
         for id in ["throughput_week", "first_pass_yield", "scrap_rate"] {
@@ -578,7 +596,7 @@ mod tests {
         // fact is `0.0` (nothing ever succeeded on the first try either).
         let engine = test_engine(Vec::new());
         for i in 0..5 {
-            finished_run(&engine, &format!("scrapped-{i}"), RunStatus::Failed, chrono::Duration::hours(1)).await;
+            finished_run(&engine, &format!("scrapped-{i}"), RunStatus::Failed, Trigger::Manual, chrono::Duration::hours(1)).await;
         }
         let now = Utc::now();
         let computed = engine.metrics(&[MetricId::new("first_pass_yield").unwrap()], now).await.unwrap();
@@ -587,16 +605,62 @@ mod tests {
 
     #[tokio::test]
     async fn a_task_reworked_then_done_does_not_count_as_first_pass() {
-        // Attempt 1 fails, attempt 2 (the same task) succeeds: the run that
-        // actually ended `done` is not first-pass, because it is not
-        // attempt 1 -- `first_pass_yield` must not credit a task for
-        // succeeding only after being retried.
+        // Attempt 1 fails, attempt 2 (a manual re-run of the same task)
+        // succeeds: the run that actually ended `done` is not first-pass,
+        // because it re-runs a run that failed -- `first_pass_yield` must
+        // not credit a task for succeeding only after being retried.
         let engine = test_engine(Vec::new());
-        finished_run(&engine, "retried", RunStatus::Failed, chrono::Duration::hours(2)).await;
-        finished_run(&engine, "retried", RunStatus::Done, chrono::Duration::hours(1)).await;
+        finished_run(&engine, "retried", RunStatus::Failed, Trigger::Manual, chrono::Duration::hours(2)).await;
+        finished_run(&engine, "retried", RunStatus::Done, Trigger::Manual, chrono::Duration::hours(1)).await;
         let now = Utc::now();
         let computed = engine.metrics(&[MetricId::new("first_pass_yield").unwrap()], now).await.unwrap();
-        assert_eq!(computed.values[0].value, Some(0.0), "two finished runs, neither of them a done attempt 1");
+        assert_eq!(computed.values[0].value, Some(0.0), "two finished runs, neither of them not-rework and done");
+    }
+
+    #[tokio::test]
+    async fn a_task_rerun_after_done_counts_as_first_pass_both_times() {
+        // The bug `is_rework` (production.rs) exists to fix: re-running a
+        // task whose previous run already finished `done` is new work on a
+        // standing task, not a correction, however much `attempt` climbs --
+        // unlike a retried, previously-failed task, both runs are first-pass.
+        let engine = test_engine(Vec::new());
+        finished_run(&engine, "requeued", RunStatus::Done, Trigger::Manual, chrono::Duration::hours(2)).await;
+        finished_run(&engine, "requeued", RunStatus::Done, Trigger::Manual, chrono::Duration::hours(1)).await;
+        let now = Utc::now();
+        let computed = engine.metrics(&[MetricId::new("first_pass_yield").unwrap()], now).await.unwrap();
+        assert_eq!(computed.values[0].value, Some(1.0), "neither run re-attempts a failure, so both are first-pass");
+    }
+
+    #[tokio::test]
+    async fn a_retry_triggered_run_is_rework_regardless_of_the_previous_runs_status() {
+        // `Trigger::Retry` is the daemon's own automatic retry of a run that
+        // just failed (`scheduler.rs`'s `resume_from_retry`) -- always
+        // rework, the same as a manual re-run after a failure, without
+        // needing this test to construct a failed predecessor at all.
+        let engine = test_engine(Vec::new());
+        finished_run(&engine, "auto-retried", RunStatus::Done, Trigger::Retry, chrono::Duration::hours(1)).await;
+        let now = Utc::now();
+        let computed = engine.metrics(&[MetricId::new("first_pass_yield").unwrap()], now).await.unwrap();
+        assert_eq!(computed.values[0].value, Some(0.0), "done but rework, so not first-pass");
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_tasks_repeated_firings_are_never_rework() {
+        // The bug this whole change exists to fix: a task fired on a
+        // schedule racks up `attempt`s the same as any other task, but none
+        // of its firings are rework -- see `production.rs`'s module doc
+        // comment. Ten done, scheduled firings of the same task: all ten are
+        // first-pass, none are reworked.
+        let engine = test_engine(Vec::new());
+        for i in 0..10 {
+            finished_run(&engine, "scheduled", RunStatus::Done, Trigger::Schedule, chrono::Duration::minutes(30 * (10 - i))).await;
+        }
+        let now = Utc::now();
+        let ids = vec![MetricId::new("throughput_week").unwrap(), MetricId::new("first_pass_yield").unwrap()];
+        let computed = engine.metrics(&ids, now).await.unwrap();
+        let get = |id: &str| computed.values.iter().find(|v| v.id.as_str() == id).unwrap().clone();
+        assert_eq!(get("throughput_week").value, Some(10.0));
+        assert_eq!(get("first_pass_yield").value, Some(1.0), "every scheduled firing is first-pass, none reworked");
     }
 
     #[tokio::test]

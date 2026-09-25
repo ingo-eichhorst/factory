@@ -31,7 +31,7 @@ import { routeHref } from "./scopes.js";
 /// are wins; higher scrap, rework and cost are not.
 export const DRIVER_DEFS = [
   { id: "throughput_week", title: "Throughput per week", description: "Finished runs in the trailing 7 days.", unit: "per_week", assumption: false, metric: "throughput_week", better: "higher" },
-  { id: "first_pass_yield", title: "First-pass yield", description: "1 minus reworked/finished, trailing 28 days.", unit: "ratio", assumption: false, metric: "first_pass_yield", better: "higher" },
+  { id: "first_pass_yield", title: "First-pass yield", description: "Finished runs that ended done without being rework, over finished, trailing 28 days.", unit: "ratio", assumption: false, metric: "first_pass_yield", better: "higher" },
   { id: "scrap_rate", title: "Scrap rate", description: "scrapped/finished, trailing 28 days.", unit: "ratio", assumption: false, metric: "scrap_rate", better: "lower" },
   { id: "rework_rate", title: "Rework rate", description: "No registry metric backs this directly -- a deliberately separate, author-supplied assumption.", unit: "ratio", assumption: true, metric: null, better: "lower" },
   { id: "capacity_factor", title: "Capacity factor", description: "A multiplier on effective throughput with no data source -- a person's own what-if.", unit: "multiplier", assumption: true, metric: null, better: "higher" },

@@ -1608,15 +1608,20 @@ pub struct ProductionBucket {
     pub to: chrono::DateTime<chrono::Utc>,
     pub finished: u32,
     pub scrapped: u32,
+    /// A finished run that re-attempts work that did not succeed. Not
+    /// `attempt > 1`: a scheduled task's every firing bumps its own
+    /// `attempt`, so that alone would count a healthy recurring task as
+    /// almost entirely rework -- see `production.rs`'s `is_rework` for the
+    /// real signal (`Run::trigger`, and the previous attempt's own outcome).
     pub reworked: u32,
-    /// A finished run that ended `done` on its first attempt -- the count
-    /// `first_pass_yield` (`first_pass / finished`) is read from. Not the
-    /// complement of `reworked`: `reworked` counts every finished run whose
-    /// own `attempt > 1` regardless of its outcome, so a task scrapped on
-    /// attempt 1 and never retried is neither reworked nor first-pass, and a
-    /// task scrapped on every attempt has `first_pass: 0` however many times
-    /// it was retried -- see `production.rs`'s module doc comment for why
-    /// `1 - reworked/finished` was the wrong formula.
+    /// A finished run that ended `done` and was not itself rework -- the
+    /// count `first_pass_yield` (`first_pass / finished`) is read from. Not
+    /// `attempt == 1`: a scheduled task's hundredth firing, done clean, is
+    /// exactly as much a first pass as its first ever firing, since
+    /// `attempt` counts occurrences of standing work, not correction
+    /// attempts -- see `production.rs`'s module doc comment for what
+    /// `reworked` means and why `1 - reworked/finished` was the wrong
+    /// formula.
     #[serde(default)]
     pub first_pass: u32,
     /// True when `to - from` falls short of the bin's nominal width. Decided

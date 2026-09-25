@@ -1186,8 +1186,9 @@ pub fn driver_defs() -> Vec<DriverDef> {
         DriverDef {
             id: "first_pass_yield",
             title: "First-pass yield",
-            description: "Finished runs that ended done on attempt 1, over finished, over the trailing 28 days \
-                           -- the same registry metric of the same name.",
+            description: "Finished runs that ended done without being rework, over finished, over the trailing \
+                           28 days -- the same registry metric of the same name. Not attempt 1: a scheduled \
+                           task's tenth firing, done clean, is as much a first pass as its first.",
             unit: "ratio",
             assumption: false,
             metric: Some("first_pass_yield"),
@@ -1204,7 +1205,8 @@ pub fn driver_defs() -> Vec<DriverDef> {
             id: "rework_rate",
             title: "Rework rate",
             description: "No registry metric backs this one directly: `first_pass_yield` is `first_pass/finished` \
-                           (done on attempt 1), a different count from `reworked` (attempt > 1, any outcome), so \
+                           (done and not rework), a different count from `reworked` (a re-attempt of work that \
+                           did not succeed -- see `production.rs`'s `is_rework`, not `attempt > 1`), so \
                            `rework_rate` is a deliberately separate, author-supplied assumption rather than a \
                            computation off either -- never confused with a registry-derived number.",
             unit: "ratio",
