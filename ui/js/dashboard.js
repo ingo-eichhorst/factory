@@ -46,6 +46,7 @@ import { inScope, routeHref, scopeLabel } from "./scopes.js";
 import { fmtAge, inboxItems } from "./operations-model.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
+import { hasFailed } from "./task-model.js";
 import { notStarted } from "./pending-model.js";
 
 /// The three presets the window selector offers. `bin` travels with every
@@ -467,8 +468,10 @@ function byScopeTable(tasks, scopes) {
   if (!scopes.length) return `<div class="empty">No scopes declared.</div>`;
   const rows = scopes.map((s) => {
     const ts = tasks.filter((t) => t.scope === s.name);
-    const active = ts.filter((t) => t.status === "running" || t.status === "dispatching" || t.status === "verifying" || t.status === "blocked").length;
-    const failed = ts.filter((t) => t.status === "failed").length;
+    // A task blocked by a failure is not active work: it counts as failed.
+    const active = ts.filter((t) => (t.status === "running" || t.status === "dispatching" || t.status === "verifying" || t.status === "blocked") && !hasFailed(t)).length;
+    // Blocked by a failure since #122; a legacy `failed` row counts too.
+    const failed = ts.filter(hasFailed).length;
     return `<tr>
       <td><div class="title">${esc(s.name)}</div><div class="sub">${esc(s.path)}</div></td>
       <td class="sub">${s.agents.length}</td>

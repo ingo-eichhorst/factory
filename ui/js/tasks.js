@@ -10,6 +10,7 @@ import { scheduleLabel } from "./schedule.js";
 import { describeWorkflowOrigin } from "./workflows.js";
 import { entryKindLabel, entryTone } from "./operations-model.js";
 import { runUsageView, taskUsageLine } from "./usage-model.js";
+import { columnFor, standing, taskActions, isSettled, CLOSE_REASONS, closeBody } from "./task-model.js";
 import { notStartedNote } from "./pending-model.js";
 
 export { scheduleLabel };
@@ -52,12 +53,14 @@ export function pausedTag(t) {
 }
 
 // -------------------------------------------------------------- the board
-// Columns are `TaskStatus` and nothing else. Blocked is first because it is
-// the one column a person has to act on; pending splits by how it will
-// start, so a scheduled task never sits in the same pile as a manual one;
-// dispatching and running share a column because a session still opening is
-// not yet work; done, failed and cancelled share a closed column, but each
-// card says its outcome plainly so a failure cannot read as done.
+// Columns are `TaskStatus` and nothing else (`task-model.js`'s `columnFor`).
+// Blocked is first because it is the one column a person has to act on, and
+// a failure goes there (#122): its card says the fail kind and the last
+// error, so it reads differently from an agent waiting on a question.
+// Pending splits by how it will start, so a scheduled task never sits in the
+// same pile as a manual one; dispatching and running share a column because
+// a session still opening is not yet work. Closed holds only what was done
+// or deliberately closed, and each card there says its reason.
 const KANBAN_COLUMNS = [
   { key: "blocked", label: "Blocked" },
   // Manual means nothing will start it: there is no queue (`#124`).
@@ -67,13 +70,22 @@ const KANBAN_COLUMNS = [
   { key: "closed", label: "Closed" },
 ];
 
-function columnFor(t) {
-  if (t.status === "blocked") return "blocked";
-  if (t.status === "pending") return t.schedule ? "scheduled" : "manual";
-  // `verifying` is still in progress: the agent said done and the daemon is
-  // running the steps its control plan requires (`#118`).
-  if (t.status === "dispatching" || t.status === "running" || t.status === "verifying") return "active";
-  return "closed";
+/// Why a task is where it is, when its status alone does not say (#122):
+/// the failure it is blocked on and its last error, a retry in flight, or
+/// how it was closed. Empty when there is nothing to add.
+export function standingHtml(t, { full = false } = {}) {
+  const s = standing(t);
+  if (!s) return "";
+  const detail = standingDetail(s.detail, full);
+  const sub = detail ? `<div class="sub">${esc(detail)}</div>` : "";
+  return `<div class="standing st-${esc(s.tone)}">${esc(s.text)}${sub}</div>`;
+}
+
+/// The standing line's detail: all of it in the modal, its first line
+/// (cut to 140 characters) on a card.
+function standingDetail(detail, full) {
+  if (!detail) return "";
+  return full ? detail : detail.split("\n")[0].slice(0, 140);
 }
 
 /// Only what `/api/tasks` already serves: title, short id, status, scope,
@@ -83,7 +95,7 @@ function taskCard(t) {
   const bits = [];
   bits.push(t.schedule ? scheduleLabel(t.schedule) : (t.runs ? `${t.runs} run${t.runs === 1 ? "" : "s"}` : "no runs yet"));
   if (t.estimate_seconds) bits.push(`est. ${shortSpan(t.estimate_seconds)}`);
-  if (!TERMINAL.includes(t.status) && t.status !== "pending" && t.last_run_at) bits.push(since(t.last_run_at));
+  if (!isSettled(t) && t.status !== "pending" && t.last_run_at) bits.push(since(t.last_run_at));
   const wt = t.worktree ? ` <span class="tag" title="runs in a git worktree of its own">worktree</span>` : "";
   return `
     <div class="kbc" data-id="${esc(t.id)}">
@@ -91,6 +103,7 @@ function taskCard(t) {
       <div class="title">${esc(t.title)}</div>
       <div class="sub">${esc(t.scope)} · ${esc(t.agent)}${wt}</div>
       <div class="sub">${esc(bits.join(" · "))}${pausedTag(t)}</div>
+      ${standingHtml(t)}
     </div>`;
 }
 
@@ -127,7 +140,7 @@ export function renderTasks() {
     <tr class="row" data-id="${esc(t.id)}">
       <td><div class="title">${esc(t.title)}</div>
           <div class="sub">${esc(scheduleLabel(t.schedule))}${pausedTag(t)}</div></td>
-      <td>${statusBadge(t.status)}</td>
+      <td>${statusBadge(t.status)}${standingHtml(t)}</td>
       <td class="sub">${t.runs || 0}</td>
       <td class="sub">${esc(t.scope)}</td>
       <td class="sub">${esc(t.agent)}${t.worktree ? ` <span class="tag" title="runs in a git worktree of its own">worktree</span>` : ""}</td>
@@ -160,8 +173,24 @@ export async function openTask(id, runId) {
       <div class="row-btns">
         <button class="btn" id="m-run">Run</button>
         <button class="btn" id="m-cancel">Cancel</button>
+        <button class="btn" id="m-close-task">Close…</button>
+        <button class="btn" id="m-reopen">Reopen</button>
         <button class="btn" id="m-edit">Edit</button>
         <button class="btn danger" id="m-delete">Delete</button>
+      </div>
+      <div class="close-form" id="m-close-form" hidden>
+        <div class="grid2">
+          <div><label for="m-close-reason">Close as</label>
+            <select id="m-close-reason">${CLOSE_REASONS.map(r => `<option value="${r.key}">${esc(r.label)}</option>`).join("")}</select></div>
+          <div id="m-dup-wrap" hidden><label for="m-close-dup">Duplicate of</label>
+            <input id="m-close-dup" placeholder="task id"></div>
+        </div>
+        <label for="m-close-note">Note</label>
+        <input id="m-close-note" placeholder="why, in a few words (journaled with your name)">
+        <div class="row-btns">
+          <button class="btn primary" id="m-close-go">Close task</button>
+          <button class="btn" id="m-close-back">Never mind</button>
+        </div>
       </div>
       <div class="err" id="m-err"></div>
       <div id="m-meta"></div>
@@ -175,6 +204,14 @@ export async function openTask(id, runId) {
   $("m-close").onclick = closeModal;
   $("m-run").onclick = () => act(`/api/tasks/${state.open}/run`);
   $("m-cancel").onclick = () => act(`/api/tasks/${state.open}/cancel`);
+  $("m-close-task").onclick = () => { $("m-close-form").hidden = false; $("m-close-reason").focus(); };
+  $("m-close-back").onclick = () => { $("m-close-form").hidden = true; };
+  $("m-close-reason").onchange = () => { $("m-dup-wrap").hidden = $("m-close-reason").value !== "duplicate"; };
+  $("m-close-go").onclick = async () => {
+    const body = closeBody($("m-close-reason").value, $("m-close-dup").value, $("m-close-note").value);
+    if (await act(`/api/tasks/${state.open}/close`, "POST", body)) $("m-close-form").hidden = true;
+  };
+  $("m-reopen").onclick = () => act(`/api/tasks/${state.open}/reopen`);
   $("m-edit").onclick = () => { const task = state.tasks.get(state.open); if (task) openEdit(task); };
   $("m-delete").onclick = () => act(`/api/tasks/${state.open}`, "DELETE");
   wireTerminal();
@@ -191,10 +228,17 @@ export async function openTask(id, runId) {
 /// A standing agent's own window: what its terminal shows, and a way to answer
 /// it. This is what makes a trust dialog or a login something you can get past
 
-export async function act(path, method = "POST") {
+/// One of the modal's actions. `true` when the daemon took it.
+export async function act(path, method, body) {
+  method = method || "POST";
   $("m-err").textContent = "";
-  try { await api(path, { method }); }
-  catch (e) { $("m-err").textContent = e.message; }
+  try {
+    await api(path, body === undefined ? { method } : { method, body: JSON.stringify(body) });
+    return true;
+  } catch (e) {
+    $("m-err").textContent = e.message;
+    return false;
+  }
 }
 
 export async function loadRuns() {
@@ -245,8 +289,12 @@ export function renderModal() {
   $("m-id").textContent = t.id;
 
   const active = state.runs.find(r => !TERMINAL.includes(r.status));
-  $("m-run").disabled = !!active;
-  $("m-cancel").disabled = !active;
+  const can = taskActions(t, active);
+  $("m-run").disabled = !can.run;
+  $("m-cancel").disabled = !can.cancel;
+  $("m-close-task").hidden = !can.close;
+  $("m-reopen").hidden = !can.reopen;
+  if (!can.close) $("m-close-form").hidden = true;
 
   let meta = `<div class="sub">${esc(t.scope)} · ${esc(t.agent)} on ${esc(t.runtime)} · ${esc(scheduleLabel(t.schedule))}${pausedTag(t)}`;
   if (t.next_run_at && !t.schedule_paused) meta += ` · next ${new Date(t.next_run_at).toLocaleString()}`;
@@ -256,6 +304,7 @@ export function renderModal() {
   if (t.worktree) meta += ` · own worktree`;
   if (t.knowledge_hints) meta += ` · knowledge hints`;
   meta += `</div>`;
+  meta += standingHtml(t, { full: true });
   if (t.workflow_origin) {
     // R9: this task's provenance, when a workflow spawned it -- linking
     // back to the run that did, falling back to bare ids if that

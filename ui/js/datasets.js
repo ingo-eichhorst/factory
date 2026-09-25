@@ -303,7 +303,8 @@ function openAddCaseForm(datasetName) {
   $("ac-id").focus();
 }
 
-const TASK_STATUSES = ["pending", "dispatching", "running", "blocked", "verifying", "done", "failed", "cancelled"];
+// No `failed`: a task whose run failed is `blocked` on it since #122.
+const TASK_STATUSES = ["pending", "dispatching", "running", "blocked", "verifying", "done", "cancelled"];
 
 function openFromTasksPicker(datasetName) {
   dropModal();

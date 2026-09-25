@@ -22,8 +22,8 @@ use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
 use factory_core::run::{BlockSource, FailKind, NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
-    NewTask, PendingRetry, RetryPolicy, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
-    WorkflowOrigin,
+    NewTask, PendingRetry, RetryPolicy, Task, TaskEntry, TaskFailure, TaskFilter, TaskPatch, TaskReport,
+    TaskStatus, WorkflowOrigin,
 };
 use factory_plugins::registry::Registry;
 use std::path::{Path, PathBuf};
@@ -980,6 +980,20 @@ impl Engine {
                 self.sync_workflow_for_task(&id).await;
                 self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
+            }
+            Request::TaskClose { id, reason, duplicate_of, note } => {
+                let asked = crate::operations::Asked::new(caller, note);
+                let task = self.close_task(&id, reason, duplicate_of, &asked).await?;
+                self.sync_workflow_for_task(&id).await;
+                self.sync_bench_for_task(&id).await;
+                Ok(Payload::Task { task })
+            }
+            Request::TaskReopen { id, reason } => {
+                let asked = crate::operations::Asked::new(caller, reason);
+                let task = self.reopen_task(&id, &asked).await?;
+                self.sync_workflow_for_task(&id).await;
+                self.sync_bench_for_task(&id).await;
+                Ok(Payload::Task { task })
             }
             Request::TaskReport { id, report } => {
                 let run = self.report(&id, report).await?;
@@ -2083,17 +2097,30 @@ impl Engine {
                         TaskEntry::new("daemon", "failed", format!("dispatch failed: {e}")),
                     )
                     .await;
+                    // Refused before any run existed, so there is no run
+                    // to mirror: the task is blocked on the failure itself
+                    // (`#122`), exactly as if a run had failed to dispatch.
                     let _ = self
                         .store
                         .update(
                             task_id,
                             &TaskPatch {
-                                status: Some(TaskStatus::Failed),
+                                status: Some(TaskStatus::Blocked),
                                 error: Some(e.to_string()),
+                                clear_result: true,
+                                failure: Some(TaskFailure {
+                                    kind: Some(FailKind::DispatchFailed),
+                                    run_id: None,
+                                    attempt: None,
+                                    at: Utc::now(),
+                                }),
+                                clear_closure: true,
+                                clear_pending_retry: true,
                                 ..Default::default()
                             },
                         )
                         .await;
+                    self.publish_task(task_id).await;
                 }
                 self.record_workflow_task_state(task_id).await;
                 self.record_bench_task_state(task_id).await;
@@ -2691,8 +2718,8 @@ impl Engine {
 
     /// After the task's mirror is updated, decide what a scheduled task's
     /// retry state should be. Only a task with a `schedule` retries at all --
-    /// a one-off task that fails just stays failed, exactly as before this
-    /// existed.
+    /// a one-off task that fails is left blocked on the failure by
+    /// `mirror_to_task` (`#122`), and nothing here touches it.
     ///
     /// A run that finished by succeeding or by being cancelled ends any
     /// retry streak in progress: `pending_retry` is the mirror `AGENTS.md`
@@ -2753,20 +2780,12 @@ impl Engine {
                     // `mirror_to_task` deliberately left this task without a
                     // "what happens next" line -- see its own comment on why
                     // it stays silent for a `Failed` recurring task -- and
-                    // this is the one place that knows the answer is "just
-                    // its next regular firing".
-                    None => {
-                        self.entry(
-                            &task.id,
-                            TaskEntry::new(
-                                "daemon",
-                                "rearmed",
-                                "recurring task is pending again, waiting for its next turn",
-                            ),
-                        )
-                        .await;
-                    }
+                    // this is the one place that knows the answer: nothing
+                    // will try again before its next regular firing.
+                    None => {}
                 }
+                self.block_on_failure(&task.id, &format!("attempt {} failed and the retry policy is `none`", run.attempt))
+                    .await;
                 return;
             }
             RetryPolicy::Backoff { max_attempts, backoff_seconds } => (max_attempts, backoff_seconds),
@@ -2788,15 +2807,12 @@ impl Engine {
         let attempts = task.pending_retry.as_ref().map(|p| p.attempts).unwrap_or(0) + 1;
 
         if attempts > max_attempts {
-            self.end_retry_streak(
-                task,
-                resume_at,
-                &format!(
-                    "retries exhausted after {max_attempts} attempt{}",
-                    if max_attempts == 1 { "" } else { "s" }
-                ),
-            )
-            .await;
+            let why = format!(
+                "retries exhausted after {max_attempts} attempt{}",
+                if max_attempts == 1 { "" } else { "s" }
+            );
+            self.end_retry_streak(task, resume_at, &why).await;
+            self.block_on_failure(&task.id, &why).await;
             return;
         }
 
@@ -2818,7 +2834,10 @@ impl Engine {
         )
         .await;
 
+        // Back to `Pending` from the block `mirror_to_task` left it in: a
+        // retry is coming, and the task shows that it is retrying.
         let patch = TaskPatch {
+            status: Some(TaskStatus::Pending),
             next_run_at: Some(retry_at),
             pending_retry: Some(PendingRetry { attempts, resume_at }),
             ..Default::default()
@@ -2875,7 +2894,13 @@ impl Engine {
             .and_then(|t| t.schedule)
             .is_some();
 
-        let status = if run.status.is_terminal() && recurring {
+        // A failed run blocks its task, recurring or not (`#122`). For a
+        // recurring one that is the safe side of what `settle_retry` --
+        // which `finish_run` calls right after this -- decides next: a
+        // queued retry puts it back to `Pending` (`queue_or_end_retry`), and
+        // anything else leaves it blocked. A crash in between leaves it
+        // blocked, never in Scheduled looking healthy.
+        let status = if run.status.is_terminal() && recurring && run.status != RunStatus::Failed {
             TaskStatus::Pending
         } else {
             run.status.as_task_status()
@@ -2903,18 +2928,45 @@ impl Engine {
 
         // The task mirrors the newest run, not the union of every run: an
         // attempt that succeeded must not leave the previous one's error
-        // standing next to its own result.
+        // standing next to its own result -- nor its failure, nor a close
+        // record from before it ran (`#122`).
+        let failed = run.status == RunStatus::Failed;
         let patch = TaskPatch {
             status: Some(status),
             result: run.result.clone(),
             clear_result: run.result.is_none(),
             error: run.error.clone(),
             clear_error: run.error.is_none(),
+            failure: failed.then(|| TaskFailure {
+                kind: run.fail_kind,
+                run_id: Some(run.id.clone()),
+                attempt: Some(run.attempt),
+                at: run.ended_at.unwrap_or_else(Utc::now),
+            }),
+            clear_failure: !failed,
+            clear_closure: true,
             ..Default::default()
         };
         if let Ok(task) = self.store.update(&run.task_id, &patch).await {
             self.bus.publish(Event::TaskUpdated { task });
         }
+    }
+
+    /// A scheduled task whose failure nothing will retry stays blocked on it
+    /// (`#122`) -- `mirror_to_task` already put it there -- and this says
+    /// so. Its schedule keeps firing: the intent still stands, and the next
+    /// run that succeeds clears the block. It is never left in Scheduled
+    /// looking like a task that works.
+    async fn block_on_failure(&self, task_id: &str, why: &str) {
+        self.entry(
+            task_id,
+            TaskEntry::new(
+                "daemon",
+                "blocked_on_failure",
+                format!("{why}; blocked until someone looks -- the schedule keeps firing, and a run that succeeds clears it"),
+            ),
+        )
+        .await;
     }
 
     /// A run that will never report back. `kind` is the reason as a fact --
@@ -3057,12 +3109,83 @@ impl Engine {
         // the rule is held here as well rather than trusted to every
         // adapter.
         let mut due = self.store.due(Utc::now()).await?;
-        due.retain(|t| !t.schedule_paused);
+        due.retain(|t| !t.schedule_paused && t.fires());
         Ok(due)
     }
 
     pub async fn active_runs(&self) -> Result<Vec<Run>> {
         self.store.active_runs().await
+    }
+
+    /// Every task still stored as `failed` -- written before `#122`, when a
+    /// failed run closed its task -- moved to `Blocked` on that failure, so
+    /// the board shows it where a person has to act instead of in a column
+    /// it no longer has. The failure is read off the newest run; a task
+    /// that never got a run (dispatch refused) has none to read, and is
+    /// blocked on a dispatch failure, which is the only way that happened.
+    ///
+    /// Blocked, not closed as not planned: the rule this exists for is that
+    /// a failure is an open item until a person disposes of it, and a bulk
+    /// close would be the daemon disposing of every one at once. A
+    /// scheduled one picks its schedule up from now -- its slots stopped
+    /// firing the moment it failed, and must not come back as a burst.
+    ///
+    /// Idempotent and cheap: once a row is moved, nothing writes `failed`
+    /// again, so later starts find none. Returns how many were moved.
+    pub async fn migrate_failed_tasks(&self) -> usize {
+        let filter = TaskFilter { status: Some(TaskStatus::Failed), ..Default::default() };
+        let Ok(tasks) = self.store.list(&filter).await else {
+            return 0;
+        };
+        let mut moved = 0;
+        for task in tasks {
+            let newest = self.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
+            let failure = match &newest {
+                Some(run) => TaskFailure {
+                    kind: run.fail_kind,
+                    run_id: Some(run.id.clone()),
+                    attempt: Some(run.attempt),
+                    at: run.ended_at.unwrap_or(task.updated_at),
+                },
+                None => TaskFailure {
+                    kind: Some(FailKind::DispatchFailed),
+                    run_id: None,
+                    attempt: None,
+                    at: task.updated_at,
+                },
+            };
+            let next_run_at = match &task.schedule {
+                Some(s) if !task.schedule_paused => schedule::next_after(s, Utc::now()).ok(),
+                _ => None,
+            };
+            let patch = TaskPatch {
+                status: Some(TaskStatus::Blocked),
+                failure: Some(failure),
+                next_run_at,
+                ..Default::default()
+            };
+            match self.store.update(&task.id, &patch).await {
+                Ok(updated) => {
+                    moved += 1;
+                    self.entry(
+                        &task.id,
+                        TaskEntry::new(
+                            "daemon",
+                            "migrated",
+                            "stored as failed before failures stopped closing tasks (#122): now blocked on that \
+                             failure until someone runs it again or closes it with a reason",
+                        ),
+                    )
+                    .await;
+                    self.bus.publish(Event::TaskUpdated { task: updated });
+                }
+                Err(e) => tracing::warn!(task = %task.id, error = %e, "could not move a failed task to blocked"),
+            }
+        }
+        if moved > 0 {
+            tracing::info!(moved, "moved tasks stored as failed to blocked (#122)");
+        }
+        moved
     }
 
     /// Move a scheduled task's next firing forward so it is not picked up twice
@@ -3363,6 +3486,33 @@ fn knowledge_write_payload(result: factory_core::knowledge::WriteResult) -> Payl
         skipped_hidden: result.skipped_hidden,
         refused: result.refused,
         truncated: result.truncated,
+    }
+}
+
+/// For tests anywhere in the daemon that need a task whose newest run
+/// failed (`#122`), without a runtime to fail one for real: a run row as
+/// dispatch makes it, ended the way the watchdog or a report ends one.
+#[cfg(test)]
+impl Engine {
+    pub(crate) async fn fail_task_for_test(self: &Arc<Self>, task_id: &str, kind: FailKind) -> Task {
+        let run = self
+            .store
+            .create_run(&NewRun {
+                task_id: task_id.to_string(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "herdr".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        self.fail_run(&run.id, kind, "the remediation run failed").await;
+        let task = self.require(task_id).await.unwrap();
+        assert!(task.blocked_by_failure(), "sanity: {:?}", task.status);
+        task
     }
 }
 
@@ -4563,6 +4713,8 @@ mod tests {
         let mid = engine.store.get(&task.id).await.unwrap().unwrap();
         assert!(mid.error.is_some(), "sanity: the failure is on the mirror before the retry runs");
         assert!(mid.pending_retry.is_some(), "sanity: a retry is queued before it runs");
+        assert_eq!(mid.status, TaskStatus::Pending, "a queued retry keeps the task scheduled (#122)");
+        assert!(mid.failure.is_some(), "and it says what it is retrying after");
 
         // The scheduler's own retry pickup (`resume_from_retry`) would run
         // here in production; a fresh run row is all `finish_run` needs.
@@ -4589,6 +4741,7 @@ mod tests {
             task.pending_retry.is_none(),
             "the streak is over; a stale `pending_retry` would misreport this task as still mid-retry"
         );
+        assert!(task.failure.is_none(), "nor may the failure it retried after outlive it (#122)");
         assert_eq!(
             task.next_run_at,
             Some(regular_next_run),
@@ -4631,11 +4784,19 @@ mod tests {
             "the task honestly shows the last thing that happened; nothing to clear here since nothing succeeded"
         );
 
+        assert_eq!(
+            task.status,
+            TaskStatus::Blocked,
+            "retries exhausted: blocked on the failure, never back in Scheduled looking healthy (#122)"
+        );
+        assert_eq!(task.failure.as_ref().and_then(|f| f.run_id.clone()), Some(retry.id.clone()));
+
         let entries = engine.store.entries(&task.id, 20).await.unwrap();
         assert!(
             entries.iter().any(|e| e.kind == "retry_settled" && e.message.contains("exhausted")),
             "exhausting the policy is visible in the journal too: {entries:?}"
         );
+        assert!(entries.iter().any(|e| e.kind == "blocked_on_failure"), "{entries:?}");
     }
 
     #[tokio::test]
@@ -4657,15 +4818,24 @@ mod tests {
         );
         assert_eq!(task.error.as_deref(), Some("boom"));
 
+        // Nothing will try again before the next regular firing, so the
+        // task is blocked on the failure (`#122`) rather than sitting in
+        // Scheduled looking healthy -- and still due at that firing.
+        assert_eq!(task.status, TaskStatus::Blocked);
+        assert!(task.blocked_by_failure());
+        assert_eq!(task.failure.as_ref().and_then(|f| f.kind), Some(FailKind::AgentFailed));
+        assert_eq!(task.failure.as_ref().and_then(|f| f.run_id.clone()), Some(run.id.clone()));
+
         // `mirror_to_task` stays silent on a `Failed` recurring task so it
         // never contradicts a retry that might follow -- for a policy that
         // never retries at all, `queue_or_end_retry` is the one that has to
-        // say the task is just waiting for its next turn.
+        // say what happens next.
         let entries = engine.store.entries(&task.id, 20).await.unwrap();
         assert!(
-            entries.iter().any(|e| e.kind == "rearmed"),
+            entries.iter().any(|e| e.kind == "blocked_on_failure" && e.message.contains("`none`")),
             "a task that will never retry still needs a line saying what happens next: {entries:?}"
         );
+        assert!(!entries.iter().any(|e| e.kind == "rearmed"), "it is not rearmed as if nothing happened");
     }
 
     #[tokio::test]
@@ -5351,6 +5521,437 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("only a scheduled task"), "{err}");
 
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    // -- a failure goes to Blocked; closing is a person's act (#122) -------
+
+    async fn one_off_task(engine: &Engine, title: &str) -> Task {
+        engine
+            .create(NewTask {
+                title: title.into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+    }
+
+    fn refusal(response: factory_core::protocol::Response) -> String {
+        match response {
+            factory_core::protocol::Response::Error { message, .. } => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    fn task_of(response: factory_core::protocol::Response) -> Task {
+        match response {
+            factory_core::protocol::Response::Ok { data: Payload::Task { task } } => task,
+            other => panic!("expected a task, got {other:?}"),
+        }
+    }
+
+    fn close(id: &str, reason: factory_core::task::CloseReason) -> Request {
+        Request::TaskClose { id: id.into(), reason, duplicate_of: None, note: None }
+    }
+
+    #[tokio::test]
+    async fn a_one_off_task_whose_run_failed_is_blocked_on_that_failure_for_every_fail_kind() {
+        let scope_dir = temp_dir("failed-blocks");
+        let engine = test_engine(scope_dir.clone());
+        for kind in [
+            FailKind::AgentFailed,
+            FailKind::SessionGone,
+            FailKind::TurnEnded,
+            FailKind::StopFailure,
+            FailKind::AckTimeout,
+            FailKind::RunTimeout,
+            FailKind::BlockedTimeout,
+            FailKind::DispatchFailed,
+        ] {
+            let task = one_off_task(&engine, kind.as_str()).await;
+            let run = run_for(&engine, &task.id, Trigger::Manual).await;
+            engine.fail_run(&run.id, kind, "it went wrong").await;
+
+            let task = engine.require(&task.id).await.unwrap();
+            assert_eq!(task.status, TaskStatus::Blocked, "{kind:?}: never closed by a failure");
+            assert!(task.blocked_by_failure(), "{kind:?}");
+            assert!(!task.status.is_terminal(), "{kind:?}: a failure is an open item");
+            assert!(task.is_settled(), "{kind:?}: but nothing is running");
+            let failure = task.failure.as_ref().unwrap();
+            assert_eq!(failure.kind, Some(kind));
+            assert_eq!(failure.run_id.as_deref(), Some(run.id.as_str()));
+            assert_eq!(failure.attempt, Some(1));
+            assert_eq!(task.error.as_deref(), Some("it went wrong"));
+
+            let run = engine.require_run(&run.id).await.unwrap();
+            assert_eq!(run.status, RunStatus::Failed, "the run keeps its meaning");
+            assert!(run.status.is_terminal());
+            assert_eq!(run.fail_kind, Some(kind));
+        }
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_refused_before_any_run_existed_blocks_the_task_on_dispatch_failed() {
+        let scope_dir = temp_dir("dispatch-refused");
+        let engine = test_engine(scope_dir.clone());
+        let task = one_off_task(&engine, "nowhere to run").await;
+        engine
+            .store
+            .update(&task.id, &TaskPatch { agent: Some("no-such-agent".into()), ..Default::default() })
+            .await
+            .unwrap();
+
+        engine.start_run_due(&task.id, Trigger::Manual, Due::now()).await;
+
+        let task = engine.require(&task.id).await.unwrap();
+        assert!(engine.store.runs(&task.id, 5).await.unwrap().is_empty(), "sanity: no run was made");
+        assert!(task.blocked_by_failure(), "{:?}", task.status);
+        let failure = task.failure.unwrap();
+        assert_eq!(failure.kind, Some(FailKind::DispatchFailed));
+        assert_eq!(failure.run_id, None);
+        assert!(task.error.is_some());
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_run_that_succeeds_after_a_failure_clears_the_block() {
+        let scope_dir = temp_dir("failure-cleared");
+        let engine = test_engine(scope_dir.clone());
+        let task = one_off_task(&engine, "flaky").await;
+        let first = run_for(&engine, &task.id, Trigger::Manual).await;
+        engine.fail_run(&first.id, FailKind::AgentFailed, "boom").await;
+
+        let second = run_for(&engine, &task.id, Trigger::Manual).await;
+        let mid = engine.require(&task.id).await.unwrap();
+        assert_eq!(mid.status, TaskStatus::Dispatching);
+        assert!(mid.failure.is_none(), "a new attempt is newer than the failure it follows");
+
+        engine
+            .finish_run(&second.id, RunStatus::Done, RunPatch { result: Some("fine".into()), ..Default::default() }, "ended")
+            .await
+            .unwrap();
+        let task = engine.require(&task.id).await.unwrap();
+        assert_eq!(task.status, TaskStatus::Done);
+        assert!(task.failure.is_none());
+        assert!(task.error.is_none());
+        assert_eq!(task.close_reason(), Some(factory_core::task::CloseReason::Completed));
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    /// The hazard the issue names first: a task blocked by a failure has no
+    /// active run, and the blocked timeout only ever looks at active runs --
+    /// so it is never timed out again, and never turns back into a failure.
+    #[tokio::test]
+    async fn a_task_blocked_by_a_failure_is_never_timed_out_again() {
+        let scope_dir = temp_dir("blocked-timeout-once");
+        let engine = test_engine(scope_dir.clone());
+        let task = one_off_task(&engine, "waits for a human").await;
+        engine
+            .store
+            .update(&task.id, &TaskPatch { blocked_timeout_seconds: Some(1), ..Default::default() })
+            .await
+            .unwrap();
+        let run = run_for(&engine, &task.id, Trigger::Manual).await;
+        let long_ago = Utc::now() - chrono::Duration::hours(1);
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Blocked),
+                    blocked_since: Some(long_ago),
+                    blocked_source: Some(BlockSource::Agent),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // What the scheduler does with it, once.
+        engine.fail_run(&run.id, FailKind::BlockedTimeout, "nobody answered").await;
+
+        let task = engine.require(&task.id).await.unwrap();
+        assert!(task.blocked_by_failure());
+        assert_eq!(task.failure.as_ref().and_then(|f| f.kind), Some(FailKind::BlockedTimeout));
+        let active = engine.active_runs().await.unwrap();
+        assert!(
+            active.iter().all(|r| r.task_id != task.id),
+            "no blocked run stands in for the failure, so nothing is left for the timeout to find: {active:?}"
+        );
+        assert_eq!(engine.store.runs(&task.id, 10).await.unwrap().len(), 1, "and no new run was made to show it");
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_with_no_run_at_all_closes_as_not_planned_and_the_journal_says_who() {
+        let scope_dir = temp_dir("close-no-run");
+        let engine = test_engine(scope_dir.clone());
+        let task = one_off_task(&engine, "never mind").await;
+
+        let closed = task_of(
+            engine
+                .handle_request(Request::TaskClose {
+                    id: task.id.clone(),
+                    reason: factory_core::task::CloseReason::NotPlanned,
+                    duplicate_of: None,
+                    note: Some("  the client dropped it  ".into()),
+                })
+                .await,
+        );
+        assert_eq!(closed.status, TaskStatus::Cancelled);
+        assert_eq!(closed.close_reason(), Some(factory_core::task::CloseReason::NotPlanned));
+        let closure = closed.closure.as_ref().unwrap();
+        assert_eq!(closure.by, "the owner");
+        assert_eq!(closure.note.as_deref(), Some("the client dropped it"));
+
+        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        let entry = entries.iter().find(|e| e.kind == "closed").expect("journaled");
+        assert_eq!(entry.source, "owner");
+        assert!(entry.message.contains("won't do") && entry.message.contains("the client dropped it"), "{}", entry.message);
+        let data = entry.data.as_ref().unwrap();
+        assert_eq!(data["by"], "the owner");
+        assert_eq!(data["close_reason"], "not_planned");
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_blocked_by_a_failure_closes_as_a_duplicate_of_another() {
+        let scope_dir = temp_dir("close-duplicate");
+        let engine = test_engine(scope_dir.clone());
+        let original = one_off_task(&engine, "the real one").await;
+        let task = one_off_task(&engine, "the copy").await;
+        let run = run_for(&engine, &task.id, Trigger::Manual).await;
+        engine.fail_run(&run.id, FailKind::AgentFailed, "boom").await;
+
+        let closed = task_of(
+            engine
+                .handle_request(Request::TaskClose {
+                    id: task.id.clone(),
+                    reason: factory_core::task::CloseReason::Duplicate,
+                    duplicate_of: Some(original.id.clone()),
+                    note: None,
+                })
+                .await,
+        );
+        assert_eq!(closed.status, TaskStatus::Cancelled);
+        assert_eq!(closed.close_reason(), Some(factory_core::task::CloseReason::Duplicate));
+        assert_eq!(closed.closure.as_ref().unwrap().duplicate_of.as_deref(), Some(original.id.as_str()));
+        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        let entry = entries.iter().find(|e| e.kind == "closed").unwrap();
+        assert!(entry.message.starts_with("its last attempt failed; closed as a duplicate of"), "{}", entry.message);
+        assert_eq!(entry.data.as_ref().unwrap()["fail_kind"], "agent_failed");
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn closing_is_refused_while_a_run_is_active_when_already_closed_and_for_a_bad_duplicate() {
+        let scope_dir = temp_dir("close-refused");
+        let engine = test_engine(scope_dir.clone());
+        use factory_core::task::CloseReason::*;
+
+        let busy = one_off_task(&engine, "busy").await;
+        run_for(&engine, &busy.id, Trigger::Manual).await;
+        let why = refusal(engine.handle_request(close(&busy.id, NotPlanned)).await);
+        assert!(why.contains("cancel it before closing"), "{why}");
+        assert_eq!(engine.require(&busy.id).await.unwrap().status, TaskStatus::Dispatching, "untouched");
+
+        let done = one_off_task(&engine, "done").await;
+        task_of(engine.handle_request(close(&done.id, Completed)).await);
+        let why = refusal(engine.handle_request(close(&done.id, NotPlanned)).await);
+        assert!(why.contains("already closed (completed)"), "{why}");
+
+        let other = one_off_task(&engine, "other").await;
+        let why = refusal(
+            engine
+                .handle_request(Request::TaskClose {
+                    id: other.id.clone(),
+                    reason: NotPlanned,
+                    duplicate_of: Some(done.id.clone()),
+                    note: None,
+                })
+                .await,
+        );
+        assert!(why.contains("goes with the reason duplicate"), "{why}");
+        let why = refusal(
+            engine
+                .handle_request(Request::TaskClose {
+                    id: other.id.clone(),
+                    reason: Duplicate,
+                    duplicate_of: Some(other.id.clone()),
+                    note: None,
+                })
+                .await,
+        );
+        assert!(why.contains("cannot duplicate itself"), "{why}");
+        let why = refusal(
+            engine
+                .handle_request(Request::TaskClose {
+                    id: other.id.clone(),
+                    reason: Duplicate,
+                    duplicate_of: Some("no-such-task".into()),
+                    note: None,
+                })
+                .await,
+        );
+        assert!(why.contains("no-such-task"), "{why}");
+        assert_eq!(engine.require(&other.id).await.unwrap().status, TaskStatus::Pending);
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_closed_task_reopens_to_pending_and_a_run_clears_a_close_record() {
+        let scope_dir = temp_dir("reopen");
+        let engine = test_engine(scope_dir.clone());
+        let task = one_off_task(&engine, "back on").await;
+        let run = run_for(&engine, &task.id, Trigger::Manual).await;
+        engine.fail_run(&run.id, FailKind::AgentFailed, "boom").await;
+        task_of(engine.handle_request(close(&task.id, factory_core::task::CloseReason::NotPlanned)).await);
+
+        let reopened = task_of(
+            engine.handle_request(Request::TaskReopen { id: task.id.clone(), reason: Some("worth another go".into()) }).await,
+        );
+        assert_eq!(reopened.status, TaskStatus::Pending);
+        assert!(reopened.closure.is_none());
+        assert!(reopened.failure.is_none(), "a pending task must not read as one mid-retry");
+        assert_eq!(reopened.close_reason(), None);
+        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        assert!(entries.iter().any(|e| e.kind == "reopened" && e.message.contains("worth another go")), "{entries:?}");
+
+        let why = refusal(engine.handle_request(Request::TaskReopen { id: task.id.clone(), reason: None }).await);
+        assert!(why.contains("not closed"), "{why}");
+
+        // A run on a task closed on purpose clears the close record with it.
+        task_of(engine.handle_request(close(&task.id, factory_core::task::CloseReason::Completed)).await);
+        run_for(&engine, &task.id, Trigger::Manual).await;
+        let task = engine.require(&task.id).await.unwrap();
+        assert_eq!(task.status, TaskStatus::Dispatching);
+        assert!(task.closure.is_none());
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_person_cancelling_a_run_closes_the_task_as_not_planned() {
+        let scope_dir = temp_dir("cancel-closes");
+        let engine = test_engine(scope_dir.clone());
+        let task = one_off_task(&engine, "stop that").await;
+        run_for(&engine, &task.id, Trigger::Manual).await;
+        let response = engine
+            .handle_request(Request::TaskCancel { id: task.id.clone(), reason: None, run: None })
+            .await;
+        assert!(matches!(response, factory_core::protocol::Response::Ok { .. }), "{response:?}");
+        let task = engine.require(&task.id).await.unwrap();
+        assert_eq!(task.status, TaskStatus::Cancelled);
+        assert_eq!(task.close_reason(), Some(factory_core::task::CloseReason::NotPlanned));
+        assert!(task.failure.is_none(), "a cancel is not a failure");
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_task_blocked_by_a_failure_stays_due_and_a_closed_one_never_fires() {
+        let scope_dir = temp_dir("blocked-still-due");
+        let engine = test_engine(scope_dir.clone());
+        let blocked = weekly_task(&engine, Some(RetryPolicy::None)).await;
+        let run = run_for(&engine, &blocked.id, Trigger::Schedule).await;
+        engine.fail_run(&run.id, FailKind::AgentFailed, "boom").await;
+        let closed = weekly_task(&engine, None).await;
+        task_of(engine.handle_request(close(&closed.id, factory_core::task::CloseReason::NotPlanned)).await);
+        let asking = weekly_task(&engine, None).await;
+        let run = run_for(&engine, &asking.id, Trigger::Schedule).await;
+        engine
+            .store
+            .update_run(&run.id, &RunPatch { status: Some(RunStatus::Blocked), ..Default::default() })
+            .await
+            .unwrap();
+        let asking_now = engine.require(&asking.id).await.unwrap();
+        engine.mirror_to_task(&engine.require_run(&run.id).await.unwrap()).await;
+        assert_eq!(engine.require(&asking.id).await.unwrap().status, TaskStatus::Blocked, "sanity");
+        let _ = asking_now;
+
+        let past = Utc::now() - chrono::Duration::minutes(1);
+        for id in [&blocked.id, &closed.id, &asking.id] {
+            engine.store.update(id, &TaskPatch { next_run_at: Some(past), ..Default::default() }).await.unwrap();
+        }
+
+        let due: Vec<String> = engine.due_now().await.unwrap().into_iter().map(|t| t.id).collect();
+        assert_eq!(due, vec![blocked.id.clone()], "the failure keeps firing; the close and the question do not");
+
+        // Closed between `due_now` and the scheduler's locked re-read: not fired.
+        let seen = engine.require(&blocked.id).await.unwrap();
+        assert!(engine.still_due(&seen).await.is_some());
+        task_of(engine.handle_request(close(&blocked.id, factory_core::task::CloseReason::NotPlanned)).await);
+        assert!(engine.still_due(&seen).await.is_none(), "closed in between, so nothing fires it");
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn reopening_a_scheduled_task_picks_its_schedule_up_from_now() {
+        let scope_dir = temp_dir("reopen-scheduled");
+        let engine = test_engine(scope_dir.clone());
+        let task = weekly_task(&engine, None).await;
+        task_of(engine.handle_request(close(&task.id, factory_core::task::CloseReason::NotPlanned)).await);
+        let long_ago = Utc::now() - chrono::Duration::days(30);
+        engine.store.update(&task.id, &TaskPatch { next_run_at: Some(long_ago), ..Default::default() }).await.unwrap();
+
+        let reopened = task_of(engine.handle_request(Request::TaskReopen { id: task.id.clone(), reason: None }).await);
+        assert_eq!(reopened.status, TaskStatus::Pending);
+        assert!(reopened.next_run_at.unwrap() > Utc::now(), "no burst of the slots that passed while it was closed");
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_stored_as_failed_is_moved_to_blocked_once_at_start() {
+        let scope_dir = temp_dir("migrate-failed");
+        let engine = test_engine(scope_dir.clone());
+
+        // The shape a failed run left before #122: run failed, task failed.
+        let old = one_off_task(&engine, "failed long ago").await;
+        let run = run_for(&engine, &old.id, Trigger::Manual).await;
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Failed),
+                    fail_kind: Some(FailKind::RunTimeout),
+                    ended_at: Some(Utc::now()),
+                    clear_token: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        engine.store.update(&old.id, &TaskPatch { status: Some(TaskStatus::Failed), ..Default::default() }).await.unwrap();
+        // One that never got a run, scheduled, its slot long past.
+        let never = weekly_task(&engine, None).await;
+        let long_ago = Utc::now() - chrono::Duration::days(30);
+        engine
+            .store
+            .update(&never.id, &TaskPatch { status: Some(TaskStatus::Failed), next_run_at: Some(long_ago), ..Default::default() })
+            .await
+            .unwrap();
+        let fine = one_off_task(&engine, "untouched").await;
+
+        assert_eq!(engine.migrate_failed_tasks().await, 2);
+
+        let old = engine.require(&old.id).await.unwrap();
+        assert!(old.blocked_by_failure());
+        assert_eq!(old.failure.as_ref().and_then(|f| f.kind), Some(FailKind::RunTimeout));
+        assert_eq!(old.failure.as_ref().and_then(|f| f.run_id.clone()), Some(run.id.clone()));
+        let entries = engine.store.entries(&old.id, 20).await.unwrap();
+        assert!(entries.iter().any(|e| e.kind == "migrated"), "{entries:?}");
+
+        let never = engine.require(&never.id).await.unwrap();
+        assert!(never.blocked_by_failure());
+        assert_eq!(never.failure.as_ref().and_then(|f| f.kind), Some(FailKind::DispatchFailed));
+        assert!(never.next_run_at.unwrap() > Utc::now(), "a migrated schedule does not fire a burst");
+
+        assert_eq!(engine.require(&fine.id).await.unwrap().status, TaskStatus::Pending);
+        assert_eq!(engine.migrate_failed_tasks().await, 0, "nothing writes failed any more, so a second start finds none");
         std::fs::remove_dir_all(&scope_dir).ok();
     }
 }

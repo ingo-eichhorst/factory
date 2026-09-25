@@ -5,6 +5,13 @@ use std::collections::BTreeMap;
 /// Where a task is in its life. The agent moves it through `Running` ->
 /// `Done`/`Failed`/`Blocked` by calling back; nothing infers completion from a
 /// terminal's appearance.
+///
+/// A *run* that failed stays `Failed`; the *task* behind it does not
+/// (`#122`). A failure is something a person has to look at, so the task
+/// goes to `Blocked` with `Task::failure` saying why -- see
+/// `Task::blocked_by_failure`. Closed means `Done` or `Cancelled`, and a
+/// failure never gets there on its own: closing one is a person's act, with
+/// a reason (`Task::closure`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -27,13 +34,22 @@ pub enum TaskStatus {
     /// being checked before that counts (`#118`). Not terminal.
     Verifying,
     Done,
+    /// Legacy, read-only: what a task whose run failed was stored as before
+    /// `#122`. Nothing writes it any more, and the daemon moves every row
+    /// still carrying it to `Blocked` when it starts
+    /// (`Engine::migrate_failed_tasks`). Kept only so those rows still
+    /// parse until then.
     Failed,
     Cancelled,
 }
 
 impl TaskStatus {
+    /// Closed: `Done`, or `Cancelled` -- closed as not planned or as a
+    /// duplicate. Not `Failed`: a failed task is open until someone
+    /// disposes of it (`#122`), which is what makes a failed remediation
+    /// task count as the open one a duplicate would pile up behind.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Done | Self::Failed | Self::Cancelled)
+        matches!(self, Self::Done | Self::Cancelled)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -211,6 +227,115 @@ pub struct PendingRetry {
     pub resume_at: DateTime<Utc>,
 }
 
+/// How a task was closed (`#122`), after GitHub's `state_reason` and Jira's
+/// resolution: the status says *that* it ended, this says *how*. A closed
+/// set, so a board can say each one plainly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseReason {
+    /// Finished: the task is `Done`.
+    Completed,
+    /// Won't do. It did not complete and will not be picked up again,
+    /// whatever the reason. The task is `Cancelled`.
+    NotPlanned,
+    /// Another task covers it -- `TaskClosure::duplicate_of` may say which.
+    /// The task is `Cancelled`.
+    Duplicate,
+}
+
+impl CloseReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NotPlanned => "not_planned",
+            Self::Duplicate => "duplicate",
+        }
+    }
+
+    /// How a person reads it on a card.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NotPlanned => "won't do",
+            Self::Duplicate => "duplicate",
+        }
+    }
+
+    /// The status a task closed this way sits in.
+    pub fn status(self) -> TaskStatus {
+        match self {
+            Self::Completed => TaskStatus::Done,
+            Self::NotPlanned | Self::Duplicate => TaskStatus::Cancelled,
+        }
+    }
+}
+
+impl std::str::FromStr for CloseReason {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.trim() {
+            "completed" => Self::Completed,
+            "not_planned" | "not-planned" => Self::NotPlanned,
+            "duplicate" => Self::Duplicate,
+            other => {
+                return Err(format!(
+                    "unknown close reason {other:?}: the reasons are completed, not_planned and duplicate"
+                ))
+            }
+        })
+    }
+}
+
+/// A task closed on purpose (`#122`): by whom, when, how, and what they
+/// said. Written only by an explicit close (`Engine::close_task`), and
+/// cleared by a reopen and by any run the task starts after it -- the
+/// mirror rule, since a close record left behind would call a task that
+/// has since run again closed.
+///
+/// A task that reached `Done` or `Cancelled` through a run has none: its
+/// reason is read off the status (`Task::close_reason`), which is also how
+/// every row written before this existed reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskClosure {
+    pub reason: CloseReason,
+    /// The task this one duplicates, when `reason` is `duplicate` and the
+    /// closer said which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<String>,
+    /// A short note in the closer's words. Journaled too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Who closed it, as the journal names them: `the owner`, or an agent.
+    pub by: String,
+    pub at: DateTime<Utc>,
+}
+
+/// The failure a task is `Blocked` on (`#122`): its newest run ended
+/// `Failed` and nothing is going to try again on its own. Mirrored from
+/// that run so a board can say why without reading every run -- the
+/// prose stays in `Task::error`, as before.
+///
+/// Set whenever the newest run failed, including while a scheduled task's
+/// retry is queued (the task is `Pending` then, and the card can say it is
+/// retrying after this); cleared the moment a newer run starts. Never a
+/// `Blocked` *run*: that is what keeps a failed task out of the blocked
+/// timeout, which only scans active runs -- a new blocked run made to show
+/// a failure would time out into another failure, forever.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskFailure {
+    /// Why, as a fact -- `None` only for a run that ended before
+    /// `FailKind` existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::run::FailKind>,
+    /// The run that failed. `None` when dispatch refused before any run
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    pub at: DateTime<Utc>,
+}
+
 /// The identity of a live agent session, as the runtime adapter that created it
 /// understands it. The daemon treats `handle` as opaque.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,6 +461,60 @@ pub struct Task {
     /// written before intake existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intake: Option<crate::intake::Intake>,
+    /// Why the newest run failed, while it is the newest -- see
+    /// `TaskFailure`. Absent on every row written before `#122`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<TaskFailure>,
+    /// How and by whom the task was closed, when a person or an agent
+    /// closed it on purpose -- see `TaskClosure`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure: Option<TaskClosure>,
+}
+
+impl Task {
+    /// `Blocked` because its newest run failed, rather than because an
+    /// agent is waiting on a question (`#122`). No run is active: there is
+    /// nobody to answer, only a failure to look at, run again, or close.
+    pub fn blocked_by_failure(&self) -> bool {
+        self.status == TaskStatus::Blocked && self.failure.is_some()
+    }
+
+    /// Nothing is running and nothing will until someone acts: closed, or
+    /// blocked by a failure. The question a caller waiting on the task's
+    /// *outcome* asks -- a workflow node, a bench attempt, a triage run --
+    /// as opposed to `TaskStatus::is_terminal`, which asks whether the task
+    /// is closed. A legacy `Failed` row counts, for the moment before the
+    /// startup migration reaches it.
+    pub fn is_settled(&self) -> bool {
+        self.status.is_terminal() || self.blocked_by_failure() || self.status == TaskStatus::Failed
+    }
+
+    /// Whether its schedule may fire it: pending, or blocked by a failure,
+    /// which a later success clears (`#122`). Never a closed task, and
+    /// never one blocked on a question -- that one has a run.
+    pub fn fires(&self) -> bool {
+        self.status == TaskStatus::Pending || self.blocked_by_failure()
+    }
+
+    /// Did it end in failure? Blocked by one, or a legacy `Failed` row.
+    pub fn has_failed(&self) -> bool {
+        self.blocked_by_failure() || self.status == TaskStatus::Failed
+    }
+
+    /// How a closed task was closed: its close record when someone closed
+    /// it on purpose, otherwise what its status says -- `Done` completed,
+    /// `Cancelled` (a run cancelled, or intake's wontfix) not planned.
+    /// `None` for a task that is not closed.
+    pub fn close_reason(&self) -> Option<CloseReason> {
+        if !self.status.is_terminal() {
+            return None;
+        }
+        Some(match &self.closure {
+            Some(c) => c.reason,
+            None if self.status == TaskStatus::Done => CloseReason::Completed,
+            None => CloseReason::NotPlanned,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,6 +662,18 @@ pub struct TaskPatch {
     /// transitions write it. Never cleared: a released item keeps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intake: Option<crate::intake::Intake>,
+    /// The mirrored failure (`#122`) -- set and cleared by the engine as
+    /// the newest run changes, the `Option`-plus-`clear` shape `error` has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<TaskFailure>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_failure: bool,
+    /// The close record (`#122`) -- written by a close, cleared by a reopen
+    /// and by any new run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure: Option<TaskClosure>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_closure: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

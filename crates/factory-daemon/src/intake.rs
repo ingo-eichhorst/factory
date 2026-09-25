@@ -132,7 +132,10 @@ impl Engine {
         let record = open_record(&item)?;
         if let Some(running) = &record.triage_task {
             if let Some(t) = self.store.get(running).await? {
-                if !t.status.is_terminal() {
+                // Settled rather than closed: a triage run that failed
+                // leaves its task blocked on the failure (`#122`), and
+                // nothing is working on the item then.
+                if !t.is_settled() {
                     return Err(FactoryError::BadRequest(format!(
                         "a triage run is already working on this item: task {} is {}",
                         t.id,

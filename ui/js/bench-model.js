@@ -12,7 +12,7 @@
 //! `bench-runs.js` itself.
 
 import { inScope } from "./scopes.js";
-import { TERMINAL } from "./core.js";
+import { isSettled } from "./task-model.js";
 
 // ------------------------------------------------------------------ routing
 //
@@ -166,15 +166,17 @@ export function progress(attempts) {
 /// verdict are all written together, once, when the worker finishes. The
 /// one place that distinction is visible at all is the attempt's own task,
 /// which the WebSocket snapshot already keeps current in `state.tasks`: a
-/// terminal task (`core.js`'s `TERMINAL`) with no verdict yet is judging: its
-/// run is over and Factory is waiting on the gate, not the agent.
-/// `taskStatus` is the caller's lookup (`state.tasks.get(attempt.task_id)`),
-/// passed in rather than read here so this stays a pure function of its
-/// arguments.
-export function attemptState(attempt, taskStatus) {
+/// settled task (`task-model.js`'s `isSettled`: closed, or blocked by a
+/// failure since #122) with no verdict yet is judging: its run is over and
+/// Factory is waiting on the gate, not the agent. `task` is the caller's
+/// lookup (`state.tasks.get(attempt.task_id)`), passed in rather than read
+/// here so this stays a pure function of its arguments; a bare status
+/// string is read as the status of a task with no failure record.
+export function attemptState(attempt, task) {
   if (attempt && attempt.verdict) return attempt.verdict;
   if (!attempt || !attempt.task_id) return "pending";
-  return TERMINAL.includes(taskStatus) ? "judging" : "running";
+  const t = typeof task === "string" ? { status: task } : task;
+  return isSettled(t) ? "judging" : "running";
 }
 
 /// One column per result row, in the order the daemon already sorted them

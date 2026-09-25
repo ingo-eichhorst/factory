@@ -51,8 +51,10 @@
 //! narrow one beside it, and each is journaled with who asked and why
 //! ([`Asked`]): run again (`task.run`), cancel (`task.cancel`), pause and
 //! resume (`task.update`'s `schedule_paused`), skip the next slot
-//! (`task.skip_next`, [`Engine::skip_next`]) and answer a blocked run
-//! (`run.answer`, [`Engine::answer_run`]). Nothing here starts, stops or
+//! (`task.skip_next`, [`Engine::skip_next`]), answer a blocked run
+//! (`run.answer`, [`Engine::answer_run`]), and close a task with a reason
+//! or reopen it (`task.close`/`task.reopen`, [`Engine::close_task`],
+//! `#122`). Nothing here starts, stops or
 //! changes anything on its own -- a picture, not a controller (design §8).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -64,7 +66,7 @@ use factory_core::operations::{
     self, HealthWindow, OperationsInput, OperationsReport, ScopeFilter, SkippedSlots, TriggeredSignpost,
 };
 use factory_core::run::RunStatus;
-use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus};
+use factory_core::task::{CloseReason, Task, TaskClosure, TaskEntry, TaskFilter, TaskPatch, TaskStatus};
 
 use crate::access::Caller;
 use crate::engine::Engine;
@@ -218,7 +220,7 @@ impl Engine {
         let seen: BTreeSet<&str> = runs.iter().map(|r| r.task_id.as_str()).collect();
         let stale: Vec<String> = tasks
             .iter()
-            .filter(|t| t.status == TaskStatus::Failed && t.bench_origin.is_none() && !seen.contains(t.id.as_str()))
+            .filter(|t| t.has_failed() && t.bench_origin.is_none() && !seen.contains(t.id.as_str()))
             .filter(|t| in_scope(&t.id))
             .map(|t| t.id.clone())
             .collect();
@@ -416,6 +418,158 @@ impl Engine {
         Ok(updated)
     }
 
+    /// `Request::TaskClose` (`#122`): dispose of a task on purpose, with a
+    /// reason. A failure waits for exactly this -- the daemon never closes
+    /// one on its own -- so it works on a task with no run at all, a task
+    /// blocked by a failure, a pending or a scheduled one.
+    ///
+    /// Refused while a run is active: that run would go on reporting into a
+    /// task somebody closed, so it is cancelled first, on purpose. Refused
+    /// on a task already closed, whose reason is changed by reopening it
+    /// and closing it again -- two lines in the journal rather than one
+    /// quietly rewritten. Refused in intake, which has its own `wontfix`.
+    ///
+    /// Held under `schedule_lock`, so a scheduled task is closed or fired,
+    /// never both. A queued retry goes with the close: nothing fires a
+    /// closed task.
+    pub(crate) async fn close_task(
+        &self,
+        id: &str,
+        reason: CloseReason,
+        duplicate_of: Option<String>,
+        asked: &Asked,
+    ) -> Result<Task> {
+        let _slot = self.schedule_lock.lock().await;
+        let task = self.require(id).await?;
+        if task.status == TaskStatus::Intake {
+            return Err(FactoryError::BadRequest(
+                "this task is still in intake: close it there (factory intake decide <id> wontfix)".into(),
+            ));
+        }
+        if let Some(run) = self.store.active_run(id).await? {
+            return Err(FactoryError::BadRequest(format!(
+                "attempt {} of this task is still {}; cancel it before closing the task",
+                run.attempt,
+                run.status.as_str()
+            )));
+        }
+        if let Some(already) = task.close_reason() {
+            return Err(FactoryError::BadRequest(format!(
+                "the task is already closed ({}); reopen it first to close it another way",
+                already.label()
+            )));
+        }
+        let duplicate_of = duplicate_of.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+        if let Some(other) = &duplicate_of {
+            if reason != CloseReason::Duplicate {
+                return Err(FactoryError::BadRequest(
+                    "--duplicate-of goes with the reason duplicate, and nothing else".into(),
+                ));
+            }
+            if other == id {
+                return Err(FactoryError::BadRequest("a task cannot duplicate itself".into()));
+            }
+            self.require(other).await?;
+        }
+
+        let closure = TaskClosure {
+            reason,
+            duplicate_of: duplicate_of.clone(),
+            note: asked.reason.clone(),
+            by: asked.by.clone(),
+            at: Utc::now(),
+        };
+        let updated = self
+            .store
+            .update(
+                id,
+                &TaskPatch {
+                    status: Some(reason.status()),
+                    closure: Some(closure),
+                    clear_pending_retry: task.pending_retry.is_some(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let how = match &duplicate_of {
+            Some(other) => format!("as a duplicate of {other}"),
+            None => format!("as {}", reason.label()),
+        };
+        let was = if task.has_failed() { "its last attempt failed; " } else { "" };
+        self.entry(
+            id,
+            asked.entry(
+                "closed",
+                format!("{was}closed {how} {}", asked.words()),
+                serde_json::json!({
+                    "close_reason": reason.as_str(),
+                    "duplicate_of": duplicate_of,
+                    "was": task.status.as_str(),
+                    "fail_kind": task.failure.as_ref().and_then(|f| f.kind).map(|k| k.as_str()),
+                }),
+            ),
+        )
+        .await;
+        self.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
+        Ok(updated)
+    }
+
+    /// `Request::TaskReopen` (`#122`): a closed task back to `Pending`, its
+    /// close record gone. A scheduled one picks its schedule up from now --
+    /// the slots that passed while it was closed were not missed, and never
+    /// fire as a burst of catch-up runs -- exactly as resuming a paused one
+    /// does. Its last run's result and error stay: they are still what
+    /// happened last. The failure it may have been closed on goes -- a
+    /// pending task carrying one would read as a task waiting on a retry.
+    pub(crate) async fn reopen_task(&self, id: &str, asked: &Asked) -> Result<Task> {
+        let _slot = self.schedule_lock.lock().await;
+        let task = self.require(id).await?;
+        let Some(was) = task.close_reason() else {
+            return Err(FactoryError::BadRequest(format!(
+                "the task is {}, not closed; only a closed task is reopened",
+                task.status.as_str()
+            )));
+        };
+        // Intake's `wontfix` is a triage verdict; reopening past it would
+        // put an item on the line that was never released (`#119`).
+        if task.intake.as_ref().is_some_and(|i| i.stage == factory_core::intake::IntakeStage::Wontfix) {
+            return Err(FactoryError::BadRequest(
+                "this task was closed in intake as wontfix; intake decides it again, not reopen".into(),
+            ));
+        }
+        let next_run_at = match &task.schedule {
+            Some(s) if !task.schedule_paused => Some(schedule::next_after(s, Utc::now())?),
+            _ => None,
+        };
+        let updated = self
+            .store
+            .update(
+                id,
+                &TaskPatch {
+                    status: Some(TaskStatus::Pending),
+                    clear_closure: true,
+                    // Somebody looked at it and put it back: a failure it
+                    // was closed on is dealt with, and must not make the
+                    // pending task read as one mid-retry.
+                    clear_failure: true,
+                    next_run_at,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        self.entry(
+            id,
+            asked.entry(
+                "reopened",
+                format!("reopened {} (it was closed as {})", asked.words(), was.label()),
+                serde_json::json!({ "was": was.as_str() }),
+            ),
+        )
+        .await;
+        self.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
+        Ok(updated)
+    }
+
     /// For the scheduler, under `schedule_lock`: `seen` as the store has it
     /// now, if it is still due exactly as `due_now` found it -- the same
     /// next firing, the same retry, not paused. `None` when anything moved
@@ -426,7 +580,10 @@ impl Engine {
         let same = now.next_run_at == seen.next_run_at
             && now.pending_retry == seen.pending_retry
             && !now.schedule_paused
-            && now.schedule.is_some();
+            && now.schedule.is_some()
+            // Closed in between (`close_task` holds the same lock) --
+            // nothing fires a closed task, or dispatch would undo the close.
+            && now.fires();
         same.then_some(now)
     }
 
@@ -909,9 +1066,16 @@ mod tests {
             )
             .await
             .unwrap();
+        // Blocked on that failure, as a failed run leaves its task (`#122`).
+        let failed = factory_core::task::TaskFailure {
+            kind: Some(factory_core::run::FailKind::AgentFailed),
+            run_id: Some(run.id.clone()),
+            attempt: Some(run.attempt),
+            at: Utc::now(),
+        };
         engine
             .store
-            .update(&task.id, &TaskPatch { status: Some(TaskStatus::Failed), ..Default::default() })
+            .update(&task.id, &TaskPatch { status: Some(TaskStatus::Blocked), failure: Some(failed), ..Default::default() })
             .await
             .unwrap();
         // Well before any history the report reads.

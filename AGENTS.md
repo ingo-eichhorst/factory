@@ -28,6 +28,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/occupancy-model.js                                     the occupancy chart's lane geometry (#120), pure
     ui/js/usage-model.js                                         a run's and a task's usage block (#117), pure
     ui/js/pending-model.js                                       pending tasks split into due, scheduled later and manual (#124), pure
+    ui/js/task-model.js                                          a task's board column, failure/close line and actions (#122), pure
     ui/js/{scenarios,scenarios-model}.js                         the L6 Scenarios tab and its pure shaping logic
     ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline

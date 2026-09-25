@@ -674,6 +674,10 @@ export const ENTRY_KINDS = {
   schedule_pause_cleared: "pause cleared",
   answer: "answered",
   answer_unsent: "answer not sent",
+  closed: "closed",
+  reopened: "reopened",
+  blocked_on_failure: "blocked on failure",
+  migrated: "moved to blocked",
   harness_unhealthy: "harness does not start",
   harness_recovered: "harness answers again",
 };
@@ -689,6 +693,9 @@ export function entryKindLabel(kind) {
 export function entryTone(entry) {
   if (entry.kind === "schedule_skipped") return "missed";
   if (entry.kind === "answer_unsent" || entry.kind === "harness_unhealthy") return "fault";
+  // The daemon's own lines about a failure (#122), not somebody's ask.
+  if (entry.kind === "blocked_on_failure") return "fault";
+  if (entry.kind === "migrated") return "";
   if (ENTRY_KINDS[entry.kind]) return "ask";
   return "";
 }

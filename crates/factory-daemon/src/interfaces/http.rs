@@ -199,6 +199,8 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/tasks/{id}", delete(delete_task))
         .route("/api/tasks/{id}/run", post(run_task))
         .route("/api/tasks/{id}/cancel", post(cancel_task))
+        .route("/api/tasks/{id}/close", post(close_task))
+        .route("/api/tasks/{id}/reopen", post(reopen_task))
         .route("/api/tasks/{id}/skip-next", post(skip_next_task))
         .route("/api/tasks/{id}/report", post(report_task))
         .route("/api/tasks/{id}/entries", get(task_entries))
@@ -1275,6 +1277,42 @@ struct CancelBody {
     /// The run the caller means to cancel; see `Request::TaskCancel`.
     #[serde(default)]
     run_id: Option<String>,
+}
+
+/// `POST /api/tasks/{id}/close` -- close a task on purpose (`#122`). Body
+/// `{reason, duplicate_of?, note?}`; `reason` is `completed`,
+/// `not_planned` or `duplicate`.
+async fn close_task(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> AxumResponse {
+    match serde_json::from_slice::<CloseBody>(&body) {
+        Ok(b) => run(&engine, Request::TaskClose { id, reason: b.reason, duplicate_of: b.duplicate_of, note: b.note }).await,
+        Err(e) => refused(format!("not a close body: {e}")),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CloseBody {
+    reason: factory_core::task::CloseReason,
+    #[serde(default)]
+    duplicate_of: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// `POST /api/tasks/{id}/reopen` -- a closed task back to pending. Body
+/// `{reason?}`, or none at all.
+async fn reopen_task(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> AxumResponse {
+    match reason_of(&body) {
+        Ok(reason) => run(&engine, Request::TaskReopen { id, reason }).await,
+        Err(why) => refused(why),
+    }
 }
 
 #[derive(serde::Deserialize, Default)]

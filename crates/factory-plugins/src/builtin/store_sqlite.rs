@@ -469,6 +469,18 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.intake {
                 task.intake = Some(v);
             }
+            if patch.clear_failure {
+                task.failure = None;
+            }
+            if let Some(v) = patch.failure {
+                task.failure = Some(v);
+            }
+            if patch.clear_closure {
+                task.closure = None;
+            }
+            if let Some(v) = patch.closure {
+                task.closure = Some(v);
+            }
             task.updated_at = Utc::now();
 
             write_task(conn, &task)?;
@@ -553,6 +565,10 @@ impl TaskStore for SqliteStore {
                 task.runs = attempt;
                 task.status = RunStatus::Dispatching.as_task_status();
                 task.last_run_at = Some(run.started_at);
+                // A new attempt is newer than whatever failed or closed the
+                // task before it (`#122`): neither mirror may outlive it.
+                task.failure = None;
+                task.closure = None;
                 task.updated_at = Utc::now();
                 write_task(&tx, &task)?;
             }
@@ -975,17 +991,24 @@ impl TaskStore for SqliteStore {
             let mut stmt = conn
                 .prepare(
                     "SELECT data FROM tasks
-                     WHERE next_run_at IS NOT NULL AND next_run_at <= ?1 AND status = 'pending'
+                     WHERE next_run_at IS NOT NULL AND next_run_at <= ?1 AND status IN ('pending', 'blocked')
                      ORDER BY next_run_at ASC",
                 )
                 .map_err(adapter_err)?;
+            // A scheduled task blocked by a failure keeps firing (`#122`):
+            // its schedule is still the intent, and the next run that
+            // succeeds clears the block. One blocked on a question has an
+            // active run and is not due -- `failure` is only ever set on a
+            // task whose newest run has ended. It lives only in the JSON
+            // row, like `schedule_paused` below, so it is sorted out after
+            // decoding.
             // `schedule_paused` lives only in the JSON row -- no column, so
             // no schema change, and a schema change here drops the whole
             // database (see the module comment). Due tasks are a handful
             // per tick, so passing over the paused ones after decoding
             // costs nothing.
             let mut due: Vec<Task> = collect(&mut stmt, params![now])?;
-            due.retain(|t| !t.schedule_paused);
+            due.retain(|t| !t.schedule_paused && t.fires());
             Ok(due)
         })
         .await
@@ -1030,6 +1053,8 @@ mod tests {
             schedule_paused: false,
             category: None,
             intake: None,
+            failure: None,
+            closure: None,
         }
     }
 
@@ -1331,6 +1356,56 @@ mod tests {
             .unwrap();
         assert!(!resumed.schedule_paused);
         assert_eq!(store.due(Utc::now()).await.unwrap().len(), 2);
+    }
+
+    /// `#122`: a scheduled task blocked by a failure keeps firing; one
+    /// blocked on a question (it has a run) and a closed one do not. A new
+    /// run clears the failure and any close record with it.
+    #[tokio::test]
+    async fn a_task_blocked_by_a_failure_is_due_and_a_new_run_clears_the_mirror() {
+        let store = SqliteStore::in_memory().unwrap();
+        let past = Utc::now() - chrono::Duration::minutes(1);
+        for (id, status) in [
+            ("failed", TaskStatus::Blocked),
+            ("asking", TaskStatus::Blocked),
+            ("closed", TaskStatus::Cancelled),
+        ] {
+            let mut task = sample_task(id);
+            task.schedule = Some(factory_core::task::Schedule::Every { seconds: 60 });
+            task.next_run_at = Some(past);
+            task.status = status;
+            store.create(&task).await.unwrap();
+        }
+        let failure = factory_core::task::TaskFailure {
+            kind: Some(factory_core::run::FailKind::AgentFailed),
+            run_id: Some("r0".into()),
+            attempt: Some(1),
+            at: Utc::now(),
+        };
+        let marked = store
+            .update("failed", &TaskPatch { failure: Some(failure), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(marked.blocked_by_failure(), "the failure round-trips");
+        let due: Vec<String> = store.due(Utc::now()).await.unwrap().into_iter().map(|t| t.id).collect();
+        assert_eq!(due, vec!["failed".to_string()]);
+
+        store
+            .create_run(&NewRun {
+                task_id: "failed".into(),
+                trigger: Trigger::Schedule,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "herdr".into(),
+                token: "t".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        let task = store.get("failed").await.unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Dispatching);
+        assert!(task.failure.is_none(), "a new attempt is newer than the failure");
     }
 
     #[tokio::test]

@@ -181,6 +181,9 @@ impl Engine {
             Request::TaskDelete { .. } => Grant::TaskDelete,
             Request::TaskRun { .. } => Grant::TaskRun,
             Request::TaskCancel { .. } => Grant::TaskCancel,
+            // Closing a task and taking that back are one decision, made
+            // about the task rather than a run (`#122`).
+            Request::TaskClose { .. } | Request::TaskReopen { .. } => Grant::TaskClose,
             // Moving a schedule's next slot is editing the task, exactly as
             // pausing it through `task.update` is (`#106`).
             Request::TaskSkipNext { .. } => Grant::TaskEdit,
@@ -471,6 +474,8 @@ impl Engine {
             Request::TaskDelete { id }
             | Request::TaskRun { id, .. }
             | Request::TaskCancel { id, .. }
+            | Request::TaskClose { id, .. }
+            | Request::TaskReopen { id, .. }
             | Request::TaskSkipNext { id, .. } => {
                 match self.store.get(id).await? {
                     Some(task) => task_in_reach(def, &task),
@@ -1195,6 +1200,8 @@ mod tests {
             schedule_paused: false,
             category: None,
             intake: None,
+            failure: None,
+            closure: None,
         };
         engine.store.create(&task).await.unwrap()
     }
@@ -1522,6 +1529,14 @@ mod tests {
             Request::TaskDelete { id: "t".into() },
             Request::TaskRun { id: "t".into(), reason: None },
             Request::TaskCancel { id: "t".into(), reason: None, run: None },
+            // Closing a task is a decision about it, not work on it (`#122`).
+            Request::TaskClose {
+                id: "t".into(),
+                reason: factory_core::task::CloseReason::NotPlanned,
+                duplicate_of: None,
+                note: None,
+            },
+            Request::TaskReopen { id: "t".into(), reason: None },
             Request::AgentStart {
                 scope: "demo".into(),
                 name: "w".into(),
@@ -1689,6 +1704,25 @@ mod tests {
             )
             .await
         );
+    }
+
+    #[tokio::test]
+    async fn task_close_is_its_own_grant_and_reaches_only_as_far_as_the_role() {
+        let e = engine_with_roles("roles:\n  closer:\n    grants: [task.close]\n    reach: scope\n");
+        task_in(&e, "here", "demo", "somebody").await;
+        let close = |id: &str| Request::TaskClose {
+            id: id.into(),
+            reason: factory_core::task::CloseReason::NotPlanned,
+            duplicate_of: None,
+            note: None,
+        };
+        assert!(allowed(&e, &wearing("closer"), close("here")).await);
+        assert!(allowed(&e, &wearing("closer"), Request::TaskReopen { id: "here".into(), reason: None }).await);
+        assert!(
+            !allowed(&e, &wearing("closer"), Request::TaskCancel { id: "here".into(), reason: None, run: None }).await,
+            "closing a task is not cancelling a run"
+        );
+        assert_eq!(Grant::expand("task.close").unwrap(), vec![Grant::TaskClose]);
     }
 
     // -- roles an instance names for itself --------------------------------

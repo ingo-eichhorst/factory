@@ -47,7 +47,12 @@ impl RunStatus {
         }
     }
 
-    /// The task's own status while this is its most recent run.
+    /// The task's own status while this is its most recent run. A failed
+    /// run leaves its task `Blocked`, never failed: the run really did fail
+    /// and stays that way, but the task is an open item until a person
+    /// disposes of it (`#122`) -- `Task::failure` says it is that kind of
+    /// block. A scheduled task's engine may still hold it `Pending` while a
+    /// retry is queued (`Engine::mirror_to_task`).
     pub fn as_task_status(self) -> crate::task::TaskStatus {
         use crate::task::TaskStatus as T;
         match self {
@@ -56,7 +61,7 @@ impl RunStatus {
             Self::Blocked => T::Blocked,
             Self::Verifying => T::Verifying,
             Self::Done => T::Done,
-            Self::Failed => T::Failed,
+            Self::Failed => T::Blocked,
             Self::Cancelled => T::Cancelled,
         }
     }
@@ -272,9 +277,10 @@ pub struct Run {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_for: Option<DateTime<Utc>>,
     /// Why the run ended `Failed` or `Cancelled` -- see [`FailKind`]. Set
-    /// once, by whatever ended it, and never mirrored onto the task:
-    /// `Task::error` already carries the prose, and one mirror less is one
-    /// fewer thing a successful retry has to remember to clear.
+    /// once, by whatever ended it. A `Failed` run's kind is mirrored onto
+    /// its task as `Task::failure` (`#122`), so a board can say why a task
+    /// is blocked; the engine clears it when a newer run starts, like any
+    /// other mirrored field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail_kind: Option<FailKind>,
     /// When the current block began. `None` whenever `status` is not

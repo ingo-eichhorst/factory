@@ -695,6 +695,12 @@ pub struct IntakeCard {
     /// that it ended without an assessment and the item is back in received.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triage_task_status: Option<TaskStatus>,
+    /// That triage task has ended and nothing is running it: closed, or
+    /// blocked by a failure (`Task::is_settled`). The status alone cannot
+    /// say so since `#122` -- a failed triage run leaves its task
+    /// `blocked`, which is also what one waiting on a question is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub triage_task_ended: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<DecisionRecord>,
 }
@@ -735,13 +741,15 @@ pub const READY_WINDOW_DAYS: i64 = 14;
 /// ready ones newest first. A `triaging` item whose triage task ended with
 /// no assessment is back in `received`: nothing is working on it any more.
 pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
-    let status_of: BTreeMap<&str, TaskStatus> = tasks.iter().map(|t| (t.id.as_str(), t.status)).collect();
+    let by_id: BTreeMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
     let since = now - chrono::Duration::days(READY_WINDOW_DAYS);
     let mut columns = IntakeColumns::default();
     let mut wontfix = 0;
     for task in tasks {
         let Some(intake) = &task.intake else { continue };
-        let triage_task_status = intake.triage_task.as_deref().and_then(|id| status_of.get(id).copied());
+        let triage = intake.triage_task.as_deref().and_then(|id| by_id.get(id).copied());
+        let triage_task_status = triage.map(|t| t.status);
+        let triage_task_ended = triage.is_some_and(Task::is_settled);
         let decided_at = intake.decision.as_ref().map(|d| d.at);
         let card = IntakeCard {
             id: task.id.clone(),
@@ -759,13 +767,13 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
             questions: intake.questions.clone(),
             triage_task: intake.triage_task.clone(),
             triage_task_status,
+            triage_task_ended,
             decision: intake.decision.clone(),
         };
         match intake.stage {
             IntakeStage::Received => columns.received.push(card),
             IntakeStage::Triaging => {
-                let stalled = intake.triage.is_none()
-                    && triage_task_status.is_some_and(|s| s.is_terminal());
+                let stalled = intake.triage.is_none() && triage_task_ended;
                 if stalled { columns.received.push(card) } else { columns.triaging.push(card) }
             }
             IntakeStage::NeedsInfo => columns.needs_info.push(card),
@@ -1189,11 +1197,27 @@ mod tests {
     fn a_triage_run_that_ended_without_an_assessment_puts_the_item_back_in_received() {
         let mut item = open(None);
         item.triage_task = Some("triage-run".into());
-        let tasks = vec![task("item", TaskStatus::Intake, Some(item)), task("triage-run", TaskStatus::Failed, None)];
+        // A failed triage run leaves its task blocked on the failure
+        // (`#122`), not closed -- and that still means nothing is triaging.
+        let mut failed = task("triage-run", TaskStatus::Blocked, None);
+        failed.failure = Some(crate::task::TaskFailure {
+            kind: Some(crate::run::FailKind::AgentFailed),
+            run_id: Some("r1".into()),
+            attempt: Some(1),
+            at: at(),
+        });
+        let tasks = vec![task("item", TaskStatus::Intake, Some(item.clone())), failed];
         let b = board(&tasks, at());
         assert_eq!(b.columns.received.len(), 1);
-        assert_eq!(b.columns.received[0].triage_task_status, Some(TaskStatus::Failed));
+        assert_eq!(b.columns.received[0].triage_task_status, Some(TaskStatus::Blocked));
+        assert!(b.columns.received[0].triage_task_ended);
         assert!(b.columns.triaging.is_empty());
+
+        // One blocked on a question is still working on it.
+        let asking = task("triage-run", TaskStatus::Blocked, None);
+        let b = board(&[task("item", TaskStatus::Intake, Some(item)), asking], at());
+        assert_eq!(b.columns.triaging.len(), 1);
+        assert!(!b.columns.triaging[0].triage_task_ended);
     }
 
     #[test]

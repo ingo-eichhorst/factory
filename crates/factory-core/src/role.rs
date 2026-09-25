@@ -94,6 +94,11 @@ pub enum Grant {
     TaskRun,
     #[serde(rename = "task.cancel")]
     TaskCancel,
+    /// Close a task with a reason, and reopen one (`#122`). Apart from
+    /// `task.cancel`, which ends a run: closing disposes of the task
+    /// itself, a failed one included, and is the act a failure waits for.
+    #[serde(rename = "task.close")]
+    TaskClose,
     #[serde(rename = "task.report")]
     TaskReport,
     #[serde(rename = "task.attach")]
@@ -150,12 +155,13 @@ pub enum Grant {
 }
 
 impl Grant {
-    pub const ALL: [Grant; 23] = [
+    pub const ALL: [Grant; 24] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
         Grant::TaskRun,
         Grant::TaskCancel,
+        Grant::TaskClose,
         Grant::TaskReport,
         Grant::TaskAttach,
         Grant::AgentStart,
@@ -183,6 +189,7 @@ impl Grant {
             Self::TaskDelete => "task.delete",
             Self::TaskRun => "task.run",
             Self::TaskCancel => "task.cancel",
+            Self::TaskClose => "task.close",
             Self::TaskReport => "task.report",
             Self::TaskAttach => "task.attach",
             Self::AgentStart => "agent.start",
@@ -212,6 +219,7 @@ impl Grant {
             Self::TaskDelete => "delete tasks",
             Self::TaskRun => "start runs",
             Self::TaskCancel => "cancel runs",
+            Self::TaskClose => "close and reopen tasks",
             Self::TaskReport => "report on tasks",
             Self::TaskAttach => "attach dependency scan documents",
             Self::AgentStart => "start agents",
@@ -243,6 +251,7 @@ impl Grant {
             | Self::TaskDelete
             | Self::TaskRun
             | Self::TaskCancel
+            | Self::TaskClose
             | Self::TaskReport
             | Self::TaskAttach => "Tasks",
             Self::AgentStart | Self::AgentConfigure | Self::AgentStop | Self::AgentInput => {

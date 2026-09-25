@@ -892,6 +892,44 @@ mod tests {
         assert!(projects.created, "another scope's gap is its own");
     }
 
+    /// `#122`: a remediation task whose run failed is blocked, not closed,
+    /// so it is still the open one -- the failure gets looked at instead of
+    /// a second copy piling up behind it (both the report's `open_tasks`
+    /// read and `quality_remediate`'s own lookup).
+    #[tokio::test]
+    async fn remediate_answers_a_failed_remediation_task_rather_than_spawning_a_duplicate() {
+        let engine = test_engine();
+        let first = engine
+            .quality_remediate("demo".into(), "maintainability.modifiability".into(), "gate".into(), None)
+            .await
+            .unwrap();
+        engine.fail_task_for_test(&first.task.id, factory_core::run::FailKind::AgentFailed).await;
+
+        let again = engine
+            .quality_remediate("demo".into(), "maintainability.modifiability".into(), "gate".into(), None)
+            .await
+            .unwrap();
+        assert!(!again.created, "the failed task is still open");
+        assert_eq!(again.task.id, first.task.id);
+        let report = engine.quality_report(Some("demo")).await.unwrap();
+        assert_eq!(report.scopes[0].open_tasks.get("maintainability.modifiability/gate"), Some(&first.task.id));
+
+        // Closed on purpose, it no longer stands in the way.
+        engine
+            .handle_request(factory_core::protocol::Request::TaskClose {
+                id: first.task.id.clone(),
+                reason: factory_core::task::CloseReason::NotPlanned,
+                duplicate_of: None,
+                note: None,
+            })
+            .await;
+        let fresh = engine
+            .quality_remediate("demo".into(), "maintainability.modifiability".into(), "gate".into(), None)
+            .await
+            .unwrap();
+        assert!(fresh.created);
+    }
+
     #[tokio::test]
     async fn remediate_refuses_a_met_scenario_a_draft_and_one_that_does_not_apply() {
         let engine = test_engine();

@@ -1648,6 +1648,24 @@ mod tests {
         );
     }
 
+    /// `#122`: a failed remediation task is blocked, not closed, so it is
+    /// still the open one and no duplicate is made.
+    #[tokio::test]
+    async fn policy_remediate_treats_a_failed_remediation_task_as_still_open() {
+        let engine = test_engine();
+        let first = engine
+            .policy_remediate("cra/b".parse().unwrap(), "engineering".to_string(), None)
+            .await
+            .unwrap();
+        engine.fail_task_for_test(&first.id, factory_core::run::FailKind::SessionGone).await;
+
+        let err = engine
+            .policy_remediate("cra/b".parse().unwrap(), "engineering".to_string(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already open") && err.to_string().contains(&first.id), "{err}");
+    }
+
     #[tokio::test]
     async fn the_report_and_the_control_detail_name_the_open_remediation_task_until_it_ends() {
         // #98: after a reload the tab reads this, not a task list, to offer

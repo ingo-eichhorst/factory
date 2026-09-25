@@ -20,7 +20,8 @@ use factory_core::protocol::{
 use factory_core::scenario;
 use factory_core::run::{Run, RunStatus};
 use factory_core::task::{
-    CronSchedule, NewTask, RetryPolicy, Schedule, Task, TaskFilter, TaskPatch, TaskReport, TaskStatus,
+    CloseReason, CronSchedule, NewTask, RetryPolicy, Schedule, Task, TaskFilter, TaskPatch, TaskReport,
+    TaskStatus,
 };
 use std::path::{Path, PathBuf};
 
@@ -807,8 +808,10 @@ enum RunCmd {
 enum TaskCmd {
     /// List tasks.
     List {
+        /// A status, or `failed` (blocked by a failed run) or `closed`
+        /// (done or cancelled).
         #[arg(long)]
-        status: Option<TaskStatus>,
+        status: Option<StatusFilter>,
         #[arg(long)]
         scope: Option<String>,
         #[arg(long)]
@@ -961,6 +964,29 @@ enum TaskCmd {
     /// Stop a running task and close its session. Journaled with who
     /// asked, and why if you say.
     Cancel {
+        id: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Close a task on purpose, with a reason: `completed`, `not_planned`
+    /// (won't do) or `duplicate`. Works with no run in progress -- a task
+    /// blocked by a failure waits for exactly this. Journaled with who
+    /// closed it, and the note if you give one.
+    Close {
+        id: Option<String>,
+        /// completed, not_planned or duplicate.
+        #[arg(long, value_parser = parse_close_reason)]
+        reason: CloseReason,
+        /// The task this one duplicates (with --reason duplicate).
+        #[arg(long)]
+        duplicate_of: Option<String>,
+        /// Why, in a few words.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Put a closed task back to pending. Journaled with who asked, and
+    /// why if you say.
+    Reopen {
         id: Option<String>,
         #[arg(long)]
         reason: Option<String>,
@@ -1602,7 +1628,7 @@ fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
         }
     }
     if c.stage == factory_core::intake::IntakeStage::Triaging
-        && c.triage_task_status.is_some_and(|s| s.is_terminal())
+        && c.triage_task_ended
         && c.triage.is_none()
     {
         line.push_str("\n      the triage run ended without an assessment");
@@ -3701,13 +3727,23 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             scope,
             limit,
         } => {
-            let payload = client
+            // `failed` and `closed` are not one stored status each, so the
+            // daemon is asked for the nearest thing and the rest is sorted
+            // out here -- and the limit applied after, not before.
+            let narrowed = status.is_some_and(|f| f.narrows());
+            let mut payload = client
                 .send(Request::TaskList(TaskFilter {
-                    status,
+                    status: status.and_then(StatusFilter::wire),
                     scope,
-                    limit,
+                    limit: if narrowed { None } else { limit },
                 }))
                 .await?;
+            if let (Some(filter), Payload::Tasks { tasks }) = (status, &mut payload) {
+                tasks.retain(|t| filter.keeps(t));
+                if let Some(limit) = limit {
+                    tasks.truncate(limit as usize);
+                }
+            }
             print(&payload, json, |p| match p {
                 Payload::Tasks { tasks } => Some(if tasks.is_empty() {
                     "no tasks".into()
@@ -3911,6 +3947,26 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             let payload = client.send(Request::TaskCancel { id: need_id(id)?, reason, run: None }).await?;
             print(&payload, json, |p| match p {
                 Payload::Run { run } => Some(run_line(run)),
+                _ => None,
+            })
+        }
+
+        TaskCmd::Close { id, reason, duplicate_of, note } => {
+            let payload = client.send(Request::TaskClose { id: need_id(id)?, reason, duplicate_of, note }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Task { task } => Some(format!(
+                    "closed {} as {}",
+                    task.id,
+                    task.close_reason().map_or("closed", |r| r.label())
+                )),
+                _ => None,
+            })
+        }
+
+        TaskCmd::Reopen { id, reason } => {
+            let payload = client.send(Request::TaskReopen { id: need_id(id)?, reason }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Task { task } => Some(format!("reopened {}; it is {}", task.id, task.status.as_str())),
                 _ => None,
             })
         }
@@ -4294,6 +4350,69 @@ fn parse_retry(text: &str) -> Result<RetryPolicy> {
     Ok(RetryPolicy::Backoff { max_attempts, backoff_seconds })
 }
 
+/// What `--status` takes on `task list`: a stored status, or one of the two
+/// a person asks for that are not one (`#122`) -- `failed`, a task blocked
+/// by a failed run, and `closed`, done or cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusFilter {
+    Is(TaskStatus),
+    Failed,
+    Closed,
+}
+
+impl std::str::FromStr for StatusFilter {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "failed" => Self::Failed,
+            "closed" => Self::Closed,
+            other => Self::Is(other.parse()?),
+        })
+    }
+}
+
+impl StatusFilter {
+    /// The status the daemon is asked for.
+    fn wire(self) -> Option<TaskStatus> {
+        match self {
+            Self::Is(status) => Some(status),
+            Self::Failed => Some(TaskStatus::Blocked),
+            Self::Closed => None,
+        }
+    }
+
+    /// Whether the daemon's answer still needs sorting here.
+    fn narrows(self) -> bool {
+        !matches!(self, Self::Is(_))
+    }
+
+    fn keeps(self, t: &Task) -> bool {
+        match self {
+            Self::Is(status) => t.status == status,
+            Self::Failed => t.has_failed(),
+            Self::Closed => t.status.is_terminal(),
+        }
+    }
+}
+
+fn parse_close_reason(text: &str) -> std::result::Result<CloseReason, String> {
+    text.parse()
+}
+
+/// Why a task is where it is, when its status alone does not say: the
+/// failure it is blocked on, or how it was closed (`#122`).
+fn standing(t: &Task) -> Option<String> {
+    if t.has_failed() {
+        let kind = t.failure.as_ref().and_then(|f| f.kind).map_or("unclassified", |k| k.as_str());
+        return Some(format!("last attempt failed: {kind}"));
+    }
+    let reason = t.close_reason()?;
+    Some(match t.closure.as_ref().and_then(|c| c.duplicate_of.as_deref()) {
+        Some(other) => format!("duplicate of {other}"),
+        None => reason.label().to_string(),
+    })
+}
+
 /// What `task create` says after the task line: whether anything will start
 /// it. Nothing dispatches a pending task on its own -- there is no queue
 /// (`#124`) -- so a task created without `--run` or a schedule sits there
@@ -4322,8 +4441,9 @@ fn one_line(t: &Task) -> String {
         1 => "  1 run  ".to_string(),
         n => format!("{n:>3} runs "),
     };
+    let why = standing(t).map(|w| format!("  [{w}]")).unwrap_or_default();
     format!(
-        "{}  {:<12} {} {:<10} {:<12} {}",
+        "{}  {:<12} {} {:<10} {:<12} {}{why}",
         &t.id[..8.min(t.id.len())],
         t.status.as_str(),
         runs,
@@ -4907,6 +5027,28 @@ fn detail(t: &Task) -> String {
             retry.attempts,
             retry.resume_at.to_rfc3339(),
         ));
+    }
+    if let Some(f) = t.failure.as_ref().filter(|_| t.has_failed()) {
+        let kind = f.kind.map_or("unclassified", |k| k.as_str());
+        let attempt = f.attempt.map(|a| format!("attempt {a} ")).unwrap_or_default();
+        s.push_str(&format!(
+            "  failed     {attempt}{kind} at {} -- run it again, or close it with a reason\n",
+            f.at.to_rfc3339()
+        ));
+    }
+    if let Some(reason) = t.close_reason() {
+        let mut line = format!("  closed     {}", reason.label());
+        if let Some(c) = &t.closure {
+            if let Some(other) = &c.duplicate_of {
+                line.push_str(&format!(" of {other}"));
+            }
+            line.push_str(&format!(" by {} at {}", c.by, c.at.to_rfc3339()));
+            if let Some(note) = &c.note {
+                line.push_str(&format!(": {note}"));
+            }
+        }
+        s.push_str(&line);
+        s.push('\n');
     }
     if let Some(v) = t.estimate_seconds {
         s.push_str(&format!("  estimate   {v}s\n"));
@@ -5504,6 +5646,32 @@ mod tests {
             _ => panic!("answer"),
         }
         assert!(Cli::try_parse_from(["factory", "run", "answer", "r1", "yes"]).is_err(), "no reason, no answer");
+        match parse(&["task", "close", "t1", "--reason", "not_planned", "--note", "the client dropped it"]).command {
+            Command::Task(TaskCmd::Close { id: Some(id), reason: CloseReason::NotPlanned, duplicate_of: None, note: Some(note) }) => {
+                assert_eq!((id.as_str(), note.as_str()), ("t1", "the client dropped it"));
+            }
+            _ => panic!("close"),
+        }
+        match parse(&["task", "close", "t1", "--reason", "duplicate", "--duplicate-of", "t0"]).command {
+            Command::Task(TaskCmd::Close { reason: CloseReason::Duplicate, duplicate_of: Some(of), .. }) => assert_eq!(of, "t0"),
+            _ => panic!("close duplicate"),
+        }
+        assert!(Cli::try_parse_from(["factory", "task", "close", "t1"]).is_err(), "no reason, no close");
+        assert!(Cli::try_parse_from(["factory", "task", "close", "t1", "--reason", "meh"]).is_err());
+        match parse(&["task", "reopen", "t1"]).command {
+            Command::Task(TaskCmd::Reopen { id: Some(_), reason: None }) => {}
+            _ => panic!("reopen"),
+        }
+    }
+
+    #[test]
+    fn task_list_status_takes_failed_and_closed_as_well_as_a_stored_status() {
+        assert_eq!("failed".parse::<StatusFilter>().unwrap(), StatusFilter::Failed);
+        assert_eq!("closed".parse::<StatusFilter>().unwrap(), StatusFilter::Closed);
+        assert_eq!("pending".parse::<StatusFilter>().unwrap(), StatusFilter::Is(TaskStatus::Pending));
+        assert!("nonsense".parse::<StatusFilter>().is_err());
+        assert_eq!(StatusFilter::Failed.wire(), Some(TaskStatus::Blocked));
+        assert_eq!(StatusFilter::Closed.wire(), None);
     }
 
     #[test]
