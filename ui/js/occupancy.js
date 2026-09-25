@@ -5,7 +5,7 @@
 import { $, esc, api, state, shortSpan } from "./core.js";
 import { inScope, scopeLabel } from "./scopes.js";
 import { openTask } from "./tasks.js";
-import { rowStyle, laneStyle, concurrency } from "./occupancy-model.js";
+import { rowStyle, laneStyle, concurrency, blockedStretches, blockedNote, waitingShare } from "./occupancy-model.js";
 
 export const OCC_STEPS = [
   [2 * 60, 15], [6 * 60, 30], [12 * 60, 60], [24 * 60, 120], [3 * 1440, 360], [Infinity, 1440],
@@ -82,10 +82,23 @@ export function renderOccupancy() {
         }
         const w = Math.max(0.25, clamp(pct(b.to || now)) - l);
         const secs = ((b.to ? new Date(b.to) : new Date(now)) - new Date(b.from)) / 1000;
+        const waits = blockedStretches(b, now);
+        const note = blockedNote(waits, shortSpan);
         parts.push(`<div class="blk run ${esc(b.status)}${w < 6 ? " tiny" : ""}"
           data-task="${esc(b.task_id)}" data-run="${esc(b.run_id)}"
           style="${lane}left:${l.toFixed(3)}%;width:${w.toFixed(3)}%"
-          title="${esc(b.title)} — attempt ${b.attempt}, ${esc(b.trigger)}, ${esc(b.status)}, ${shortSpan(secs)}">${esc(b.title)}</div>`);
+          title="${esc(b.title)} — attempt ${b.attempt}, ${esc(b.trigger)}, ${esc(b.status)}, ${shortSpan(secs)}${note ? ` · ${note}` : ""}">${esc(b.title)}</div>`);
+        // The time it spent waiting on a human, laid over the bar in the run's
+        // own lane. The bar keeps the colour of how the run ended; this is
+        // what it waited on along the way, which the run record forgets.
+        for (const s of waits) {
+          const sl = clamp(pct(s.from));
+          const sw = clamp(pct(s.to)) - sl;
+          if (sw <= 0) continue;
+          parts.push(`<div class="blk seg blocked" data-task="${esc(b.task_id)}" data-run="${esc(b.run_id)}"
+            style="${lane}left:${sl.toFixed(3)}%;width:${Math.max(0.25, sw).toFixed(3)}%"
+            title="${esc(b.title)} — blocked ${shortSpan(s.seconds)} waiting for a human"></div>`);
+        }
       }
 
       for (const p of r.planned) {
@@ -108,10 +121,14 @@ export function renderOccupancy() {
       const busy = r.busy_seconds > 0
         ? `${Math.min(100, Math.round((r.busy_seconds / elapsed) * 100))}%`
         : (r.spans.some(s => s.status === "working") ? "—" : "idle");
+      // Blocked time stays inside busy time (#121 leaves that call open); the
+      // share of it spent waiting is marked on the figure, not taken off it.
+      const wait = waitingShare(r);
+      const shown = wait ? `<span class="occ-wait" title="${esc(wait.title)}">${busy}</span>` : busy;
       const conc = concurrency(r);
       const util = conc
-        ? `<span class="occ-conc" title="${esc(conc.title)}">${esc(conc.tag)}</span> ${busy}`
-        : busy;
+        ? `<span class="occ-conc" title="${esc(conc.title)}">${esc(conc.tag)}</span> ${shown}`
+        : shown;
 
       return `<div class="occ-row"${rowStyle(r)}>
         <span class="occ-lab${r.blocks.length ? "" : " free"}"
@@ -147,6 +164,7 @@ export function renderOccupancy() {
       <span><i style="background:var(--wait)"></i>running</span>
       <span><i style="background:var(--fault)"></i>failed</span>
       <span><i style="background:var(--signal)"></i>blocked</span>
+      <span><i style="background:var(--run);box-shadow:inset 0 -3px 0 var(--signal)"></i>waited on a human</span>
       <span><i style="border:1px dashed var(--signal);height:6px"></i>scheduled</span>
       <span><i style="border:1px dotted var(--wait);height:6px"></i>estimated duration</span>
       <span><i style="background:var(--run);opacity:.6;height:4px"></i>runtime saw it busy</span>
