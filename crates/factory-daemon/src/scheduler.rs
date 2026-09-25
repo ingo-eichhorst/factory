@@ -159,7 +159,13 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
             // Applies to a `Blocked` run too -- a block is honest only as long
             // as the session it names is actually still there.
             let age = (now - run.started_at).num_seconds();
-            if age > 30 && engine.session_status(&run).await == RuntimeStatus::Gone {
+            // A verifying run's agent is finished; its session going away
+            // (a `shell` pane that exits) says nothing about the gates the
+            // daemon is running for it.
+            if run.status != RunStatus::Verifying
+                && age > 30
+                && engine.session_status(&run).await == RuntimeStatus::Gone
+            {
                 engine
                     .fail_run(
                         &run.id,
@@ -196,6 +202,13 @@ fn overdue(
     timeout_secs: i64,
     blocked_secs: i64,
 ) -> Option<(FailKind, String)> {
+    // `#118`: the agent has said done and the daemon is running its
+    // required gates, each bounded by its own timeout. Neither the ack nor
+    // the run's total-duration cap is about this stretch -- the work is
+    // finished -- so neither may fail it mid-verification.
+    if status == RunStatus::Verifying {
+        return None;
+    }
     if status == RunStatus::Blocked {
         // `blocked_since` should always be set by whatever put the run into
         // `Blocked`, but a run that somehow lacks it is still a run someone
@@ -255,6 +268,11 @@ mod tests {
 
     fn at(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap()
+    }
+
+    #[test]
+    fn a_verifying_run_is_never_overdue_however_long_its_gates_take() {
+        assert_eq!(overdue(RunStatus::Verifying, at(0), None, at(1_000_000), 100, 3600, 10_000), None);
     }
 
     #[test]

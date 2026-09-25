@@ -17,6 +17,7 @@
 //! ADR 0004 introduces: the audit trail of who attested to what, and when
 //! that was withdrawn.
 
+use factory_core::control_plan::StepAttestation;
 use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{Attestation, ControlRef, Withdrawal};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -39,6 +40,20 @@ CREATE INDEX IF NOT EXISTS policy_attestations_scope ON policy_attestations(scop
 -- the insert instead of silently adding a row nothing folds in.
 CREATE UNIQUE INDEX IF NOT EXISTS policy_attestations_one_withdrawal
     ON policy_attestations(withdraws) WHERE withdraws IS NOT NULL;
+
+-- `#118`: the evidence each required step left for one run -- a gate's exit
+-- code and output tail, who ran it, the commit it judged. Append-only like
+-- the table above, and for the same reason: a second verification of the
+-- same run appends, it never rewrites what the first one found.
+CREATE TABLE IF NOT EXISTS run_attestations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    step TEXT NOT NULL,
+    at TEXT NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS run_attestations_run ON run_attestations(run_id, at);
 "#;
 
 fn error(error: impl std::fmt::Display) -> FactoryError {
@@ -234,6 +249,47 @@ impl PolicyStore {
     }
 }
 
+impl PolicyStore {
+    /// Record one step's evidence for one run (`#118`). Insert only.
+    pub async fn append_step_attestation(&self, attestation: &StepAttestation) -> Result<()> {
+        let attestation = attestation.clone();
+        self.with_conn(move |conn| {
+            let data = serde_json::to_string(&attestation).map_err(error)?;
+            conn.execute(
+                "INSERT INTO run_attestations (id, run_id, task_id, step, at, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    attestation.id,
+                    attestation.run_id,
+                    attestation.task_id,
+                    attestation.step,
+                    attestation.at.to_rfc3339(),
+                    data
+                ],
+            )
+            .map_err(error)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Every attestation a run has collected, oldest first.
+    pub async fn step_attestations(&self, run_id: &str) -> Result<Vec<StepAttestation>> {
+        let run_id = run_id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, data FROM run_attestations WHERE run_id=?1 ORDER BY at ASC, rowid ASC")
+                .map_err(error)?;
+            let rows = stmt
+                .query_map([&run_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(error)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(error)?;
+            Ok(decode_all(rows, "run_attestations"))
+        })
+        .await
+    }
+}
+
 /// The one withdrawal row referencing `attestation_id`, if there is one --
 /// the unique index guarantees there is never more than one.
 fn fetch_withdrawal(conn: &Connection, attestation_id: &str) -> Result<Option<Withdrawal>> {
@@ -266,6 +322,39 @@ mod tests {
             expires_at: now + chrono::Duration::days(30),
             withdrawn: None,
         }
+    }
+
+    #[tokio::test]
+    async fn step_attestations_append_and_come_back_per_run_oldest_first() {
+        use factory_core::control_plan::{AttestationVerdict, StepKind};
+        let store = PolicyStore::in_memory().unwrap();
+        let at = Utc::now();
+        let make = |id: &str, run: &str, verdict, secs| StepAttestation {
+            id: id.into(),
+            run_id: run.into(),
+            task_id: "t".into(),
+            scope: "demo".into(),
+            category: "feature".into(),
+            step: "tests".into(),
+            kind: StepKind::Gate,
+            actor: "factory-daemon".into(),
+            verdict,
+            required_by: vec![],
+            command: Some("true".into()),
+            exit_code: Some(0),
+            output: None,
+            dir: "/tmp".into(),
+            commit: None,
+            dirty: None,
+            node_id: None,
+            at: at + chrono::Duration::seconds(secs),
+        };
+        store.append_step_attestation(&make("b", "r1", AttestationVerdict::Pass, 2)).await.unwrap();
+        store.append_step_attestation(&make("a", "r1", AttestationVerdict::Fail, 1)).await.unwrap();
+        store.append_step_attestation(&make("c", "r2", AttestationVerdict::Pass, 1)).await.unwrap();
+        let got = store.step_attestations("r1").await.unwrap();
+        assert_eq!(got.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert!(store.append_step_attestation(&make("a", "r1", AttestationVerdict::Pass, 3)).await.is_err(), "an id is written once");
     }
 
     #[tokio::test]

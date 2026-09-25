@@ -63,6 +63,12 @@ pub struct TaskBinding {
     /// `upstream`. Page ids and reasons only, never page text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge: Option<crate::adapter::knowledge::KnowledgeHints>,
+    /// The steps this run must pass before its `done` counts (`#118`) --
+    /// `Run::required_steps`, fixed at dispatch. Named in the reporting
+    /// contract so the agent can run them itself before it says it is done.
+    /// Absent on the wire when empty, like `upstream`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_steps: Vec<crate::control_plan::RequiredStep>,
 }
 
 /// One direct parent's contribution to a downstream workflow node's dispatch:
@@ -271,7 +277,28 @@ impl AgentContext {
         };
         let bin = self.factory_bin.display();
         let id = &binding.task.id;
-        format!(
+        let checks: Vec<String> = binding
+            .required_steps
+            .iter()
+            .filter(|s| s.kind.enforced())
+            .map(|s| {
+                let command = s.command.as_deref().map(|c| format!(" (`{c}`)")).unwrap_or_else(|| " (no command declared)".into());
+                let by = if s.required_by.is_empty() { String::new() } else { format!(", required by {}", s.required_by.join(", ")) };
+                format!("- {}{command}{by}\n", s.step)
+            })
+            .collect();
+        let verification = if checks.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nBefore done counts, Factory runs these checks itself, in your working \
+                 directory, and the run waits in `verifying` until they pass:\n{}\
+                 Run them yourself before you report done. If one fails, the run is blocked \
+                 with the reason; fix it and report done again.",
+                checks.concat()
+            )
+        };
+        let contract = format!(
             "Report progress by running these commands in your shell. They are how \
              this task is tracked; nothing watches your terminal to guess.\n\
              \n\
@@ -285,7 +312,8 @@ impl AgentContext {
              blocked -- before your turn ends. When your harness says a turn ended \
              without one of them, and nothing is still running in the background to \
              wake you, Factory may end the run as failed."
-        )
+        );
+        contract + &verification
     }
 
     /// A short, adapter-neutral guide to Factory itself: what it is, who this
@@ -772,6 +800,7 @@ mod tests {
             worktree_branch: None,
             upstream: Vec::new(),
             knowledge: None,
+            required_steps: Vec::new(),
         });
         ctx.identity_token = None;
         ctx

@@ -269,6 +269,10 @@ impl Engine {
             | Request::WorkflowList { .. }
             | Request::WorkflowRunGet { .. }
             | Request::WorkflowRunList { .. }
+            // A preview folded from authored catalogues, and the evidence a
+            // run already carries: nothing written (`#118`).
+            | Request::WorkflowLint { .. }
+            | Request::RunAttestations { .. }
             | Request::RoleList { .. }
             | Request::Subscribe => return Needs::Nothing,
 

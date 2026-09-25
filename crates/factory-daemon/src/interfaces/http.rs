@@ -195,6 +195,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/tasks/{id}/output", get(task_output))
         .route("/api/tasks/{id}/runs", get(task_runs))
         .route("/api/workflows", get(list_workflows).post(create_workflow))
+        .route("/api/workflow-lint", get(workflow_lint))
         .route(
             "/api/workflows/{id}",
             get(get_workflow)
@@ -207,6 +208,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/workflow-runs/{id}/cancel", post(cancel_workflow_run))
         .route("/api/runs/{id}", get(get_run))
         .route("/api/runs/{id}/entries", get(run_entries))
+        .route("/api/runs/{id}/attestations", get(run_attestations))
         .route("/api/runs/{id}/output", get(run_output))
         .route("/api/runs/{id}/input", post(run_input))
         .route("/api/runs/{id}/answer", post(run_answer))
@@ -1243,6 +1245,28 @@ async fn cancel_workflow_run(
     Path(id): Path<String>,
 ) -> AxumResponse {
     run(&engine, Request::WorkflowRunCancel { id }).await
+}
+
+#[derive(serde::Deserialize)]
+struct LintQuery {
+    workflow: Option<String>,
+    task: Option<String>,
+    scope: Option<String>,
+    category: Option<String>,
+}
+
+/// `#118`: `?workflow=<id>`, `?task=<id>` or `?scope=<name>`, each with an
+/// optional `&category=`.
+async fn workflow_lint(State(engine): State<Arc<Engine>>, Query(q): Query<LintQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::WorkflowLint { workflow: q.workflow, task: q.task, scope: q.scope, category: q.category },
+    )
+    .await
+}
+
+async fn run_attestations(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::RunAttestations { id }).await
 }
 
 async fn get_run(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {

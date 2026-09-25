@@ -484,6 +484,7 @@ mod tests {
                 worktree_branch,
                 upstream: Vec::new(),
                 knowledge: None,
+                required_steps: Vec::new(),
             }),
             identity_token: None,
             role: None,

@@ -32,28 +32,11 @@ fn missing(kind: &str, id: &str) -> FactoryError {
 }
 
 /// 10 minutes -- the reset timeout the issue names, and the gate's own
-/// fallback when a case sets no `timeout_seconds`.
-const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 600;
+/// fallback when a case sets no `timeout_seconds`. The same number
+/// `#118`'s required steps fall back to, from the same shared runner.
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = crate::verification::DEFAULT_GATE_TIMEOUT_SECS;
 
-/// Run `sh -c command` in `dir`, combined stdout+stderr, bounded by
-/// `timeout_secs`. `(None, ...)` on a timeout or a failure to even start the
-/// process -- both read as "could not confirm this passed", never as `Pass`.
-async fn run_shell_capture(dir: &Path, command: &str, timeout_secs: u64) -> (Option<i32>, String) {
-    let attempt = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(dir)
-        .output();
-    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), attempt).await {
-        Ok(Ok(output)) => {
-            let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-            combined.push_str(&String::from_utf8_lossy(&output.stderr));
-            (output.status.code(), combined)
-        }
-        Ok(Err(e)) => (None, format!("could not run the command: {e}")),
-        Err(_) => (None, format!("did not finish within {timeout_secs}s")),
-    }
-}
+use crate::verification::run_shell_capture;
 
 /// Resolve `rev` to the full 40-hex commit SHA it names in `scope_path`, or
 /// `None` when it does not name one there -- an unknown revision, or `rev`
@@ -543,7 +526,7 @@ impl Engine {
                     }
                 }
             }
-            RunStatus::Dispatching | RunStatus::Running | RunStatus::Blocked => {
+            RunStatus::Dispatching | RunStatus::Running | RunStatus::Blocked | RunStatus::Verifying => {
                 unreachable!("checked terminal above")
             }
         }

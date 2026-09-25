@@ -593,6 +593,28 @@ impl WorkflowDefinition {
     }
 }
 
+/// `factory workflow lint`'s answer (`#118`): the effective plan for each
+/// category a definition's task nodes are planned as, what injection adds,
+/// which authored gates already satisfy a step, and the ordering rules the
+/// graph breaks. An author-facing preview, never a gate of its own -- the
+/// runtime check is the daemon's verifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowLint {
+    /// The workflow's id, `task:<id>` for a task's implicit workflow, or
+    /// empty for a bare scope-and-category preview.
+    pub subject: String,
+    pub scope: String,
+    pub plans: Vec<ControlPlan>,
+    #[serde(default)]
+    pub injections: Vec<Injection>,
+    #[serde(default)]
+    pub violations: Vec<String>,
+    /// The definition as a run of it would start: authored nodes plus the
+    /// locked gates. Absent for a bare scope-and-category preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injected: Option<WorkflowDefinition>,
+}
+
 /// The one node of [`WorkflowDefinition::implicit`].
 pub const IMPLICIT_NODE: &str = "work";
 

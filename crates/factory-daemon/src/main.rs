@@ -25,6 +25,7 @@ mod schedule;
 mod site;
 mod stores;
 mod ui;
+mod verification;
 mod worktree;
 mod workflows;
 
@@ -339,6 +340,9 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // The one place a bench attempt's gate actually runs -- started before
     // recovery below, so anything it enqueues has a consumer immediately.
     engine.spawn_bench_judge();
+    // `#118`'s verifier, and the runs a restart caught mid-verification.
+    engine.spawn_verifier();
+    engine.recover_verifications().await;
     // The same, for bench runs still `running` when the daemon last stopped.
     engine.recover_bench_runs().await;
 

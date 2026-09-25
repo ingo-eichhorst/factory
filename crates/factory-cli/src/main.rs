@@ -72,6 +72,9 @@ enum Command {
     /// Create, run, and report on tasks.
     #[command(subcommand)]
     Task(TaskCmd),
+    /// Workflows: `lint` previews the control plan a run is held to.
+    #[command(subcommand)]
+    Workflow(WorkflowCmd),
     /// The L5 Knowledge tab: an index of the instance's knowledge vault,
     /// rebuilt from the files on every call. With no subcommand, prints the
     /// index; `import`/`add` are the only way anything is ever written --
@@ -557,6 +560,30 @@ enum KnowledgeCmd {
 }
 
 #[derive(Subcommand)]
+enum WorkflowCmd {
+    /// The control plan (`#118`) a workflow, a task or a scope's category is
+    /// held to: the steps its policy controls and quality attributes
+    /// require, which of them a run gets injected as locked gates, which
+    /// authored gate nodes already satisfy one, and the before/after rules
+    /// the graph breaks. A preview for authors -- the daemon enforces the
+    /// same plan when a run reports done.
+    Lint {
+        /// A stored workflow's id.
+        workflow: Option<String>,
+        /// Lint a task instead, as the one-node workflow it runs as.
+        #[arg(long, conflicts_with = "workflow")]
+        task: Option<String>,
+        /// With neither a workflow nor a task: the scope whose plan to show.
+        #[arg(long)]
+        scope: Option<String>,
+        /// The category to plan for, instead of the one the workflow or
+        /// task names (or `default`).
+        #[arg(long)]
+        category: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum RunCmd {
     /// The runs of a task, newest first.
     List {
@@ -566,6 +593,9 @@ enum RunCmd {
     },
     /// One run.
     Show { id: String },
+    /// The evidence a run's required steps left (`#118`): who ran each
+    /// gate, on which commit, and what it found. Append-only.
+    Attestations { id: String },
     /// One run's journal.
     Log {
         id: String,
@@ -652,6 +682,11 @@ enum TaskCmd {
         /// instructions, searched when the run starts.
         #[arg(long)]
         knowledge_hints: bool,
+        /// What kind of work this is -- `feature`, `bugfix`, `release`,
+        /// `docs` -- which picks the control plan its runs are held to.
+        /// Without it the task is planned as `default`.
+        #[arg(long)]
+        category: Option<String>,
         /// Dispatch it immediately as well.
         #[arg(long)]
         run: bool,
@@ -722,6 +757,12 @@ enum TaskCmd {
         /// the schedule.
         #[arg(long)]
         reason: Option<String>,
+        /// Set the category its runs are planned as.
+        #[arg(long, conflicts_with = "default_category")]
+        category: Option<String>,
+        /// Go back to the default category.
+        #[arg(long)]
+        default_category: bool,
     },
     /// Show one task.
     Show { id: Option<String> },
@@ -972,6 +1013,7 @@ async fn main() -> Result<()> {
         Command::Agent(cmd) => agent_cmd(cli.json, &client, cmd).await,
         Command::Run(cmd) => run_cmd(cli.json, &client, cmd).await,
         Command::Task(cmd) => task(cli.json, &client, cmd).await,
+        Command::Workflow(cmd) => workflow_cmd(cli.json, &client, cmd).await,
 
         Command::Knowledge { command: None } => {
             let payload = client.send(Request::Knowledge).await?;
@@ -2958,6 +3000,13 @@ async fn run_cmd(json: bool, client: &Client, cmd: RunCmd) -> Result<()> {
                 _ => None,
             })
         }
+        RunCmd::Attestations { id } => {
+            let payload = client.send(Request::RunAttestations { id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Attestations { attestations } => Some(attestations_text(attestations)),
+                _ => None,
+            })
+        }
         RunCmd::Log { id, limit } => {
             let payload = client
                 .send(Request::RunEntries {
@@ -3038,6 +3087,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             worktree,
             no_worktree,
             knowledge_hints,
+            category,
             run,
         } => {
             let schedule = schedule
@@ -3071,6 +3121,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     labels: parse_labels(&labels)?,
                     worktree,
                     knowledge_hints,
+                    category,
                 }))
                 .await?;
             let created = match &payload {
@@ -3119,6 +3170,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             pause_schedule,
             resume_schedule,
             reason,
+            category,
+            default_category,
         } => {
             let retry = retry.as_deref().map(parse_retry).transpose()?;
             let patch = TaskPatch {
@@ -3157,6 +3210,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 } else {
                     Some(parse_labels(&labels)?)
                 },
+                category,
+                clear_category: default_category,
                 ..Default::default()
             };
             let payload = client
@@ -3546,6 +3601,102 @@ fn run_line(r: &Run) -> String {
     )
 }
 
+async fn workflow_cmd(json: bool, client: &Client, cmd: WorkflowCmd) -> Result<()> {
+    match cmd {
+        WorkflowCmd::Lint { workflow, task, scope, category } => {
+            let payload = client.send(Request::WorkflowLint { workflow, task, scope, category }).await?;
+            print(&payload, json, |p| match p {
+                Payload::WorkflowLint { lint } => Some(lint_text(lint)),
+                _ => None,
+            })
+        }
+    }
+}
+
+/// `factory workflow lint`, for a person: each category's plan, then what a
+/// run would get injected, then what the graph gets wrong.
+fn lint_text(lint: &factory_core::workflow::WorkflowLint) -> String {
+    let mut s = String::new();
+    if !lint.subject.is_empty() {
+        s.push_str(&format!("{}  (scope {})\n", lint.subject, lint.scope));
+    }
+    for plan in &lint.plans {
+        s.push_str(&format!("\nplan for {} at {}:\n", plan.category, plan.scope));
+        if plan.steps.is_empty() {
+            s.push_str("  nothing required\n");
+        }
+        for step in &plan.steps {
+            let command = step.command.as_deref().map(|c| format!(" `{c}`")).unwrap_or_default();
+            let enforced = if step.enforced { "" } else { "  [not enforced until v2]" };
+            let order = [
+                step.before.iter().map(|b| format!("before {b}")).collect::<Vec<_>>(),
+                step.after.iter().map(|a| format!("after {a}")).collect::<Vec<_>>(),
+            ]
+            .concat();
+            let order = if order.is_empty() { String::new() } else { format!(" [{}]", order.join(", ")) };
+            s.push_str(&format!(
+                "  {:<14} {}{command}{order}  <- {}{enforced}\n",
+                step.id,
+                step.kind.as_str(),
+                step.required_by.join(", ")
+            ));
+        }
+        for waiver in &plan.waived {
+            s.push_str(&format!(
+                "  waived: {} ({}) n/a at {}: {}\n",
+                waiver.control,
+                waiver.steps.join(", "),
+                waiver.scope,
+                waiver.rationale
+            ));
+        }
+        for finding in &plan.findings {
+            s.push_str(&format!("  ! {finding}\n"));
+        }
+    }
+    if !lint.injections.is_empty() {
+        s.push_str("\ninjected at run start:\n");
+        for i in &lint.injections {
+            let how = if i.satisfied_by_authored {
+                format!("satisfied by authored gate {}", i.gate_node_id)
+            } else {
+                format!("+ locked gate {}", i.gate_node_id)
+            };
+            s.push_str(&format!("  {:<14} after {:<18} {how}\n", i.step, i.node_id));
+        }
+    }
+    if !lint.violations.is_empty() {
+        s.push_str("\nordering violations:\n");
+        for v in &lint.violations {
+            s.push_str(&format!("  ! {v}\n"));
+        }
+    }
+    s.trim_end().to_string()
+}
+
+fn attestations_text(attestations: &[factory_core::control_plan::StepAttestation]) -> String {
+    if attestations.is_empty() {
+        return "no attestations".into();
+    }
+    attestations
+        .iter()
+        .map(|a| {
+            let code = a.exit_code.map(|c| format!("exit {c}")).unwrap_or_else(|| "did not finish".into());
+            let commit = a.commit.as_deref().map(|c| &c[..c.len().min(12)]).unwrap_or("-");
+            let dirty = if a.dirty == Some(true) { "+dirty" } else { "" };
+            let by = if a.required_by.is_empty() { String::new() } else { format!("  <- {}", a.required_by.join(", ")) };
+            format!(
+                "{}  {:<14} {:<4} {code:<14} by {}  on {commit}{dirty}{by}",
+                a.at.to_rfc3339(),
+                a.step,
+                a.verdict.as_str(),
+                a.actor
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn run_detail(r: &Run) -> String {
     let mut s = format!(
         "{}\n  task       {}\n  attempt    {}\n  status     {}\n  trigger    {}\n  agent      {} on {}\n  started    {}\n",
@@ -3583,6 +3734,12 @@ fn run_detail(r: &Run) -> String {
     }
     if let Some(path) = &r.worktree_path {
         s.push_str(&format!("  worktree   {path}\n"));
+    }
+    for (i, step) in r.required_steps.iter().enumerate() {
+        let label = if i == 0 { "requires" } else { "" };
+        let command = step.command.as_deref().map(|c| format!(" `{c}`")).unwrap_or_default();
+        let by = if step.required_by.is_empty() { String::new() } else { format!(" ({})", step.required_by.join(", ")) };
+        s.push_str(&format!("  {label:<10} {}{command}{by}\n", step.step));
     }
     if let Some(v) = &r.result {
         s.push_str(&format!("\nresult:\n{v}\n"));
@@ -3623,6 +3780,9 @@ fn detail(t: &Task) -> String {
         t.runtime,
         t.created_at.to_rfc3339(),
     );
+    if let Some(category) = &t.category {
+        s.push_str(&format!("  category   {category}\n"));
+    }
     if let Some(sched) = &t.schedule {
         let paused = if t.schedule_paused { " (paused)" } else { "" };
         s.push_str(&format!("  schedule   {}{paused}\n", describe_schedule(sched)));
