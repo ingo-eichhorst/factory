@@ -233,6 +233,21 @@ pub struct Engine {
     /// (`dispatch`), released for every run `close_session` ever sees,
     /// terminal outcome or not.
     pub(crate) power: crate::power::PowerAssertions,
+    /// The fingerprint of what the last successful `Request::Quality`
+    /// loaded -- every profile in `.factory/quality/` and every scope's
+    /// quality chain -- with when it loaded them, so the next read can tell
+    /// that it moved and publish `Event::QualityChanged`, and an older read
+    /// finishing late never overwrites a newer one (`quality/mod.rs`).
+    /// `None` until the first read, which has nothing to compare against
+    /// and so publishes nothing; lost on restart for the same reason
+    /// `seen_status` is.
+    pub(crate) quality_seen: std::sync::Mutex<Option<(Instant, u64)>>,
+    /// Each scope's guide quality block, with when it was judged and the
+    /// profiles' fingerprint it was judged under -- reused for
+    /// `quality::GUIDE_TTL` so a burst of dispatches does not each read the
+    /// run history. An async lock, held across the judging itself, so that
+    /// burst waits for one answer rather than computing it once each.
+    pub(crate) quality_guide_cache: tokio::sync::Mutex<crate::quality::GuideCache>,
 }
 
 impl Engine {
@@ -274,6 +289,8 @@ impl Engine {
             worktree_caps: Default::default(),
             site_memory: Default::default(),
             power,
+            quality_seen: Default::default(),
+            quality_guide_cache: Default::default(),
         }
     }
 
@@ -707,6 +724,17 @@ impl Engine {
             }),
             Request::ScenarioWhatIf { scenario, drivers } => Ok(Payload::ScenarioWhatIf {
                 result: self.scenario_whatif(scenario, drivers).await?,
+            }),
+            // `Event::QualityChanged`, when due, is published inside
+            // `quality_report` itself -- it is a read that notices, not a write.
+            Request::Quality { scope } => Ok(Payload::Quality {
+                report: self.quality_report(scope.as_deref()).await?,
+            }),
+            // No event of its own: a created task already fired
+            // `Event::TaskCreated` inside `Engine::create`, and answering an
+            // already-open one changes nothing -- `PolicyRemediate`'s rule.
+            Request::QualityRemediate { scope, attribute, scenario, agent } => Ok(Payload::QualityRemediate {
+                result: self.quality_remediate(scope, attribute, scenario, agent).await?,
             }),
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),
@@ -1898,6 +1926,9 @@ impl Engine {
         // once here, the same as `policy_frameworks`, never re-read once the
         // guide is built.
         let goal = self.goal_context(factory.root.clone(), task.labels.get("goal").cloned()).await;
+        // The scope's H-importance quality attributes (`#107`), judged now
+        // and never again for this run -- the same once-at-dispatch rule.
+        let quality = self.quality_context(&task.scope).await;
 
         let ctx = AgentContext {
             scope: task.scope.clone(),
@@ -1919,6 +1950,7 @@ impl Engine {
             role,
             policy_frameworks,
             goal,
+            quality,
         };
 
         let mut launch = agent.launch_spec(&ctx).await?;
@@ -2989,6 +3021,7 @@ mod tests {
             },
             roles: Default::default(),
             policies: Default::default(),
+            quality: Default::default(),
             scope: None,
             scopes: vec![Scope {
                 id: "scope-id".into(),
@@ -3001,6 +3034,7 @@ mod tests {
                 task_store: None,
                 roles: Default::default(),
                 policies: Default::default(),
+                quality: Default::default(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,
@@ -4536,6 +4570,7 @@ mod tests {
             ),
             policy_frameworks: Vec::new(),
             goal: None,
+            quality: Vec::new(),
         };
         let agent = HarnessAgent::pi().with_args(vec!["--model".into(), "sonnet".into()]);
         let mut launch = agent.launch_spec(&ctx).await.unwrap();

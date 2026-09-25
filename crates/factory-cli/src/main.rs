@@ -145,6 +145,56 @@ enum Command {
         #[command(subcommand)]
         command: Option<ScenarioCmd>,
     },
+    /// The L6 Quality attributes tab (`#107`): which ISO 25010 qualities
+    /// each scope declares (`.factory/quality/` profiles, bound by the
+    /// root's `quality:` and each scope's `scope.quality`), how much they
+    /// matter, and whether each scenario is met -- measured, never claimed.
+    /// With no subcommand, prints the status board -- the same thing
+    /// `factory quality status` prints.
+    Quality {
+        /// Only this scope and its descendants (default: the whole instance).
+        #[arg(long)]
+        scope: Option<String>,
+        #[command(subcommand)]
+        command: Option<QualityCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum QualityCmd {
+    /// One line per scope and attribute: importance/difficulty and the
+    /// attribute's rollup, the worst of its scenarios. No score -- there is
+    /// none, per scope or overall.
+    Status {
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// One scope's whole utility tree: every attribute, every scenario with
+    /// its measure, status, reasons and any open remediation task, then its
+    /// trade-offs.
+    Scope { name: String },
+    /// Everything wrong with the profiles or the chains that bind them --
+    /// unknown ids, loosening, more than seven attributes, an H attribute
+    /// nobody measures.
+    Findings {
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Create the task that closes one scenario's gap in `--scope`, labelled
+    /// `quality=<scope>/<attribute>/<scenario>`. Needs `task.create` there,
+    /// the same rule `factory task create` is checked against. Refused for
+    /// a met scenario or a draft; answers the already-open task, creating
+    /// nothing, when there is one.
+    Remediate {
+        /// `<attribute>/<scenario>`, e.g. `reliability.recoverability/daemon-restart`.
+        scenario: String,
+        #[arg(long)]
+        scope: String,
+        /// Overrides which agent the task runs as; the scope's own default
+        /// otherwise.
+        #[arg(long)]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1059,6 +1109,25 @@ async fn main() -> Result<()> {
             };
             scenario_cmd(cli.json, &client, cmd).await
         }
+
+        Command::Quality { scope, command } => {
+            // `--scope` before the subcommand name (or with none at all) is
+            // the same flag `status`/`findings` take after it -- the merge
+            // `Command::Scenario` does above.
+            let cmd = match command {
+                None => QualityCmd::Status { scope },
+                Some(QualityCmd::Status { scope: s }) => QualityCmd::Status { scope: s.or(scope) },
+                Some(QualityCmd::Findings { scope: s }) => QualityCmd::Findings { scope: s.or(scope) },
+                Some(_) if scope.is_some() => {
+                    return Err(anyhow!(
+                        "--scope before the subcommand only applies to `status` and `findings`; repeat \
+                         it after the subcommand name if it takes its own"
+                    ));
+                }
+                Some(other) => other,
+            };
+            quality_cmd(cli.json, &client, cmd).await
+        }
     }
 }
 
@@ -1897,6 +1966,160 @@ fn goals_cycles_text(report: &GoalsReport) -> String {
         .map(|c| {
             let score = c.score.map(|s| format!("{:.0}%", s * 100.0)).unwrap_or_else(|| "--".to_string());
             format!("{:<12} {}..{}  {:<8} score {score}", c.id, c.from, c.to, cycle_status_str(c.status))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// =============================================================== quality
+
+async fn quality_cmd(json: bool, client: &Client, cmd: QualityCmd) -> Result<()> {
+    match cmd {
+        QualityCmd::Status { scope } => {
+            let payload = client.send(Request::Quality { scope }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Quality { report } => Some(quality_status_text(report)),
+                _ => None,
+            })
+        }
+        QualityCmd::Scope { name } => {
+            let payload = client.send(Request::Quality { scope: Some(name.clone()) }).await?;
+            print(&payload, json, |p| match p {
+                // The report covers `name` and everything below it; this
+                // view is `name`'s own tree. Canonical names come back, so
+                // match on the report's own `scope`, not what was typed.
+                Payload::Quality { report } => Some(
+                    report
+                        .scopes
+                        .iter()
+                        .find(|s| Some(&s.report.scope) == report.scope.as_ref())
+                        .map(quality_scope_text)
+                        .unwrap_or_else(|| format!("no quality profile applies at {name}")),
+                ),
+                _ => None,
+            })
+        }
+        QualityCmd::Findings { scope } => {
+            let payload = client.send(Request::Quality { scope }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Quality { report } => Some(quality_findings_text(&report.findings)),
+                _ => None,
+            })
+        }
+        QualityCmd::Remediate { scenario, scope, agent } => {
+            let (attribute, scenario) = parse_quality_target(&scenario)?;
+            let payload = client
+                .send(Request::QualityRemediate { scope, attribute, scenario, agent })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::QualityRemediate { result } => Some(format!(
+                    "{}  {}  {}",
+                    if result.created { "created" } else { "already open" },
+                    result.task.id,
+                    result.task.title
+                )),
+                _ => None,
+            })
+        }
+    }
+}
+
+/// `<attribute>/<scenario>` -> the two halves. Neither half can hold a `/`
+/// (an attribute id is `characteristic[.sub]`, a scenario id a slug), so
+/// the first one is the split.
+fn parse_quality_target(s: &str) -> Result<(String, String)> {
+    match s.split_once('/') {
+        Some((a, b)) if !a.is_empty() && !b.is_empty() && !b.contains('/') => Ok((a.to_string(), b.to_string())),
+        _ => Err(anyhow!("{s:?} is not <attribute>/<scenario>, e.g. reliability.recoverability/daemon-restart")),
+    }
+}
+
+fn level_str(level: factory_core::quality::Level) -> &'static str {
+    match level {
+        factory_core::quality::Level::High => "H",
+        factory_core::quality::Level::Medium => "M",
+        factory_core::quality::Level::Low => "L",
+    }
+}
+
+/// `factory quality [status]`: per scope, one line per attribute --
+/// (importance, difficulty) and its rollup -- then how many findings.
+fn quality_status_text(report: &factory_core::protocol::QualityReport) -> String {
+    let mut out = String::new();
+    if report.scopes.is_empty() {
+        out.push_str("no quality profile applies anywhere asked\n");
+    }
+    for scope in &report.scopes {
+        let r = &scope.report;
+        out.push_str(&format!("{}  ({})\n", r.scope, r.profiles.join(", ")));
+        for a in &r.attributes {
+            out.push_str(&format!(
+                "  ({},{})  {:<8} {}\n",
+                level_str(a.importance),
+                level_str(a.difficulty),
+                a.status.as_str(),
+                a.id
+            ));
+        }
+    }
+    if !report.findings.is_empty() {
+        out.push_str(&format!("\n{} finding(s) -- factory quality findings\n", report.findings.len()));
+    }
+    out.trim_end().to_string()
+}
+
+/// `factory quality scope <name>`: the whole utility tree of one scope.
+fn quality_scope_text(scope: &factory_core::protocol::ScopeQuality) -> String {
+    let r = &scope.report;
+    let mut out = format!("{}  (profiles: {})\n", r.scope, r.profiles.join(", "));
+    for a in &r.attributes {
+        out.push_str(&format!(
+            "\n{}  importance {}, difficulty {}  -- {}  (from {} at {})\n",
+            a.id,
+            level_str(a.importance),
+            level_str(a.difficulty),
+            a.status.as_str(),
+            a.declared_at.profile,
+            a.declared_at.scope
+        ));
+        for s in &a.scenarios {
+            let sc = &s.scenario.scenario;
+            let measure = sc
+                .measure
+                .as_ref()
+                .map(factory_core::quality::describe_measure)
+                .unwrap_or_else(|| "no measure yet".to_string());
+            out.push_str(&format!("  [{:<7}] {}  {measure}\n", s.status.as_str(), sc.id));
+            if let Some(task) = scope.open_tasks.get(&format!("{}/{}", a.id, sc.id)) {
+                out.push_str(&format!("            remediation task open: {task}\n"));
+            }
+            for reason in &s.reasons {
+                out.push_str(&format!("            {reason}\n"));
+            }
+        }
+    }
+    if !r.tradeoffs.is_empty() {
+        out.push_str("\ntrade-offs:\n");
+        for t in &r.tradeoffs {
+            let decision = t.tradeoff.decision.as_deref().map(|d| format!("  ({d})")).unwrap_or_default();
+            out.push_str(&format!(
+                "  {} <-> {}: {}{decision}\n",
+                t.tradeoff.between[0], t.tradeoff.between[1], t.tradeoff.point
+            ));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+fn quality_findings_text(findings: &[factory_core::quality::Finding]) -> String {
+    if findings.is_empty() {
+        return "no findings".to_string();
+    }
+    findings
+        .iter()
+        .map(|f| {
+            let kind = serde_json::to_value(f.kind).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+            format!("{kind:<30} {}  {}", f.subject, f.detail)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -3164,6 +3387,9 @@ fn describe_event(e: &Event) -> String {
         Event::GoalsChanged { kr } => {
             format!("goals    {kr}  checked in")
         }
+        Event::QualityChanged { profiles } => {
+            format!("quality  profiles changed ({})", profiles.join(", "))
+        }
         Event::AgentActivity {
             subject, status, ..
         } => format!("activity {subject}  {}", status.as_str()),
@@ -3360,6 +3586,45 @@ mod tests {
         let kept = turn.last_message.unwrap();
         assert!(kept.len() <= HOOK_LAST_MESSAGE_BYTE_CAP);
         assert!(kept.ends_with("THE END"));
+    }
+
+    // -- quality -------------------------------------------------------------
+
+    #[test]
+    fn quality_parses_with_and_without_a_subcommand() {
+        let cli = Cli::try_parse_from(["factory", "quality"]).unwrap();
+        assert!(matches!(cli.command, Command::Quality { scope: None, command: None }));
+
+        let cli = Cli::try_parse_from(["factory", "quality", "--scope", "demo", "status"]).unwrap();
+        assert!(matches!(cli.command, Command::Quality { scope: Some(_), command: Some(QualityCmd::Status { scope: None }) }));
+
+        let cli = Cli::try_parse_from(["factory", "quality", "scope", "demo", "--json"]).unwrap();
+        assert!(cli.json);
+        assert!(matches!(cli.command, Command::Quality { command: Some(QualityCmd::Scope { ref name }), .. } if name == "demo"));
+
+        let cli = Cli::try_parse_from(["factory", "quality", "findings", "--scope", "demo"]).unwrap();
+        assert!(matches!(cli.command, Command::Quality { command: Some(QualityCmd::Findings { scope: Some(_) }), .. }));
+
+        let cli = Cli::try_parse_from([
+            "factory", "quality", "remediate", "reliability.recoverability/daemon-restart", "--scope", "demo",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Quality { command: Some(QualityCmd::Remediate { .. }), .. }));
+        assert!(
+            Cli::try_parse_from(["factory", "quality", "remediate", "reliability/x"]).is_err(),
+            "--scope is required: a remediation task lands in one named scope"
+        );
+    }
+
+    #[test]
+    fn a_quality_target_is_attribute_then_scenario() {
+        assert_eq!(
+            parse_quality_target("reliability.recoverability/daemon-restart").unwrap(),
+            ("reliability.recoverability".to_string(), "daemon-restart".to_string())
+        );
+        for bad in ["reliability", "/x", "reliability/", "a/b/c"] {
+            assert!(parse_quality_target(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
