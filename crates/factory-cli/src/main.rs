@@ -3720,12 +3720,16 @@ fn usage_block(u: &factory_core::usage::RunUsage) -> String {
 
 fn task_usage_text(u: &factory_core::usage::TaskUsage) -> String {
     let mut s = format!("usage over {} run{}\n", u.total.runs, if u.total.runs == 1 { "" } else { "s" });
-    s.push_str(&format!(
-        "  total      {} tokens, {}{}\n",
-        fmt_tokens(u.total.tokens.total()),
-        fmt_usd(u.total.cost_usd),
-        unknown_suffix(&u.total)
-    ));
+    if u.total.runs_unknown == u.total.runs {
+        s.push_str("  total      unknown -- no run's usage was measured\n");
+    } else {
+        s.push_str(&format!(
+            "  total      {} tokens, {}{}\n",
+            fmt_tokens(u.total.tokens.total()),
+            sum_usd(&u.total),
+            unknown_suffix(&u.total)
+        ));
+    }
     for r in &u.runs {
         let what = match r.usage.state {
             factory_core::usage::UsageState::Known => format!(
@@ -3747,6 +3751,16 @@ fn task_usage_text(u: &factory_core::usage::TaskUsage) -> String {
         ));
     }
     s.trim_end().to_string()
+}
+
+/// A group's cost, or `?` when not one of its runs had a measured cost --
+/// a sum of nothing is not $0.00.
+fn sum_usd(row: &factory_core::usage::CostRow) -> String {
+    if row.runs_costed() == 0 {
+        "?".into()
+    } else {
+        fmt_usd(row.cost_usd)
+    }
 }
 
 /// What a sum is missing, said beside it.
@@ -3792,8 +3806,8 @@ fn costs_text(r: &factory_core::usage::CostReport) -> String {
             key,
             row.runs,
             row.runs_unknown + row.runs_cost_unknown,
-            fmt_tokens(row.tokens.total()),
-            fmt_usd(row.cost_usd),
+            if row.runs_unknown == row.runs { "?".to_string() } else { fmt_tokens(row.tokens.total()) },
+            sum_usd(row),
             row.label.as_deref().unwrap_or("")
         )
     };
@@ -4463,6 +4477,7 @@ mod tests {
         };
         let text = costs_text(&report);
         assert!(text.contains("issue=117"), "{text}");
+        assert!(!text.contains("$0.00"), "a group with nothing measured is ?, not free: {text}");
         assert!(text.contains("1 of 1 runs have no measured cost"), "{text}");
     }
 }
