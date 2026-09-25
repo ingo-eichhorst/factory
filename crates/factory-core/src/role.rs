@@ -150,7 +150,7 @@ pub enum Grant {
 }
 
 impl Grant {
-    pub const ALL: [Grant; 22] = [
+    pub const ALL: [Grant; 23] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
