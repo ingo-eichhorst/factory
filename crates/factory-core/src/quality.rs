@@ -401,6 +401,11 @@ pub enum FindingKind {
     MissingThreshold,
     /// A trade-off between an attribute and itself.
     BadTradeoff,
+    /// A `knowledge` check with no `tag:` under a dotted attribute id. Its
+    /// default tag would be `control/quality/<attribute>/<scenario>`, and a
+    /// knowledge tag cannot contain `.` (`knowledge::is_tag_char`), so no
+    /// page could ever carry it -- the scenario could never be met.
+    UntaggedKnowledgeCheck,
     /// A config `quality:` list names a profile with no file, or one whose
     /// file failed to parse.
     MissingProfile,
@@ -542,8 +547,20 @@ fn validate_profile(mut profile: Profile, subject: &str, findings: &mut Vec<Find
                     ),
                 ));
             }
-            if let Some(Measure::Metric(m)) = &s.measure {
-                check_metric(m, subject, &format!("{}/{}", attr.id, s.id), findings);
+            match &s.measure {
+                Some(Measure::Metric(m)) => check_metric(m, subject, &format!("{}/{}", attr.id, s.id), findings),
+                Some(Measure::Check(Check::Knowledge { tag: None })) if attr.id.contains('.') => {
+                    findings.push(finding(
+                        FindingKind::UntaggedKnowledgeCheck,
+                        subject,
+                        format!(
+                            "{}/{}'s knowledge check needs a `tag:`: the default one would contain `.`, \
+                             which a knowledge tag cannot",
+                            attr.id, s.id
+                        ),
+                    ));
+                }
+                _ => {}
             }
         }
         true
@@ -1134,7 +1151,9 @@ fn evaluate_metric(m: &MetricMeasure, values: &BTreeMap<MetricId, MetricValue>, 
 /// `<attribute>/<scenario>`. `policy::evaluate` needs *some* `ControlRef`,
 /// and this one names the scenario exactly. An `attestation` check matches
 /// an `Attestation` recorded against this same ref; how one gets recorded
-/// is a later slice's question.
+/// is a later slice's question -- this ref is built with `ControlRef::new`
+/// and does not survive `ControlRef`'s own `FromStr` (its id holds `.` and
+/// `/`), so that slice cannot simply parse one off a command line.
 pub fn control_ref(attribute: &str, scenario: &str) -> ControlRef {
     ControlRef::new("quality", format!("{attribute}/{scenario}"))
 }
@@ -1402,6 +1421,21 @@ mod tests {
         );
         let unavailable = q.findings.iter().find(|f| f.kind == FindingKind::UnavailableMetric).unwrap();
         assert!(unavailable.detail.contains("§12.6"), "{}", unavailable.detail);
+    }
+
+    #[test]
+    fn a_knowledge_check_under_a_dotted_attribute_must_name_its_tag() {
+        let q = catalogue_from(&[(
+            "p.yaml",
+            "attributes:\n\
+             \x20 - id: security.accountability\n    importance: M\n    difficulty: M\n    scenarios:\n\
+             \x20     - { id: untagged, measure: { check: knowledge } }\n\
+             \x20     - { id: tagged, measure: { check: knowledge, tag: audit/runbook } }\n\
+             \x20 - id: safety\n    importance: M\n    difficulty: M\n    scenarios:\n\
+             \x20     - { id: default-tag-is-fine, measure: { check: knowledge } }\n",
+        )]);
+        assert_eq!(kinds(&q.findings), vec![FindingKind::UntaggedKnowledgeCheck]);
+        assert!(q.findings[0].detail.contains("security.accountability/untagged"), "{}", q.findings[0].detail);
     }
 
     #[test]
