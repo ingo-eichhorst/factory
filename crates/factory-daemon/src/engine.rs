@@ -5663,7 +5663,7 @@ mod tests {
         assert_eq!(closed.closure.as_ref().unwrap().duplicate_of.as_deref(), Some(original.id.as_str()));
         let entries = engine.store.entries(&task.id, 20).await.unwrap();
         let entry = entries.iter().find(|e| e.kind == "closed").unwrap();
-        assert!(entry.message.contains("after its last attempt failed"), "{}", entry.message);
+        assert!(entry.message.starts_with("its last attempt failed; closed as a duplicate of"), "{}", entry.message);
         assert_eq!(entry.data.as_ref().unwrap()["fail_kind"], "agent_failed");
         std::fs::remove_dir_all(&scope_dir).ok();
     }

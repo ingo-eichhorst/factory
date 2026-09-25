@@ -494,12 +494,12 @@ impl Engine {
             Some(other) => format!("as a duplicate of {other}"),
             None => format!("as {}", reason.label()),
         };
-        let was = if task.has_failed() { " after its last attempt failed" } else { "" };
+        let was = if task.has_failed() { "its last attempt failed; " } else { "" };
         self.entry(
             id,
             asked.entry(
                 "closed",
-                format!("closed {how}{was} {}", asked.words()),
+                format!("{was}closed {how} {}", asked.words()),
                 serde_json::json!({
                     "close_reason": reason.as_str(),
                     "duplicate_of": duplicate_of,
