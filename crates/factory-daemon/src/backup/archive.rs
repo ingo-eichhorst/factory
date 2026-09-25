@@ -544,6 +544,11 @@ fn verify_database(path: &Path, manifest: &Manifest) -> VerifyCheck {
     )
 }
 
+/// `1 page`, `2 pages`.
+fn count(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
 /// The first few problems, and how many more there were.
 fn summarize(problems: &[String]) -> String {
     const SHOWN: usize = 3;
@@ -581,7 +586,7 @@ fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
     let controls: usize = catalogues.iter().map(|c| c.controls.len()).sum();
     out.push(loaded(
         "policies",
-        format!("{} catalogues ({controls} controls), {} drafts", catalogues.len(), drafts.len()),
+        format!("{}, {}, {}", count(catalogues.len(), "catalogue"), count(controls, "control"), count(drafts.len(), "draft")),
         unparsed,
     ));
 
@@ -595,9 +600,9 @@ fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
     out.push(loaded(
         "goals",
         format!(
-            "{} direction, {} cycles",
+            "{} direction, {}",
             if catalogue.direction.is_some() { "a" } else { "no" },
-            catalogue.cycles.len()
+            count(catalogue.cycles.len(), "cycle")
         ),
         unparsed,
     ));
@@ -608,7 +613,7 @@ fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
         .filter(|f| f.kind == scenario::FindingKind::ParseFailed)
         .map(|f| f.subject.clone())
         .collect();
-    out.push(loaded("scenarios", format!("{} scenarios", scenarios.len()), unparsed));
+    out.push(loaded("scenarios", count(scenarios.len(), "scenario"), unparsed));
 
     let profiles = quality::load(&quality::quality_dir(root));
     let unparsed = profiles
@@ -617,7 +622,7 @@ fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
         .filter(|f| f.kind == quality::FindingKind::ParseFailed)
         .map(|f| f.subject.clone())
         .collect();
-    out.push(loaded("quality", format!("{} profiles", profiles.profiles.len()), unparsed));
+    out.push(loaded("quality", count(profiles.profiles.len(), "profile"), unparsed));
 
     let dir = root.join(FACTORY_DIR).join("datasets");
     let mut names: Vec<String> = fs::read_dir(&dir)
@@ -643,7 +648,7 @@ fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
             Err(e) => unparsed.push(format!("{name}.yaml ({e})")),
         }
     }
-    out.push(loaded("datasets", format!("{datasets} datasets ({cases} cases)"), unparsed));
+    out.push(loaded("datasets", format!("{}, {}", count(datasets, "dataset"), count(cases, "case")), unparsed));
 
     let index = knowledge::index(root);
     let truncated: Vec<String> = index
@@ -655,7 +660,7 @@ fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
     out.push(loaded(
         "knowledge",
         if index.present {
-            format!("{} pages, {} documents, {} tags", index.pages.len(), index.documents.len(), index.tags.len())
+            format!("{}, {}, {}", count(index.pages.len(), "page"), count(index.documents.len(), "document"), count(index.tags.len(), "tag"))
         } else {
             "no knowledge vault in this snapshot".into()
         },

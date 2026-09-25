@@ -495,7 +495,9 @@ pub struct WarningFacts {
     pub scheduled: bool,
     pub newest: Option<DateTime<Utc>>,
     pub age: Option<AgeLevel>,
-    /// The newest verification of any snapshot, and whether it passed.
+    /// The newest verification of a snapshot still in the destination, and
+    /// whether it passed. A pass on a snapshot retention has since deleted
+    /// proves nothing about the ones left.
     pub last_verified: Option<(DateTime<Utc>, bool)>,
     /// The newest failed attempt, when it is newer than the newest success.
     pub failure_since_newest: Option<(DateTime<Utc>, String)>,
@@ -569,7 +571,7 @@ pub fn warnings(f: &WarningFacts) -> Vec<BackupWarning> {
         None if f.newest.is_some() => push(
             "never_verified",
             WarningLevel::Warn,
-            "No backup has ever been verified, so nobody knows whether one would restore. Run Verify.".into(),
+            "No snapshot in the destination has been verified, so nobody knows whether one would restore. Run Verify.".into(),
         ),
         Some((at, false)) => push(
             "verify_failed",

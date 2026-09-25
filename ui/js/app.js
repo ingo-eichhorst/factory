@@ -23,6 +23,8 @@ import { loadDatasets, renderDatasetsSegment, wireDatasets } from "./datasets.js
 import { acceptBenchRunEvent, loadBenchRuns, renderBenchRunsSegment, wireBenchRuns } from "./bench-runs.js";
 import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from "./knowledge.js";
 import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
+import { refreshBackup, renderBackup, wireBackup } from "./backup.js";
+import { isBackupEvent } from "./backup-model.js";
 import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
 import { loadGoals, reloadGoals, wireGoals } from "./goals.js";
 import { loadQuality, reloadQuality, wireQuality } from "./quality.js";
@@ -121,6 +123,10 @@ const VIEWS = {
     tail: { write: knowledgeTail, read: readKnowledgeTail },
   },
   infrastructure: { onShow: startInfrastructure, onHide: stopAgentPoll },
+  // Polled like Infrastructure -- the destination is a disk that can be
+  // unplugged, which fires no event -- and refetched on every `backup_*`
+  // event (`onEvent` below), which the daemon's own job publishes too.
+  backup: { onShow: startBackup, onHide: stopAgentPoll },
 };
 
 // ------------------------------------------------------------------- the URL
@@ -206,7 +212,7 @@ const LEVEL_VIEWS = {
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets"],
   imp: ["benchmarks", "knowledge"],
-  infra: ["infrastructure"],
+  infra: ["infrastructure", "backup"],
 };
 
 /// The live level that claims `tab`, for backfilling `state.level` before any
@@ -336,6 +342,8 @@ function rerender(route) {
   // the rail says; what narrows is the agents listed under each account and
   // under Unassigned -- the same split Secrets keeps for the home directory.
   else if (state.tab === "infrastructure") renderInfrastructure();
+  // A backup is of the whole instance: no rail selection narrows it.
+  else if (state.tab === "backup") renderBackup();
 }
 
 /// The rail is a view over `state.scopes`, so it is rebuilt wherever that is
@@ -485,6 +493,12 @@ function startInfrastructure() {
   state.agentPoll = setInterval(refreshInfrastructure, 30000);
 }
 
+function startBackup() {
+  stopAgentPoll();
+  refreshBackup();
+  state.agentPoll = setInterval(refreshBackup, 30000);
+}
+
 // ---------------------------------------------------------------------- boot
 
 async function boot() {
@@ -556,6 +570,7 @@ async function boot() {
   wireBenchRuns();
   $("knowledge-refresh").onclick = () => loadKnowledge();
   $("infrastructure-refresh").onclick = () => refreshInfrastructure();
+  wireBackup();
   $("occ-window").onchange = () => loadOccupancy();
   $("newTask").onclick = () => openCreate();
   wireDashboard();
@@ -688,6 +703,8 @@ function onEvent(ev) {
   // result detail modal, if one happens to be open on the checked-in key
   // result.
   if (ev.type === "goals_changed" && state.tab === "goals") reloadGoals();
+  // A backup taken (by a person or the schedule), failed or verified.
+  if (isBackupEvent(ev) && state.tab === "backup") refreshBackup();
   // A scenario's own policy delta and goal-scenario probabilities are read
   // off the same live evidence and check-ins those two events already name;
   // `reloadScenarios` is a full reload (the forecast itself is a Monte Carlo

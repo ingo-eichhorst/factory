@@ -364,6 +364,7 @@ impl Engine {
         };
         let name = factory_core::backup::archive_name(&factory.config.instance.name, at);
         let destination = config.destination.clone();
+        let config_destination = config.destination.clone();
         let instance = factory.config.instance.name.clone();
         let config = config.clone();
         let started = std::time::Instant::now();
@@ -388,7 +389,9 @@ impl Engine {
         .map_err(|e| FactoryError::adapter("backup", format!("the backup task stopped: {e}")))??;
         Ok(Snapshot {
             name: taken.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-            path: taken.path.display().to_string(),
+            // As configured, not canonicalized: the path a person wrote is the
+            // one they will look for.
+            path: config_destination.join(taken.path.file_name().unwrap_or_default()).display().to_string(),
             at,
             trigger,
             by,

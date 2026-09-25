@@ -24,6 +24,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/{policy,policy-model}.js                               the L6 Policy tab and its pure shaping logic
     ui/js/{goals,goals-model}.js                                 the L6 Goals tab and its pure shaping logic
     ui/js/{scenarios,scenarios-model}.js                         the L6 Scenarios tab and its pure shaping logic
+    ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
 
