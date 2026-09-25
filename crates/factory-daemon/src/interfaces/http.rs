@@ -121,6 +121,9 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
         .route("/api/infrastructure", get(infrastructure))
+        .route("/api/backup", get(backup))
+        .route("/api/backup/run", post(backup_run))
+        .route("/api/backup/verify", post(backup_verify))
         .route("/api/knowledge", get(knowledge))
         .route("/api/knowledge/search", get(knowledge_search))
         // Its own body limit, scoped to this one route with a nested router:
@@ -328,6 +331,29 @@ async fn environment(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn infrastructure(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Infrastructure).await
+}
+
+async fn backup(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Backup).await
+}
+
+/// `POST /api/backup/run` -- takes no body, so it has no `Json` extractor to
+/// refuse a bare POST with.
+async fn backup_run(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::BackupRun).await
+}
+
+#[derive(serde::Deserialize)]
+struct VerifyQuery {
+    #[serde(default)]
+    snapshot: Option<String>,
+}
+
+/// `POST /api/backup/verify?snapshot=` -- the newest when `snapshot` is left
+/// out. A query parameter, like `withdraw_attestation`'s `reason`, so a bare
+/// POST works.
+async fn backup_verify(State(engine): State<Arc<Engine>>, Query(q): Query<VerifyQuery>) -> AxumResponse {
+    run(&engine, Request::BackupVerify { snapshot: q.snapshot }).await
 }
 
 async fn knowledge(State(engine): State<Arc<Engine>>) -> AxumResponse {

@@ -295,6 +295,28 @@ pub enum Request {
     /// only ever what the config says it is.
     #[serde(rename = "infrastructure")]
     Infrastructure,
+    /// The L1 Backup page (`#116`): the configured destination and schedule,
+    /// every snapshot of this instance found there with how it was kept and
+    /// verified, and the honest warnings those facts add up to. Read-only,
+    /// like `Infrastructure`: listing a destination changes nothing.
+    #[serde(rename = "backup")]
+    Backup,
+    /// Take a snapshot now -- the same one the schedule takes -- then apply
+    /// retention. `backup.run`, checked against the root scope like
+    /// `policy.attest`: the instance's state is company-wide, not one
+    /// project's. Refused while another backup or verification is running.
+    #[serde(rename = "backup.run")]
+    BackupRun,
+    /// Unpack a snapshot into a temporary directory and prove it would
+    /// restore: every checksum in its manifest, `integrity_check` on the
+    /// database copy, and every authored-content loader. `snapshot: None`
+    /// is the newest. The same grant as `BackupRun`. Nothing in the
+    /// destination or the instance is changed; the result is recorded.
+    #[serde(rename = "backup.verify")]
+    BackupVerify {
+        #[serde(default)]
+        snapshot: Option<String>,
+    },
     /// The L5 Knowledge tab: an index of `<root>/.factory/knowledge/`,
     /// rebuilt from the files on every request. Read-only, like
     /// `Environment` -- see `knowledge::index`, which does the actual walk.
@@ -711,6 +733,13 @@ pub enum Payload {
         providers: Vec<ProviderRow>,
         unassigned: Vec<UnassignedAgent>,
     },
+    /// The L1 Backup page -- see `backup::BackupReport`. Boxed for the same
+    /// reason `Operations` is.
+    Backup { report: Box<crate::backup::BackupReport> },
+    /// The answer to `Request::BackupRun`: the snapshot as taken.
+    BackupRun { snapshot: crate::backup::Snapshot },
+    /// The answer to `Request::BackupVerify`: every step and its outcome.
+    BackupVerify { verification: crate::backup::Verification },
     /// The L5 Knowledge tab. `present: false` when the vault
     /// (`<root>/.factory/knowledge/`) does not exist -- an empty state, not
     /// an error -- with `root` still naming the path that was looked in, and

@@ -140,10 +140,15 @@ pub enum Grant {
     /// the key result it moves belongs to an objective scoped to one.
     #[serde(rename = "goals.checkin")]
     GoalsCheckIn,
+    /// Take a backup now, or verify one (`#116`). The root scope is the
+    /// subject, for the same reason as `policy.attest`: a backup is of the
+    /// whole instance's state, not one project's.
+    #[serde(rename = "backup.run")]
+    BackupRun,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 21] = [
+    pub const ALL: [Grant; 22] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -165,6 +170,7 @@ impl Grant {
         Grant::BenchRun,
         Grant::PolicyAttest,
         Grant::GoalsCheckIn,
+        Grant::BackupRun,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -190,6 +196,7 @@ impl Grant {
             Self::BenchRun => "bench.run",
             Self::PolicyAttest => "policy.attest",
             Self::GoalsCheckIn => "goals.checkin",
+            Self::BackupRun => "backup.run",
         }
     }
 
@@ -217,6 +224,7 @@ impl Grant {
             Self::BenchRun => "start, cancel, and clean bench runs",
             Self::PolicyAttest => "record and withdraw policy attestations",
             Self::GoalsCheckIn => "record check-ins against manual key results",
+            Self::BackupRun => "take or verify a backup of the instance",
         }
     }
 
@@ -245,6 +253,7 @@ impl Grant {
             Self::BenchRun => "Bench",
             Self::PolicyAttest => "Policy",
             Self::GoalsCheckIn => "Goals",
+            Self::BackupRun => "Backup",
         }
     }
 
@@ -605,7 +614,7 @@ mod tests {
     fn every_grant_belongs_to_a_group_a_person_reads() {
         for grant in Grant::ALL {
             assert!(
-                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals"]
+                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals", "Backup"]
                     .contains(&grant.group()),
                 "{} has no group",
                 grant.as_str()
@@ -618,6 +627,7 @@ mod tests {
         assert_eq!(Grant::BenchRun.group(), "Bench");
         assert_eq!(Grant::PolicyAttest.group(), "Policy");
         assert_eq!(Grant::GoalsCheckIn.group(), "Goals");
+        assert_eq!(Grant::BackupRun.group(), "Backup");
     }
 
     #[test]
@@ -626,15 +636,17 @@ mod tests {
         // and of `Grant::ALL`, in the order each was added, so a parallel
         // track appending its own grant there too merges without a real
         // conflict.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::DatasetEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::BenchRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::PolicyAttest);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::GoalsCheckIn);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::DatasetEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::BenchRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::PolicyAttest);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::GoalsCheckIn);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::BackupRun);
         let all = Grant::expand("*").unwrap();
         assert!(all.contains(&Grant::DatasetEdit));
         assert!(all.contains(&Grant::BenchRun));
         assert!(all.contains(&Grant::PolicyAttest));
         assert!(all.contains(&Grant::GoalsCheckIn));
+        assert!(all.contains(&Grant::BackupRun));
     }
 
     #[test]

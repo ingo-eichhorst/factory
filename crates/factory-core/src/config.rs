@@ -688,8 +688,9 @@ impl Sandbox {
 }
 
 /// The root config's `infrastructure:` block: what the agents run on that
-/// Factory does not run itself. Today that is only `providers`, the AI
-/// accounts that pay for the agents' model calls.
+/// Factory does not run itself: `providers`, the AI accounts that pay for
+/// the agents' model calls, and `backup`, where the instance's own state is
+/// copied to.
 ///
 /// **Declared, never discovered.** Nothing in Factory opens a credential
 /// file, the Keychain or an `.env` to find out which accounts exist, and
@@ -705,6 +706,11 @@ impl Sandbox {
 pub struct Infrastructure {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<Provider>,
+    /// Where and when the instance's own state is backed up (`#116`). See
+    /// `backup::BackupConfig`; absent means no backup is configured, which
+    /// the L1 Backup page says in red rather than leaving blank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<crate::backup::BackupConfig>,
 }
 
 /// One AI account, as the root config declares it.
@@ -783,7 +789,7 @@ pub const SHELL_HARNESS: &str = "shell";
 
 impl Infrastructure {
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty()
+        self.providers.is_empty() && self.backup.is_none()
     }
 
     pub fn provider(&self, name: &str) -> Option<&Provider> {
@@ -814,6 +820,9 @@ impl Infrastructure {
     /// subscription, and a provider claiming `shell`. An unknown `kind` never
     /// gets this far -- serde refuses it while parsing.
     pub fn validate(&self) -> Result<()> {
+        if let Some(backup) = &self.backup {
+            backup.validate()?;
+        }
         let mut names = std::collections::BTreeSet::new();
         let mut claimed: BTreeMap<&str, &str> = BTreeMap::new();
         for provider in &self.providers {
@@ -2409,6 +2418,29 @@ mod tests {
         let c: Config = serde_yaml_ng::from_str("instance:\n  id: i\n  name: n\n").unwrap();
         assert!(c.infrastructure.is_empty());
         assert!(!serde_yaml_ng::to_string(&c).unwrap().contains("infrastructure"));
+    }
+
+    /// A backup block with no providers beside it is still a block: it must
+    /// survive the root config being written back, and be checked on load.
+    #[test]
+    fn a_backup_block_alone_round_trips_and_is_validated_at_load() {
+        let c: Config = serde_yaml_ng::from_str(
+            "instance:\n  id: i\n  name: n\ninfrastructure:\n  backup:\n    destination: /Volumes/Backup/factory\n\
+             \x20   schedule: { cron: \"0 3 * * *\", timezone: Europe/Berlin }\n",
+        )
+        .unwrap();
+        assert!(!c.infrastructure.is_empty());
+        c.validate_instance().unwrap();
+        let rendered = serde_yaml_ng::to_string(&c).unwrap();
+        assert!(rendered.contains("destination: /Volumes/Backup/factory"), "{rendered}");
+        let reparsed: Config = serde_yaml_ng::from_str(&rendered).unwrap();
+        assert_eq!(reparsed.infrastructure, c.infrastructure);
+
+        let relative: Config = serde_yaml_ng::from_str(
+            "instance:\n  id: i\n  name: n\ninfrastructure:\n  backup:\n    destination: backups\n",
+        )
+        .unwrap();
+        assert!(relative.validate_instance().unwrap_err().to_string().contains("absolute"));
     }
 
     #[test]
