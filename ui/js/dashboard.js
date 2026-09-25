@@ -451,7 +451,8 @@ function byScopeTable(tasks, scopes) {
   if (!scopes.length) return `<div class="empty">No scopes declared.</div>`;
   const rows = scopes.map((s) => {
     const ts = tasks.filter((t) => t.scope === s.name);
-    const active = ts.filter((t) => t.status === "running" || t.status === "dispatching" || t.status === "verifying" || t.status === "blocked").length;
+    // A task blocked by a failure is not active work: it counts as failed.
+    const active = ts.filter((t) => (t.status === "running" || t.status === "dispatching" || t.status === "verifying" || t.status === "blocked") && !hasFailed(t)).length;
     // Blocked by a failure since #122; a legacy `failed` row counts too.
     const failed = ts.filter(hasFailed).length;
     return `<tr>
