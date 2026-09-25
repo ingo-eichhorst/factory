@@ -12,6 +12,8 @@ import {
   scanLabel,
   serviceTarget,
   shapeFindings,
+  visibleDocuments,
+  visibleFindings,
 } from "./dependencies-model.js";
 
 function renderChrome() {
@@ -116,11 +118,11 @@ export function renderDependencies() {
   error.hidden = !state.dependenciesError;
   const report = state.dependenciesError ? null : state.dependencies;
 
-  const documents = report?.documents || [];
+  const documents = visibleDocuments(report?.documents, selected);
   $("dependencies-documents").innerHTML = documents.map(documentCard).join("");
   $("no-dependency-documents").hidden = documents.length !== 0 || !!state.dependenciesError;
 
-  const findings = shapeFindings(report?.findings);
+  const findings = shapeFindings(visibleFindings(report?.findings, selected));
   const counts = findingCounts(findings);
   $("dependencies-counts").textContent = `${counts.open} open · ${counts.assessed} assessed · ${counts.resolved} resolved · ${counts.stale} stale`;
   $("dependencies-findings").innerHTML = findings.map(findingCard).join("");

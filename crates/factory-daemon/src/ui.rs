@@ -126,6 +126,16 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../../ui/js/dependencies.js"),
     ),
     (
+        "js/doctor-model.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/doctor-model.js"),
+    ),
+    (
+        "js/doctor.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/doctor.js"),
+    ),
+    (
         "js/benchmarks.js",
         "text/javascript; charset=utf-8",
         include_str!("../../../ui/js/benchmarks.js"),

@@ -31,6 +31,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/task-model.js                                          a task's board column, failure/close line and actions (#122), pure
     ui/js/{scenarios,scenarios-model}.js                         the L6 Scenarios tab and its pure shaping logic
     ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
+    ui/js/{doctor,doctor-model}.js                               the L1 Doctor dependency view and its pure shaping logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
 
@@ -53,6 +54,13 @@ The `shell` agent runs the task's instructions as a shell command and reports
 the exit status and stdout, so the whole dispatch path can be exercised
 without spending a model call. Use it for anything that is not specifically
 about an AI harness.
+
+Factory releases are built and scanned outside the daemon with
+`examples/factory-dependency-scan.sh built`: it runs `cargo auditable build
+--workspace --release` and attaches separate CycloneDX build SBOM and
+vulnerability documents. The `running` mode scans only the installed
+`~/.local/bin/factory` and `factory-daemon` binaries. The daemon and L1 Doctor
+only read those immutable attachments; they never invoke a scanner.
 
 Set the hooks up once per clone, before writing any code, from the primary
 checkout:

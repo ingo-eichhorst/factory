@@ -1781,4 +1781,14 @@ mod tests {
         plain.validate().unwrap();
         assert_eq!(plain.with_inputs(&BTreeMap::new()).unwrap().nodes[0].task.instructions, "docker ps --format '{{Names}}'");
     }
+
+    #[test]
+    fn the_factory_dependency_scan_example_is_a_valid_workflow() {
+        let draft: WorkflowDraft = serde_yaml_ng::from_str(include_str!(
+            "../../../workflows/factory-dependency-scan.yaml"
+        ))
+        .unwrap();
+        let definition = WorkflowDefinition::from_draft(draft);
+        assert_eq!(definition.validate().unwrap(), vec!["built", "running"]);
+    }
 }

@@ -7,7 +7,7 @@ use crate::benchmark::Configuration;
 use crate::building::{Activity, Cues, RepoMetrics, Shape};
 use crate::agent::AgentSession;
 use crate::config::ScopeAgent;
-use crate::dependencies::{Attachment, AttachmentKind, DependenciesReport};
+use crate::dependencies::{Attachment, AttachmentKind, DependenciesReport, DoctorReport};
 use crate::event::Event;
 use crate::knowledge::{Document, Finding, Gap, Page, Refusal, Tag};
 use crate::occupancy::Occupancy;
@@ -357,6 +357,10 @@ pub enum Request {
     Dependencies { scope: String },
     #[serde(rename = "dependencies.vex")]
     DependenciesVex { scope: String },
+    /// The L1 Doctor dependency view: newest Factory build versus the
+    /// installed binaries, derived from immutable scan evidence.
+    #[serde(rename = "doctor")]
+    Doctor,
     /// The L1 Infrastructure page: what everything runs on -- the host and
     /// the daemon on it, read live on every request, and the AI accounts the
     /// root config declares with the agents each one pays for. Read-only,
@@ -866,6 +870,7 @@ pub enum Payload {
     },
     Attachment { attachment: Attachment },
     Dependencies { report: DependenciesReport },
+    Doctor { report: DoctorReport },
     /// The L1 Infrastructure page, read from the bottom up: the host, the
     /// daemon on it, the declared AI accounts above that with the agents
     /// each one serves, and the model agents no account claims yet. A host
@@ -2632,5 +2637,10 @@ mod tests {
         assert_eq!(wire["op"], "infrastructure");
         let env: Envelope = serde_json::from_str(r#"{"op":"infrastructure"}"#).unwrap();
         assert!(matches!(env.request, Request::Infrastructure));
+
+        let wire = serde_json::to_value(Envelope { request: Request::Doctor, token: None }).unwrap();
+        assert_eq!(wire["op"], "doctor");
+        let env: Envelope = serde_json::from_str(r#"{"op":"doctor"}"#).unwrap();
+        assert!(matches!(env.request, Request::Doctor));
     }
 }

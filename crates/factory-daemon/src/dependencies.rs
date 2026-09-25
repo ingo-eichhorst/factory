@@ -5,9 +5,9 @@
 
 use chrono::{DateTime, Utc};
 use factory_core::dependencies::{
-    validate_document, AffectedComponent, Attachment, AttachmentKind, DependenciesFact,
-    DependenciesReport, DependencyFinding, DependencyServiceView, DocumentSummary, FindingStatus,
-    LifecycleDocuments, LifecycleState, Rating, Severity,
+    product_identity, validate_document, AffectedComponent, Attachment, AttachmentKind,
+    DependenciesFact, DependenciesReport, DependencyFinding, DependencyServiceView,
+    DocumentSummary, FindingStatus, LifecycleDocuments, LifecycleState, Rating, Severity,
 };
 use factory_core::error::{FactoryError, Result};
 use factory_core::protocol::CredentialRow;
@@ -172,6 +172,7 @@ fn summary(document: &StoredDocument) -> DocumentSummary {
         tool,
         tool_version,
         scan_time,
+        identity: product_identity(&document.json),
     }
 }
 

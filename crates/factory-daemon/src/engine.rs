@@ -547,6 +547,9 @@ impl Engine {
             Request::DependenciesVex { scope } => Ok(Payload::Text {
                 text: self.dependencies_vex(&scope).await?,
             }),
+            Request::Doctor => Ok(Payload::Doctor {
+                report: self.doctor_report().await?,
+            }),
             Request::Infrastructure => Ok(self.infrastructure().await),
             Request::Backup => Ok(Payload::Backup {
                 report: Box::new(self.backup_report().await?),

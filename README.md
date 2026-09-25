@@ -449,10 +449,40 @@ scan is older than the scope's `max_age`. These are derived statuses: there is
 no write API for them. `factory:` properties on a vulnerability carry KEV,
 EUVD and EPSS signals.
 
+For the `factory` scope only, L2 omits the running document and its findings:
+that evidence describes this installed instance and appears in L1 Doctor.
+The socket/CLI projection still carries every lifecycle so
+`factory dependencies factory` remains the detailed read side.
+
 VEX judgments are authored content at
 `<root>/.factory/vex/<scope>/*.cdx.json`, separate from every SBOM. `factory
 dependencies vex <scope>` validates them and prints one merged CycloneDX VEX
 document for a scan workflow to consume. Factory never edits those files.
+
+Factory's own v2 workflow is checked in as
+`workflows/factory-dependency-scan.yaml`. Its `built` node runs
+`cargo auditable build --workspace --release`, scans the two release binaries,
+and attaches a `build` SBOM plus a separate vulnerability document. Its
+`running` node scans exactly `~/.local/bin/factory` and
+`~/.local/bin/factory-daemon` (or `FACTORY_INSTALL_DIR`) from their embedded
+audit data and attaches the equivalent `operations` documents. Both nodes use
+`examples/factory-dependency-scan.sh`; Syft, Grype, jq and cargo-auditable are
+workflow tools, not daemon dependencies.
+
+Those Factory SBOMs identify the product by the workspace version and a
+`factory:git-sha` property on `metadata.component`. Both binaries expose the
+same identity in `--version`, embedded at build time, so the installed scan
+does not infer a commit from the current checkout. `factory dependencies
+factory` prints that version and commit beside built and running document
+rows.
+
+The L1 **Doctor** tab reads `GET /api/doctor`, a read-only projection of the
+newest Factory `build` and `operations` documents. The daemon derives
+`current` when both identities match, `behind` when both exist and differ, and
+`missing` when either document or identity is absent. Doctor shows scan age
+and findings from the running state only. The daemon never scans itself, and
+Doctor does not yet diagnose daemon health, the store, socket, plugins,
+harnesses or repository hygiene; that broader work belongs to #157.
 
 Policy catalogues may read the same evidence:
 
@@ -2615,5 +2645,6 @@ unchanged.
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
+    ui/js/{doctor,doctor-model}.js                               the L1 Doctor dependency view and its pure shaping logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter

@@ -464,6 +464,21 @@ a.role-origin:hover { color: var(--signal); border-color: var(--signal); }
 .dep-severity { font: 600 9px/1 var(--cond); letter-spacing: .08em; text-transform: uppercase; }
 .dep-severity.sev-critical, .dep-severity.sev-high { color: var(--fault); }
 .dep-severity.sev-medium { color: var(--wait); }
+
+/* L1 Doctor: two evidence cards and only the running scan's findings. */
+.doctor-page { display: grid; gap: 14px; }
+.doctor-hero[data-level="ok"] { border-left-color: var(--run); }
+.doctor-hero[data-level="warn"] { border-left-color: var(--wait); }
+.doctor-hero[data-level="bad"] { border-left-color: var(--fault); }
+.doctor-evidence-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.doctor-evidence { border-left-color: var(--signal); }
+.doctor-evidence.missing { border-left-color: var(--fault); border-style: dashed; border-left-style: solid; }
+.doctor-identity { font: 500 13px/1.5 var(--mono); overflow-wrap: anywhere; margin-bottom: 5px; }
+.doctor-evidence code { overflow-wrap: anywhere; }
+.doctor-findings h3 { margin: 0 0 8px; font: 600 12px/1.4 var(--cond); letter-spacing: .04em; }
+.doctor-findings h3 .sub { margin-left: 8px; font: 400 11px/1.4 var(--sans); }
+.doctor-table { overflow-x: auto; }
+.doctor-table td { vertical-align: top; }
 .role-holders { display: flex; gap: 10px; flex-wrap: wrap; }
 .role-holder { font-weight: 500; }
 .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

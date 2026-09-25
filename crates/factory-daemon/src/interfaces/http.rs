@@ -121,6 +121,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
         .route("/api/dependencies", get(dependencies))
+        .route("/api/doctor", get(doctor))
         .route("/api/infrastructure", get(infrastructure))
         .route("/api/backup", get(backup))
         .route("/api/backup/run", post(backup_run))
@@ -360,6 +361,10 @@ async fn dependencies(
 
 async fn infrastructure(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Infrastructure).await
+}
+
+async fn doctor(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Doctor).await
 }
 
 async fn backup(State(engine): State<Arc<Engine>>) -> AxumResponse {

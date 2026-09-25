@@ -75,16 +75,16 @@ const NULL_HOST = {
 
 // ------------------------------------------------------------------ the level
 
-test("L1 Infrastructure is live, with its sub-label, one tab and a view", () => {
+test("L1 Infrastructure is live, with its sub-label, tab and view", () => {
   assert.doesNotMatch(page, /id="lv-infra"[^>]*disabled/);
   assert.doesNotMatch(page, /id="lv-infra"[^>]*Not built yet/);
-  assert.match(page, /id="lv-infra"[\s\S]*?<span class="lv-sub">Host, daemon, AI accounts and backup<\/span>/);
+  assert.match(page, /id="lv-infra"[\s\S]*?<span class="lv-sub">Host, daemon, Doctor and backup<\/span>/);
   assert.match(page, /id="tab-infrastructure"[^>]*>Infrastructure<\/button>/);
   assert.match(page, /id="view-infrastructure"/);
 });
 
 test("LEVEL_VIEWS.infra names Infrastructure first, and the view is registered", () => {
-  assert.match(app, /infra: \["infrastructure", "backup"\]/);
+  assert.match(app, /infra: \["infrastructure", "doctor", "backup"\]/);
   assert.match(app, /infrastructure: \{ onShow: startInfrastructure, onHide: stopAgentPoll \}/);
   assert.match(app, /state\.tab === "infrastructure"/, "the rail's re-render names every tab");
 });
