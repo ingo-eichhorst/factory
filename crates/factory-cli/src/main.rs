@@ -1495,6 +1495,10 @@ fn intake_item_text(task: &Task) -> String {
     if let Some(r) = &task.result {
         out.push_str(&format!("  result     {r}\n"));
     }
+    // The item as handed in, and anything added to it since.
+    if !task.instructions.trim().is_empty() {
+        out.push_str(&format!("\n{}\n", task.instructions.trim()));
+    }
     out.trim_end().to_string()
 }
 

@@ -14,6 +14,8 @@ import { openCreate } from "./task-form.js";
 import { acceptWorkflowEvent, loadWorkflows, readWorkflowTail, renderWorkflows, wireWorkflows, workflowTail } from "./workflows.js";
 import { loadDashboard, renderDashboard, loadInbox, renderInbox, wireDashboard } from "./dashboard.js";
 import { loadOperations, showOperations, hideOperations, wireOperations } from "./operations.js";
+import { loadIntake, showIntake, hideIntake, refreshIntake, wireIntake } from "./intake.js";
+import { touchesIntake } from "./intake-model.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 import { loadEnvironment, renderSandboxes } from "./sandboxes.js";
@@ -86,6 +88,9 @@ const VIEWS = {
   // or agent event, and `onEvent` refetches on those (`scheduleOpsRefresh`).
   // `onHide` is where "since you last looked" is written down.
   operations: { onShow: showOperations, onHide: hideOperations },
+  // No poll either: an item changes only through a task event, and
+  // `onEvent` refetches on the ones that touch intake (`touchesIntake`).
+  intake: { onShow: showIntake, onHide: hideIntake },
   occupancy: {
     onShow: startOccupancy,
     onHide: stopAgentPoll,
@@ -201,8 +206,9 @@ const LEVEL_VIEWS = {
   // how good the work has to be on the way, and only then the control
   // catalogue that holds the company to what it already committed to.
   dir: ["goals", "quality", "policy", "scenarios"],
-  // The work first, then how it is running.
-  proc: ["tasks", "workflows", "operations"],
+  // The work first, then how it is running. Intake sits beside Tasks: it
+  // is the queue in front of them (`#119`).
+  proc: ["tasks", "intake", "workflows", "operations"],
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets"],
   imp: ["benchmarks", "knowledge"],
@@ -286,6 +292,8 @@ function rerender(route) {
   // The daemon narrows the report to the selected subtree (`operations.js`'s
   // header), so a rail change refetches.
   if (state.tab === "operations") { loadOperations(); return; }
+  // So does the intake board: the daemon narrows it to the subtree.
+  if (state.tab === "intake") { loadIntake(); return; }
   // Everything already in the tail is still there; a scope change only
   // changes how much of it is drawn, the same re-render `renderTasks` does
   // below for the tasks it already holds.
@@ -561,6 +569,7 @@ async function boot() {
   wireDashboard();
   wireWorkflows();
   wireOperations();
+  wireIntake();
   // A page in a background browser tab skips its refetches; coming back is
   // when it catches up, once.
   document.addEventListener("visibilitychange", () => { if (!document.hidden) scheduleOpsRefresh(); });
@@ -720,6 +729,8 @@ function onEvent(ev) {
   if ((ev.type.startsWith("task_") || ev.type.startsWith("run_") || ev.type.startsWith("agent_")) && ev.type !== "agent_activity") {
     scheduleOpsRefresh();
   }
+  // An item handed in, triaged, decided or deleted; a triage run moving.
+  if (touchesIntake(ev)) refreshIntake();
 }
 
 /// One refetch of `/api/operations` for a burst of events, at most one per

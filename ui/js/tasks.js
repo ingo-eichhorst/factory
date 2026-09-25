@@ -91,7 +91,10 @@ function taskCard(t) {
 
 function renderBoard(rows) {
   const byCol = new Map(KANBAN_COLUMNS.map(c => [c.key, []]));
-  for (const t of rows) byCol.get(columnFor(t)).push(t);
+  // An item still in intake (`#119`) is not work on the line yet: it has
+  // no run and cannot start one, and it has a board of its own. Left in,
+  // `columnFor` would file it under Closed.
+  for (const t of rows) if (t.status !== "intake") byCol.get(columnFor(t)).push(t);
   $("kanban").innerHTML = KANBAN_COLUMNS.map(c => {
     const items = byCol.get(c.key);
     return `
