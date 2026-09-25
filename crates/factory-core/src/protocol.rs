@@ -159,11 +159,16 @@ pub enum Request {
     /// to the slot after it, and the skip is journaled with who asked and
     /// why -- as `slot_skipped`, never `schedule_skipped`, which is the
     /// scheduler's record of slots that passed *without* anyone deciding so.
+    /// `slot`, when given, is the firing the caller means to skip (the
+    /// `next_run_at` it read); the skip is refused if the schedule has moved
+    /// on since, rather than landing on a firing nobody chose.
     #[serde(rename = "task.skip_next")]
     TaskSkipNext {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot: Option<chrono::DateTime<chrono::Utc>>,
     },
     #[serde(rename = "task.report")]
     TaskReport { id: String, report: TaskReport },

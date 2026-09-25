@@ -2973,7 +2973,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
         }
 
         TaskCmd::SkipNext { id, reason } => {
-            let payload = client.send(Request::TaskSkipNext { id: need_id(id)?, reason }).await?;
+            let payload = client.send(Request::TaskSkipNext { id: need_id(id)?, reason, slot: None }).await?;
             print(&payload, json, |p| match p {
                 Payload::Task { task } => Some(match task.next_run_at {
                     Some(next) => format!("skipped; next firing at {}", next.to_rfc3339()),

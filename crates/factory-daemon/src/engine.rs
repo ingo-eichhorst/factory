@@ -233,6 +233,15 @@ pub struct Engine {
     /// (`dispatch`), released for every run `close_session` ever sees,
     /// terminal outcome or not.
     pub(crate) power: crate::power::PowerAssertions,
+    /// Serializes the two things that move a schedule's next slot on a
+    /// person's or the clock's account: the scheduler firing a due task, and
+    /// `task.skip_next`. Each re-reads the task under it, so a slot is
+    /// either fired or skipped, never both (`#106`).
+    pub(crate) schedule_lock: tokio::sync::Mutex<()>,
+    /// The Operations report's triggered signposts, kept for a minute --
+    /// computing them runs the metrics they name. See
+    /// `Engine::triggered_signposts_cached`.
+    pub(crate) signpost_cache: std::sync::Mutex<Option<crate::operations::SignpostCache>>,
 }
 
 impl Engine {
@@ -274,6 +283,8 @@ impl Engine {
             worktree_caps: Default::default(),
             site_memory: Default::default(),
             power,
+            schedule_lock: tokio::sync::Mutex::new(()),
+            signpost_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -798,10 +809,10 @@ impl Engine {
                     task: self.update(&id, patch, Some(&asked)).await?,
                 })
             }
-            Request::TaskSkipNext { id, reason } => {
+            Request::TaskSkipNext { id, reason, slot } => {
                 let asked = crate::operations::Asked::new(caller, reason);
                 Ok(Payload::Task {
-                    task: self.skip_next(&id, &asked).await?,
+                    task: self.skip_next(&id, slot, &asked).await?,
                 })
             }
             Request::TaskDelete { id } => {
@@ -828,16 +839,23 @@ impl Engine {
                 // Who asked, written down before the run exists: the record
                 // otherwise says only that a run was `manual`, which a
                 // person and an agent both are (`#106`).
-                let asked = crate::operations::Asked::new(caller, reason);
-                self.entry(
-                    &id,
-                    asked.entry("run_requested", format!("run requested {}", asked.words()), serde_json::json!({})),
-                )
-                .await;
-                let engine = self.clone();
                 // Stamped here, not inside the spawned dispatch: the queue
                 // wait of a manual run starts when it was asked for.
                 let due = Due::now();
+                // `queued_at` is what ties this entry to the run it starts,
+                // which does not exist yet: the Operations report leaves a
+                // run an agent asked for out of the interventions by it.
+                let asked = crate::operations::Asked::new(caller, reason);
+                self.entry(
+                    &id,
+                    asked.entry(
+                        crate::operations::RUN_REQUESTED_KIND,
+                        format!("run requested {}", asked.words()),
+                        serde_json::json!({ "queued_at": due.queued_at }),
+                    ),
+                )
+                .await;
+                let engine = self.clone();
                 // Dispatch can take a minute: opening a pane, waiting for an
                 // agent to be ready. The caller gets its answer now.
                 tokio::spawn(async move {

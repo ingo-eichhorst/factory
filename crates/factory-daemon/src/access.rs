@@ -1390,7 +1390,7 @@ mod tests {
         // Skipping its own task's next slot is editing its own task, which a
         // worker may do -- the same grant, and the same reach, as pausing
         // that schedule through `task.update`.
-        assert!(allowed(&e, &worker("w"), Request::TaskSkipNext { id: "t".into(), reason: None }).await);
+        assert!(allowed(&e, &worker("w"), Request::TaskSkipNext { id: "t".into(), reason: None, slot: None }).await);
     }
 
     // -- the foreman -------------------------------------------------------
@@ -1419,7 +1419,7 @@ mod tests {
             Request::TaskDelete { id: "here".into() },
             Request::TaskRun { id: "here".into(), reason: None },
             Request::TaskCancel { id: "here".into(), reason: None },
-            Request::TaskSkipNext { id: "here".into(), reason: None },
+            Request::TaskSkipNext { id: "here".into(), reason: None, slot: None },
             Request::TaskReport {
                 id: "here".into(),
                 report: report(),
@@ -1480,6 +1480,7 @@ mod tests {
             Request::TaskSkipNext {
                 id: "elsewhere".into(),
                 reason: None,
+                slot: None,
             },
             Request::TaskReport {
                 id: "elsewhere".into(),

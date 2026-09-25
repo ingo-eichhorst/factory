@@ -991,8 +991,11 @@ fn reason_of(body: &[u8]) -> std::result::Result<Option<String>, String> {
         .map_err(|e| format!("not a reason body: {e}"))
 }
 
+/// A body refused before the engine saw it, in the same envelope every
+/// other refusal comes back in -- `core.js`'s `api()` reads `message`.
 fn refused(why: String) -> AxumResponse {
-    (StatusCode::BAD_REQUEST, why).into_response()
+    let response = Response::Error { code: "bad_request".into(), message: why };
+    (StatusCode::BAD_REQUEST, Json(response)).into_response()
 }
 
 async fn run_task(
@@ -1017,14 +1020,29 @@ async fn cancel_task(
     }
 }
 
+#[derive(serde::Deserialize, Default)]
+struct SkipBody {
+    #[serde(default)]
+    reason: Option<String>,
+    /// The `next_run_at` the caller means to skip; see `Request::TaskSkipNext`.
+    #[serde(default)]
+    slot: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// `POST /api/tasks/{id}/skip-next` -- pass over the schedule's next slot.
+/// Body `{reason?, slot?}`, or none at all.
 async fn skip_next_task(
     State(engine): State<Arc<Engine>>,
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> AxumResponse {
-    match reason_of(&body) {
-        Ok(reason) => run(&engine, Request::TaskSkipNext { id, reason }).await,
+    let parsed = if body.iter().all(u8::is_ascii_whitespace) {
+        Ok(SkipBody::default())
+    } else {
+        serde_json::from_slice::<SkipBody>(&body).map_err(|e| format!("not a skip body: {e}"))
+    };
+    match parsed {
+        Ok(b) => run(&engine, Request::TaskSkipNext { id, reason: b.reason, slot: b.slot }).await,
         Err(why) => refused(why),
     }
 }
@@ -1631,7 +1649,12 @@ mod tests {
         assert_eq!(code, 404, "{body}");
         let (code, body) = call(addr, "POST", "/api/tasks/nope/run", true, "not json").await;
         assert_eq!(code, 400);
-        assert!(body.contains("not a reason body"), "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("the error envelope, not bare text");
+        assert_eq!(v["status"], "error");
+        assert!(v["message"].as_str().unwrap().contains("not a reason body"), "{body}");
+        let (code, body) =
+            call(addr, "POST", "/api/tasks/nope/skip-next", true, r#"{"reason":"r","slot":"2026-09-25T09:00:00Z"}"#).await;
+        assert_eq!(code, 404, "{body}");
         // The task form's PATCH, with and without a reason beside the
         // patch's own fields, reaches the engine: the flattened body
         // must not refuse what a bare `TaskPatch` took.

@@ -20,7 +20,9 @@
 //!   a blocked run's newest `blocked` entry is its reason, in its agent's
 //!   own words (or the runtime's, for a block a lifecycle hook reported).
 //! * **Journal-only facts**: one `TaskStore::entries_of_kinds` query for
-//!   `schedule_skipped` and `answer` entries, so nothing walks every task's
+//!   `schedule_skipped`, `answer` and `run_requested` entries (the owner's
+//!   answers count as interventions; an agent's run requests are left out
+//!   of them), so nothing walks every task's
 //!   whole journal, transcripts and all. A passed-over slot needs a look
 //!   for [`MISSED_LOOKBACK_HOURS`]; after that it is history, and the
 //!   journal still has it.
@@ -30,7 +32,9 @@
 //!   the Scenarios report, and only for the unscoped report: a signpost
 //!   watches a company-wide metric and belongs to a scenario, not a scope.
 //!   A scenario directory that cannot be read costs the report its
-//!   signposts, never the report itself.
+//!   signposts, never the report itself. They are kept for
+//!   [`SIGNPOST_TTL`] while the scenario files are unchanged; a failure
+//!   is never kept.
 //!
 //! ## Capacity is unknown, and says so
 //!
@@ -51,7 +55,7 @@
 //! (`run.answer`, [`Engine::answer_run`]). Nothing here starts, stops or
 //! changes anything on its own -- a picture, not a controller (design §8).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
@@ -80,8 +84,47 @@ const MISSED_LOOKBACK_HOURS: i64 = 24;
 const OPEN_RUN_ENTRIES: u32 = 50;
 
 /// The journal kind of an answer typed into a blocked run -- what the
-/// report counts as an intervention.
+/// report counts as an intervention, when the owner gave it.
 pub(crate) const ANSWER_KIND: &str = "answer";
+
+/// The journal kind `task.run` writes, with who asked and the run's
+/// `queued_at` -- how the report tells an agent's run from a person's.
+pub(crate) const RUN_REQUESTED_KIND: &str = "run_requested";
+
+/// How long the report reuses the triggered signposts it computed. They
+/// are an observation at the bottom of the queue, a minute stale is fine,
+/// and each computation runs the metrics the signposts name -- production
+/// and policy evaluation among them -- which a report re-read on every
+/// event must not pay for every time.
+const SIGNPOST_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Each scenario file's name, modification time and size: an edit to the
+/// directory shows here, so a changed scenario is not answered from the
+/// cache for up to a minute.
+type Fingerprint = Vec<(std::ffi::OsString, Option<std::time::SystemTime>, u64)>;
+
+/// The last triggered signposts computed, when, and over which files.
+pub(crate) struct SignpostCache {
+    at: std::time::Instant,
+    fingerprint: Fingerprint,
+    signposts: Vec<factory_core::protocol::TriggeredSignpost>,
+}
+
+fn fingerprint(dir: &std::path::Path) -> Fingerprint {
+    let mut out: Fingerprint = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| {
+                    let meta = e.metadata().ok()?;
+                    Some((e.file_name(), meta.modified().ok(), meta.len()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
 
 /// Who asked for an action and why, as the journal records it: the entry's
 /// `source` says whether a person or an agent asked, `data.by` which one,
@@ -168,19 +211,29 @@ impl Engine {
             }
         }
 
-        // Answers are counted over both health windows; slots only over the
-        // lookback. One query for both, from the earlier of the two.
-        let answers_from = now - Duration::days(2 * window.days());
+        // Answers and who asked for a run are read over both health
+        // windows; slots only over the lookback. One query for all three,
+        // from the earlier of the two. Only the owner's answers are
+        // interventions, and only an agent's run requests are left out of
+        // them -- see "intervention" in `factory_core::operations`.
+        let asks_from = now - Duration::days(2 * window.days());
         let missed_from = now - Duration::hours(MISSED_LOOKBACK_HOURS);
         let journal = self
             .store
-            .entries_of_kinds(&["schedule_skipped", ANSWER_KIND], answers_from.min(missed_from))
+            .entries_of_kinds(&["schedule_skipped", ANSWER_KIND, RUN_REQUESTED_KIND], asks_from.min(missed_from))
             .await?;
         let mut skipped = Vec::new();
         let mut answers = Vec::new();
+        let mut agent_runs = BTreeSet::new();
         for (task_id, entry) in journal.into_iter().filter(|(t, _)| in_scope(t)) {
             match entry.kind.as_str() {
-                ANSWER_KIND if entry.at > answers_from => answers.push(entry.at),
+                ANSWER_KIND if entry.at > asks_from && entry.source == "owner" => answers.push(entry.at),
+                RUN_REQUESTED_KIND if entry.at > asks_from && entry.source == "agent" => {
+                    let queued = entry.data.as_ref().and_then(|d| d.get("queued_at")).cloned();
+                    if let Some(at) = queued.and_then(|v| serde_json::from_value::<DateTime<Utc>>(v).ok()) {
+                        agent_runs.insert((task_id, at));
+                    }
+                }
                 "schedule_skipped" if entry.at > missed_from => {
                     if let Some(slots) = skipped_slots(task_id, &entry) {
                         skipped.push(slots);
@@ -191,7 +244,7 @@ impl Engine {
         }
 
         let signposts = if scope.is_none() {
-            match self.triggered_signposts(now).await {
+            match self.triggered_signposts_cached(now).await {
                 Ok(found) => found.into_iter().map(signpost).collect(),
                 Err(e) => {
                     tracing::warn!("operations: leaving scenario signposts out: {e}");
@@ -215,6 +268,7 @@ impl Engine {
             skipped,
             signposts,
             answers,
+            agent_runs,
             // Two ticks: a slot the next tick is about to fire is not late
             // -- what the model's own default means, at this instance's tick.
             late_after_seconds: Some(2 * snapshot.config.daemon.tick_seconds as i64),
@@ -222,14 +276,56 @@ impl Engine {
         Ok(operations::report(&input))
     }
 
-    /// `Request::TaskSkipNext`: pass over a scheduled task's next slot. The
-    /// schedule moves to the first slot after it -- or after now, when the
-    /// slot has already passed undispatched, so skipping a late slot never
-    /// turns into firing an earlier one. A retry queued for the task is the
-    /// next thing that would fire, so it is what gets skipped: the streak is
-    /// dropped, the same way resuming a schedule drops one, and the journal
-    /// says so.
-    pub(crate) async fn skip_next(&self, id: &str, asked: &Asked) -> Result<Task> {
+    /// `Engine::triggered_signposts`, reused for [`SIGNPOST_TTL`] while the
+    /// scenario files are unchanged. A failure is never kept: the next read
+    /// tries again.
+    pub(crate) async fn triggered_signposts_cached(
+        self: &Arc<Self>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<factory_core::protocol::TriggeredSignpost>> {
+        let dir = factory_core::scenario::scenarios_dir(&self.factory_snapshot().root);
+        let print = tokio::task::spawn_blocking(move || fingerprint(&dir))
+            .await
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("scenario directory walk: {e}")))?;
+        {
+            let cache = self.signpost_cache.lock().unwrap();
+            if let Some(c) = cache.as_ref() {
+                if c.fingerprint == print && c.at.elapsed() < SIGNPOST_TTL {
+                    return Ok(c.signposts.clone());
+                }
+            }
+        }
+        let signposts = self.triggered_signposts(now).await?;
+        *self.signpost_cache.lock().unwrap() = Some(SignpostCache {
+            at: std::time::Instant::now(),
+            fingerprint: print,
+            signposts: signposts.clone(),
+        });
+        Ok(signposts)
+    }
+
+    /// `Request::TaskSkipNext`: pass over a scheduled task's next firing.
+    ///
+    /// * With no retry queued, the next firing is the schedule's slot, and
+    ///   the schedule moves to the first slot after it -- or after now, when
+    ///   the slot has already passed undispatched, so skipping a late slot
+    ///   never turns into firing an earlier one.
+    /// * With a retry queued, the retry is the next firing, and skipping it
+    ///   ends the streak exactly as `end_retry_streak` does: the regular
+    ///   slot the streak stood in front of (`PendingRetry::resume_at`) comes
+    ///   back, or the first slot after now if that has passed too. Skipping
+    ///   from the retry's own time instead would lose that slot and let an
+    ///   `every` schedule drift by the backoff.
+    ///
+    /// `slot`, when given, is the firing the caller means to skip -- the
+    /// `next_run_at` it was looking at. If the schedule has moved on since
+    /// (the scheduler fired it, somebody else skipped it) the skip is
+    /// refused rather than landing on a firing nobody chose. Either way
+    /// it runs under `schedule_lock`, which the scheduler holds while it
+    /// re-reads and fires a due task, so a slot is fired or skipped, never
+    /// both.
+    pub(crate) async fn skip_next(&self, id: &str, slot: Option<DateTime<Utc>>, asked: &Asked) -> Result<Task> {
+        let _slot = self.schedule_lock.lock().await;
         let task = self.require(id).await?;
         let Some(s) = &task.schedule else {
             return Err(FactoryError::BadRequest("only a scheduled task has a next slot to skip".into()));
@@ -239,11 +335,24 @@ impl Engine {
                 "the schedule is paused, so no slot is coming to skip; resume it first".into(),
             ));
         }
-        let Some(slot) = task.next_run_at else {
+        let Some(next_firing) = task.next_run_at else {
             return Err(FactoryError::BadRequest("the task has no next slot to skip".into()));
         };
+        if let Some(expected) = slot {
+            if expected != next_firing {
+                return Err(FactoryError::BadRequest(format!(
+                    "the next firing is {} now, not {}; the schedule moved on since it was read -- look again",
+                    next_firing.to_rfc3339(),
+                    expected.to_rfc3339()
+                )));
+            }
+        }
         let now = Utc::now();
-        let next = schedule::next_after(s, slot.max(now))?;
+        let next = match &task.pending_retry {
+            Some(retry) if retry.resume_at > now => retry.resume_at,
+            Some(_) => schedule::next_after(s, now)?,
+            None => schedule::next_after(s, next_firing.max(now))?,
+        };
         let dropped_retry = task.pending_retry.is_some();
         let updated = self
             .store
@@ -257,22 +366,37 @@ impl Engine {
             )
             .await?;
         let what = if dropped_retry { "the queued retry" } else { "the slot" };
+        let then = if dropped_retry { "resuming the regular schedule" } else { "next firing" };
         self.entry(
             id,
             asked.entry(
                 "slot_skipped",
                 format!(
-                    "{what} at {} skipped {}; next firing at {}",
-                    slot.to_rfc3339(),
+                    "{what} at {} skipped {}; {then} at {}",
+                    next_firing.to_rfc3339(),
                     asked.words(),
                     next.to_rfc3339()
                 ),
-                serde_json::json!({ "skipped": slot, "next": next, "dropped_retry": dropped_retry }),
+                serde_json::json!({ "skipped": next_firing, "next": next, "dropped_retry": dropped_retry }),
             ),
         )
         .await;
         self.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
         Ok(updated)
+    }
+
+    /// For the scheduler, under `schedule_lock`: `seen` as the store has it
+    /// now, if it is still due exactly as `due_now` found it -- the same
+    /// next firing, the same retry, not paused. `None` when anything moved
+    /// in between (a skip, a pause, an edit): that is somebody's decision,
+    /// and the next tick reads it afresh.
+    pub(crate) async fn still_due(&self, seen: &Task) -> Option<Task> {
+        let now = self.store.get(&seen.id).await.ok().flatten()?;
+        let same = now.next_run_at == seen.next_run_at
+            && now.pending_retry == seen.pending_retry
+            && !now.schedule_paused
+            && now.schedule.is_some();
+        same.then_some(now)
     }
 
     /// `Request::RunAnswer`: type `text` into a blocked run's own session and
@@ -284,6 +408,17 @@ impl Engine {
     /// intervention; the text is not, since a record is no place for what
     /// a person had to type. The run stays `Blocked` until its agent says
     /// otherwise.
+    ///
+    /// The answer is journaled the moment the text is in the session, before
+    /// enter is pressed: text that reached the agent is on record even if
+    /// the keypress then fails, so a person retrying after an error is
+    /// looking at a journal that says the first attempt typed something. A
+    /// failed keypress is journaled too, and returned as the error.
+    ///
+    /// There is a race nothing here can close: the agent may unblock itself
+    /// between the `Blocked` check and the text arriving, and then the
+    /// answer lands in whatever it is doing next. The window is one runtime
+    /// call wide; the journal records that an answer was sent either way.
     pub(crate) async fn answer_run(&self, run_id: &str, text: &str, asked: &Asked) -> Result<()> {
         if asked.reason.is_none() {
             return Err(FactoryError::BadRequest(
@@ -300,10 +435,11 @@ impl Engine {
                 run.status.as_str()
             )));
         }
-        if run.session.is_none() {
+        let Some(session) = run.session.as_ref() else {
             return Err(FactoryError::BadRequest(format!("run {run_id} has no session to answer into")));
-        }
-        self.run_input(run_id, Some(text), &["enter".to_string()]).await?;
+        };
+        let runtime = self.registry.runtime(&session.runtime)?;
+        runtime.send_text(session, text).await?;
         self.entry(
             &run.task_id,
             asked
@@ -315,6 +451,19 @@ impl Engine {
                 .in_run(&run.id),
         )
         .await;
+        if let Err(e) = runtime.send_keys(session, &["enter".to_string()]).await {
+            self.entry(
+                &run.task_id,
+                TaskEntry::new(
+                    "daemon",
+                    "answer_unsent",
+                    format!("the answer was typed but enter could not be pressed: {e}"),
+                )
+                .in_run(&run.id),
+            )
+            .await;
+            return Err(e);
+        }
         Ok(())
     }
 }
@@ -367,6 +516,8 @@ mod tests {
     #[derive(Default)]
     struct TypingRuntime {
         typed: Mutex<Vec<String>>,
+        /// Refuse every keypress, as a session that died mid-answer would.
+        keys_fail: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -388,6 +539,9 @@ mod tests {
             Ok(())
         }
         async fn send_keys(&self, _: &SessionRef, keys: &[String]) -> Result<()> {
+            if self.keys_fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(FactoryError::Other(anyhow::anyhow!("the pane is gone")));
+            }
             self.typed.lock().unwrap().extend(keys.iter().map(|k| format!("<{k}>")));
             Ok(())
         }
@@ -708,7 +862,7 @@ mod tests {
         let task = task_in(&engine, "demo", "hourly", Some(Schedule::Every { seconds: 3600 })).await;
         let slot = task.next_run_at.unwrap();
 
-        let skipped = engine.skip_next(&task.id, &owner("the host is being moved")).await.unwrap();
+        let skipped = engine.skip_next(&task.id, None, &owner("the host is being moved")).await.unwrap();
         let next = skipped.next_run_at.unwrap();
         assert!(next > slot, "past the skipped slot");
         assert!(next <= slot + Duration::seconds(3600) + Duration::seconds(5), "and no further than the one after it");
@@ -721,7 +875,7 @@ mod tests {
         assert!(!entries.iter().any(|e| e.kind == "schedule_skipped"), "a decision is not a missed slot");
 
         let one_off = task_in(&engine, "demo", "one-off", None).await;
-        let err = engine.skip_next(&one_off.id, &owner("x")).await.unwrap_err();
+        let err = engine.skip_next(&one_off.id, None, &owner("x")).await.unwrap_err();
         assert!(err.to_string().contains("only a scheduled task"), "{err}");
         std::fs::remove_dir_all(root).ok();
     }
@@ -735,7 +889,7 @@ mod tests {
             .update(&task.id, &TaskPatch { next_run_at: Some(Utc::now() - Duration::hours(5)), ..Default::default() })
             .await
             .unwrap();
-        let skipped = engine.skip_next(&task.id, &owner("stale")).await.unwrap();
+        let skipped = engine.skip_next(&task.id, None, &owner("stale")).await.unwrap();
         assert!(skipped.next_run_at.unwrap() > Utc::now(), "from now, not from the overdue slot");
         std::fs::remove_dir_all(root).ok();
     }
@@ -834,5 +988,139 @@ mod tests {
         assert!(asked.by.contains("w"));
         assert_eq!(asked.reason, None);
         assert_eq!(asked.words(), format!("by {}", asked.by));
+    }
+
+    // -- review fixes -------------------------------------------------------
+
+    #[tokio::test]
+    async fn only_the_owners_answers_and_runs_again_are_interventions() {
+        let (engine, _, root) = test_engine();
+        let task = task_in(&engine, "demo", "flaky", None).await;
+        let first = run_of(&engine, &task.id).await;
+        engine.fail_run(&first.id, FailKind::AgentFailed, "exit 1").await;
+        // An agent asks for the run again: journaled with its queued_at,
+        // exactly as `task.run` writes it.
+        let again = run_of(&engine, &task.id).await;
+        let agent = Asked::new(
+            &Caller::Agent { scope: "demo".into(), name: "foreman".into(), role: Role::worker(), run_id: None },
+            Some("tidying up".into()),
+        );
+        engine
+            .entry(
+                &task.id,
+                agent.entry(RUN_REQUESTED_KIND, "run requested".into(), serde_json::json!({ "queued_at": again.queued_at })),
+            )
+            .await;
+        // And answers a blocked run of another task.
+        let other = task_in(&engine, "demo", "asks", None).await;
+        let blocked = blocked_run(&engine, &other.id, "?").await;
+        engine.entry(&other.id, agent.entry(ANSWER_KIND, "answered".into(), serde_json::json!({})).in_run(&blocked.id)).await;
+
+        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        assert_eq!(report.health.current.interventions, 0, "nothing here was the owner's doing");
+
+        // The owner's answer is.
+        engine.answer_run(&blocked.id, "yes", &owner("it asked")).await.unwrap();
+        let report = engine.operations_report(None, HealthWindow::Week).await.unwrap();
+        assert_eq!(report.health.current.interventions, 1);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn skipping_a_queued_retry_resumes_the_regular_slot_it_stood_in_front_of() {
+        let (engine, _, root) = test_engine();
+        let task = task_in(&engine, "demo", "hourly", Some(Schedule::Every { seconds: 3600 })).await;
+        let regular = Utc::now() + Duration::minutes(40);
+        engine
+            .store
+            .update(
+                &task.id,
+                &TaskPatch {
+                    next_run_at: Some(Utc::now() + Duration::minutes(5)),
+                    pending_retry: Some(factory_core::task::PendingRetry { attempts: 1, resume_at: regular }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let skipped = engine.skip_next(&task.id, None, &owner("not today")).await.unwrap();
+        assert_eq!(skipped.next_run_at, Some(regular), "the regular slot, not one drifted by the backoff");
+        assert!(skipped.pending_retry.is_none());
+        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let e = entry_of(&entries, "slot_skipped");
+        assert!(e.message.contains(&regular.to_rfc3339()), "{}", e.message);
+
+        // A streak whose regular slot has passed as well resumes from now.
+        engine
+            .store
+            .update(
+                &task.id,
+                &TaskPatch {
+                    pending_retry: Some(factory_core::task::PendingRetry {
+                        attempts: 1,
+                        resume_at: Utc::now() - Duration::minutes(10),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let skipped = engine.skip_next(&task.id, None, &owner("still not")).await.unwrap();
+        let next = skipped.next_run_at.unwrap();
+        assert!(next > Utc::now() && next <= Utc::now() + Duration::seconds(3600), "{next}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_skip_for_a_slot_that_moved_on_is_refused_and_the_scheduler_leaves_a_skipped_slot_alone() {
+        let (engine, _, root) = test_engine();
+        let task = task_in(&engine, "demo", "hourly", Some(Schedule::Every { seconds: 3600 })).await;
+        let seen = task.next_run_at.unwrap();
+
+        let stale = seen - Duration::hours(1);
+        let err = engine.skip_next(&task.id, Some(stale), &owner("x")).await.unwrap_err();
+        assert!(err.to_string().contains("moved on"), "{err}");
+        assert_eq!(engine.require(&task.id).await.unwrap().next_run_at, Some(seen), "nothing moved");
+
+        // The scheduler read the task as due; a skip lands before it fires.
+        let as_the_scheduler_saw_it = engine.require(&task.id).await.unwrap();
+        engine.skip_next(&task.id, Some(seen), &owner("x")).await.unwrap();
+        assert!(engine.still_due(&as_the_scheduler_saw_it).await.is_none(), "the skipped slot is not fired");
+        let fresh = engine.require(&task.id).await.unwrap();
+        assert!(engine.still_due(&fresh).await.is_some());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn an_answer_is_on_record_once_typed_even_when_enter_fails() {
+        let (engine, runtime, root) = test_engine();
+        let task = task_in(&engine, "demo", "t", None).await;
+        let run = blocked_run(&engine, &task.id, "?").await;
+        runtime.keys_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        assert!(engine.answer_run(&run.id, "yes", &owner("it asked")).await.is_err());
+        let kinds: Vec<String> = engine.store.run_entries(&run.id, 50).await.unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&ANSWER_KIND.to_string()), "{kinds:?}");
+        assert!(kinds.contains(&"answer_unsent".to_string()), "{kinds:?}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn signposts_are_reused_until_a_scenario_file_changes() {
+        let (engine, _, root) = test_engine();
+        let dir = root.join(".factory/scenarios");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("slow-year.yaml");
+        std::fs::write(&file, "name: slow-year\ntitle: A slow year\nsignposts:\n  - { metric: throughput_week, below: 999 }\n").unwrap();
+
+        let now = Utc::now();
+        assert_eq!(engine.triggered_signposts_cached(now).await.unwrap().len(), 1);
+        assert!(engine.signpost_cache.lock().unwrap().is_some(), "kept");
+        assert_eq!(engine.triggered_signposts_cached(now).await.unwrap().len(), 1, "served from the cache");
+
+        std::fs::remove_file(&file).unwrap();
+        assert!(engine.triggered_signposts_cached(now).await.unwrap().is_empty(), "a removed file is not answered from the cache");
+        std::fs::remove_dir_all(root).ok();
     }
 }
