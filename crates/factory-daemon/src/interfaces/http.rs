@@ -158,6 +158,11 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/quality", get(quality))
         .route("/api/quality/remediate", post(quality_remediate))
         .route("/api/operations", get(operations))
+        .route("/api/intake", get(intake_board).post(intake_add))
+        .route("/api/intake/{id}/triage", post(intake_triage))
+        .route("/api/intake/{id}/assess", post(intake_assess))
+        .route("/api/intake/{id}/decide", post(intake_decide))
+        .route("/api/intake/{id}/info", post(intake_info))
         .route("/api/benchmarks", get(benchmarks))
         .route("/api/datasets", get(list_datasets).post(create_dataset))
         .route("/api/datasets/{name}", get(get_dataset).delete(delete_dataset))
@@ -819,6 +824,89 @@ async fn operations(State(engine): State<Arc<Engine>>, Query(q): Query<Operation
         },
     )
     .await
+}
+
+#[derive(serde::Deserialize)]
+struct IntakeQuery {
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// `GET /api/intake?scope=` -- the L4 Intake view's board (`#119`).
+async fn intake_board(State(engine): State<Arc<Engine>>, Query(q): Query<IntakeQuery>) -> AxumResponse {
+    run(&engine, Request::IntakeBoard { scope: q.scope }).await
+}
+
+/// `POST /api/intake` -- hand an item in. The web UI is the caller that
+/// arrives here, so an item that names no source is recorded as `ui`.
+async fn intake_add(
+    State(engine): State<Arc<Engine>>,
+    Json(mut new): Json<factory_core::intake::NewIntake>,
+) -> AxumResponse {
+    new.source.get_or_insert(factory_core::intake::SourceKind::Ui);
+    run(&engine, Request::IntakeAdd(new)).await
+}
+
+#[derive(serde::Deserialize, Default)]
+struct IntakeTriageBody {
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+/// `POST /api/intake/{id}/triage` -- start the triage node, `{agent?}`.
+async fn intake_triage(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> AxumResponse {
+    let parsed = if body.iter().all(u8::is_ascii_whitespace) {
+        Ok(IntakeTriageBody::default())
+    } else {
+        serde_json::from_slice::<IntakeTriageBody>(&body).map_err(|e| format!("not a triage body: {e}"))
+    };
+    match parsed {
+        Ok(b) => run(&engine, Request::IntakeTriage { id, agent: b.agent }).await,
+        Err(why) => refused(why),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct IntakeAssessBody {
+    assessment: factory_core::intake::Assessment,
+    #[serde(default)]
+    decide: bool,
+}
+
+/// `POST /api/intake/{id}/assess` -- `{assessment, decide?}`.
+async fn intake_assess(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<IntakeAssessBody>,
+) -> AxumResponse {
+    run(&engine, Request::IntakeAssess { id, assessment: body.assessment, decide: body.decide }).await
+}
+
+/// `POST /api/intake/{id}/decide` -- a `Decision`, tagged by `decision`.
+async fn intake_decide(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(decision): Json<factory_core::intake::Decision>,
+) -> AxumResponse {
+    run(&engine, Request::IntakeDecide { id, decision }).await
+}
+
+#[derive(serde::Deserialize)]
+struct IntakeInfoBody {
+    text: String,
+}
+
+/// `POST /api/intake/{id}/info` -- `{text}`, the answer to a needs-info.
+async fn intake_info(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<IntakeInfoBody>,
+) -> AxumResponse {
+    run(&engine, Request::IntakeInfo { id, text: body.text }).await
 }
 
 /// `POST /api/scenarios/promote` -- turn a scenario into real work. Answers

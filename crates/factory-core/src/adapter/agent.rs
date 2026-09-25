@@ -463,10 +463,17 @@ impl AgentContext {
             }
             lines.push(match grant {
                 Grant::TaskCreate => format!(
-                    "task.create -> {bin} task create \"<title>\" -i \"<instructions>\" --scope {scope} --agent <agent>"
+                    "task.create -> {bin} task create \"<title>\" -i \"<instructions>\" --scope {scope} --agent <agent>; \
+                     or, for work that is not yet clear, tested or known to be ours, hand it in through the \
+                     intake gate instead: {bin} intake add \"<title>\" -i \"<what is asked>\" --scope {scope} \
+                     (it is triaged before it can run; {bin} intake info <id> \"...\" answers a needs-info)"
                 ),
                 Grant::TaskEdit => {
-                    format!("task.edit -> {bin} task edit <id> ... (see --help for every field)")
+                    format!(
+                        "task.edit -> {bin} task edit <id> ... (see --help for every field); triaging an \
+                         intake item is an edit too: {bin} intake assess <id> --file <assessment.json> \
+                         [--decide], {bin} intake decide <id> ready|needs-info|wontfix"
+                    )
                 }
                 Grant::TaskDelete => format!("task.delete -> {bin} task delete <id>"),
                 Grant::TaskRun => format!("task.run -> {bin} task run <id>"),
@@ -747,6 +754,7 @@ mod tests {
             retry: None,
             pending_retry: None,
             schedule_paused: false,
+            intake: None,
         }
     }
 

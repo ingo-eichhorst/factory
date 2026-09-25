@@ -214,6 +214,33 @@ tr.row:hover { background: var(--panel-2); }
 .s-blocked { color: var(--signal); border-color: transparent; background: var(--signal-wash); }
 .s-done { color: var(--run); border-color: transparent; background: var(--run-wash); }
 .s-failed, .s-cancelled { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+/* Held in the intake gate (#119): not on the line, so no wash of its own. */
+.s-intake { color: var(--signal-ink); border-style: dashed; }
+
+/* ---------------------------------------------------------- intake board
+   The Tasks board's columns and cards, with the seven readiness axes as a
+   row of marks: pass, fail, tolerated (a cheap observability gap) and not
+   yet assessed. */
+#intake .kbcol[data-col="ik-needs_info"] { border-top-color: var(--wait); }
+#intake .kbcol[data-col="ik-ready"] { border-top-color: var(--run); }
+.ik-marks { display: inline-flex; gap: 2px; font: 600 11px/1 var(--mono); }
+.ik-axis { width: 12px; text-align: center; }
+.ik-pass { color: var(--run); }
+.ik-fail { color: var(--fault); }
+.ik-tolerated { color: var(--wait); }
+.ik-unassessed { color: var(--faint); }
+.ik-chips { display: flex; gap: 6px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
+.ik-p.ik-P1 { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+.ik-p.ik-P2 { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
+.ik-note, .ik-q { margin-top: 3px; }
+table.ik-axes { width: 100%; border-collapse: collapse; margin: 8px 0; }
+table.ik-axes th, table.ik-axes td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 12px; }
+table.ik-axes th { white-space: nowrap; font-weight: 500; }
+table.ik-axes.ik-form th { width: 150px; }
+table.ik-axes.ik-form .checkrow { margin: 4px 0; text-transform: none; letter-spacing: 0; }
+.ik-grid { display: flex; gap: 12px; flex-wrap: wrap; }
+.ik-grid label { flex: 1 1 140px; }
+.ik-preview { font: 500 11px/1.4 var(--mono); color: var(--ink-2); }
 
 /* ---------------------------------------------------------- tasks board
    Columns are statuses and nothing else: blocked sits leftmost because it is

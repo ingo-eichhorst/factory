@@ -460,6 +460,9 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.schedule_paused {
                 task.schedule_paused = v;
             }
+            if let Some(v) = patch.intake {
+                task.intake = Some(v);
+            }
             task.updated_at = Utc::now();
 
             write_task(conn, &task)?;
@@ -1015,6 +1018,7 @@ mod tests {
             retry: None,
             pending_retry: None,
             schedule_paused: false,
+            intake: None,
         }
     }
 

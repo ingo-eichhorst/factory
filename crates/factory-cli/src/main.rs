@@ -201,6 +201,94 @@ enum Command {
         #[command(subcommand)]
         command: Option<StatsCmd>,
     },
+    /// Intake (`#119`), the inbound quality gate: work handed in here is
+    /// held outside the dispatchable queue until triage -- the seven
+    /// readiness axes, category, priority and estimate -- releases it
+    /// (`ready`), sends it back (`needs-info`) or closes it (`wontfix`).
+    /// With no subcommand, prints the board: received, triaging, needs-info
+    /// and recently released.
+    Intake {
+        /// Only this scope and the scopes below it (default: every scope).
+        #[arg(long)]
+        scope: Option<String>,
+        #[command(subcommand)]
+        command: Option<IntakeCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum IntakeCmd {
+    /// The board: every item in intake, by column, oldest first.
+    List {
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Hand an item in. It is not a task anyone can run until it is
+    /// released.
+    Add {
+        title: String,
+        /// What is being asked for, as the requester put it.
+        #[arg(short, long, default_value = "")]
+        instructions: String,
+        /// The scope it is thought to belong to; triage routes it.
+        #[arg(long)]
+        scope: Option<String>,
+        /// Where it came from: an issue URL, a mail id.
+        #[arg(long)]
+        reference: Option<String>,
+        /// On whose behalf, when that is not you.
+        #[arg(long)]
+        requester: Option<String>,
+        /// Repeatable: `--label area=infra`.
+        #[arg(long = "label")]
+        labels: Vec<String>,
+    },
+    /// One item: its text, where it stands, its assessment and decision.
+    Show { id: String },
+    /// Start the triage node: a run that assesses the item and submits it.
+    Triage {
+        id: String,
+        /// The agent to triage with (default: the scope's own).
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Record an assessment, read as JSON from a file (`-` for stdin) --
+    /// the shape a triage run's instructions show.
+    Assess {
+        id: String,
+        #[arg(long)]
+        file: PathBuf,
+        /// Also apply what the rules give: ready releases, needs-info sends
+        /// it back.
+        #[arg(long)]
+        decide: bool,
+    },
+    /// Decide: `ready` releases, `needs-info` sends it back with questions,
+    /// `wontfix` closes it -- only with a verified reason and evidence.
+    Decide {
+        id: String,
+        #[arg(value_parser = ["ready", "needs-info", "wontfix"])]
+        decision: String,
+        /// ready: dispatch the released task at once.
+        #[arg(long)]
+        run: bool,
+        /// needs-info: repeatable. Absent asks the assessment's questions,
+        /// or its failed axes.
+        #[arg(long = "question")]
+        questions: Vec<String>,
+        /// wontfix: duplicate, invalid or out-of-scope.
+        #[arg(long, value_parser = ["duplicate", "invalid", "out-of-scope"])]
+        reason: Option<String>,
+        /// wontfix: what verifies the reason.
+        #[arg(long)]
+        evidence: Option<String>,
+        /// wontfix duplicate: what it duplicates.
+        #[arg(long)]
+        duplicate_of: Option<String>,
+    },
+    /// Add information to an item -- the answer to a needs-info, which puts
+    /// it back in the queue.
+    Info { id: String, text: String },
 }
 
 #[derive(Subcommand)]
@@ -1292,7 +1380,215 @@ async fn main() -> Result<()> {
             };
             stats_cmd(cli.json, &client, cmd).await
         }
+
+        Command::Intake { scope, command } => {
+            // The same merge `Command::Scenario` does: `--scope` before the
+            // subcommand name counts for `list`.
+            let cmd = match command {
+                None => IntakeCmd::List { scope },
+                Some(IntakeCmd::List { scope: s }) => IntakeCmd::List { scope: s.or(scope) },
+                Some(IntakeCmd::Add { scope: s, title, instructions, reference, requester, labels }) => {
+                    IntakeCmd::Add { scope: s.or(scope), title, instructions, reference, requester, labels }
+                }
+                Some(_) if scope.is_some() => {
+                    return Err(anyhow!(
+                        "--scope before the subcommand only applies to `list` and `add`; the others name an item"
+                    ));
+                }
+                Some(other) => other,
+            };
+            intake_cmd(cli.json, &client, cmd).await
+        }
     }
+}
+
+async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
+    use factory_core::intake::{Decision, NewIntake, SourceKind, WontfixReason};
+    let payload = match cmd {
+        IntakeCmd::List { scope } => client.send(Request::IntakeBoard { scope }).await?,
+        IntakeCmd::Add { title, instructions, scope, reference, requester, labels } => {
+            client
+                .send(Request::IntakeAdd(NewIntake {
+                    title,
+                    instructions,
+                    scope,
+                    source: Some(SourceKind::Cli),
+                    reference,
+                    requester,
+                    labels: parse_labels(&labels)?,
+                }))
+                .await?
+        }
+        IntakeCmd::Show { id } => client.send(Request::TaskGet { id }).await?,
+        IntakeCmd::Triage { id, agent } => client.send(Request::IntakeTriage { id, agent }).await?,
+        IntakeCmd::Assess { id, file, decide } => {
+            let text = if file.as_os_str() == "-" {
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+                text
+            } else {
+                std::fs::read_to_string(&file).map_err(|e| anyhow!("cannot read {}: {e}", file.display()))?
+            };
+            let assessment = serde_json::from_str(&text).map_err(|e| anyhow!("not an assessment: {e}"))?;
+            client.send(Request::IntakeAssess { id, assessment, decide }).await?
+        }
+        IntakeCmd::Decide { id, decision, run, questions, reason, evidence, duplicate_of } => {
+            let decision = match decision.as_str() {
+                "ready" => Decision::Ready { run },
+                "needs-info" => Decision::NeedsInfo { questions },
+                _ => Decision::Wontfix {
+                    reason: match reason.as_deref() {
+                        Some("duplicate") => WontfixReason::Duplicate,
+                        Some("invalid") => WontfixReason::Invalid,
+                        Some("out-of-scope") => WontfixReason::OutOfScope,
+                        _ => return Err(anyhow!("wontfix needs --reason duplicate|invalid|out-of-scope")),
+                    },
+                    evidence: evidence.unwrap_or_default(),
+                    duplicate_of,
+                },
+            };
+            client.send(Request::IntakeDecide { id, decision }).await?
+        }
+        IntakeCmd::Info { id, text } => client.send(Request::IntakeInfo { id, text }).await?,
+    };
+    print(&payload, json, |p| match p {
+        Payload::IntakeBoard { board } => Some(intake_board_text(board)),
+        Payload::Task { task } => Some(intake_item_text(task)),
+        _ => None,
+    })
+}
+
+/// A card's line: full id (it is what every other `intake` command takes),
+/// age, priority/category/estimate once assessed, the seven axes as a row
+/// of marks, the title.
+fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
+    let (verdict, marks) = match &c.triage {
+        Some(t) => (
+            format!(
+                "{} {} {}",
+                t.priority.as_str(),
+                t.assessment.category,
+                t.estimate.map(|e| e.describe()).unwrap_or_else(|| "-".into())
+            ),
+            t.assessment.axes.iter().map(|a| if a.pass { '+' } else { 'x' }).collect::<String>(),
+        ),
+        None => ("-".into(), ".......".into()),
+    };
+    let mut line = format!(
+        "  {}  {:>7}  {}  {:<24} {} [{}] from {}",
+        c.id,
+        duration(c.age_seconds.max(0) as u64),
+        marks,
+        verdict,
+        c.title,
+        c.scope,
+        c.requester
+    );
+    if c.stage == factory_core::intake::IntakeStage::Triaging && c.triage.is_none() {
+        if let Some(t) = &c.triage_task {
+            line.push_str(&format!("\n      triage run in task {t}"));
+        }
+    }
+    if c.stage == factory_core::intake::IntakeStage::Triaging
+        && c.triage_task_status.is_some_and(|s| s.is_terminal())
+        && c.triage.is_none()
+    {
+        line.push_str("\n      the triage run ended without an assessment");
+    }
+    for q in &c.questions {
+        line.push_str(&format!("\n      ? {q}"));
+    }
+    line
+}
+
+fn intake_board_text(board: &factory_core::intake::IntakeBoard) -> String {
+    let columns = [
+        ("RECEIVED", &board.columns.received),
+        ("TRIAGING", &board.columns.triaging),
+        ("NEEDS INFO", &board.columns.needs_info),
+        ("READY (released, last 14 days)", &board.columns.ready),
+    ];
+    let mut out = String::new();
+    for (name, cards) in columns {
+        out.push_str(&format!("{name}  {}\n", cards.len()));
+        for c in cards.iter() {
+            out.push_str(&intake_card_line(c));
+            out.push('\n');
+        }
+    }
+    out.push_str(&format!(
+        "closed as wontfix in the last {} days: {}\naxes: {}",
+        board.ready_window_days,
+        board.wontfix,
+        board.axes.iter().map(|a| a.label.as_str()).collect::<Vec<_>>().join(", ")
+    ));
+    out
+}
+
+fn intake_item_text(task: &Task) -> String {
+    let Some(i) = &task.intake else { return detail(task) };
+    let mut out = format!(
+        "{}\n  {}\n  status     {} ({})\n  scope      {}\n  from       {} via {}{}\n  received   {}\n",
+        task.id,
+        task.title,
+        task.status.as_str(),
+        i.stage.as_str().replace('_', "-"),
+        task.scope,
+        i.requester,
+        i.source.kind.as_str(),
+        i.source.reference.as_ref().map(|r| format!(" ({r})")).unwrap_or_default(),
+        i.received_at.to_rfc3339(),
+    );
+    if let Some(t) = &i.triage_task {
+        out.push_str(&format!("  triage run task {t}\n"));
+    }
+    if let Some(t) = &i.triage {
+        out.push_str(&format!(
+            "  assessed   by {} at {}: {}\n  category   {}\n  priority   {} (impact {}, urgency {})\n  estimate   {} (complexity {})\n  route      {}{}{}\n",
+            t.by,
+            t.at.to_rfc3339(),
+            t.verdict.as_str().replace('_', "-"),
+            t.assessment.category,
+            t.priority.as_str(),
+            t.assessment.impact.as_str(),
+            t.assessment.urgency.as_str(),
+            t.estimate.map(|e| e.describe()).unwrap_or_else(|| "none".into()),
+            t.assessment.complexity,
+            t.assessment.routing.scope,
+            t.assessment.routing.agent.as_ref().map(|a| format!(" as {a}")).unwrap_or_default(),
+            t.assessment.routing.workflow.as_ref().map(|w| format!(", workflow {w}")).unwrap_or_default(),
+        ));
+        for a in &t.assessment.axes {
+            out.push_str(&format!(
+                "    {} {:<14} {}{}\n",
+                if a.pass { "+" } else { "x" },
+                a.axis.as_str(),
+                a.evidence,
+                a.cost.map(|c| format!(" [cost {c:?}]").to_lowercase()).unwrap_or_default()
+            ));
+        }
+        if !t.assessment.summary.is_empty() {
+            out.push_str(&format!("  summary    {}\n", t.assessment.summary));
+        }
+    }
+    for q in &i.questions {
+        out.push_str(&format!("  ? {q}\n"));
+    }
+    if let Some(d) = &i.decision {
+        out.push_str(&format!("  decided    {} by {} at {}", d.decision.as_str().replace('_', "-"), d.by, d.at.to_rfc3339()));
+        if let Some(run) = &d.workflow_run {
+            out.push_str(&format!(" (workflow run {run})"));
+        }
+        out.push('\n');
+    }
+    if let Some(r) = &task.result {
+        out.push_str(&format!("  result     {r}\n"));
+    }
+    // The item as handed in, and anything added to it since.
+    if !task.instructions.trim().is_empty() {
+        out.push_str(&format!("\n{}\n", task.instructions.trim()));
+    }
+    out.trim_end().to_string()
 }
 
 /// `factory infra`, for a person: the host, the daemon on it, then each
@@ -4595,6 +4891,32 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("factory").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn intake_parses_its_subcommands_and_refuses_an_unknown_decision() {
+        assert!(matches!(parse(&["intake"]).command, Command::Intake { scope: None, command: None }));
+        match parse(&["intake", "add", "Broken link", "-i", "the footer", "--scope", "web", "--reference", "mail-7"]).command {
+            Command::Intake { command: Some(IntakeCmd::Add { title, scope: Some(s), reference: Some(r), .. }), .. } => {
+                assert_eq!((title.as_str(), s.as_str(), r.as_str()), ("Broken link", "web", "mail-7"));
+            }
+            _ => panic!("not an add"),
+        }
+        match parse(&["intake", "decide", "abc", "needs-info", "--question", "which page?", "--question", "since when?"])
+            .command
+        {
+            Command::Intake { command: Some(IntakeCmd::Decide { decision, questions, .. }), .. } => {
+                assert_eq!(decision, "needs-info");
+                assert_eq!(questions.len(), 2);
+            }
+            _ => panic!("not a decide"),
+        }
+        assert!(matches!(
+            parse(&["intake", "assess", "abc", "--file", "-", "--decide"]).command,
+            Command::Intake { command: Some(IntakeCmd::Assess { decide: true, .. }), .. }
+        ));
+        let bad = Cli::try_parse_from(["factory", "intake", "decide", "abc", "maybe"]);
+        assert!(bad.is_err(), "only ready, needs-info or wontfix");
     }
 
     #[test]

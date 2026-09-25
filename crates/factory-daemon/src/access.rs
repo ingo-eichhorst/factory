@@ -173,6 +173,11 @@ impl Engine {
         Needs::Grant(match request {
             Request::TaskCreate(_) => Grant::TaskCreate,
             Request::TaskUpdate { .. } => Grant::TaskEdit,
+            // Intake (`#119`) reuses the task grants: handing something in
+            // is creating a task, triaging one is editing it. The `triager`
+            // role that narrows this is v2.
+            Request::IntakeAdd(_) | Request::IntakeTriage { .. } | Request::IntakeInfo { .. } => Grant::TaskCreate,
+            Request::IntakeAssess { .. } | Request::IntakeDecide { .. } => Grant::TaskEdit,
             Request::TaskDelete { .. } => Grant::TaskDelete,
             Request::TaskRun { .. } => Grant::TaskRun,
             Request::TaskCancel { .. } => Grant::TaskCancel,
@@ -259,6 +264,8 @@ impl Engine {
             | Request::Scenarios { .. }
             // A projection over what the reads below already return (`#106`).
             | Request::Operations { .. }
+            // A projection over the task list, like `Operations` (`#119`).
+            | Request::IntakeBoard { .. }
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
@@ -411,6 +418,47 @@ impl Engine {
                     in_scope(s)?;
                 }
                 Ok(())
+            }
+
+            // Handing in follows `TaskCreate`'s rule to the letter.
+            Request::IntakeAdd(new) => in_scope(new.scope.as_deref().unwrap_or(scope)),
+            // Starting a triage run creates a task in the item's scope.
+            Request::IntakeTriage { id, .. } => match self.store.get(id).await? {
+                Some(item) => task_in_reach(def, &item),
+                None => Ok(()),
+            },
+            // Assessing and deciding: reach over the item, or being the run
+            // of its own triage task -- the one way an agent with no reach
+            // over an item gets to answer for it, and only for that item.
+            // Releasing moves it, so the route has to be in reach as well.
+            Request::IntakeAssess { id, assessment, .. } => {
+                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
+                    return Err(deny("assess an intake item that is neither in its reach nor its own triage run's"));
+                }
+                in_scope(&assessment.routing.scope)
+            }
+            Request::IntakeDecide { id, decision } => {
+                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
+                    return Err(deny("decide an intake item that is neither in its reach nor its own triage run's"));
+                }
+                let routed = item.intake.as_ref().and_then(|i| i.triage.as_ref()).map(|t| &t.assessment.routing.scope);
+                match (decision, routed) {
+                    (factory_core::intake::Decision::Ready { .. }, Some(routed)) => in_scope(routed),
+                    _ => Ok(()),
+                }
+            }
+            // Answering a needs-info: reach over the item, or having handed
+            // it in.
+            Request::IntakeInfo { id, .. } => {
+                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                let me = caller.describe();
+                let requested = item
+                    .intake
+                    .as_ref()
+                    .is_some_and(|i| i.requester == me || i.requester.ends_with(&format!("(via {me})")));
+                if requested { Ok(()) } else { task_in_reach(def, &item) }
             }
 
             Request::TaskDelete { id }
@@ -1136,6 +1184,7 @@ mod tests {
             retry: None,
             pending_retry: None,
             schedule_paused: false,
+            intake: None,
         };
         engine.store.create(&task).await.unwrap()
     }

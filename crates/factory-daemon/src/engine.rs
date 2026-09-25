@@ -893,7 +893,14 @@ impl Engine {
                 Ok(Payload::Deleted { deleted })
             }
             Request::TaskRun { id, reason } => {
-                self.require(&id).await?;
+                let task = self.require(&id).await?;
+                // The gate (`#119`): an item still in intake has not been
+                // released, and nothing but a decision releases it.
+                if task.status == TaskStatus::Intake {
+                    return Err(FactoryError::BadRequest(
+                        "this task is still in intake: triage it and release it (factory intake decide) before it can run".into(),
+                    ));
+                }
                 // A task is a standing intent; a run is one attempt at it. Two
                 // attempts at once would race for the same working directory.
                 if let Some(run) = self.store.active_run(&id).await? {
@@ -979,6 +986,25 @@ impl Engine {
                     },
                 })
             }
+
+            // Intake (`#119`). Every write publishes `TaskCreated` or
+            // `TaskUpdated` itself; the board is a read over tasks.
+            Request::IntakeAdd(new) => Ok(Payload::Task { task: self.intake_add(caller, new).await? }),
+            Request::IntakeBoard { scope } => Ok(Payload::IntakeBoard {
+                board: self.intake_board(scope.as_deref()).await?,
+            }),
+            Request::IntakeTriage { id, agent } => Ok(Payload::Task {
+                task: self.intake_triage(caller, &id, agent).await?,
+            }),
+            Request::IntakeAssess { id, assessment, decide } => Ok(Payload::Task {
+                task: self.intake_assess(caller, &id, assessment, decide).await?,
+            }),
+            Request::IntakeDecide { id, decision } => Ok(Payload::Task {
+                task: self.intake_decide(caller, &id, decision).await?,
+            }),
+            Request::IntakeInfo { id, text } => Ok(Payload::Task {
+                task: self.intake_info(caller, &id, &text).await?,
+            }),
 
             Request::WorkflowCreate(draft) => Ok(Payload::Workflow {
                 workflow: self.create_workflow(draft).await?,
@@ -1670,6 +1696,18 @@ impl Engine {
         let current = self.require(id).await?;
         // The bookkeeping is the daemon's, not a caller's.
         patch.runs = None;
+        // So is the intake record, and the way out of intake is a decision
+        // (`crate::intake`), not an edit of the status (`#119`).
+        if patch.intake.is_some() {
+            return Err(FactoryError::BadRequest(
+                "the intake record is written by the intake requests, not by an edit".into(),
+            ));
+        }
+        if current.status == TaskStatus::Intake && patch.status.is_some_and(|s| s != TaskStatus::Intake) {
+            return Err(FactoryError::BadRequest(
+                "an item leaves intake by a decision (factory intake decide), not by an edit of its status".into(),
+            ));
+        }
         if patch.estimate_seconds == Some(0) {
             return Err(FactoryError::BadRequest(
                 "a task estimate must be at least one second".into(),
@@ -1818,7 +1856,22 @@ impl Engine {
     // -- creating ----------------------------------------------------------
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {
-        self.create_task(new, None, None, None).await
+        self.create_task(new, None, None, None, None).await
+    }
+
+    /// A task born inside the intake gate (`#119`): `TaskStatus::Intake`
+    /// from its first write, so there is no moment it could be dispatched.
+    pub(crate) async fn create_intake_task(
+        &self,
+        new: NewTask,
+        intake: factory_core::intake::Intake,
+    ) -> Result<Task> {
+        if new.schedule.is_some() {
+            return Err(FactoryError::BadRequest(
+                "an intake item has no schedule; release it first, then schedule the task".into(),
+            ));
+        }
+        self.create_task(new, None, None, None, Some(intake)).await
     }
 
     pub(crate) async fn create_workflow_task(
@@ -1827,7 +1880,7 @@ impl Engine {
         origin: WorkflowOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, Some(origin), None, Some(id)).await
+        self.create_task(new, Some(origin), None, Some(id), None).await
     }
 
     pub(crate) async fn create_bench_task(
@@ -1836,7 +1889,7 @@ impl Engine {
         origin: factory_core::bench::BenchOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, None, Some(origin), Some(id)).await
+        self.create_task(new, None, Some(origin), Some(id), None).await
     }
 
     async fn create_task(
@@ -1845,6 +1898,7 @@ impl Engine {
         workflow_origin: Option<WorkflowOrigin>,
         bench_origin: Option<factory_core::bench::BenchOrigin>,
         id: Option<String>,
+        intake: Option<factory_core::intake::Intake>,
     ) -> Result<Task> {
         let factory = self.factory_snapshot();
         if new.title.trim().is_empty() {
@@ -1903,6 +1957,10 @@ impl Engine {
         if let Some(id) = id { task.id = id; }
         task.workflow_origin = workflow_origin;
         task.bench_origin = bench_origin;
+        if let Some(intake) = intake {
+            task.status = TaskStatus::Intake;
+            task.intake = Some(intake);
+        }
         if let Some(s) = &task.schedule {
             task.next_run_at = Some(schedule::next_after(s, Utc::now())?);
         }
@@ -1932,6 +1990,19 @@ impl Engine {
     /// the dispatch got going. Failures here end the run rather than
     /// escaping, because nobody is waiting on the answer.
     pub async fn start_run_due(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due) {
+        // However it was asked for, an item still in intake is not started --
+        // and not failed either, which is what a dispatch error below would
+        // do to it (`#119`).
+        if let Ok(Some(task)) = self.store.get(task_id).await {
+            if task.status == TaskStatus::Intake {
+                self.entry(
+                    task_id,
+                    TaskEntry::new("daemon", "intake_held", "not started: the task is still in intake"),
+                )
+                .await;
+                return;
+            }
+        }
         let run = match self.dispatch(task_id, trigger, due).await {
             Ok(run) => run,
             Err(e) => {
