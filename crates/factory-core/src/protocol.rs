@@ -637,6 +637,54 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         detail: bool,
     },
+    /// `#119`: hand work in through the intake gate instead of straight
+    /// onto the line. Creates a task in `TaskStatus::Intake` with its
+    /// `Intake` record -- no run, and none until it is released. Needs
+    /// `task.create` in the target scope, like `TaskCreate`. An agent's
+    /// request is recorded as source `agent`, whatever it says.
+    #[serde(rename = "intake.add")]
+    IntakeAdd(crate::intake::NewIntake),
+    /// The Intake view and `factory intake list`: every intake item in the
+    /// four columns, computed fresh (`factory_core::intake::board`). A scope
+    /// means its whole subtree, as for `Operations`.
+    #[serde(rename = "intake.board")]
+    IntakeBoard {
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    /// Start the triage node on an item: a task in the item's scope whose
+    /// instructions are the generalised `ir:triage`, dispatched at once, that
+    /// answers with `IntakeAssess`. Needs `task.create` and reach over the
+    /// item.
+    #[serde(rename = "intake.triage")]
+    IntakeTriage {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+    },
+    /// Record an assessment on an item. With `decide`, also apply what the
+    /// rules give -- ready or needs-info, never wontfix. Needs `task.edit`
+    /// and reach over the item -- or to be the run of the item's own triage
+    /// task.
+    #[serde(rename = "intake.assess")]
+    IntakeAssess {
+        id: String,
+        assessment: crate::intake::Assessment,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        decide: bool,
+    },
+    /// Decide an item: release it, send it back, or close it. The same grant
+    /// and reach as `IntakeAssess`.
+    #[serde(rename = "intake.decide")]
+    IntakeDecide {
+        id: String,
+        decision: crate::intake::Decision,
+    },
+    /// Add information to an item that is still in intake -- the answer to a
+    /// needs-info, which puts it back in `received`. Needs `task.create`
+    /// with reach over the item, or to be the one who handed it in.
+    #[serde(rename = "intake.info")]
+    IntakeInfo { id: String, text: String },
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -817,6 +865,8 @@ pub enum Payload {
     /// and would otherwise set the size of every `Response` (serde writes a
     /// box as what it holds).
     Operations { report: Box<crate::operations::OperationsReport> },
+    /// The Intake view -- see `factory_core::intake::IntakeBoard`.
+    IntakeBoard { board: crate::intake::IntakeBoard },
 }
 
 /// A request plus who is making it.

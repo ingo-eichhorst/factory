@@ -10,6 +10,7 @@ mod discovery;
 mod engine;
 mod goals;
 mod host;
+mod intake;
 mod interfaces;
 mod metrics;
 mod occupancy;
