@@ -3,11 +3,11 @@
 
 use chrono::{DateTime, Utc};
 use factory_core::adapter::runtime::RuntimeStatus;
-use factory_core::run::{RunStatus, Trigger};
+use factory_core::run::{FailKind, RunStatus, Trigger};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::engine::Engine;
+use crate::engine::{Due, Engine};
 
 pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     let factory = engine.factory_snapshot();
@@ -40,10 +40,16 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                     // longer than the interval cannot start the same task
                     // twice -- see each function's own comment for why they
                     // move it differently.
-                    let (trigger, advanced) = if task.pending_retry.is_some() {
-                        (Trigger::Retry, engine.resume_from_retry(&task).await)
+                    //
+                    // The slot is read off the task first, because both of
+                    // those move `next_run_at` on and it is gone after: it is
+                    // when this run became due, and -- for the schedule's own
+                    // firing -- the slot that fired it.
+                    let slot = task.next_run_at.unwrap_or_else(Utc::now);
+                    let (trigger, due, advanced) = if task.pending_retry.is_some() {
+                        (Trigger::Retry, Due::retry(slot), engine.resume_from_retry(&task).await)
                     } else {
-                        (Trigger::Schedule, engine.advance_schedule(&task).await)
+                        (Trigger::Schedule, Due::slot(slot), engine.advance_schedule(&task).await)
                     };
                     if let Err(e) = advanced {
                         tracing::warn!(task = %task.id, "could not advance schedule: {e}");
@@ -58,7 +64,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                     let engine = engine.clone();
                     let id = task.id.clone();
                     tokio::spawn(async move {
-                        engine.start_run(&id, trigger).await;
+                        engine.start_run_due(&id, trigger, due).await;
                     });
                 }
             }
@@ -124,7 +130,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 .map(|v| v as i64)
                 .unwrap_or(default_blocked);
 
-            if let Some(why) = overdue(
+            if let Some((kind, why)) = overdue(
                 run.status,
                 run.started_at,
                 run.blocked_since,
@@ -133,7 +139,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 timeout_secs,
                 blocked_secs,
             ) {
-                engine.fail_run(&run.id, &why).await;
+                engine.fail_run(&run.id, kind, &why).await;
                 continue;
             }
 
@@ -144,7 +150,11 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
             let age = (now - run.started_at).num_seconds();
             if age > 30 && engine.session_status(&run).await == RuntimeStatus::Gone {
                 engine
-                    .fail_run(&run.id, "the agent's session is gone and it never reported back")
+                    .fail_run(
+                        &run.id,
+                        FailKind::SessionGone,
+                        "the agent's session is gone and it never reported back",
+                    )
                     .await;
             }
         }
@@ -153,7 +163,9 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
 
 /// Whether an active run has run out of patience, and why -- judged only by
 /// its own status and timestamps, so this is testable without a store, a
-/// runtime, or an `Engine`. `None` means "leave it running"; the caller still
+/// runtime, or an `Engine`. The kind comes back with the prose, decided in
+/// the same branch that wrote it, so the two cannot disagree. `None` means
+/// "leave it running"; the caller still
 /// has its own, separate `Gone`-session check to make afterwards.
 ///
 /// A `Blocked` run is measured against `blocked_secs` from `blocked_since`,
@@ -172,7 +184,7 @@ fn overdue(
     ack_secs: i64,
     timeout_secs: i64,
     blocked_secs: i64,
-) -> Option<String> {
+) -> Option<(FailKind, String)> {
     if status == RunStatus::Blocked {
         // `blocked_since` should always be set by whatever put the run into
         // `Blocked`, but a run that somehow lacks it is still a run someone
@@ -181,10 +193,10 @@ fn overdue(
         let since = blocked_since.unwrap_or(started_at);
         let blocked_age = (now - since).num_seconds();
         if blocked_age > blocked_secs {
-            return Some(format!(
+            return Some((FailKind::BlockedTimeout, format!(
                 "blocked and waiting for a human for {blocked_secs}s and nobody answered. \
                  Its session is still open -- it is sitting on a question."
-            ));
+            )));
         }
         return None;
     }
@@ -194,11 +206,11 @@ fn overdue(
     // Still `dispatching` means the agent was given the task and has not
     // said a word about it. Something is in front of it.
     if status == RunStatus::Dispatching && age > ack_secs {
-        return Some(format!(
+        return Some((FailKind::AckTimeout, format!(
             "the agent never acknowledged the task within {ack_secs}s. \
              Its session is usually still there -- look at it: an agent \
              waiting on a trust prompt or a login looks exactly like this."
-        ));
+        )));
     }
 
     // `age` is still `now - started_at`, unmodified, which is deliberate but
@@ -217,10 +229,10 @@ fn overdue(
         // `age`, not a silence watchdog -- so whoever reads the run's error
         // goes looking at the right clock instead of the time since its
         // last report.
-        return Some(format!(
+        return Some((FailKind::RunTimeout, format!(
             "ran for longer than {timeout_secs}s without finishing; giving up. The agent may \
              still be working -- look at its session before starting it again."
-        ));
+        )));
     }
 
     None
@@ -248,8 +260,9 @@ mod tests {
         );
 
         let now_past = at(500 + 1001);
-        assert!(
-            overdue(RunStatus::Blocked, started, Some(blocked_since), now_past, 100, 100, 1000).is_some(),
+        assert_eq!(
+            overdue(RunStatus::Blocked, started, Some(blocked_since), now_past, 100, 100, 1000).map(|(k, _)| k),
+            Some(FailKind::BlockedTimeout),
             "1001s blocked exceeds a 1000s blocked timeout"
         );
     }
@@ -269,14 +282,16 @@ mod tests {
 
     #[test]
     fn a_run_still_dispatching_past_its_ack_timeout_fails_with_that_reason() {
-        let why = overdue(RunStatus::Dispatching, at(0), None, at(200), 100, 10_000, 10_000).unwrap();
+        let (kind, why) = overdue(RunStatus::Dispatching, at(0), None, at(200), 100, 10_000, 10_000).unwrap();
         assert!(why.contains("never acknowledged"), "{why}");
+        assert_eq!(kind, FailKind::AckTimeout);
     }
 
     #[test]
     fn a_running_run_past_its_task_timeout_fails_with_that_reason() {
-        let why = overdue(RunStatus::Running, at(0), None, at(4000), 100, 3600, 10_000).unwrap();
+        let (kind, why) = overdue(RunStatus::Running, at(0), None, at(4000), 100, 3600, 10_000).unwrap();
         assert!(why.contains("ran for longer than 3600s"), "{why}");
+        assert_eq!(kind, FailKind::RunTimeout);
     }
 
     #[test]
@@ -285,7 +300,7 @@ mod tests {
         // started_at`, so a run that reported constantly right up until the
         // tick that catches it is still killed here -- the message must not
         // claim it went quiet, only that it ran too long.
-        let why = overdue(RunStatus::Running, at(0), None, at(5726), 100, 5400, 10_000).unwrap();
+        let (_, why) = overdue(RunStatus::Running, at(0), None, at(5726), 100, 5400, 10_000).unwrap();
         assert!(!why.contains("no report"), "{why}");
         assert!(why.contains("ran for longer than 5400s without finishing"), "{why}");
     }

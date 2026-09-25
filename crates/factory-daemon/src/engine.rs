@@ -20,7 +20,7 @@ use factory_core::protocol::{
 };
 use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
-use factory_core::run::{BlockSource, NewRun, Run, RunPatch, RunStatus, Trigger};
+use factory_core::run::{BlockSource, FailKind, NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
     NewTask, PendingRetry, RetryPolicy, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
     WorkflowOrigin,
@@ -32,6 +32,72 @@ use std::time::{Duration, Instant};
 
 use crate::schedule;
 use crate::worktree;
+
+/// When a run became due, and the schedule slot behind it when there is
+/// one -- carried from whoever decided to start a run to the `NewRun` that
+/// records it. See `Run::queued_at` for what "due" means per trigger.
+#[derive(Debug, Clone, Copy)]
+pub struct Due {
+    pub queued_at: chrono::DateTime<Utc>,
+    pub scheduled_for: Option<chrono::DateTime<Utc>>,
+}
+
+impl Due {
+    /// Due the moment it was asked for.
+    pub fn now() -> Self {
+        Self { queued_at: Utc::now(), scheduled_for: None }
+    }
+
+    /// A schedule's own slot: due at the slot, and that slot is what fired it.
+    pub fn slot(slot: chrono::DateTime<Utc>) -> Self {
+        Self { queued_at: slot, scheduled_for: Some(slot) }
+    }
+
+    /// A queued retry: due when its backoff ran out. Not a slot -- the
+    /// schedule's own firing it stands in front of is a different one.
+    pub fn retry(at: chrono::DateTime<Utc>) -> Self {
+        Self { queued_at: at, scheduled_for: None }
+    }
+}
+
+/// Why a `schedule_skipped` entry's slots passed -- `data.reason` on the
+/// entry. Two causes produce the same state (a past `next_run_at` on a
+/// pending task), so the entry says which one it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkipReason {
+    /// The task's previous run was still going when the first skipped slot
+    /// came round -- `due()` only fires a `pending` task.
+    StillActive,
+    /// Nothing was running: the daemon was not there to fire it.
+    NotRunning,
+}
+
+/// `Engine::skip_reason`'s rule, apart from the store: the newest run was
+/// open at `first` (started by then, not yet ended) or it was not.
+fn skip_reason_of(newest: Option<&Run>, first: chrono::DateTime<Utc>) -> SkipReason {
+    match newest {
+        Some(run) if run.started_at <= first && run.ended_at.is_none_or(|end| end >= first) => {
+            SkipReason::StillActive
+        }
+        _ => SkipReason::NotRunning,
+    }
+}
+
+impl SkipReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::StillActive => "still_active",
+            Self::NotRunning => "not_running",
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::StillActive => "the previous run was still going",
+            Self::NotRunning => "nothing was running it: the daemon was down, asleep or behind",
+        }
+    }
+}
 
 /// How long a scope's worktree capability is trusted for. Shorter than
 /// `site::WALK_TTL`: a person who just ran `git init` in a scope to make the
@@ -713,15 +779,25 @@ impl Engine {
                     )));
                 }
                 let engine = self.clone();
+                // Stamped here, not inside the spawned dispatch: the queue
+                // wait of a manual run starts when it was asked for.
+                let due = Due::now();
                 // Dispatch can take a minute: opening a pane, waiting for an
                 // agent to be ready. The caller gets its answer now.
                 tokio::spawn(async move {
-                    engine.start_run(&id, Trigger::Manual).await;
+                    engine.start_run_due(&id, Trigger::Manual, due).await;
                 });
                 Ok(Payload::Ok)
             }
             Request::TaskCancel { id } => {
-                let run = self.cancel_task_run(&id).await?;
+                // Who asked is the one thing that tells a person's
+                // intervention from an agent tidying up -- see `FailKind`
+                // for the limit of that.
+                let kind = match caller {
+                    crate::access::Caller::Owner => FailKind::CancelledByPerson,
+                    crate::access::Caller::Agent { .. } => FailKind::CancelledByAgent,
+                };
+                let run = self.cancel_task_run(&id, kind).await?;
                 self.sync_workflow_for_task(&id).await;
                 self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
@@ -1453,6 +1529,45 @@ impl Engine {
         if let Some(s) = &patch.schedule {
             patch.next_run_at = Some(schedule::next_after(s, Utc::now())?);
         }
+        // Pausing keeps the schedule, so it needs one to keep; resuming
+        // starts again from now -- the slots that passed while paused were
+        // paused, not missed, and must not fire as a catch-up burst. A
+        // retry streak the pause interrupted is over too: its backoff time
+        // has passed with nothing fired, and leaving `pending_retry` behind
+        // would make the resumed schedule's first regular firing claim to
+        // be a retry of it (the stale-mirror problem `PendingRetry`
+        // describes).
+        let pause_change = match patch.schedule_paused {
+            Some(paused) if paused != current.schedule_paused => Some(paused),
+            // Saying what is already so changes nothing and journals
+            // nothing.
+            Some(_) => {
+                patch.schedule_paused = None;
+                None
+            }
+            None => None,
+        };
+        if let Some(paused) = pause_change {
+            let schedule = if patch.clear_schedule {
+                None
+            } else {
+                patch.schedule.clone().or_else(|| current.schedule.clone())
+            };
+            match (&schedule, paused) {
+                (None, true) => {
+                    return Err(FactoryError::BadRequest(
+                        "only a scheduled task has a schedule to pause".into(),
+                    ));
+                }
+                (Some(s), false) => {
+                    patch.next_run_at = Some(schedule::next_after(s, Utc::now())?);
+                    if current.pending_retry.is_some() {
+                        patch.clear_pending_retry = true;
+                    }
+                }
+                _ => {}
+            }
+        }
         // Same rule `create_task` enforces, checked against what the task's
         // schedule will actually be once this patch lands rather than what
         // it is now -- clearing the schedule in the same edit that sets a
@@ -1472,6 +1587,15 @@ impl Engine {
         }
 
         let task = self.store.update(id, &patch).await?;
+        if let Some(paused) = pause_change {
+            let message = match (paused, task.next_run_at) {
+                (true, _) => "schedule paused; nothing fires until it is resumed".to_string(),
+                (false, Some(next)) => format!("schedule resumed; next firing at {}", next.to_rfc3339()),
+                (false, None) => "schedule resumed".to_string(),
+            };
+            let kind = if paused { "schedule_paused" } else { "schedule_resumed" };
+            self.entry(&task.id, TaskEntry::new("daemon", kind, message)).await;
+        }
         self.bus.publish(Event::TaskUpdated { task: task.clone() });
         Ok(task)
     }
@@ -1580,15 +1704,26 @@ impl Engine {
 
     // -- running -----------------------------------------------------------
 
-    /// Start one attempt at a task and hand it to an agent. Failures here end
-    /// the run rather than escaping, because nobody is waiting on the answer.
+    /// Start one attempt at a task and hand it to an agent, due now -- what
+    /// a workflow node, an agent's request and a bench attempt all mean by
+    /// starting one: the moment the daemon asks is the moment it became
+    /// eligible. See `start_run_due` for one that became due earlier.
     pub async fn start_run(self: &Arc<Self>, task_id: &str, trigger: Trigger) {
-        let run = match self.dispatch(task_id, trigger).await {
+        self.start_run_due(task_id, trigger, Due::now()).await
+    }
+
+    /// Start one attempt at a task that became due at `due` -- a schedule's
+    /// slot, a retry's backoff running out, a request that arrived before
+    /// the dispatch got going. Failures here end the run rather than
+    /// escaping, because nobody is waiting on the answer.
+    pub async fn start_run_due(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due) {
+        let run = match self.dispatch(task_id, trigger, due).await {
             Ok(run) => run,
             Err(e) => {
                 // The run may or may not exist yet; if it does, close it.
                 if let Ok(Some(run)) = self.store.active_run(task_id).await {
-                    self.fail_run(&run.id, &format!("dispatch failed: {e}")).await;
+                    self.fail_run(&run.id, FailKind::DispatchFailed, &format!("dispatch failed: {e}"))
+                        .await;
                 } else {
                     self.entry(
                         task_id,
@@ -1617,7 +1752,7 @@ impl Engine {
         self.record_bench_task_state(task_id).await;
     }
 
-    async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger) -> Result<Run> {
+    async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due) -> Result<Run> {
         let task = self.require(task_id).await?;
         // Resolve again rather than trusting what was written down: the config
         // may have changed since the task was created.
@@ -1645,6 +1780,8 @@ impl Engine {
                 adapter: adapter_name.clone(),
                 runtime: task.runtime.clone(),
                 token: token.clone(),
+                queued_at: Some(due.queued_at),
+                scheduled_for: due.scheduled_for,
             })
             .await?;
 
@@ -1976,6 +2113,14 @@ impl Engine {
         // `blocked_since` alone, so the clock still reads from when the
         // block actually began; reporting anything else always lets go of
         // it, agent-set or not, because this report is the agent speaking.
+        // The agent ending its own run is the one terminal report that says
+        // why in so many words.
+        patch.fail_kind = match report.status {
+            Some(RunStatus::Failed) => Some(FailKind::AgentFailed),
+            Some(RunStatus::Cancelled) => Some(FailKind::CancelledByAgent),
+            _ => None,
+        };
+
         match report.status {
             Some(RunStatus::Blocked) => {
                 patch.blocked_source = Some(BlockSource::Agent);
@@ -2002,7 +2147,10 @@ impl Engine {
         }
     }
 
-    pub(crate) async fn cancel_task_run(&self, task_id: &str) -> Result<Run> {
+    /// Cancel a task's active run. `kind` says on whose word -- a person, an
+    /// agent, or the workflow or bench run above it -- and is recorded on
+    /// the run; the journal line stays the same for all three.
+    pub(crate) async fn cancel_task_run(&self, task_id: &str, kind: FailKind) -> Result<Run> {
         let run = self.store.active_run(task_id).await?.ok_or_else(|| {
             FactoryError::BadRequest(format!("task {task_id} has no run to cancel"))
         })?;
@@ -2010,7 +2158,11 @@ impl Engine {
         self.finish_run(
             &run.id,
             RunStatus::Cancelled,
-            RunPatch { status: Some(RunStatus::Cancelled), ..Default::default() },
+            RunPatch {
+                status: Some(RunStatus::Cancelled),
+                fail_kind: Some(kind),
+                ..Default::default()
+            },
             "cancelled by request",
         ).await
     }
@@ -2292,8 +2444,10 @@ impl Engine {
         }
     }
 
-    /// A run that will never report back.
-    pub async fn fail_run(self: &Arc<Self>, run_id: &str, why: &str) {
+    /// A run that will never report back. `kind` is the reason as a fact --
+    /// every caller has to name one, which is what keeps "why do runs fail"
+    /// answerable without reading `why`'s prose back apart.
+    pub async fn fail_run(self: &Arc<Self>, run_id: &str, kind: FailKind, why: &str) {
         let Ok(run) = self.require_run(run_id).await else {
             return;
         };
@@ -2309,6 +2463,7 @@ impl Engine {
                 RunStatus::Failed,
                 RunPatch {
                     error: Some(why.to_string()),
+                    fail_kind: Some(kind),
                     ..Default::default()
                 },
                 why,
@@ -2421,7 +2576,13 @@ impl Engine {
     // -- what the scheduler needs ------------------------------------------
 
     pub async fn due_now(&self) -> Result<Vec<Task>> {
-        self.store.due(Utc::now()).await
+        // The sqlite store already passes over a paused schedule; an
+        // out-of-process store may predate the field and not know to, so
+        // the rule is held here as well rather than trusted to every
+        // adapter.
+        let mut due = self.store.due(Utc::now()).await?;
+        due.retain(|t| !t.schedule_paused);
+        Ok(due)
     }
 
     pub async fn active_runs(&self) -> Result<Vec<Run>> {
@@ -2430,11 +2591,51 @@ impl Engine {
 
     /// Move a scheduled task's next firing forward so it is not picked up twice
     /// while it runs.
+    ///
+    /// The next firing is computed from now, not from the slot that is
+    /// firing, so a task that was still running through later slots -- or a
+    /// daemon that was down through them -- fires once, not once per slot.
+    /// Those passed-over slots are written down here, as one
+    /// `schedule_skipped` entry, because this is the only place that knows
+    /// they existed: nothing else would ever say the 03:00 run did not
+    /// happen.
     pub async fn advance_schedule(&self, task: &Task) -> Result<()> {
         let Some(s) = &task.schedule else {
             return Ok(());
         };
-        let next = schedule::next_after(s, Utc::now())?;
+        let now = Utc::now();
+        if let Some(slot) = task.next_run_at {
+            if let Some(skipped) = schedule::skipped_between(s, slot, now) {
+                let reason = self.skip_reason(task, skipped.first).await;
+                self.entry(
+                    &task.id,
+                    TaskEntry::new(
+                        "scheduler",
+                        "schedule_skipped",
+                        format!(
+                            "{} slot{} between {} and {} passed without firing ({}); \
+                             firing once for {} instead of catching up",
+                            skipped.count,
+                            if skipped.count == 1 { "" } else { "s" },
+                            skipped.first.to_rfc3339(),
+                            skipped.last.to_rfc3339(),
+                            reason.describe(),
+                            slot.to_rfc3339(),
+                        ),
+                    )
+                    .with_data(serde_json::json!({
+                        "count": skipped.count,
+                        "first": skipped.first,
+                        "last": skipped.last,
+                        "capped": skipped.capped,
+                        "fired_slot": slot,
+                        "reason": reason.as_str(),
+                    })),
+                )
+                .await;
+            }
+        }
+        let next = schedule::next_after(s, now)?;
         let updated = self
             .store
             .update(
@@ -2447,6 +2648,16 @@ impl Engine {
             .await?;
         self.bus.publish(Event::TaskUpdated { task: updated });
         Ok(())
+    }
+
+    /// Why the slots from `first` on passed without firing: the task's own
+    /// previous run was still going at `first`, or it was not -- in which
+    /// case the daemon was not there to fire it (asleep, stopped, or its
+    /// tick running late). Read off the newest run's own times, the only
+    /// record either way.
+    async fn skip_reason(&self, task: &Task, first: chrono::DateTime<Utc>) -> SkipReason {
+        let newest = self.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
+        skip_reason_of(newest.as_ref(), first)
     }
 
     /// Move a queued retry's task back onto the regular slot its streak is
@@ -3427,7 +3638,7 @@ mod tests {
         // `dispatch` directly rather than through `start_run` is what lets
         // this test see the assertion still held: `start_run` would carry
         // the same error straight into `fail_run` and release it again.
-        let err = engine.dispatch(&task.id, Trigger::Manual).await.unwrap_err();
+        let err = engine.dispatch(&task.id, Trigger::Manual, Due::now()).await.unwrap_err();
         assert!(err.to_string().contains("not a git repository"), "got: {err}");
 
         assert_eq!(
@@ -3469,6 +3680,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: task.runtime.clone(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -3489,7 +3702,7 @@ mod tests {
             .unwrap();
         assert!(blocked.blocked_since.is_some(), "the block is on before we fail it");
 
-        engine.fail_run(&run.id, "nobody ever answered").await;
+        engine.fail_run(&run.id, FailKind::AgentFailed, "nobody ever answered").await;
 
         let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(failed.status, RunStatus::Failed);
@@ -3598,6 +3811,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: "herdr".into(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap()
@@ -3714,7 +3929,7 @@ mod tests {
         let (task, run) = running_run(&engine, RunStatus::Running).await;
         send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
 
-        engine.fail_run(&run.id, "for some other reason").await;
+        engine.fail_run(&run.id, FailKind::AgentFailed, "for some other reason").await;
         let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
         assert!(failed.turn_ended_at.is_none(), "nothing left to settle on a finished run");
         assert!(failed.turn_end_reason.is_none());
@@ -3800,7 +4015,7 @@ mod tests {
         let regular_next_run = task.next_run_at.expect("a schedule always sets one");
         let run = run_for(&engine, &task.id, Trigger::Schedule).await;
 
-        engine.fail_run(&run.id, "the audit script exited 1").await;
+        engine.fail_run(&run.id, FailKind::AgentFailed, "the audit script exited 1").await;
 
         let task = engine.store.get(&task.id).await.unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Pending, "recurring tasks go back to pending");
@@ -3851,7 +4066,7 @@ mod tests {
         let regular_next_run = task.next_run_at.unwrap();
 
         let first = run_for(&engine, &task.id, Trigger::Schedule).await;
-        engine.fail_run(&first.id, "the audit script exited 1").await;
+        engine.fail_run(&first.id, FailKind::AgentFailed, "the audit script exited 1").await;
         let mid = engine.store.get(&task.id).await.unwrap().unwrap();
         assert!(mid.error.is_some(), "sanity: the failure is on the mirror before the retry runs");
         assert!(mid.pending_retry.is_some(), "sanity: a retry is queued before it runs");
@@ -3900,12 +4115,12 @@ mod tests {
         let regular_next_run = task.next_run_at.unwrap();
 
         let first = run_for(&engine, &task.id, Trigger::Schedule).await;
-        engine.fail_run(&first.id, "attempt 1 failed").await;
+        engine.fail_run(&first.id, FailKind::AgentFailed, "attempt 1 failed").await;
         let mid = engine.store.get(&task.id).await.unwrap().unwrap();
         assert_eq!(mid.pending_retry.map(|p| p.attempts), Some(1), "the one allowed retry is queued");
 
         let retry = run_for(&engine, &task.id, Trigger::Retry).await;
-        engine.fail_run(&retry.id, "attempt 2 failed too").await;
+        engine.fail_run(&retry.id, FailKind::AgentFailed, "attempt 2 failed too").await;
 
         let task = engine.store.get(&task.id).await.unwrap().unwrap();
         assert!(
@@ -3938,7 +4153,7 @@ mod tests {
         let regular_next_run = task.next_run_at.unwrap();
 
         let run = run_for(&engine, &task.id, Trigger::Schedule).await;
-        engine.fail_run(&run.id, "boom").await;
+        engine.fail_run(&run.id, FailKind::AgentFailed, "boom").await;
 
         let task = engine.store.get(&task.id).await.unwrap().unwrap();
         assert!(task.pending_retry.is_none(), "`retry: none` queues nothing");
@@ -4078,6 +4293,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: task.runtime.clone(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -4167,6 +4384,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: task.runtime.clone(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -4260,5 +4479,267 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -- operations facts, issue #106 -----------------------------------------
+
+    #[tokio::test]
+    async fn every_way_a_run_ends_badly_records_its_kind() {
+        let scope_dir = temp_dir("fail-kinds");
+        let engine = test_engine(scope_dir.clone());
+        let task = weekly_task(&engine, None).await;
+
+        let run = run_for(&engine, &task.id, Trigger::Schedule).await;
+        engine.fail_run(&run.id, FailKind::RunTimeout, "ran for longer than 60s").await;
+        let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(failed.fail_kind, Some(FailKind::RunTimeout));
+        assert_eq!(failed.error.as_deref(), Some("ran for longer than 60s"), "the prose stays beside it");
+
+        let run = run_for(&engine, &task.id, Trigger::Manual).await;
+        engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: Some(RunStatus::Failed),
+                    message: None,
+                    result: None,
+                    error: Some("the tests do not pass".into()),
+                    token: Some("tok".into()),
+                },
+            )
+            .await
+            .unwrap();
+        let reported = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(reported.fail_kind, Some(FailKind::AgentFailed));
+
+        let run = run_for(&engine, &task.id, Trigger::Manual).await;
+        let response = engine.handle_request(Request::TaskCancel { id: task.id.clone() }).await;
+        assert!(matches!(response, Response::Ok { .. }), "{response:?}");
+        let cancelled = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, RunStatus::Cancelled);
+        assert_eq!(
+            cancelled.fail_kind,
+            Some(FailKind::CancelledByPerson),
+            "a cancel that came in with no token came in as the owner"
+        );
+
+        let done = run_for(&engine, &task.id, Trigger::Manual).await;
+        engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some("fine".into()),
+                    error: None,
+                    token: Some("tok".into()),
+                },
+            )
+            .await
+            .unwrap();
+        let done = engine.store.get_run(&done.id).await.unwrap().unwrap();
+        assert_eq!(done.fail_kind, None, "a run that succeeded has no fail kind");
+
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_run_started_for_a_slot_records_the_slot_and_a_dispatch_failure_says_so() {
+        let scope_dir = temp_dir("due-slot");
+        let engine = test_engine(scope_dir.clone());
+        // A worktree task in a scope that is not a git repository: the run
+        // row exists, and then `place_run` refuses.
+        let task = engine
+            .create(NewTask {
+                title: "fires on a slot".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let slot = Utc::now() - chrono::Duration::seconds(40);
+
+        engine.start_run_due(&task.id, Trigger::Schedule, Due::slot(slot)).await;
+
+        let run = engine.store.runs(&task.id, 1).await.unwrap().remove(0);
+        assert_eq!(run.queued_at, Some(slot), "due at the slot, not at the tick that noticed it");
+        assert_eq!(run.scheduled_for, Some(slot));
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.fail_kind, Some(FailKind::DispatchFailed));
+
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn advancing_past_several_slots_journals_one_schedule_skipped_entry() {
+        let scope_dir = temp_dir("skipped");
+        let engine = test_engine(scope_dir.clone());
+        let task = engine
+            .create(NewTask {
+                title: "every minute".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(false),
+                schedule: Some(Schedule::Every { seconds: 60 }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // The slot three and a half minutes ago fires now; the three after
+        // it never will.
+        let slot = Utc::now() - chrono::Duration::seconds(210);
+        let task = engine
+            .store
+            .update(&task.id, &TaskPatch { next_run_at: Some(slot), ..Default::default() })
+            .await
+            .unwrap();
+
+        engine.advance_schedule(&task).await.unwrap();
+
+        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        let skipped: Vec<_> = entries.iter().filter(|e| e.kind == "schedule_skipped").collect();
+        assert_eq!(skipped.len(), 1, "one entry for the whole gap, not one per slot: {entries:?}");
+        let data = skipped[0].data.as_ref().unwrap();
+        assert_eq!(data["count"], 3);
+        assert_eq!(data["reason"], "not_running");
+        assert_eq!(
+            data["first"].as_str().unwrap().parse::<chrono::DateTime<Utc>>().unwrap(),
+            slot + chrono::Duration::seconds(60)
+        );
+
+        // Fired on time: nothing skipped, nothing journalled.
+        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        let on_time = engine
+            .store
+            .update(&task.id, &TaskPatch { next_run_at: Some(Utc::now()), ..Default::default() })
+            .await
+            .unwrap();
+        engine.advance_schedule(&on_time).await.unwrap();
+        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        assert_eq!(entries.iter().filter(|e| e.kind == "schedule_skipped").count(), 1);
+
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[test]
+    fn a_skip_is_blamed_on_the_previous_run_only_if_it_was_open_at_the_first_skipped_slot() {
+        let t0 = Utc::now();
+        let mut run = Run {
+            id: "r".into(),
+            task_id: "t".into(),
+            attempt: 1,
+            status: RunStatus::Done,
+            trigger: Trigger::Schedule,
+            agent: "shell".into(),
+            adapter: "shell".into(),
+            worktree_path: None,
+            worktree_branch: None,
+            runtime: "herdr".into(),
+            session: None,
+            token: None,
+            result: None,
+            error: None,
+            started_at: t0,
+            ended_at: Some(t0 + chrono::Duration::minutes(10)),
+            queued_at: None,
+            scheduled_for: None,
+            fail_kind: None,
+            blocked_since: None,
+            blocked_source: None,
+            block_suspected_since: None,
+            turn_ended_at: None,
+            turn_end_reason: None,
+        };
+        let first = t0 + chrono::Duration::minutes(5);
+        assert_eq!(skip_reason_of(Some(&run), first), SkipReason::StillActive);
+        run.ended_at = Some(t0 + chrono::Duration::minutes(2));
+        assert_eq!(skip_reason_of(Some(&run), first), SkipReason::NotRunning);
+        run.ended_at = None;
+        assert_eq!(skip_reason_of(Some(&run), first), SkipReason::StillActive);
+        assert_eq!(skip_reason_of(None, first), SkipReason::NotRunning);
+    }
+
+    #[tokio::test]
+    async fn a_paused_schedule_is_kept_skipped_by_due_and_resumes_from_now() {
+        let scope_dir = temp_dir("pause");
+        let engine = test_engine(scope_dir.clone());
+        let task = weekly_task(&engine, None).await;
+        let schedule = task.schedule.clone();
+
+        // Mid-streak, and overdue: the case a pause has to hold back.
+        let run = run_for(&engine, &task.id, Trigger::Schedule).await;
+        engine.fail_run(&run.id, FailKind::AgentFailed, "exit 1").await;
+        let long_ago = Utc::now() - chrono::Duration::hours(2);
+        engine
+            .store
+            .update(&task.id, &TaskPatch { next_run_at: Some(long_ago), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(engine.due_now().await.unwrap().iter().any(|t| t.id == task.id), "sanity: due before the pause");
+
+        let paused = engine
+            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(paused.schedule_paused);
+        assert_eq!(paused.schedule, schedule, "a paused task keeps its schedule");
+        assert!(!engine.due_now().await.unwrap().iter().any(|t| t.id == task.id), "nothing fires while paused");
+
+        let resumed = engine
+            .update(&task.id, TaskPatch { schedule_paused: Some(false), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(!resumed.schedule_paused);
+        assert!(resumed.next_run_at.unwrap() > Utc::now(), "recomputed from now: no catch-up firing");
+        assert!(resumed.pending_retry.is_none(), "the interrupted retry streak is over");
+        assert!(!engine.due_now().await.unwrap().iter().any(|t| t.id == task.id));
+
+        let kinds: Vec<String> = engine.store.entries(&task.id, 50).await.unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&"schedule_paused".to_string()), "{kinds:?}");
+        assert!(kinds.contains(&"schedule_resumed".to_string()), "{kinds:?}");
+
+        // Saying it again changes nothing and journals nothing.
+        engine
+            .update(&task.id, TaskPatch { schedule_paused: Some(false), ..Default::default() })
+            .await
+            .unwrap();
+        let resumes = engine
+            .store
+            .entries(&task.id, 50)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "schedule_resumed")
+            .count();
+        assert_eq!(resumes, 1);
+
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn only_a_scheduled_task_can_be_paused() {
+        let scope_dir = temp_dir("pause-unscheduled");
+        let engine = test_engine(scope_dir.clone());
+        let task = engine
+            .create(NewTask {
+                title: "one-off".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let err = engine
+            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("only a scheduled task"), "{err}");
+
+        std::fs::remove_dir_all(&scope_dir).ok();
     }
 }

@@ -686,7 +686,9 @@ impl Engine {
 
         for task_id in &task_ids {
             if self.store.active_run(task_id).await.ok().flatten().is_some() {
-                let _ = self.cancel_task_run(task_id).await;
+                let _ = self
+                    .cancel_task_run(task_id, factory_core::run::FailKind::CancelledWithParent)
+                    .await;
             }
             // Best-effort: `judge_bench_attempt`, via the worker, may settle
             // this properly (with `reported`, and whatever the case's own
@@ -988,6 +990,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: "local".into(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -1051,6 +1055,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: "local".into(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -1108,6 +1114,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: "local".into(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -1232,6 +1240,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: "local".into(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -1297,6 +1307,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: "local".into(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -1395,6 +1407,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: "local".into(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -1479,6 +1493,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: "local".into(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -1506,7 +1522,7 @@ mod tests {
             .unwrap();
 
         let started = std::time::Instant::now();
-        engine.fail_run(&task_run.id, "the agent's session is gone").await;
+        engine.fail_run(&task_run.id, factory_core::run::FailKind::SessionGone, "the agent's session is gone").await;
         let elapsed = started.elapsed();
 
         assert!(

@@ -872,6 +872,7 @@ mod tests {
             bench_origin: None,
             retry: None,
             pending_retry: None,
+            schedule_paused: false,
         };
         let task = engine.store.create(&task).await.unwrap();
         let run = engine
@@ -883,6 +884,8 @@ mod tests {
                 adapter: "pi".into(),
                 runtime: "herdr".into(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -1277,6 +1280,7 @@ mod tests {
             bench_origin: None,
             retry: None,
             pending_retry: None,
+            schedule_paused: false,
         };
         engine.store.create(&task).await.unwrap();
 
@@ -1401,7 +1405,7 @@ mod tests {
         assert!(guide.exists());
 
         let run = engine.store.active_run(&task.id).await.unwrap().unwrap();
-        engine.fail_run(&run.id, "gave up waiting").await;
+        engine.fail_run(&run.id, factory_core::run::FailKind::AckTimeout, "gave up waiting").await;
 
         assert!(!guide.exists(), "gone once the watchdog closes the run too");
         std::fs::remove_dir_all(root).ok();

@@ -129,6 +129,66 @@ impl BlockSource {
     }
 }
 
+/// Why a run ended `Failed` or `Cancelled`, as a fact recorded where it
+/// happened rather than read back out of `error`'s prose -- counting
+/// timeouts by matching strings is exactly what this exists to avoid. The
+/// free-text `error` stays alongside it for a person to read.
+///
+/// `None` on a run that ended any other way, and on every run that ended
+/// before this field existed: those are *unclassified*, never quietly
+/// counted as one of the kinds below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailKind {
+    /// Still `Dispatching` past its ack timeout: the agent never said a word.
+    AckTimeout,
+    /// Ran past its total-duration cap (`timeout_seconds`).
+    RunTimeout,
+    /// Sat `Blocked` past `blocked_timeout_seconds` with nobody answering.
+    BlockedTimeout,
+    /// The session went away and the agent never reported back.
+    SessionGone,
+    /// Never reached an agent at all: the scope, the worktree, the runtime
+    /// or the agent refused before the task was handed over.
+    DispatchFailed,
+    /// The agent itself reported `failed`.
+    AgentFailed,
+    /// The harness said the agent's turn ended with no report before it --
+    /// a `Stop` hook that stood, or `pi`'s own `idle` lifecycle hook.
+    TurnEnded,
+    /// The harness's `StopFailure` hook: the turn was cut short by an API
+    /// error.
+    StopFailure,
+    /// Cancelled on a request that came in as the owner -- the UI, the CLI,
+    /// or anything else that presented no token. That last clause is the
+    /// honest limit of the name: an agent that omits its token *is* the
+    /// owner (`AGENTS.md`), and nothing here can tell the two apart.
+    CancelledByPerson,
+    /// Cancelled by an agent that identified itself, or reported as
+    /// `cancelled` by the run's own agent.
+    CancelledByAgent,
+    /// Cancelled because the workflow or bench run it belongs to was.
+    CancelledWithParent,
+}
+
+impl FailKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AckTimeout => "ack_timeout",
+            Self::RunTimeout => "run_timeout",
+            Self::BlockedTimeout => "blocked_timeout",
+            Self::SessionGone => "session_gone",
+            Self::DispatchFailed => "dispatch_failed",
+            Self::AgentFailed => "agent_failed",
+            Self::TurnEnded => "turn_ended",
+            Self::StopFailure => "stop_failure",
+            Self::CancelledByPerson => "cancelled_by_person",
+            Self::CancelledByAgent => "cancelled_by_agent",
+            Self::CancelledWithParent => "cancelled_with_parent",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
     pub id: String,
@@ -169,6 +229,33 @@ pub struct Run {
     pub started_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
+    /// The moment this attempt became due -- the start of its queue wait,
+    /// so `started_at - queued_at` is how long it waited to be dispatched:
+    ///
+    /// * a schedule's firing: the slot itself (`scheduled_for`), not the
+    ///   tick that noticed it;
+    /// * a queued retry: when its backoff ran out (`next_run_at` as
+    ///   `queue_or_end_retry` left it);
+    /// * a manual `task.run`: when the request arrived;
+    /// * a workflow node, an agent's request, a bench attempt: when the
+    ///   daemon made it eligible and asked for it to start.
+    ///
+    /// `None` on every run made before the field existed -- an unknown
+    /// wait, never a zero one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_at: Option<DateTime<Utc>>,
+    /// The schedule slot that fired this run, for a `Trigger::Schedule` run
+    /// and nothing else. Captured before `advance_schedule` moves
+    /// `next_run_at` on, which is the only moment the slot still exists;
+    /// `started_at - scheduled_for` is how late the firing was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_for: Option<DateTime<Utc>>,
+    /// Why the run ended `Failed` or `Cancelled` -- see [`FailKind`]. Set
+    /// once, by whatever ended it, and never mirrored onto the task:
+    /// `Task::error` already carries the prose, and one mirror less is one
+    /// fewer thing a successful retry has to remember to clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_kind: Option<FailKind>,
     /// When the current block began. `None` whenever `status` is not
     /// `Blocked` -- this is the block's own clock, not a history of every
     /// block the run has ever had, so it is cleared the moment the block
@@ -219,6 +306,15 @@ pub struct NewRun {
     pub adapter: String,
     pub runtime: String,
     pub token: String,
+    /// See `Run::queued_at`. `None` means "now": the store stamps the run's
+    /// own start, which is honest for anything dispatched the moment it was
+    /// asked for. Defaulted on the wire, so an out-of-process store that
+    /// predates it still parses what it is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_at: Option<DateTime<Utc>>,
+    /// See `Run::scheduled_for`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_for: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -269,4 +365,62 @@ pub struct RunPatch {
     pub worktree_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// Set together with a terminal `Failed`/`Cancelled` status. Nothing
+    /// clears it: a run ends once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_kind: Option<FailKind>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stored_run_from_before_queue_and_fail_facts_reads_them_as_unknown() {
+        // A row written before `queued_at`, `scheduled_for` and `fail_kind`
+        // existed. They must come back `None` -- unknown -- so nothing
+        // downstream can mistake an old run for one that waited zero
+        // seconds or failed for no reason at all.
+        let json = r#"{
+            "id": "r1", "task_id": "t1", "attempt": 1, "status": "failed",
+            "trigger": "schedule", "agent": "shell", "runtime": "herdr",
+            "error": "the agent never acknowledged the task within 300s",
+            "started_at": "2024-01-01T00:00:00Z", "ended_at": "2024-01-01T00:05:00Z"
+        }"#;
+        let run: Run = serde_json::from_str(json).unwrap();
+        assert_eq!(run.queued_at, None);
+        assert_eq!(run.scheduled_for, None);
+        assert_eq!(run.fail_kind, None);
+    }
+
+    #[test]
+    fn a_fail_kind_is_snake_case_on_the_wire_and_matches_as_str() {
+        for kind in [
+            FailKind::AckTimeout,
+            FailKind::RunTimeout,
+            FailKind::BlockedTimeout,
+            FailKind::SessionGone,
+            FailKind::DispatchFailed,
+            FailKind::AgentFailed,
+            FailKind::TurnEnded,
+            FailKind::StopFailure,
+            FailKind::CancelledByPerson,
+            FailKind::CancelledByAgent,
+            FailKind::CancelledWithParent,
+        ] {
+            let json = serde_json::to_value(kind).unwrap();
+            assert_eq!(json, serde_json::json!(kind.as_str()));
+            assert_eq!(serde_json::from_value::<FailKind>(json).unwrap(), kind);
+        }
+    }
+
+    #[test]
+    fn a_new_run_from_an_older_caller_parses_with_no_queue_facts() {
+        let new: NewRun = serde_json::from_str(
+            r#"{"task_id":"t1","trigger":"manual","agent":"shell","adapter":"shell","runtime":"herdr","token":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(new.queued_at, None);
+        assert_eq!(new.scheduled_for, None);
+    }
 }

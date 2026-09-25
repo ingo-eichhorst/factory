@@ -350,6 +350,9 @@ mod tests {
             turn_end_reason: None,
             worktree_path: None,
             worktree_branch: None,
+            queued_at: None,
+            scheduled_for: None,
+            fail_kind: None,
         }
     }
 

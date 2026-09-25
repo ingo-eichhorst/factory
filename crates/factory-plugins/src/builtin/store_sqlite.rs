@@ -433,6 +433,9 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.pending_retry {
                 task.pending_retry = Some(v);
             }
+            if let Some(v) = patch.schedule_paused {
+                task.schedule_paused = v;
+            }
             task.updated_at = Utc::now();
 
             write_task(conn, &task)?;
@@ -471,6 +474,7 @@ impl TaskStore for SqliteStore {
                 )
                 .map_err(adapter_err)?;
 
+            let started_at = Utc::now();
             let run = Run {
                 id: uuid::Uuid::new_v4().to_string(),
                 task_id: new.task_id.clone(),
@@ -489,8 +493,14 @@ impl TaskStore for SqliteStore {
                 token: Some(new.token.clone()),
                 result: None,
                 error: None,
-                started_at: Utc::now(),
+                started_at,
                 ended_at: None,
+                // Never later than the start: a slot or a request is
+                // always in the past by the time the row exists, and a
+                // caller that names none was dispatched on the spot.
+                queued_at: Some(new.queued_at.map_or(started_at, |q| q.min(started_at))),
+                scheduled_for: new.scheduled_for,
+                fail_kind: None,
                 blocked_since: None,
                 blocked_source: None,
                 block_suspected_since: None,
@@ -599,6 +609,9 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.worktree_branch {
                 run.worktree_branch = Some(v);
+            }
+            if let Some(v) = patch.fail_kind {
+                run.fail_kind = Some(v);
             }
 
             write_run(conn, &run)?;
@@ -845,7 +858,14 @@ impl TaskStore for SqliteStore {
                      ORDER BY next_run_at ASC",
                 )
                 .map_err(adapter_err)?;
-            collect(&mut stmt, params![now])
+            // `schedule_paused` lives only in the JSON row -- no column, so
+            // no schema change, and a schema change here drops the whole
+            // database (see the module comment). Due tasks are a handful
+            // per tick, so passing over the paused ones after decoding
+            // costs nothing.
+            let mut due: Vec<Task> = collect(&mut stmt, params![now])?;
+            due.retain(|t| !t.schedule_paused);
+            Ok(due)
         })
         .await
     }
@@ -886,6 +906,7 @@ mod tests {
             bench_origin: None,
             retry: None,
             pending_retry: None,
+            schedule_paused: false,
         }
     }
 
@@ -897,6 +918,8 @@ mod tests {
             adapter: "shell".into(),
             runtime: "shell".into(),
             token: "tok".into(),
+            queued_at: None,
+            scheduled_for: None,
         }
     }
 
@@ -978,6 +1001,8 @@ mod tests {
                 adapter: "shell".into(),
                 runtime: "herdr".into(),
                 token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
             })
             .await
             .unwrap();
@@ -1099,5 +1124,89 @@ mod tests {
             store.get("t1").await.unwrap().unwrap().estimate_seconds,
             None
         );
+    }
+
+    // The three operations facts ride in the JSON row, with no column of
+    // their own -- this pins the round trip, and that a caller naming no
+    // queue time gets the run's own start rather than nothing.
+    #[tokio::test]
+    async fn a_runs_queue_and_fail_facts_round_trip_through_sqlite() {
+        use factory_core::run::FailKind;
+        let store = SqliteStore::in_memory().unwrap();
+        store.create(&sample_task("t1")).await.unwrap();
+
+        let slot = Utc::now() - chrono::Duration::minutes(3);
+        let run = store
+            .create_run(&NewRun {
+                trigger: Trigger::Schedule,
+                queued_at: Some(slot),
+                scheduled_for: Some(slot),
+                ..sample_new_run("t1")
+            })
+            .await
+            .unwrap();
+        assert_eq!(run.queued_at, Some(slot));
+        assert_eq!(run.scheduled_for, Some(slot));
+        assert_eq!(run.fail_kind, None);
+
+        store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Failed),
+                    fail_kind: Some(FailKind::AckTimeout),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let reloaded = store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.queued_at, Some(slot));
+        assert_eq!(reloaded.scheduled_for, Some(slot));
+        assert_eq!(reloaded.fail_kind, Some(FailKind::AckTimeout));
+
+        let manual = store.create_run(&sample_new_run("t1")).await.unwrap();
+        assert_eq!(manual.queued_at, Some(manual.started_at), "no queue time named means dispatched on the spot");
+        assert_eq!(manual.scheduled_for, None);
+
+        let future = store
+            .create_run(&NewRun {
+                queued_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                ..sample_new_run("t1")
+            })
+            .await
+            .unwrap();
+        assert_eq!(future.queued_at, Some(future.started_at), "a queue wait is never negative");
+    }
+
+    #[tokio::test]
+    async fn a_paused_schedule_is_not_due_and_round_trips() {
+        let store = SqliteStore::in_memory().unwrap();
+        let past = Utc::now() - chrono::Duration::minutes(1);
+        for id in ["running", "paused"] {
+            let mut task = sample_task(id);
+            task.schedule = Some(factory_core::task::Schedule::Every { seconds: 60 });
+            task.next_run_at = Some(past);
+            store.create(&task).await.unwrap();
+        }
+
+        let paused = store
+            .update("paused", &TaskPatch { schedule_paused: Some(true), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(paused.schedule_paused);
+        assert!(paused.schedule.is_some(), "pausing keeps the schedule");
+        assert_eq!(paused.next_run_at, Some(past), "and the slot it would have fired");
+        assert!(store.get("paused").await.unwrap().unwrap().schedule_paused);
+
+        let due: Vec<String> = store.due(Utc::now()).await.unwrap().into_iter().map(|t| t.id).collect();
+        assert_eq!(due, vec!["running".to_string()]);
+
+        let resumed = store
+            .update("paused", &TaskPatch { schedule_paused: Some(false), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(!resumed.schedule_paused);
+        assert_eq!(store.due(Utc::now()).await.unwrap().len(), 2);
     }
 }

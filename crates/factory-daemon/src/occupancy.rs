@@ -18,7 +18,7 @@ use factory_core::event::Event;
 use factory_core::occupancy::{
     spans_from, Occupancy, OccupancyBlock, OccupancyPlan, OccupancyRow, OccupancyScope, StatusChange,
 };
-use factory_core::run::{BlockSource, Run, RunPatch, RunStatus};
+use factory_core::run::{BlockSource, FailKind, Run, RunPatch, RunStatus};
 use factory_core::task::{TaskEntry, TurnEndEvent, TurnEnded};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -330,10 +330,10 @@ impl Engine {
             // the run there and then; a `Stop` is only held on the run, and
             // stands here, below, once `settle_turn_end` says it has.
             if turn_ended_action(&report, run.status) == TurnEndedAction::Fail {
-                self.fail_run(&run.id, TURN_ENDED_REASON).await;
+                self.fail_run(&run.id, FailKind::TurnEnded, TURN_ENDED_REASON).await;
             } else if settle_turn_end(run.status, run.turn_ended_at, report.status, Utc::now()) {
                 let why = run.turn_end_reason.as_deref().unwrap_or(TURN_ENDED_REASON);
-                self.fail_run(&run.id, why).await;
+                self.fail_run(&run.id, FailKind::TurnEnded, why).await;
             }
         }
     }
@@ -357,7 +357,7 @@ impl Engine {
         self.check_run_token(&run, turn.token.as_deref(), task_id)?;
         match hook_turn_ended_action(&turn, run.status) {
             HookTurnAction::FailNow => {
-                self.fail_run(&run.id, &hook_turn_ended_reason(&turn)).await;
+                self.fail_run(&run.id, FailKind::StopFailure, &hook_turn_ended_reason(&turn)).await;
             }
             HookTurnAction::Settle => {
                 self.patch_run(
@@ -876,6 +876,9 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            queued_at: None,
+            scheduled_for: None,
+            fail_kind: None,
         }
     }
 

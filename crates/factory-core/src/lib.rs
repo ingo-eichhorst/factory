@@ -30,7 +30,7 @@ pub use error::{FactoryError, Result};
 pub use agent::{AgentSession, AgentState, Lifetime};
 pub use role::{Grant, Reach, Role, RoleDef, RoleSpec, Roles};
 pub use event::{Event, EventBus};
-pub use run::{BlockSource, NewRun, Run, RunPatch, RunStatus, Trigger};
+pub use run::{BlockSource, FailKind, NewRun, Run, RunPatch, RunStatus, Trigger};
 pub use task::{
     NewTask, PendingRetry, RetryPolicy, Schedule, SessionRef, Task, TaskEntry, TaskFilter, TaskPatch,
     TaskReport, TaskStatus, WorkflowOrigin,
