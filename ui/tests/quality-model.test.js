@@ -25,6 +25,7 @@ import {
   remediateBody,
   scenarioSentence,
   sentenceText,
+  seriesPoints,
   seriesValues,
   sparkGeometry,
   tableRows,
@@ -325,11 +326,45 @@ test("valueDomain widens past 1 only when something on it does, and holds zero, 
 
 test("sparkGeometry needs two points and shares the bullet's value axis", () => {
   assert.equal(seriesValues(report, "scrap_rate").length, 1);
-  assert.equal(sparkGeometry(seriesValues(report, "scrap_rate"), [0, 1]), null, "one point is a value, not a trend");
-  assert.equal(seriesValues(report, "bench.resolve_rate.smoke"), null, "never invented for a metric with no series");
-  const g = sparkGeometry([0, 0.5, 1], [0, 1], { width: 100, height: 10 });
-  assert.equal(g.points, "0.0,10.0 50.0,5.0 100.0,0.0");
+  assert.equal(sparkGeometry(seriesPoints(report, "scrap_rate"), [0, 1]), null, "one point is a value, not a trend");
+  assert.equal(seriesPoints(report, "bench.resolve_rate.smoke"), null, "never invented for a metric with no series");
+  const g = sparkGeometry([{ day: 0, value: 0 }, { day: 1, value: 0.5 }, { day: 2, value: 1 }], [0, 1], { width: 100, height: 10 });
+  assert.deepEqual(g.segments, [["0.0,10.0", "50.0,5.0", "100.0,0.0"]]);
   assert.equal(g.y(0.05), 9.5);
+});
+
+test("a sparkline places each point by its date and breaks at missing days -- never squeezes a gap out", () => {
+  const gappy = {
+    series: [{ id: "scrap_rate", points: [
+      ["2026-09-01", 0.2], ["2026-09-02", 0.4], // two days, then nothing for three
+      ["2026-09-06", 0.1],                       // a lone day
+      ["2026-09-08", 0.3], ["2026-09-09", null], ["2026-09-11", 0.5],
+    ] }],
+  };
+  const pts = seriesPoints(gappy, "scrap_rate");
+  assert.deepEqual(pts.map((p) => p.day - pts[0].day), [0, 1, 5, 7, 10], "a null value is dropped and shows as a gap");
+  const g = sparkGeometry(pts, [0, 1], { width: 100, height: 10 });
+  assert.equal(g.count, 5);
+  assert.equal(g.days, 11);
+  assert.deepEqual(g.segments.map((s) => s.map((p) => p.split(",")[0])), [["0.0", "10.0"], ["50.0"], ["70.0"], ["100.0"]]);
+});
+
+test("the bullet's bar grows from zero, so a negative value reads leftwards of it", () => {
+  const g = bulletGeometry({ metric: "delta", above: 0 }, -2, [-4, 3], { width: 100, height: 20 });
+  const [lo, hi] = g.domain;
+  const x0 = ((0 - lo) / (hi - lo)) * 100;
+  const xv = ((-2 - lo) / (hi - lo)) * 100;
+  assert.ok(lo < 0);
+  assert.equal(g.bar.x, xv);
+  assert.ok(Math.abs(g.bar.w - (x0 - xv)) < 1e-9);
+  const pos = bulletGeometry({ metric: "delta", above: 0 }, 2, [-4, 3], { width: 100, height: 20 });
+  assert.equal(pos.bar.x, x0);
+});
+
+test("bulletGeometry with no bound draws no tick and no pass limit", () => {
+  const g = bulletGeometry({ metric: "scrap_rate" }, 0.5, null, { width: 100, height: 20 });
+  assert.deepEqual(g.ticks, []);
+  assert.deepEqual(g.pass, { x: 0, w: 100 });
 });
 
 // ---------------------------------------------------------------- tradeoffs
@@ -346,15 +381,23 @@ test("tradeoffMatrix is symmetric and keeps the declared order, appending an und
   const odd = { ...demo, tradeoffs: [{ between: [a, "safety.fail-safe"], point: "p" }] };
   const n = tradeoffMatrix(odd);
   assert.deepEqual(n.axes.at(-1), { id: "safety.fail-safe", declared: false });
+
+  // A self-trade-off survives the loader (with a `bad_tradeoff` finding)
+  // and lands on the diagonal, once.
+  const self = tradeoffMatrix({ ...demo, tradeoffs: [{ between: [a, a], point: "p" }] });
+  assert.equal(self.cells.get(`${a}|${a}`).length, 1);
 });
 
-test("decisionLink: a knowledge page deep-links by its page id, a URL opens as itself, anything else stays text", () => {
+test("decisionLink: a knowledge-vault page deep-links by its page id, a URL opens as itself, anything else stays text", () => {
   const k = decisionLink("knowledge/adr-sandbox.md", "demo");
   assert.equal(k.kind, "knowledge");
   assert.equal(k.label, "adr-sandbox");
   assert.match(k.href, /^#demo\/.*knowledge\/adr-sandbox$/);
   assert.match(decisionLink(".factory/knowledge/decisions/adr-7.md", null).href, /knowledge\/decisions\/adr-7$/);
   assert.equal(decisionLink("https://example.com/d/42", "demo").kind, "external");
+  assert.deepEqual(decisionLink("docs/adr-7.md", "demo"), { kind: "text", label: "docs/adr-7.md", href: null },
+    "a markdown file outside the vault is not guessed into a Knowledge link");
+  assert.equal(decisionLink("adr-7.md", "demo").kind, "text");
   assert.deepEqual(decisionLink("the March offsite", "demo"), { kind: "text", label: "the March offsite", href: null });
   assert.equal(decisionLink(undefined, "demo"), null);
 });

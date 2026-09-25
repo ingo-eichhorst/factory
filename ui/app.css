@@ -1949,6 +1949,7 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
 .qa-bullet-tick { stroke: var(--ink); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .qa-spark { display: block; width: 100%; height: 30px; margin-top: 4px; }
 .qa-spark-line { fill: none; stroke: var(--signal); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.qa-spark-dot { stroke-width: 3; stroke-linecap: round; }
 .qa-spark-bound { stroke: var(--faint); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
 
 /* ------------------------------------------------------ trade-off matrix */
@@ -1974,21 +1975,26 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
 /* --------------------------------------------- importance × difficulty
    ATAM's 3×3, the (H,H) corner at the top right, emphasised: it is where
    architecture attention belongs. */
-.qa-grid { display: grid; grid-template-columns: 22px repeat(3, minmax(0, 1fr)); gap: 6px; position: relative; }
-.qa-grid-ylabel { position: absolute; left: -2px; top: -18px; font: 600 9.5px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
-.qa-grid-rowlabel, .qa-grid-collabel { font: 700 11px/1 var(--mono); color: var(--faint); display: flex; align-items: center; justify-content: center; }
-.qa-grid-collabel { padding-top: 2px; }
-.qa-grid-xlabel { text-align: right; margin-top: 4px; font: 600 9.5px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; }
-.qa-grid-cell {
-  min-height: 86px; background: var(--sunk); border: 1px solid var(--line-soft); border-radius: 4px;
-  padding: 6px; display: flex; flex-direction: column; gap: 4px; min-width: 0;
+.qa-grid { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 6px; }
+.qa-grid th, .qa-grid td { padding: 0; border: 0; }
+.qa-grid-corner { width: 24px; }
+.qa-grid-caption {
+  caption-side: top; text-align: left; padding: 0 6px 2px;
+  font: 600 9.5px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; color: var(--faint);
 }
+.qa-grid-rowlabel, .qa-grid-collabel { font: 700 11px/1 var(--mono); color: var(--faint); text-align: center; vertical-align: middle; letter-spacing: 0; text-transform: none; }
+.qa-grid-collabel { padding-bottom: 4px !important; vertical-align: bottom; }
+.qa-grid-cell {
+  height: 86px; background: var(--sunk); border: 1px solid var(--line-soft); border-radius: 4px;
+  padding: 6px !important; vertical-align: top; min-width: 0;
+}
+.qa-grid-cell > * + * { margin-top: 4px; }
 .qa-grid-cell.qa-hot { border: 2px solid var(--lvl6); background: var(--fault-wash); }
 .qa-grid-tag { font: 600 10px/1.2 var(--mono); color: var(--faint); }
 .qa-hot .qa-grid-tag { color: var(--lvl6); }
 .qa-hot-note { font: 600 8.5px/1 var(--cond); letter-spacing: .08em; text-transform: uppercase; }
 .qa-grid-attr {
-  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; cursor: pointer;
+  width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; cursor: pointer;
   font: 500 11.5px/1.25 var(--sans); padding: 5px 6px; border-radius: 3px; border-width: 1px; border-style: solid;
   /* Hyphenated, not broken anywhere: a phone's third of a grid is
      narrower than "Maintainability", and "Maintainabilit / y" reads as a
@@ -1999,7 +2005,6 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
 .qa-grid-attr.qa-st-draft { border-style: dashed; }
 .qa-grid-attr:hover { outline: 1px solid var(--signal); }
 .qa-grid-status { font: 600 8.5px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; }
-#qa-view-grid { padding-top: 26px; }
 
 /* Only the reasons column may break inside a word (a run id is one long
    token); an (I,D) tag or a scenario id broken mid-way reads as two. */
@@ -2012,7 +2017,7 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
   .qa-attr { margin-left: 6px; }
   .qa-scenarios { margin-left: 4px; }
   .qa-from { margin-left: 0; flex-basis: 100%; }
-  .qa-grid-cell { min-height: 64px; padding: 4px; }
+  .qa-grid-cell { height: 64px; padding: 4px !important; }
   .qa-grid-attr { font-size: 10.5px; }
 }
 

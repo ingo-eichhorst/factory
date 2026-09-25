@@ -10,7 +10,7 @@ import { readHash, setRouter } from "../js/scopes.js";
 // that does cannot break this file in a confusing way.
 const bare = { addEventListener() {}, getElementById: () => null };
 globalThis.document = bare;
-const { loadQuality, renderQuality } = await import("../js/quality.js");
+const { askRemediate, confirmRemediate, loadQuality, noteToggle, renderQuality } = await import("../js/quality.js");
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const wiring = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
@@ -31,6 +31,8 @@ test("the tab reloads on quality_changed, on a run settling and on a quality= ta
   assert.match(wiring, /ev\.type === "quality_changed"/);
   assert.match(wiring, /ev\.type === "run_updated" && TERMINAL\.includes\(ev\.run\.status\)/);
   assert.match(wiring, /ev\.task\.labels && ev\.task\.labels\.quality/);
+  assert.match(wiring, /ev\.type === "task_updated" && qualityTask && \(!priorTask \|\| priorTask\.status !== ev\.task\.status\)/,
+    "a quality= task's progress updates do not reload the tab; its status changing does");
   assert.match(wiring, /reloadQuality\(\)/);
   const view = readFileSync(new URL("../js/quality.js", import.meta.url), "utf8");
   assert.doesNotMatch(view, /setInterval/);
@@ -108,6 +110,10 @@ function fixtureReport() {
         tradeoffs: [{
           between: ["security.integrity", "reliability.recoverability"], point: "signed releases slow a restart",
           decision: "knowledge/adr-sandbox.md", declared_at: { scope: "demo", profile: "daemon-service" },
+        }, {
+          // Kept by the loader beside a `bad_tradeoff` finding.
+          between: ["security.integrity", "security.integrity"], point: "against itself",
+          declared_at: { scope: "demo", profile: "daemon-service" },
         }],
         open_tasks: { "maintainability.modifiability/right-first-time": "b7732c3a-2828-41ef-9972-bcf917d4dc56" },
       },
@@ -169,7 +175,11 @@ test("loadQuality fetches the rail's scope and draws every view from the one ans
 
   assert.match(elements["qa-table"].innerHTML, /daemon-restart/);
   assert.match(elements["qa-grid"].innerHTML, /qa-hot/);
-  assert.match(elements["qa-tradeoffs"].innerHTML, /qa-tm-btn/);
+  assert.match(elements["qa-tradeoffs"].innerHTML, /data-qa-pair="security\.integrity\|security\.integrity"/,
+    "a self-trade-off on the diagonal still gets a button");
+  assert.match(heat, /<span class="vh">web, Safety: not declared<\/span>/, "hidden text, not aria-label on a span");
+  assert.doesNotMatch(elements["qa-grid"].innerHTML, /role="grid/, "a real table, not grid roles without rows");
+  assert.match(elements["qa-grid"].innerHTML, /<th scope="row" class="qa-grid-rowlabel">/);
   assert.match(elements["qa-findings"].innerHTML, /H-importance attribute with no measured scenario/);
   assert.equal(elements["qa-no-findings"].hidden, true);
 
@@ -201,4 +211,68 @@ test("no profiles bound: the empty state shows, and findings still do; a failed 
   delete globalThis.fetch;
   globalThis.document = bare;
   renderQuality(); // no throw with the bare shim
+});
+
+function routedFetch(routes) {
+  return async (path, opts) => {
+    for (const [prefix, answer] of routes) if (path.startsWith(prefix)) return answer(path, opts);
+    throw new Error(`unexpected fetch ${path}`);
+  };
+}
+const ok = (data) => ({ status: 200, statusText: "OK", json: async () => ({ status: "ok", data }) });
+
+test("a reload never wipes what a person is in the middle of: a confirmation, a request in flight, its refusal, a closed node", async () => {
+  const elements = fakeElements();
+  globalThis.document = { ...bare, getElementById: (id) => (id in elements ? elements[id] : null) };
+  let settle;
+  globalThis.fetch = routedFetch([
+    ["/api/quality/remediate", () => new Promise((resolve) => { settle = resolve; })],
+    ["/api/quality", () => ok({ kind: "quality", report: fixtureReport() })],
+  ]);
+  state.scope = "demo";
+  await loadQuality();
+  const tree = () => elements["qa-tree"].innerHTML;
+  const key = JSON.stringify(["demo", "reliability.recoverability", "daemon-restart"]);
+
+  askRemediate(key);
+  assert.match(tree(), /data-qa-confirm>Create task/);
+  await loadQuality(); // a socket-driven reload
+  assert.match(tree(), /data-qa-confirm>Create task/, "the confirmation survives the redraw");
+
+  const request = confirmRemediate(key);
+  assert.match(tree(), /data-qa-confirm disabled>Creating…/);
+  await loadQuality(); // the tree is replaced while the request is out
+  assert.match(tree(), /Creating…/, "still pending after the redraw");
+  settle({ status: 400, statusText: "Bad Request", json: async () => ({ status: "error", message: "already met at demo" }) });
+  await request;
+  assert.match(tree(), /qa-remediate-err">already met at demo/, "the refusal lands in the tree on screen, not a detached node");
+  await loadQuality();
+  assert.match(tree(), /already met at demo/, "and survives the next reload too");
+
+  const reliability = JSON.stringify(["demo", "char", "reliability"]);
+  noteToggle(reliability, false);
+  await loadQuality();
+  assert.match(tree(), /<details class="qa-node qa-char" data-qa-node="[^"]*" data-qa-group="reliability">/, "a closed node stays closed");
+  assert.match(tree(), /<details class="qa-node qa-char" open data-qa-node="[^"]*" data-qa-group="security">/);
+  noteToggle(reliability, true);
+  await loadQuality();
+  assert.match(tree(), /<details class="qa-node qa-char" open data-qa-node="[^"]*" data-qa-group="reliability">/);
+
+  delete globalThis.fetch;
+  globalThis.document = bare;
+});
+
+test("a bullet chart with no bound says so rather than 'required ,'", async () => {
+  const elements = fakeElements();
+  globalThis.document = { ...bare, getElementById: (id) => (id in elements ? elements[id] : null) };
+  const report = fixtureReport();
+  report.scopes[0].attributes[0].scenarios[0].measure = { metric: "scrap_rate" };
+  globalThis.fetch = routedFetch([["/api/quality", () => ok({ kind: "quality", report })]]);
+  state.scope = "demo";
+  await loadQuality();
+  assert.doesNotMatch(elements["qa-tree"].innerHTML, /required\s*[,<]/);
+  assert.match(elements["qa-tree"].innerHTML, /no threshold/);
+  delete globalThis.fetch;
+  globalThis.document = bare;
+  state.scope = null;
 });

@@ -53,6 +53,7 @@ import {
   openTaskFor,
   remediateBody,
   scenarioSentence,
+  seriesPoints,
   seriesValues,
   sparkGeometry,
   statusLabel,
@@ -101,6 +102,23 @@ let spotlight = null;
 /// The trade-off pair whose detail is open, `"a|b"`, or `null`.
 let openPair = null;
 
+/// What a person is in the middle of, kept here rather than in the DOM so a
+/// reload -- which the socket can fire at any moment, and which redraws the
+/// whole tree -- never throws it away. `remediation` is keyed by
+/// `remediationKey` and holds `{phase: "confirming" | "pending" | "error" |
+/// "done", message?, task?, created?}`; a scenario absent from it shows its
+/// plain "Create task". `collapsed` holds the tree nodes a person closed,
+/// by `nodeKey`, so a redraw reopens nothing.
+const remediation = new Map();
+const collapsed = new Set();
+
+function remediationKey(scope, attribute, scenario) {
+  return JSON.stringify([scope, attribute, scenario]);
+}
+function nodeKey(scope, kind, id) {
+  return JSON.stringify([scope, kind, id]);
+}
+
 // ------------------------------------------------------------------- load
 
 export async function loadQuality() {
@@ -111,6 +129,7 @@ export async function loadQuality() {
     if (mine !== asked) return;
     report = answer.report;
     failure = null;
+    settleRemediation();
   } catch (e) {
     if (mine !== asked) return;
     report = null;
@@ -266,7 +285,9 @@ function renderHeatmap() {
         .map((cell, i) => {
           const label = cellLabel(r.scope, columns[i], cell);
           if (!cell.declared) {
-            return `<td class="qa-hm-cell"><span class="qa-hm-blank" title="${esc(label)}" aria-label="${esc(label)}">·</span></td>`;
+            // Text, not `aria-label`: a label on a plain `<span>` is not
+            // reliably announced, and hidden text always is.
+            return `<td class="qa-hm-cell"><span class="qa-hm-blank" title="${esc(label)}"><span aria-hidden="true">·</span><span class="vh">${esc(label)}</span></span></td>`;
           }
           return `<td class="qa-hm-cell"><button type="button" class="qa-hm-btn qa-st-${esc(cell.status)} qa-imp-${esc(cell.importance)}"
             data-qa-tree="${esc(r.scope)}" data-qa-char="${esc(cell.characteristic)}" title="${esc(label)}" aria-label="${esc(label)}">
@@ -305,12 +326,17 @@ function renderTree(scopeQuality) {
   if (!el) return;
   if (!scopeQuality) { el.innerHTML = ""; return; }
   const tree = utilityTree(scopeQuality, report.catalogue);
+  // A heatmap click asks to see a characteristic; it cannot stay closed.
+  if (spotlight) collapsed.delete(nodeKey(scopeQuality.scope, "char", spotlight));
   el.innerHTML = `<div class="qa-tree-head">
       <h3>${esc(scopeQuality.scope)}</h3>
       <span class="sub">profiles: ${scopeQuality.profiles.map(esc).join(", ")}</span>
     </div>
     ${tree.length ? tree.map((g) => characteristicHtml(scopeQuality, g)).join("") : `<div class="empty">No attributes declared.</div>`}`;
   wireRemediate(el);
+  for (const d of el.querySelectorAll("details[data-qa-node]")) {
+    d.ontoggle = () => noteToggle(d.dataset.qaNode, d.open);
+  }
   if (spotlight) {
     const target = el.querySelector(`[data-qa-group="${cssEscape(spotlight)}"]`);
     if (target && typeof target.scrollIntoView === "function") {
@@ -334,13 +360,15 @@ function cssEscape(s) {
   return typeof CSS !== "undefined" && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&");
 }
 
-/// `<details open>` twice over -- a characteristic, then an attribute --
-/// is the whole collapsible tree: native, keyboard-operable, and needing no
-/// script. The spotlighted characteristic (a heatmap click) is marked so
-/// the CSS can ring it.
+/// `<details>` twice over -- a characteristic, then an attribute -- is the
+/// whole collapsible tree: native and keyboard-operable. Open unless a
+/// person closed it (`collapsed`, restored on every redraw). The
+/// spotlighted characteristic (a heatmap click) is marked so the CSS can
+/// ring it.
 function characteristicHtml(scopeQuality, g) {
   const lit = spotlight === g.characteristic ? " qa-spotlight" : "";
-  return `<details class="qa-node qa-char${lit}" open data-qa-group="${esc(g.characteristic)}">
+  const key = nodeKey(scopeQuality.scope, "char", g.characteristic);
+  return `<details class="qa-node qa-char${lit}"${collapsed.has(key) ? "" : " open"} data-qa-node="${esc(key)}" data-qa-group="${esc(g.characteristic)}">
     <summary><span class="qa-node-title">${esc(g.title)}</span>${statusChip(g.status)}</summary>
     ${g.attributes.map((a) => attributeHtml(scopeQuality, a)).join("")}
   </details>`;
@@ -349,7 +377,8 @@ function characteristicHtml(scopeQuality, g) {
 function attributeHtml(scopeQuality, a) {
   const from = a.declared_at ? `from ${a.declared_at.profile} at ${a.declared_at.scope}` : "";
   const ai = a.standard === "iso-25059" ? ` <span class="qa-pack" title="ISO/IEC 25059 AI pack">AI</span>` : "";
-  return `<details class="qa-node qa-attr" open>
+  const key = nodeKey(scopeQuality.scope, "attr", a.id);
+  return `<details class="qa-node qa-attr"${collapsed.has(key) ? "" : " open"} data-qa-node="${esc(key)}">
     <summary>
       <span class="qa-node-title">${esc(a.title)}${ai}</span>
       <code class="id">${esc(a.id)}</code>
@@ -378,7 +407,7 @@ function sentenceHtml(s) {
 /// card -- the same trap `index.html`'s `.goal-header` comment names.
 function scenarioCardHtml(scopeQuality, a, s) {
   const kind = measureKind(s.measure);
-  const history = s.measure && s.measure.metric ? seriesValues(report, s.measure.metric) : null;
+  const history = s.measure && s.measure.metric ? seriesPoints(report, s.measure.metric) : null;
   const refs = refLinks(scopeQuality.scope, s.refs);
   return `<article class="qa-card qa-card-${esc(s.status)}">
     <div class="qa-card-head">
@@ -401,27 +430,41 @@ function scenarioCardHtml(scopeQuality, a, s) {
 /// verdict), each bound is a tick -- and the sparkline below reads the same
 /// `valueDomain`, with the bound as a dashed line through it.
 function bulletHtml(s, history) {
-  const g = bulletGeometry(s.measure, s.value, history);
+  const values = history ? history.map((p) => p.value) : null;
+  const g = bulletGeometry(s.measure, s.value, values);
   if (!g) return "";
   const [lo, hi] = g.domain;
   const bounds = g.ticks.map((t) => `${t.kind === "above" ? "≥" : "≤"} ${formatNumber(t.value)}`).join(" and ");
-  const aria = `${s.measure.metric}: ${formatNumber(s.value)}, required ${bounds}, axis ${formatNumber(lo)} to ${formatNumber(hi)}`;
+  // A measure with no bound is a `missing_threshold` finding; say nothing
+  // is required rather than "required ," with nothing after it.
+  const required = bounds ? ` · required ${bounds}` : " · no threshold";
+  const aria = `${s.measure.metric}: ${formatNumber(s.value)}${bounds ? `, required ${bounds}` : ", no threshold"}, axis ${formatNumber(lo)} to ${formatNumber(hi)}`;
   const bullet = `<svg class="qa-bullet" viewBox="0 0 ${g.width} ${g.height}" preserveAspectRatio="none" role="img" aria-label="${esc(aria)}">
       <rect class="qa-bullet-track" x="0" y="0" width="${g.width}" height="${g.height}"></rect>
       <rect class="qa-bullet-pass" x="${g.pass.x}" y="0" width="${g.pass.w}" height="${g.height}"></rect>
       <rect class="qa-bullet-bar qa-fill-${esc(s.status)}" x="${g.bar.x}" y="${g.bar.y}" width="${g.bar.w}" height="${g.bar.h}"></rect>
       ${g.ticks.map((t) => `<line class="qa-bullet-tick" x1="${t.x}" x2="${t.x}" y1="2" y2="${g.height - 2}"></line>`).join("")}
     </svg>`;
-  const spark = sparkGeometry(history, valueDomain(s.measure, s.value, history), { width: g.width, height: 30 });
+  const spark = sparkGeometry(history, valueDomain(s.measure, s.value, values), { width: g.width, height: 30 });
+  // One polyline per unbroken run of days; a lone day is a zero-length line
+  // whose round cap draws a dot, since a `<circle>` would be stretched by
+  // `preserveAspectRatio="none"`.
+  const runs = spark
+    ? spark.segments
+      .map((seg) => (seg.length > 1
+        ? `<polyline class="qa-spark-line" points="${seg.join(" ")}"></polyline>`
+        : `<line class="qa-spark-line qa-spark-dot" x1="${seg[0].split(",")[0]}" y1="${seg[0].split(",")[1]}" x2="${seg[0].split(",")[0]}" y2="${seg[0].split(",")[1]}"></line>`))
+      .join("")
+    : "";
   const sparkSvg = spark
     ? `<svg class="qa-spark" viewBox="0 0 ${spark.width} ${spark.height}" preserveAspectRatio="none" aria-hidden="true">
         ${g.ticks.map((t) => `<line class="qa-spark-bound" x1="0" x2="${spark.width}" y1="${spark.y(t.value).toFixed(1)}" y2="${spark.y(t.value).toFixed(1)}"></line>`).join("")}
-        <polyline class="qa-spark-line" points="${spark.points}"></polyline>
+        ${runs}
       </svg>
-      <div class="qa-axis sub"><span>history, ${history.length} days</span></div>`
+      <div class="qa-axis sub"><span>history: ${spark.count} points over ${spark.days} days</span></div>`
     : "";
   return `<div class="qa-evidence">
-    <div class="qa-axis sub"><span>${esc(formatNumber(lo))}</span><span>actual <b>${esc(formatNumber(s.value))}</b> · required ${esc(bounds)}</span><span>${esc(formatNumber(hi))}</span></div>
+    <div class="qa-axis sub"><span>${esc(formatNumber(lo))}</span><span>actual <b>${esc(formatNumber(s.value))}</b>${esc(required)}</span><span>${esc(formatNumber(hi))}</span></div>
     ${bullet}
     ${sparkSvg}
   </div>`;
@@ -434,54 +477,94 @@ function bulletHtml(s, history) {
 // already open for the scenario instead of offering to make another
 // (`#98`, from `ScopeQuality::open_tasks`). The daemon remains the guard: a
 // refusal (already met, or a `no_data` gap no task can close) lands as
-// inline text naming its reason.
+// inline text naming its reason. Every step lives in `remediation`, never
+// only in the DOM, and the cell is drawn from it -- so a reload mid-way
+// redraws the same confirmation, the same "creating…", the same refusal.
 
 function remediateCellHtml(scopeQuality, a, s) {
+  const key = remediationKey(scopeQuality.scope, a.id, s.id);
+  const entry = remediation.get(key);
+  if (entry && entry.phase === "done") {
+    return `<div class="qa-remediate"><a class="qa-task-link" href="${esc(taskHref(scopeQuality.scope, entry.task.id))}" title="${esc(entry.task.title)}">${entry.created ? "Task created →" : "Task open →"}</a></div>`;
+  }
   const open = openTaskFor(scopeQuality, a.id, s.id);
   if (open) {
     return `<div class="qa-remediate"><a class="qa-task-link" href="${esc(taskHref(scopeQuality.scope, open))}">Task open →</a></div>`;
   }
   if (!canRemediate(s, report.findings)) return "";
-  return `<div class="qa-remediate" data-qa-remediate-cell data-scope="${esc(scopeQuality.scope)}" data-attribute="${esc(a.id)}" data-scenario="${esc(s.id)}">
-    <button type="button" class="btn" data-qa-remediate>Create task</button>
-  </div>`;
+  const cell = (inner) => `<div class="qa-remediate" data-qa-remediate-cell="${esc(key)}" data-scenario="${esc(s.id)}">${inner}</div>`;
+  if (entry && (entry.phase === "confirming" || entry.phase === "pending")) {
+    const busy = entry.phase === "pending" ? " disabled" : "";
+    return cell(`<span class="sub">Create a task to meet <code class="id">${esc(a.id)}/${esc(s.id)}</code> in ${esc(scopeQuality.scope)}?</span>
+      <button type="button" class="btn primary" data-qa-confirm${busy}>${entry.phase === "pending" ? "Creating…" : "Create task"}</button>
+      <button type="button" class="btn" data-qa-cancel${busy}>Cancel</button>`);
+  }
+  const error = entry && entry.phase === "error" ? `<div class="sub qa-remediate-err">${esc(entry.message)}</div>` : "";
+  return cell(`<button type="button" class="btn" data-qa-remediate>Create task</button>${error}`);
 }
 
 function wireRemediate(root) {
-  for (const b of root.querySelectorAll("[data-qa-remediate]")) {
-    b.onclick = () => askRemediate(b.closest("[data-qa-remediate-cell]"));
+  for (const cell of root.querySelectorAll("[data-qa-remediate-cell]")) {
+    const key = cell.dataset.qaRemediateCell;
+    const on = (sel, fn) => { const b = cell.querySelector(sel); if (b) b.onclick = () => fn(key); };
+    on("[data-qa-remediate]", askRemediate);
+    on("[data-qa-confirm]", confirmRemediate);
+    on("[data-qa-cancel]", cancelRemediate);
   }
 }
 
-function askRemediate(cell) {
-  if (!cell) return;
-  const { scope, attribute, scenario } = cell.dataset;
-  cell.innerHTML = `<span class="sub">Create a task to meet <code class="id">${esc(attribute)}/${esc(scenario)}</code> in ${esc(scope)}?</span>
-    <button type="button" class="btn primary" data-qa-confirm>Create task</button>
-    <button type="button" class="btn" data-qa-cancel>Cancel</button>`;
-  cell.querySelector("[data-qa-confirm]").onclick = () => remediate(cell);
-  cell.querySelector("[data-qa-cancel]").onclick = () => {
-    cell.innerHTML = `<button type="button" class="btn" data-qa-remediate>Create task</button>`;
-    wireRemediate(cell);
-  };
+/// Redraw after a remediation step. The tree is the only view that shows
+/// the cell, and a redraw restores everything else it held (`collapsed`).
+function redrawTree() {
+  if (!report || !hasProfiles(report)) return;
+  renderTree(report.scopes.find((s) => s.scope === picked) || null);
 }
 
-async function remediate(cell) {
-  const { scope, attribute, scenario } = cell.dataset;
-  for (const b of cell.querySelectorAll("button")) b.disabled = true;
-  const prior = cell.querySelector(".qa-remediate-err");
-  if (prior) prior.remove();
+export function askRemediate(key) {
+  remediation.set(key, { phase: "confirming" });
+  redrawTree();
+}
+
+export function cancelRemediate(key) {
+  remediation.delete(key);
+  redrawTree();
+}
+
+export async function confirmRemediate(key) {
+  const current = remediation.get(key);
+  if (current && current.phase === "pending") return;
+  const [scope, attribute, scenario] = JSON.parse(key);
+  remediation.set(key, { phase: "pending" });
+  redrawTree();
   try {
     const answer = await api("/api/quality/remediate", {
       method: "POST",
       body: JSON.stringify(remediateBody(scope, attribute, scenario)),
     });
-    const { task, created } = answer.result;
-    cell.innerHTML = `<a class="qa-task-link" href="${esc(taskHref(scope, task.id))}" title="${esc(task.title)}">${created ? "Task created →" : "Task open →"}</a>`;
+    remediation.set(key, { phase: "done", task: answer.result.task, created: answer.result.created });
   } catch (e) {
-    for (const b of cell.querySelectorAll("button")) b.disabled = false;
-    cell.insertAdjacentHTML("beforeend", `<div class="sub qa-remediate-err">${esc(e.message)}</div>`);
+    remediation.set(key, { phase: "error", message: e.message });
   }
+  // Drawn from state into whatever tree is on screen *now* -- a reload
+  // while the request was out replaced the cell it started from.
+  redrawTree();
+}
+
+/// After a fresh report: a finished remediation whose task the report now
+/// lists under `open_tasks` has nothing left to say that the report does
+/// not, so it is dropped; anything in progress or refused is kept.
+function settleRemediation() {
+  for (const [key, entry] of remediation) {
+    if (entry.phase !== "done") continue;
+    const [scope, attribute, scenario] = JSON.parse(key);
+    const sq = report.scopes && report.scopes.find((s) => s.scope === scope);
+    if (sq && openTaskFor(sq, attribute, scenario)) remediation.delete(key);
+  }
+}
+
+/// A `<details>` opened or closed by a person (its `toggle` event).
+export function noteToggle(key, open) {
+  if (open) collapsed.delete(key); else collapsed.add(key);
 }
 
 // ---------------------------------------------------------------- tradeoffs
@@ -509,9 +592,13 @@ function renderTradeoffs(scopeQuality) {
         ${row.declared ? "" : `<span class="sub"> (not declared)</span>`}</th>
       ${m.axes
         .map((col, j) => {
-          if (i === j) return `<td class="qa-tm-cell qa-tm-diag" aria-hidden="true"></td>`;
           const key = `${row.id}|${col.id}`;
           const list = m.cells.get(key);
+          // The diagonal is an attribute against itself: empty by
+          // definition, except when a profile declared exactly that (a
+          // `bad_tradeoff` finding, kept by the loader) -- which still gets
+          // a button, so the point is readable rather than hidden.
+          if (i === j && !list) return `<td class="qa-tm-cell qa-tm-diag" aria-hidden="true"></td>`;
           if (!list) return `<td class="qa-tm-cell"></td>`;
           const on = openPair === key || openPair === `${col.id}|${row.id}`;
           return `<td class="qa-tm-cell"><button type="button" class="qa-tm-btn${on ? " on" : ""}" data-qa-pair="${esc(key)}"
@@ -537,7 +624,7 @@ function pairDetailHtml(scopeQuality, m) {
   const list = m.cells.get(openPair) || [];
   return list
     .map((t) => {
-      const link = decisionLink(t.decision, state.scope);
+      const link = decisionLink(t.decision, scopeQuality.scope);
       const decision = !link
         ? `<span class="sub">no decision linked</span>`
         : link.kind === "knowledge"
@@ -557,31 +644,31 @@ function pairDetailHtml(scopeQuality, m) {
 
 // ------------------------------------------------- importance × difficulty
 
+/// A real `<table>`: importance down the rows (H at the top), difficulty
+/// across the columns (L on the left), so a screen reader announces each
+/// cell's two headers -- the grid it looks like is what it is.
 function renderGrid(scopeQuality) {
   const el = $("qa-grid");
   if (!el) return;
   if (!scopeQuality) { el.innerHTML = ""; return; }
   const cells = importanceDifficultyGrid(scopeQuality);
-  const cellHtml = (c) => `<div class="qa-grid-cell${c.hot ? " qa-hot" : ""}" role="gridcell"
-      aria-label="${esc(`importance ${levelWord(c.importance)}, difficulty ${levelWord(c.difficulty)}: ${c.attributes.length} attribute${c.attributes.length === 1 ? "" : "s"}`)}">
+  const cellHtml = (c) => `<td class="qa-grid-cell${c.hot ? " qa-hot" : ""}">
       <div class="qa-grid-tag">${esc(`(${c.importance},${c.difficulty})`)}${c.hot ? ` <span class="qa-hot-note">measure these first</span>` : ""}</div>
       ${c.attributes
         .map((a) => `<button type="button" class="qa-grid-attr qa-st-${esc(a.status)}" data-qa-attr-char="${esc(a.characteristic)}">
           ${esc(attributeLabel(a.id, report.catalogue))}<span class="qa-grid-status">${esc(statusLabel(a.status))}</span></button>`)
         .join("")}
-    </div>`;
-  // Row by row: H, M, L importance, each with the three difficulties.
-  const rows = LEVELS.map((imp) => `<div class="qa-grid-rowlabel" aria-hidden="true">${esc(imp)}</div>${cells
+    </td>`;
+  const rows = LEVELS.map((imp) => `<tr><th scope="row" class="qa-grid-rowlabel"><span class="vh">importance </span>${esc(imp)}</th>${cells
     .filter((c) => c.importance === imp)
     .map(cellHtml)
-    .join("")}`).join("");
-  el.innerHTML = `<div class="qa-grid" role="grid" aria-label="Importance by difficulty for ${esc(scopeQuality.scope)}">
-      <div class="qa-grid-ylabel" aria-hidden="true">importance ↑</div>
-      ${rows}
-      <div></div>
-      <div class="qa-grid-collabel" aria-hidden="true">L</div><div class="qa-grid-collabel" aria-hidden="true">M</div><div class="qa-grid-collabel" aria-hidden="true">H</div>
-    </div>
-    <div class="qa-grid-xlabel sub">difficulty →</div>`;
+    .join("")}</tr>`).join("");
+  el.innerHTML = `<table class="qa-grid">
+      <caption class="qa-grid-caption">Importance ↓ by difficulty → <span class="vh">for ${esc(scopeQuality.scope)}</span></caption>
+      <thead><tr><td class="qa-grid-corner"></td>${["L", "M", "H"]
+        .map((d) => `<th scope="col" class="qa-grid-collabel"><span class="vh">difficulty </span>${d}</th>`).join("")}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
   for (const b of el.querySelectorAll("[data-qa-attr-char]")) {
     b.onclick = () => openTree(scopeQuality.scope, b.dataset.qaAttrChar);
   }

@@ -310,14 +310,29 @@ export function sentenceText(s) {
 
 // ------------------------------------------------------------ bullet chart
 
-/// The history behind a scenario's metric, oldest first, from the report's
-/// own `series` (only ever present for the production metrics a scenario
-/// reads -- never invented for one without), or `null`.
-export function seriesValues(report, metric) {
+/// The history behind a scenario's metric, oldest first, as `{day, value}`
+/// with `day` a whole-day index (UTC days since the epoch) so a gap in the
+/// series is a gap on the axis -- from the report's own `series` (only ever
+/// present for the production metrics a scenario reads, never invented for
+/// one without), or `null`. A point with no finite value is dropped here
+/// and shows as the gap it is.
+export function seriesPoints(report, metric) {
   if (!metric) return null;
   const s = ((report && report.series) || []).find((x) => x.id === metric);
   if (!s || !s.points || !s.points.length) return null;
-  return s.points.map(([, v]) => v).filter((v) => Number.isFinite(v));
+  const out = [];
+  for (const [date, value] of s.points) {
+    const ms = Date.parse(`${String(date).slice(0, 10)}T00:00:00Z`);
+    if (Number.isFinite(ms) && Number.isFinite(value)) out.push({ day: Math.round(ms / 86400000), value });
+  }
+  out.sort((a, b) => a.day - b.day);
+  return out.length ? out : null;
+}
+
+/// Just the values of `seriesPoints`, for the value axis.
+export function seriesValues(report, metric) {
+  const pts = seriesPoints(report, metric);
+  return pts ? pts.map((p) => p.value) : null;
 }
 
 /// The one value axis a scenario card's bullet chart and sparkline share:
@@ -358,31 +373,44 @@ export function bulletGeometry(measure, value, history, { width = 240, height = 
   if (hasAbove) ticks.push({ x: x(measure.above), value: measure.above, kind: "above" });
   if (hasBelow) ticks.push({ x: x(measure.below), value: measure.below, kind: "below" });
   const barH = Math.round(height * 0.36);
+  // The bar grows from zero, which `valueDomain` always holds -- so a
+  // negative value reads leftwards of its zero, never as a positive length
+  // from the axis' low end.
+  const x0 = x(0);
+  const xv = x(value);
   return {
     width,
     height,
     domain: [lo, hi],
     pass: { x: passFrom, w: Math.max(passTo - passFrom, 0) },
-    bar: { x: 0, y: (height - barH) / 2, w: x(value), h: barH },
+    bar: { x: Math.min(x0, xv), y: (height - barH) / 2, w: Math.abs(xv - x0), h: barH },
     ticks,
   };
 }
 
 /// A sparkline on the bullet chart's own value axis (`valueDomain`), with
 /// a dashed line at every bound -- so "above the line" means the same thing
-/// in both pictures. `null` with fewer than two points: one point is a
-/// value, not a trend.
-export function sparkGeometry(history, domain, { width = 240, height = 30 } = {}) {
-  if (!history || history.length < 2 || !domain) return null;
+/// in both pictures. `points` are `seriesPoints`' `{day, value}`: x is the
+/// day, spread from the first to the last, so a missing day is space on the
+/// axis rather than squeezed out, and the line breaks there -- `segments`
+/// holds one polyline per unbroken run of days, and a lone day between two
+/// gaps is a segment of one (drawn as a dot). `null` with fewer than two
+/// points: one point is a value, not a trend.
+export function sparkGeometry(points, domain, { width = 240, height = 30 } = {}) {
+  if (!points || points.length < 2 || !domain) return null;
   const [lo, hi] = domain;
   const y = (v) => height - ((Math.min(Math.max(v, lo), hi) - lo) / (hi - lo || 1)) * height;
-  const step = width / (history.length - 1);
-  return {
-    width,
-    height,
-    points: history.map((v, i) => `${(i * step).toFixed(1)},${y(v).toFixed(1)}`).join(" "),
-    y,
-  };
+  const first = points[0].day;
+  const span = points[points.length - 1].day - first || 1;
+  const x = (day) => ((day - first) / span) * width;
+  const segments = [];
+  let run = [];
+  for (let i = 0; i < points.length; i++) {
+    if (i > 0 && points[i].day - points[i - 1].day > 1) { segments.push(run); run = []; }
+    run.push(`${x(points[i].day).toFixed(1)},${y(points[i].value).toFixed(1)}`);
+  }
+  segments.push(run);
+  return { width, height, segments, count: points.length, days: span + 1, y };
 }
 
 // ---------------------------------------------------------------- tradeoffs
@@ -418,20 +446,21 @@ export function tradeoffMatrix(scopeQuality) {
   return { axes, cells, count: ((scopeQuality && scopeQuality.tradeoffs) || []).length };
 }
 
-/// Where a trade-off's `decision` leads. A knowledge page (`knowledge/x.md`,
-/// `.factory/knowledge/x.md`, or a bare `x.md`) deep-links into the
-/// Knowledge tab by its page id -- the vault-relative path without `.md`,
-/// `knowledge.rs`'s own definition; an `http(s)` URL opens as itself; any
-/// other text is shown as it was written, never guessed into a link.
+/// Where a trade-off's `decision` leads. A knowledge-vault page --
+/// `knowledge/x.md` or `.factory/knowledge/x.md`, the vault being
+/// `.factory/knowledge/` -- deep-links into the Knowledge tab by its page
+/// id (the vault-relative path without `.md`, `knowledge.rs`'s own
+/// definition); an `http(s)` URL opens as itself; anything else, a bare
+/// `docs/adr.md` included, is shown as it was written and never guessed
+/// into a link to a page that may not be in the vault at all.
 export function decisionLink(decision, scope) {
   if (!decision) return null;
   const d = String(decision).trim();
   if (/^https?:\/\//i.test(d)) return { kind: "external", label: d, href: d };
-  if (/\.md$/i.test(d)) {
-    const id = d.replace(/^\.\//, "").replace(/^\.factory\//, "").replace(/^knowledge\//, "").replace(/\.md$/i, "");
-    if (!id) return { kind: "text", label: d, href: null };
-    const tail = nodeTail(id).map(encodeURIComponent).join("/");
-    return { kind: "knowledge", label: id, href: `${routeHref(scope, "knowledge")}/${tail}` };
+  const m = /^(?:\.\/)?(?:\.factory\/)?knowledge\/(.+)\.md$/i.exec(d);
+  if (m && m[1]) {
+    const tail = nodeTail(m[1]).map(encodeURIComponent).join("/");
+    return { kind: "knowledge", label: m[1], href: `${routeHref(scope, "knowledge")}/${tail}` };
   }
   return { kind: "text", label: d, href: null };
 }

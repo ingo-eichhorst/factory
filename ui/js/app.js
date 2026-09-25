@@ -586,6 +586,9 @@ boot();
 /// What an event means for what is on screen. This is the one place that knows
 /// every view, which is why it lives in the wiring and not in the transport.
 function onEvent(ev) {
+  // Read before the switch below overwrites it: the Quality tab reloads on a
+  // `quality=` task's status *changing*, not on every progress update.
+  const priorTask = ev.task ? state.tasks.get(ev.task.id) : null;
   recordEvent(ev);
   if (ev.type.startsWith("workflow_")) acceptWorkflowEvent(ev);
 
@@ -684,12 +687,15 @@ function onEvent(ev) {
   // when a fitness function's verdict lands and a production metric moves
   // (not every `run_updated` -- a run reporting progress changes nothing a
   // scenario reads); and a task carrying a `quality=` label appearing,
-  // settling or going away, which is `open_tasks` changing under a
-  // scenario's "Create task". A deleted task's event carries only its id, so
-  // any deletion reloads -- rare enough not to be worth telling apart.
+  // changing status or going away, which is `open_tasks` changing under a
+  // scenario's "Create task" -- not every `task_updated` it sends, most of
+  // which are progress. A deleted task's event carries only its id, so any
+  // deletion reloads -- rare enough not to be worth telling apart.
+  const qualityTask = ev.task && ev.task.labels && ev.task.labels.quality;
   if (state.tab === "quality" && (ev.type === "quality_changed"
       || (ev.type === "run_updated" && TERMINAL.includes(ev.run.status))
-      || ((ev.type === "task_created" || ev.type === "task_updated") && ev.task.labels && ev.task.labels.quality)
+      || (ev.type === "task_created" && qualityTask)
+      || (ev.type === "task_updated" && qualityTask && (!priorTask || priorTask.status !== ev.task.status))
       || ev.type === "task_deleted")) {
     reloadQuality();
   }
