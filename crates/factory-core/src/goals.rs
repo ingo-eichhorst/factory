@@ -284,6 +284,20 @@ pub enum FindingKind {
     /// An `aligns_to` chain loops back on itself (directly, or through
     /// other objectives) instead of terminating.
     CyclicAlignsTo,
+    /// A cycle, objective, key-result, or roadmap-item id is not
+    /// `dataset::is_slug`-shaped (`[a-z0-9][a-z0-9-]*`). Every one of
+    /// these ids is later named from outside its own file -- a check-in's
+    /// [`KrRef`], a task's `goal=<objective>/<kr>` label, `aligns_to`, a
+    /// roadmap item's `objectives` -- and a badly-shaped one can never be
+    /// matched by any of them, so it never becomes anything but a vanity
+    /// entry no evidence can ever reach.
+    BadIdShape,
+    /// A key result's `baseline`/`target` move the opposite way from its
+    /// metric's [`metrics::Better`] -- e.g. a `scrap_rate` (lower is
+    /// better) key result with `baseline: 0.05, target: 0.11`, which asks
+    /// to make the number worse. Only checked for a metric-backed key
+    /// result: a `manual` one has no `Better` to contradict.
+    WrongDirection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,11 +411,16 @@ pub fn load(dir: &Path) -> GoalsCatalogue {
     GoalsCatalogue { direction, cycles, findings }
 }
 
-fn check_metric(id: &MetricId, subject: &str, what: &str, findings: &mut Vec<Finding>) {
+/// Resolves `id`, pushing an `UnknownMetric`/`UnavailableMetric` finding and
+/// returning `None` if it can't be; `Some` the metric's own definition
+/// otherwise, for a caller (the key-result direction check below) that
+/// needs more than just whether it resolved.
+fn check_metric(id: &MetricId, subject: &str, what: &str, findings: &mut Vec<Finding>) -> Option<metrics::MetricDef> {
     match metrics::resolve(id) {
-        Ok(_) => {}
+        Ok(def) => Some(def),
         Err(MetricError::Unknown(_)) => {
             findings.push(finding(FindingKind::UnknownMetric, subject, format!("{what} names unknown metric {id}")));
+            None
         }
         Err(MetricError::Unavailable { reason, .. }) => {
             findings.push(finding(
@@ -409,7 +428,22 @@ fn check_metric(id: &MetricId, subject: &str, what: &str, findings: &mut Vec<Fin
                 subject,
                 format!("{what} names metric {id} which is not available yet: {reason}"),
             ));
+            None
         }
+    }
+}
+
+/// `dataset::is_slug`-shaped, or a [`FindingKind::BadIdShape`] naming
+/// `what` and the offending `id`. See that variant's own doc comment for
+/// why: every one of these ids is later matched from outside its own
+/// file.
+fn check_id_shape(id: &str, subject: &str, what: &str, findings: &mut Vec<Finding>) {
+    if !is_slug(id) {
+        findings.push(finding(
+            FindingKind::BadIdShape,
+            subject,
+            format!("{what} {id:?} is not shaped like dataset::is_slug ([a-z0-9][a-z0-9-]*)"),
+        ));
     }
 }
 
@@ -425,6 +459,8 @@ fn validate_direction(direction: &Direction, findings: &mut Vec<Finding>) {
 
 fn validate_cycle(cycle: &Cycle, findings: &mut Vec<Finding>) {
     let subject = format!("{}.yaml", cycle.id());
+
+    check_id_shape(cycle.id(), &subject, "cycle id", findings);
 
     if cycle.starts_on() > cycle.ends_on() {
         findings.push(finding(
@@ -446,6 +482,8 @@ fn validate_cycle(cycle: &Cycle, findings: &mut Vec<Finding>) {
     let mut seen_objective_ids: BTreeSet<&str> = BTreeSet::new();
 
     for objective in &cycle.objectives {
+        check_id_shape(&objective.id, &subject, "objective id", findings);
+
         if !seen_objective_ids.insert(objective.id.as_str()) {
             findings.push(finding(
                 FindingKind::DuplicateId,
@@ -474,6 +512,8 @@ fn validate_cycle(cycle: &Cycle, findings: &mut Vec<Finding>) {
 
         let mut seen_kr_ids: BTreeSet<&str> = BTreeSet::new();
         for kr in &objective.key_results {
+            check_id_shape(&kr.id, &subject, "key result id", findings);
+
             if !seen_kr_ids.insert(kr.id.as_str()) {
                 findings.push(finding(
                     FindingKind::DuplicateId,
@@ -500,7 +540,28 @@ fn validate_cycle(cycle: &Cycle, findings: &mut Vec<Finding>) {
             if kr.metric.is_some() {
                 let what = format!("{}/{}", objective.id, kr.id);
                 match kr.bound_metric(&objective.id) {
-                    Some(bound) => check_metric(&bound, &subject, &what, findings),
+                    Some(bound) => {
+                        if let Some(def) = check_metric(&bound, &subject, &what, findings) {
+                            // Only a computed metric has a `Better` to
+                            // contradict -- a manual key result (excluded
+                            // by the `kr.metric.is_some()` guard above) has
+                            // none, so it is never checked here.
+                            let wrong_direction = match def.better {
+                                metrics::Better::Higher => kr.target < kr.baseline,
+                                metrics::Better::Lower => kr.target > kr.baseline,
+                            };
+                            if wrong_direction {
+                                findings.push(finding(
+                                    FindingKind::WrongDirection,
+                                    &subject,
+                                    format!(
+                                        "{what}'s baseline {} -> target {} moves the wrong way for {bound} (better: {:?})",
+                                        kr.baseline, kr.target, def.better
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                     None => findings.push(finding(
                         FindingKind::UnknownMetric,
                         &subject,
@@ -517,6 +578,8 @@ fn validate_cycle(cycle: &Cycle, findings: &mut Vec<Finding>) {
 
     let mut seen_roadmap_ids: BTreeSet<&str> = BTreeSet::new();
     for item in &cycle.roadmap {
+        check_id_shape(&item.id, &subject, "roadmap item id", findings);
+
         if !seen_roadmap_ids.insert(item.id.as_str()) {
             findings.push(finding(
                 FindingKind::DuplicateId,
@@ -1181,6 +1244,80 @@ mod tests {
         cleanup(&dir);
     }
 
+    // -- WrongDirection ----------------------------------------------------
+
+    #[test]
+    fn a_lower_is_better_metric_with_a_rising_target_is_a_wrong_direction_finding() {
+        // scrap_rate is lower-is-better; baseline 0.05 -> target 0.11 asks
+        // to make it worse.
+        let dir = tempdir("wrong-direction-lower");
+        write(
+            &dir,
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives:\n\
+             \x20\x20- id: obj\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20key_results:\n\
+             \x20\x20\x20\x20\x20\x20- {id: kr, title: K, kind: aspirational, metric: scrap_rate, baseline: 0.05, target: 0.11}\n",
+        );
+        let catalogue = load(&dir);
+        let f = catalogue.findings.iter().find(|f| f.kind == FindingKind::WrongDirection).unwrap();
+        assert!(f.detail.contains("obj/kr"), "{}", f.detail);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_higher_is_better_metric_with_a_falling_target_is_a_wrong_direction_finding() {
+        // first_pass_yield is higher-is-better; baseline 0.9 -> target 0.5
+        // asks to make it worse.
+        let dir = tempdir("wrong-direction-higher");
+        write(
+            &dir,
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives:\n\
+             \x20\x20- id: obj\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20key_results:\n\
+             \x20\x20\x20\x20\x20\x20- {id: kr, title: K, kind: aspirational, metric: first_pass_yield, baseline: 0.9, target: 0.5}\n",
+        );
+        let catalogue = load(&dir);
+        assert!(catalogue.findings.iter().any(|f| f.kind == FindingKind::WrongDirection));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn the_right_direction_for_either_kind_of_metric_is_no_finding() {
+        let dir = tempdir("right-direction");
+        write(
+            &dir,
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives:\n\
+             \x20\x20- id: obj\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20key_results:\n\
+             \x20\x20\x20\x20\x20\x20- {id: higher, title: H, kind: committed, metric: first_pass_yield, baseline: 0.7, target: 0.9}\n\
+             \x20\x20\x20\x20\x20\x20- {id: lower, title: L, kind: aspirational, metric: scrap_rate, baseline: 0.11, target: 0.05}\n",
+        );
+        let catalogue = load(&dir);
+        assert!(!catalogue.findings.iter().any(|f| f.kind == FindingKind::WrongDirection), "{:?}", catalogue.findings);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_manual_key_result_is_never_checked_for_direction() {
+        // No metric means no Better to contradict, however baseline and
+        // target are ordered.
+        let dir = tempdir("wrong-direction-manual");
+        write(
+            &dir,
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives:\n\
+             \x20\x20- id: obj\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20key_results:\n\
+             \x20\x20\x20\x20\x20\x20- {id: kr, title: K, kind: aspirational, manual: true, baseline: 12, target: 0}\n",
+        );
+        let catalogue = load(&dir);
+        assert!(!catalogue.findings.iter().any(|f| f.kind == FindingKind::WrongDirection), "{:?}", catalogue.findings);
+        cleanup(&dir);
+    }
+
     // -- vanity / conflicting key results -----------------------------------
 
     #[test]
@@ -1259,6 +1396,88 @@ mod tests {
         write(&dir, "2026-q4.yaml", &format!("{MINIMAL_CYCLE}roadmap:\n\x20\x20- {{id: item, title: I, lane: now, objectives: [nope]}}\n"));
         let catalogue = load(&dir);
         assert!(catalogue.findings.iter().any(|f| f.kind == FindingKind::UnknownRoadmapObjective));
+        cleanup(&dir);
+    }
+
+    // -- BadIdShape ----------------------------------------------------
+
+    #[test]
+    fn a_non_slug_cycle_id_is_a_bad_id_shape_finding() {
+        let dir = tempdir("bad-cycle-id");
+        // The stem must still match `cycle.id`, so the file name is the
+        // same not-a-slug string -- `is_slug` forbids the underscore.
+        write(&dir, "2026_q4.yaml", "cycle: { id: 2026_q4, from: 2026-10-01, to: 2026-12-31 }\nobjectives: []\n");
+        let catalogue = load(&dir);
+        let f = catalogue.findings.iter().find(|f| f.kind == FindingKind::BadIdShape).unwrap();
+        assert!(f.detail.contains("cycle id"), "{}", f.detail);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_non_slug_objective_id_is_a_bad_id_shape_finding() {
+        let dir = tempdir("bad-objective-id");
+        write(
+            &dir,
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives: [{id: Ship_Compliant, title: A, key_results: [{id: kr, title: K, kind: committed, manual: true, baseline: 0, target: 1}]}]\n",
+        );
+        let catalogue = load(&dir);
+        let f = catalogue.findings.iter().find(|f| f.kind == FindingKind::BadIdShape).unwrap();
+        assert!(f.detail.contains("objective id"), "{}", f.detail);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_non_slug_key_result_id_is_a_bad_id_shape_finding() {
+        let dir = tempdir("bad-kr-id");
+        write(
+            &dir,
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives: [{id: obj, title: A, key_results: [{id: Bad_Id, title: K, kind: committed, manual: true, baseline: 0, target: 1}]}]\n",
+        );
+        let catalogue = load(&dir);
+        let f = catalogue.findings.iter().find(|f| f.kind == FindingKind::BadIdShape).unwrap();
+        assert!(f.detail.contains("key result id"), "{}", f.detail);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_non_slug_roadmap_item_id_is_a_bad_id_shape_finding() {
+        let dir = tempdir("bad-roadmap-id");
+        write(&dir, "2026-q4.yaml", &format!("{MINIMAL_CYCLE}roadmap:\n\x20\x20- {{id: Bad_Item, title: I, lane: now, objectives: [obj]}}\n"));
+        let catalogue = load(&dir);
+        let f = catalogue.findings.iter().find(|f| f.kind == FindingKind::BadIdShape).unwrap();
+        assert!(f.detail.contains("roadmap item id"), "{}", f.detail);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_bad_id_shape_makes_a_bare_goal_tasks_done_metric_unbindable_but_never_panics() {
+        // The exact failure mode `BadIdShape` is meant to catch early: a
+        // badly-shaped key-result id can never be matched by a check-in or
+        // a `goal=` label, and `goal_tasks_done`'s auto-binding can't even
+        // construct a valid metric id from it.
+        let dir = tempdir("bad-id-goal-tasks-done");
+        write(
+            &dir,
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives: [{id: obj, title: A, key_results: [{id: Bad_Id, title: K, kind: committed, metric: goal_tasks_done, baseline: 0, target: 1}]}]\n",
+        );
+        let catalogue = load(&dir);
+        assert!(catalogue.findings.iter().any(|f| f.kind == FindingKind::BadIdShape));
+        assert!(catalogue.findings.iter().any(|f| f.kind == FindingKind::UnknownMetric));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn slug_shaped_ids_throughout_are_no_bad_id_shape_finding() {
+        let dir = tempdir("good-id-shapes");
+        write(&dir, "2026-q4.yaml", &format!("{MINIMAL_CYCLE}roadmap:\n\x20\x20- {{id: item-1, title: I, lane: now, objectives: [obj]}}\n"));
+        let catalogue = load(&dir);
+        assert!(!catalogue.findings.iter().any(|f| f.kind == FindingKind::BadIdShape), "{:?}", catalogue.findings);
         cleanup(&dir);
     }
 
