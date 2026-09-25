@@ -759,7 +759,10 @@ pub enum Payload {
     /// The answer to `Request::ScenarioWhatIf` -- see `ScenarioWhatIfResult`.
     ScenarioWhatIf { result: ScenarioWhatIfResult },
     /// The L4 Operations tab -- see `factory_core::operations::OperationsReport`.
-    Operations { report: crate::operations::OperationsReport },
+    /// Boxed: the report is several times the size of every other payload,
+    /// and would otherwise set the size of every `Response` (serde writes a
+    /// box as what it holds).
+    Operations { report: Box<crate::operations::OperationsReport> },
 }
 
 /// A request plus who is making it.

@@ -702,7 +702,7 @@ impl Engine {
             // `TaskUpdated`, `RunUpdated`, `TaskEntry` or `AgentUpdated`
             // already, and a viewer re-reads on those.
             Request::Operations { scope, window } => Ok(Payload::Operations {
-                report: self.operations_report(scope.as_deref(), window).await?,
+                report: Box::new(self.operations_report(scope.as_deref(), window).await?),
             }),
             // No event: promote creates ordinary tasks through `Engine::create`,
             // which already publishes `Event::TaskCreated` for each one --

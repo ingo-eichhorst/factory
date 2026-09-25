@@ -982,13 +982,17 @@ struct ReasonBody {
 /// The body of an action that may say why, and may say nothing -- read by
 /// hand rather than through `Option<Json<_>>`, which refuses the empty body
 /// the web UI sends with its JSON content type on every POST.
-fn reason_of(body: &[u8]) -> std::result::Result<Option<String>, AxumResponse> {
+fn reason_of(body: &[u8]) -> std::result::Result<Option<String>, String> {
     if body.iter().all(u8::is_ascii_whitespace) {
         return Ok(None);
     }
     serde_json::from_slice::<ReasonBody>(body)
         .map(|b| b.reason)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("not a reason body: {e}")).into_response())
+        .map_err(|e| format!("not a reason body: {e}"))
+}
+
+fn refused(why: String) -> AxumResponse {
+    (StatusCode::BAD_REQUEST, why).into_response()
 }
 
 async fn run_task(
@@ -998,7 +1002,7 @@ async fn run_task(
 ) -> AxumResponse {
     match reason_of(&body) {
         Ok(reason) => run(&engine, Request::TaskRun { id, reason }).await,
-        Err(refused) => refused,
+        Err(why) => refused(why),
     }
 }
 
@@ -1009,7 +1013,7 @@ async fn cancel_task(
 ) -> AxumResponse {
     match reason_of(&body) {
         Ok(reason) => run(&engine, Request::TaskCancel { id, reason }).await,
-        Err(refused) => refused,
+        Err(why) => refused(why),
     }
 }
 
@@ -1021,7 +1025,7 @@ async fn skip_next_task(
 ) -> AxumResponse {
     match reason_of(&body) {
         Ok(reason) => run(&engine, Request::TaskSkipNext { id, reason }).await,
-        Err(refused) => refused,
+        Err(why) => refused(why),
     }
 }
 
