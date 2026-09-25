@@ -1592,9 +1592,10 @@ pub enum ProductionBin {
     Week,
 }
 
-/// One period of finished runs. `scrapped` and `reworked` are both read
-/// against `finished`, not tallied separately from it -- a run that fails on
-/// its second attempt is one run, counted once, in both.
+/// One period of finished runs. `scrapped`, `reworked` and `first_pass` are
+/// all read against `finished`, not tallied separately from it -- a run that
+/// fails on its second attempt is one run, counted once, in each of the
+/// fields it qualifies for.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductionBucket {
     /// The bucket's real start. Equal to the bin's own calendar boundary
@@ -1608,6 +1609,16 @@ pub struct ProductionBucket {
     pub finished: u32,
     pub scrapped: u32,
     pub reworked: u32,
+    /// A finished run that ended `done` on its first attempt -- the count
+    /// `first_pass_yield` (`first_pass / finished`) is read from. Not the
+    /// complement of `reworked`: `reworked` counts every finished run whose
+    /// own `attempt > 1` regardless of its outcome, so a task scrapped on
+    /// attempt 1 and never retried is neither reworked nor first-pass, and a
+    /// task scrapped on every attempt has `first_pass: 0` however many times
+    /// it was retried -- see `production.rs`'s module doc comment for why
+    /// `1 - reworked/finished` was the wrong formula.
+    #[serde(default)]
+    pub first_pass: u32,
     /// True when `to - from` falls short of the bin's nominal width. Decided
     /// once, here -- so a chart never has to guess whether a short bar is a
     /// quiet period or a bucket that has not finished collecting yet.

@@ -12,6 +12,15 @@
 //! * **reworked** -- a finished run with `attempt > 1`. The only rework
 //!   signal the domain has: it says a task was tried again, not that
 //!   anyone rejected anything.
+//! * **first_pass** -- a finished run whose status is `done` *and* whose
+//!   `attempt == 1`. Not `!reworked`: `reworked` is a property of the
+//!   individual run (its own `attempt`), so a task scrapped on attempt 1 and
+//!   never retried is neither reworked nor first-pass, and a task that is
+//!   scrapped on every attempt -- `first_pass_yield`'s own bug before this
+//!   field existed -- has `first_pass: 0` regardless of how many times it
+//!   was retried. `1.0 - reworked/finished` reads a scrap-only run (0
+//!   reworked, all failed) as a perfect `1.0`; `first_pass/finished` reads
+//!   it as `0.0`, which is the true fact.
 //!
 //! A run carries no scope of its own. Narrowed by joining through its task,
 //! by exact name -- the way `occupancy.rs` does. The rail's tree (a scope's
@@ -178,7 +187,7 @@ fn bucket(finished: &[(&Run, DateTime<Utc>)], bin: ProductionBin, from: DateTime
         .enumerate()
         .map(|(i, (b_from, b_to))| {
             let inclusive_end = i == last;
-            let (mut count, mut scrapped, mut reworked) = (0u32, 0u32, 0u32);
+            let (mut count, mut scrapped, mut reworked, mut first_pass) = (0u32, 0u32, 0u32, 0u32);
             for (run, end) in finished {
                 let in_bucket = *end >= b_from && if inclusive_end { *end <= b_to } else { *end < b_to };
                 if !in_bucket {
@@ -191,6 +200,9 @@ fn bucket(finished: &[(&Run, DateTime<Utc>)], bin: ProductionBin, from: DateTime
                 if run.attempt > 1 {
                     reworked += 1;
                 }
+                if run.status == RunStatus::Done && run.attempt == 1 {
+                    first_pass += 1;
+                }
             }
             ProductionBucket {
                 from: b_from,
@@ -198,6 +210,7 @@ fn bucket(finished: &[(&Run, DateTime<Utc>)], bin: ProductionBin, from: DateTime
                 finished: count,
                 scrapped,
                 reworked,
+                first_pass,
                 partial: b_to - b_from < width,
             }
         })
@@ -276,12 +289,12 @@ mod tests {
     }
 
     #[test]
-    fn scrapped_and_reworked_are_read_against_finished_not_tallied_apart() {
+    fn scrapped_reworked_and_first_pass_are_read_against_finished_not_tallied_apart() {
         let from = floor_to(ProductionBin::Day, at(0));
         let now = from + Duration::hours(1);
-        let r1 = run("r1", "t1", 1, RunStatus::Done, from, Some(from + Duration::seconds(100)));
+        let r1 = run("r1", "t1", 1, RunStatus::Done, from, Some(from + Duration::seconds(100))); // first-pass
         let r2 = run("r2", "t1", 2, RunStatus::Failed, from, Some(from + Duration::seconds(200))); // reworked AND scrapped
-        let r3 = run("r3", "t1", 1, RunStatus::Cancelled, from, Some(from + Duration::seconds(300)));
+        let r3 = run("r3", "t1", 1, RunStatus::Cancelled, from, Some(from + Duration::seconds(300))); // scrapped, attempt 1, not first-pass (not done)
         let finished: Vec<(&Run, DateTime<Utc>)> = vec![
             (&r1, r1.ended_at.unwrap()),
             (&r2, r2.ended_at.unwrap()),
@@ -293,6 +306,63 @@ mod tests {
         assert_eq!(b.finished, 3);
         assert_eq!(b.scrapped, 2, "failed and cancelled are both scrap");
         assert_eq!(b.reworked, 1, "only the attempt > 1 run is rework");
+        assert_eq!(b.first_pass, 1, "only the done, attempt-1 run is first-pass");
+    }
+
+    #[test]
+    fn every_run_scrapped_is_zero_first_pass_not_a_perfect_one() {
+        // The bug this field fixes: `1.0 - reworked/finished` reads a
+        // scrap-only bucket (nothing ever reworked) as a perfect `1.0`.
+        // `first_pass` must read `0` here regardless.
+        let from = floor_to(ProductionBin::Day, at(0));
+        let now = from + Duration::hours(1);
+        let runs: Vec<Run> = (0..5)
+            .map(|i| run(&format!("r{i}"), &format!("t{i}"), 1, RunStatus::Failed, from, Some(from + Duration::seconds(i))))
+            .collect();
+        let finished: Vec<(&Run, DateTime<Utc>)> = runs.iter().map(|r| (r, r.ended_at.unwrap())).collect();
+        let buckets = bucket(&finished, ProductionBin::Day, from, now);
+        let b = &buckets[0];
+        assert_eq!(b.finished, 5);
+        assert_eq!(b.scrapped, 5);
+        assert_eq!(b.reworked, 0, "every run was its own first attempt -- none reworked");
+        assert_eq!(b.first_pass, 0, "none of them ended done, so none are first-pass");
+    }
+
+    #[test]
+    fn a_run_reworked_then_done_is_reworked_but_not_first_pass() {
+        // Attempt 1 fails, attempt 2 succeeds: the successful run is not
+        // first-pass (its own `attempt` is 2), and the failed attempt 1 is
+        // not first-pass either (it never reached `done`) -- `first_pass`
+        // is the count of runs that were *both*, not the complement of
+        // `reworked`.
+        let from = floor_to(ProductionBin::Day, at(0));
+        let now = from + Duration::hours(1);
+        let attempt1 = run("r1", "t1", 1, RunStatus::Failed, from, Some(from + Duration::seconds(10)));
+        let attempt2 = run("r2", "t1", 2, RunStatus::Done, from, Some(from + Duration::seconds(20)));
+        let finished: Vec<(&Run, DateTime<Utc>)> = vec![(&attempt1, attempt1.ended_at.unwrap()), (&attempt2, attempt2.ended_at.unwrap())];
+        let buckets = bucket(&finished, ProductionBin::Day, from, now);
+        let b = &buckets[0];
+        assert_eq!(b.finished, 2);
+        assert_eq!(b.reworked, 1, "attempt 2 is reworked");
+        assert_eq!(b.first_pass, 0, "attempt 2 is done but not attempt 1; attempt 1 is attempt 1 but not done");
+    }
+
+    #[test]
+    fn a_mixed_bucket_counts_first_pass_independently_of_scrapped_and_reworked() {
+        let from = floor_to(ProductionBin::Day, at(0));
+        let now = from + Duration::hours(1);
+        let clean = run("r1", "t1", 1, RunStatus::Done, from, Some(from + Duration::seconds(1))); // first-pass
+        let reworked_then_done = run("r2", "t2", 2, RunStatus::Done, from, Some(from + Duration::seconds(2))); // reworked, not first-pass
+        let scrapped_first_try = run("r3", "t3", 1, RunStatus::Failed, from, Some(from + Duration::seconds(3))); // scrapped, not first-pass
+        let scrapped_after_rework = run("r4", "t4", 2, RunStatus::Cancelled, from, Some(from + Duration::seconds(4))); // reworked AND scrapped
+        let runs = [&clean, &reworked_then_done, &scrapped_first_try, &scrapped_after_rework];
+        let finished: Vec<(&Run, DateTime<Utc>)> = runs.iter().map(|r| (*r, r.ended_at.unwrap())).collect();
+        let buckets = bucket(&finished, ProductionBin::Day, from, now);
+        let b = &buckets[0];
+        assert_eq!(b.finished, 4);
+        assert_eq!(b.scrapped, 2);
+        assert_eq!(b.reworked, 2);
+        assert_eq!(b.first_pass, 1, "only `clean` is both done and attempt 1");
     }
 
     #[test]
@@ -374,7 +444,7 @@ mod tests {
     fn an_empty_store_produces_full_buckets_of_zero_not_an_error() {
         let buckets = bucket(&[], ProductionBin::Day, at(0), at(5 * 24 * 3600));
         assert!(!buckets.is_empty(), "the window still has buckets to draw, just empty ones");
-        assert!(buckets.iter().all(|b| b.finished == 0 && b.scrapped == 0 && b.reworked == 0));
+        assert!(buckets.iter().all(|b| b.finished == 0 && b.scrapped == 0 && b.reworked == 0 && b.first_pass == 0));
     }
 
     #[test]

@@ -315,26 +315,27 @@ pub(crate) fn push_if_known(ids: &mut Vec<MetricId>, id: &MetricId) {
     }
 }
 
-/// Sum `finished`/`scrapped`/`reworked` over a `window`-day trailing window
-/// ending at each day in `daily` (clipped at the start of the grid, so the
-/// earliest few points are over a shorter window than `window`), and hand
-/// each sum to `calc` -- `None` skips that day's point entirely (used for a
-/// ratio with nothing finished yet to divide by) rather than fabricating a
-/// number.
+/// Sum `finished`/`scrapped`/`reworked`/`first_pass` over a `window`-day
+/// trailing window ending at each day in `daily` (clipped at the start of
+/// the grid, so the earliest few points are over a shorter window than
+/// `window`), and hand each sum to `calc` -- `None` skips that day's point
+/// entirely (used for a ratio with nothing finished yet to divide by)
+/// rather than fabricating a number.
 fn rolling_series<F>(daily: &[factory_core::protocol::ProductionBucket], window: usize, calc: F) -> Vec<(NaiveDate, f64)>
 where
-    F: Fn(u32, u32, u32) -> Option<f64>,
+    F: Fn(u32, u32, u32, u32) -> Option<f64>,
 {
     let mut points = Vec::new();
     for i in 0..daily.len() {
         let start = i.saturating_sub(window.saturating_sub(1));
-        let (mut finished, mut scrapped, mut reworked) = (0u32, 0u32, 0u32);
+        let (mut finished, mut scrapped, mut reworked, mut first_pass) = (0u32, 0u32, 0u32, 0u32);
         for bucket in &daily[start..=i] {
             finished += bucket.finished;
             scrapped += bucket.scrapped;
             reworked += bucket.reworked;
+            first_pass += bucket.first_pass;
         }
-        if let Some(value) = calc(finished, scrapped, reworked) {
+        if let Some(value) = calc(finished, scrapped, reworked, first_pass) {
             points.push((daily[i].from.date_naive(), value));
         }
     }
@@ -344,18 +345,23 @@ where
 fn throughput_week_series(daily: &[factory_core::protocol::ProductionBucket]) -> MetricSeries {
     MetricSeries {
         id: MetricId::new("throughput_week").expect("fixed id"),
-        points: rolling_series(daily, 7, |finished, _, _| Some(f64::from(finished))),
+        points: rolling_series(daily, 7, |finished, _, _, _| Some(f64::from(finished))),
     }
 }
 
+/// `first_pass / finished`, never `1 - reworked / finished` -- a bucket
+/// where nothing was ever retried but nothing ever succeeded either
+/// (`reworked: 0`, `first_pass: 0`) is a real `0.0`, not a manufactured
+/// `1.0`. See `production.rs`'s module doc comment for `first_pass`'s own
+/// definition.
 fn first_pass_yield_series(daily: &[factory_core::protocol::ProductionBucket]) -> MetricSeries {
     MetricSeries {
         id: MetricId::new("first_pass_yield").expect("fixed id"),
-        points: rolling_series(daily, 28, |finished, _, reworked| {
+        points: rolling_series(daily, 28, |finished, _, _, first_pass| {
             if finished == 0 {
                 None
             } else {
-                Some(1.0 - f64::from(reworked) / f64::from(finished))
+                Some(f64::from(first_pass) / f64::from(finished))
             }
         }),
     }
@@ -364,7 +370,7 @@ fn first_pass_yield_series(daily: &[factory_core::protocol::ProductionBucket]) -
 fn scrap_rate_series(daily: &[factory_core::protocol::ProductionBucket]) -> MetricSeries {
     MetricSeries {
         id: MetricId::new("scrap_rate").expect("fixed id"),
-        points: rolling_series(daily, 28, |finished, scrapped, _| {
+        points: rolling_series(daily, 28, |finished, scrapped, _, _| {
             if finished == 0 {
                 None
             } else {
@@ -532,9 +538,12 @@ mod tests {
     #[tokio::test]
     async fn throughput_yield_and_scrap_are_computed_from_real_runs() {
         let engine = test_engine(Vec::new());
-        // One clean finish, one reworked finish (a second attempt on the
-        // same task), one scrapped finish (failed) -- three finished runs
-        // total, one reworked, one scrapped.
+        // One clean finish (done, attempt 1 -- first-pass), one task reworked
+        // then done (attempt 1 done, attempt 2 also done -- attempt 1 is
+        // still first-pass, attempt 2 is reworked but not first-pass since
+        // its own attempt is 2), one scrapped finish (failed, attempt 1 --
+        // not first-pass, never reached done) -- four finished runs total,
+        // two first-pass, one reworked, one scrapped.
         finished_run(&engine, "clean", RunStatus::Done, chrono::Duration::hours(1)).await;
         finished_run(&engine, "reworked", RunStatus::Done, chrono::Duration::hours(2)).await;
         finished_run(&engine, "reworked", RunStatus::Done, chrono::Duration::hours(1)).await;
@@ -550,7 +559,7 @@ mod tests {
 
         let get = |id: &str| computed.values.iter().find(|v| v.id.as_str() == id).unwrap().clone();
         assert_eq!(get("throughput_week").value, Some(4.0), "four finished runs in the trailing week");
-        assert_eq!(get("first_pass_yield").value, Some(1.0 - 1.0 / 4.0), "one of four finished was reworked");
+        assert_eq!(get("first_pass_yield").value, Some(2.0 / 4.0), "two of four finished runs were done on attempt 1");
         assert_eq!(get("scrap_rate").value, Some(1.0 / 4.0), "one of four finished was scrapped");
 
         // The series' own last point always equals the metric's value.
@@ -559,6 +568,35 @@ mod tests {
             let last = series.points.last().unwrap().1;
             assert_eq!(Some(last), get(id).value, "{id}'s series must end on its own value");
         }
+    }
+
+    #[tokio::test]
+    async fn every_run_scrapped_is_a_zero_first_pass_yield_not_a_perfect_one() {
+        // The bug `first_pass` (production.rs) exists to fix: five finished
+        // runs, all failed on their only attempt -- `1 - reworked/finished`
+        // would read this as `1.0` (nothing was ever reworked); the true
+        // fact is `0.0` (nothing ever succeeded on the first try either).
+        let engine = test_engine(Vec::new());
+        for i in 0..5 {
+            finished_run(&engine, &format!("scrapped-{i}"), RunStatus::Failed, chrono::Duration::hours(1)).await;
+        }
+        let now = Utc::now();
+        let computed = engine.metrics(&[MetricId::new("first_pass_yield").unwrap()], now).await.unwrap();
+        assert_eq!(computed.values[0].value, Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn a_task_reworked_then_done_does_not_count_as_first_pass() {
+        // Attempt 1 fails, attempt 2 (the same task) succeeds: the run that
+        // actually ended `done` is not first-pass, because it is not
+        // attempt 1 -- `first_pass_yield` must not credit a task for
+        // succeeding only after being retried.
+        let engine = test_engine(Vec::new());
+        finished_run(&engine, "retried", RunStatus::Failed, chrono::Duration::hours(2)).await;
+        finished_run(&engine, "retried", RunStatus::Done, chrono::Duration::hours(1)).await;
+        let now = Utc::now();
+        let computed = engine.metrics(&[MetricId::new("first_pass_yield").unwrap()], now).await.unwrap();
+        assert_eq!(computed.values[0].value, Some(0.0), "two finished runs, neither of them a done attempt 1");
     }
 
     #[tokio::test]

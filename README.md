@@ -780,7 +780,7 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | id | means | source |
 |---|---|---|
 | `throughput_week` | finished runs, trailing 7 days | `production.rs`'s daily grid |
-| `first_pass_yield` | `1 − reworked/finished`, trailing 28 days | `production.rs`'s daily grid |
+| `first_pass_yield` | `first_pass/finished` (done on attempt 1, over finished), trailing 28 days | `production.rs`'s daily grid |
 | `scrap_rate` | `scrapped/finished`, trailing 28 days | `production.rs`'s daily grid |
 | `compliance.<framework>` | share of counted controls satisfied, attested, or n/a | `policy_report(None)`'s subtree rollup |
 | `open_controls.<framework>` | count of counted controls still open or stale | `policy_report(None)`'s subtree rollup |
