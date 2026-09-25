@@ -10,6 +10,7 @@ import {
   bandLabel,
   checkinBody,
   connectorPath,
+  cycleOptionLabel,
   cycleProgress,
   danglingAlignsTo,
   defaultCycleId,
@@ -246,6 +247,11 @@ test("defaultCycleId prefers current, then the soonest future, then the most rec
   );
   assert.equal(defaultCycleId([]), null);
   assert.equal(defaultCycleId(null), null);
+});
+
+test("cycleOptionLabel names id, status and a rounded percent score, or unscored", () => {
+  assert.equal(cycleOptionLabel({ id: "2026-q3", status: "current", score: 0.479 }), "2026-q3 — current — 48%");
+  assert.equal(cycleOptionLabel({ id: "2026-q5", status: "future", score: null }), "2026-q5 — future — unscored");
 });
 
 test("cycleProgress reads elapsed as a percent and scores as the mean of every scored key result, unscored excluded", () => {

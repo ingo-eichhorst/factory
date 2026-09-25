@@ -56,6 +56,14 @@ export function defaultCycleId(cycles) {
   return list[0].id;
 }
 
+/// The cycle switcher's own option label -- id, status and score in one
+/// line, so a person can tell past/current/future and how it is doing apart
+/// without opening it first.
+export function cycleOptionLabel(cycleSummary) {
+  const score = cycleSummary.score === null || cycleSummary.score === undefined ? "unscored" : `${Math.round(cycleSummary.score * 100)}%`;
+  return `${cycleSummary.id} — ${cycleSummary.status} — ${score}`;
+}
+
 /// The cycle progress bar's two figures: how much of the calendar window has
 /// elapsed, and the mean score across every scored key result (committed and
 /// aspirational together -- the same "unscored, not zero" mean

@@ -1346,3 +1346,154 @@ button.linklike:hover { color: var(--signal); }
 }
 .pol-finding-group ul { margin: 0; padding-left: 18px; }
 .pol-finding-group li { font-size: 12px; color: var(--ink-2); margin: 3px 0; }
+
+/* ================================================================ L6 goals:
+   vision, mission and objectives as a strategy map, a roadmap, an orbit and
+   a table (#99 slice 3). Every colour and font comes from the theme tokens
+   at the top of this file, so the tab reads right in both themes without a
+   colour of its own -- the one exception is `--obj-color`, an inline custom
+   property `goals.js` sets per card from `objectiveColorVar`'s own fixed
+   `--t1`..`--t7` palette, already identical in both themes. */
+
+.goal-header { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 14px; border-bottom: 1px solid var(--line-soft); margin-bottom: 14px; }
+.goal-vision { font: 600 19px/1.35 var(--cond); color: var(--ink); max-width: 900px; }
+.goal-mission { font: 400 13px/1.5 var(--sans); color: var(--ink-2); max-width: 900px; }
+.goal-values { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.goal-chip {
+  font: 500 10.5px/1 var(--sans); color: var(--ink-2); background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 12px; padding: 4px 10px;
+}
+.goal-cycle-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.goal-cycle-row label {
+  margin: 0; font: 600 9.5px/1 var(--cond); letter-spacing: .13em; text-transform: uppercase; color: var(--faint);
+}
+.goal-cycle-row select { width: auto; min-width: 220px; }
+.goal-progress { flex: 1 1 240px; min-width: 200px; display: flex; flex-direction: column; gap: 4px; }
+.goal-bar-label { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--muted); }
+.goal-bar { position: relative; height: 8px; border-radius: 4px; background: var(--sunk); border: 1px solid var(--line-soft); overflow: visible; }
+.goal-bar-fill { position: absolute; inset: 0; width: 0; border-radius: 4px; background: var(--signal); transition: width 900ms ease; }
+.goal-bar-marker {
+  position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--wait);
+  transform: translateX(-1px); transition: left 900ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .goal-bar-fill, .goal-bar-marker { transition: none; }
+}
+
+/* -------------------------------------------------------------- map view */
+.goal-map { display: flex; flex-direction: column; gap: 18px; }
+.goal-northstar-row { display: flex; align-items: stretch; gap: 12px; flex-wrap: wrap; }
+.goal-ns-box {
+  background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--lvl6);
+  border-radius: 4px; padding: 10px 14px; min-width: 220px;
+}
+.goal-ns-value { font: 600 20px/1.2 var(--cond); color: var(--ink); margin-top: 2px; }
+.goal-ns-id { font: 400 11px/1.4 var(--mono); color: var(--faint); }
+.goal-ns-why { margin-top: 4px; max-width: 320px; }
+.goal-ns-arrow { align-self: center; font-size: 20px; color: var(--faint); }
+.goal-inputs { display: flex; flex-wrap: wrap; gap: 8px; align-content: flex-start; }
+.goal-input-box {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+  padding: 7px 10px; min-width: 120px;
+}
+.goal-input-id { font: 400 10px/1.3 var(--mono); color: var(--faint); }
+.goal-input-value { font: 600 14px/1.3 var(--cond); color: var(--ink); margin-top: 2px; }
+
+.goal-layers-wrap { position: relative; }
+.goal-connectors { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; overflow: visible; }
+.goal-connector { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.goal-layer { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 20px; }
+.goal-layer:last-child { margin-bottom: 0; }
+.goal-obj {
+  flex: 1 1 320px; min-width: 260px; background: var(--panel); border: 1px solid var(--line);
+  border-left: 3px solid var(--obj-color, var(--line)); border-radius: 4px; padding: 10px 12px 12px;
+}
+.goal-obj-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.goal-obj-head h4 { margin: 0; font: 600 13.5px/1.3 var(--cond); color: var(--ink); }
+.goal-dangling { font-style: italic; }
+.goal-krs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.goal-kr {
+  flex: 1 1 190px; min-width: 170px; display: flex; align-items: center; gap: 8px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+  padding: 8px 10px; cursor: pointer; text-align: left; font: inherit; color: inherit;
+}
+.goal-kr:hover { border-color: var(--signal); }
+.goal-kr:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
+.goal-kr-ring { flex: 0 0 auto; }
+.goal-ring-track { fill: none; stroke: var(--line-soft); stroke-width: 4; }
+.goal-ring-fill { fill: none; stroke-width: 4; stroke-linecap: round; transition: stroke-dashoffset 900ms ease; }
+@media (prefers-reduced-motion: reduce) {
+  .goal-ring-fill { transition: none; }
+}
+.goal-kr-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.goal-kr-title { font: 500 12px/1.35 var(--sans); color: var(--ink); }
+.goal-kr-source { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.goal-spark { display: block; width: 74px; height: 20px; margin-top: 3px; }
+.goal-no-history { display: block; margin-top: 3px; font-style: italic; }
+
+.goal-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 16px; font-size: 11px; color: var(--muted); }
+.goal-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.goal-legend-ring { display: inline-block; width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--ink-2); }
+.goal-legend-dashed { border-style: dashed; }
+
+/* Bands: the four scores a key result's ring and badge can carry -- an
+   extension of the shared `.badge.s-*` convention (`.s-satisfied` etc.,
+   above), not a new one. */
+.s-green { color: var(--run); border-color: transparent; background: var(--run-wash); }
+.s-yellow { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
+.s-red { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+.s-unscored { color: var(--muted); }
+
+/* ---------------------------------------------------------- roadmap view
+   Now / Next / Later lanes, the same swimlane shape as the tasks board's
+   `.kbcols`/`.kbcol` above -- a roadmap item is not a task and never becomes
+   one just by looking like its card, so this keeps its own class names
+   rather than reusing `.kbc` and risking the two drifting apart by accident. */
+.goal-lanes { display: flex; gap: 12px; padding: 4px 0; overflow-x: auto; align-items: flex-start; }
+.goal-lane {
+  flex: 0 0 260px; display: flex; flex-direction: column; gap: 8px;
+  background: var(--panel-2); border: 1px solid var(--line); border-top: 2px solid var(--line);
+  border-radius: 4px; padding: 10px;
+}
+.goal-lane-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
+  font: 600 10px/1 var(--cond); letter-spacing: .13em; text-transform: uppercase; color: var(--faint);
+  padding-bottom: 7px; border-bottom: 1px solid var(--line);
+}
+.goal-lane-count { font: 500 10px/1 var(--mono); color: var(--muted); letter-spacing: 0; text-transform: none; }
+.goal-lane-body { display: flex; flex-direction: column; gap: 8px; min-height: 6px; }
+.goal-roadmap-card {
+  background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--obj-color, var(--line));
+  border-radius: 3px; padding: 8px 10px;
+}
+.goal-roadmap-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.goal-roadmap-card-head h4 { margin: 0; font: 600 12px/1.3 var(--cond); color: var(--ink); }
+.goal-orphan { color: var(--fault); }
+
+/* ------------------------------------------------------------- orbit view
+   A showpiece: `orbitLayout` (goals-model.js) already refuses to lay out
+   past twenty key results, so this view only ever has to draw a readable
+   wheel, never scroll one. */
+.goal-orbit-svg { display: block; width: 100%; max-width: 640px; height: auto; margin: 0 auto; }
+.goal-orbit-centre { fill: var(--ink-2); }
+.goal-orbit-centre-label {
+  font: 600 9px/1 var(--cond); letter-spacing: .12em; text-transform: uppercase; fill: var(--muted);
+}
+.goal-orbit-edge { stroke: var(--line); stroke-width: 1; }
+.goal-orbit-obj { fill: var(--panel-2); stroke: var(--signal); stroke-width: 2; }
+.goal-orbit-label { font: 500 9px/1 var(--sans); fill: var(--ink-2); text-anchor: middle; }
+.goal-orbit-kr { cursor: pointer; }
+.goal-orbit-kr:hover { opacity: .8; }
+.goal-orbit-kr:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+/* Phone width: the map's north-star row and each cascade layer stack
+   vertically instead of wrapping into narrow columns, and a key result card
+   takes the full row rather than shrinking to unreadable. */
+@media (max-width: 720px) {
+  .goal-northstar-row { flex-direction: column; }
+  .goal-ns-arrow { display: none; }
+  .goal-layer { flex-direction: column; }
+  .goal-obj { flex-basis: auto; }
+  .goal-kr { flex-basis: 100%; }
+  .goal-cycle-row { flex-direction: column; align-items: stretch; }
+}
