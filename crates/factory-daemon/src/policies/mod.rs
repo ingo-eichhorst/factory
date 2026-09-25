@@ -569,7 +569,32 @@ impl Engine {
                 scope: t.name.clone(),
                 statuses,
                 rollup: scope_rollup,
+                open_tasks: BTreeMap::new(),
             });
+        }
+
+        // One unscoped read for every open remediation task, rather than one
+        // per row -- the same read `quality_report` makes. A `policy=` label
+        // names no scope (unlike `quality=`), so the task's own scope is half
+        // the key; the store already filters on exactly that column when
+        // `policy_remediate` asks it for one scope, so the two agree.
+        if !rows.is_empty() {
+            let mut open: BTreeMap<(String, String), String> = BTreeMap::new();
+            for task in self.store.list(&TaskFilter::default()).await? {
+                if let Some(label) = open_policy_label(&task) {
+                    // Newest first: keep the one `policy_remediate`'s own
+                    // `find` would name, should two ever carry one label.
+                    open.entry((task.scope.clone(), label.to_string())).or_insert_with(|| task.id.clone());
+                }
+            }
+            for row in &mut rows {
+                for status in &row.statuses {
+                    let label = status.control.to_string();
+                    if let Some(id) = open.get(&(row.scope.clone(), label.clone())) {
+                        row.open_tasks.insert(label, id.clone());
+                    }
+                }
+            }
         }
 
         let subtree_rollup = policy::rollup(&policy::worst_across_scopes(&per_scope_statuses));
@@ -663,6 +688,7 @@ impl Engine {
             .into_iter()
             .find(|s| s.control == control)
             .ok_or_else(|| FactoryError::Other(anyhow::anyhow!("{control} evaluated to no status")))?;
+        let open_task = self.open_policy_task(&control, &scope_obj.name).await?.map(|t| t.id);
 
         Ok(PolicyControlDetail {
             control: found.control.clone(),
@@ -675,6 +701,7 @@ impl Engine {
             remediation: found.remediation.clone(),
             refs: evaluated.refs,
             status: evaluated.status,
+            open_task,
             attestations: history,
         })
     }
@@ -805,17 +832,7 @@ impl Engine {
             policy::StatusKind::Open | policy::StatusKind::Stale => {}
         }
 
-        let label = control.to_string();
-        let existing = self
-            .store
-            .list(&TaskFilter {
-                scope: Some(scope.clone()),
-                ..Default::default()
-            })
-            .await?
-            .into_iter()
-            .find(|t| !t.status.is_terminal() && t.labels.get("policy").map(String::as_str) == Some(label.as_str()));
-        if let Some(task) = existing {
+        if let Some(task) = self.open_policy_task(&control, &scope).await? {
             return Err(FactoryError::BadRequest(format!(
                 "a task to close {control} at {scope:?} is already open: {} ({:?})",
                 task.id, task.title
@@ -823,7 +840,7 @@ impl Engine {
         }
 
         let mut labels = BTreeMap::new();
-        labels.insert("policy".to_string(), label);
+        labels.insert("policy".to_string(), control.to_string());
         let new_task = NewTask {
             title: format!("Close {control}: {}", detail.title),
             instructions: policy::remediation_instructions(
@@ -838,6 +855,23 @@ impl Engine {
             ..Default::default()
         };
         self.create(new_task).await
+    }
+
+    /// The non-terminal task in `scope` labelled `policy=<control>`, if one
+    /// is open: what `policy_remediate` refuses a second task over, and what
+    /// `policy_control` reports as `open_task` (`#98`). An exact match on
+    /// the label, never a title guess.
+    async fn open_policy_task(&self, control: &ControlRef, scope: &str) -> Result<Option<Task>> {
+        let label = control.to_string();
+        Ok(self
+            .store
+            .list(&TaskFilter {
+                scope: Some(scope.to_string()),
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            .find(|t| open_policy_label(t) == Some(label.as_str())))
     }
 
     /// `Request::PolicyExport`'s data: `policy_report(scope)` plus, per row,
@@ -914,6 +948,17 @@ pub(crate) fn caller_name(caller: &Caller) -> String {
         Caller::Owner => "owner".to_string(),
         Caller::Agent { name, .. } => name.clone(),
     }
+}
+
+/// A task's `policy=` label while it is still open -- `None` once it is
+/// terminal, or when it carries no such label. The one predicate
+/// `policy_report`'s `open_tasks` and `open_policy_task` both read, so the
+/// tab's "Task open" and the remediation refusal can never disagree.
+fn open_policy_label(task: &Task) -> Option<&str> {
+    if task.status.is_terminal() {
+        return None;
+    }
+    task.labels.get("policy").map(String::as_str)
 }
 
 #[cfg(test)]
@@ -1584,6 +1629,68 @@ mod tests {
             1,
             "the refusal must never create a second task"
         );
+    }
+
+    #[tokio::test]
+    async fn the_report_and_the_control_detail_name_the_open_remediation_task_until_it_ends() {
+        // #98: after a reload the tab reads this, not a task list, to offer
+        // "Task open" instead of "Create task".
+        let engine = test_engine();
+        let control: ControlRef = "cra/b".parse().unwrap();
+
+        let before = engine.policy_report(None).await.unwrap();
+        assert!(before.rows.iter().all(|r| r.open_tasks.is_empty()), "nothing open yet");
+        assert_eq!(engine.policy_control(control.clone(), "engineering").await.unwrap().open_task, None);
+
+        let task = engine.policy_remediate(control.clone(), "engineering".to_string(), None).await.unwrap();
+
+        let report = engine.policy_report(None).await.unwrap();
+        let row = |scope: &str| report.rows.iter().find(|r| r.scope == scope).unwrap().open_tasks.clone();
+        assert_eq!(row("engineering").get("cra/b"), Some(&task.id));
+        assert_eq!(row("engineering").len(), 1, "only the control the task is labelled for");
+        // Scoped to exactly the task's own scope, like the refusal: an
+        // ancestor or a descendant still has its own gap to close.
+        assert!(row("company").is_empty(), "{:?}", row("company"));
+        assert!(row("demo-app").is_empty(), "{:?}", row("demo-app"));
+        assert!(row("sibling").is_empty(), "{:?}", row("sibling"));
+
+        let narrowed = engine.policy_report(Some("engineering")).await.unwrap();
+        assert_eq!(
+            narrowed.rows.iter().find(|r| r.scope == "engineering").unwrap().open_tasks.get("cra/b"),
+            Some(&task.id),
+            "a scope query carries it too"
+        );
+        assert_eq!(
+            engine.policy_control(control.clone(), "engineering").await.unwrap().open_task,
+            Some(task.id.clone())
+        );
+        assert_eq!(engine.policy_control(control.clone(), "company").await.unwrap().open_task, None);
+
+        // Once the task is terminal it is no longer open: the tab offers
+        // "Create task" again, and the daemon lets it.
+        engine
+            .store
+            .update(
+                &task.id,
+                &factory_core::task::TaskPatch {
+                    status: Some(factory_core::task::TaskStatus::Done),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let after = engine.policy_report(None).await.unwrap();
+        assert!(after.rows.iter().all(|r| r.open_tasks.is_empty()), "a done task is not open");
+        assert_eq!(engine.policy_control(control.clone(), "engineering").await.unwrap().open_task, None);
+        engine.policy_remediate(control, "engineering".to_string(), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_report_leaves_open_tasks_out_of_the_wire_when_there_are_none() {
+        let engine = test_engine();
+        let report = engine.policy_report(None).await.unwrap();
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json["rows"][0].get("open_tasks").is_none(), "{json}");
     }
 
     #[tokio::test]
