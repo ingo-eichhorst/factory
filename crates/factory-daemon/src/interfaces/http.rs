@@ -1632,6 +1632,23 @@ mod tests {
         let (code, body) = call(addr, "POST", "/api/tasks/nope/run", true, "not json").await;
         assert_eq!(code, 400);
         assert!(body.contains("not a reason body"), "{body}");
+        // The task form's PATCH, with and without a reason beside the
+        // patch's own fields, reaches the engine: the flattened body
+        // must not refuse what a bare `TaskPatch` took.
+        let (code, body) = call(addr, "PATCH", "/api/tasks/nope", true, r#"{"title":"x"}"#).await;
+        assert_eq!(code, 404, "{body}");
+        let (code, body) = call(
+            addr,
+            "PATCH",
+            "/api/tasks/nope",
+            true,
+            r#"{"schedule_paused":true,"schedule":{"cron":{"expr":"0 9 * * 1","timezone":"Europe/Berlin"}},"reason":"r"}"#,
+        )
+        .await;
+        assert_eq!(code, 404, "{body}");
+        let (code, body) =
+            call(addr, "PATCH", "/api/tasks/nope", true, r#"{"schedule":{"cron":"0 7 * * 1"},"clear_estimate":true}"#).await;
+        assert_eq!(code, 404, "{body}");
         // An answer's reason is not optional.
         let (code, _) = call(addr, "POST", "/api/runs/nope/answer", true, r#"{"text":"yes"}"#).await;
         assert_eq!(code, 422);
