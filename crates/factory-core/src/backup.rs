@@ -1,0 +1,895 @@
+//! L1 Backup (`#116`): what a snapshot of the instance's own state is, how
+//! long each one is kept, and what the page is told about them.
+//!
+//! Everything here is pure -- the config block, the manifest every archive
+//! carries, the wire report, and the three decisions that must never depend
+//! on a disk being there to be tested: grandfather-father-son retention
+//! ([`retain`]), how old is too old ([`age_level`]) and which honest warnings
+//! a set of facts adds up to ([`warnings`]). Taking a snapshot, verifying one
+//! and the daemon job that runs them live in `factory-daemon`'s `backup`
+//! module, which is the only place that touches a file.
+//!
+//! **What a backup is.** A consistent copy of the database (taken with
+//! `VACUUM INTO`, never a file copy -- the stores use WAL), the
+//! authored-content directories nothing in Factory regenerates, and the
+//! configs that give the instance its shape, as one
+//! `factory-backup-<instance>-<utc>.tar.zst` with a `manifest.json` naming
+//! the path, size and sha256 of every other file in it. Secrets are never
+//! read, let alone copied.
+
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+
+use crate::error::{FactoryError, Result};
+
+/// Every archive's name starts with this, then the instance's slug.
+pub const ARCHIVE_PREFIX: &str = "factory-backup-";
+/// And ends with this.
+pub const ARCHIVE_SUFFIX: &str = ".tar.zst";
+/// Written into every archive, after every file it describes -- see
+/// [`Manifest`].
+pub const MANIFEST_FILE: &str = "manifest.json";
+/// The format of [`Manifest`], bumped when a reader would need to know.
+pub const MANIFEST_VERSION: u32 = 1;
+/// Where the database copy sits inside an archive: the same path it has
+/// under the instance root, so an unpacked archive is laid out like one.
+pub const DATABASE_ENTRY: &str = ".factory/factory.sqlite";
+/// The spelling of an archive's UTC timestamp: `20260925T030000Z`.
+const STAMP_FORMAT: &str = "%Y%m%dT%H%M%SZ";
+
+/// How long past its due time a backup may be before it counts as stale: a
+/// nightly job that takes a few minutes, or a daemon restarted a little after
+/// the slot, is not a missed night.
+pub const GRACE_HOURS: i64 = 2;
+
+/// With no `schedule:`, the age a backup may reach before it counts as
+/// stale, and then as overdue. Backups then happen only when somebody asks
+/// for one, so this is only a yardstick for the page, never a trigger.
+pub const UNSCHEDULED_STALE_HOURS: i64 = 26;
+pub const UNSCHEDULED_OVERDUE_HOURS: i64 = 7 * 24;
+
+// ================================================================== config
+
+/// The root config's `infrastructure.backup` block.
+///
+/// ```yaml
+/// infrastructure:
+///   backup:
+///     destination: /Volumes/Backup/factory
+///     schedule: { cron: "0 3 * * *", timezone: Europe/Berlin }
+///     keep: { daily: 7, weekly: 4, monthly: 6 }
+///     include_logs: false
+/// ```
+///
+/// `deny_unknown_fields`, like the rest of `infrastructure:`: `encrypt_to`
+/// is v2 (`age`), and a config that asks for encryption must be refused
+/// rather than quietly given plaintext archives it believes are encrypted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupConfig {
+    /// A local path: an external disk, a NAS mount, a synced folder. Must be
+    /// absolute. Created on the first backup if it does not exist yet.
+    pub destination: PathBuf,
+    /// When the daemon takes one on its own. Without it, backups happen only
+    /// when somebody runs one -- and the page says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<BackupSchedule>,
+    #[serde(default)]
+    pub keep: Keep,
+    /// Also copy `.factory/guides/` and `.factory/logs/`: useful, not
+    /// essential, and the one part of a snapshot that may grow without bound.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_logs: bool,
+}
+
+/// A cron expression and the timezone its fields are read in, exactly as a
+/// task's schedule has them (`task::CronSchedule`); `None` is UTC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupSchedule {
+    pub cron: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+impl BackupSchedule {
+    /// The same schedule as a task would carry it, for the daemon's one
+    /// `schedule::next_after`.
+    pub fn as_task_schedule(&self) -> crate::task::Schedule {
+        crate::task::Schedule::Cron(crate::task::CronSchedule {
+            expr: self.cron.clone(),
+            timezone: self.timezone.clone(),
+        })
+    }
+
+    /// `0 3 * * * (Europe/Berlin)`.
+    pub fn describe(&self) -> String {
+        match &self.timezone {
+            Some(tz) => format!("{} ({tz})", self.cron),
+            None => format!("{} (UTC)", self.cron),
+        }
+    }
+}
+
+/// Grandfather-father-son: how many of the newest days, ISO weeks and months
+/// keep their newest snapshot. See [`retain`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Keep {
+    #[serde(default = "default_daily")]
+    pub daily: u32,
+    #[serde(default = "default_weekly")]
+    pub weekly: u32,
+    #[serde(default = "default_monthly")]
+    pub monthly: u32,
+}
+
+fn default_daily() -> u32 {
+    7
+}
+fn default_weekly() -> u32 {
+    4
+}
+fn default_monthly() -> u32 {
+    6
+}
+
+impl Default for Keep {
+    fn default() -> Self {
+        Self { daily: default_daily(), weekly: default_weekly(), monthly: default_monthly() }
+    }
+}
+
+impl BackupConfig {
+    /// The load-time refusals that need nothing but the block itself. The
+    /// cron expression and timezone are checked by the daemon at start
+    /// (`croner` and `chrono-tz` are its dependencies, not this crate's), and
+    /// whether the destination is inside the instance by the daemon too,
+    /// which is the one that knows the root.
+    pub fn validate(&self) -> Result<()> {
+        if !self.destination.is_absolute() {
+            return Err(FactoryError::BadRequest(format!(
+                "infrastructure.backup.destination {:?} must be an absolute path -- an external disk, \
+                 a NAS mount or a synced folder",
+                self.destination.display().to_string()
+            )));
+        }
+        if let Some(schedule) = &self.schedule {
+            if schedule.cron.trim().is_empty() {
+                return Err(FactoryError::BadRequest(
+                    "infrastructure.backup.schedule has no cron expression".into(),
+                ));
+            }
+        }
+        if self.keep.daily == 0 && self.keep.weekly == 0 && self.keep.monthly == 0 {
+            return Err(FactoryError::BadRequest(
+                "infrastructure.backup.keep keeps nothing: every snapshot but the newest would be deleted \
+                 after each backup. Keep at least one daily, weekly or monthly snapshot"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+// ================================================================ the files
+
+/// Which part of the instance a file in a snapshot belongs to. The include
+/// table on the page is one row per group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Group {
+    Database,
+    Config,
+    Knowledge,
+    Datasets,
+    Policies,
+    Goals,
+    Scenarios,
+    Quality,
+    Guides,
+    Logs,
+}
+
+impl Group {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Database => "database",
+            Self::Config => "config",
+            Self::Knowledge => "knowledge",
+            Self::Datasets => "datasets",
+            Self::Policies => "policies",
+            Self::Goals => "goals",
+            Self::Scenarios => "scenarios",
+            Self::Quality => "quality",
+            Self::Guides => "guides",
+            Self::Logs => "logs",
+        }
+    }
+}
+
+/// The authored-content directories under `.factory/`, each copied whole:
+/// the exception AGENTS.md makes to "everything under `.factory/` is the
+/// daemon's", because nothing regenerates them. `quality/` is here although
+/// the issue's table predates it -- AGENTS.md names it with the others.
+pub const AUTHORED: [(Group, &str, &str); 6] = [
+    (Group::Knowledge, ".factory/knowledge/", "the knowledge vault: pages and documents"),
+    (Group::Datasets, ".factory/datasets/", "benchmark datasets"),
+    (Group::Policies, ".factory/policies/", "policy catalogues, drafts included"),
+    (Group::Goals, ".factory/goals/", "direction and cycle files"),
+    (Group::Scenarios, ".factory/scenarios/", "scenario files"),
+    (Group::Quality, ".factory/quality/", "quality profiles"),
+];
+
+/// The two optional directories `include_logs: true` adds.
+pub const OPTIONAL: [(Group, &str, &str); 2] = [
+    (Group::Guides, ".factory/guides/", "the guide files Factory writes for harnesses"),
+    (Group::Logs, ".factory/logs/", "the daemon's logs"),
+];
+
+/// What a snapshot never holds, and why -- the page's exclude table, and the
+/// same rules `is_excluded` applies file by file.
+pub const EXCLUDED: [(&str, &str); 6] = [
+    (".factory/secrets.yaml", "a secret: never read, never copied"),
+    ("…/secrets/…", "anything under a secrets directory, for the same reason"),
+    (".factory/factory.sqlite-wal, -shm", "transient: the database copy is taken whole with VACUUM INTO"),
+    (".factory/worktrees/", "derivable: a run's worktree is rebuilt from its scope's repository"),
+    (".factory/factory.sock", "transient: the daemon's control socket"),
+    ("scope source code", "backed up by pushing each scope's repository to its git remote"),
+];
+
+/// Whether a file under an included directory is nonetheless left out, and
+/// why. Checked on the path relative to the instance root. A secret is never
+/// even opened: this runs before a file is read.
+pub fn is_excluded(relative: &str) -> Option<&'static str> {
+    let segments: Vec<&str> = relative.split('/').collect();
+    let name = segments.last().copied().unwrap_or_default();
+    if name == "secrets.yaml" || segments.iter().any(|s| *s == "secrets") {
+        return Some("a secret: never read, never copied");
+    }
+    if name == ".env" || name.starts_with(".env.") {
+        return Some("an environment file, which may hold secrets");
+    }
+    if name.ends_with("-wal") || name.ends_with("-shm") || name.ends_with(".sock") {
+        return Some("transient");
+    }
+    None
+}
+
+/// The archive name for a snapshot taken at `at`:
+/// `factory-backup-<instance>-20260925T030000Z.tar.zst`.
+pub fn archive_name(instance: &str, at: DateTime<Utc>) -> String {
+    format!("{ARCHIVE_PREFIX}{}-{}{ARCHIVE_SUFFIX}", slug(instance), at.format(STAMP_FORMAT))
+}
+
+/// The time an archive of `instance` was taken, read back off its name --
+/// `None` for anything that is not one of this instance's archives. The only
+/// test retention and the listing apply before they look at a file: nothing
+/// in a destination that does not match is ever listed, verified or deleted.
+pub fn parse_archive_name(instance: &str, name: &str) -> Option<DateTime<Utc>> {
+    let rest = name.strip_prefix(ARCHIVE_PREFIX)?.strip_suffix(ARCHIVE_SUFFIX)?;
+    let stamp = rest.strip_prefix(&slug(instance))?.strip_prefix('-')?;
+    chrono::NaiveDateTime::parse_from_str(stamp, STAMP_FORMAT)
+        .ok()
+        .map(|t| t.and_utc())
+}
+
+/// The instance name as it appears in a file name: lowercase ASCII letters,
+/// digits and single dashes.
+pub fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() { "instance".into() } else { out }
+}
+
+/// Refuse a snapshot name off the wire that could name anything but a file
+/// directly in the destination.
+pub fn refuse_bad_snapshot_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.starts_with('.')
+        || !name.starts_with(ARCHIVE_PREFIX)
+        || !name.ends_with(ARCHIVE_SUFFIX)
+    {
+        return Err(FactoryError::BadRequest(format!(
+            "{name:?} is not a snapshot name; `factory backup list` shows them \
+             ({ARCHIVE_PREFIX}<instance>-<utc>{ARCHIVE_SUFFIX})"
+        )));
+    }
+    Ok(())
+}
+
+// ================================================================ manifest
+
+/// `manifest.json`: what is in an archive, written into it after every file
+/// it describes, so each file is read exactly once -- hashed and archived
+/// from the same bytes, never re-read -- and an edit landing mid-backup can
+/// never make the two disagree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Manifest {
+    pub version: u32,
+    pub instance: ManifestInstance,
+    /// `CARGO_PKG_VERSION` of the daemon that wrote it. There is no build
+    /// commit compiled in, so none is claimed.
+    pub daemon_version: String,
+    pub created_at: DateTime<Utc>,
+    pub database: DatabaseFacts,
+    /// Every file in the archive but this manifest, sorted by path.
+    pub files: Vec<ManifestFile>,
+    /// What was found under an included directory and left out, and why.
+    #[serde(default)]
+    pub excluded: Vec<ExcludedFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestInstance {
+    pub id: String,
+    pub name: String,
+}
+
+/// What the database copy said about itself when it was taken.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseFacts {
+    pub path: String,
+    /// `PRAGMA user_version`: the task store's schema version.
+    pub user_version: i64,
+    /// Every table in the copy, sorted -- the workflow, bench, policy and
+    /// goals stores keep no version of their own, so their tables are the
+    /// schema fact there is.
+    pub tables: Vec<String>,
+    /// `PRAGMA integrity_check` on the copy: `ok`, or the first problem.
+    pub integrity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestFile {
+    /// Relative to the instance root, `/`-separated.
+    pub path: String,
+    pub size: u64,
+    /// Lowercase hex.
+    pub sha256: String,
+    pub group: Group,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExcludedFile {
+    pub path: String,
+    pub reason: String,
+}
+
+impl Manifest {
+    /// Files and bytes per group, for the include table.
+    pub fn totals(&self, group: Group) -> (u64, u64) {
+        self.files
+            .iter()
+            .filter(|f| f.group == group)
+            .fold((0, 0), |(n, bytes), f| (n + 1, bytes + f.size))
+    }
+
+    pub fn total_bytes(&self) -> u64 {
+        self.files.iter().map(|f| f.size).sum()
+    }
+}
+
+// ================================================================ retention
+
+/// Why a snapshot survives retention. A snapshot kept by no rule is deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeptBy {
+    /// The newest snapshot is never deleted, whatever `keep` says.
+    Newest,
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+/// Grandfather-father-son retention over snapshots sorted newest first, each
+/// given as the calendar date it was taken on in the schedule's timezone.
+/// Answers, in the same order, the rules that keep each one; an empty list
+/// means delete it.
+///
+/// Each rule keeps the newest snapshot of each of its `n` most recent
+/// buckets that *have* a snapshot -- days, ISO weeks, months -- so a week
+/// the daemon was off costs no daily slot. The rules overlap freely: last
+/// night's backup is usually the daily, the weekly and the monthly one.
+pub fn retain(dates_newest_first: &[NaiveDate], keep: &Keep) -> Vec<Vec<KeptBy>> {
+    let mut out: Vec<Vec<KeptBy>> = vec![Vec::new(); dates_newest_first.len()];
+    if let Some(first) = out.first_mut() {
+        first.push(KeptBy::Newest);
+    }
+    let mut apply = |rule: KeptBy, limit: u32, bucket: &dyn Fn(NaiveDate) -> (i32, u32)| {
+        let mut seen = BTreeSet::new();
+        for (i, date) in dates_newest_first.iter().enumerate() {
+            if seen.len() as u32 >= limit {
+                break;
+            }
+            // Newest first, so the first snapshot met in a bucket is its newest.
+            if seen.insert(bucket(*date)) {
+                out[i].push(rule);
+            }
+        }
+    };
+    apply(KeptBy::Daily, keep.daily, &|d| (d.year(), d.ordinal()));
+    apply(KeptBy::Weekly, keep.weekly, &|d| {
+        let w = d.iso_week();
+        (w.year(), w.week())
+    });
+    apply(KeptBy::Monthly, keep.monthly, &|d| (d.year(), d.month()));
+    out
+}
+
+// ================================================================ age
+
+/// How the newest backup's age reads against its schedule: the colour of the
+/// status hero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgeLevel {
+    /// Within its schedule (plus [`GRACE_HOURS`]). Green.
+    Fresh,
+    /// One slot has passed without a newer backup. Amber.
+    Stale,
+    /// Two or more. Red.
+    Overdue,
+    /// There is no backup at all. Red.
+    None,
+}
+
+/// `due_by` is when the newest backup stops being fresh -- the next slot
+/// after it, plus grace -- and `overdue_by` the slot after that, plus grace.
+/// The daemon computes both from the schedule; this only compares.
+pub fn age_level(
+    now: DateTime<Utc>,
+    newest: Option<DateTime<Utc>>,
+    due_by: Option<DateTime<Utc>>,
+    overdue_by: Option<DateTime<Utc>>,
+) -> AgeLevel {
+    if newest.is_none() {
+        return AgeLevel::None;
+    }
+    match (due_by, overdue_by) {
+        (Some(due), _) if now <= due => AgeLevel::Fresh,
+        (_, Some(overdue)) if now <= overdue => AgeLevel::Stale,
+        _ => AgeLevel::Overdue,
+    }
+}
+
+// ================================================================ warnings
+
+/// How loudly a warning is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarningLevel {
+    Warn,
+    Bad,
+}
+
+/// One honest warning: a fact the daemon read, never a guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupWarning {
+    /// A stable id the page and a test can match on: `not_configured`,
+    /// `same_device`, ...
+    pub kind: String,
+    pub level: WarningLevel,
+    pub message: String,
+}
+
+/// What [`warnings`] is decided from.
+#[derive(Debug, Clone, Default)]
+pub struct WarningFacts {
+    pub configured: bool,
+    pub destination: Option<String>,
+    pub destination_exists: bool,
+    pub same_device: Option<bool>,
+    pub scheduled: bool,
+    pub newest: Option<DateTime<Utc>>,
+    pub age: Option<AgeLevel>,
+    /// The newest verification of a snapshot still in the destination, and
+    /// whether it passed. A pass on a snapshot retention has since deleted
+    /// proves nothing about the ones left.
+    pub last_verified: Option<(DateTime<Utc>, bool)>,
+    /// The newest failed attempt, when it is newer than the newest success.
+    pub failure_since_newest: Option<(DateTime<Utc>, String)>,
+}
+
+pub fn warnings(f: &WarningFacts) -> Vec<BackupWarning> {
+    let mut out = Vec::new();
+    let mut push = |kind: &str, level: WarningLevel, message: String| {
+        out.push(BackupWarning { kind: kind.into(), level, message });
+    };
+    if !f.configured {
+        push(
+            "not_configured",
+            WarningLevel::Bad,
+            "No backup is configured: the database, the knowledge vault, the policies, goals and scenarios \
+             exist on this disk only. Add infrastructure.backup to the root .factory/config.yaml."
+                .into(),
+        );
+        return out;
+    }
+    let destination = f.destination.clone().unwrap_or_default();
+    if let Some((at, reason)) = &f.failure_since_newest {
+        push(
+            "last_failed",
+            WarningLevel::Bad,
+            format!("The last backup attempt failed ({}): {reason}", at.format("%Y-%m-%d %H:%M UTC")),
+        );
+    }
+    if !f.destination_exists {
+        push(
+            "destination_missing",
+            WarningLevel::Bad,
+            format!("The destination {destination} does not exist or is not mounted."),
+        );
+    }
+    if f.same_device == Some(true) {
+        push(
+            "same_device",
+            WarningLevel::Bad,
+            format!(
+                "The destination {destination} is on the same device as the instance, so a disk failure \
+                 loses both: this is a copy, not a backup. Point it at an external disk, a NAS mount or a \
+                 synced folder."
+            ),
+        );
+    }
+    match (f.newest, f.age) {
+        (None, _) => push("no_backup", WarningLevel::Bad, "No backup has been taken yet.".into()),
+        (Some(_), Some(AgeLevel::Stale)) => push(
+            "stale",
+            WarningLevel::Warn,
+            "The newest backup is older than its schedule: at least one slot passed without a backup.".into(),
+        ),
+        (Some(_), Some(AgeLevel::Overdue)) => push(
+            "overdue",
+            WarningLevel::Bad,
+            "The newest backup is overdue: more than one scheduled backup has been missed.".into(),
+        ),
+        _ => {}
+    }
+    if !f.scheduled {
+        push(
+            "unscheduled",
+            WarningLevel::Warn,
+            "No schedule is configured: a backup is taken only when somebody runs one. Add \
+             infrastructure.backup.schedule."
+                .into(),
+        );
+    }
+    match f.last_verified {
+        None if f.newest.is_some() => push(
+            "never_verified",
+            WarningLevel::Warn,
+            "No snapshot in the destination has been verified, so nobody knows whether one would restore. Run Verify.".into(),
+        ),
+        Some((at, false)) => push(
+            "verify_failed",
+            WarningLevel::Bad,
+            format!("The last verification ({}) failed.", at.format("%Y-%m-%d %H:%M UTC")),
+        ),
+        _ => {}
+    }
+    out
+}
+
+// ================================================================ the wire
+
+/// `GET /api/backup`: everything the L1 › Backup page draws.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackupReport {
+    /// The daemon's clock, so the page reads every age against the same
+    /// "now" the levels were decided with.
+    pub now: DateTime<Utc>,
+    /// The block as configured; `None` when there is none.
+    pub config: Option<BackupConfig>,
+    pub destination: Option<DestinationFacts>,
+    pub age: AgeLevel,
+    /// When the newest backup stops being fresh.
+    pub due_by: Option<DateTime<Utc>>,
+    /// When the schedule next takes one.
+    pub next_run: Option<DateTime<Utc>>,
+    /// A backup or verification is in progress right now.
+    pub running: bool,
+    pub last_verified: Option<VerifySummary>,
+    pub last_failure: Option<BackupFailure>,
+    pub warnings: Vec<BackupWarning>,
+    /// Newest first: every archive of this instance in the destination.
+    pub snapshots: Vec<SnapshotRow>,
+    pub include: Vec<IncludeRow>,
+    pub exclude: Vec<ExcludeRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DestinationFacts {
+    pub path: String,
+    pub exists: bool,
+    /// Same `st_dev` as the instance root. `None` when it cannot be asked.
+    pub same_device: Option<bool>,
+    pub free_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotRow {
+    pub name: String,
+    pub at: DateTime<Utc>,
+    pub size_bytes: u64,
+    /// Files in the archive, the manifest aside. `None` for an archive this
+    /// daemon has no record of taking (restored database, copied in).
+    pub files: Option<u64>,
+    pub verified: Option<VerifySummary>,
+    pub kept_by: Vec<KeptBy>,
+    /// Always false in v1: `age` encryption is v2.
+    pub encrypted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifySummary {
+    pub snapshot: String,
+    pub at: DateTime<Utc>,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupFailure {
+    pub at: DateTime<Utc>,
+    pub trigger: BackupTrigger,
+    pub reason: String,
+}
+
+/// Who started a backup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupTrigger {
+    Schedule,
+    Manual,
+}
+
+impl BackupTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Schedule => "schedule",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncludeRow {
+    pub path: String,
+    pub why: String,
+    /// False for the optional directories while `include_logs` is off.
+    pub included: bool,
+    /// From the newest snapshot's manifest, when this daemon took it.
+    pub files: Option<u64>,
+    pub bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExcludeRow {
+    pub path: String,
+    pub why: String,
+}
+
+/// A backup as taken: the answer to `backup.run`, and what `backup_completed`
+/// carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub name: String,
+    pub path: String,
+    pub at: DateTime<Utc>,
+    pub trigger: BackupTrigger,
+    pub by: String,
+    pub size_bytes: u64,
+    pub files: u64,
+    pub database_bytes: u64,
+    pub duration_ms: u64,
+    /// What retention deleted after it, by name.
+    #[serde(default)]
+    pub pruned: Vec<String>,
+    /// Files and bytes per group, from its manifest -- the include table's
+    /// numbers, kept so the page never has to open an archive to draw them.
+    #[serde(default)]
+    pub groups: Vec<GroupTotal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupTotal {
+    pub group: Group,
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// One step of a verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Ok,
+    /// Loaded, but with a finding worth reading -- a file the live instance
+    /// most likely cannot parse either. Does not fail the verification.
+    Warn,
+    Fail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyCheck {
+    pub name: String,
+    pub status: CheckStatus,
+    pub detail: String,
+}
+
+/// The answer to `backup.verify`: every step, in the order it ran.
+/// `ok` is "no step failed".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Verification {
+    pub snapshot: String,
+    pub at: DateTime<Utc>,
+    pub by: String,
+    pub ok: bool,
+    pub checks: Vec<VerifyCheck>,
+    pub duration_ms: u64,
+}
+
+impl Verification {
+    pub fn summary(&self) -> VerifySummary {
+        VerifySummary { snapshot: self.snapshot.clone(), at: self.at, ok: self.ok }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn d(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn the_issue_example_block_parses_and_refuses_encrypt_to() {
+        let c: BackupConfig = serde_yaml_ng::from_str(
+            "destination: /Volumes/Backup/factory\nschedule: { cron: \"0 3 * * *\", timezone: Europe/Berlin }\n\
+             keep: { daily: 7, weekly: 4, monthly: 6 }\ninclude_logs: false\n",
+        )
+        .unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.schedule.as_ref().unwrap().describe(), "0 3 * * * (Europe/Berlin)");
+        assert_eq!(c.keep, Keep::default());
+        // v2's age encryption: refused, never silently ignored.
+        let e = serde_yaml_ng::from_str::<BackupConfig>("destination: /x\nencrypt_to: age1abc\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("encrypt_to"), "{e}");
+    }
+
+    #[test]
+    fn a_relative_destination_and_a_keep_that_keeps_nothing_are_refused() {
+        let relative: BackupConfig = serde_yaml_ng::from_str("destination: backups\n").unwrap();
+        assert!(relative.validate().unwrap_err().to_string().contains("absolute"));
+        let nothing: BackupConfig =
+            serde_yaml_ng::from_str("destination: /b\nkeep: { daily: 0, weekly: 0, monthly: 0 }\n").unwrap();
+        assert!(nothing.validate().unwrap_err().to_string().contains("keeps nothing"));
+        let partial: BackupConfig = serde_yaml_ng::from_str("destination: /b\nkeep: { daily: 2 }\n").unwrap();
+        assert_eq!(partial.keep, Keep { daily: 2, weekly: 4, monthly: 6 });
+    }
+
+    #[test]
+    fn archive_names_round_trip_and_ignore_everything_else() {
+        let at = Utc.with_ymd_and_hms(2026, 9, 25, 3, 0, 7).unwrap();
+        let name = archive_name("Business Factory", at);
+        assert_eq!(name, "factory-backup-business-factory-20260925T030007Z.tar.zst");
+        assert_eq!(parse_archive_name("Business Factory", &name), Some(at));
+        assert_eq!(parse_archive_name("other", &name), None, "another instance's archive is not ours");
+        assert_eq!(parse_archive_name("business-factory", "factory-backup-business-factory-x.tar.zst"), None);
+        assert_eq!(parse_archive_name("business-factory", "notes.txt"), None);
+        assert_eq!(
+            parse_archive_name("business-factory", "factory-backup-business-factory-20260925T030007Z.tar.zst.partial"),
+            None,
+            "a half-written archive is never listed"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_name_off_the_wire_cannot_leave_the_destination() {
+        refuse_bad_snapshot_name("factory-backup-x-20260925T030000Z.tar.zst").unwrap();
+        for bad in ["", "../factory-backup-x.tar.zst", "factory-backup-x/../../etc.tar.zst", "notes.txt", ".factory-backup-x.tar.zst"] {
+            assert!(refuse_bad_snapshot_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn secrets_and_transient_files_are_excluded_before_they_are_read() {
+        assert!(is_excluded(".factory/secrets.yaml").is_some());
+        assert!(is_excluded(".factory/knowledge/data/secrets/token.txt").is_some());
+        assert!(is_excluded(".factory/knowledge/.env").is_some());
+        assert!(is_excluded(".factory/factory.sqlite-wal").is_some());
+        assert!(is_excluded(".factory/knowledge/company/README.md").is_none());
+        assert!(is_excluded(".factory/policies/secrets-policy.yaml").is_none(), "only the exact names");
+    }
+
+    #[test]
+    fn retention_keeps_the_newest_of_each_day_week_and_month_up_to_the_limits() {
+        // Newest first: two on the 25th, one a day back to the 20th, then
+        // the end of August, then July.
+        let dates = [
+            "2026-09-25", "2026-09-25", "2026-09-24", "2026-09-23", "2026-09-22", "2026-09-21", "2026-09-20",
+            "2026-08-31", "2026-07-15",
+        ]
+        .map(d);
+        let kept = retain(&dates, &Keep { daily: 3, weekly: 2, monthly: 2 });
+        assert_eq!(kept[0], vec![KeptBy::Newest, KeptBy::Daily, KeptBy::Weekly, KeptBy::Monthly]);
+        assert!(kept[1].is_empty(), "the older one on the same day goes: {:?}", kept[1]);
+        assert_eq!(kept[2], vec![KeptBy::Daily]);
+        assert_eq!(kept[3], vec![KeptBy::Daily]);
+        assert!(kept[4].is_empty(), "past the three days");
+        // 2026-09-20 is a Sunday: the newest of the ISO week before.
+        assert_eq!(kept[6], vec![KeptBy::Weekly]);
+        assert_eq!(kept[7], vec![KeptBy::Monthly], "the newest of August");
+        assert!(kept[8].is_empty(), "past the two months");
+    }
+
+    #[test]
+    fn retention_over_nothing_or_one_keeps_what_there_is() {
+        assert!(retain(&[], &Keep::default()).is_empty());
+        let one = retain(&[d("2026-01-01")], &Keep { daily: 0, weekly: 0, monthly: 1 });
+        assert_eq!(one, vec![vec![KeptBy::Newest, KeptBy::Monthly]]);
+    }
+
+    #[test]
+    fn the_age_level_reads_the_newest_backup_against_its_schedule() {
+        let t = |h| Utc.with_ymd_and_hms(2026, 9, 25, h, 0, 0).unwrap();
+        let (due, overdue) = (Some(t(5)), Some(t(20)));
+        assert_eq!(age_level(t(4), Some(t(1)), due, overdue), AgeLevel::Fresh);
+        assert_eq!(age_level(t(6), Some(t(1)), due, overdue), AgeLevel::Stale);
+        assert_eq!(age_level(t(21), Some(t(1)), due, overdue), AgeLevel::Overdue);
+        assert_eq!(age_level(t(4), None, due, overdue), AgeLevel::None);
+    }
+
+    #[test]
+    fn warnings_say_what_is_true_and_nothing_else() {
+        let none = warnings(&WarningFacts::default());
+        assert_eq!(none.iter().map(|w| w.kind.as_str()).collect::<Vec<_>>(), ["not_configured"]);
+
+        let fine = WarningFacts {
+            configured: true,
+            destination: Some("/Volumes/Backup".into()),
+            destination_exists: true,
+            same_device: Some(false),
+            scheduled: true,
+            newest: Some(Utc::now()),
+            age: Some(AgeLevel::Fresh),
+            last_verified: Some((Utc::now(), true)),
+            failure_since_newest: None,
+        };
+        assert!(warnings(&fine).is_empty(), "{:?}", warnings(&fine));
+
+        let worrying = WarningFacts {
+            same_device: Some(true),
+            scheduled: false,
+            age: Some(AgeLevel::Stale),
+            last_verified: None,
+            failure_since_newest: Some((Utc::now(), "disk full".into())),
+            ..fine.clone()
+        };
+        let kinds: Vec<String> = warnings(&worrying).into_iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["last_failed", "same_device", "stale", "unscheduled", "never_verified"]);
+
+        let unknown_device = WarningFacts { same_device: None, ..fine.clone() };
+        assert!(warnings(&unknown_device).is_empty(), "an unknown device is not claimed to be the same one");
+
+        let never = WarningFacts { newest: None, age: Some(AgeLevel::None), last_verified: None, ..fine };
+        let kinds: Vec<String> = warnings(&never).into_iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["no_backup"], "never_verified says nothing new when there is nothing to verify");
+    }
+}

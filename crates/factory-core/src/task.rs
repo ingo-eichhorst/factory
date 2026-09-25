@@ -8,6 +8,10 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
+    /// Handed in through intake (`#119`) and not yet released: held outside
+    /// the dispatchable queue, with no run, until triage decides. Never due,
+    /// and `task run` refuses it -- see `crate::intake`.
+    Intake,
     /// Created, waiting for a trigger (manual, schedule, or another agent).
     Pending,
     /// The daemon has a runtime session and is handing the prompt over.
@@ -31,6 +35,7 @@ impl TaskStatus {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Intake => "intake",
             Self::Pending => "pending",
             Self::Dispatching => "dispatching",
             Self::Running => "running",
@@ -47,6 +52,7 @@ impl std::str::FromStr for TaskStatus {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
+            "intake" => Self::Intake,
             "pending" => Self::Pending,
             "dispatching" => Self::Dispatching,
             "running" => Self::Running,
@@ -320,6 +326,13 @@ pub struct Task {
     /// task cannot get round the plan by leaving this out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// The intake record (`#119`), on a task that was handed in through the
+    /// gate rather than created straight onto the line. It stays after
+    /// release -- the triage verdict and who decided belong to the task's
+    /// history -- and is absent on every other task, including every one
+    /// written before intake existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake: Option<crate::intake::Intake>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -463,6 +476,10 @@ pub struct TaskPatch {
     pub category: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_category: bool,
+    /// The whole intake record, replaced -- only the engine's intake
+    /// transitions write it. Never cleared: a released item keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake: Option<crate::intake::Intake>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

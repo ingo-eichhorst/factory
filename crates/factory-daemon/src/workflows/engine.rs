@@ -1127,7 +1127,9 @@ mod tests {
 
 fn node_status(status: TaskStatus) -> WorkflowNodeStatus {
     match status {
-        TaskStatus::Pending => WorkflowNodeStatus::Pending,
+        // A node's task is created straight onto the line and never goes
+        // through intake; were one ever to, it is not started yet either.
+        TaskStatus::Intake | TaskStatus::Pending => WorkflowNodeStatus::Pending,
         TaskStatus::Dispatching => WorkflowNodeStatus::Dispatching,
         TaskStatus::Running => WorkflowNodeStatus::Running,
         TaskStatus::Blocked => WorkflowNodeStatus::Blocked,

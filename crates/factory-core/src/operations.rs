@@ -1638,6 +1638,7 @@ mod tests {
             pending_retry: None,
             schedule_paused: false,
             category: None,
+            intake: None,
         }
     }
 
@@ -1680,6 +1681,7 @@ mod tests {
             turn_ended_at: None,
             turn_end_reason: None,
             required_steps: Vec::new(),
+            usage: None,
         }
     }
 

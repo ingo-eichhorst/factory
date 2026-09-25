@@ -313,6 +313,28 @@ pub enum Request {
     /// only ever what the config says it is.
     #[serde(rename = "infrastructure")]
     Infrastructure,
+    /// The L1 Backup page (`#116`): the configured destination and schedule,
+    /// every snapshot of this instance found there with how it was kept and
+    /// verified, and the honest warnings those facts add up to. Read-only,
+    /// like `Infrastructure`: listing a destination changes nothing.
+    #[serde(rename = "backup")]
+    Backup,
+    /// Take a snapshot now -- the same one the schedule takes -- then apply
+    /// retention. `backup.run`, checked against the root scope like
+    /// `policy.attest`: the instance's state is company-wide, not one
+    /// project's. Refused while another backup or verification is running.
+    #[serde(rename = "backup.run")]
+    BackupRun,
+    /// Unpack a snapshot into a temporary directory and prove it would
+    /// restore: every checksum in its manifest, `integrity_check` on the
+    /// database copy, and every authored-content loader. `snapshot: None`
+    /// is the newest. The same grant as `BackupRun`. Nothing in the
+    /// destination or the instance is changed; the result is recorded.
+    #[serde(rename = "backup.verify")]
+    BackupVerify {
+        #[serde(default)]
+        snapshot: Option<String>,
+    },
     /// The L5 Knowledge tab: an index of `<root>/.factory/knowledge/`,
     /// rebuilt from the files on every request. Read-only, like
     /// `Environment` -- see `knowledge::index`, which does the actual walk.
@@ -655,6 +677,76 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         detail: bool,
     },
+    /// `#119`: hand work in through the intake gate instead of straight
+    /// onto the line. Creates a task in `TaskStatus::Intake` with its
+    /// `Intake` record -- no run, and none until it is released. Needs
+    /// `task.create` in the target scope, like `TaskCreate`. An agent's
+    /// request is recorded as source `agent`, whatever it says.
+    #[serde(rename = "intake.add")]
+    IntakeAdd(crate::intake::NewIntake),
+    /// The Intake view and `factory intake list`: every intake item in the
+    /// four columns, computed fresh (`factory_core::intake::board`). A scope
+    /// means its whole subtree, as for `Operations`.
+    #[serde(rename = "intake.board")]
+    IntakeBoard {
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    /// Start the triage node on an item: a task in the item's scope whose
+    /// instructions are the generalised `ir:triage`, dispatched at once, that
+    /// answers with `IntakeAssess`. Needs `task.create` and reach over the
+    /// item.
+    #[serde(rename = "intake.triage")]
+    IntakeTriage {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+    },
+    /// Record an assessment on an item. With `decide`, also apply what the
+    /// rules give -- ready or needs-info, never wontfix. Needs `task.edit`
+    /// and reach over the item -- or to be the run of the item's own triage
+    /// task.
+    #[serde(rename = "intake.assess")]
+    IntakeAssess {
+        id: String,
+        assessment: crate::intake::Assessment,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        decide: bool,
+    },
+    /// Decide an item: release it, send it back, or close it. The same grant
+    /// and reach as `IntakeAssess`.
+    #[serde(rename = "intake.decide")]
+    IntakeDecide {
+        id: String,
+        decision: crate::intake::Decision,
+    },
+    /// Add information to an item that is still in intake -- the answer to a
+    /// needs-info, which puts it back in `received`. Needs `task.create`
+    /// with reach over the item, or to be the one who handed it in.
+    #[serde(rename = "intake.info")]
+    IntakeInfo { id: String, text: String },
+    /// One task's usage and cost: every run's, and their sum (#117).
+    /// Read-only, derived from what the runs already carry.
+    #[serde(rename = "task.usage")]
+    TaskUsage { id: String },
+    /// One run's usage snapshots as taken -- dispatch, each turn end, run
+    /// end -- answered or not. The record behind `Run::usage`.
+    #[serde(rename = "run.usage")]
+    RunUsage { id: String },
+    /// Usage and cost summed over the runs that started in `[from, to)`,
+    /// grouped (#117). `from` defaults to thirty days before `to`, `to` to
+    /// now; `scope` narrows to that scope and its descendants.
+    #[serde(rename = "costs")]
+    Costs {
+        #[serde(default)]
+        group_by: crate::usage::CostGroupBy,
+        #[serde(default)]
+        from: Option<chrono::DateTime<chrono::Utc>>,
+        #[serde(default)]
+        to: Option<chrono::DateTime<chrono::Utc>>,
+        #[serde(default)]
+        scope: Option<String>,
+    },
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -731,6 +823,13 @@ pub enum Payload {
         providers: Vec<ProviderRow>,
         unassigned: Vec<UnassignedAgent>,
     },
+    /// The L1 Backup page -- see `backup::BackupReport`. Boxed for the same
+    /// reason `Operations` is.
+    Backup { report: Box<crate::backup::BackupReport> },
+    /// The answer to `Request::BackupRun`: the snapshot as taken.
+    BackupRun { snapshot: crate::backup::Snapshot },
+    /// The answer to `Request::BackupVerify`: every step and its outcome.
+    BackupVerify { verification: crate::backup::Verification },
     /// The L5 Knowledge tab. `present: false` when the vault
     /// (`<root>/.factory/knowledge/`) does not exist -- an empty state, not
     /// an error -- with `root` still naming the path that was looked in, and
@@ -837,6 +936,14 @@ pub enum Payload {
     /// and would otherwise set the size of every `Response` (serde writes a
     /// box as what it holds).
     Operations { report: Box<crate::operations::OperationsReport> },
+    /// The Intake view -- see `factory_core::intake::IntakeBoard`.
+    IntakeBoard { board: crate::intake::IntakeBoard },
+    /// `Request::TaskUsage`'s answer.
+    TaskUsage { usage: crate::usage::TaskUsage },
+    /// `Request::RunUsage`'s answer.
+    UsageSnapshots { snapshots: Vec<crate::usage::UsageSnapshot> },
+    /// `Request::Costs`' answer.
+    Costs { report: crate::usage::CostReport },
 }
 
 /// A request plus who is making it.

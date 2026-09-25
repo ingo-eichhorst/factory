@@ -411,7 +411,8 @@ pub enum FindingKind {
     /// A metric measure names something `metrics::resolve` has never heard of.
     UnknownMetric,
     /// A metric measure names a metric `metrics::resolve` knows but cannot
-    /// compute yet -- `unit_cost` before design §12.6, say.
+    /// compute yet. None is today -- `unit_cost` was, until #117 gave runs
+    /// their usage.
     UnavailableMetric,
     /// A metric measure with neither `above` nor `below`: no response
     /// measure at all, so the scenario can only ever be a draft.
@@ -1619,7 +1620,7 @@ mod tests {
     }
 
     #[test]
-    fn load_refuses_unknown_and_unavailable_metrics_with_the_reason_and_a_missing_threshold() {
+    fn load_refuses_an_unknown_metric_and_a_missing_threshold_and_accepts_unit_cost() {
         let q = catalogue_from(&[(
             "p.yaml",
             "attributes:\n  - id: performance-efficiency.resource-utilization\n    importance: M\n    difficulty: M\n    scenarios:\n\
@@ -1627,12 +1628,9 @@ mod tests {
              \x20     - { id: fail, measure: { metric: not_a_metric, below: 0.05 } }\n\
              \x20     - { id: bare, measure: { metric: scrap_rate } }\n",
         )]);
-        assert_eq!(
-            kinds(&q.findings),
-            vec![FindingKind::UnknownMetric, FindingKind::UnavailableMetric, FindingKind::MissingThreshold]
-        );
-        let unavailable = q.findings.iter().find(|f| f.kind == FindingKind::UnavailableMetric).unwrap();
-        assert!(unavailable.detail.contains("§12.6"), "{}", unavailable.detail);
+        // `unit_cost` is computable since #117, so `cost` is a measure
+        // like any other; no metric is left to be unavailable.
+        assert_eq!(kinds(&q.findings), vec![FindingKind::UnknownMetric, FindingKind::MissingThreshold]);
     }
 
     #[test]
@@ -1903,7 +1901,7 @@ mod tests {
             report.attributes[0].scenarios.iter().find(|s| s.scenario.scenario.id == id).unwrap().reasons.join(" ")
         };
         assert!(reasons("uncomputed").contains("no finished runs"), "{}", reasons("uncomputed"));
-        assert!(reasons("cost").contains("§12.6"), "{}", reasons("cost"));
+        assert!(reasons("cost").contains("no value for unit_cost"), "{}", reasons("cost"));
         assert!(reasons("unknown").contains("not a known metric"), "{}", reasons("unknown"));
     }
 

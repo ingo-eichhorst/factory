@@ -158,11 +158,22 @@ pub struct Engine {
     /// a goals request is stateful: the direction and cycle catalogues are
     /// read fresh off disk on every call, like the policy catalogues.
     pub(crate) goals: crate::goals::GoalsStore,
+    /// What happened to backups -- see `backup::BackupStore`. The archives
+    /// themselves are the destination's, listed fresh on every request.
+    pub(crate) backups: crate::backup::BackupStore,
+    /// Held for the whole of a backup or a verification, so the job and a
+    /// person can never run two at once over one destination. Taken with
+    /// `try_lock`: a second request is refused, never queued.
+    pub(crate) backup_busy: tokio::sync::Mutex<()>,
     /// Serializes a bench run's own read-modify-write: choosing which
     /// pending attempts to start, and recomputing the run's own status once
     /// every attempt has settled. Coarse -- one lock for every run, the same
     /// trade `workflow_edit` already makes -- rather than one per run.
     pub(crate) bench_edit: tokio::sync::Mutex<()>,
+    /// Serializes a run's usage read-modify-write -- append a snapshot, read
+    /// them all back, write the derived `usage` -- so two snapshots landing
+    /// together never leave the older sum on the run (`costs.rs`).
+    pub(crate) usage_edit: tokio::sync::Mutex<()>,
     /// Task ids already enqueued for judgement, or currently being judged by
     /// the worker: the guard that keeps a report and a cancel racing each
     /// other (or a live enqueue racing recovery's own sweep) from queuing
@@ -293,7 +304,11 @@ impl Engine {
                 .expect("an in-memory policy store should open"),
             goals: crate::goals::GoalsStore::in_memory()
                 .expect("an in-memory goals store should open"),
+            backups: crate::backup::BackupStore::in_memory()
+                .expect("an in-memory backup store should open"),
+            backup_busy: tokio::sync::Mutex::new(()),
             bench_edit: tokio::sync::Mutex::new(()),
+            usage_edit: tokio::sync::Mutex::new(()),
             bench_judging: Default::default(),
             bench_judge_tx,
             bench_judge_rx: std::sync::Mutex::new(Some(bench_judge_rx)),
@@ -341,6 +356,12 @@ impl Engine {
     /// The same, for goals check-ins.
     pub fn with_goals_store(mut self, goals: crate::goals::GoalsStore) -> Self {
         self.goals = goals;
+        self
+    }
+
+    /// The same, for the backup history.
+    pub fn with_backup_store(mut self, backups: crate::backup::BackupStore) -> Self {
+        self.backups = backups;
         self
     }
 
@@ -516,6 +537,24 @@ impl Engine {
                 })
             }
             Request::Infrastructure => Ok(self.infrastructure().await),
+            Request::Backup => Ok(Payload::Backup {
+                report: Box::new(self.backup_report().await?),
+            }),
+            // `backup_completed`/`backup_failed`/`backup_verified` are
+            // published inside, where the job's own backups publish them too.
+            Request::BackupRun => Ok(Payload::BackupRun {
+                snapshot: self
+                    .backup_run(
+                        factory_core::backup::BackupTrigger::Manual,
+                        crate::policies::caller_name(caller),
+                    )
+                    .await?,
+            }),
+            Request::BackupVerify { snapshot } => Ok(Payload::BackupVerify {
+                verification: self
+                    .backup_verify(snapshot, crate::policies::caller_name(caller))
+                    .await?,
+            }),
             Request::Knowledge => {
                 let root = self.factory_snapshot().root;
                 let index = tokio::task::spawn_blocking(move || factory_core::knowledge::index(&root))
@@ -867,7 +906,14 @@ impl Engine {
                 Ok(Payload::Deleted { deleted })
             }
             Request::TaskRun { id, reason } => {
-                self.require(&id).await?;
+                let task = self.require(&id).await?;
+                // The gate (`#119`): an item still in intake has not been
+                // released, and nothing but a decision releases it.
+                if task.status == TaskStatus::Intake {
+                    return Err(FactoryError::BadRequest(
+                        "this task is still in intake: triage it and release it (factory intake decide) before it can run".into(),
+                    ));
+                }
                 // A task is a standing intent; a run is one attempt at it. Two
                 // attempts at once would race for the same working directory.
                 if let Some(run) = self.store.active_run(&id).await? {
@@ -954,6 +1000,25 @@ impl Engine {
                 })
             }
 
+            // Intake (`#119`). Every write publishes `TaskCreated` or
+            // `TaskUpdated` itself; the board is a read over tasks.
+            Request::IntakeAdd(new) => Ok(Payload::Task { task: self.intake_add(caller, new).await? }),
+            Request::IntakeBoard { scope } => Ok(Payload::IntakeBoard {
+                board: self.intake_board(scope.as_deref()).await?,
+            }),
+            Request::IntakeTriage { id, agent } => Ok(Payload::Task {
+                task: self.intake_triage(caller, &id, agent).await?,
+            }),
+            Request::IntakeAssess { id, assessment, decide } => Ok(Payload::Task {
+                task: self.intake_assess(caller, &id, assessment, decide).await?,
+            }),
+            Request::IntakeDecide { id, decision } => Ok(Payload::Task {
+                task: self.intake_decide(caller, &id, decision).await?,
+            }),
+            Request::IntakeInfo { id, text } => Ok(Payload::Task {
+                task: self.intake_info(caller, &id, &text).await?,
+            }),
+
             Request::WorkflowCreate(draft) => Ok(Payload::Workflow {
                 workflow: self.create_workflow(draft).await?,
             }),
@@ -999,6 +1064,18 @@ impl Engine {
             }),
             Request::RunGet { id } => Ok(Payload::Run {
                 run: self.require_run(&id).await?.redacted(),
+            }),
+            Request::RunUsage { id } => {
+                let run = self.require_run(&id).await?;
+                Ok(Payload::UsageSnapshots {
+                    snapshots: self.store.usage_snapshots(&run.id).await?,
+                })
+            }
+            Request::TaskUsage { id } => Ok(Payload::TaskUsage {
+                usage: self.task_usage(&id).await?,
+            }),
+            Request::Costs { group_by, from, to, scope } => Ok(Payload::Costs {
+                report: self.costs_report(group_by, from, to, scope.as_deref()).await?,
             }),
             Request::RunEntries { id, limit } => Ok(Payload::Entries {
                 entries: self.store.run_entries(&id, limit.unwrap_or(200)).await?,
@@ -1638,6 +1715,18 @@ impl Engine {
         let current = self.require(id).await?;
         // The bookkeeping is the daemon's, not a caller's.
         patch.runs = None;
+        // So is the intake record, and the way out of intake is a decision
+        // (`crate::intake`), not an edit of the status (`#119`).
+        if patch.intake.is_some() {
+            return Err(FactoryError::BadRequest(
+                "the intake record is written by the intake requests, not by an edit".into(),
+            ));
+        }
+        if current.status == TaskStatus::Intake && patch.status.is_some_and(|s| s != TaskStatus::Intake) {
+            return Err(FactoryError::BadRequest(
+                "an item leaves intake by a decision (factory intake decide), not by an edit of its status".into(),
+            ));
+        }
         if patch.estimate_seconds == Some(0) {
             return Err(FactoryError::BadRequest(
                 "a task estimate must be at least one second".into(),
@@ -1789,7 +1878,22 @@ impl Engine {
     // -- creating ----------------------------------------------------------
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {
-        self.create_task(new, None, None, None).await
+        self.create_task(new, None, None, None, None).await
+    }
+
+    /// A task born inside the intake gate (`#119`): `TaskStatus::Intake`
+    /// from its first write, so there is no moment it could be dispatched.
+    pub(crate) async fn create_intake_task(
+        &self,
+        new: NewTask,
+        intake: factory_core::intake::Intake,
+    ) -> Result<Task> {
+        if new.schedule.is_some() {
+            return Err(FactoryError::BadRequest(
+                "an intake item has no schedule; release it first, then schedule the task".into(),
+            ));
+        }
+        self.create_task(new, None, None, None, Some(intake)).await
     }
 
     pub(crate) async fn create_workflow_task(
@@ -1798,7 +1902,7 @@ impl Engine {
         origin: WorkflowOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, Some(origin), None, Some(id)).await
+        self.create_task(new, Some(origin), None, Some(id), None).await
     }
 
     pub(crate) async fn create_bench_task(
@@ -1807,7 +1911,7 @@ impl Engine {
         origin: factory_core::bench::BenchOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, None, Some(origin), Some(id)).await
+        self.create_task(new, None, Some(origin), Some(id), None).await
     }
 
     async fn create_task(
@@ -1816,6 +1920,7 @@ impl Engine {
         workflow_origin: Option<WorkflowOrigin>,
         bench_origin: Option<factory_core::bench::BenchOrigin>,
         id: Option<String>,
+        intake: Option<factory_core::intake::Intake>,
     ) -> Result<Task> {
         let factory = self.factory_snapshot();
         if new.title.trim().is_empty() {
@@ -1877,6 +1982,10 @@ impl Engine {
         if let Some(id) = id { task.id = id; }
         task.workflow_origin = workflow_origin;
         task.bench_origin = bench_origin;
+        if let Some(intake) = intake {
+            task.status = TaskStatus::Intake;
+            task.intake = Some(intake);
+        }
         if let Some(s) = &task.schedule {
             task.next_run_at = Some(schedule::next_after(s, Utc::now())?);
         }
@@ -1906,6 +2015,19 @@ impl Engine {
     /// the dispatch got going. Failures here end the run rather than
     /// escaping, because nobody is waiting on the answer.
     pub async fn start_run_due(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due) {
+        // However it was asked for, an item still in intake is not started --
+        // and not failed either, which is what a dispatch error below would
+        // do to it (`#119`).
+        if let Ok(Some(task)) = self.store.get(task_id).await {
+            if task.status == TaskStatus::Intake {
+                self.entry(
+                    task_id,
+                    TaskEntry::new("daemon", "intake_held", "not started: the task is still in intake"),
+                )
+                .await;
+                return;
+            }
+        }
         let run = match self.dispatch(task_id, trigger, due).await {
             Ok(run) => run,
             Err(e) => {
@@ -2129,6 +2251,13 @@ impl Engine {
             )
             .await?;
         self.bus.publish(Event::RunUpdated { run: run.clone() });
+
+        // The baseline, before the task is handed over: whatever the session
+        // had already used -- a pane an earlier run left behind, a harness
+        // that spent tokens coming up -- is not this run's (#117). Never a
+        // `?`: a runtime with no usage to give must not fail the run.
+        self.snapshot_usage(&run, factory_core::usage::SnapshotPoint::Dispatch)
+            .await;
 
         let prompt = agent.prompt(&ctx).await?;
         runtime.submit(&session, &prompt).await?;
@@ -2806,6 +2935,9 @@ impl Engine {
                     .await;
                 }
             }
+            // The last reading, while the session is still there to ask.
+            self.snapshot_usage(run, factory_core::usage::SnapshotPoint::RunEnd)
+                .await;
             let _ = runtime.stop(session).await;
         }
     }
@@ -4936,6 +5068,7 @@ mod tests {
             turn_ended_at: None,
             turn_end_reason: None,
             required_steps: Vec::new(),
+            usage: None,
         };
         let first = t0 + chrono::Duration::minutes(5);
         assert_eq!(skip_reason_of(Some(&run), first), SkipReason::StillActive);
@@ -5098,6 +5231,7 @@ mod tests {
             turn_ended_at: None,
             turn_end_reason: None,
             required_steps: Vec::new(),
+            usage: None,
         };
         let slot = t(60);
         let booted = t(1000);

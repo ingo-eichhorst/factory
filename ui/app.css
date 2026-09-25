@@ -214,6 +214,33 @@ tr.row:hover { background: var(--panel-2); }
 .s-blocked { color: var(--signal); border-color: transparent; background: var(--signal-wash); }
 .s-done { color: var(--run); border-color: transparent; background: var(--run-wash); }
 .s-failed, .s-cancelled { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+/* Held in the intake gate (#119): not on the line, so no wash of its own. */
+.s-intake { color: var(--signal-ink); border-style: dashed; }
+
+/* ---------------------------------------------------------- intake board
+   The Tasks board's columns and cards, with the seven readiness axes as a
+   row of marks: pass, fail, tolerated (a cheap observability gap) and not
+   yet assessed. */
+#intake .kbcol[data-col="ik-needs_info"] { border-top-color: var(--wait); }
+#intake .kbcol[data-col="ik-ready"] { border-top-color: var(--run); }
+.ik-marks { display: inline-flex; gap: 2px; font: 600 11px/1 var(--mono); }
+.ik-axis { width: 12px; text-align: center; }
+.ik-pass { color: var(--run); }
+.ik-fail { color: var(--fault); }
+.ik-tolerated { color: var(--wait); }
+.ik-unassessed { color: var(--faint); }
+.ik-chips { display: flex; gap: 6px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
+.ik-p.ik-P1 { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+.ik-p.ik-P2 { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
+.ik-note, .ik-q { margin-top: 3px; }
+table.ik-axes { width: 100%; border-collapse: collapse; margin: 8px 0; }
+table.ik-axes th, table.ik-axes td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 12px; }
+table.ik-axes th { white-space: nowrap; font-weight: 500; }
+table.ik-axes.ik-form th { width: 150px; }
+table.ik-axes.ik-form .checkrow { margin: 4px 0; text-transform: none; letter-spacing: 0; }
+.ik-grid { display: flex; gap: 12px; flex-wrap: wrap; }
+.ik-grid label { flex: 1 1 140px; }
+.ik-preview { font: 500 11px/1.4 var(--mono); color: var(--ink-2); }
 
 /* ---------------------------------------------------------- tasks board
    Columns are statuses and nothing else: blocked sits leftmost because it is
@@ -1287,6 +1314,38 @@ button.linklike:hover { color: var(--signal); }
   .infra-on span { grid-column: 1; }
 }
 
+/* ============================================================ L1 backup (#116):
+   a status hero whose left edge and badge carry the age level -- green,
+   amber, red from the shared `--run`/`--wait`/`--fault` -- then the warning
+   strip, the history and the include/exclude tables. It reuses the
+   Infrastructure cards and facts; only the level colours are its own. */
+.bk-page { display: grid; gap: 14px; }
+.bk-hero[data-level="ok"] { border-left-color: var(--run); }
+.bk-hero[data-level="warn"] { border-left-color: var(--wait); }
+.bk-hero[data-level="bad"] { border-left-color: var(--fault); }
+.tag.bk-badge[data-level="ok"] { color: var(--run); border-color: var(--run); }
+.tag.bk-badge[data-level="warn"] { color: var(--wait); border-color: var(--wait); }
+.tag.bk-badge[data-level="bad"] { color: var(--fault); border-color: var(--fault); }
+.bk-headline { margin: 2px 0 12px; }
+.bk-age { font: 600 22px/1.15 var(--cond); letter-spacing: .01em; color: var(--ink); }
+.bk-ok { color: var(--run); }
+.bk-warn { color: var(--wait); }
+.bk-bad { color: var(--fault); font-weight: 600; }
+.bk-none { color: var(--muted); }
+.bk-warnings { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.bk-warnings .env-note { margin: 0; }
+/* A `<section>` is already the panel and its `h3` the heading bar (see the
+   L5 block below); only the sub-caption and the cells are this page's. */
+.bk-section h3 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
+.bk-scroll { overflow-x: auto; }
+.bk-section td code, .bk-section .mono { font: 400 11px/1.45 var(--mono); color: var(--ink-2); }
+.bk-path code { white-space: nowrap; }
+.bk-name { overflow-wrap: anywhere; }
+.bk-nowrap { white-space: nowrap; }
+.bk-off td { color: var(--faint); }
+.bk-contents { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 14px; }
+.bk-contents > section { min-width: 0; }
+
 /* ================================================================== L6
    direction: policy. A control's five statuses reuse the shared `.badge
    s-*` convention tasks already use (`statusBadge` in core.js) -- these
@@ -2201,3 +2260,8 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
 @media (prefers-reduced-motion: reduce) {
   .ops-dot { transition: none; }
 }
+
+/* A run's usage block in the task modal (#117). Unknown reads as muted
+   text, never as a zero. */
+.usage { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.usage-known > div:first-child { font-weight: 600; }

@@ -459,6 +459,7 @@ mod tests {
             pending_retry: None,
             schedule_paused: false,
             category: None,
+            intake: None,
         }
     }
 

@@ -4,6 +4,7 @@
 
 pub mod adapter;
 pub mod agent;
+pub mod backup;
 pub mod bench;
 pub mod benchmark;
 pub mod building;
@@ -13,6 +14,7 @@ pub mod dataset;
 pub mod error;
 pub mod event;
 pub mod goals;
+pub mod intake;
 pub mod knowledge;
 pub mod metrics;
 pub mod occupancy;
@@ -25,6 +27,7 @@ pub mod role;
 pub mod run;
 pub mod scenario;
 pub mod task;
+pub mod usage;
 pub mod workflow;
 
 pub use adapter::{Agent, AdapterKind, AgentRuntime, Interface, TaskStore};

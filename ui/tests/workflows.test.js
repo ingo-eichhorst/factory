@@ -32,12 +32,14 @@ const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
 
 test("Workflows is a Process peer of Tasks with an accessible canvas and summary", () => {
-  assert.match(page, /id="tab-tasks"[^>]*>Tasks<\/button>\s*<button id="tab-workflows"[^>]*>Workflows<\/button>/);
+  // Intake (`#119`) sits between them -- the queue in front of the line --
+  // and `intake.test.js` pins that half.
+  assert.match(page, /id="tab-intake"[^>]*>Intake<\/button>\s*<button id="tab-workflows"[^>]*>Workflows<\/button>/);
   assert.match(page, /id="workflow-canvas"[^>]*tabindex="0"/);
   assert.match(page, /id="workflow-summary"/);
   // Not anchored at the closing bracket: Operations follows (`#106`), and
   // `operations.test.js` pins the whole row.
-  assert.match(app, /proc: \["tasks", "workflows"/);
+  assert.match(app, /proc: \["tasks", "intake", "workflows"/);
 });
 
 // ------------------------------------------------------------------ R1: drag

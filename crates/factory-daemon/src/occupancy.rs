@@ -352,7 +352,15 @@ impl Engine {
             return Ok(());
         };
         self.check_run_token(&run, turn.token.as_deref(), task_id)?;
-        match hook_turn_ended_action(&turn, run.status) {
+        let action = hook_turn_ended_action(&turn, run.status);
+        // A turn ended, so the usage so far is worth a reading (#117) --
+        // taken off this request, which is the harness's own hook waiting
+        // on an answer. A run failing right here gets its run-end reading
+        // from `close_session` instead.
+        if !matches!(action, HookTurnAction::FailNow) {
+            crate::costs::spawn_snapshot(self, run.clone(), factory_core::usage::SnapshotPoint::TurnEnded);
+        }
+        match action {
             HookTurnAction::FailNow => {
                 self.fail_run(&run.id, FailKind::StopFailure, &hook_turn_ended_reason(&turn)).await;
             }
@@ -905,6 +913,7 @@ mod tests {
             turn_ended_at: None,
             turn_end_reason: None,
             required_steps: Vec::new(),
+            usage: None,
             queued_at: None,
             scheduled_for: None,
             fail_kind: None,

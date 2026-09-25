@@ -103,6 +103,22 @@ pub enum Event {
     QualityChanged {
         profiles: Vec<String>,
     },
+    /// A backup finished and retention ran after it (`#116`). Published for
+    /// the schedule's backups and a person's alike.
+    BackupCompleted {
+        snapshot: crate::backup::Snapshot,
+    },
+    /// A backup could not be taken. The daemon carries on; this, the
+    /// daemon's log and the page's warning are where the reason goes.
+    BackupFailed {
+        at: DateTime<Utc>,
+        trigger: crate::backup::BackupTrigger,
+        reason: String,
+    },
+    /// A snapshot was verified, whether or not it passed.
+    BackupVerified {
+        verification: crate::backup::VerifySummary,
+    },
     /// A push from a runtime, mapped onto whichever standing agent or run's
     /// session it was about. This never moves a task or a run -- only the
     /// agent's own `factory task report` may do that -- so `task_id()` is
@@ -147,7 +163,10 @@ impl Event {
             | Event::RolesChanged { .. }
             | Event::PolicyChanged { .. }
             | Event::GoalsChanged { .. }
-            | Event::QualityChanged { .. } => None,
+            | Event::QualityChanged { .. }
+            | Event::BackupCompleted { .. }
+            | Event::BackupFailed { .. }
+            | Event::BackupVerified { .. } => None,
             Event::WorkflowCreated { .. }
             | Event::WorkflowUpdated { .. }
             | Event::WorkflowDeleted { .. }

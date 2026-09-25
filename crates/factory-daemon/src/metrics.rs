@@ -39,13 +39,21 @@
 //! Every other metric is a single number with no time axis of its own to
 //! draw yet.
 //!
+//! `unit_cost` and `tokens_per_run` (#117) are
+//! `factory_core::usage::usage_metric` over the same trailing 28 days of
+//! runs, reading the usage each run carries -- measured by the agent
+//! runtime, never guessed. A run whose usage is unknown is left out of both
+//! sides of the figure; with none left the value is `None` and the reason
+//! says how many finished runs there were.
+//!
 //! ## Unknown vs. unavailable
 //!
 //! An id `metrics::resolve` has never heard of refuses the whole call --
 //! `Engine::metrics` is the one place a typo becomes a `BadRequest` rather
-//! than a quiet `None`. An id it knows but cannot compute yet (`unit_cost`,
-//! `tokens_per_run`) comes back as `value: None` with the registry's own
-//! reason -- the issue's own last bullet. `default_metric_ids`, used only
+//! than a quiet `None`. An id it knows but cannot compute yet comes back as
+//! `value: None` with the registry's own reason. No metric is in that state
+//! today -- the last two, `unit_cost` and `tokens_per_run`, became
+//! computable with #117 -- but the path stays for the next one. `default_metric_ids`, used only
 //! when a caller's own `ids` was empty, filters the other way: it never
 //! offers an *unknown* id (nothing built it), but does offer an
 //! *unavailable* one, since "every non-parameterised metric" names both.
@@ -88,6 +96,10 @@ fn is_operations_metric(id: &str) -> bool {
 /// The window the operations metrics are read over -- the trailing 28 days
 /// the production ratios use.
 const OPERATIONS_WINDOW_DAYS: i64 = 28;
+
+fn is_usage_metric(id: &str) -> bool {
+    matches!(id, "unit_cost" | "tokens_per_run")
+}
 
 fn is_policy_metric(id: &str) -> bool {
     id.starts_with("compliance.") || id.starts_with("open_controls.")
@@ -157,7 +169,9 @@ impl Engine {
 
         let needs_production = computing.iter().any(|(id, r)| r.is_ok() && is_production_metric(id.as_str()));
         let needs_policy = computing.iter().any(|(id, r)| r.is_ok() && is_policy_metric(id.as_str()));
-        let needs_runs = computing.iter().any(|(id, r)| r.is_ok() && is_operations_metric(id.as_str()));
+        let needs_runs = computing
+            .iter()
+            .any(|(id, r)| r.is_ok() && (is_operations_metric(id.as_str()) || is_usage_metric(id.as_str())));
 
         let production = if needs_production {
             Some(self.production(Some(5), Some(ProductionBin::Day), None).await?)
@@ -280,6 +294,8 @@ impl Engine {
             (ratio_value(value_from_series(&s, now, NO_RECENT_RUNS), daily(), 28, now), Some(s))
         } else if is_operations_metric(id.as_str()) {
             (operations_value(id, runs.expect("needs_runs set"), now), None)
+        } else if is_usage_metric(id.as_str()) {
+            (usage_value(id, runs.expect("needs_runs set"), now), None)
         } else if let Some(framework) = id.as_str().strip_prefix("compliance.") {
             (compliance_value(id, policy_report.expect("needs_policy set"), framework, now), None)
         } else if let Some(framework) = id.as_str().strip_prefix("open_controls.") {
@@ -587,6 +603,26 @@ fn operations_value(id: &MetricId, runs: &[factory_core::run::Run], now: DateTim
                 .and(factory_core::operations::registry_metric_as_of(id.as_str(), runs, &window))
                 .unwrap_or(now),
             value: figure.value,
+            reason: figure.reason,
+        },
+        None => MetricValue {
+            id: id.clone(),
+            value: None,
+            as_of: now,
+            reason: Some("no computation wired for this metric yet".to_string()),
+        },
+    }
+}
+
+/// `unit_cost`/`tokens_per_run`, `as_of` the newest run end behind the
+/// value, like the operations metrics -- `now` beside a reason when there
+/// is none.
+fn usage_value(id: &MetricId, runs: &[factory_core::run::Run], now: DateTime<Utc>) -> MetricValue {
+    match factory_core::usage::usage_metric(id.as_str(), runs, now, OPERATIONS_WINDOW_DAYS) {
+        Some(figure) => MetricValue {
+            id: id.clone(),
+            value: figure.value,
+            as_of: figure.as_of.unwrap_or(now),
             reason: figure.reason,
         },
         None => MetricValue {
@@ -1194,18 +1230,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unavailable_id_comes_back_as_none_with_the_registrys_reason() {
+    async fn unit_cost_and_tokens_per_run_read_the_usage_runs_carry() {
+        use factory_core::usage::{RunUsage, TokenCounts, UsageState};
         let engine = test_engine(Vec::new());
-        let computed = engine.metrics(&[MetricId::new("unit_cost").unwrap()], Utc::now()).await.unwrap();
-        assert_eq!(computed.values[0].value, None);
-        assert!(computed.values[0].reason.as_deref().unwrap().contains("design §12.6"));
-        assert!(!computed.registry[0].available);
+        let ids = [MetricId::new("unit_cost").unwrap(), MetricId::new("tokens_per_run").unwrap()];
+
+        // Nothing measured yet: no value, and a reason -- never a zero.
+        finished_run(&engine, "unmeasured", RunStatus::Done, Trigger::Manual, chrono::Duration::hours(3)).await;
+        let computed = engine.metrics(&ids, Utc::now()).await.unwrap();
+        for v in &computed.values {
+            assert_eq!(v.value, None, "{v:?}");
+            assert!(v.reason.as_deref().unwrap().contains("none of the 1 runs"), "{v:?}");
+        }
+        assert!(computed.registry.iter().all(|d| d.available));
+
+        let measured = |usd: f64, tokens: u64| RunUsage {
+            state: UsageState::Known,
+            reason: None,
+            tokens: TokenCounts { input: Some(tokens), output: Some(0), cache_read: Some(0), cache_write: Some(0) },
+            cost_usd: Some(usd),
+            ..RunUsage::unknown("", 2)
+        };
+        for (label, status, usd, tokens) in
+            [("a", RunStatus::Done, 2.0, 1_000), ("b", RunStatus::Failed, 1.0, 3_000)]
+        {
+            let task = finished_run(&engine, label, status, Trigger::Manual, chrono::Duration::hours(2)).await;
+            let run = engine.store.runs(&task.id, 1).await.unwrap().remove(0);
+            engine
+                .store
+                .update_run(&run.id, &RunPatch { usage: Some(measured(usd, tokens)), ..Default::default() })
+                .await
+                .unwrap();
+        }
+        let computed = engine.metrics(&ids, Utc::now()).await.unwrap();
+        let get = |id: &str| computed.values.iter().find(|v| v.id.as_str() == id).unwrap();
+        assert_eq!(get("unit_cost").value, Some(3.0), "a failed run's cost is spread over what got done");
+        assert_eq!(get("tokens_per_run").value, Some(2_000.0));
     }
 
     // -------------------------------------------------------- default ids
 
     #[tokio::test]
-    async fn default_ids_include_unavailable_fixed_metrics_and_what_the_catalogues_imply() {
+    async fn default_ids_include_every_fixed_metric_and_what_the_catalogues_imply() {
         let engine = test_engine(vec!["cra".to_string()]);
         {
             let snapshot = engine.factory_snapshot();
@@ -1236,7 +1302,7 @@ mod tests {
         let ids = engine.default_metric_ids().await;
         let has = |s: &str| ids.iter().any(|id| id.as_str() == s);
         assert!(has("throughput_week"), "fixed metrics are always in the default set");
-        assert!(has("unit_cost"), "an unavailable fixed metric is still 'non-parameterised'");
+        assert!(has("unit_cost"), "a fixed metric, so in the default set");
         assert!(has("tokens_per_run"));
         assert!(has("compliance.cra"), "implied by the loaded policy catalogue");
         assert!(has("open_controls.cra"));

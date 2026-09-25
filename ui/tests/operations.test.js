@@ -22,11 +22,11 @@ const REPORT = JSON.parse(readFileSync(new URL("./fixtures/operations-report.jso
 
 // ------------------------------------------------------------- the frame
 
-test("Operations is L4's third tab, after Tasks and Workflows, and is served", () => {
+test("Operations is L4's last tab, after Tasks, Intake and Workflows, and is served", () => {
   assert.match(page, /id="tab-workflows"[^>]*>Workflows<\/button>\s*<button id="tab-operations"[^>]*>Operations<\/button>/);
   assert.match(page, /id="view-operations"/);
-  assert.match(page, /<span class="lv-sub">Tasks, workflows, operations<\/span>/);
-  assert.match(wiring, /proc: \["tasks", "workflows", "operations"\]/);
+  assert.match(page, /<span class="lv-sub">Tasks, intake, workflows, operations<\/span>/);
+  assert.match(wiring, /proc: \["tasks", "intake", "workflows", "operations"\]/);
   assert.match(wiring, /operations: \{ onShow: showOperations, onHide: hideOperations \}/);
   assert.match(served, /"js\/operations\.js"/);
   assert.match(served, /"js\/operations-model\.js"/);

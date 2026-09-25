@@ -5,7 +5,7 @@
 import { $, api, state, connect, setTheme, currentTheme, toggleTheme, TERMINAL } from "./core.js";
 import { initRail, writeHash, setRouter, readHash, applyRoute } from "./scopes.js";
 import { closeModal, dropModal } from "./modal.js";
-import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyTasksView, currentTasksView, setTasksView } from "./tasks.js";
+import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyTasksView, currentTasksView, setTasksView, loadTaskUsage } from "./tasks.js";
 import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { legacyAgentRoute, loadRuntimeConnections, renderRuntimeConnections } from "./agent-runtime.js";
@@ -14,6 +14,8 @@ import { openCreate } from "./task-form.js";
 import { acceptWorkflowEvent, loadWorkflows, readWorkflowTail, renderWorkflows, wireWorkflows, workflowTail } from "./workflows.js";
 import { loadDashboard, renderDashboard, loadInbox, renderInbox, wireDashboard } from "./dashboard.js";
 import { loadOperations, showOperations, hideOperations, wireOperations } from "./operations.js";
+import { loadIntake, showIntake, hideIntake, refreshIntake, wireIntake } from "./intake.js";
+import { touchesIntake } from "./intake-model.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 import { loadEnvironment, renderSandboxes } from "./sandboxes.js";
@@ -23,6 +25,8 @@ import { loadDatasets, renderDatasetsSegment, wireDatasets } from "./datasets.js
 import { acceptBenchRunEvent, loadBenchRuns, renderBenchRunsSegment, wireBenchRuns } from "./bench-runs.js";
 import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from "./knowledge.js";
 import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
+import { refreshBackup, renderBackup, wireBackup } from "./backup.js";
+import { isBackupEvent } from "./backup-model.js";
 import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
 import { loadGoals, reloadGoals, wireGoals } from "./goals.js";
 import { loadQuality, reloadQuality, wireQuality } from "./quality.js";
@@ -86,6 +90,9 @@ const VIEWS = {
   // or agent event, and `onEvent` refetches on those (`scheduleOpsRefresh`).
   // `onHide` is where "since you last looked" is written down.
   operations: { onShow: showOperations, onHide: hideOperations },
+  // No poll either: an item changes only through a task event, and
+  // `onEvent` refetches on the ones that touch intake (`touchesIntake`).
+  intake: { onShow: showIntake, onHide: hideIntake },
   occupancy: {
     onShow: startOccupancy,
     onHide: stopAgentPoll,
@@ -121,6 +128,10 @@ const VIEWS = {
     tail: { write: knowledgeTail, read: readKnowledgeTail },
   },
   infrastructure: { onShow: startInfrastructure, onHide: stopAgentPoll },
+  // Polled like Infrastructure -- the destination is a disk that can be
+  // unplugged, which fires no event -- and refetched on every `backup_*`
+  // event (`onEvent` below), which the daemon's own job publishes too.
+  backup: { onShow: startBackup, onHide: stopAgentPoll },
 };
 
 // ------------------------------------------------------------------- the URL
@@ -201,12 +212,13 @@ const LEVEL_VIEWS = {
   // how good the work has to be on the way, and only then the control
   // catalogue that holds the company to what it already committed to.
   dir: ["goals", "quality", "policy", "scenarios"],
-  // The work first, then how it is running.
-  proc: ["tasks", "workflows", "operations"],
+  // The work first, then how it is running. Intake sits beside Tasks: it
+  // is the queue in front of them (`#119`).
+  proc: ["tasks", "intake", "workflows", "operations"],
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets"],
   imp: ["benchmarks", "knowledge"],
-  infra: ["infrastructure"],
+  infra: ["infrastructure", "backup"],
 };
 
 /// The live level that claims `tab`, for backfilling `state.level` before any
@@ -286,6 +298,8 @@ function rerender(route) {
   // The daemon narrows the report to the selected subtree (`operations.js`'s
   // header), so a rail change refetches.
   if (state.tab === "operations") { loadOperations(); return; }
+  // So does the intake board: the daemon narrows it to the subtree.
+  if (state.tab === "intake") { loadIntake(); return; }
   // Everything already in the tail is still there; a scope change only
   // changes how much of it is drawn, the same re-render `renderTasks` does
   // below for the tasks it already holds.
@@ -336,6 +350,8 @@ function rerender(route) {
   // the rail says; what narrows is the agents listed under each account and
   // under Unassigned -- the same split Secrets keeps for the home directory.
   else if (state.tab === "infrastructure") renderInfrastructure();
+  // A backup is of the whole instance: no rail selection narrows it.
+  else if (state.tab === "backup") renderBackup();
 }
 
 /// The rail is a view over `state.scopes`, so it is rebuilt wherever that is
@@ -485,6 +501,12 @@ function startInfrastructure() {
   state.agentPoll = setInterval(refreshInfrastructure, 30000);
 }
 
+function startBackup() {
+  stopAgentPoll();
+  refreshBackup();
+  state.agentPoll = setInterval(refreshBackup, 30000);
+}
+
 // ---------------------------------------------------------------------- boot
 
 async function boot() {
@@ -556,11 +578,13 @@ async function boot() {
   wireBenchRuns();
   $("knowledge-refresh").onclick = () => loadKnowledge();
   $("infrastructure-refresh").onclick = () => refreshInfrastructure();
+  wireBackup();
   $("occ-window").onchange = () => loadOccupancy();
   $("newTask").onclick = () => openCreate();
   wireDashboard();
   wireWorkflows();
   wireOperations();
+  wireIntake();
   // A page in a background browser tab skips its refetches; coming back is
   // when it catches up, once.
   document.addEventListener("visibilitychange", () => { if (!document.hidden) scheduleOpsRefresh(); });
@@ -638,7 +662,11 @@ function onEvent(ev) {
     case "run_updated":
       if (state.open === ev.run.task_id) {
         const i = state.runs.findIndex(r => r.id === ev.run.id);
+        // A new usage reading moves the task's sum too (#117); re-read it
+        // only then, not on every status flicker.
+        const usageMoved = JSON.stringify(i >= 0 ? state.runs[i].usage : null) !== JSON.stringify(ev.run.usage || null);
         if (i >= 0) state.runs[i] = ev.run; else state.runs.unshift(ev.run);
+        if (usageMoved) loadTaskUsage().then(renderModal);
         // A new run is the one worth watching.
         if (ev.type === "run_started") state.run = ev.run.id;
         renderModal();
@@ -688,6 +716,8 @@ function onEvent(ev) {
   // result detail modal, if one happens to be open on the checked-in key
   // result.
   if (ev.type === "goals_changed" && state.tab === "goals") reloadGoals();
+  // A backup taken (by a person or the schedule), failed or verified.
+  if (isBackupEvent(ev) && state.tab === "backup") refreshBackup();
   // A scenario's own policy delta and goal-scenario probabilities are read
   // off the same live evidence and check-ins those two events already name;
   // `reloadScenarios` is a full reload (the forecast itself is a Monte Carlo
@@ -720,6 +750,8 @@ function onEvent(ev) {
   if ((ev.type.startsWith("task_") || ev.type.startsWith("run_") || ev.type.startsWith("agent_")) && ev.type !== "agent_activity") {
     scheduleOpsRefresh();
   }
+  // An item handed in, triaged, decided or deleted; a triage run moving.
+  if (touchesIntake(ev)) refreshIntake();
 }
 
 /// One refetch of `/api/operations` for a burst of events, at most one per

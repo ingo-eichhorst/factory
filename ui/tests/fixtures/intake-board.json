@@ -1,0 +1,401 @@
+{
+ "kind": "intake_board",
+ "board": {
+  "now": "2026-09-25T16:20:26.149502Z",
+  "ready_window_days": 14,
+  "columns": {
+   "received": [
+    {
+     "id": "4984bf53-c4c5-43ef-8528-5cad36fb9c43",
+     "title": "Make the site better",
+     "scope": "web",
+     "status": "intake",
+     "stage": "received",
+     "source": {
+      "kind": "cli"
+     },
+     "requester": "the owner",
+     "received_at": "2026-09-25T16:19:39.869667Z",
+     "age_seconds": 46,
+     "triage": {
+      "assessment": {
+       "axes": [
+        {
+         "axis": "scope",
+         "pass": false,
+         "evidence": "'the site' is every page; nothing bounds which part is slow."
+        },
+        {
+         "axis": "specification",
+         "pass": true,
+         "evidence": "specification: holds -- see the item text"
+        },
+        {
+         "axis": "verifiability",
+         "pass": false,
+         "evidence": "No page, number or threshold says what fast enough is."
+        },
+        {
+         "axis": "observability",
+         "pass": true,
+         "evidence": "observability: holds -- see the item text"
+        },
+        {
+         "axis": "context",
+         "pass": true,
+         "evidence": "context: holds -- see the item text"
+        },
+        {
+         "axis": "independence",
+         "pass": true,
+         "evidence": "independence: holds -- see the item text"
+        },
+        {
+         "axis": "reversibility",
+         "pass": true,
+         "evidence": "reversibility: holds -- see the item text"
+        }
+       ],
+       "category": "feature",
+       "impact": "medium",
+       "urgency": "low",
+       "complexity": 6,
+       "routing": {
+        "scope": "web"
+       },
+       "summary": "A general complaint with no page or measure.",
+       "questions": [
+        "Which page feels slow, and doing what?",
+        "What load time would be acceptable?"
+       ]
+      },
+      "priority": "P4",
+      "estimate": {
+       "min_seconds": 5400,
+       "max_seconds": 10800
+      },
+      "verdict": {
+       "verdict": "needs_info",
+       "blockers": [
+        "Scope: 'the site' is every page; nothing bounds which part is slow.",
+        "Verifiability: No page, number or threshold says what fast enough is."
+       ]
+      },
+      "by": "the owner",
+      "at": "2026-09-25T16:20:02.934110Z"
+     },
+     "decision": {
+      "decision": {
+       "decision": "needs_info",
+       "questions": []
+      },
+      "by": "the owner",
+      "at": "2026-09-25T16:20:02.934788Z"
+     }
+    }
+   ],
+   "triaging": [
+    {
+     "id": "cdc081d4-9e5d-4299-ba11-dca6269642a3",
+     "title": "Export invoices as CSV",
+     "scope": "demo",
+     "status": "intake",
+     "stage": "triaging",
+     "source": {
+      "kind": "cli"
+     },
+     "requester": "the owner",
+     "received_at": "2026-09-25T16:20:26.052849Z",
+     "age_seconds": 0,
+     "triage": {
+      "assessment": {
+       "axes": [
+        {
+         "axis": "scope",
+         "pass": true,
+         "evidence": "scope: holds -- see the item text"
+        },
+        {
+         "axis": "specification",
+         "pass": true,
+         "evidence": "specification: holds -- see the item text"
+        },
+        {
+         "axis": "verifiability",
+         "pass": true,
+         "evidence": "verifiability: holds -- see the item text"
+        },
+        {
+         "axis": "observability",
+         "pass": false,
+         "evidence": "No test covers the refund refresh yet; an existing order fixture can be extended.",
+         "cost": "medium"
+        },
+        {
+         "axis": "context",
+         "pass": true,
+         "evidence": "context: holds -- see the item text"
+        },
+        {
+         "axis": "independence",
+         "pass": true,
+         "evidence": "independence: holds -- see the item text"
+        },
+        {
+         "axis": "reversibility",
+         "pass": true,
+         "evidence": "reversibility: holds -- see the item text"
+        }
+       ],
+       "category": "feature",
+       "impact": "medium",
+       "urgency": "medium",
+       "complexity": 2,
+       "routing": {
+        "scope": "demo"
+       },
+       "summary": "A small export; one handler and a template."
+      },
+      "priority": "P3",
+      "estimate": {
+       "min_seconds": 900,
+       "max_seconds": 2700
+      },
+      "verdict": {
+       "verdict": "ready"
+      },
+      "by": "the owner",
+      "at": "2026-09-25T16:20:26.121873Z"
+     }
+    }
+   ],
+   "needs_info": [
+    {
+     "id": "11d7b6cc-c7f4-4c1b-abe4-7ff448c7d3ca",
+     "title": "Rotate the API key",
+     "scope": "web",
+     "status": "intake",
+     "stage": "needs_info",
+     "source": {
+      "kind": "cli"
+     },
+     "requester": "the owner",
+     "received_at": "2026-09-25T16:20:26.080767Z",
+     "age_seconds": 0,
+     "triage": {
+      "assessment": {
+       "axes": [
+        {
+         "axis": "scope",
+         "pass": true,
+         "evidence": "scope: holds -- see the item text"
+        },
+        {
+         "axis": "specification",
+         "pass": true,
+         "evidence": "specification: holds -- see the item text"
+        },
+        {
+         "axis": "verifiability",
+         "pass": true,
+         "evidence": "verifiability: holds -- see the item text"
+        },
+        {
+         "axis": "observability",
+         "pass": false,
+         "evidence": "No test covers the refund refresh yet; an existing order fixture can be extended.",
+         "cost": "medium"
+        },
+        {
+         "axis": "context",
+         "pass": true,
+         "evidence": "context: holds -- see the item text"
+        },
+        {
+         "axis": "independence",
+         "pass": false,
+         "evidence": "The new key has to come from the partner; nobody has asked for it yet."
+        },
+        {
+         "axis": "reversibility",
+         "pass": true,
+         "evidence": "reversibility: holds -- see the item text"
+        }
+       ],
+       "category": "chore",
+       "impact": "high",
+       "urgency": "medium",
+       "complexity": 4,
+       "routing": {
+        "scope": "web"
+       },
+       "summary": "The order total is cached across a refund; bounded to the order page and its cache.",
+       "questions": [
+        "Who at the partner issues the new key?"
+       ]
+      },
+      "priority": "P2",
+      "estimate": {
+       "min_seconds": 2700,
+       "max_seconds": 7200
+      },
+      "verdict": {
+       "verdict": "needs_info",
+       "blockers": [
+        "Independence: The new key has to come from the partner; nobody has asked for it yet."
+       ]
+      },
+      "by": "the owner",
+      "at": "2026-09-25T16:20:26.132103Z"
+     },
+     "questions": [
+      "Who at the partner issues the new key?"
+     ],
+     "decision": {
+      "decision": {
+       "decision": "needs_info",
+       "questions": []
+      },
+      "by": "the owner",
+      "at": "2026-09-25T16:20:26.132646Z"
+     }
+    }
+   ],
+   "ready": [
+    {
+     "id": "ae41f503-afb3-46ec-9f58-d93bdf07bf8c",
+     "title": "Order page shows stale totals",
+     "scope": "demo",
+     "status": "failed",
+     "stage": "ready",
+     "source": {
+      "kind": "cli",
+      "reference": "mail-4711"
+     },
+     "requester": "Kim (customer)",
+     "received_at": "2026-09-25T16:19:39.847307Z",
+     "age_seconds": 23,
+     "triage": {
+      "assessment": {
+       "axes": [
+        {
+         "axis": "scope",
+         "pass": true,
+         "evidence": "scope: holds -- see the item text"
+        },
+        {
+         "axis": "specification",
+         "pass": true,
+         "evidence": "specification: holds -- see the item text"
+        },
+        {
+         "axis": "verifiability",
+         "pass": true,
+         "evidence": "verifiability: holds -- see the item text"
+        },
+        {
+         "axis": "observability",
+         "pass": false,
+         "evidence": "No test covers the refund refresh yet; an existing order fixture can be extended.",
+         "cost": "medium"
+        },
+        {
+         "axis": "context",
+         "pass": true,
+         "evidence": "context: holds -- see the item text"
+        },
+        {
+         "axis": "independence",
+         "pass": true,
+         "evidence": "independence: holds -- see the item text"
+        },
+        {
+         "axis": "reversibility",
+         "pass": true,
+         "evidence": "reversibility: holds -- see the item text"
+        }
+       ],
+       "category": "bugfix",
+       "impact": "high",
+       "urgency": "medium",
+       "complexity": 4,
+       "routing": {
+        "scope": "demo",
+        "agent": "demo-agent"
+       },
+       "summary": "The order total is cached across a refund; bounded to the order page and its cache."
+      },
+      "priority": "P2",
+      "estimate": {
+       "min_seconds": 2700,
+       "max_seconds": 7200
+      },
+      "verdict": {
+       "verdict": "ready"
+      },
+      "by": "the owner",
+      "at": "2026-09-25T16:20:02.965189Z"
+     },
+     "triage_task": "3e1d8486-752a-4ea1-8830-2836429ab133",
+     "triage_task_status": "failed",
+     "decision": {
+      "decision": {
+       "decision": "ready",
+       "run": false
+      },
+      "by": "the owner",
+      "at": "2026-09-25T16:20:02.965709Z"
+     }
+    }
+   ]
+  },
+  "wontfix": 1,
+  "axes": [
+   {
+    "axis": "scope",
+    "label": "Scope",
+    "pass_condition": "The affected behaviour and likely components are bounded."
+   },
+   {
+    "axis": "specification",
+    "label": "Specification",
+    "pass_condition": "No external or hard-to-reverse decision remains."
+   },
+   {
+    "axis": "verifiability",
+    "label": "Verifiability",
+    "pass_condition": "A concrete signal can distinguish success from failure."
+   },
+   {
+    "axis": "observability",
+    "label": "Observability",
+    "pass_condition": "Existing or small new instrumentation can expose that signal."
+   },
+   {
+    "axis": "context",
+    "label": "Context",
+    "pass_condition": "Relevant code, documents and prior work are cited or directly findable."
+   },
+   {
+    "axis": "independence",
+    "label": "Independence",
+    "pass_condition": "No unresolved issue, task, credential or human decision blocks the work."
+   },
+   {
+    "axis": "reversibility",
+    "label": "Reversibility",
+    "pass_condition": "The change is local and can be reverted safely."
+   }
+  ],
+  "categories": [
+   "feature",
+   "bugfix",
+   "release",
+   "publish",
+   "docs",
+   "chore",
+   "security-report",
+   "customer-request"
+  ]
+ }
+}

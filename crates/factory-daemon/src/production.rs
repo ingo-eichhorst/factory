@@ -349,6 +349,7 @@ mod tests {
             turn_ended_at: None,
             turn_end_reason: None,
             required_steps: Vec::new(),
+            usage: None,
             worktree_path: None,
             worktree_branch: None,
             queued_at: None,

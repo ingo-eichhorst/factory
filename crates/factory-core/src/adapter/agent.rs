@@ -397,7 +397,9 @@ impl AgentContext {
              agents; {bin} run list [task-id], run show <run-id>, run log \
              <run-id>, run output <run-id>; {bin} adapters; {bin} infra, \
              which shows the host, the daemon and which AI account each \
-             agent's model calls go to.\n\n\
+             agent's model calls go to; {bin} backup status, backup list, \
+             which show whether the instance's state is backed up, how \
+             recently and whether a backup has been verified.\n\n\
              The company's knowledge base is part of that: {bin} knowledge \
              search <words> [--tag <tag>] lists the pages that match, best \
              first, as file paths with the reason each matched. It never \
@@ -489,10 +491,17 @@ impl AgentContext {
             }
             lines.push(match grant {
                 Grant::TaskCreate => format!(
-                    "task.create -> {bin} task create \"<title>\" -i \"<instructions>\" --scope {scope} --agent <agent>"
+                    "task.create -> {bin} task create \"<title>\" -i \"<instructions>\" --scope {scope} --agent <agent>; \
+                     or, for work that is not yet clear, tested or known to be ours, hand it in through the \
+                     intake gate instead: {bin} intake add \"<title>\" -i \"<what is asked>\" --scope {scope} \
+                     (it is triaged before it can run; {bin} intake info <id> \"...\" answers a needs-info)"
                 ),
                 Grant::TaskEdit => {
-                    format!("task.edit -> {bin} task edit <id> ... (see --help for every field)")
+                    format!(
+                        "task.edit -> {bin} task edit <id> ... (see --help for every field); triaging an \
+                         intake item is an edit too: {bin} intake assess <id> --file <assessment.json> \
+                         [--decide], {bin} intake decide <id> ready|needs-info|wontfix"
+                    )
                 }
                 Grant::TaskDelete => format!("task.delete -> {bin} task delete <id>"),
                 Grant::TaskRun => format!("task.run -> {bin} task run <id>"),
@@ -547,6 +556,9 @@ impl AgentContext {
                 ),
                 Grant::GoalsCheckIn => format!(
                     "goals.checkin -> {bin} goals checkin <objective>/<kr> --value <n> --confidence <0-10> [--note \"...\"]; only for a manual key result, and the grant itself is company-wide, not scoped to {scope}"
+                ),
+                Grant::BackupRun => format!(
+                    "backup.run -> {bin} backup run; {bin} backup verify [<snapshot>]; a backup is of the whole instance, not scoped to {scope}"
                 ),
             });
         }
@@ -771,6 +783,7 @@ mod tests {
             pending_retry: None,
             schedule_paused: false,
             category: None,
+            intake: None,
         }
     }
 

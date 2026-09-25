@@ -173,6 +173,11 @@ impl Engine {
         Needs::Grant(match request {
             Request::TaskCreate(_) => Grant::TaskCreate,
             Request::TaskUpdate { .. } => Grant::TaskEdit,
+            // Intake (`#119`) reuses the task grants: handing something in
+            // is creating a task, triaging one is editing it. The `triager`
+            // role that narrows this is v2.
+            Request::IntakeAdd(_) | Request::IntakeTriage { .. } | Request::IntakeInfo { .. } => Grant::TaskCreate,
+            Request::IntakeAssess { .. } | Request::IntakeDecide { .. } => Grant::TaskEdit,
             Request::TaskDelete { .. } => Grant::TaskDelete,
             Request::TaskRun { .. } => Grant::TaskRun,
             Request::TaskCancel { .. } => Grant::TaskCancel,
@@ -216,6 +221,9 @@ impl Engine {
             // Checked against the root scope for the same reason
             // `policy.attest` is -- see `in_root_scope`.
             Request::GoalsCheckIn { .. } => Grant::GoalsCheckIn,
+            // Checked against the root scope too: a backup is of the whole
+            // instance's state (`#116`).
+            Request::BackupRun | Request::BackupVerify { .. } => Grant::BackupRun,
             // The same door `TaskCreate`/`PolicyRemediate` already open --
             // this is not a second one (`#100`).
             Request::ScenarioPromote { .. } => Grant::TaskCreate,
@@ -232,6 +240,8 @@ impl Engine {
             | Request::SiteFootprint
             | Request::Environment
             | Request::Infrastructure
+            // Lists the destination and reads the history; writes nothing.
+            | Request::Backup
             | Request::Knowledge
             | Request::KnowledgeSearch { .. }
             | Request::Benchmarks
@@ -254,6 +264,8 @@ impl Engine {
             | Request::Scenarios { .. }
             // A projection over what the reads below already return (`#106`).
             | Request::Operations { .. }
+            // A projection over the task list, like `Operations` (`#119`).
+            | Request::IntakeBoard { .. }
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
@@ -262,6 +274,11 @@ impl Engine {
             | Request::RunGet { .. }
             | Request::RunEntries { .. }
             | Request::RunOutput { .. }
+            // Usage and cost (#117): read off runs and their snapshots,
+            // nothing written.
+            | Request::RunUsage { .. }
+            | Request::TaskUsage { .. }
+            | Request::Costs { .. }
             | Request::AgentOutput { .. }
             | Request::AgentScreen { .. }
             | Request::RunScreen { .. }
@@ -351,14 +368,15 @@ impl Engine {
                 Some(root) if root.name == *scope => Ok(()),
                 Some(root) => Err(FactoryError::Denied(format!(
                     "{} works in {scope}; the knowledge base, datasets, bench runs, policy \
-                     attestations and goals check-ins are company-wide and belong to the root \
-                     scope ({:?}) alone",
+                     attestations, goals check-ins and backups are company-wide and belong to the \
+                     root scope ({:?}) alone",
                     caller.describe(),
                     root.name
                 ))),
                 None => Err(FactoryError::Denied(format!(
                     "{} may not write knowledge, manage datasets, run benchmarks, attest to a \
-                     policy control, or check in a goal; this instance declares no root scope",
+                     policy control, check in a goal, or take a backup; this instance declares no \
+                     root scope",
                     caller.describe()
                 ))),
             }
@@ -404,6 +422,47 @@ impl Engine {
                     in_scope(s)?;
                 }
                 Ok(())
+            }
+
+            // Handing in follows `TaskCreate`'s rule to the letter.
+            Request::IntakeAdd(new) => in_scope(new.scope.as_deref().unwrap_or(scope)),
+            // Starting a triage run creates a task in the item's scope.
+            Request::IntakeTriage { id, .. } => match self.store.get(id).await? {
+                Some(item) => task_in_reach(def, &item),
+                None => Ok(()),
+            },
+            // Assessing and deciding: reach over the item, or being the run
+            // of its own triage task -- the one way an agent with no reach
+            // over an item gets to answer for it, and only for that item.
+            // Releasing moves it, so the route has to be in reach as well.
+            Request::IntakeAssess { id, assessment, .. } => {
+                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
+                    return Err(deny("assess an intake item that is neither in its reach nor its own triage run's"));
+                }
+                in_scope(&assessment.routing.scope)
+            }
+            Request::IntakeDecide { id, decision } => {
+                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
+                    return Err(deny("decide an intake item that is neither in its reach nor its own triage run's"));
+                }
+                let routed = item.intake.as_ref().and_then(|i| i.triage.as_ref()).map(|t| &t.assessment.routing.scope);
+                match (decision, routed) {
+                    (factory_core::intake::Decision::Ready { .. }, Some(routed)) => in_scope(routed),
+                    _ => Ok(()),
+                }
+            }
+            // Answering a needs-info: reach over the item, or having handed
+            // it in.
+            Request::IntakeInfo { id, .. } => {
+                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                let me = caller.describe();
+                let requested = item
+                    .intake
+                    .as_ref()
+                    .is_some_and(|i| i.requester == me || i.requester.ends_with(&format!("(via {me})")));
+                if requested { Ok(()) } else { task_in_reach(def, &item) }
             }
 
             Request::TaskDelete { id }
@@ -522,6 +581,10 @@ impl Engine {
             Request::GoalsCheckIn { .. } => match def.reach {
                 Reach::Scope => in_root_scope(),
                 Reach::Own => Err(deny("record a goals check-in; that requires scope reach")),
+            },
+            Request::BackupRun | Request::BackupVerify { .. } => match def.reach {
+                Reach::Scope => in_root_scope(),
+                Reach::Own => Err(deny("take or verify a backup; that requires scope reach")),
             },
 
             // Reads returned above, and anything needing a grant nobody holds
@@ -890,6 +953,39 @@ mod tests {
         );
     }
 
+    /// `backup.run` covers taking and verifying a backup, and is checked
+    /// against the configured root scope exactly like `policy.attest`;
+    /// reading the backup status is open to every agent (`#116`).
+    #[tokio::test]
+    async fn backup_run_is_checked_against_the_configured_root_scope_and_reading_is_open() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  keeper:\n    grants: [backup.run]\n    reach: scope\n  \
+             own-keeper:\n    grants: [backup.run]\n    reach: own\n",
+        );
+        let caller = |scope: &str, role: &str| Caller::Agent {
+            scope: scope.into(),
+            name: "w".into(),
+            role: Role::new(role),
+            run_id: None,
+        };
+        let verify = Request::BackupVerify { snapshot: None };
+
+        assert!(allowed(&e, &caller("demo", "keeper"), Request::BackupRun).await);
+        assert!(allowed(&e, &caller("demo", "keeper"), verify.clone()).await);
+        assert!(
+            !allowed(&e, &caller("other", "keeper"), Request::BackupRun).await,
+            "the same grant outside the root scope is refused"
+        );
+        assert!(
+            !allowed(&e, &caller("demo", "own-keeper"), Request::BackupRun).await,
+            "own reach never covers the whole instance"
+        );
+        assert!(!allowed(&e, &worker("w"), verify).await, "a worker holds no backup.run");
+        assert!(allowed(&e, &worker("w"), Request::Backup).await, "reading the status is open to every agent");
+        assert!(allowed(&e, &Caller::Owner, Request::BackupRun).await);
+    }
+
     /// `goals.checkin` is checked against the configured root scope exactly
     /// like `policy.attest` -- the same `in_root_scope` closure, since a
     /// check-in speaks for the company's own goals, not for one project.
@@ -1093,6 +1189,7 @@ mod tests {
             pending_retry: None,
             schedule_paused: false,
             category: None,
+            intake: None,
         };
         engine.store.create(&task).await.unwrap()
     }

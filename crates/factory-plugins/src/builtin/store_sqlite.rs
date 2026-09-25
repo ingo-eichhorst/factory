@@ -14,6 +14,7 @@ use factory_core::agent::AgentSession;
 use factory_core::occupancy::StatusChange;
 use factory_core::run::{NewRun, Run, RunPatch, RunStatus};
 use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch};
+use factory_core::usage::UsageSnapshot;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -85,12 +86,30 @@ CREATE TABLE IF NOT EXISTS agent_status (
 );
 CREATE INDEX IF NOT EXISTS agent_status_at ON agent_status(at);
 CREATE INDEX IF NOT EXISTS agent_status_subject ON agent_status(subject, seq);
+
+-- Usage snapshots (#117), append-only: one row per reading of a run's
+-- session -- at dispatch, at each turn end, as the run ends -- answered or
+-- not. `Run::usage` is derived from these. A new table rather than a change
+-- to an old one's shape, so it joins a database already at this version on
+-- its next start without a version bump (the same reasoning as
+-- `entries_at` above); it annotates runs, so a version mismatch that
+-- rebuilds them drops it with them (`DROP_ALL`).
+CREATE TABLE IF NOT EXISTS run_usage (
+    seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id  TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    point   TEXT NOT NULL,
+    at      TEXT NOT NULL,
+    data    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS run_usage_run ON run_usage(run_id, seq);
 "#;
 
 /// What a version mismatch throws away. `agent_status` is not in here on
 /// purpose: it is an observation log, and the runs it annotates being rebuilt
 /// is no reason to forget what the agents were doing.
 const DROP_ALL: &str = r#"
+DROP TABLE IF EXISTS run_usage;
 DROP TABLE IF EXISTS agent_sessions;
 DROP TABLE IF EXISTS task_entries;
 DROP TABLE IF EXISTS runs;
@@ -447,6 +466,9 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.category {
                 task.category = Some(v);
             }
+            if let Some(v) = patch.intake {
+                task.intake = Some(v);
+            }
             task.updated_at = Utc::now();
 
             write_task(conn, &task)?;
@@ -518,6 +540,7 @@ impl TaskStore for SqliteStore {
                 turn_ended_at: None,
                 turn_end_reason: None,
                 required_steps: Vec::new(),
+                usage: None,
             };
             write_run(&tx, &run)?;
 
@@ -627,6 +650,9 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.required_steps {
                 run.required_steps = v;
+            }
+            if let Some(v) = patch.usage {
+                run.usage = Some(v);
             }
 
             write_run(conn, &run)?;
@@ -851,6 +877,32 @@ impl TaskStore for SqliteStore {
         .await
     }
 
+    async fn append_usage(&self, snapshot: &UsageSnapshot) -> Result<()> {
+        let data = serde_json::to_string(snapshot).map_err(adapter_err)?;
+        let (run_id, task_id) = (snapshot.run_id.clone(), snapshot.task_id.clone());
+        let (point, at) = (snapshot.point.as_str(), snapshot.at.to_rfc3339());
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO run_usage (run_id, task_id, point, at, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![run_id, task_id, point, at, data],
+            )
+            .map_err(adapter_err)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn usage_snapshots(&self, run_id: &str) -> Result<Vec<UsageSnapshot>> {
+        let run_id = run_id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT data FROM run_usage WHERE run_id = ?1 ORDER BY seq ASC")
+                .map_err(adapter_err)?;
+            collect(&mut stmt, params![run_id])
+        })
+        .await
+    }
+
     async fn append_status(&self, change: &StatusChange) -> Result<()> {
         let (subject, scope, agent) = (
             change.subject.clone(),
@@ -977,6 +1029,7 @@ mod tests {
             pending_retry: None,
             schedule_paused: false,
             category: None,
+            intake: None,
         }
     }
 
@@ -1278,6 +1331,42 @@ mod tests {
             .unwrap();
         assert!(!resumed.schedule_paused);
         assert_eq!(store.due(Utc::now()).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn usage_snapshots_are_kept_in_order_and_an_existing_database_gains_the_table() {
+        use factory_core::usage::{SnapshotPoint, UsageSnapshot};
+        let dir = std::env::temp_dir().join(format!("factory-sqlite-usage-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("f.sqlite");
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            store.create(&sample_task("t1")).await.unwrap();
+        }
+        // A database written before `run_usage` existed, at the same version.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("DROP TABLE run_usage;").unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert!(store.get("t1").await.unwrap().is_some(), "gaining a table drops nothing");
+
+        let snap = |point, reason: &str| UsageSnapshot {
+            run_id: "r1".into(),
+            task_id: "t1".into(),
+            point,
+            at: Utc::now(),
+            runtime: "herdr".into(),
+            usage: None,
+            unknown: Some(reason.into()),
+        };
+        store.append_usage(&snap(SnapshotPoint::Dispatch, "a")).await.unwrap();
+        store.append_usage(&snap(SnapshotPoint::RunEnd, "b")).await.unwrap();
+        store.append_usage(&UsageSnapshot { run_id: "r2".into(), ..snap(SnapshotPoint::Dispatch, "c") }).await.unwrap();
+        let got = store.usage_snapshots("r1").await.unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].unknown.as_deref(), Some("a"));
+        assert_eq!(got[1].point, SnapshotPoint::RunEnd);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

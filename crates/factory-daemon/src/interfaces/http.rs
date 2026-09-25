@@ -121,6 +121,9 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
         .route("/api/infrastructure", get(infrastructure))
+        .route("/api/backup", get(backup))
+        .route("/api/backup/run", post(backup_run))
+        .route("/api/backup/verify", post(backup_verify))
         .route("/api/knowledge", get(knowledge))
         .route("/api/knowledge/search", get(knowledge_search))
         // Its own body limit, scoped to this one route with a nested router:
@@ -145,6 +148,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/policy/remediate", post(policy_remediate))
         .route("/api/policy/export", get(policy_export))
         .route("/api/metrics", get(metrics))
+        .route("/api/costs", get(costs))
         .route("/api/goals", get(goals))
         .route("/api/goals/checkins", post(create_goals_checkin))
         .route("/api/scenarios", get(scenarios))
@@ -154,6 +158,11 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/quality", get(quality))
         .route("/api/quality/remediate", post(quality_remediate))
         .route("/api/operations", get(operations))
+        .route("/api/intake", get(intake_board).post(intake_add))
+        .route("/api/intake/{id}/triage", post(intake_triage))
+        .route("/api/intake/{id}/assess", post(intake_assess))
+        .route("/api/intake/{id}/decide", post(intake_decide))
+        .route("/api/intake/{id}/info", post(intake_info))
         .route("/api/benchmarks", get(benchmarks))
         .route("/api/datasets", get(list_datasets).post(create_dataset))
         .route("/api/datasets/{name}", get(get_dataset).delete(delete_dataset))
@@ -194,6 +203,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/tasks/{id}/entries", get(task_entries))
         .route("/api/tasks/{id}/output", get(task_output))
         .route("/api/tasks/{id}/runs", get(task_runs))
+        .route("/api/tasks/{id}/usage", get(task_usage))
         .route("/api/workflows", get(list_workflows).post(create_workflow))
         .route("/api/workflow-lint", get(workflow_lint))
         .route(
@@ -209,6 +219,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/runs/{id}", get(get_run))
         .route("/api/runs/{id}/entries", get(run_entries))
         .route("/api/runs/{id}/attestations", get(run_attestations))
+        .route("/api/runs/{id}/usage", get(run_usage))
         .route("/api/runs/{id}/output", get(run_output))
         .route("/api/runs/{id}/input", post(run_input))
         .route("/api/runs/{id}/answer", post(run_answer))
@@ -330,6 +341,29 @@ async fn environment(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn infrastructure(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Infrastructure).await
+}
+
+async fn backup(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Backup).await
+}
+
+/// `POST /api/backup/run` -- takes no body, so it has no `Json` extractor to
+/// refuse a bare POST with.
+async fn backup_run(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::BackupRun).await
+}
+
+#[derive(serde::Deserialize)]
+struct VerifyQuery {
+    #[serde(default)]
+    snapshot: Option<String>,
+}
+
+/// `POST /api/backup/verify?snapshot=` -- the newest when `snapshot` is left
+/// out. A query parameter, like `withdraw_attestation`'s `reason`, so a bare
+/// POST works.
+async fn backup_verify(State(engine): State<Arc<Engine>>, Query(q): Query<VerifyQuery>) -> AxumResponse {
+    run(&engine, Request::BackupVerify { snapshot: q.snapshot }).await
 }
 
 async fn knowledge(State(engine): State<Arc<Engine>>) -> AxumResponse {
@@ -613,6 +647,51 @@ async fn policy_export(
 }
 
 #[derive(serde::Deserialize)]
+struct CostsQuery {
+    #[serde(default)]
+    group_by: Option<String>,
+    #[serde(default)]
+    from: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    to: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// `GET /api/costs?group_by=task|issue|scope|agent&from=&to=&scope=` --
+/// usage and cost summed per group over the runs that started in the
+/// window (#117). `from`/`to` are RFC 3339; the window defaults to the last
+/// thirty days. A grouping v1 does not offer yet (`provider`, `workflow`)
+/// is a 400 that says so, not an empty answer.
+async fn costs(State(engine): State<Arc<Engine>>, Query(q): Query<CostsQuery>) -> AxumResponse {
+    let group_by = match q.group_by.as_deref().filter(|g| !g.trim().is_empty()) {
+        None => factory_core::usage::CostGroupBy::default(),
+        Some(raw) => match raw.parse() {
+            Ok(g) => g,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response(),
+        },
+    };
+    run(
+        &engine,
+        Request::Costs {
+            group_by,
+            from: q.from,
+            to: q.to,
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+        },
+    )
+    .await
+}
+
+async fn task_usage(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::TaskUsage { id }).await
+}
+
+async fn run_usage(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::RunUsage { id }).await
+}
+
+#[derive(serde::Deserialize)]
 struct MetricsQuery {
     /// Comma-separated, the same convention `KnowledgeSearchQuery::tags`
     /// already uses for a query string's repeated-key limitation. Empty (or
@@ -747,6 +826,89 @@ async fn operations(State(engine): State<Arc<Engine>>, Query(q): Query<Operation
         },
     )
     .await
+}
+
+#[derive(serde::Deserialize)]
+struct IntakeQuery {
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// `GET /api/intake?scope=` -- the L4 Intake view's board (`#119`).
+async fn intake_board(State(engine): State<Arc<Engine>>, Query(q): Query<IntakeQuery>) -> AxumResponse {
+    run(&engine, Request::IntakeBoard { scope: q.scope }).await
+}
+
+/// `POST /api/intake` -- hand an item in. The web UI is the caller that
+/// arrives here, so an item that names no source is recorded as `ui`.
+async fn intake_add(
+    State(engine): State<Arc<Engine>>,
+    Json(mut new): Json<factory_core::intake::NewIntake>,
+) -> AxumResponse {
+    new.source.get_or_insert(factory_core::intake::SourceKind::Ui);
+    run(&engine, Request::IntakeAdd(new)).await
+}
+
+#[derive(serde::Deserialize, Default)]
+struct IntakeTriageBody {
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+/// `POST /api/intake/{id}/triage` -- start the triage node, `{agent?}`.
+async fn intake_triage(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> AxumResponse {
+    let parsed = if body.iter().all(u8::is_ascii_whitespace) {
+        Ok(IntakeTriageBody::default())
+    } else {
+        serde_json::from_slice::<IntakeTriageBody>(&body).map_err(|e| format!("not a triage body: {e}"))
+    };
+    match parsed {
+        Ok(b) => run(&engine, Request::IntakeTriage { id, agent: b.agent }).await,
+        Err(why) => refused(why),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct IntakeAssessBody {
+    assessment: factory_core::intake::Assessment,
+    #[serde(default)]
+    decide: bool,
+}
+
+/// `POST /api/intake/{id}/assess` -- `{assessment, decide?}`.
+async fn intake_assess(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<IntakeAssessBody>,
+) -> AxumResponse {
+    run(&engine, Request::IntakeAssess { id, assessment: body.assessment, decide: body.decide }).await
+}
+
+/// `POST /api/intake/{id}/decide` -- a `Decision`, tagged by `decision`.
+async fn intake_decide(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(decision): Json<factory_core::intake::Decision>,
+) -> AxumResponse {
+    run(&engine, Request::IntakeDecide { id, decision }).await
+}
+
+#[derive(serde::Deserialize)]
+struct IntakeInfoBody {
+    text: String,
+}
+
+/// `POST /api/intake/{id}/info` -- `{text}`, the answer to a needs-info.
+async fn intake_info(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<IntakeInfoBody>,
+) -> AxumResponse {
+    run(&engine, Request::IntakeInfo { id, text: body.text }).await
 }
 
 /// `POST /api/scenarios/promote` -- turn a scenario into real work. Answers
@@ -1733,6 +1895,30 @@ mod tests {
         let status: u16 = text.split(' ').nth(1).unwrap().parse().unwrap();
         let (_, payload) = text.split_once("\r\n\r\n").unwrap();
         (status, serde_json::from_str(payload).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn get_api_costs_groups_and_refuses_a_grouping_it_does_not_offer() {
+        let engine = engine_with_quality();
+        let (status, json) = request(
+            engine.clone(),
+            "GET",
+            "/api/costs?group_by=scope&from=2026-01-01T00:00:00Z&to=2026-02-01T00:00:00Z",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["kind"], "costs");
+        assert_eq!(json["data"]["report"]["group_by"], "scope");
+        assert_eq!(json["data"]["report"]["total"]["runs"], 0);
+        assert_eq!(json["data"]["report"]["from"], "2026-01-01T00:00:00Z");
+
+        let (status, json) = request(engine.clone(), "GET", "/api/costs?group_by=provider", None).await;
+        assert_eq!(status, 400, "{json}");
+        assert!(json["message"].as_str().unwrap().contains("provider"), "{json}");
+
+        let (status, _) = request(engine, "GET", "/api/tasks/nope/usage", None).await;
+        assert_eq!(status, 404);
     }
 
     #[tokio::test]

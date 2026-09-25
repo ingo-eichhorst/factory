@@ -24,6 +24,7 @@ use factory_core::error::Result;
 use factory_core::occupancy::StatusChange;
 use factory_core::run::{NewRun, Run, RunPatch, RunStatus};
 use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch};
+use factory_core::usage::UsageSnapshot;
 
 pub struct ScopedStores {
     /// Where runs, the journal, standing agents and liveness live, whatever
@@ -271,6 +272,16 @@ impl TaskStore for ScopedStores {
         self.ledger.append_status(change).await
     }
 
+    // Usage snapshots annotate a run, so they live where runs do. The trait's
+    // defaults would compile here just as well and quietly drop every one.
+    async fn append_usage(&self, snapshot: &UsageSnapshot) -> Result<()> {
+        self.ledger.append_usage(snapshot).await
+    }
+
+    async fn usage_snapshots(&self, run_id: &str) -> Result<Vec<UsageSnapshot>> {
+        self.ledger.usage_snapshots(run_id).await
+    }
+
     async fn status_changes(&self, since: DateTime<Utc>) -> Result<Vec<StatusChange>> {
         self.ledger.status_changes(since).await
     }
@@ -333,6 +344,7 @@ mod tests {
             pending_retry: None,
             schedule_paused: false,
             category: None,
+            intake: None,
         }
     }
 
@@ -371,6 +383,33 @@ mod tests {
 
         assert!(b.get("t1").await.unwrap().is_some());
         assert!(ledger.get("t1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn usage_snapshots_land_on_the_ledger_whatever_store_holds_the_task() {
+        use factory_core::usage::{SnapshotPoint, UsageSnapshot};
+        let ledger = store("ledger");
+        let b = store("b");
+        let mut by_scope = HashMap::new();
+        by_scope.insert("b".to_string(), b.clone());
+        let scoped = ScopedStores::new(ledger.clone(), by_scope);
+        scoped.create(&task("t1", "b", 0)).await.unwrap();
+        let run = scoped.create_run(&new_run("t1")).await.unwrap();
+
+        let snapshot = UsageSnapshot {
+            run_id: run.id.clone(),
+            task_id: "t1".into(),
+            point: SnapshotPoint::Dispatch,
+            at: Utc::now(),
+            runtime: "herdr".into(),
+            usage: None,
+            unknown: Some("no plugin".into()),
+        };
+        scoped.append_usage(&snapshot).await.unwrap();
+
+        assert_eq!(ledger.usage_snapshots(&run.id).await.unwrap(), vec![snapshot.clone()]);
+        assert!(b.usage_snapshots(&run.id).await.unwrap().is_empty());
+        assert_eq!(scoped.usage_snapshots(&run.id).await.unwrap(), vec![snapshot]);
     }
 
     #[tokio::test]
