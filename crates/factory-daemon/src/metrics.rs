@@ -20,6 +20,12 @@
 //! (`self.store`) so `ScopedStores` still shards correctly by scope --
 //! unscoped, the same way `production.rs` reads every run before narrowing.
 //!
+//! The six operations metrics (`cycle_time_p50`/`_p85`, `queue_wait_p95`,
+//! `fail_rate`, `rework_rate`, `time_to_recover_p50`) are
+//! `factory_core::operations::registry_metric` over the trailing 28 days of
+//! runs -- the same functions the Operations tab's health strip calls, so a
+//! KR over one of them and the tab can never disagree about its value.
+//!
 //! ## Series
 //!
 //! Only the three production-based metrics carry a history: one point per
@@ -68,6 +74,17 @@ fn is_production_metric(id: &str) -> bool {
     matches!(id, "throughput_week" | "first_pass_yield" | "scrap_rate")
 }
 
+fn is_operations_metric(id: &str) -> bool {
+    matches!(
+        id,
+        "cycle_time_p50" | "cycle_time_p85" | "queue_wait_p95" | "fail_rate" | "rework_rate" | "time_to_recover_p50"
+    )
+}
+
+/// The window the operations metrics are read over -- the trailing 28 days
+/// the production ratios use.
+const OPERATIONS_WINDOW_DAYS: i64 = 28;
+
 fn is_policy_metric(id: &str) -> bool {
     id.starts_with("compliance.") || id.starts_with("open_controls.")
 }
@@ -101,9 +118,23 @@ impl Engine {
 
         let needs_production = resolved.iter().any(|(id, r)| r.is_ok() && is_production_metric(id.as_str()));
         let needs_policy = resolved.iter().any(|(id, r)| r.is_ok() && is_policy_metric(id.as_str()));
+        let needs_runs = resolved.iter().any(|(id, r)| r.is_ok() && is_operations_metric(id.as_str()));
 
         let production = if needs_production {
             Some(self.production(Some(5), Some(ProductionBin::Day), None).await?)
+        } else {
+            None
+        };
+        let operations_window = factory_core::operations::Window::trailing(now, OPERATIONS_WINDOW_DAYS);
+        // Twice the window: a recovery that ends inside it may have started
+        // failing before it, and cutting the history at the window's edge
+        // would shorten that streak rather than leave it out.
+        let runs = if needs_runs {
+            Some(
+                self.store
+                    .runs_between(now - chrono::Duration::days(2 * OPERATIONS_WINDOW_DAYS), now)
+                    .await?,
+            )
         } else {
             None
         };
@@ -156,6 +187,22 @@ impl Engine {
                 let v = value_from_series(&s, now, "no finished runs in the trailing 28 days");
                 series.push(s);
                 v
+            } else if is_operations_metric(id.as_str()) {
+                let runs = runs.as_deref().expect("needs_runs set");
+                match factory_core::operations::registry_metric(id.as_str(), runs, &operations_window) {
+                    Some(figure) => MetricValue {
+                        id: id.clone(),
+                        value: figure.value,
+                        as_of: now,
+                        reason: figure.reason,
+                    },
+                    None => MetricValue {
+                        id: id.clone(),
+                        value: None,
+                        as_of: now,
+                        reason: Some("no computation wired for this metric yet".to_string()),
+                    },
+                }
             } else if let Some(framework) = id.as_str().strip_prefix("compliance.") {
                 compliance_value(&id, policy_report.as_ref().expect("needs_policy set"), framework, now)
             } else if let Some(framework) = id.as_str().strip_prefix("open_controls.") {
@@ -543,6 +590,43 @@ mod tests {
             .await
             .unwrap();
         task
+    }
+
+    // ------------------------------------------------------- operations
+
+    #[tokio::test]
+    async fn the_operations_metrics_are_computed_from_real_runs() {
+        let engine = test_engine(Vec::new());
+        finished_run(&engine, "clean", RunStatus::Done, chrono::Duration::hours(1)).await;
+        finished_run(&engine, "flaky", RunStatus::Failed, chrono::Duration::hours(3)).await;
+        finished_run(&engine, "flaky", RunStatus::Done, chrono::Duration::hours(1)).await;
+
+        let ids: Vec<MetricId> = ["fail_rate", "rework_rate", "time_to_recover_p50", "queue_wait_p95", "cycle_time_p50"]
+            .into_iter()
+            .map(|id| MetricId::new(id).unwrap())
+            .collect();
+        let computed = engine.metrics(&ids, Utc::now()).await.unwrap();
+        let get = |id: &str| computed.values.iter().find(|v| v.id.as_str() == id).unwrap().clone();
+
+        assert_eq!(get("fail_rate").value, Some(1.0 / 3.0));
+        assert_eq!(get("rework_rate").value, Some(1.0 / 3.0), "flaky's second attempt");
+        let recover = get("time_to_recover_p50").value.unwrap();
+        assert!((recover - 7200.0).abs() < 5.0, "failed three hours ago, done one hour ago: {recover}");
+        assert!(get("queue_wait_p95").value.is_some(), "every run made now records its queue wait");
+        assert!(get("cycle_time_p50").value.is_some());
+        assert_eq!(computed.registry.len(), ids.len(), "each comes with its definition");
+    }
+
+    #[tokio::test]
+    async fn an_operations_metric_with_no_runs_is_none_with_a_reason() {
+        let engine = test_engine(Vec::new());
+        let ids = vec![MetricId::new("cycle_time_p85").unwrap()];
+        let computed = engine.metrics(&ids, Utc::now()).await.unwrap();
+        assert_eq!(computed.values[0].value, None);
+        assert_eq!(
+            computed.values[0].reason.as_deref(),
+            Some(factory_core::operations::METRIC_EMPTY_NO_DONE)
+        );
     }
 
     // ------------------------------------------------------- production
