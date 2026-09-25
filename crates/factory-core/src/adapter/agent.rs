@@ -334,7 +334,10 @@ impl AgentContext {
              task is the standing intent: what to do, and with which agent; \
              a run is one attempt at it, with its own session and outcome. \
              Status comes only from an agent calling `task report`, never \
-             from what a terminal looks like.\n\n",
+             from what a terminal looks like. Creating a task does not \
+             start it, and there is no queue that will: an unscheduled task \
+             stays pending until someone runs it with `task run <id>`, and a \
+             scheduled one waits for its slot.\n\n",
         );
 
         match &self.task {
@@ -492,6 +495,8 @@ impl AgentContext {
             lines.push(match grant {
                 Grant::TaskCreate => format!(
                     "task.create -> {bin} task create \"<title>\" -i \"<instructions>\" --scope {scope} --agent <agent>; \
+                     that creates it and nothing more -- it is not dispatched until `task run <id>` \
+                     (or `task create --run`, which does both) or its schedule fires; \
                      or, for work that is not yet clear, tested or known to be ours, hand it in through the \
                      intake gate instead: {bin} intake add \"<title>\" -i \"<what is asked>\" --scope {scope} \
                      (it is triaged before it can run; {bin} intake info <id> \"...\" answers a needs-info)"
@@ -885,6 +890,27 @@ mod tests {
             assert!(guide.contains("knowledge search <words>"), "{guide}");
             assert!(guide.contains("never prints a page's text"), "{guide}");
         }
+    }
+
+    #[test]
+    fn every_agent_is_told_a_created_task_is_not_started_and_there_is_no_queue() {
+        // `#124`: an agent that creates a task and expects the daemon to pick
+        // it up once an agent is free waits forever. Whatever the role --
+        // one that can only read may still be asked why a task never ran.
+        for role in [Some(worker()), Some(custom(&[], Reach::Own)), None] {
+            let guide = base(role).factory_guide();
+            assert!(guide.contains("Creating a task does not start it"), "{guide}");
+            assert!(guide.contains("there is no queue"), "{guide}");
+            assert!(guide.contains("`task run <id>`"), "{guide}");
+        }
+    }
+
+    #[test]
+    fn the_task_create_line_says_creating_is_not_dispatching() {
+        let guide = base(Some(custom(&[Grant::TaskCreate], Reach::Scope))).factory_guide();
+        let line = guide.lines().find(|l| l.starts_with("- task.create")).expect(&guide);
+        assert!(line.contains("it is not dispatched until `task run <id>`"), "{line}");
+        assert!(line.contains("`task create --run`"), "{line}");
     }
 
     #[test]

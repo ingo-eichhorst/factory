@@ -10,6 +10,7 @@ import { scheduleLabel } from "./schedule.js";
 import { describeWorkflowOrigin } from "./workflows.js";
 import { entryKindLabel, entryTone } from "./operations-model.js";
 import { runUsageView, taskUsageLine } from "./usage-model.js";
+import { notStartedNote } from "./pending-model.js";
 
 export { scheduleLabel };
 
@@ -59,7 +60,8 @@ export function pausedTag(t) {
 // card says its outcome plainly so a failure cannot read as done.
 const KANBAN_COLUMNS = [
   { key: "blocked", label: "Blocked" },
-  { key: "manual", label: "Manual" },
+  // Manual means nothing will start it: there is no queue (`#124`).
+  { key: "manual", label: "Manual · not run" },
   { key: "scheduled", label: "Scheduled" },
   { key: "active", label: "In progress" },
   { key: "closed", label: "Closed" },
@@ -266,6 +268,8 @@ export function renderModal() {
   if (labels.length) {
     meta += `<div class="sub">${labels.map(([k, v]) => `<span class="tag">${esc(k)}=${esc(v)}</span>`).join(" ")}</div>`;
   }
+  const idle = notStartedNote(t);
+  if (idle) meta += `<div class="sub">${esc(idle)}</div>`;
   if (t.instructions) meta += `<label>Instructions</label><pre>${esc(t.instructions)}</pre>`;
   const r = selectedRun();
   // The branch and the path this attempt worked in, next to the attach
