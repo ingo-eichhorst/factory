@@ -213,13 +213,13 @@ test("DRIVER_DEFS mirrors the seven built-in drivers, cost drivers named but not
   assert.equal(DRIVER_DEFS.find((d) => d.id === "rework_rate").assumption, false);
   assert.equal(DRIVER_DEFS.find((d) => d.id === "rework_rate").metric, "rework_rate");
   assert.equal(DRIVER_DEFS.find((d) => d.id === "capacity_factor").assumption, true);
-  // unit_cost/tokens_per_run *name* a registry metric (design §12.6) -- they
-  // are unavailable, not bare assumptions, the same distinction
-  // `validate_scenario`'s own `UnavailableDriver` finding draws.
+  // unit_cost/tokens_per_run *name* a registry metric -- measured since
+  // #117 -- so they are not bare assumptions; the forecast does not use
+  // them yet (#117 v3), so their sliders stay disabled.
   assert.equal(DRIVER_DEFS.find((d) => d.id === "unit_cost").assumption, false);
   assert.equal(DRIVER_DEFS.find((d) => d.id === "unit_cost").metric, "unit_cost");
   // `unavailable` is fixed, compiled-in fact -- true for exactly the two
-  // §12.6 drivers, never derived from a `GET /api/metrics` fetch that might
+  // cost drivers, never derived from a `GET /api/metrics` fetch that might
   // fail (see `driverUnavailableReason`'s own doc comment).
   assert.deepEqual(DRIVER_DEFS.filter((d) => d.unavailable).map((d) => d.id), ["unit_cost", "tokens_per_run"]);
 });
@@ -232,13 +232,17 @@ test("driverRange: ratios 0..1, capacity_factor 0..2, throughput scales with the
   assert.deepEqual(driverRange("throughput_week", undefined), { min: 0, max: 10, step: 0.5 });
 });
 
-test("driverUnavailableReason: prefers baseline.metrics' own reason, then the registry, then the fixed §12.6 fallback", () => {
-  const def = DRIVER_DEFS.find((d) => d.id === "unit_cost");
-  const fromBaseline = [{ id: "unit_cost", value: null, reason: "a Run records no model, tokens or cost yet (design §12.6)" }];
-  assert.equal(driverUnavailableReason(def, fromBaseline, {}), "a Run records no model, tokens or cost yet (design §12.6)");
-  assert.equal(driverUnavailableReason(def, [], { unit_cost: { unavailable_reason: "registry says so" } }), "registry says so");
-  assert.equal(driverUnavailableReason(def, [], {}), "a Run records no model, tokens or cost yet (design §12.6)");
-  assert.equal(driverUnavailableReason(def, null, null), "a Run records no model, tokens or cost yet (design §12.6)");
+test("driverUnavailableReason: a def's own reason first, then baseline.metrics' reason, then the registry, then a fallback", () => {
+  const cost = DRIVER_DEFS.find((d) => d.id === "unit_cost");
+  // A cost driver's metric is measured (#117 v1); the forecast just does
+  // not use it yet, and that is what it says, whatever the metric reads.
+  const fromBaseline = [{ id: "unit_cost", value: null, reason: "no run finished in the trailing 28 days" }];
+  assert.match(driverUnavailableReason(cost, fromBaseline, {}), /forecast does not model cost yet/);
+  const def = { id: "future", metric: "future_metric", unavailable: true };
+  assert.equal(driverUnavailableReason(def, [{ id: "future_metric", value: null, reason: "not yet" }], {}), "not yet");
+  assert.equal(driverUnavailableReason(def, [], { future_metric: { unavailable_reason: "registry says so" } }), "registry says so");
+  assert.equal(driverUnavailableReason(def, [], {}), "this driver has no data source yet");
+  assert.equal(driverUnavailableReason(def, null, null), "this driver has no data source yet");
 });
 
 // ------------------------------------------------------------------ metrics

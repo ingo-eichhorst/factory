@@ -369,7 +369,7 @@ pub enum FindingKind {
     /// A signpost names a metric [`metrics::resolve`] has never heard of.
     UnknownMetric,
     /// A signpost names a metric `metrics::resolve` knows but cannot
-    /// compute yet (e.g. a cost metric -- design §12.6).
+    /// compute yet. None is today; the cost metrics were until #117.
     UnavailableMetric,
     /// A signpost names neither `below` nor `above`.
     SignpostMissingThreshold,
@@ -382,8 +382,8 @@ pub enum FindingKind {
     /// A `goals:` entry names neither `target` nor `by`.
     NoOpGoalChange,
     /// A `drivers:` entry names a driver whose own metric
-    /// [`metrics::resolve`] knows but cannot compute yet (a cost driver --
-    /// design §12.6), with a *relative* override -- there is no baseline to
+    /// [`metrics::resolve`] knows but cannot compute yet (the cost drivers
+    /// were, until #117), with a *relative* override -- there is no baseline to
     /// be relative to. Only `=N`, a pure assumption needing no baseline,
     /// survives this check.
     UnavailableDriver,
@@ -557,9 +557,9 @@ fn validate_scenario(scenario: &Scenario, findings: &mut Vec<Finding>) {
             }
         };
 
-        // A driver named §12.6's own unavailable metric (unit_cost,
-        // tokens_per_run) has no baseline to be relative to -- only `=N`, a
-        // pure assumption, can stand alone for it.
+        // A driver whose metric cannot be computed yet has no baseline to
+        // be relative to -- only `=N`, a pure assumption, can stand alone
+        // for it. (The cost drivers were such until #117; none is today.)
         if let Some(metric_name) = def.and_then(|d| d.metric) {
             if let Ok(mid) = MetricId::new(metric_name) {
                 if let Err(MetricError::Unavailable { reason, .. }) = metrics::resolve(&mid) {
@@ -1222,26 +1222,26 @@ pub fn driver_defs() -> Vec<DriverDef> {
             assumption: true,
             metric: None,
         },
-        // Cost drivers: listed, per the issue, but unavailable -- a Run
-        // records no model, tokens or cost yet (design §12.6), exactly
-        // `metrics::resolve`'s own `unit_cost`/`tokens_per_run` entries.
-        // `assumption: false`, not `true`: these *do* name a registry
-        // metric, unlike `capacity_factor` -- they are simply
-        // not computable from it yet. `validate_scenario` refuses a
-        // relative override against either (`FindingKind::UnavailableDriver`);
-        // only `=N`, a pure assumption needing no baseline, survives.
+        // Cost drivers, over the registry's `unit_cost`/`tokens_per_run` --
+        // computable since #117 gave every run its measured usage.
+        // `assumption: false`: these name a registry metric, unlike
+        // `capacity_factor`. Should either become unavailable again,
+        // `validate_scenario` refuses a relative override against it
+        // (`FindingKind::UnavailableDriver`); only `=N` would survive.
+        // Neither feeds `evaluate_outcomes`' throughput model yet -- cost
+        // drivers in Scenarios are #117's v3.
         DriverDef {
             id: "unit_cost",
             title: "Unit cost",
-            description: "Cost per finished unit -- named by the registry but not yet computable (design §12.6).",
-            unit: "ratio",
+            description: "API-equivalent USD per finished unit, from each run's measured usage.",
+            unit: "usd",
             assumption: false,
             metric: Some("unit_cost"),
         },
         DriverDef {
             id: "tokens_per_run",
             title: "Tokens per run",
-            description: "Tokens spent per run -- same §12.6 unavailability as `unit_cost`.",
+            description: "Tokens spent per run, from each run's measured usage.",
             unit: "count",
             assumption: false,
             metric: Some("tokens_per_run"),
@@ -2011,7 +2011,7 @@ mod tests {
     }
 
     #[test]
-    fn signpost_findings_cover_unknown_unavailable_and_missing_threshold() {
+    fn signpost_findings_cover_unknown_metric_and_missing_threshold() {
         let dir = tempdir("signpost-findings");
         write(
             &dir,
@@ -2020,7 +2020,8 @@ mod tests {
         );
         let (_scenarios, findings) = load(&dir);
         assert!(findings.iter().any(|f| f.kind == FindingKind::UnknownMetric));
-        assert!(findings.iter().any(|f| f.kind == FindingKind::UnavailableMetric));
+        // `unit_cost` became computable with #117; a signpost on it is fine.
+        assert!(!findings.iter().any(|f| f.kind == FindingKind::UnavailableMetric), "{findings:?}");
         assert!(findings.iter().any(|f| f.kind == FindingKind::SignpostMissingThreshold));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2120,14 +2121,17 @@ mod tests {
         assert_eq!(stale_findings(&scenarios, dt(2026, 9, 25)), Vec::new(), "both examples are anchored in the future of this date");
     }
 
-    // -- unavailable driver (cost, design §12.6) ------------------------------
+    // -- cost drivers (#117) ---------------------------------------------------
 
     #[test]
-    fn a_relative_override_on_an_unavailable_driver_is_a_finding_but_set_is_not() {
+    fn a_cost_driver_takes_a_relative_override_now_that_its_metric_is_computable() {
+        // Until #117 a relative override on `unit_cost` was refused: there
+        // was no baseline to be relative to. Runs carry their usage now, so
+        // the metric resolves and both kinds of override load clean.
         let dir = tempdir("unavailable-driver");
         write(&dir, "s.yaml", "name: s\ntitle: X\ndrivers:\n  unit_cost: \"\u{d7}2\"\n");
         let (_scenarios, findings) = load(&dir);
-        assert!(findings.iter().any(|f| f.kind == FindingKind::UnavailableDriver), "{findings:?}");
+        assert!(!findings.iter().any(|f| f.kind == FindingKind::UnavailableDriver), "{findings:?}");
         std::fs::remove_dir_all(&dir).ok();
 
         let dir = tempdir("unavailable-driver-set");
@@ -2138,10 +2142,10 @@ mod tests {
     }
 
     #[test]
-    fn driver_defs_lists_cost_drivers_as_unavailable_not_assumption() {
+    fn driver_defs_lists_cost_drivers_with_a_metric_not_as_assumptions() {
         for id in ["unit_cost", "tokens_per_run"] {
             let def = driver_defs().into_iter().find(|d| d.id == id).unwrap();
-            assert!(!def.assumption, "{id} has a named metric source, it just isn't computable yet");
+            assert!(!def.assumption, "{id} has a named metric source");
             assert!(def.metric.is_some());
         }
     }

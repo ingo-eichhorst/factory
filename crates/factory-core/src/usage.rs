@@ -686,6 +686,98 @@ pub struct RunUsageEntry {
     pub usage: RunUsage,
 }
 
+// -- the two registry metrics (`unit_cost`, `tokens_per_run`) ---------------
+
+/// One cost metric's value over a window, and what it rests on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageFigure {
+    pub value: Option<f64>,
+    /// Why there is no value; `None` whenever there is one.
+    pub reason: Option<String>,
+    /// The newest run end the value rests on.
+    pub as_of: Option<DateTime<Utc>>,
+}
+
+/// A run whose usage counts toward a metric: it finished, and its usage was
+/// measured start to end. A partial reading is a lower bound, and a lower
+/// bound averaged in would make every figure look cheaper than it was.
+fn measured(run: &crate::run::Run) -> Option<&RunUsage> {
+    run.usage.as_ref().filter(|u| u.is_known() && !u.partial)
+}
+
+/// `tokens_per_run` and `unit_cost` over the runs that ended in
+/// `(to - days, to]`. `None` for any other id.
+///
+/// * `tokens_per_run`: the mean of every token type summed, over finished
+///   runs whose usage was fully measured.
+/// * `unit_cost`: what those runs cost -- failed and cancelled ones
+///   included, since scrap is part of what a finished unit costs -- over
+///   how many of them ended `done`. Only runs with a measured cost are in
+///   either side of the division.
+///
+/// Runs whose usage is unknown are left out of both, never counted as
+/// zero; with none left there is no value, and the reason says how many
+/// finished runs there were.
+pub fn usage_metric(id: &str, runs: &[crate::run::Run], to: DateTime<Utc>, days: i64) -> Option<UsageFigure> {
+    let from = to - chrono::Duration::days(days);
+    let finished: Vec<&crate::run::Run> = runs
+        .iter()
+        .filter(|r| r.status.is_terminal() && r.ended_at.is_some_and(|e| e > from && e <= to))
+        .collect();
+    let none = |what: &str| UsageFigure {
+        value: None,
+        reason: Some(if finished.is_empty() {
+            format!("no run finished in the trailing {days} days")
+        } else {
+            format!(
+                "none of the {} runs that finished in the trailing {days} days has {what}",
+                finished.len()
+            )
+        }),
+        as_of: None,
+    };
+    let newest = |rs: &[&crate::run::Run]| rs.iter().filter_map(|r| r.ended_at).max();
+    match id {
+        "tokens_per_run" => {
+            let counted: Vec<(&crate::run::Run, u64)> = finished
+                .iter()
+                .filter_map(|r| measured(r).and_then(|u| u.tokens.total()).map(|t| (*r, t)))
+                .collect();
+            if counted.is_empty() {
+                return Some(none("fully measured token usage"));
+            }
+            let sum: u64 = counted.iter().map(|(_, t)| t).sum();
+            let rs: Vec<&crate::run::Run> = counted.iter().map(|(r, _)| *r).collect();
+            Some(UsageFigure {
+                value: Some(sum as f64 / counted.len() as f64),
+                reason: None,
+                as_of: newest(&rs),
+            })
+        }
+        "unit_cost" => {
+            let costed: Vec<(&crate::run::Run, f64)> = finished
+                .iter()
+                .filter_map(|r| measured(r).and_then(|u| u.cost_usd).map(|c| (*r, c)))
+                .collect();
+            let done = costed
+                .iter()
+                .filter(|(r, _)| r.status == crate::run::RunStatus::Done)
+                .count();
+            if done == 0 {
+                return Some(none("a measured cost and ended done"));
+            }
+            let spent: f64 = costed.iter().map(|(_, c)| c).sum();
+            let rs: Vec<&crate::run::Run> = costed.iter().map(|(r, _)| *r).collect();
+            Some(UsageFigure {
+                value: Some(spent / done as f64),
+                reason: None,
+                as_of: newest(&rs),
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,6 +996,53 @@ mod tests {
         assert_eq!(row.cost_usd, 0.25);
         assert_eq!(row.tokens.output, 10);
         assert_eq!(row.tokens.input, 10);
+    }
+
+    fn finished_run(id: &str, status: crate::run::RunStatus, ended_min: i64, usage: Option<RunUsage>) -> crate::run::Run {
+        let mut run: crate::run::Run = serde_json::from_value(serde_json::json!({
+            "id": id, "task_id": "t", "attempt": 1, "status": status.as_str(), "trigger": "manual",
+            "agent": "builder", "runtime": "herdr", "started_at": at(ended_min - 10), "ended_at": at(ended_min)
+        }))
+        .unwrap();
+        run.usage = usage;
+        run
+    }
+
+    fn measured_usage(total_in: u64, usd: Option<f64>) -> RunUsage {
+        run_usage(&[
+            snap(SnapshotPoint::Dispatch, 0, Some(usage(vec![]))),
+            snap(SnapshotPoint::RunEnd, 9, Some(usage(vec![session("a", Some(total_in), 0, usd)]))),
+        ])
+    }
+
+    #[test]
+    fn unit_cost_spreads_scrap_over_what_got_done_and_leaves_the_unmeasured_out() {
+        use crate::run::RunStatus::{Done, Failed};
+        let runs = vec![
+            finished_run("a", Done, 0, Some(measured_usage(100, Some(1.0)))),
+            finished_run("b", Failed, 1, Some(measured_usage(300, Some(0.5)))),
+            finished_run("c", Done, 2, Some(measured_usage(200, Some(1.5)))),
+            // Unknown and partial usage is in neither side of either sum.
+            finished_run("d", Done, 3, Some(RunUsage::unknown("no plugin", 2))),
+            finished_run("e", Done, 4, None),
+        ];
+        let now = at(10);
+        let cost = usage_metric("unit_cost", &runs, now, 28).unwrap();
+        assert_eq!(cost.value, Some((1.0 + 0.5 + 1.5) / 2.0));
+        assert_eq!(cost.as_of, Some(at(2)));
+        let tokens = usage_metric("tokens_per_run", &runs, now, 28).unwrap();
+        assert_eq!(tokens.value, Some(200.0));
+        assert!(usage_metric("throughput_week", &runs, now, 28).is_none());
+    }
+
+    #[test]
+    fn with_nothing_measured_a_cost_metric_is_none_with_the_reason() {
+        let runs = vec![finished_run("d", crate::run::RunStatus::Done, 3, Some(RunUsage::unknown("x", 1)))];
+        let cost = usage_metric("unit_cost", &runs, at(10), 28).unwrap();
+        assert_eq!(cost.value, None);
+        assert!(cost.reason.unwrap().contains("none of the 1 runs"));
+        let empty = usage_metric("tokens_per_run", &[], at(10), 28).unwrap();
+        assert!(empty.reason.unwrap().contains("no run finished"));
     }
 
     #[test]

@@ -2197,3 +2197,8 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
 @media (prefers-reduced-motion: reduce) {
   .ops-dot { transition: none; }
 }
+
+/* A run's usage block in the task modal (#117). Unknown reads as muted
+   text, never as a zero. */
+.usage { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.usage-known > div:first-child { font-weight: 600; }

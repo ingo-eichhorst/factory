@@ -145,6 +145,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/policy/remediate", post(policy_remediate))
         .route("/api/policy/export", get(policy_export))
         .route("/api/metrics", get(metrics))
+        .route("/api/costs", get(costs))
         .route("/api/goals", get(goals))
         .route("/api/goals/checkins", post(create_goals_checkin))
         .route("/api/scenarios", get(scenarios))
@@ -194,6 +195,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/tasks/{id}/entries", get(task_entries))
         .route("/api/tasks/{id}/output", get(task_output))
         .route("/api/tasks/{id}/runs", get(task_runs))
+        .route("/api/tasks/{id}/usage", get(task_usage))
         .route("/api/workflows", get(list_workflows).post(create_workflow))
         .route(
             "/api/workflows/{id}",
@@ -207,6 +209,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/workflow-runs/{id}/cancel", post(cancel_workflow_run))
         .route("/api/runs/{id}", get(get_run))
         .route("/api/runs/{id}/entries", get(run_entries))
+        .route("/api/runs/{id}/usage", get(run_usage))
         .route("/api/runs/{id}/output", get(run_output))
         .route("/api/runs/{id}/input", post(run_input))
         .route("/api/runs/{id}/answer", post(run_answer))
@@ -608,6 +611,51 @@ async fn policy_export(
         }
         other => (status_for(&other), Json(other)).into_response(),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct CostsQuery {
+    #[serde(default)]
+    group_by: Option<String>,
+    #[serde(default)]
+    from: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    to: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// `GET /api/costs?group_by=task|issue|scope|agent&from=&to=&scope=` --
+/// usage and cost summed per group over the runs that started in the
+/// window (#117). `from`/`to` are RFC 3339; the window defaults to the last
+/// thirty days. A grouping v1 does not offer yet (`provider`, `workflow`)
+/// is a 400 that says so, not an empty answer.
+async fn costs(State(engine): State<Arc<Engine>>, Query(q): Query<CostsQuery>) -> AxumResponse {
+    let group_by = match q.group_by.as_deref().filter(|g| !g.trim().is_empty()) {
+        None => factory_core::usage::CostGroupBy::default(),
+        Some(raw) => match raw.parse() {
+            Ok(g) => g,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response(),
+        },
+    };
+    run(
+        &engine,
+        Request::Costs {
+            group_by,
+            from: q.from,
+            to: q.to,
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+        },
+    )
+    .await
+}
+
+async fn task_usage(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::TaskUsage { id }).await
+}
+
+async fn run_usage(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::RunUsage { id }).await
 }
 
 #[derive(serde::Deserialize)]
@@ -1709,6 +1757,30 @@ mod tests {
         let status: u16 = text.split(' ').nth(1).unwrap().parse().unwrap();
         let (_, payload) = text.split_once("\r\n\r\n").unwrap();
         (status, serde_json::from_str(payload).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn get_api_costs_groups_and_refuses_a_grouping_it_does_not_offer() {
+        let engine = engine_with_quality();
+        let (status, json) = request(
+            engine.clone(),
+            "GET",
+            "/api/costs?group_by=scope&from=2026-01-01T00:00:00Z&to=2026-02-01T00:00:00Z",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["kind"], "costs");
+        assert_eq!(json["data"]["report"]["group_by"], "scope");
+        assert_eq!(json["data"]["report"]["total"]["runs"], 0);
+        assert_eq!(json["data"]["report"]["from"], "2026-01-01T00:00:00Z");
+
+        let (status, json) = request(engine.clone(), "GET", "/api/costs?group_by=provider", None).await;
+        assert_eq!(status, 400, "{json}");
+        assert!(json["message"].as_str().unwrap().contains("provider"), "{json}");
+
+        let (status, _) = request(engine, "GET", "/api/tasks/nope/usage", None).await;
+        assert_eq!(status, 404);
     }
 
     #[tokio::test]

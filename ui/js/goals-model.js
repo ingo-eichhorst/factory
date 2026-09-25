@@ -241,7 +241,7 @@ export function seriesIndex(metricsAnswer) {
 }
 
 /// `{value, as_of, reason}` -> a plain number string per `Unit`
-/// (`ratio`/`count`/`per_week`/`seconds`), or an em dash for `null` --
+/// (`ratio`/`count`/`per_week`/`seconds`/`usd`), or an em dash for `null` --
 /// display only, never used in a computation. `unit` is `null` for a manual
 /// key result (no registry entry backs it) or when the registry has not
 /// answered yet; either way this falls back to a trimmed plain number rather
@@ -257,6 +257,8 @@ export function formatUnitValue(value, unit) {
       return `${value.toFixed(1)}/wk`;
     case "seconds":
       return formatSeconds(value);
+    case "usd":
+      return value > 0 && value < 0.005 ? "<$0.01" : `$${value.toFixed(2)}`;
     default:
       return String(Math.round(value * 100) / 100);
   }
