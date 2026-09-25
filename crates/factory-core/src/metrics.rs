@@ -317,6 +317,23 @@ fn goal_tasks_done_def(objective: &str, kr: &str) -> MetricDef {
     )
 }
 
+fn quality_def(characteristic: &str) -> MetricDef {
+    fixed(
+        &format!("quality.{characteristic}"),
+        &format!("Quality scenarios met ({characteristic})"),
+        &format!(
+            "Share of every declared quality scenario under ISO 25010 characteristic \
+             {characteristic} that is met, counted once per scope it applies in, across the \
+             whole instance. A draft or no-data scenario counts against it: declared but not \
+             shown to be met is not met. Company-wide only -- a scope name can hold `/`, which a \
+             metric id segment cannot."
+        ),
+        Unit::Ratio,
+        Better::Higher,
+        "quality::evaluate over every scope's merged utility tree (/api/quality)",
+    )
+}
+
 /// The v1 metric registry, sorted by `id` (a family's own pattern for a
 /// parameterised metric, e.g. `compliance.<framework>`).
 pub fn registry() -> Vec<MetricDef> {
@@ -328,6 +345,7 @@ pub fn registry() -> Vec<MetricDef> {
         open_controls_def("<framework>"),
         bench_resolve_rate_def("<dataset>"),
         goal_tasks_done_def("<objective>", "<kr>"),
+        quality_def("<characteristic>"),
         unit_cost_def(),
         tokens_per_run_def(),
     ];
@@ -379,6 +397,11 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         ["open_controls", framework] => open_controls_def(framework),
         ["bench", "resolve_rate", dataset] => bench_resolve_rate_def(dataset),
         ["goal_tasks_done", objective, kr] => goal_tasks_done_def(objective, kr),
+        // Bound like `compliance.<framework>`: this module knows no quality
+        // catalogue (the same one-way rule it keeps with `goals.rs`), so a
+        // characteristic ISO 25010 does not name still resolves here, and
+        // `factory-daemon` answers it with `value: None` and the reason.
+        ["quality", characteristic] => quality_def(characteristic),
         _ => return Err(MetricError::Unknown(id.clone())),
     };
     Ok(def)
@@ -508,6 +531,7 @@ mod tests {
             "open_controls.<framework>",
             "bench.resolve_rate.<dataset>",
             "goal_tasks_done.<objective>.<kr>",
+            "quality.<characteristic>",
             "unit_cost",
             "tokens_per_run",
         ] {
@@ -542,6 +566,11 @@ mod tests {
 
         let def = resolve(&MetricId::new("open_controls.dsgvo").unwrap()).unwrap();
         assert_eq!(def.id, "open_controls.dsgvo");
+
+        let def = resolve(&MetricId::new("quality.reliability").unwrap()).unwrap();
+        assert_eq!(def.id, "quality.reliability");
+        assert_eq!((def.unit, def.better), (Unit::Ratio, Better::Higher));
+        assert!(matches!(resolve(&MetricId::new("quality").unwrap()), Err(MetricError::Unknown(_))));
     }
 
     #[test]
