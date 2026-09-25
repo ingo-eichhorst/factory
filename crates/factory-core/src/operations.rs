@@ -1678,6 +1678,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            usage: None,
         }
     }
 

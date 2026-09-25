@@ -28,6 +28,18 @@
 //! one `wait` returning and the next starting. That race is closed by
 //! re-reading `status()` itself the moment a wait comes back, rather than
 //! trusting the state it happened to wait for.
+//!
+//! `usage()` is the one call that goes past the CLI to herdr's socket API.
+//! The usage of a pane comes from a herdr plugin's `usage` action (Irrlicht's,
+//! per issue #117), and an action has to be told which pane it is about:
+//! `herdr plugin action invoke` has no pane argument and always acts on the
+//! focused pane -- verified on herdr 0.8.0, where neither `HERDR_PANE_ID`
+//! nor `HERDR_ACTIVE_PANE_ID` in the caller's environment changes that --
+//! which from a daemon is whichever pane a person last clicked. The socket's
+//! `plugin.action.invoke` takes the pane as `context.focused_pane_id`, and
+//! herdr hands it to the plugin as `HERDR_PANE_ID`. The invoke returns
+//! before the command finishes; its stdout is read back from
+//! `plugin.log.list` by the log id the invoke answered with.
 
 use async_trait::async_trait;
 use factory_core::adapter::agent::LaunchKind;
@@ -38,10 +50,13 @@ use factory_core::adapter::runtime::{
 };
 use factory_core::error::{FactoryError, Result};
 use factory_core::task::SessionRef;
-use serde_json::Value;
+use factory_core::usage::SessionUsage;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
@@ -54,6 +69,16 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// A diagnostic is polled while its view is open. It must not leave the page
 /// spinning forever if a broken client never answers.
 const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(5);
+/// One whole usage read -- finding the action, invoking it, waiting for its
+/// output. It sits on the dispatch path (the baseline is taken before the
+/// task is handed over) and on every run's way out, so a plugin that hangs
+/// must cost a few seconds and an "unknown", never a stuck run.
+const USAGE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The action a usage plugin offers -- the #117 contract's name for it.
+const USAGE_ACTION: &str = "usage";
+/// How far back `plugin.log.list` is read for the invocation's own entry.
+/// Concurrent reads from other runs interleave there; this is generous.
+const USAGE_LOG_WINDOW: u32 = 200;
 
 /// Which herdr states `agent wait` should block for, given the one Factory
 /// currently believes the agent is in. Excludes whatever `current` already
@@ -104,6 +129,12 @@ pub struct HerdrRuntime {
     /// called while a caller already holds this lock -- `resolve_pane`
     /// itself never calls it -- so this can never deadlock; keep it that way.
     workspace_lock: Arc<tokio::sync::Mutex<()>>,
+    /// herdr's API socket, as `herdr status` reported it -- resolved on the
+    /// first `usage()` and forgotten again if connecting to it fails, so a
+    /// herdr restart is picked up without restarting the daemon.
+    api_socket: Arc<Mutex<Option<PathBuf>>>,
+    /// `USAGE_TIMEOUT`, except in tests.
+    usage_timeout: Duration,
 }
 
 #[derive(Default)]
@@ -130,6 +161,149 @@ impl HerdrRuntime {
             herdr_session,
             watch: Arc::new(Mutex::new(WatchState::default())),
             workspace_lock: Arc::new(tokio::sync::Mutex::new(())),
+            api_socket: Arc::new(Mutex::new(None)),
+            usage_timeout: USAGE_TIMEOUT,
+        }
+    }
+
+    /// Talk to this API socket rather than the one `herdr status` names.
+    /// For tests, which stand up a fake herdr of their own.
+    pub fn with_api_socket(self, socket: impl Into<PathBuf>) -> Self {
+        if let Ok(mut s) = self.api_socket.lock() {
+            *s = Some(socket.into());
+        }
+        self
+    }
+
+    async fn api_socket(&self) -> Result<PathBuf> {
+        if let Some(path) = self.api_socket.lock().ok().and_then(|s| s.clone()) {
+            return Ok(path);
+        }
+        let status = self.run(&[s("status"), s("--json")]).await?;
+        let path = status
+            .pointer("/server/socket")
+            .and_then(Value::as_str)
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| FactoryError::adapter(ADAPTER, "herdr status names no API socket"))?;
+        if let Ok(mut s) = self.api_socket.lock() {
+            *s = Some(path.clone());
+        }
+        Ok(path)
+    }
+
+    /// One request on herdr's socket API. A connection that fails forgets
+    /// the cached socket, so the next call asks `herdr status` again.
+    async fn api(&self, method: &str, params: Value) -> Result<Value> {
+        let socket = self.api_socket().await?;
+        match api_call(&socket, method, params).await {
+            Err(ApiError::Connect(e)) => {
+                if let Ok(mut s) = self.api_socket.lock() {
+                    *s = None;
+                }
+                Err(FactoryError::adapter(
+                    ADAPTER,
+                    format!("cannot reach herdr's API socket {}: {e}", socket.display()),
+                ))
+            }
+            Err(ApiError::Refused { code, message }) => Err(FactoryError::adapter(
+                ADAPTER,
+                format!("herdr refused `{method}`: {message} [{code}]"),
+            )),
+            Err(ApiError::Other(e)) => Err(FactoryError::adapter(ADAPTER, format!("herdr `{method}`: {e}"))),
+            Ok(v) => Ok(v),
+        }
+    }
+
+    /// Which plugin answers `usage`, if any does. Asked every time rather than
+    /// configured: the plugin's id is its author's to choose, and installing
+    /// or removing it should take effect without touching Factory. More than
+    /// one is refused as ambiguous unless `FACTORY_HERDR_USAGE_PLUGIN` names
+    /// the one to use.
+    async fn usage_plugin(&self) -> Result<Option<String>> {
+        let listed = self.api("plugin.action.list", json!({})).await?;
+        let mut offering: Vec<String> = listed
+            .get("actions")
+            .and_then(Value::as_array)
+            .map(|actions| {
+                actions
+                    .iter()
+                    .filter(|a| a.get("action_id").and_then(Value::as_str) == Some(USAGE_ACTION))
+                    .filter_map(|a| a.get("plugin_id").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        offering.sort();
+        offering.dedup();
+        if let Ok(wanted) = std::env::var("FACTORY_HERDR_USAGE_PLUGIN") {
+            return Ok(offering.into_iter().find(|p| *p == wanted));
+        }
+        match offering.len() {
+            0 => Ok(None),
+            1 => Ok(offering.pop()),
+            _ => Err(FactoryError::adapter(
+                ADAPTER,
+                format!(
+                    "more than one herdr plugin offers `{USAGE_ACTION}` ({}); set FACTORY_HERDR_USAGE_PLUGIN to choose",
+                    offering.join(", ")
+                ),
+            )),
+        }
+    }
+
+    /// Invoke `usage` for one pane and wait for what it printed.
+    async fn invoke_usage(&self, plugin: &str, pane: &str) -> Result<String> {
+        let invoked = self
+            .api(
+                "plugin.action.invoke",
+                json!({
+                    "plugin_id": plugin,
+                    "action_id": USAGE_ACTION,
+                    "context": { "focused_pane_id": pane },
+                }),
+            )
+            .await?;
+        let mut log = invoked.get("log").cloned().unwrap_or(Value::Null);
+        let log_id = log
+            .get("log_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| FactoryError::adapter(ADAPTER, "herdr's invoke answered no log id"))?
+            .to_string();
+        loop {
+            match log.get("status").and_then(Value::as_str) {
+                Some("succeeded") => {
+                    return Ok(log.get("stdout").and_then(Value::as_str).unwrap_or_default().to_string())
+                }
+                Some("failed") => {
+                    let why = log
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .filter(|e| !e.is_empty())
+                        .or_else(|| log.get("stderr").and_then(Value::as_str).map(str::trim).filter(|e| !e.is_empty()))
+                        .unwrap_or("no reason given");
+                    let code = log.get("exit_code").and_then(Value::as_i64);
+                    return Err(FactoryError::adapter(
+                        ADAPTER,
+                        format!(
+                            "the `{USAGE_ACTION}` action of plugin {plugin} failed{}: {}",
+                            code.map(|c| format!(" (exit {c})")).unwrap_or_default(),
+                            truncate_reason(why)
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let logs = self
+                .api("plugin.log.list", json!({ "plugin_id": plugin, "limit": USAGE_LOG_WINDOW }))
+                .await?;
+            if let Some(found) = logs
+                .get("logs")
+                .and_then(Value::as_array)
+                .and_then(|l| l.iter().find(|e| e.get("log_id").and_then(Value::as_str) == Some(&log_id)))
+            {
+                log = found.clone();
+            }
         }
     }
 
@@ -555,6 +729,49 @@ fn strip_sgr(line: &str) -> String {
 
 fn s(v: &str) -> String {
     v.to_string()
+}
+
+/// A plugin's stderr is kept as a reason on the run; keep it to a line.
+fn truncate_reason(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    if line.chars().count() > 200 {
+        format!("{}...", line.chars().take(200).collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
+
+enum ApiError {
+    /// The socket was not there to talk to.
+    Connect(std::io::Error),
+    /// herdr answered, with an error.
+    Refused { code: String, message: String },
+    Other(String),
+}
+
+/// One newline-delimited JSON request on herdr's API socket, and its one
+/// line of answer, unwrapped to its `result`.
+async fn api_call(socket: &Path, method: &str, params: Value) -> std::result::Result<Value, ApiError> {
+    let mut stream = tokio::net::UnixStream::connect(socket).await.map_err(ApiError::Connect)?;
+    let request = json!({ "id": format!("factory:{method}"), "method": method, "params": params });
+    let mut line = serde_json::to_vec(&request).map_err(|e| ApiError::Other(e.to_string()))?;
+    line.push(b'\n');
+    stream.write_all(&line).await.map_err(|e| ApiError::Other(e.to_string()))?;
+    let mut reader = BufReader::new(stream);
+    let mut answer = String::new();
+    reader
+        .read_line(&mut answer)
+        .await
+        .map_err(|e| ApiError::Other(e.to_string()))?;
+    let value: Value = serde_json::from_str(answer.trim())
+        .map_err(|e| ApiError::Other(format!("unreadable answer: {e}")))?;
+    if let Some(err) = value.get("error") {
+        return Err(ApiError::Refused {
+            code: err.get("code").and_then(Value::as_str).unwrap_or("error").to_string(),
+            message: err.get("message").and_then(Value::as_str).unwrap_or_default().to_string(),
+        });
+    }
+    Ok(value.get("result").cloned().unwrap_or(Value::Null))
 }
 
 /// `herdr status` prints the socket it is talking to; the directory above it is
@@ -1062,6 +1279,35 @@ impl AgentRuntime for HerdrRuntime {
         Ok(Some(rx))
     }
 
+    /// Usage from whichever herdr plugin offers the #117 `usage` action --
+    /// Irrlicht's. No such plugin is `None`: this runtime then has no source
+    /// for it, which is not a failure of anything. Everything else that goes
+    /// wrong -- herdr unreachable, the plugin failing or too slow, an answer
+    /// in a schema this Factory does not read -- is an error whose message
+    /// becomes the reason the run's usage is unknown.
+    async fn usage(&self, session: &SessionRef) -> Result<Option<SessionUsage>> {
+        let pane = Self::pane_of(session).to_string();
+        let read = async {
+            let Some(plugin) = self.usage_plugin().await? else {
+                return Ok(None);
+            };
+            let stdout = self.invoke_usage(&plugin, &pane).await?;
+            SessionUsage::parse(&stdout)
+                .map(Some)
+                .map_err(|e| FactoryError::adapter(ADAPTER, format!("plugin {plugin}: {e}")))
+        };
+        match tokio::time::timeout(self.usage_timeout, read).await {
+            Ok(answer) => answer,
+            Err(_) => Err(FactoryError::adapter(
+                ADAPTER,
+                format!(
+                    "the `{USAGE_ACTION}` action did not answer within {}ms",
+                    self.usage_timeout.as_millis()
+                ),
+            )),
+        }
+    }
+
     async fn stop(&self, session: &SessionRef) -> Result<()> {
         self.forget_session(Self::pane_of(session));
         let tab = session.meta.get("tab_id").cloned().unwrap_or_default();
@@ -1384,5 +1630,171 @@ fi
         assert_eq!(got.endpoint.as_deref(), Some("/tmp/chosen/herdr.sock"));
 
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    // -- usage over the socket API ------------------------------------------
+
+    use std::sync::Mutex as StdMutex;
+    use tokio::net::UnixListener;
+
+    /// A herdr that answers its socket API from a table, remembering every
+    /// request it was sent. The socket lives under `/tmp` with a short name:
+    /// a path past `sun_path`'s ~104 bytes cannot be bound at all.
+    struct FakeHerdr {
+        socket: PathBuf,
+        seen: Arc<StdMutex<Vec<Value>>>,
+    }
+
+    impl Drop for FakeHerdr {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.socket);
+        }
+    }
+
+    fn fake_herdr<F>(answer: F) -> FakeHerdr
+    where
+        F: Fn(&str, &Value) -> Value + Send + Sync + 'static,
+    {
+        let socket = PathBuf::from(format!("/tmp/fh-{}.sock", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let (log, answer) = (seen.clone(), Arc::new(answer));
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (log, answer) = (log.clone(), answer.clone());
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut line = String::new();
+                    BufReader::new(read).read_line(&mut line).await.unwrap();
+                    let req: Value = serde_json::from_str(&line).unwrap();
+                    log.lock().unwrap().push(req.clone());
+                    let method = req["method"].as_str().unwrap().to_string();
+                    let reply = answer(&method, &req["params"]);
+                    let mut out = serde_json::to_vec(&reply).unwrap();
+                    out.push(b'\n');
+                    let _ = write.write_all(&out).await;
+                });
+            }
+        });
+        FakeHerdr { socket, seen }
+    }
+
+    fn ok(result: Value) -> Value {
+        json!({ "id": "x", "result": result })
+    }
+
+    fn actions(plugins: &[&str]) -> Value {
+        ok(json!({ "type": "plugin_action_list", "actions": plugins.iter().map(|p| json!({
+            "plugin_id": p, "action_id": "usage", "title": "Usage", "contexts": ["pane"], "command": ["x"]
+        })).collect::<Vec<_>>() }))
+    }
+
+    const USAGE_JSON: &str = r#"{"schema":1,"pane_id":"w3:p1","sessions":[{"session_id":"s1","adapter":"codex",
+        "model":"gpt-5","tokens":{"input":61000,"output":900,"cache_read":null,"cache_write":null},
+        "cost":{"usd":2.70,"pricing_source":"litellm@test"},"last_assistant_text":"never stored"}]}"#;
+
+    /// Answers `usage` for plugin `irrlicht`: the invoke says running, the
+    /// first log read says running still, the second has the output.
+    fn working_plugin(stdout: &'static str, status: &'static str) -> impl Fn(&str, &Value) -> Value {
+        let reads = Arc::new(StdMutex::new(0));
+        move |method, _params| match method {
+            "plugin.action.list" => actions(&["irrlicht"]),
+            "plugin.action.invoke" => ok(json!({ "type": "plugin_action_invoked",
+                "log": { "log_id": "plugin-log-7", "plugin_id": "irrlicht", "status": "running" } })),
+            "plugin.log.list" => {
+                let mut n = reads.lock().unwrap();
+                *n += 1;
+                let mine = if *n < 2 {
+                    json!({ "log_id": "plugin-log-7", "status": "running" })
+                } else {
+                    json!({ "log_id": "plugin-log-7", "status": status, "exit_code": if status == "failed" { 3 } else { 0 },
+                            "stdout": stdout, "stderr": "irrlichd is not running\nmore" })
+                };
+                ok(json!({ "type": "plugin_log_list", "logs": [
+                    { "log_id": "plugin-log-6", "status": "succeeded", "stdout": "{\"schema\":1,\"sessions\":[]}" },
+                    mine,
+                ] }))
+            }
+            other => json!({ "id": "x", "error": { "code": "unknown_method", "message": other } }),
+        }
+    }
+
+    fn runtime_on(fake: &FakeHerdr) -> HerdrRuntime {
+        let mut rt = HerdrRuntime::with_bin("/nonexistent/herdr").with_api_socket(&fake.socket);
+        rt.usage_timeout = Duration::from_millis(800);
+        rt
+    }
+
+    #[tokio::test]
+    async fn usage_asks_the_plugin_about_the_sessions_own_pane_and_parses_the_answer() {
+        let fake = fake_herdr(working_plugin(USAGE_JSON, "succeeded"));
+        let usage = runtime_on(&fake).usage(&agent_mode_session()).await.unwrap().unwrap();
+        assert_eq!(usage.sessions[0].tokens.input, Some(61_000));
+        assert_eq!(usage.sessions[0].tokens.cache_read, None);
+        assert_eq!(usage.sessions[0].cost.pricing_source.as_deref(), Some("litellm@test"));
+
+        let seen = fake.seen.lock().unwrap().clone();
+        let invoke = seen.iter().find(|r| r["method"] == "plugin.action.invoke").unwrap();
+        assert_eq!(invoke["params"]["plugin_id"], "irrlicht");
+        assert_eq!(invoke["params"]["action_id"], "usage");
+        assert_eq!(
+            invoke["params"]["context"]["focused_pane_id"], "pane1",
+            "the pane is passed as context, never left to herdr's focus"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_plugin_offering_usage_is_none_not_an_error() {
+        let fake = fake_herdr(|method, _| match method {
+            "plugin.action.list" => actions(&[]),
+            _ => panic!("nothing should be invoked"),
+        });
+        assert_eq!(runtime_on(&fake).usage(&agent_mode_session()).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_failing_plugin_is_an_error_carrying_its_first_line_of_stderr() {
+        let fake = fake_herdr(working_plugin("", "failed"));
+        let err = runtime_on(&fake).usage(&agent_mode_session()).await.unwrap_err().to_string();
+        assert!(err.contains("exit 3") && err.contains("irrlichd is not running"), "{err}");
+        assert!(!err.contains("more"), "one line of stderr, not the whole of it: {err}");
+    }
+
+    #[tokio::test]
+    async fn an_answer_in_another_schema_is_refused() {
+        let fake = fake_herdr(working_plugin(r#"{"schema":2,"sessions":[]}"#, "succeeded"));
+        let err = runtime_on(&fake).usage(&agent_mode_session()).await.unwrap_err().to_string();
+        assert!(err.contains("schema 2"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_plugin_that_never_finishes_times_out_rather_than_hanging_the_run() {
+        let fake = fake_herdr(|method, _| match method {
+            "plugin.action.list" => actions(&["irrlicht"]),
+            "plugin.action.invoke" => ok(json!({ "log": { "log_id": "l1", "status": "running" } })),
+            _ => ok(json!({ "logs": [ { "log_id": "l1", "status": "running" } ] })),
+        });
+        let started = std::time::Instant::now();
+        let err = runtime_on(&fake).usage(&agent_mode_session()).await.unwrap_err().to_string();
+        assert!(err.contains("did not answer within"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn two_plugins_offering_usage_is_ambiguous() {
+        let fake = fake_herdr(|method, _| match method {
+            "plugin.action.list" => actions(&["irrlicht", "other"]),
+            _ => panic!("nothing should be invoked"),
+        });
+        let err = runtime_on(&fake).usage(&agent_mode_session()).await.unwrap_err().to_string();
+        assert!(err.contains("irrlicht, other"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_socket_is_an_error_and_is_forgotten() {
+        let rt = HerdrRuntime::with_bin("/nonexistent/herdr").with_api_socket("/tmp/fh-not-there.sock");
+        let err = rt.usage(&agent_mode_session()).await.unwrap_err().to_string();
+        assert!(err.contains("cannot reach"), "{err}");
+        assert!(rt.api_socket.lock().unwrap().is_none(), "the next read asks herdr status again");
     }
 }

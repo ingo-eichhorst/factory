@@ -5,6 +5,7 @@ mod access;
 mod agents;
 mod bench;
 mod configuration;
+mod costs;
 mod datasets;
 mod discovery;
 mod engine;

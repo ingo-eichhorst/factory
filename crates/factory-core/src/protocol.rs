@@ -637,6 +637,28 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         detail: bool,
     },
+    /// One task's usage and cost: every run's, and their sum (#117).
+    /// Read-only, derived from what the runs already carry.
+    #[serde(rename = "task.usage")]
+    TaskUsage { id: String },
+    /// One run's usage snapshots as taken -- dispatch, each turn end, run
+    /// end -- answered or not. The record behind `Run::usage`.
+    #[serde(rename = "run.usage")]
+    RunUsage { id: String },
+    /// Usage and cost summed over the runs that started in `[from, to)`,
+    /// grouped (#117). `from` defaults to thirty days before `to`, `to` to
+    /// now; `scope` narrows to that scope and its descendants.
+    #[serde(rename = "costs")]
+    Costs {
+        #[serde(default)]
+        group_by: crate::usage::CostGroupBy,
+        #[serde(default)]
+        from: Option<chrono::DateTime<chrono::Utc>>,
+        #[serde(default)]
+        to: Option<chrono::DateTime<chrono::Utc>>,
+        #[serde(default)]
+        scope: Option<String>,
+    },
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -817,6 +839,12 @@ pub enum Payload {
     /// and would otherwise set the size of every `Response` (serde writes a
     /// box as what it holds).
     Operations { report: Box<crate::operations::OperationsReport> },
+    /// `Request::TaskUsage`'s answer.
+    TaskUsage { usage: crate::usage::TaskUsage },
+    /// `Request::RunUsage`'s answer.
+    UsageSnapshots { snapshots: Vec<crate::usage::UsageSnapshot> },
+    /// `Request::Costs`' answer.
+    Costs { report: crate::usage::CostReport },
 }
 
 /// A request plus who is making it.

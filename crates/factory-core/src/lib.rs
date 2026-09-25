@@ -24,6 +24,7 @@ pub mod role;
 pub mod run;
 pub mod scenario;
 pub mod task;
+pub mod usage;
 pub mod workflow;
 
 pub use adapter::{Agent, AdapterKind, AgentRuntime, Interface, TaskStore};
