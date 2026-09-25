@@ -32,6 +32,14 @@ test("a policy_changed event and the refresh button both go through the same loa
   assert.match(wiring, /reloadPolicy\(\)/);
 });
 
+test("a task carrying a policy= label appearing or changing status reloads the tab (#98)", () => {
+  assert.match(wiring, /const policyTask = ev\.task && ev\.task\.labels && ev\.task\.labels\.policy;/);
+  assert.match(
+    wiring,
+    /state\.tab === "policy" && \(\(ev\.type === "task_created" && policyTask\)[\s\S]*?ev\.type === "task_updated" && policyTask && \(!priorTask \|\| priorTask\.status !== ev\.task\.status\)[\s\S]*?ev\.type === "task_deleted"\)\)\s*\{\s*reloadPolicy\(\);/,
+  );
+});
+
 test("a link with a level segment and an old bare link both land on the Policy page", () => {
   setRouter({ pages: ["dashboard", "policy", "roles"], redirects: {} });
 
@@ -85,6 +93,13 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
                     reasons: ["knowledge: tag `control/cra/annex-i-2-1` not found"],
                   },
                   {
+                    control: "cra/annex-i-2-3",
+                    title: "Known exploitable vulnerabilities are tracked and remediated",
+                    kind: "regulation",
+                    status: "open",
+                    reasons: ["attestation: none recorded"],
+                  },
+                  {
                     control: "cra/annex-i-2-4",
                     title: "Security updates are provided without undue delay",
                     kind: "regulation",
@@ -93,6 +108,7 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
                   },
                 ],
                 rollup: [],
+                open_tasks: { "cra/annex-i-2-3": "task-open-3" },
               },
             ],
             rollup: [
@@ -123,6 +139,16 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
     elements["policy-gaps"].innerHTML,
     /data-remediate="cra\/annex-i-2-1"[^>]*data-remediate-scope="demo"/,
     "an open row gets a Create task button, labelled for the same control and scope",
+  );
+  assert.match(
+    elements["policy-gaps"].innerHTML,
+    /<a class="pol-task-created" href="#demo\/tasks\/task\/task-open-3">Task open →<\/a>/,
+    "#98: a row whose remediation task is already open links to it",
+  );
+  assert.doesNotMatch(
+    elements["policy-gaps"].innerHTML,
+    /data-remediate="cra\/annex-i-2-3"/,
+    "... and offers no Create task button beside it",
   );
   assert.match(elements["policy-na"].innerHTML, /covered at the root/);
   assert.match(elements["policy-findings"].innerHTML, /names a control nothing defines/);

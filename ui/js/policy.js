@@ -22,7 +22,6 @@ import { $, api, esc, state } from "./core.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
 import {
   attestBody,
-  canRemediate,
   checkTarget,
   closingLinks,
   describeCheck,
@@ -33,9 +32,11 @@ import {
   kindLabel,
   notApplicableRows,
   refLinks,
+  remediateAction,
   remediateBody,
   statusLabel,
   statusOf,
+  taskHref,
 } from "./policy-model.js";
 
 /// Answers can arrive out of order when the rail moves quickly; only the
@@ -105,7 +106,7 @@ function gapRow(row) {
       <div class="pol-links">${links.length
         ? links.map((l) => `<a href="${esc(l.href)}">${esc(l.label)}</a>`).join("")
         : `<span class="sub">—</span>`}</div>
-      ${canRemediate(row.status) ? remediateButtonHtml(row.control, row.scope) : ""}
+      ${remediateHtml(row.control, row.scope, remediateAction(row.status, row.openTask))}
     </td>
   </tr>`;
 }
@@ -141,8 +142,19 @@ function findingsHtml(findings) {
 // Never `alert()`/`confirm()` -- a refusal (a control already satisfied, or
 // a task already open) lands as inline text next to the button, the same
 // restraint this page's Withdraw form already takes.
+//
+// When the report already names an open remediation task for the control
+// (`open_tasks`/`open_task`, `#98`), the same cell holds a link to it
+// instead of the button -- what a click would have been refused over. The
+// daemon's refusal stays the guard for a task opened since the last load.
 
-function remediateButtonHtml(control, scope) {
+function remediateHtml(control, scope, action) {
+  if (!action) return "";
+  if (action.kind === "open") {
+    return `<div class="pol-remediate" data-remediate-cell>
+    <a class="pol-task-created" href="${esc(taskHref(scope, action.task))}">Task open →</a>
+  </div>`;
+  }
   return `<div class="pol-remediate" data-remediate-cell>
     <button type="button" class="btn" data-remediate="${esc(control)}" data-remediate-scope="${esc(scope)}">Create task</button>
   </div>`;
@@ -168,19 +180,11 @@ async function remediate(button) {
       body: JSON.stringify(remediateBody(control, scope)),
     });
     const task = answer.task;
-    cell.innerHTML = `<a class="pol-task-created" href="${esc(taskLinkHref(scope, task.id))}" title="${esc(task.title)}">Task created →</a>`;
+    cell.innerHTML = `<a class="pol-task-created" href="${esc(taskHref(scope, task.id))}" title="${esc(task.title)}">Task created →</a>`;
   } catch (e) {
     button.disabled = false;
     cell.insertAdjacentHTML("beforeend", `<div class="sub pol-remediate-err">${esc(e.message)}</div>`);
   }
-}
-
-/// The one place this file needs a task-modal link built from a bare id
-/// rather than an `EvidenceRef` -- `refLinks` builds the same shape for a
-/// control's own refs; this mirrors it for a task `remediate` itself just
-/// created, which is not a ref on the wire at all.
-function taskLinkHref(scope, taskId) {
-  return refLinks(scope, [{ kind: "task", id: taskId }])[0].href;
 }
 
 // ------------------------------------------------------------------- board
@@ -355,7 +359,7 @@ function controlBodyHtml(detail) {
       ? `<p class="sub">maps_to: ${detail.maps_to.map(esc).join(", ")}</p>`
       : ""}
     ${detail.remediation ? `<p class="sub">${esc(detail.remediation.trim())}</p>` : ""}
-    ${canRemediate(s.status) ? remediateButtonHtml(detail.control, openControl.scope) : ""}
+    ${remediateHtml(detail.control, openControl.scope, remediateAction(s.status, detail.open_task))}
 
     <h3 class="pol-sub-head">Evidence</h3>
     ${checksHtml(openControl.scope, detail.control, detail.checks)}

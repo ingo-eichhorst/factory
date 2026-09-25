@@ -711,6 +711,16 @@ function onEvent(ev) {
   // change a descendant's rollup too, and `reloadPolicy` also refreshes the
   // control detail modal, if one happens to be open.
   if (ev.type === "policy_changed" && state.tab === "policy") reloadPolicy();
+  // And a task carrying a `policy=` label appearing, changing status or going
+  // away, which is `open_tasks` changing under a gap's "Create task"/"Task
+  // open" (#98) -- the same rule, and the same restraint, as the Quality
+  // tab's `quality=` label below.
+  const policyTask = ev.task && ev.task.labels && ev.task.labels.policy;
+  if (state.tab === "policy" && ((ev.type === "task_created" && policyTask)
+      || (ev.type === "task_updated" && policyTask && (!priorTask || priorTask.status !== ev.task.status))
+      || ev.type === "task_deleted")) {
+    reloadPolicy();
+  }
   // A check-in recorded against a manual key result -- see `Event::GoalsChanged`.
   // Reload whenever the tab is open: `reloadGoals` also refreshes the key
   // result detail modal, if one happens to be open on the checked-in key
