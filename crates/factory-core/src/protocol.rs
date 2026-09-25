@@ -1216,6 +1216,13 @@ pub struct ScopePolicy {
     pub scope: String,
     pub statuses: Vec<crate::policy::ControlStatus>,
     pub rollup: Vec<crate::policy::FrameworkRollup>,
+    /// A control's `framework/id` to the id of the non-terminal task in this
+    /// scope labelled `policy=<framework>/<id>` -- the one
+    /// `Request::PolicyRemediate` would refuse a second call naming -- so a
+    /// reader can show that task instead of offering to create another
+    /// (`#98`, the same field `ScopeQuality` carries).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub open_tasks: std::collections::BTreeMap<String, String>,
 }
 
 /// The L6 Policy tab's whole answer: every applicable control's status for
@@ -1277,6 +1284,11 @@ pub struct PolicyControlDetail {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<crate::policy::EvidenceRef>,
     pub status: crate::policy::Status,
+    /// The id of the non-terminal task in this scope labelled
+    /// `policy=<framework>/<id>` for this control, if one is open -- the
+    /// same lookup as `ScopePolicy::open_tasks` (`#98`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_task: Option<String>,
     /// Every attestation ever recorded for this control at this scope or an
     /// ancestor of it, most recent first -- withdrawn and expired ones
     /// included, since this is the audit trail, not just what currently
