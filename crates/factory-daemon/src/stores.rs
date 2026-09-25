@@ -255,6 +255,14 @@ impl TaskStore for ScopedStores {
         self.ledger.run_entries(run_id, limit).await
     }
 
+    async fn entries_of_kinds(
+        &self,
+        kinds: &[&str],
+        since: DateTime<Utc>,
+    ) -> Result<Vec<(String, TaskEntry)>> {
+        self.ledger.entries_of_kinds(kinds, since).await
+    }
+
     async fn append_status(&self, change: &StatusChange) -> Result<()> {
         self.ledger.append_status(change).await
     }
