@@ -1319,6 +1319,7 @@ why (`data.reason`, when given):
 ```sh
 factory task run <id> --reason "..."          # run again; journals run_requested
 factory task cancel <id> --reason "..."       # journals cancel_requested; counts as scrap
+factory task close <id> --reason not_planned --note "..."   # task.close; journals closed
 factory task edit <id> --pause-schedule --reason "stop the line"
 factory task skip-next <id> --reason "..."    # task.skip_next; journals slot_skipped
 factory run answer <run-id> "text" --reason "..."   # run.answer
@@ -1394,6 +1395,44 @@ started again has two runs, numbered `attempt 1` and `attempt 2`, and both are
 kept with their own journal, their own outcome, and their own terminal
 transcript. The task itself mirrors the newest run, so a list stays cheap to
 read; the history lives on the runs.
+
+### A failure is Blocked; closing is a person's act (#122)
+
+A run that fails stays `failed` -- the attempt really did fail, and every
+`FailKind` says why. Its **task** does not: it goes to `blocked`, with
+`failure` (the fail kind, the run, the attempt) mirrored beside the run's
+`error`, because Blocked is the one column a person has to act on. The
+board's card says which kind of block it is -- *attempt 2 failed: ran past
+its timeout* reads differently from an agent waiting on a question. It is
+never a blocked *run*, so `blocked_timeout_seconds` never finds it and it
+cannot time out into another failure.
+
+A scheduled task keeps its retry streak: while a retry is queued it stays in
+Scheduled and says it is retrying; once the retries are used up, or with
+`retry: none`, it is blocked on the failure instead of looking healthy. Its
+schedule keeps firing, and the next run that succeeds clears the block.
+
+Closed is `done`, or closed on purpose with a reason -- never the default
+outcome of a failure:
+
+```sh
+factory task close <id> --reason not_planned --note "the client dropped it"
+factory task close <id> --reason duplicate --duplicate-of <other-id>
+factory task close <id> --reason completed      # it was done by hand
+factory task reopen <id> --reason "worth another go"
+factory task list --status failed               # blocked by a failed run
+factory task list --status closed               # done or cancelled
+```
+
+`POST /api/tasks/{id}/close` takes `{reason, duplicate_of?, note?}`,
+`POST /api/tasks/{id}/reopen` `{reason?}`. Closing works with no run at all
+and is refused while a run is active (cancel it first); it is journaled
+(`closed`) with who closed it and the note, and needs the `task.close`
+grant, which also covers reopening. A person cancelling a running task still
+closes it, as *won't do*. A new run clears the close record and the failure,
+like every other mirrored field. Tasks stored as `failed` before this are
+moved to blocked-on-that-failure when the daemon starts (`migrated` in their
+journal).
 
 Everything a task carries can be set when it is created and changed afterwards
 — scope, agent, schedule, labels, and how patient the daemon is with it:
@@ -1510,7 +1549,9 @@ revision it started with. Root nodes create and run tasks immediately; every
 other node waits until all incoming predecessors have reported `done`.
 Fan-out starts every newly eligible node and fan-in waits for every parent.
 A failed or cancelled task stops the attempt and leaves downstream nodes
-`skipped`; a blocked task simply pauses it. The task remains authoritative for
+`skipped` -- a task blocked by a failed run is a failed node, even though
+the task itself waits in Blocked for a person; a task blocked on a question
+simply pauses it. The task remains authoritative for
 all of these states, including after the run itself has an outcome: a sibling
 still running when the run fails keeps moving to its own `done`/`failed`/
 `cancelled` rather than freezing, and a task deleted out from under an active
