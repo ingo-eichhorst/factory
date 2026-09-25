@@ -38,10 +38,10 @@
 //! [`evaluate`] takes the applicable controls, a bundle of [`Evidence`]
 //! Factory already has lying around, and `now`, and produces a
 //! [`ControlStatus`] per control -- pure, so a caller passes `now` in rather
-//! than this module reading the clock. `evaluate` now understands all nine
+//! than this module reading the clock. `evaluate` now understands all ten
 //! of `Check`'s kinds: `knowledge` and `attestation` (v1), `task`,
 //! `workflow` and `gate` (`#81`), and `roles`, `sandbox`, `secrets` and
-//! `daemon` (`#82`). The last four read facts the engine resolves once,
+//! `daemon` (`#82`), plus `dependencies` (`#123`). The four config checks read facts the engine resolves once,
 //! synchronously, from the live config snapshot rather than a store --
 //! `Evidence::agents` (`Engine::agent_facts_for`, `Scope::agents_with` and
 //! `Engine::roles_for`), `Evidence::secrets` (`Engine::credential_inventory`,
@@ -97,6 +97,7 @@
 
 use crate::bench::Verdict;
 use crate::dataset::is_slug;
+use crate::dependencies::{DependenciesFact, Severity};
 use crate::role::Grant;
 use crate::run::RunStatus;
 use crate::workflow::WorkflowRunStatus;
@@ -271,7 +272,7 @@ impl From<ControlRef> for String {
 
 /// One thing Factory already records that can stand as evidence for a
 /// control. Every kind the ADR names is parsed here and `evaluate` now
-/// understands all nine -- v1 shipped `knowledge` and `attestation` writable
+/// understands all ten -- v1 shipped `knowledge` and `attestation` writable
 /// ahead of evaluation, and every ticket since (`#81`, `#82`) taught
 /// `evaluate` a few more kinds without ever having to change the file format
 /// underneath an author who already wrote one.
@@ -331,6 +332,15 @@ pub enum Check {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         absent: Vec<String>,
     },
+    /// The newest declared dependency inventory and its derived open findings.
+    Dependencies {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sbom_max_age: Option<Duration>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        max_open: BTreeMap<Severity, u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exploited_open: Option<u32>,
+    },
     /// A named fact about the daemon's own configuration holds -- see
     /// [`KNOWN_DAEMON_FACTS`] for the fixed vocabulary this evaluates; any
     /// other name is a [`Finding`] ([`FindingKind::UnknownDaemonFact`]) and
@@ -372,6 +382,7 @@ impl Check {
             Check::Roles { .. } => "roles",
             Check::Sandbox => "sandbox",
             Check::Secrets { .. } => "secrets",
+            Check::Dependencies { .. } => "dependencies",
             Check::Daemon { .. } => "daemon",
         }
     }
@@ -380,6 +391,7 @@ impl Check {
     fn own_max_age(&self) -> Option<Duration> {
         match self {
             Check::Task { max_age, .. } | Check::Workflow { max_age, .. } | Check::Gate { max_age, .. } => *max_age,
+            Check::Dependencies { sbom_max_age, .. } => *sbom_max_age,
             _ => None,
         }
     }
@@ -422,6 +434,13 @@ impl Check {
                 }
             }
             Check::Daemon { fact } => format!("daemon: {fact}"),
+            Check::Dependencies { sbom_max_age, max_open, exploited_open } => {
+                let mut terms = Vec::new();
+                if let Some(age) = sbom_max_age { terms.push(format!("SBOM max_age {age}")); }
+                for (severity, limit) in max_open { terms.push(format!("{} <= {limit}", severity.as_str())); }
+                if let Some(limit) = exploited_open { terms.push(format!("exploited <= {limit}")); }
+                format!("dependencies: {}", terms.join(", "))
+            }
         }
     }
 }
@@ -1216,6 +1235,10 @@ pub struct Evidence {
     /// [`DaemonFact`]. `None` means "never gathered".
     #[serde(default)]
     pub daemon: Option<DaemonFact>,
+    /// Dependency evidence derived from the L2 report. `None` means it was
+    /// never gathered, not an empty inventory.
+    #[serde(default)]
+    pub dependencies: Option<DependenciesFact>,
 }
 
 // =============================================================== evaluate
@@ -1414,7 +1437,7 @@ fn workflow_run_status_str(status: WorkflowRunStatus) -> &'static str {
 }
 
 /// This control's status from its own checks alone, and the refs those
-/// checks can point at -- every one of `Check`'s nine kinds now evaluated
+/// checks can point at -- every one of `Check`'s ten kinds now evaluated
 /// for real (`knowledge`/`attestation` in v1, `task`/`workflow`/`gate` in
 /// `#81`, `roles`/`sandbox`/`secrets`/`daemon` in `#82`). None of the last
 /// four carries a ref: nothing behind them is an id a UI could link to
@@ -1777,6 +1800,40 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                         }
                         None => open.push(format!("daemon: `{fact}` could not be determined")),
                     }
+                }
+            }
+            Check::Dependencies { sbom_max_age: _, max_open, exploited_open } => {
+                let Some(fact) = &evidence.dependencies else {
+                    open.push("dependencies: not resolved for this scope".to_string());
+                    continue;
+                };
+                let mut breaches = Vec::new();
+                if let Some(max_age) = applied.max_age {
+                    match fact.declared_sbom_at {
+                        None => breaches.push("no declared SBOM".to_string()),
+                        Some(at) if !within_max_age(Some(max_age), at, now) => breaches.push(format!(
+                            "declared SBOM from {at} is older than {max_age}"
+                        )),
+                        Some(_) => {}
+                    }
+                }
+                for (severity, limit) in max_open {
+                    let actual = fact.open.get(severity).copied().unwrap_or_default();
+                    if actual > *limit {
+                        breaches.push(format!("{} open {actual}, maximum {limit}", severity.as_str()));
+                    }
+                }
+                if let Some(limit) = exploited_open {
+                    if fact.exploited_open > *limit {
+                        breaches.push(format!(
+                            "exploited open {}, maximum {limit}", fact.exploited_open
+                        ));
+                    }
+                }
+                if breaches.is_empty() {
+                    satisfied.push("dependencies: inventory and findings are within policy".to_string());
+                } else {
+                    open.extend(breaches.into_iter().map(|reason| format!("dependencies: {reason}")));
                 }
             }
         }
@@ -3999,5 +4056,27 @@ mod tests {
         let status = Status::Stale { reasons: vec!["attestation: `att-1` expired at 2020-01-01T00:00:00Z".to_string()] };
         let text = remediation_instructions(&control, None, &status, &[Check::Attestation]);
         assert!(text.starts_with("Missing evidence:"), "{text:?}");
+    }
+
+    #[test]
+    fn dependencies_check_enforces_freshness_severity_and_exploitation_limits() {
+        let check = Check::Dependencies {
+            sbom_max_age: Some("30d".parse().unwrap()),
+            max_open: BTreeMap::from([(Severity::Critical, 0)]),
+            exploited_open: Some(0),
+        };
+        let applied = vec![applied_control("dependencies", vec![check], Vec::new())];
+        let now = "2026-09-25T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut evidence = Evidence::default();
+        evidence.dependencies = Some(DependenciesFact {
+            declared_sbom_at: Some(now - chrono::Duration::days(1)),
+            open: BTreeMap::new(),
+            exploited_open: 0,
+        });
+        assert_eq!(evaluate(&applied, &evidence, now)[0].status.kind(), StatusKind::Satisfied);
+
+        evidence.dependencies.as_mut().unwrap().open.insert(Severity::Critical, 1);
+        evidence.dependencies.as_mut().unwrap().exploited_open = 1;
+        assert_eq!(evaluate(&applied, &evidence, now)[0].status.kind(), StatusKind::Open);
     }
 }

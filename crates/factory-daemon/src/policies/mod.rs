@@ -80,6 +80,11 @@ fn needs_daemon_facts(applied: &[policy::Applied]) -> bool {
         .any(|check| matches!(check, policy::Check::Daemon { .. }))
 }
 
+fn needs_dependencies_facts(applied: &[policy::Applied]) -> bool {
+    applied.iter().flat_map(|a| &a.evidence)
+        .any(|check| matches!(check, policy::Check::Dependencies { .. }))
+}
+
 /// Every agent Factory would actually dispatch in `scope` --
 /// `Scope::agents_with`, which folds in a synthesised foreman when
 /// `daemon.foreman` covers this scope. That is a deliberate choice, not an
@@ -493,6 +498,11 @@ impl Engine {
         } else {
             BTreeMap::new()
         };
+        let dependencies = if needs_dependencies_facts(applied) {
+            Some(crate::dependencies::fact(&self.dependencies_report(&t.name).await?))
+        } else {
+            None
+        };
         Ok(policy::Evidence {
             tags: tags.clone(),
             attestations: all_attestations
@@ -506,6 +516,7 @@ impl Engine {
             agents,
             secrets,
             daemon: daemon_fact,
+            dependencies,
         })
     }
 
@@ -674,6 +685,11 @@ impl Engine {
             BTreeMap::new()
         };
         let daemon = needs_daemon_facts(&applied).then(|| self.daemon_facts());
+        let dependencies = if needs_dependencies_facts(&applied) {
+            Some(crate::dependencies::fact(&self.dependencies_report(&scope_obj.name).await?))
+        } else {
+            None
+        };
         let evidence = policy::Evidence {
             tags,
             attestations: history.clone(),
@@ -683,6 +699,7 @@ impl Engine {
             agents,
             secrets,
             daemon,
+            dependencies,
         };
         let evaluated = policy::evaluate(&applied, &evidence, Utc::now())
             .into_iter()

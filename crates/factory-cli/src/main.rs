@@ -7,6 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use factory_core::bench::{BenchResult, BenchRun, Verdict};
 use factory_core::dataset::{Case, Dataset, DatasetFinding, DatasetSummary};
+use factory_core::dependencies::{AttachmentKind, DependenciesReport};
 use factory_core::event::Event;
 use factory_core::goals::{self as goals_core, Band, CycleStatus, KrRef};
 use factory_core::knowledge::FindingKind;
@@ -83,6 +84,12 @@ enum Command {
     /// Workflows: `lint` previews the control plan a run is held to.
     #[command(subcommand)]
     Workflow(WorkflowCmd),
+    /// Read one scope's dependency inventory, or merge its authored VEX.
+    Dependencies {
+        /// `<scope>`, or `vex <scope>`.
+        #[arg(num_args = 1..=2)]
+        args: Vec<String>,
+    },
     /// The L5 Knowledge tab: an index of the instance's knowledge vault,
     /// rebuilt from the files on every call. With no subcommand, prints the
     /// index; `import`/`add` are the only way anything is ever written --
@@ -972,6 +979,17 @@ enum TaskCmd {
         #[arg(long = "run-token", env = "FACTORY_TASK_TOKEN")]
         token: Option<String>,
     },
+    /// Attach an immutable CycloneDX scan document to this run.
+    Attach {
+        #[arg(long)]
+        kind: AttachmentKind,
+        file: PathBuf,
+        /// Defaults to FACTORY_TASK_ID.
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long = "run-token", env = "FACTORY_TASK_TOKEN")]
+        token: Option<String>,
+    },
     /// What a harness's turn-end hook runs -- Claude Code's `Stop` and
     /// `StopFailure`, from the settings file Factory generates for a run.
     /// Not for agents: it reads the hook's JSON from stdin, prints nothing,
@@ -1181,6 +1199,19 @@ async fn main() -> Result<()> {
         Command::Run(cmd) => run_cmd(cli.json, &client, cmd).await,
         Command::Task(cmd) => task(cli.json, &client, cmd).await,
         Command::Workflow(cmd) => workflow_cmd(cli.json, &client, cmd).await,
+        Command::Dependencies { args } => {
+            let request = match args.as_slice() {
+                [scope] => Request::Dependencies { scope: scope.clone() },
+                [verb, scope] if verb == "vex" => Request::DependenciesVex { scope: scope.clone() },
+                _ => return Err(anyhow!("use `factory dependencies <scope>` or `factory dependencies vex <scope>`")),
+            };
+            let payload = client.send(request).await?;
+            print(&payload, cli.json, |p| match p {
+                Payload::Dependencies { report } => Some(dependencies_text(report)),
+                Payload::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+        }
 
         Command::Knowledge { command: None } => {
             let payload = client.send(Request::Knowledge).await?;
@@ -3940,6 +3971,24 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             })
         }
 
+        TaskCmd::Attach { id, kind, file, token } => {
+            let token = token.ok_or_else(|| anyhow!(
+                "task attach needs the run callback token in FACTORY_TASK_TOKEN or --run-token"
+            ))?;
+            let bytes = std::fs::read(&file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            let filename = file.file_name().and_then(|n| n.to_str()).unwrap_or("attachment.cdx.json").to_string();
+            let payload = client.send(Request::TaskAttach {
+                id: need_id(id)?, token, kind, filename, bytes,
+            }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Attachment { attachment } => Some(format!(
+                    "attached {} for run {} attempt {}", attachment.kind, attachment.run_id, attachment.attempt
+                )),
+                _ => None,
+            })
+        }
+
         // Every failure is written to stderr (Claude Code keeps an async
         // hook's in its debug log) and swallowed: nothing this can say would
         // be seen by anyone who could act on it mid-turn, and the daemon's
@@ -3957,6 +4006,40 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn dependencies_text(report: &DependenciesReport) -> String {
+    let mut out = format!("{} dependencies\n", report.scope);
+    if report.documents.is_empty() { out.push_str("  no scans\n"); }
+    for document in &report.documents {
+        out.push_str(&format!(
+            "  {:<8} {}{}\n", document.state, document.sbom.attachment.attached_at,
+            if document.vulnerabilities.is_some() { " + vulnerabilities" } else { "" }
+        ));
+    }
+    if !report.findings.is_empty() {
+        out.push_str("findings\n");
+        for finding in &report.findings {
+            out.push_str(&format!(
+                "  {:<10} {:<8} {} {} {}\n",
+                format!("{:?}", finding.status).to_ascii_lowercase(),
+                finding.severity.as_str(), finding.id, finding.affected.name, finding.state
+            ));
+        }
+    }
+    if !report.services.is_empty() {
+        out.push_str("services\n");
+        for service in &report.services {
+            out.push_str(&format!("  {} ({:?})", service.service.name, service.service.transport));
+            if let Some(credential) = &service.service.credential {
+                out.push_str(&format!(" credential {credential}: {}", match service.credential_present {
+                    Some(true) => "present", Some(false) => "absent", None => "unknown",
+                }));
+            }
+            out.push('\n');
+        }
+    }
+    out.trim_end().to_string()
 }
 
 /// The JSON a hook is handed on stdin, or `Null` when there is none to read
@@ -5037,6 +5120,21 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{event}: {e}"));
             assert!(matches!(cli.command, Command::Task(TaskCmd::TurnEnded { .. })));
         }
+    }
+
+    #[test]
+    fn dependency_commands_parse_in_the_documented_forms() {
+        let attach = Cli::try_parse_from([
+            "factory", "task", "attach", "--kind", "sbom", "scan.cdx.json",
+        ]).unwrap();
+        assert!(matches!(attach.command, Command::Task(TaskCmd::Attach {
+            kind: AttachmentKind::Sbom, ref file, id: None, ..
+        }) if file == Path::new("scan.cdx.json")));
+
+        let read = Cli::try_parse_from(["factory", "dependencies", "demo"]).unwrap();
+        assert!(matches!(read.command, Command::Dependencies { ref args } if args == &["demo"]));
+        let vex = Cli::try_parse_from(["factory", "dependencies", "vex", "demo"]).unwrap();
+        assert!(matches!(vex.command, Command::Dependencies { ref args } if args == &["vex", "demo"]));
     }
 
     // -- --timezone ----------------------------------------------------------

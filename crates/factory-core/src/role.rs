@@ -96,6 +96,8 @@ pub enum Grant {
     TaskCancel,
     #[serde(rename = "task.report")]
     TaskReport,
+    #[serde(rename = "task.attach")]
+    TaskAttach,
     #[serde(rename = "agent.start")]
     AgentStart,
     #[serde(rename = "agent.configure")]
@@ -155,6 +157,7 @@ impl Grant {
         Grant::TaskRun,
         Grant::TaskCancel,
         Grant::TaskReport,
+        Grant::TaskAttach,
         Grant::AgentStart,
         Grant::AgentConfigure,
         Grant::AgentStop,
@@ -181,6 +184,7 @@ impl Grant {
             Self::TaskRun => "task.run",
             Self::TaskCancel => "task.cancel",
             Self::TaskReport => "task.report",
+            Self::TaskAttach => "task.attach",
             Self::AgentStart => "agent.start",
             Self::AgentConfigure => "agent.configure",
             Self::AgentStop => "agent.stop",
@@ -209,6 +213,7 @@ impl Grant {
             Self::TaskRun => "start runs",
             Self::TaskCancel => "cancel runs",
             Self::TaskReport => "report on tasks",
+            Self::TaskAttach => "attach dependency scan documents",
             Self::AgentStart => "start agents",
             Self::AgentConfigure => "configure agents",
             Self::AgentStop => "stop agents",
@@ -238,7 +243,8 @@ impl Grant {
             | Self::TaskDelete
             | Self::TaskRun
             | Self::TaskCancel
-            | Self::TaskReport => "Tasks",
+            | Self::TaskReport
+            | Self::TaskAttach => "Tasks",
             Self::AgentStart | Self::AgentConfigure | Self::AgentStop | Self::AgentInput => {
                 "Agents"
             }
@@ -392,7 +398,7 @@ impl Roles {
         let worker = RoleDef {
             name: Role::worker(),
             describe: "reads the board, and works the tasks assigned to it".into(),
-            grants: [Grant::TaskEdit, Grant::TaskReport, Grant::RunInput]
+            grants: [Grant::TaskEdit, Grant::TaskReport, Grant::TaskAttach, Grant::RunInput]
                 .into_iter()
                 .collect(),
             reach: Reach::Own,
@@ -498,6 +504,7 @@ mod tests {
         assert_eq!(worker.reach, Reach::Own);
         assert!(worker.allows(Grant::TaskEdit));
         assert!(worker.allows(Grant::TaskReport));
+        assert!(worker.allows(Grant::TaskAttach));
         assert!(!worker.allows(Grant::TaskCreate));
         assert!(!worker.allows(Grant::AgentStart));
 

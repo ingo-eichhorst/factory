@@ -298,6 +298,7 @@ impl AgentContext {
                 checks.concat()
             )
         };
+        let scope = &self.scope;
         let contract = format!(
             "Report progress by running these commands in your shell. They are how \
              this task is tracked; nothing watches your terminal to guess.\n\
@@ -307,6 +308,9 @@ impl AgentContext {
              - Need a human:    {bin} task report {id} --status blocked --message \"<what you need>\"\n\
              - Finished:        {bin} task report {id} --status done --result \"<what you did>\"\n\
              - Gave up:         {bin} task report {id} --status failed --error \"<why>\"\n\
+             \n\
+             Dependency scans attach CycloneDX documents with `{bin} task attach --kind sbom|vulnerabilities <file>`. \
+             Authored VEX is available with `{bin} dependencies vex {scope}`.\n\
              \n\
              Report running first, then finish with exactly one of done, failed, or \
              blocked -- before your turn ends. When your harness says a turn ended \
@@ -521,6 +525,9 @@ impl AgentContext {
                         "task.report -> {bin} task report <id> --status <running|done|failed|blocked> --message/--result/--error \"...\", once you are given a task to report on"
                     ),
                 },
+                Grant::TaskAttach => format!(
+                    "task.attach -> {bin} task attach --kind sbom|vulnerabilities <file>"
+                ),
                 Grant::AgentStart => format!("agent.start -> {bin} agent start {scope} <name>"),
                 Grant::AgentConfigure => {
                     "agent.configure -> add, edit or delete a standing agent's declaration in its scope; today that is the web UI's Roster, not this CLI".to_string()

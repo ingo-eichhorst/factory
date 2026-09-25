@@ -187,6 +187,7 @@ impl Engine {
             // The harness saying a turn ended is a report on the run in
             // everything but who is speaking: same token, same authority.
             Request::TaskReport { .. } | Request::TaskTurnEnded { .. } => Grant::TaskReport,
+            Request::TaskAttach { .. } => Grant::TaskAttach,
             Request::AgentStart { .. } => Grant::AgentStart,
             Request::AgentConfigure { .. } | Request::AgentDelete { .. } => Grant::AgentConfigure,
             Request::AgentStop { .. } => Grant::AgentStop,
@@ -239,6 +240,8 @@ impl Engine {
             | Request::Production { .. }
             | Request::SiteFootprint
             | Request::Environment
+            | Request::Dependencies { .. }
+            | Request::DependenciesVex { .. }
             | Request::Infrastructure
             // Lists the destination and reads the history; writes nothing.
             | Request::Backup
@@ -475,7 +478,9 @@ impl Engine {
                 }
             }
 
-            Request::TaskReport { id, .. } | Request::TaskTurnEnded { id, .. } => {
+            Request::TaskReport { id, .. }
+            | Request::TaskTurnEnded { id, .. }
+            | Request::TaskAttach { id, .. } => {
                 let Some(task) = self.store.get(id).await? else {
                     return Ok(());
                 };
