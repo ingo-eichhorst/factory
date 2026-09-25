@@ -98,6 +98,10 @@ function fixtureReport() {
               id: "cra-controls-evidenced", measure: { metric: "compliance.cra", above: 0.9 },
               declared_at: { scope: "dev", profile: "baseline" }, status: "no_data",
               reasons: ["compliance.cra could not be computed"],
+            }, {
+              id: "signed-off", measure: { check: "attestation" },
+              declared_at: { scope: "dev", profile: "baseline" }, status: "no_data",
+              reasons: ["attestation checks are not supported for quality scenarios"],
             }],
           },
         ],
@@ -158,9 +162,10 @@ test("loadQuality fetches the rail's scope and draws every view from the one ans
   assert.match(tree, /When <em[^>]*>daemon restarted while 3 runs are active<\/em>/);
   assert.match(tree, /class="qa-bullet"/, "a bullet chart for a metric measure with a value");
   assert.match(tree, /class="qa-spark"/, "and its sparkline, since scrap_rate has a series");
-  assert.match(tree, /data-qa-remediate/, "not_met with no open task offers Create task");
   assert.match(tree, /Task open →/, "the open remediation task is shown instead of a second Create task");
-  assert.equal((tree.match(/data-qa-remediate>/g) || []).length, 1, "never for no_data, never beside an open task");
+  const offered = [...tree.matchAll(/data-scenario="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(offered, ["daemon-restart", "cra-controls-evidenced"],
+    "not_met, and no_data a task could close -- never an attestation gap only a profile edit fixes, never beside an open task");
 
   assert.match(elements["qa-table"].innerHTML, /daemon-restart/);
   assert.match(elements["qa-grid"].innerHTML, /qa-hot/);

@@ -157,8 +157,23 @@ test("worstStatus follows ScenarioStatus' own order, reads nothing as draft, and
   assert.equal(worstStatus(["met", "on_fire"]), "on_fire", "never read a status this build does not know as good news");
 });
 
-test("only not_met and stale offer Create task -- met, draft and no_data never do", () => {
-  assert.deepEqual(STATUS_ORDER.filter(canRemediate), ["stale", "not_met"]);
+test("Create task: always for not_met and stale, for a no_data gap a task could close, never for one only a profile edit can", () => {
+  assert.equal(canRemediate(scenario("reliability.recoverability", "daemon-restart"), []), true); // not_met
+  assert.equal(canRemediate({ status: "stale", measure: { metric: "scrap_rate", below: 0.1 } }, []), true);
+  assert.equal(canRemediate(scenario("security.confidentiality", "agents-sandboxed"), []), false, "met");
+  assert.equal(canRemediate(scenario("interaction-capability.transparency", "failure-explained"), []), false, "draft");
+  // no_data because the bench was never run -- a task can run it.
+  const bench = scenario("performance-efficiency.time-behaviour", "bench-latency");
+  assert.equal(canRemediate(bench, []), true);
+  // The daemon's own `unfixable_by_a_task` cases, read off the wire.
+  assert.equal(canRemediate({ status: "no_data", measure: { check: "attestation" } }, []), false);
+  assert.equal(canRemediate({ status: "no_data", measure: { check: "task", task: "gate" } }, []), true);
+  assert.equal(canRemediate({ status: "no_data", measure: { metric: "quality.reliability", above: 1 } }, []), false);
+  const unavailable = [{ kind: "unavailable_metric", subject: "p.yaml", detail: "attribute a scenario s names metric unit_cost which is not available yet: §12.6" }];
+  assert.equal(canRemediate({ status: "no_data", measure: { metric: "unit_cost", below: 1 } }, unavailable), false);
+  assert.equal(canRemediate({ status: "no_data", measure: { metric: "unit", below: 1 } }, unavailable), true, "a whole metric id, not a prefix of one");
+  const unknown = [{ kind: "unknown_metric", subject: "p.yaml", detail: "attribute a scenario s names unknown metric fail_rate" }];
+  assert.equal(canRemediate({ status: "no_data", measure: { metric: "fail_rate", below: 1 } }, unknown), false);
 });
 
 test("maxLevel, idTag", () => {

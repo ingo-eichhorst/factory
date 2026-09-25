@@ -64,12 +64,27 @@ export function worstStatus(statuses) {
   return worst === null ? "draft" : worst;
 }
 
-/// Which statuses offer "Create task". `not_met` and `stale` only: the
-/// daemon itself refuses `met` and `draft` (`Engine::quality_remediate`),
-/// and a `no_data` scenario's gap is usually that nothing measures it yet,
-/// which a person fixes in the profile, not with a task.
-export function canRemediate(status) {
-  return status === "not_met" || status === "stale";
+/// Whether a scenario offers "Create task". `not_met` and `stale` always
+/// do. `no_data` does when a task could close the gap -- the bench was
+/// never run, the fitness-function task never finished -- and not when only
+/// an edit to the profile could: an `attestation` check measure, a
+/// `quality.*` metric (circular), or a metric the registry does not know or
+/// cannot compute yet, which the report names in an `unknown_metric`/
+/// `unavailable_metric`/`self_referential_metric` finding. That is the
+/// daemon's own `unfixable_by_a_task` rule read off the wire; the daemon's
+/// refusal stays the guard for anything this misjudges, and lands inline
+/// with its reason. `met` and `draft` never do (the daemon refuses both).
+const UNFIXABLE_FINDINGS = ["unknown_metric", "unavailable_metric", "self_referential_metric"];
+export function canRemediate(scenario, findings) {
+  const status = scenario && scenario.status;
+  if (status === "not_met" || status === "stale") return true;
+  if (status !== "no_data") return false;
+  const m = scenario.measure;
+  if (!m) return false;
+  if (m.check) return m.check !== "attestation";
+  if (!m.metric || /^quality\./.test(m.metric)) return false;
+  const named = new RegExp(`(^|\\s)${m.metric.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s|,|:|$)`);
+  return !(findings || []).some((f) => UNFIXABLE_FINDINGS.includes(f.kind) && named.test(f.detail || ""));
 }
 
 // ------------------------------------------------------------------ levels

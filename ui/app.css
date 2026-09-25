@@ -1823,7 +1823,9 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
 .s-draft { color: var(--muted); border-color: var(--line); border-style: dashed; }
 
 .qa-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
-.qa-toolbar .seg { flex-wrap: wrap; }
+/* Five segments are wider than a phone: allowed to shrink and wrap, where
+   the shared `.seg` is otherwise a rigid `0 0 auto` strip. */
+.qa-toolbar .seg { flex-wrap: wrap; flex: 0 1 auto; max-width: 100%; }
 .qa-scope-pick { display: flex; align-items: center; gap: 8px; }
 .qa-scope-pick label { margin: 0; }
 .qa-scope-pick select { width: auto; min-width: 140px; }
@@ -1836,18 +1838,24 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
    Fill is status, border weight is importance, and a status word sits in
    every cell so nothing is colour alone. `qa-st-*`/`qa-imp-*` are shared
    by the legend's swatches and the grid's attribute chips. */
-.qa-heatmap { border-collapse: separate; border-spacing: 4px; width: auto; min-width: 100%; }
-.qa-heatmap caption { text-align: left; padding: 0 4px 8px; caption-side: top; }
+/* `fixed` so the nine columns are equal whatever their titles' lengths --
+   a wider cell would read as a weightier characteristic. The floor keeps a
+   cell legible on a phone, where the box scrolls sideways instead. */
+.qa-heatmap { border-collapse: separate; border-spacing: 4px; width: 100%; min-width: 700px; table-layout: fixed; }
+.qa-hm-caption { margin: 0 0 6px; }
 .qa-heatmap th, .qa-heatmap td { padding: 0; border: 0; }
-.qa-hm-corner { vertical-align: bottom; padding: 0 8px 4px 4px !important; }
-.qa-hm-col { vertical-align: bottom; min-width: 66px; padding: 0 2px 4px !important; }
+.qa-hm-corner { vertical-align: bottom; width: 170px; padding: 0 8px 4px 4px !important; }
+.qa-hm-col { vertical-align: bottom; text-align: center; padding: 0 2px 4px !important; }
 .qa-hm-col span {
   display: block; text-transform: none; letter-spacing: .02em; line-height: 1.25;
   font: 600 10px/1.25 var(--cond); color: var(--ink-2); white-space: normal;
 }
-.qa-hm-scope { text-align: left; padding: 4px 10px 4px 4px !important; white-space: nowrap; vertical-align: middle; text-transform: none; letter-spacing: 0; }
+.qa-hm-scope { text-align: left; padding: 4px 10px 4px 4px !important; vertical-align: middle; text-transform: none; letter-spacing: 0; overflow-wrap: anywhere; }
 .qa-hm-scope button.linklike { font: 600 12.5px/1.3 var(--sans); color: var(--ink); }
 .qa-hm-scope .sub { font: 400 10px/1.3 var(--mono); }
+/* The scope names stay put while a phone scrolls the nine columns under
+   them. */
+.qa-hm-scope, .qa-hm-corner { position: sticky; left: 0; z-index: 1; background: var(--panel); }
 .qa-hm-cell { height: 44px; }
 .qa-hm-btn {
   width: 100%; height: 44px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
@@ -1892,7 +1900,9 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
 .qa-node > summary::before { content: "▸"; color: var(--faint); width: 10px; flex: 0 0 10px; transition: transform .12s; }
 .qa-node[open] > summary::before { transform: rotate(90deg); }
 .qa-node > summary:hover { background: var(--panel-2); }
-.qa-char { border-top: 1px solid var(--line-soft); padding: 4px 0; }
+/* Clear of the sticky title bar and level rows when a heatmap click
+   scrolls one into view. */
+.qa-char { border-top: 1px solid var(--line-soft); padding: 4px 0; scroll-margin-top: 160px; }
 .qa-char:first-of-type { border-top: 0; }
 .qa-char > summary .qa-node-title { font: 600 13px/1.3 var(--cond); letter-spacing: .03em; text-transform: uppercase; color: var(--ink-2); }
 .qa-spotlight > summary { background: var(--signal-wash); }
@@ -1980,15 +1990,25 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
 .qa-grid-attr {
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; cursor: pointer;
   font: 500 11.5px/1.25 var(--sans); padding: 5px 6px; border-radius: 3px; border-width: 1px; border-style: solid;
-  overflow-wrap: anywhere; min-width: 0;
+  /* Hyphenated, not broken anywhere: a phone's third of a grid is
+     narrower than "Maintainability", and "Maintainabilit / y" reads as a
+     typo where "Maintain- / ability" reads as a word. */
+  overflow-wrap: break-word; hyphens: auto; min-width: 0;
 }
+.qa-grid-attr.qa-st-no_data { border-style: dotted; }
+.qa-grid-attr.qa-st-draft { border-style: dashed; }
 .qa-grid-attr:hover { outline: 1px solid var(--signal); }
 .qa-grid-status { font: 600 8.5px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; }
 #qa-view-grid { padding-top: 26px; }
 
-.qa-table td { overflow-wrap: anywhere; }
+/* Only the reasons column may break inside a word (a run id is one long
+   token); an (I,D) tag or a scenario id broken mid-way reads as two. */
+.qa-table td:last-child { overflow-wrap: anywhere; }
+.qa-table td:nth-child(3) { white-space: nowrap; }
 
 @media (max-width: 720px) {
+  .qa-hm-corner { width: 112px; }
+  .qa-heatmap { min-width: 620px; }
   .qa-attr { margin-left: 6px; }
   .qa-scenarios { margin-left: 4px; }
   .qa-from { margin-left: 0; flex-basis: 100%; }

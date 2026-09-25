@@ -276,8 +276,11 @@ function renderHeatmap() {
         .join("")}
     </tr>`)
     .join("");
-  el.innerHTML = `<div class="qa-scroll"><table class="qa-heatmap">
-    <caption class="sub">Worst scenario status per characteristic; border weight is importance. A blank cell is not declared -- not a stated concern, never failing.</caption>
+  // The explanation sits outside the scrolling box: as a `<caption>` it
+  // scrolled away with the columns on a phone and was cut off mid-word.
+  el.innerHTML = `<p class="sub qa-hm-caption" id="qa-hm-caption">Worst scenario status per characteristic; border weight is importance.
+    A blank cell is not declared -- not a stated concern, never failing.</p>
+    <div class="qa-scroll"><table class="qa-heatmap" aria-describedby="qa-hm-caption">
     <thead>${head}</thead><tbody>${body}</tbody></table></div>`;
   for (const b of el.querySelectorAll("[data-qa-tree]")) {
     b.onclick = () => openTree(b.dataset.qaTree, b.dataset.qaChar);
@@ -311,7 +314,10 @@ function renderTree(scopeQuality) {
   if (spotlight) {
     const target = el.querySelector(`[data-qa-group="${cssEscape(spotlight)}"]`);
     if (target && typeof target.scrollIntoView === "function") {
-      target.scrollIntoView({ block: "start", behavior: reducedMotion() ? "auto" : "smooth" });
+      // A frame later, once the view just un-hidden has a layout to scroll
+      // to -- called straight away, the scroll starts and stalls near the top.
+      const go = () => target.scrollIntoView({ block: "start", behavior: reducedMotion() ? "auto" : "smooth" });
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(go); else go();
     }
     spotlight = null;
   }
@@ -367,19 +373,21 @@ function sentenceHtml(s) {
 /// reasons, then the evidence -- a bullet chart of the value against its
 /// bound(s) and the metric's sparkline on the same value axis for a
 /// continual measure, links to the task/run for a triggered one -- and the
-/// remediation cell.
+/// remediation cell. The head is a `<div>`, not a `<header>`: the page's
+/// bare `header` rule (its title bar) would otherwise paint a bar inside the
+/// card -- the same trap `index.html`'s `.goal-header` comment names.
 function scenarioCardHtml(scopeQuality, a, s) {
   const kind = measureKind(s.measure);
   const history = s.measure && s.measure.metric ? seriesValues(report, s.measure.metric) : null;
   const refs = refLinks(scopeQuality.scope, s.refs);
   return `<article class="qa-card qa-card-${esc(s.status)}">
-    <header class="qa-card-head">
+    <div class="qa-card-head">
       <span class="qa-card-id">${esc(s.id)}</span>
       ${s.kind ? `<span class="qa-kind">${esc(s.kind)}</span>` : ""}
       ${kind ? `<span class="qa-kind" title="${kind === "continual" ? "a threshold on a registry metric" : "a policy-style check"}">${esc(kind)}</span>` : ""}
       <span class="sp"></span>
       ${statusChip(s.status)}
-    </header>
+    </div>
     <p class="qa-sentence">${sentenceHtml(s)}</p>
     ${bulletHtml(s, history)}
     ${refs.length ? `<div class="qa-refs">${refs.map((l) => `<a href="${esc(l.href)}">${esc(l.label)} <code class="id">${esc(l.id.slice(0, 8))}</code></a>`).join("")}</div>` : ""}
@@ -433,7 +441,7 @@ function remediateCellHtml(scopeQuality, a, s) {
   if (open) {
     return `<div class="qa-remediate"><a class="qa-task-link" href="${esc(taskHref(scopeQuality.scope, open))}">Task open →</a></div>`;
   }
-  if (!canRemediate(s.status)) return "";
+  if (!canRemediate(s, report.findings)) return "";
   return `<div class="qa-remediate" data-qa-remediate-cell data-scope="${esc(scopeQuality.scope)}" data-attribute="${esc(a.id)}" data-scenario="${esc(s.id)}">
     <button type="button" class="btn" data-qa-remediate>Create task</button>
   </div>`;
