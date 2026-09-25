@@ -39,8 +39,12 @@ import {
   readWorkflowRouteTail,
   reworkBadge,
   reworkProblems,
+  reworkRequestText,
   reworkSentence,
+  roundLabel,
+  runInputs,
   saveDraft,
+  supersededTasks,
   validate,
   workflowRouteTail,
 } from "./workflow-model.js";
@@ -302,8 +306,10 @@ function renderCanvas() {
       <strong>${esc(node.task.title || "Untitled task")}</strong>
       <span class="wf-line">${esc(node.task.scope || "")} · ${esc(node.task.agent || "default agent")}</span>
       ${node.rework ? `<span class="wf-line wf-rework-line" title="${esc(reworkSentence(graph.nodes, node))}">${esc(reworkBadge(graph.nodes, node))}</span>` : ""}
-      <span class="wf-badge-row"><span class="wf-badge" data-role="badge"></span></span>
+      <span class="wf-badge-row"><span class="wf-badge" data-role="badge"></span><span class="wf-badge wf-round" data-role="round" hidden></span></span>
+      <span class="wf-request" data-role="request" hidden></span>
       <button type="button" class="wf-open-task" data-role="open-task" hidden>Open task ↗</button>
+      <span class="wf-earlier" data-role="earlier" hidden></span>
       <button type="button" class="wf-port-out" data-port="${esc(node.id)}" aria-label="Link from ${esc(node.task.title || "this node")}">+</button>
     </div>`).join("");
   for (const node of $("workflow-nodes").querySelectorAll("[data-node]")) wireNode(node);
@@ -338,6 +344,7 @@ function paintStatuses() {
       openBtn.hidden = !action;
       if (action) { openBtn.dataset.task = execution.task_id; openBtn.onclick = event => { event.stopPropagation(); action(); }; }
     }
+    paintRound(el, execution, graph.nodes);
   }
   for (const edge of graph.edges) {
     const from = graph.nodes.find(node => node.id === edge.from);
@@ -354,6 +361,31 @@ function paintStatuses() {
   renderRunStatusChip();
 }
 
+/// `#143`: a node run's rework state -- its round, who sent work back to it,
+/// and links to the tasks earlier rounds spawned -- on a card or a summary
+/// row alike, so the two always say the same thing. Design mode has no
+/// `execution`, which empties all three. The earlier-task links are the only
+/// thing here that rebuilds an element, and only when the ids change, so a
+/// focused link survives a burst of run updates.
+function paintRound(el, execution, nodes) {
+  const round = el.querySelector('[data-role="round"]');
+  if (round) { const label = roundLabel(execution); round.hidden = !label; round.textContent = label; }
+  const request = el.querySelector('[data-role="request"]');
+  if (request) { const text = reworkRequestText(execution, nodes); request.hidden = !text; request.textContent = text; }
+  const earlier = el.querySelector('[data-role="earlier"]');
+  if (!earlier) return;
+  const ids = supersededTasks(execution);
+  if (earlier.dataset.ids !== ids.join(" ")) {
+    earlier.dataset.ids = ids.join(" ");
+    earlier.innerHTML = ids.length ? `earlier: ${ids.map((id, i) => `<button type="button" class="wf-open-task" data-earlier-task="${esc(id)}"
+      aria-label="Open the task of ${i ? `rework ${i}` : "the first pass"} (${esc(id)})">task ${esc(id.slice(0, 8))} ↗</button>`).join(" ")}` : "";
+    for (const button of earlier.querySelectorAll("[data-earlier-task]")) {
+      button.onclick = event => { event.stopPropagation(); openTask(button.dataset.earlierTask); };
+    }
+  }
+  earlier.hidden = !ids.length;
+}
+
 /// Each rework curve, drawn to the cards' rendered heights -- which a run can
 /// change (an "Open task" link appears), so this is repainted with the
 /// statuses rather than once with the structure.
@@ -364,6 +396,7 @@ function paintReworks(graph) {
     const to = from && graph.nodes.find(node => node.id === from.rework?.to);
     if (!to) continue;
     path.setAttribute("d", reworkPath(from, to, height(from.id), height(to.id)));
+    path.classList.toggle("wf-rework-used", (runNode(from.id)?.round || 0) > 0);
   }
 }
 
@@ -426,7 +459,7 @@ function wireNode(element) {
     // pointer on the card first would swallow the port/open-task button's
     // own click. The port itself is hidden in Run mode (see app.css), so
     // this exclusion only ever matters in Design mode.
-    if (event.button !== 0 || event.target.closest('[data-role="open-task"], [data-port]')) return;
+    if (event.button !== 0 || event.target.closest('[data-role="open-task"], [data-port], [data-earlier-task]')) return;
     // Run mode never repositions a node -- there is nothing to drag -- but
     // a click there still selects it (R5), so pointer handling stays wired
     // rather than bailing out the way keyboard movement does.
@@ -685,13 +718,18 @@ function renderRunPanel() {
   if (mode !== "run" || !currentRun) { $("workflow-run-meta").innerHTML = ""; return; }
   const failed = currentRun.nodes.find(node => node.node_id === currentRun.failure_node_id);
   const failedTitle = failed && currentRun.definition.nodes.find(node => node.id === failed.node_id)?.task.title;
+  const inputs = runInputs(currentRun);
   $("workflow-run-meta").innerHTML = `<dl>
       <dt>Run</dt><dd>${esc(currentRun.id)}</dd>
       <dt>Status</dt><dd>${esc(currentRun.status)}</dd>
       <dt>Revision</dt><dd>${esc(currentRun.revision)}</dd>
       ${currentRun.failure_node_id ? `<dt>Failed node</dt><dd>${esc(failedTitle || currentRun.failure_node_id)}</dd>` : ""}
       ${currentRun.error ? `<dt>Error</dt><dd>${esc(currentRun.error)}</dd>` : ""}
-    </dl>`;
+    </dl>${inputs.length ? `
+    <h3 id="workflow-run-inputs-h">Inputs</h3>
+    <dl aria-labelledby="workflow-run-inputs-h">
+      ${inputs.map(([name, value]) => `<dt>${esc(name)}</dt><dd>${esc(value)}</dd>`).join("")}
+    </dl>` : ""}`;
 }
 
 // ------------------------------------------------------------------ summary
@@ -708,8 +746,11 @@ function renderSummary() {
       return `<li data-summary-node="${esc(item.id)}">
           <button type="button" data-select-node="${esc(item.id)}">${esc(node.task.title || item.id)}</button>
           <span class="wf-badge" data-role="badge"></span>
+          <span class="wf-badge wf-round" data-role="round" hidden></span>
           <span> after ${esc(after)}</span>
+          <span class="wf-request" data-role="request" hidden></span>
           <button type="button" class="wf-open-task" data-role="open-task" hidden>Open task ↗</button>
+          <span class="wf-earlier" data-role="earlier" hidden></span>
         </li>`;
     }).join("");
   }
@@ -743,6 +784,7 @@ function paintSummaryStatuses() {
       openBtn.hidden = !action;
       if (action) openBtn.onclick = action;
     }
+    paintRound(li, execution, activeGraph().nodes);
   }
 }
 

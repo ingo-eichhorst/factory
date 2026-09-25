@@ -283,6 +283,35 @@ export function openTaskAction(nodeRun, openTask) {
   return () => openTask(nodeRun.task_id);
 }
 
+// ------------------------------------------------------ #143: run-mode rework
+
+/// "rework 2" on a node run that work has been sent back through, "" on its
+/// first pass. The engine titles that round's task "<title> (rework 2)", so
+/// the canvas and the task list say the same thing.
+export function roundLabel(nodeRun) {
+  return nodeRun?.round > 0 ? `rework ${nodeRun.round}` : "";
+}
+
+/// The tasks earlier rounds spawned on this node, oldest first.
+export function supersededTasks(nodeRun) {
+  return nodeRun?.superseded_task_ids ?? [];
+}
+
+/// On the node work was sent back to: "sent back by Review, round 1 of 5".
+/// `nodes` is the run's own definition -- `from_node` is an id, named here
+/// by the title that run gave it.
+export function reworkRequestText(nodeRun, nodes) {
+  const request = nodeRun?.rework_request;
+  if (!request) return "";
+  return `sent back by ${nodeTitle(nodes, request.from_node)}, round ${request.round} of ${request.max_rounds}`;
+}
+
+/// What a run was started with, as `[name, value]` pairs -- empty for a
+/// workflow that declares none, whose run the server sends without the key.
+export function runInputs(run) {
+  return Object.entries(run?.inputs ?? {});
+}
+
 // ------------------------------------------------------------------ events
 
 /// Fold one server event into `{ workflows, current, currentRun, dirty }`.

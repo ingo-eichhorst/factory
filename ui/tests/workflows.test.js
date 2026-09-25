@@ -33,8 +33,12 @@ import {
   readWorkflowRouteTail,
   reworkBadge,
   reworkProblems,
+  reworkRequestText,
   reworkSentence,
+  roundLabel,
+  runInputs,
   saveDraft,
+  supersededTasks,
   validate,
   workflowRouteTail,
 } from "../js/workflow-model.js";
@@ -626,4 +630,54 @@ test("#143 the page has the inputs list and the rework fields", () => {
   assert.match(page, /id="workflow-input-add"/);
   assert.match(page, /id="workflow-node-rework-to"/);
   assert.match(page, /id="workflow-node-rework-max"[^>]*min="1"/);
+});
+
+// ------------------------------------------------ #143: rework in Run mode
+
+/// A run of review -> implement after one send-back, in the shape
+/// `workflow.rs`'s `send_back` test leaves it: implement and review both on
+/// round 1, implement's first task superseded and told who sent it back.
+function reworkedRun() {
+  const definition = githubIssue();
+  definition.nodes[1].task.title = "Implement #143";
+  definition.nodes[2].task.title = "Review #143";
+  return {
+    id: "run-1", workflow_id: "wf-1", revision: 3, status: "running", definition,
+    inputs: { issue: "143" },
+    nodes: [
+      { node_id: "triage", status: "done", task_id: "t1" },
+      { node_id: "implement", status: "running", task_id: "i2", round: 1, superseded_task_ids: ["i1"],
+        rework_request: { from_node: "review", from_task: "r1", round: 1, max_rounds: 5 } },
+      { node_id: "review", status: "pending", round: 1, superseded_task_ids: ["r1"] },
+      { node_id: "ready", status: "pending" },
+    ],
+  };
+}
+
+test("#143 a node run after a send-back reads 'rework 1'; a first pass reads nothing", () => {
+  const run = reworkedRun();
+  assert.equal(roundLabel(run.nodes[1]), "rework 1");
+  assert.equal(roundLabel(run.nodes[2]), "rework 1");
+  assert.equal(roundLabel(run.nodes[0]), "", "round 0 is omitted on the wire");
+  assert.equal(roundLabel(undefined), "", "Design mode has no node run at all");
+});
+
+test("#143 the superseded tasks are the earlier rounds', oldest first", () => {
+  const run = reworkedRun();
+  assert.deepEqual(supersededTasks(run.nodes[1]), ["i1"]);
+  assert.deepEqual(supersededTasks(run.nodes[3]), []);
+  assert.deepEqual(supersededTasks(null), []);
+});
+
+test("#143 the target node says who sent the work back, by the run's own title, and which round", () => {
+  const run = reworkedRun();
+  assert.equal(reworkRequestText(run.nodes[1], run.definition.nodes), "sent back by Review #143, round 1 of 5");
+  assert.equal(reworkRequestText(run.nodes[2], run.definition.nodes), "", "the sender carries no request");
+});
+
+test("#143 the run's inputs are listed; a run the server sent without any lists none", () => {
+  assert.deepEqual(runInputs(reworkedRun()), [["issue", "143"]]);
+  const bare = reworkedRun();
+  delete bare.inputs;
+  assert.deepEqual(runInputs(bare), []);
 });
