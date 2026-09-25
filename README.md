@@ -1502,6 +1502,97 @@ parents said — the acceptance bar is that literal command. Either way, each
 parent's result is tail-truncated to a byte budget first, so one noisy
 upstream step can't blow up every prompt downstream of it.
 
+## Compliant workflows
+
+A run used to be `done` the moment its own agent said so. Policy controls and
+quality attributes already *state* what good work includes -- an SBOM, a
+security scan, tests -- but nothing obliged a run to go through those steps or
+to prove it had (`#118`). Now a control, or a quality attribute, can say which
+steps a **category** of work must pass, and the line enforces it: a run that
+owes a step is only `done` once the step has left evidence, produced by the
+daemon rather than by the agent that did the work.
+
+```yaml
+# .factory/policies/house.yaml -- a control's `requires:`
+- id: tested
+  title: Changes are tested
+  requires:
+    - { applies_to: [feature, bugfix], step: tests, gate: "cargo test --workspace" }
+    - { applies_to: [release], step: sbom, gate: "make sbom", before: publish }
+    - { applies_to: ["*"], step: lint, gate: "cargo clippy -- -D warnings", timeout_seconds: 900 }
+```
+
+The same `requires:` list goes on an attribute of a quality profile
+(`.factory/quality/<profile>.yaml`), where it is named `quality/<attribute>`.
+
+- **Categories.** A task (`factory task create --category feature`) or a
+  workflow (`category:` on its definition, overridable per node) says what kind
+  of work it is. Leaving it out is the category `default`, never "no plan":
+  `applies_to: [default]` catches uncategorised work, and `*` catches every
+  category. A category is a name (`[a-z0-9][a-z0-9_-]*`); nothing else is
+  checked.
+- **The control plan** for a scope and category is resolved from what already
+  applies there, down the same chain `policies:` and `quality:` use: add or
+  tighten only. A scope adds a framework and with it the framework's
+  requirements; the same step and command required twice is one step naming
+  both controls; the same step with two commands runs both; a timeout only
+  shortens. The one way a requirement leaves the plan is an `n/a` with a
+  rationale on its control, and the plan lists that as a waiver.
+- **Injection at dispatch.** When a workflow run starts, each task node's plan
+  is merged into the run's immutable snapshot as **locked `gate` nodes**,
+  chained after that node in the plan's `before:`/`after:` order; whatever
+  followed the node now follows its last gate. Gates go after *every* task
+  node, not only the last ones, because every node works in a worktree of its
+  own. An authored gate node for the same step satisfies the requirement
+  instead. A standalone task is planned as an implicit one-node workflow
+  through exactly the same injection. The stored definition never changes, and
+  a run keeps the plan it started with: the steps are fixed on the run at
+  dispatch (`Run::required_steps`), and the agent is told them in its
+  reporting contract.
+- **`verifying`, and the `done` gate.** A run with required steps that reports
+  `done` becomes `verifying`. The daemon runs each gate itself -- the bench
+  gate runner, `sh -c` in the run's worktree (the scope directory for a
+  `--no-worktree` task), exit 0 passes, ten minutes unless the requirement
+  says otherwise -- in plan order, stopping at the first failure. Every gate
+  appends an **attestation**: the step, who ran it (`factory-daemon`), the
+  verdict, exit code, output tail, and the commit and dirtiness of the tree
+  it judged. The run is `done` only when every required step has a passing
+  attestation from this round and not from the executing agent. Otherwise it
+  goes to **`blocked`**, with the reason as its journal's block line -- so it
+  is in the Inbox, answerable like any other block. Its session stays open:
+  the agent fixes the problem, reports `done` again, and the gates run again.
+  While a run verifies the agent may add a note or give the run up, nothing
+  else; the run timeout and the session-gone check do not apply to it, and a
+  restart verifies it again from the start. Bench attempts are not planned --
+  their own case gate already judges them.
+- **Gate nodes mirror, never execute.** In a workflow run, a gate node's status
+  is read off its subject run's attestations; it never spawns a task, and a
+  node downstream of it starts only once the work the gate judged is itself
+  `done`.
+- **`factory workflow lint`** is the author's preview: the effective plan per
+  category, which steps a run would get injected and which authored gates
+  already satisfy one, waivers, findings (a gate step with no command -- it
+  can never pass, so every such run blocks), and ordering violations (a
+  `before: publish` whose `publish` node can start with no scan before it).
+
+```sh
+factory workflow lint <workflow-id>                 # what a run of it gets
+factory workflow lint --task <task-id>              # a task, as its one-node workflow
+factory workflow lint --scope demo --category release
+factory run attestations <run-id>                   # the evidence a run carries
+```
+
+The same over HTTP: `GET /api/workflow-lint?workflow=|task=|scope=&category=`
+and `GET /api/runs/{id}/attestations`. Attestations live in the append-only
+`run_attestations` table next to `policy_attestations`.
+
+**Not in v1.** `review` and `approval` steps parse and show in the plan and in
+`lint`, marked not enforced -- they need a functionary other than the daemon
+(another agent, a person), which is v2 along with a rework task proposed on a
+failed gate and a canvas that draws injected nodes distinctly (the Workflows
+canvas only labels them `GATE 🔒` today). The `attested` policy check and the
+conformance metrics are v3.
+
 ## How a task actually runs
 
 1. `task.create` resolves the scope, agent, and runtime — from the request, then
