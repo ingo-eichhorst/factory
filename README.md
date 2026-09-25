@@ -807,7 +807,9 @@ that metric's own trailing-window definition evaluated as of that day — the
 series' own last point always equals the metric's current value.
 A value's `as_of` is when the data behind it is from, not when it was asked
 for: `first_pass_yield`/`scrap_rate` are as of the end of the newest day in
-their window that finished anything, `bench.resolve_rate.<dataset>` as of
+their window that finished anything (and have no value at all, with the
+reason, when nothing in their trailing 28 days finished — never an older
+day's ratio), `bench.resolve_rate.<dataset>` as of
 the run it came from settling. `throughput_week` stays as of now — a count
 over a window ending now is a current fact even when it is zero. This is
 what lets a freshness window (a quality scenario's `max_age`) read a value
@@ -1179,16 +1181,23 @@ the whole instance, the share that is `met`. Drafts and `no_data` count
 against it — declared but not shown to be met is not met. `None`, with the
 reason, when nothing is declared under it (that is not "all met").
 Company-wide only: a scope name may hold `/`, which a metric id segment
-cannot, so there is no per-scope parameter. `quality_report` never asks for
-a `quality.*` metric itself, so computing one never loops.
+cannot, so there is no per-scope parameter. `Engine::metrics` computes the
+metrics a quality evaluation reads in the same pass as the ones it was
+asked for, so `production`/`policy_report` are read once per call and
+nothing loops; if the quality evaluation fails, only the `quality.*` values
+come back `None` with the error as reason — a dashboard or Goals read never
+fails over it, and never publishes `quality_changed`.
 
 **The agent guide.** A task's run is told its scope's H-importance
 attributes, one line each: every scenario's measure in words, and a status
 word (`not met`, `stale`, `no data`) only when it is not met — never a value
 or a time, so the guide stays byte-for-byte the same from one dispatch to
 the next while nothing moved. Judged once at dispatch, like the policy
-frameworks line; a scope with nothing ranked H gets no block at all, and a
-profile that cannot be read never stops a dispatch. A standing agent's
+frameworks line, and reused for 60 seconds per scope while the profiles'
+fingerprint holds — single-flight, so a burst of dispatches into one scope
+judges it once. A scope with nothing ranked H gets no block at all, and a
+profile that cannot be read never stops a dispatch (a failure is never
+cached). A standing agent's
 guide carries no block: it is written once for the agent's whole life, and
 any status in it would soon be stale.
 
@@ -1198,8 +1207,12 @@ scenario, agent?}`) creates an ordinary task through the exact path `factory
 task create`/`policy remediate` use, labelled
 `quality=<scope>/<attribute>/<scenario>`, with the scenario's six parts, its
 measure and why it is not met as instructions. It needs `task.create` in
-`S`. It is refused for a `met` scenario and for a `draft` (with no measure
-there is no gap, only a measure to write). When a non-terminal task with
+`S`. It is refused for a `met` scenario, for a `draft` (with no measure
+there is no gap, only a measure to write), and for a `no_data` scenario no
+task could ever give data to — an `attestation` check, or a `quality.*`,
+unknown or unavailable metric — where the fix is an edit to the profile.
+Checking for an open task and creating one are not atomic, the same as
+`policy remediate`: two calls racing can both create. When a non-terminal task with
 that label is already open in `S`, that task comes back with `created:
 false` and nothing new is made (`#98`); the report's `open_tasks` names it
 per scenario so a reader can show it up front.
@@ -1209,7 +1222,10 @@ writes; quality has none (a remediation task already fires `TaskCreated`),
 and nothing in Factory watches files. So every report fingerprints the
 profiles and every scope's chain it loaded, and publishes
 `Event::QualityChanged` when that moved since the last read — the issue's
-"on the next read". The first read after a start publishes nothing.
+"on the next read". Only a successful `Request::Quality` records it, under
+one lock with the comparison, and a read that loaded its profiles earlier
+than the recorded one never overwrites it. The first read after a start
+publishes nothing.
 Evidence changing (a fitness-function task finishing) is not this event;
 it arrives as `RunUpdated`.
 

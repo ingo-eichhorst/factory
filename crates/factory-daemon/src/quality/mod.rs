@@ -52,6 +52,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use factory_core::adapter::agent::{QualityAttributeContext, QualityScenarioContext};
@@ -101,9 +102,9 @@ fn fingerprint(snapshot: &Factory, catalogue: &QualityCatalogue) -> u64 {
 /// never heard of (`push_if_known`, so one typo in one profile cannot make
 /// `Engine::metrics` refuse the whole call; the profile's own
 /// `unknown_metric` finding already names it).
-fn metric_ids(trees: &[(&Scope, QualityTree)]) -> Vec<MetricId> {
+fn metric_ids<'a>(trees: impl IntoIterator<Item = &'a QualityTree>) -> Vec<MetricId> {
     let mut ids = Vec::new();
-    for (_, tree) in trees {
+    for tree in trees {
         for attr in &tree.attributes {
             for s in &attr.scenarios {
                 if let Some(Measure::Metric(m)) = &s.scenario.measure {
@@ -198,6 +199,60 @@ fn remediation_instructions(scope: &str, attribute: &str, result: &quality::Scen
     out
 }
 
+/// Everything a quality evaluation reads before any evidence or metric:
+/// the snapshot, the loaded profiles and their fingerprint, and each scope's
+/// merged tree. Built by [`Engine::quality_inputs`]; the metric values its
+/// trees need are then computed by whoever holds it -- `quality_report`
+/// through `Engine::metrics`, or `Engine::metrics` itself in the same pass
+/// as the rest of a request, so `production`/`policy_report` are read once.
+pub(crate) struct QualityInputs {
+    snapshot: Factory,
+    catalogue: QualityCatalogue,
+    fingerprint: u64,
+    /// When the profiles were read -- orders two concurrent reports'
+    /// fingerprints, so an older read can never overwrite a newer one.
+    loaded_at: Instant,
+    asked: Option<Scope>,
+    trees: Vec<(Scope, QualityTree)>,
+    findings: Vec<quality::Finding>,
+}
+
+impl QualityInputs {
+    /// Every metric id the trees measure by -- see [`metric_ids`].
+    pub(crate) fn metric_ids(&self) -> Vec<MetricId> {
+        metric_ids(self.trees.iter().map(|(_, t)| t))
+    }
+}
+
+/// Why a `no_data` scenario's measure can never produce data, whatever any
+/// task does -- an `attestation` check (nothing can record one), or a metric
+/// measure on a `quality.*`, unknown or unavailable metric. `None` when the
+/// missing data is the kind work can supply: a task not yet run, a metric
+/// with no finished runs behind it yet.
+fn unfixable_by_a_task(measure: Option<&Measure>) -> Option<String> {
+    match measure? {
+        Measure::Check(Check::Attestation) => Some(quality::ATTESTATION_UNSUPPORTED.to_string()),
+        Measure::Check(_) => None,
+        Measure::Metric(m) if quality::is_quality_metric(&m.metric) => {
+            Some(format!("{} is computed from quality scenarios themselves, so it cannot measure one", m.metric))
+        }
+        Measure::Metric(m) => match factory_core::metrics::resolve(&m.metric) {
+            Ok(_) => None,
+            Err(e) => Some(e.to_string()),
+        },
+    }
+}
+
+/// How long a scope's guide block is reused before it is judged again. Short
+/// enough that a status word is never more than a minute behind; long
+/// enough that a burst of dispatches into one scope (a bench run, a
+/// workflow fanning out) judges it once rather than once per task.
+const GUIDE_TTL: Duration = Duration::from_secs(60);
+
+/// `Engine::quality_guide_cache`: canonical scope name to when its block was
+/// judged, the profiles' fingerprint it was judged under, and the block.
+pub(crate) type GuideCache = std::collections::HashMap<String, (Instant, u64, Vec<QualityAttributeContext>)>;
+
 impl Engine {
     /// `.factory/quality/`, loaded off the async runtime.
     async fn load_quality(&self, snapshot: &Factory) -> Result<QualityCatalogue> {
@@ -207,35 +262,73 @@ impl Engine {
             .map_err(|e| FactoryError::Other(anyhow::anyhow!("quality profile walk: {e}")))
     }
 
-    /// Publish `Event::QualityChanged` when `fp` differs from the last
-    /// read's -- never on the first read after a start, which has nothing to
-    /// compare against.
-    fn note_quality_fingerprint(&self, fp: u64, catalogue: &QualityCatalogue) {
-        let previous = {
-            let mut seen = self.quality_seen.lock().unwrap_or_else(|p| p.into_inner());
-            seen.replace(fp)
-        };
-        if previous.is_some_and(|p| p != fp) {
-            self.bus.publish(Event::QualityChanged {
-                profiles: catalogue.profiles.keys().cloned().collect(),
-            });
+    /// Load the profiles and fold every scope in `scope`'s subtree (the
+    /// whole instance for `None`) that binds at least one -- or, with
+    /// `only`, just that one scope, the guide's and remediation's case.
+    pub(crate) async fn quality_inputs(&self, scope: Option<&str>, only: bool) -> Result<QualityInputs> {
+        let loaded_at = Instant::now();
+        let snapshot = self.factory_snapshot();
+        let catalogue = self.load_quality(&snapshot).await?;
+        let (asked, mut target_scopes) = subtree_scopes(&snapshot, scope)?;
+        if only {
+            target_scopes.retain(|s| Some(&s.name) == asked.as_ref().map(|a| &a.name));
         }
+        let mut findings = catalogue.findings.clone();
+        let mut trees = Vec::new();
+        for t in target_scopes {
+            let chain = snapshot.config.quality_chain_for_scope(&t);
+            if chain.is_empty() {
+                continue;
+            }
+            let (tree, chain_findings) = quality::applicable(&catalogue, &t.name, &chain);
+            findings.extend(chain_findings);
+            trees.push((t, tree));
+        }
+        Ok(QualityInputs {
+            fingerprint: fingerprint(&snapshot, &catalogue),
+            snapshot,
+            catalogue,
+            loaded_at,
+            asked,
+            trees,
+            findings,
+        })
     }
 
-    /// Judge every tree in `trees` in one pass: the evidence every scope
-    /// shares gathered once (`dataset_level_facts`), each scope's own
-    /// through `evidence_for_scope`, and every metric any of them reads
-    /// computed once (`Engine::metrics`). Returns each scope's report, in
-    /// `trees`' order, every ambiguous-check finding the evidence turned up,
-    /// and the series behind any metric that has one.
-    async fn judge_quality(
-        self: &Arc<Self>,
-        snapshot: &Factory,
-        trees: &[(&Scope, QualityTree)],
+    /// Record what a *successful* report read, and publish
+    /// `Event::QualityChanged` when it differs from what was recorded
+    /// before. Compare, store and publish happen under one lock, so two
+    /// reports finishing together cannot both publish, or lose the change;
+    /// and a read that loaded its profiles before the recorded one never
+    /// overwrites it, so a slow report over the old files cannot flip the
+    /// fingerprint back. The first read after a start has nothing to
+    /// compare against and publishes nothing.
+    fn record_quality_fingerprint(&self, inputs: &QualityInputs) {
+        let mut seen = self.quality_seen.lock().unwrap_or_else(|p| p.into_inner());
+        match *seen {
+            Some((at, _)) if at > inputs.loaded_at => return,
+            Some((_, previous)) if previous != inputs.fingerprint => self.bus.publish(Event::QualityChanged {
+                profiles: inputs.catalogue.profiles.keys().cloned().collect(),
+            }),
+            _ => {}
+        }
+        *seen = Some((inputs.loaded_at, inputs.fingerprint));
+    }
+
+    /// Judge every tree in `inputs` against `values`, already computed:
+    /// the evidence every scope shares gathered once (`dataset_level_facts`)
+    /// and each scope's own through `evidence_for_scope`. Returns each
+    /// scope's report, in `inputs.trees` order, and every ambiguous-check
+    /// finding the evidence turned up. Never computes a metric itself --
+    /// which is what lets `Engine::metrics` call this without a cycle.
+    pub(crate) async fn judge_quality(
+        &self,
+        inputs: &QualityInputs,
+        values: &BTreeMap<MetricId, MetricValue>,
         now: DateTime<Utc>,
-    ) -> Result<(Vec<ScopeReport>, Vec<quality::Finding>, Vec<MetricSeries>)> {
+    ) -> Result<(Vec<ScopeReport>, Vec<quality::Finding>)> {
         let per_scope_applied: Vec<(&Scope, Vec<policy::Applied>)> =
-            trees.iter().map(|(t, tree)| (*t, quality::applied_checks(tree))).collect();
+            inputs.trees.iter().map(|(t, tree)| (t, quality::applied_checks(tree))).collect();
 
         // The knowledge vault is walked only when some scenario asks a
         // `knowledge` question -- through `load_catalogues_and_tags`, the
@@ -252,7 +345,30 @@ impl Engine {
         };
         let (gates, daemon_fact, credential_rows) = self.dataset_level_facts(&per_scope_applied).await?;
 
-        let ids = metric_ids(trees);
+        let mut reports = Vec::new();
+        let mut findings = Vec::new();
+        for ((t, applied), (_, tree)) in per_scope_applied.iter().zip(&inputs.trees) {
+            let evidence = self
+                .evidence_for_scope(&inputs.snapshot, t, applied, &tags, &[], &gates, daemon_fact, &credential_rows)
+                .await?;
+            findings.extend(policy::evidence_findings(&evidence, &t.name).into_iter().map(|f| quality::Finding {
+                kind: quality::FindingKind::AmbiguousCheckTarget,
+                subject: f.subject,
+                detail: f.detail,
+            }));
+            reports.push(quality::evaluate(tree, values, &evidence, now));
+        }
+        Ok((reports, findings))
+    }
+
+    /// Load, compute the metrics the trees read, and judge -- the whole
+    /// evaluation for a caller that has no metric values of its own.
+    async fn evaluate_quality(
+        self: &Arc<Self>,
+        inputs: &QualityInputs,
+        now: DateTime<Utc>,
+    ) -> Result<(Vec<ScopeReport>, Vec<quality::Finding>, Vec<MetricSeries>)> {
+        let ids = inputs.metric_ids();
         let (values, series) = if ids.is_empty() {
             (BTreeMap::new(), Vec::new())
         } else {
@@ -260,44 +376,20 @@ impl Engine {
             let values: BTreeMap<MetricId, MetricValue> = computed.values.into_iter().map(|v| (v.id.clone(), v)).collect();
             (values, computed.series)
         };
-
-        let mut reports = Vec::new();
-        let mut findings = Vec::new();
-        for ((t, applied), (_, tree)) in per_scope_applied.iter().zip(trees) {
-            let evidence = self
-                .evidence_for_scope(snapshot, t, applied, &tags, &[], &gates, daemon_fact, &credential_rows)
-                .await?;
-            findings.extend(policy::evidence_findings(&evidence, &t.name).into_iter().map(|f| quality::Finding {
-                kind: quality::FindingKind::AmbiguousCheckTarget,
-                subject: f.subject,
-                detail: f.detail,
-            }));
-            reports.push(quality::evaluate(tree, &values, &evidence, now));
-        }
+        let (reports, findings) = self.judge_quality(inputs, &values, now).await?;
         Ok((reports, findings, series))
     }
 
-    /// The L6 Quality attributes tab: `Request::Quality`.
+    /// The L6 Quality attributes tab: `Request::Quality`. The one read
+    /// that records the profiles' fingerprint (and so may publish
+    /// `Event::QualityChanged`) -- a metrics or goals read that happens to
+    /// compute `quality.*` does not.
     pub(crate) async fn quality_report(self: &Arc<Self>, scope: Option<&str>) -> Result<QualityReport> {
         let now = Utc::now();
-        let snapshot = self.factory_snapshot();
-        let catalogue = self.load_quality(&snapshot).await?;
-        let (asked, target_scopes) = subtree_scopes(&snapshot, scope)?;
-        self.note_quality_fingerprint(fingerprint(&snapshot, &catalogue), &catalogue);
+        let inputs = self.quality_inputs(scope, false).await?;
+        let (reports, evidence_findings, series) = self.evaluate_quality(&inputs, now).await?;
 
-        let mut findings = catalogue.findings.clone();
-        let mut trees: Vec<(&Scope, QualityTree)> = Vec::new();
-        for t in &target_scopes {
-            let chain = snapshot.config.quality_chain_for_scope(t);
-            if chain.is_empty() {
-                continue;
-            }
-            let (tree, chain_findings) = quality::applicable(&catalogue, &t.name, &chain);
-            findings.extend(chain_findings);
-            trees.push((t, tree));
-        }
-
-        let (reports, evidence_findings, series) = self.judge_quality(&snapshot, &trees, now).await?;
+        let mut findings = inputs.findings.clone();
         findings.extend(evidence_findings);
         findings.sort_by(|a, b| a.subject.cmp(&b.subject).then(a.kind.cmp(&b.kind)).then(a.detail.cmp(&b.detail)));
         findings.dedup();
@@ -333,8 +425,9 @@ impl Engine {
             })
             .collect();
 
+        self.record_quality_fingerprint(&inputs);
         Ok(QualityReport {
-            scope: asked.as_ref().map(|s| s.name.clone()),
+            scope: inputs.asked.as_ref().map(|s| s.name.clone()),
             scopes,
             findings,
             catalogue: quality::CATALOGUE.iter().map(CharacteristicView::from).collect(),
@@ -346,34 +439,50 @@ impl Engine {
     /// profile. `h_only` narrows the tree to H-importance attributes before
     /// anything is gathered -- all the guide shows, so a dispatch never
     /// pays for evidence behind an M or L attribute.
-    async fn quality_for_scope(self: &Arc<Self>, scope: &str, h_only: bool) -> Result<Option<ScopeReport>> {
-        let now = Utc::now();
-        let snapshot = self.factory_snapshot();
-        let scope_obj = snapshot.scope(scope)?.clone();
-        let chain = snapshot.config.quality_chain_for_scope(&scope_obj);
-        if chain.is_empty() {
+    async fn quality_for_scope(self: &Arc<Self>, mut inputs: QualityInputs, h_only: bool) -> Result<Option<ScopeReport>> {
+        if h_only {
+            for (_, tree) in &mut inputs.trees {
+                tree.attributes.retain(|a| a.importance == Level::High);
+            }
+            inputs.trees.retain(|(_, tree)| !tree.attributes.is_empty());
+        }
+        if inputs.trees.is_empty() {
             return Ok(None);
         }
-        let catalogue = self.load_quality(&snapshot).await?;
-        let (mut tree, _findings) = quality::applicable(&catalogue, &scope_obj.name, &chain);
-        if h_only {
-            tree.attributes.retain(|a| a.importance == Level::High);
-            if tree.attributes.is_empty() {
-                return Ok(None);
-            }
-        }
-        let (mut reports, _, _) = self.judge_quality(&snapshot, &[(&scope_obj, tree)], now).await?;
+        let (mut reports, _, _) = self.evaluate_quality(&inputs, Utc::now()).await?;
         Ok(reports.pop())
     }
 
     /// The guide's quality block for a task in `scope` -- resolved once per
-    /// dispatch, the same as `policy_frameworks` and `goal_context`. Empty,
-    /// never an error, when nothing applies or something cannot be read: a
-    /// quality profile must never stop a task from dispatching.
+    /// dispatch, the same as `policy_frameworks` and `goal_context`, and
+    /// reused for [`GUIDE_TTL`] while the profiles' fingerprint holds.
+    /// Judging is single-flight: the cache's lock is held across it, so a
+    /// burst of dispatches waits for the first one's answer instead of each
+    /// reading a year of runs. Empty, never an error, when nothing applies
+    /// or something cannot be read -- a quality profile must never stop a
+    /// task from dispatching -- and a failure is never cached.
     pub(crate) async fn quality_context(self: &Arc<Self>, scope: &str) -> Vec<QualityAttributeContext> {
-        match self.quality_for_scope(scope, true).await {
-            Ok(Some(report)) => guide_context(&report),
-            Ok(None) => Vec::new(),
+        let mut cache = self.quality_guide_cache.lock().await;
+        let inputs = match self.quality_inputs(Some(scope), true).await {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                tracing::warn!(scope, "could not load quality profiles for the agent guide: {error}");
+                return Vec::new();
+            }
+        };
+        let key = inputs.asked.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| scope.to_string());
+        if let Some((at, fp, block)) = cache.get(&key) {
+            if *fp == inputs.fingerprint && at.elapsed() < GUIDE_TTL {
+                return block.clone();
+            }
+        }
+        let fp = inputs.fingerprint;
+        match self.quality_for_scope(inputs, true).await {
+            Ok(report) => {
+                let block = report.as_ref().map(guide_context).unwrap_or_default();
+                cache.insert(key, (Instant::now(), fp, block.clone()));
+                block
+            }
             Err(error) => {
                 tracing::warn!(scope, "could not judge quality for the agent guide: {error}");
                 Vec::new()
@@ -386,13 +495,17 @@ impl Engine {
     /// `policy_remediate` and `scenario_promote` use, so every validation it
     /// does and its `Event::TaskCreated` apply here too.
     ///
-    /// Refused when the scenario is `met` (no gap) or a `draft` (no measure,
-    /// so no gap either -- only a measure to write, which is an edit to a
-    /// profile, not a task for an agent). When a non-terminal task labelled
-    /// `quality=<scope>/<attribute>/<scenario>` is already open in `scope`,
-    /// that task is answered with `created: false` and nothing is created
-    /// (`#98`) -- unlike `policy_remediate`, which refuses and names it,
-    /// because here the caller is asking for *the* task, and one exists.
+    /// Refused when the scenario is `met` (no gap), a `draft` (no measure,
+    /// so only a measure to write), or `no_data` for a reason no task can
+    /// change (an `attestation` check, a `quality.*`, unknown or unavailable
+    /// metric -- [`unfixable_by_a_task`]); each of the last two is an edit
+    /// to a profile, and the refusal says so. When a non-terminal task
+    /// labelled `quality=<scope>/<attribute>/<scenario>` is already open in
+    /// `scope`, that task is answered with `created: false` and nothing is
+    /// created (`#98`) -- unlike `policy_remediate`, which refuses and names
+    /// it, because here the caller is asking for *the* task, and one exists.
+    /// The check and the create are not atomic, the same as
+    /// `policy_remediate`: two calls racing can both create.
     pub(crate) async fn quality_remediate(
         self: &Arc<Self>,
         scope: String,
@@ -400,11 +513,12 @@ impl Engine {
         scenario: String,
         agent: Option<String>,
     ) -> Result<QualityRemediation> {
-        let snapshot = self.factory_snapshot();
-        let scope = snapshot.scope(&scope)?.name.clone();
-        let report = self.quality_for_scope(&scope, false).await?.ok_or_else(|| {
-            FactoryError::BadRequest(format!("no quality profile applies at {scope:?}"))
-        })?;
+        let inputs = self.quality_inputs(Some(&scope), true).await?;
+        let scope = inputs.asked.as_ref().map(|s| s.name.clone()).unwrap_or(scope);
+        let report = self
+            .quality_for_scope(inputs, false)
+            .await?
+            .ok_or_else(|| FactoryError::BadRequest(format!("no quality profile applies at {scope:?}")))?;
         let result = report
             .attributes
             .iter()
@@ -426,7 +540,15 @@ impl Engine {
                      measure in its profile first -- there is no gap to close until there is"
                 )));
             }
-            ScenarioStatus::NotMet | ScenarioStatus::Stale | ScenarioStatus::NoData => {}
+            ScenarioStatus::NoData => {
+                if let Some(why) = unfixable_by_a_task(result.scenario.scenario.measure.as_ref()) {
+                    return Err(FactoryError::BadRequest(format!(
+                        "{attribute}/{scenario} at {scope:?} has no data, and no task can change that: {why}. \
+                         The fix is an edit to its measure in the profile, not a task"
+                    )));
+                }
+            }
+            ScenarioStatus::NotMet | ScenarioStatus::Stale => {}
         }
 
         let label = remediation_label(&scope, &attribute, &scenario);
@@ -780,5 +902,78 @@ mod tests {
         assert!(refuse("reliability", "someday", "demo").await.contains("draft"));
         assert!(refuse("maintainability.modifiability", "gate", "sibling").await.contains("not a quality scenario"));
         assert!(engine.store.list(&TaskFilter::default()).await.unwrap().is_empty(), "nothing was created");
+    }
+
+    #[tokio::test]
+    async fn remediate_refuses_no_data_that_only_a_profile_edit_can_fix() {
+        let engine = test_engine();
+        write_profile(
+            &engine,
+            "service",
+            "attributes:\n  - id: maintainability.modifiability\n    importance: H\n    difficulty: H\n    scenarios:\n\
+             \x20     - { id: signed-off, measure: { check: attestation } }\n\
+             \x20     - { id: cheap, measure: { metric: unit_cost, below: 1 } }\n\
+             \x20     - { id: gate, measure: { check: task, task: quality-gate } }\n",
+        );
+        for scenario in ["signed-off", "cheap"] {
+            let err = engine
+                .quality_remediate("demo".into(), "maintainability.modifiability".into(), scenario.into(), None)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("no task can change that") && err.contains("profile"), "{scenario}: {err}");
+        }
+        let ok = engine
+            .quality_remediate("demo".into(), "maintainability.modifiability".into(), "gate".into(), None)
+            .await
+            .unwrap();
+        assert!(ok.created, "no task yet is exactly the no_data a fitness-function task fixes");
+    }
+
+    #[tokio::test]
+    async fn an_older_read_never_overwrites_a_newer_fingerprint_or_publishes() {
+        let engine = test_engine();
+        let mut bus = engine.bus.subscribe();
+        let older = engine.quality_inputs(None, false).await.unwrap();
+        write_profile(&engine, "service", &SERVICE.replace("importance: H", "importance: M"));
+        let newer = engine.quality_inputs(None, false).await.unwrap();
+        assert_ne!(older.fingerprint, newer.fingerprint);
+
+        engine.record_quality_fingerprint(&newer);
+        engine.record_quality_fingerprint(&older);
+        assert!(bus.try_recv().is_err(), "first record has nothing to compare; the older one is ignored");
+        let seen = engine.quality_seen.lock().unwrap().unwrap();
+        assert_eq!(seen.1, newer.fingerprint, "the newer read stays recorded");
+    }
+
+    #[tokio::test]
+    async fn a_metrics_read_of_quality_never_publishes_quality_changed() {
+        let engine = test_engine();
+        let mut bus = engine.bus.subscribe();
+        engine.quality_report(None).await.unwrap();
+        write_profile(&engine, "service", &SERVICE.replace("importance: H", "importance: M"));
+        let ids = vec![MetricId::new("quality.security").unwrap(), MetricId::new("scrap_rate").unwrap()];
+        let computed = engine.metrics(&ids, Utc::now()).await.unwrap();
+        assert_eq!(computed.values.len(), 2, "only what was asked comes back, whatever quality read on the side");
+        assert_eq!(computed.series.len(), 1);
+        assert!(
+            !std::iter::from_fn(|| bus.try_recv().ok()).any(|e| matches!(e, Event::QualityChanged { .. })),
+            "only a quality report read records and publishes"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_guide_block_is_reused_within_its_ttl_until_a_profile_changes() {
+        let engine = test_engine();
+        let first = engine.quality_context("projects").await;
+        let gate = task_in(&engine, "projects", "quality-gate").await;
+        finish(&engine, &gate, RunStatus::Done).await;
+        assert_eq!(engine.quality_context("projects").await, first, "cached: the evidence moved, the block did not yet");
+
+        write_profile(&engine, "service", &SERVICE.replace("right-first-time", "first-time"));
+        let fresh = engine.quality_context("projects").await;
+        assert_ne!(fresh, first, "a profile edit changes the fingerprint, so the block is judged again");
+        let gate_line = fresh[1].scenarios.iter().find(|s| s.scenario == "gate").unwrap();
+        assert_eq!(gate_line.status, None, "and now reads the finished task: met");
     }
 }

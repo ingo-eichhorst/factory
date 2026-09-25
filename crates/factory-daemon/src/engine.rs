@@ -141,13 +141,21 @@ pub struct Engine {
     /// (`dispatch`), released for every run `close_session` ever sees,
     /// terminal outcome or not.
     pub(crate) power: crate::power::PowerAssertions,
-    /// The fingerprint of what the last `Request::Quality` loaded -- every
-    /// profile in `.factory/quality/` and every scope's quality chain --
-    /// so the next read can tell that it moved and publish
-    /// `Event::QualityChanged` (`quality/mod.rs`). `None` until the first
-    /// read, which has nothing to compare against and so publishes nothing;
-    /// lost on restart for the same reason `seen_status` is.
-    pub(crate) quality_seen: std::sync::Mutex<Option<u64>>,
+    /// The fingerprint of what the last successful `Request::Quality`
+    /// loaded -- every profile in `.factory/quality/` and every scope's
+    /// quality chain -- with when it loaded them, so the next read can tell
+    /// that it moved and publish `Event::QualityChanged`, and an older read
+    /// finishing late never overwrites a newer one (`quality/mod.rs`).
+    /// `None` until the first read, which has nothing to compare against
+    /// and so publishes nothing; lost on restart for the same reason
+    /// `seen_status` is.
+    pub(crate) quality_seen: std::sync::Mutex<Option<(Instant, u64)>>,
+    /// Each scope's guide quality block, with when it was judged and the
+    /// profiles' fingerprint it was judged under -- reused for
+    /// `quality::GUIDE_TTL` so a burst of dispatches does not each read the
+    /// run history. An async lock, held across the judging itself, so that
+    /// burst waits for one answer rather than computing it once each.
+    pub(crate) quality_guide_cache: tokio::sync::Mutex<crate::quality::GuideCache>,
 }
 
 impl Engine {
@@ -189,6 +197,7 @@ impl Engine {
             site_memory: Default::default(),
             power,
             quality_seen: Default::default(),
+            quality_guide_cache: Default::default(),
         }
     }
 
