@@ -962,8 +962,7 @@ computed once and shared: the metric values any scenario's drivers,
 signposts or goal changes reference; the driver tree's own baseline values
 (a registry-backed driver's current metric value; `capacity_factor`'s
 neutral `1.0`, the same default `evaluate_outcomes` itself falls back to
-when a driver is absent; `rework_rate`'s neutral `0.0`, since nothing
-computes a real baseline for it); the current policy rollup over the asked
+when a driver is absent); the current policy rollup over the asked
 subtree; and a baseline forecast — `forecast_completion` over the same
 throughput history, backlog = every non-terminal task in the subtree right
 now, `Horizon::default()`'s 26 weeks. Chosen over a bare metric trend so it
@@ -971,9 +970,9 @@ is the *same* `Forecast` shape every scenario's own forecast carries, and a
 fan chart can draw the baseline band and a scenario's band on one axis.
 
 **Drivers.** A small, built-in tree tied to the metric registry where one
-exists: `throughput_week`, `first_pass_yield`, `scrap_rate` (registry-backed);
-`rework_rate`, `capacity_factor` (assumptions — no data source, a person's
-own what-if); `unit_cost`, `tokens_per_run` (named, but **unavailable** —
+exists: `throughput_week`, `first_pass_yield`, `scrap_rate`, `rework_rate`
+(registry-backed); `capacity_factor` (an assumption — no data source, a
+person's own what-if); `unit_cost`, `tokens_per_run` (named, but **unavailable** —
 design §12.6, a `Run` records no cost yet; only `=N`, a pure assumption
 needing no baseline, may override one). The one v1 formula:
 `effective_throughput = throughput_week × capacity_factor × first_pass_yield`.

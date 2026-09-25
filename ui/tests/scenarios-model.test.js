@@ -209,7 +209,9 @@ const REAL_REPORT = {
 test("DRIVER_DEFS mirrors the seven built-in drivers, cost drivers named but not assumptions", () => {
   const ids = DRIVER_DEFS.map((d) => d.id);
   assert.deepEqual(ids, ["throughput_week", "first_pass_yield", "scrap_rate", "rework_rate", "capacity_factor", "unit_cost", "tokens_per_run"]);
-  assert.equal(DRIVER_DEFS.find((d) => d.id === "rework_rate").assumption, true);
+  // Backed by the registry metric of the same name since #106.
+  assert.equal(DRIVER_DEFS.find((d) => d.id === "rework_rate").assumption, false);
+  assert.equal(DRIVER_DEFS.find((d) => d.id === "rework_rate").metric, "rework_rate");
   assert.equal(DRIVER_DEFS.find((d) => d.id === "capacity_factor").assumption, true);
   // unit_cost/tokens_per_run *name* a registry metric (design §12.6) -- they
   // are unavailable, not bare assumptions, the same distinction

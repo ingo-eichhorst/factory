@@ -1204,14 +1204,13 @@ pub fn driver_defs() -> Vec<DriverDef> {
         DriverDef {
             id: "rework_rate",
             title: "Rework rate",
-            description: "No registry metric backs this one directly: `first_pass_yield` is `first_pass/finished` \
-                           (done and not rework), a different count from `reworked` (a re-attempt of work that \
-                           did not succeed -- see `production.rs`'s `is_rework`, not `attempt > 1`), so \
-                           `rework_rate` is a deliberately separate, author-supplied assumption rather than a \
-                           computation off either -- never confused with a registry-derived number.",
+            description: "reworked/finished, over the trailing 28 days -- the same registry metric of the \
+                           same name (a re-attempt of work that did not succeed, `production.rs`'s \
+                           `is_rework`, not `attempt > 1`). Not `1 - first_pass_yield`: a run scrapped first \
+                           time round is neither.",
             unit: "ratio",
-            assumption: true,
-            metric: None,
+            assumption: false,
+            metric: Some("rework_rate"),
         },
         DriverDef {
             id: "capacity_factor",
@@ -1227,7 +1226,7 @@ pub fn driver_defs() -> Vec<DriverDef> {
         // records no model, tokens or cost yet (design §12.6), exactly
         // `metrics::resolve`'s own `unit_cost`/`tokens_per_run` entries.
         // `assumption: false`, not `true`: these *do* name a registry
-        // metric, unlike `rework_rate`/`capacity_factor` -- they are simply
+        // metric, unlike `capacity_factor` -- they are simply
         // not computable from it yet. `validate_scenario` refuses a
         // relative override against either (`FindingKind::UnavailableDriver`);
         // only `=N`, a pure assumption needing no baseline, survives.
