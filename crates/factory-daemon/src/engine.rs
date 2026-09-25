@@ -48,7 +48,9 @@ impl Due {
         Self { queued_at: Utc::now(), scheduled_for: None }
     }
 
-    /// A schedule's own slot: due at the slot, and that slot is what fired it.
+    /// A schedule's own slot, queued at the slot itself. `Engine::due_for`
+    /// starts from this and moves `queued_at` past any time the slot could
+    /// not have been dispatched in.
     pub fn slot(slot: chrono::DateTime<Utc>) -> Self {
         Self { queued_at: slot, scheduled_for: Some(slot) }
     }
@@ -70,6 +72,27 @@ enum SkipReason {
     StillActive,
     /// Nothing was running: the daemon was not there to fire it.
     NotRunning,
+}
+
+/// When an attempt due at `due` could first have been dispatched: not
+/// before the daemon was up to dispatch it (`booted_at`), and not before
+/// the task's previous run -- if it was still going at `due` -- ended, since
+/// only a pending task fires. The time between `due` and this is lateness
+/// (`started_at - scheduled_for` measures it for a slot), not queue wait.
+/// A host asleep with the daemon still running leaves no record, so that
+/// stretch still reads as queue wait.
+fn dispatchable_from(
+    due: chrono::DateTime<Utc>,
+    booted_at: chrono::DateTime<Utc>,
+    previous: Option<&Run>,
+) -> chrono::DateTime<Utc> {
+    let mut from = due.max(booted_at);
+    if let Some(run) = previous {
+        if let Some(end) = run.ended_at.filter(|end| run.started_at <= due && *end > due) {
+            from = from.max(end);
+        }
+    }
+    from
 }
 
 /// `Engine::skip_reason`'s rule, apart from the store: the newest run was
@@ -168,6 +191,9 @@ pub struct Engine {
     pub bus: EventBus,
     pub factory_bin: PathBuf,
     started: Instant,
+    /// The wall-clock moment this daemon came up. A slot that fell before it
+    /// could not have been dispatched before it -- see `Engine::due_for`.
+    pub(crate) booted_at: chrono::DateTime<Utc>,
     interfaces: Vec<String>,
     /// The last liveness we wrote down for each session, so a poll that finds
     /// no change writes nothing. Lost on restart, which is right: after a
@@ -241,6 +267,7 @@ impl Engine {
             bus: EventBus::default(),
             factory_bin,
             started: Instant::now(),
+            booted_at: Utc::now(),
             interfaces,
             seen_status: Default::default(),
             site_walks: Default::default(),
@@ -1537,6 +1564,18 @@ impl Engine {
         // would make the resumed schedule's first regular firing claim to
         // be a retry of it (the stale-mirror problem `PendingRetry`
         // describes).
+        // A pause belongs to a schedule. Removing the schedule (without
+        // setting another in the same patch) takes the pause with it, or a
+        // schedule added later would sit paused with nobody having paused
+        // it -- and the UI's form clears the schedule on every save that
+        // leaves it empty.
+        let will_be_scheduled =
+            patch.schedule.is_some() || (!patch.clear_schedule && current.schedule.is_some());
+        let pause_dropped =
+            current.schedule_paused && !will_be_scheduled && patch.schedule_paused != Some(true);
+        if pause_dropped {
+            patch.schedule_paused = Some(false);
+        }
         let pause_change = match patch.schedule_paused {
             Some(paused) if paused != current.schedule_paused => Some(paused),
             // Saying what is already so changes nothing and journals
@@ -1548,10 +1587,12 @@ impl Engine {
             None => None,
         };
         if let Some(paused) = pause_change {
-            let schedule = if patch.clear_schedule {
-                None
-            } else {
-                patch.schedule.clone().or_else(|| current.schedule.clone())
+            // What the store will leave: it clears before it sets, so a
+            // patch carrying both ends up with the new schedule.
+            let schedule = match (&patch.schedule, patch.clear_schedule) {
+                (Some(s), _) => Some(s.clone()),
+                (None, true) => None,
+                (None, false) => current.schedule.clone(),
             };
             match (&schedule, paused) {
                 (None, true) => {
@@ -1588,12 +1629,33 @@ impl Engine {
 
         let task = self.store.update(id, &patch).await?;
         if let Some(paused) = pause_change {
-            let message = match (paused, task.next_run_at) {
-                (true, _) => "schedule paused; nothing fires until it is resumed".to_string(),
-                (false, Some(next)) => format!("schedule resumed; next firing at {}", next.to_rfc3339()),
-                (false, None) => "schedule resumed".to_string(),
+            // Journal what the store kept, not what was asked: an
+            // out-of-process store written before pausing existed takes the
+            // patch and quietly drops the field, and a journal saying
+            // "paused" over a schedule that still fires would be worse than
+            // the error.
+            if task.schedule_paused != paused {
+                return Err(FactoryError::adapter(
+                    self.store.name(),
+                    format!(
+                        "the task store did not keep schedule_paused = {paused}; it may predate \
+                         pausing schedules, so the schedule is unchanged"
+                    ),
+                ));
+            }
+            let (kind, message) = match (pause_dropped, paused, task.next_run_at) {
+                (true, _, _) => (
+                    "schedule_pause_cleared",
+                    "schedule removed, and its pause with it; a schedule added later fires".to_string(),
+                ),
+                (false, true, _) => {
+                    ("schedule_paused", "schedule paused; nothing fires until it is resumed".to_string())
+                }
+                (false, false, Some(next)) => {
+                    ("schedule_resumed", format!("schedule resumed; next firing at {}", next.to_rfc3339()))
+                }
+                (false, false, None) => ("schedule_resumed", "schedule resumed".to_string()),
             };
-            let kind = if paused { "schedule_paused" } else { "schedule_resumed" };
             self.entry(&task.id, TaskEntry::new("daemon", kind, message)).await;
         }
         self.bus.publish(Event::TaskUpdated { task: task.clone() });
@@ -2605,7 +2667,8 @@ impl Engine {
         };
         let now = Utc::now();
         if let Some(slot) = task.next_run_at {
-            if let Some(skipped) = schedule::skipped_between(s, slot, now) {
+            let tick = chrono::Duration::seconds(self.factory_snapshot().config.daemon.tick_seconds.max(1) as i64);
+            if let Some(skipped) = schedule::skipped_beyond_tick(s, slot, now, tick) {
                 let reason = self.skip_reason(task, skipped.first).await;
                 self.entry(
                     &task.id,
@@ -2648,6 +2711,19 @@ impl Engine {
             .await?;
         self.bus.publish(Event::TaskUpdated { task: updated });
         Ok(())
+    }
+
+    /// The `Due` for a scheduled firing (`scheduled: true`, `at` is the slot)
+    /// or a queued retry (`at` is when its backoff ran out): due at `at`,
+    /// queued from the moment it could first have been dispatched -- see
+    /// `dispatchable_from`. Read before `advance_schedule` or
+    /// `resume_from_retry` moves `next_run_at` on, and before the new run
+    /// exists, so the newest run is the previous one.
+    pub async fn due_for(&self, task: &Task, at: chrono::DateTime<Utc>, scheduled: bool) -> Due {
+        let previous = self.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
+        let mut due = if scheduled { Due::slot(at) } else { Due::retry(at) };
+        due.queued_at = dispatchable_from(at, self.booted_at, previous.as_ref());
+        due
     }
 
     /// Why the slots from `first` on passed without firing: the task's own
@@ -4717,6 +4793,117 @@ mod tests {
         assert_eq!(resumes, 1);
 
         std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    /// The review's regression: the task form clears an empty schedule on
+    /// every save, and a pause left behind on a task with no schedule held
+    /// back the next schedule anyone gave it.
+    #[tokio::test]
+    async fn clearing_a_paused_schedule_clears_the_pause_so_a_new_one_fires() {
+        let scope_dir = temp_dir("pause-clear");
+        let engine = test_engine(scope_dir.clone());
+        let task = weekly_task(&engine, None).await;
+        engine
+            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() })
+            .await
+            .unwrap();
+
+        let cleared = engine
+            .update(&task.id, TaskPatch { clear_schedule: true, ..Default::default() })
+            .await
+            .unwrap();
+        assert!(cleared.schedule.is_none());
+        assert!(!cleared.schedule_paused, "the pause went with the schedule");
+        let kinds: Vec<String> = engine.store.entries(&task.id, 50).await.unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&"schedule_pause_cleared".to_string()), "{kinds:?}");
+
+        let rescheduled = engine
+            .update(&task.id, TaskPatch { schedule: Some(Schedule::Every { seconds: 60 }), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(!rescheduled.schedule_paused);
+        // Due once its first slot comes round.
+        engine
+            .store
+            .update(&task.id, &TaskPatch { next_run_at: Some(Utc::now() - chrono::Duration::seconds(1)), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(engine.due_now().await.unwrap().iter().any(|t| t.id == task.id), "the new schedule fires");
+
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn replacing_a_paused_schedule_in_one_patch_keeps_it_paused() {
+        let scope_dir = temp_dir("pause-replace");
+        let engine = test_engine(scope_dir.clone());
+        let task = weekly_task(&engine, None).await;
+        engine
+            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() })
+            .await
+            .unwrap();
+        let replaced = engine
+            .update(
+                &task.id,
+                TaskPatch {
+                    clear_schedule: true,
+                    schedule: Some(Schedule::Every { seconds: 60 }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(replaced.schedule.is_some());
+        assert!(replaced.schedule_paused, "a schedule is still there, so the pause holds");
+
+        std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    #[test]
+    fn a_slot_is_queued_from_when_it_could_first_have_been_dispatched() {
+        let base = Utc::now();
+        let t = |m: i64| base - chrono::Duration::minutes(m);
+        let mut previous = Run {
+            id: "r".into(),
+            task_id: "t".into(),
+            attempt: 1,
+            status: RunStatus::Done,
+            trigger: Trigger::Schedule,
+            agent: "shell".into(),
+            adapter: "shell".into(),
+            worktree_path: None,
+            worktree_branch: None,
+            runtime: "herdr".into(),
+            session: None,
+            token: None,
+            result: None,
+            error: None,
+            started_at: t(90),
+            ended_at: Some(t(80)),
+            queued_at: None,
+            scheduled_for: None,
+            fail_kind: None,
+            blocked_since: None,
+            blocked_source: None,
+            block_suspected_since: None,
+            turn_ended_at: None,
+            turn_end_reason: None,
+        };
+        let slot = t(60);
+        let booted = t(1000);
+        // Nothing in the way: the slot itself.
+        assert_eq!(dispatchable_from(slot, booted, Some(&previous)), slot);
+        assert_eq!(dispatchable_from(slot, booted, None), slot);
+        // The daemon came up after the slot: from then.
+        assert_eq!(dispatchable_from(slot, t(30), None), t(30));
+        // The previous run was still going at the slot: from its end.
+        previous.ended_at = Some(t(40));
+        assert_eq!(dispatchable_from(slot, booted, Some(&previous)), t(40));
+        // Both: whichever came later.
+        assert_eq!(dispatchable_from(slot, t(20), Some(&previous)), t(20));
+        // A previous run that started after the slot did not hold it up.
+        previous.started_at = t(50);
+        assert_eq!(dispatchable_from(slot, booted, Some(&previous)), slot);
     }
 
     #[tokio::test]

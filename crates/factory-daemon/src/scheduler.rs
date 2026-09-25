@@ -7,7 +7,7 @@ use factory_core::run::{FailKind, RunStatus, Trigger};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::engine::{Due, Engine};
+use crate::engine::Engine;
 
 pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     let factory = engine.factory_snapshot();
@@ -46,10 +46,12 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                     // when this run became due, and -- for the schedule's own
                     // firing -- the slot that fired it.
                     let slot = task.next_run_at.unwrap_or_else(Utc::now);
-                    let (trigger, due, advanced) = if task.pending_retry.is_some() {
-                        (Trigger::Retry, Due::retry(slot), engine.resume_from_retry(&task).await)
+                    let retry = task.pending_retry.is_some();
+                    let due = engine.due_for(&task, slot, !retry).await;
+                    let (trigger, advanced) = if retry {
+                        (Trigger::Retry, engine.resume_from_retry(&task).await)
                     } else {
-                        (Trigger::Schedule, Due::slot(slot), engine.advance_schedule(&task).await)
+                        (Trigger::Schedule, engine.advance_schedule(&task).await)
                     };
                     if let Err(e) = advanced {
                         tracing::warn!(task = %task.id, "could not advance schedule: {e}");
