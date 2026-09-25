@@ -1901,7 +1901,8 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
 .ops-p85 { stroke: var(--wait); }
 .ops-p95 { stroke: var(--fault); }
 .ops-plabel {
-  position: absolute; right: 4px; transform: translateY(-100%); padding-bottom: 1px;
+  position: absolute; right: 4px; transform: translateY(-50%); padding: 0 3px;
+  background: var(--sunk); border-radius: 2px;
   font: 400 9.5px/1 var(--mono); color: var(--muted); pointer-events: none; white-space: nowrap;
 }
 .ops-xaxis { position: relative; height: 16px; margin: 3px 0 0 36px; font: 400 9.5px/1.4 var(--mono); color: var(--faint); }
@@ -1969,6 +1970,12 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
   .ops-row .ops-acts { flex-basis: 100%; padding-left: 17px; }
   .ops-card .stn .nm { flex-basis: 110px; }
   .ops-mults { grid-template-columns: 1fr 1fr; }
+  /* A five-column schedule table does not fit a phone; each row becomes a
+     small card instead of a strip to scroll sideways. */
+  .ops-sched thead { display: none; }
+  .ops-sched tr { display: block; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
+  .ops-sched tr:last-child { border-bottom: 0; }
+  .ops-sched td { display: block; border: 0; padding: 2px 4px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .ops-dot { transition: none; }

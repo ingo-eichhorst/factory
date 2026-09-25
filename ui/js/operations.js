@@ -216,7 +216,7 @@ function attentionRowHtml(r) {
       <div class="ops-head"><span class="ops-kind k-${esc(r.severity)}">${esc(r.label)}</span>${flag}
         <b>${esc(who)}</b>${r.scope ? `<span class="sub">${esc(r.scope)}</span>` : ""}</div>
       <div class="ops-reason">${esc(r.reason)}</div>
-      ${r.alsoLabels.length ? `<div class="sub">also ${esc(r.alsoLabels.join(", "))}</div>` : ""}
+      ${r.alsoLabels.length ? `<div class="sub">also ${esc(r.alsoLabels.join(", "))}${(r.also || []).includes("suspected_stuck") ? ` <span class="ops-suspect">(may be stuck is a suspicion, not a status)</span>` : ""}</div>` : ""}
     </div>
     <span class="it-age" title="since ${esc(utcStamp(r.since))}">${esc(fmtAge(r.age))}</span>
     ${r.actions && r.actions.length ? `<div class="ops-acts">${actionButtons(r, r.actions)}</div>` : ""}
@@ -300,7 +300,7 @@ function agingChartHtml(group, elapsed) {
   const grid = g.ticks.map((t) => `<line x1="0" x2="100" y1="${t.y.toFixed(1)}" y2="${t.y.toFixed(1)}" class="ops-grid"/>`).join("");
   const cols = g.columns.slice(1).map((c) => `<line x1="${c.x}" x2="${c.x}" y1="0" y2="240" class="ops-grid"/>`).join("");
   const yLabels = g.ticks.map((t) => `<span style="top:${t.y.toFixed(1)}px">${esc(t.label)}</span>`).join("");
-  const lineLabels = g.lines.map((l) => `<span class="ops-plabel" style="top:${l.y.toFixed(1)}px">${esc(l.name)} ${esc(fmtAge(l.v))}</span>`).join("");
+  const lineLabels = g.lines.map((l) => `<span class="ops-plabel" style="top:${l.labelY.toFixed(1)}px">${esc(l.name)} ${esc(fmtAge(l.v))}</span>`).join("");
   const dots = g.dots.map((d) => {
     const pace = d.pace ? PACE_LABELS[d.pace] : "no pace";
     const title = `${d.title} · ${d.stage} ${fmtAge(d.age)} · ${pace} (${basisText(d.basis)})`;
@@ -373,7 +373,7 @@ function scatterHtml(cur) {
   const lines = g.lines.map((l) => `<line x1="0" x2="100" y1="${l.y.toFixed(1)}" y2="${l.y.toFixed(1)}" class="ops-pline ops-${l.name}"/>`).join("");
   const grid = g.ticks.map((t) => `<line x1="0" x2="100" y1="${t.y.toFixed(1)}" y2="${t.y.toFixed(1)}" class="ops-grid"/>`).join("");
   const yLabels = g.ticks.map((t) => `<span style="top:${t.y.toFixed(1)}px">${esc(t.label)}</span>`).join("");
-  const lineLabels = g.lines.map((l) => `<span class="ops-plabel" style="top:${l.y.toFixed(1)}px">${esc(l.name)} ${esc(fmtAge(l.v))}</span>`).join("");
+  const lineLabels = g.lines.map((l) => `<span class="ops-plabel" style="top:${l.labelY.toFixed(1)}px">${esc(l.name)} ${esc(fmtAge(l.v))}</span>`).join("");
   const title = (d) => {
     const t = state.tasks.get(d.task_id);
     return `${t ? t.title : d.task_id.slice(0, 8)} · ${fmtAge(d.cycle_s)} · ended ${utcStamp(d.ended_at)}`;
@@ -403,7 +403,7 @@ function cfdHtml(cur) {
   const table = tableBlock("Cumulative flow as a table", ["Step ending", "Finished (cum.)", "In progress", "Waiting"],
     g.stacks.map((s) => [esc(utcStamp(s.to)), String(s.done), String(s.progress - s.done), String(s.waiting - s.progress)]));
   return `<div class="chleg">${legend}</div>
-    <div class="ops-plot-row"><div class="ops-yaxis"><span style="top:0">${g.max}</span><span style="top:180px">0</span></div>
+    <div class="ops-plot-row"><div class="ops-yaxis"><span style="top:6px">${g.max}</span><span style="top:174px">0</span></div>
       <div class="ops-plot" style="height:180px"><svg viewBox="0 0 100 180" preserveAspectRatio="none" role="img"
         aria-label="Cumulative flow: finished, in progress and waiting at the end of each day of the window">${bands}</svg></div></div>
     <div class="ops-xaxis"><span style="left:0;transform:none">${esc(dayLabel(cur.window.from))}</span><span style="left:100%;transform:translateX(-100%)">now</span></div>
@@ -567,18 +567,18 @@ export function openActionDialog(action, row) {
       </div>
     </div>`);
   const values = () => ({ reason: $("oa-reason").value, text: needsText ? $("oa-text").value : "" });
-  const confirm = $("oa-confirm");
-  const sync = () => { confirm.disabled = !actionReady(action, values()); };
+  const go = $("oa-confirm");
+  const sync = () => { go.disabled = !actionReady(action, values()); };
   for (const id of ["oa-reason", "oa-text"]) { const el = $(id); if (el) el.oninput = sync; }
   sync();
   $("oa-close").onclick = closeModal;
   $("oa-cancel").onclick = closeModal;
   (needsText ? $("oa-text") : $("oa-reason")).focus();
-  confirm.onclick = async () => {
+  go.onclick = async () => {
     const req = actionRequest(action, row, values());
     if (!req) return;
     $("oa-err").textContent = "";
-    confirm.disabled = true;
+    go.disabled = true;
     try {
       await api(req.path, { method: req.method, body: JSON.stringify(req.body) });
       closeModal();

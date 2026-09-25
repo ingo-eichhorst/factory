@@ -381,12 +381,16 @@ const LOG_TICKS = [
   [86400, "1d"], [7 * 86400, "7d"], [30 * 86400, "30d"],
 ];
 
-/// A log scale over seconds, floored at ten seconds -- a task that became
-/// due a moment ago has an age of nearly nothing, and log(0) is not a
-/// place on a chart.
+/// A log scale over seconds. Its floor is the tick at or below half the
+/// smallest value, never under ten seconds -- a task that became due a
+/// moment ago has an age of nearly nothing, and log(0) is not a place on a
+/// chart -- so a chart of hour-long runs does not spend most of its height
+/// on the seconds nobody is in.
 export function logScale(values, height, pad = 0) {
-  const floor = 10;
-  const top = Math.max(60, ...values.filter(Number.isFinite)) * 1.6;
+  const finite = values.filter((v) => Number.isFinite(v) && v > 0);
+  const least = finite.length ? Math.min(...finite) / 2 : 10;
+  const floor = Math.max(10, ...LOG_TICKS.map(([v]) => v).filter((v) => v <= least));
+  const top = Math.max(floor * 6, ...finite) * 1.6;
   const lo = Math.log10(floor);
   const hi = Math.log10(top);
   const y = (v) => {
@@ -394,7 +398,22 @@ export function logScale(values, height, pad = 0) {
     return pad + (1 - t) * (height - 2 * pad);
   };
   const ticks = LOG_TICKS.filter(([v]) => v >= floor && v <= top).map(([v, label]) => ({ v, label, y: y(v) }));
-  return { y, ticks, top };
+  return { y, ticks, top, floor };
+}
+
+/// Label positions for lines drawn at `ys` (any order), each at least
+/// `gap` apart, pushed apart from the middle out so they neither overlap
+/// nor stray far from their own line. Returned in the order given.
+export function spreadLabels(ys, gap) {
+  const order = ys.map((y, i) => ({ y, i })).sort((a, b) => a.y - b.y);
+  const placed = order.map((o) => o.y);
+  for (let k = 1; k < placed.length; k++) placed[k] = Math.max(placed[k], placed[k - 1] + gap);
+  // Centre the block on where the lines really are, so a tight cluster
+  // spreads both ways rather than only downward.
+  const shift = placed.length ? (placed.reduce((a, b) => a + b, 0) - order.reduce((a, o) => a + o.y, 0)) / placed.length : 0;
+  const out = new Array(ys.length);
+  order.forEach((o, k) => { out[o.i] = placed[k] - shift; });
+  return out;
 }
 
 /// Vacanti's Aging WIP chart for one scope: stage on x, age on a log y,
@@ -419,6 +438,8 @@ export function agingGeometry(items, lines, elapsedS = 0, { width = 600, height 
   const pLines = lines
     ? [["p50", lines.p50], ["p70", lines.p70], ["p85", lines.p85], ["p95", lines.p95]].map(([name, v]) => ({ name, v, y: scale.y(v) }))
     : [];
+  const labelY = spreadLabels(pLines.map((l) => l.y), 11);
+  pLines.forEach((l, i) => { l.labelY = labelY[i]; });
   const columns = STAGES.map((s, i) => ({ stage: s, x: i * colW, w: colW, cx: (i + 0.5) * colW }));
   return { width, height, dots, lines: pLines, ticks: scale.ticks, columns };
 }
@@ -536,7 +557,11 @@ export function scatterGeometry(finishedRuns, window, health, { width = 600, hei
     width,
     height,
     ticks: scale.ticks,
-    lines: lines.map((l) => ({ ...l, y: scale.y(l.v) })),
+    lines: (() => {
+      const placed = lines.map((l) => ({ ...l, y: scale.y(l.v) }));
+      const labelY = spreadLabels(placed.map((l) => l.y), 11);
+      return placed.map((l, i) => ({ ...l, labelY: labelY[i] }));
+    })(),
     dots: done.map((r) => ({ ...r, cx: ((Date.parse(r.ended_at) - from) / span) * width, cy: scale.y(r.cycle_s) })),
     empty: !done.length,
   };
