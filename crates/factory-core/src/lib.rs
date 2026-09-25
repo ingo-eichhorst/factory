@@ -15,6 +15,7 @@ pub mod goals;
 pub mod knowledge;
 pub mod metrics;
 pub mod occupancy;
+pub mod operations;
 pub mod policy;
 pub mod policy_export;
 pub mod protocol;

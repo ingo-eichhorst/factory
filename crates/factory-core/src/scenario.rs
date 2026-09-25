@@ -912,7 +912,7 @@ pub fn seed_from(parts: &[&str]) -> u64 {
 /// `p * (len - 1)` is monotone in `p`, and rounding preserves monotonicity
 /// -- which is what keeps p10 <= p50 <= p90 a guarantee rather than a
 /// coincidence of the data (pinned directly by a test below).
-fn nearest_rank(len: usize, p: f64) -> usize {
+pub(crate) fn nearest_rank(len: usize, p: f64) -> usize {
     if len == 0 {
         return 0;
     }
