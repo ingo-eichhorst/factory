@@ -208,7 +208,7 @@ test("cycles are reported with the node titles, not just their ids", () => {
 // ---------------------------------------------------------- status overlays
 
 test("every node status (the issue's 8 visual categories, 9 enum values since pending and dispatching share one) maps to its own class, and an unknown one is neutral", () => {
-  assert.equal(NODE_STATUSES.length, 9, "9 WorkflowNodeStatus variants");
+  assert.equal(NODE_STATUSES.length, 10, "10 WorkflowNodeStatus variants (verifying: #118)");
   const classes = new Set(NODE_STATUSES.map(nodeStatusClass));
   assert.equal(classes.size, NODE_STATUSES.length, "no two statuses share a class");
   assert.equal(nodeStatusClass("done"), "wf-s-done");

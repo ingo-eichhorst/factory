@@ -67,7 +67,9 @@ const KANBAN_COLUMNS = [
 function columnFor(t) {
   if (t.status === "blocked") return "blocked";
   if (t.status === "pending") return t.schedule ? "scheduled" : "manual";
-  if (t.status === "dispatching" || t.status === "running") return "active";
+  // `verifying` is still in progress: the agent said done and the daemon is
+  // running the steps its control plan requires (`#118`).
+  if (t.status === "dispatching" || t.status === "running" || t.status === "verifying") return "active";
   return "closed";
 }
 

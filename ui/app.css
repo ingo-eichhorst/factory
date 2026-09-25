@@ -210,7 +210,7 @@ tr.row:hover { background: var(--panel-2); }
   background: none;
 }
 .s-pending { color: var(--muted); }
-.s-dispatching, .s-running { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
+.s-dispatching, .s-running, .s-verifying { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
 .s-blocked { color: var(--signal); border-color: transparent; background: var(--signal-wash); }
 .s-done { color: var(--run); border-color: transparent; background: var(--run-wash); }
 .s-failed, .s-cancelled { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
@@ -914,6 +914,9 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
   box-shadow: 0 0 0 1px var(--run), 0 5px 16px rgba(0,0,0,.18);
 }
 .workflow-node.wf-s-blocked { border-left: 3px solid var(--wait); background: var(--wait-wash); }
+/* `#118`: a task node whose done is being checked, or a gate running. Dotted,
+   so it reads apart from running's solid accent without relying on hue. */
+.workflow-node.wf-s-verifying { border-left: 3px dotted var(--run); background: var(--run-wash); }
 .workflow-node.wf-s-done { border-left: 4px solid var(--run); background: var(--run-wash); }
 .workflow-node.wf-s-failed {
   border-left: 3px solid var(--fault); background:
@@ -932,6 +935,7 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 .wf-badge.wf-s-pending, .wf-badge.wf-s-dispatching { color: var(--signal); border-color: transparent; background: var(--signal-wash); }
 .wf-badge.wf-s-running { color: var(--run); border-color: transparent; background: var(--run-wash); font-weight: 700; }
 .wf-badge.wf-s-blocked { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
+.wf-badge.wf-s-verifying { color: var(--run); border-color: transparent; background: var(--run-wash); }
 .wf-badge.wf-s-done { color: var(--run); border-color: transparent; background: var(--run-wash); }
 .wf-badge.wf-s-failed { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
 .wf-badge.wf-s-cancelled { color: var(--fault); border-color: transparent; background: var(--fault-wash); opacity: .7; }
