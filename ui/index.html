@@ -46,7 +46,7 @@
     <span class="lv-n">Overview</span><span class="lv-name">Dashboard</span><span class="lv-sub">Site, activity and inbox</span>
   </button>
   <button id="lv-dir" class="lvl" data-level="dir" data-lv="6">
-    <span class="lv-n">L6</span><span class="lv-name">Direction</span><span class="lv-sub">Goals, policy, budget</span>
+    <span class="lv-n">L6</span><span class="lv-name">Direction</span><span class="lv-sub">Goals, policy, scenarios</span>
   </button>
   <button id="lv-imp" class="lvl" data-level="imp" data-lv="5">
     <span class="lv-n">L5</span><span class="lv-name">Improvement</span><span class="lv-sub">Benchmarks and knowledge</span>
@@ -76,6 +76,7 @@
   <button id="tab-inbox">Inbox</button>
   <button id="tab-goals" hidden>Goals</button>
   <button id="tab-policy" hidden>Policy</button>
+  <button id="tab-scenarios" hidden>Scenarios</button>
   <button id="tab-tasks" hidden>Tasks</button>
   <button id="tab-workflows" hidden>Workflows</button>
   <button id="tab-occupancy" hidden>Occupancy</button>
@@ -230,6 +231,49 @@
       <h3>Findings</h3>
       <div id="policy-findings"></div>
       <div class="empty" id="policy-no-findings" hidden>No findings.</div>
+    </section>
+  </div>
+
+  <div id="view-scenarios" hidden>
+    <div class="bar">
+      <h2>Scenarios</h2>
+      <span class="sub" id="scn-count"></span>
+      <span class="sp"></span>
+      <button class="btn" id="scn-refresh">Refresh</button>
+    </div>
+    <p class="env-note" id="scn-scope-note"></p>
+    <p class="env-note">A scenario is an overlay evaluated in memory -- it never changes the real config. Exact
+      policy results are drawn as counts, never a band; every forecast is always a p10–p90 band, never a single
+      line. The two are never mixed into one number.</p>
+    <p class="env-note bad" id="scn-error" hidden></p>
+
+    <div class="scn-signposts" id="scn-signposts"></div>
+
+    <div class="seg" id="scn-mode">
+      <button type="button" class="on" data-mode="board">Board</button>
+      <button type="button" data-mode="workshop">Workshop</button>
+    </div>
+
+    <div id="scn-board-wrap">
+      <div class="scn-board" id="scn-board"></div>
+
+      <section style="margin-top:14px">
+        <h3>Delta table</h3>
+        <div id="scn-delta"></div>
+      </section>
+
+      <section style="margin-top:14px" id="scn-drivers"></section>
+
+      <section style="margin-top:14px" id="scn-matrix"></section>
+    </div>
+
+    <div id="scn-workshop-wrap" hidden>
+      <div id="scn-workshop"></div>
+    </div>
+
+    <section style="margin-top:14px">
+      <h3>Findings</h3>
+      <div id="scn-findings"></div>
     </section>
   </div>
 

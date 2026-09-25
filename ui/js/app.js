@@ -24,6 +24,7 @@ import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from
 import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
 import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
 import { loadGoals, reloadGoals, wireGoals } from "./goals.js";
+import { loadScenarios, reloadScenarios, wireScenarios } from "./scenarios.js";
 
 // ------------------------------------------------------------------ views
 //
@@ -52,6 +53,12 @@ const VIEWS = {
   // cached metric computations, re-read on every request, and a change only
   // ever arrives as `goals_changed` (a check-in), not on a clock.
   goals: { onShow: loadGoals },
+  // Not poll-free the same way: `loadScenarios` itself makes a second fetch
+  // (`GET /api/metrics?ids=…`, for the titles a signpost strip needs) and
+  // seeds the driver panel with one `POST /api/scenarios/whatif` call, so
+  // this is a heavier `onShow` than its two neighbours -- still no poll,
+  // since nothing here changes on a clock either.
+  scenarios: { onShow: loadScenarios },
   activity: {
     onShow: () => { if (!activityStarted) { initActivity(); activityStarted = true; } },
     tail: { write: activityFilter, read: ([f]) => setActivityFilter(f || "all") },
@@ -179,7 +186,7 @@ const LEVEL_VIEWS = {
   // Goals first, then Policy: Direction reads vision through rules -- the
   // long-term frame and this cycle's objectives before the control
   // catalogue that holds the company to what it already committed to.
-  dir: ["goals", "policy"],
+  dir: ["goals", "policy", "scenarios"],
   proc: ["tasks", "workflows"],
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets"],
@@ -280,6 +287,11 @@ function rerender(route) {
   // Same reason again: which objectives and roadmap items belong to a scope
   // is the daemon's own filter (`GET /api/goals?scope=`).
   else if (state.tab === "goals") loadGoals();
+  // Same reason again: `GET /api/scenarios?scope=` narrows the baseline and
+  // every scenario's own policy delta to the asked subtree -- the one
+  // exception is the driver panel's own `POST /api/scenarios/whatif`, which
+  // carries no scope at all (`driverPanelHtml`'s own caption says so).
+  else if (state.tab === "scenarios") loadScenarios();
   // Both L2 tabs answer to the rail. Secrets narrows only the rows that
   // belong to a scope: a credential in the owner's home belongs to none of
   // them and is reachable from all of them, so it survives every selection.
@@ -508,6 +520,7 @@ async function boot() {
   wireRoles();
   wirePolicy();
   wireGoals();
+  wireScenarios();
   $("environment-refresh").onclick = () => refreshEnvironment();
   $("secrets-refresh").onclick = () => refreshEnvironment();
   $("benchmarks-refresh").onclick = () => {
@@ -647,6 +660,14 @@ function onEvent(ev) {
   // result detail modal, if one happens to be open on the checked-in key
   // result.
   if (ev.type === "goals_changed" && state.tab === "goals") reloadGoals();
+  // A scenario's own policy delta and goal-scenario probabilities are read
+  // off the same live evidence and check-ins those two events already name;
+  // `reloadScenarios` is a full reload (the forecast itself is a Monte Carlo
+  // draw the daemon has to recompute, not a client-side re-render), so this
+  // deliberately does not also answer to `run_updated`/`task_created` --
+  // Refresh covers those, the same restraint the Scenarios tab's own `onShow`
+  // comment explains.
+  if ((ev.type === "policy_changed" || ev.type === "goals_changed") && state.tab === "scenarios") reloadScenarios();
 }
 
 /// The site's halls are built from `state.scopes`, which only the Roster view

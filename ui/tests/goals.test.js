@@ -21,7 +21,10 @@ test("L6 Direction's Goals tab exists, is ordered before Policy, and is wired to
   const tabGoals = page.indexOf('id="tab-goals"');
   const tabPolicy = page.indexOf('id="tab-policy"');
   assert.ok(tabGoals > 0 && tabPolicy > 0 && tabGoals < tabPolicy, "Goals precedes Policy in the view-tab row");
-  assert.match(wiring, /dir:\s*\["goals",\s*"policy"\]/);
+  // Not anchored at the closing bracket: `dir` grows a trailing "scenarios"
+  // (#100) after this pair, and this assertion only cares that Goals still
+  // precedes Policy in it.
+  assert.match(wiring, /dir:\s*\["goals",\s*"policy"/);
   assert.match(wiring, /goals:\s*\{\s*onShow:\s*loadGoals\s*\}/);
 });
 

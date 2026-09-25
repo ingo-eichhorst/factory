@@ -1573,3 +1573,239 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
 @media (max-width: 520px) {
   .goal-krs { grid-template-columns: 1fr; }
 }
+
+/* ====================================================== L6 Scenarios (#100)
+   Grids throughout, never a wrapping flex row: a card, a driver slider and a
+   2x2 quadrant all size themselves from `minmax(…, 1fr)` and collapse to one
+   column under their own width, with no manual breakpoint and no flex-basis
+   that would turn into a height once a row stacks (the Goals tab's own
+   lesson -- see `.goal-obj`'s note above). Every colour here is a theme
+   token, so both themes and a triggered signpost's glow stay honest; the
+   glow itself is guarded by `prefers-reduced-motion`, the same rule
+   `.goal-ring-fill`'s own transition follows just above. */
+
+.scn-signposts { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; margin: 14px 0; }
+.scn-signpost {
+  display: flex; align-items: flex-start; gap: 8px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 4px; padding: 7px 10px; min-width: 0;
+}
+.scn-signpost-title { font: 600 12px/1.3 var(--sans); color: var(--ink); }
+.scn-signpost-text { min-width: 0; }
+
+/* One light, reused for the strip and for a card's own row of them
+   (`.scn-lights`) -- a flex-shrink:0 circle, never a badge, so it never
+   stretches under a flex column the way a full-width badge would. */
+.scn-light {
+  flex: 0 0 auto; width: 10px; height: 10px; margin-top: 3px; border-radius: 50%;
+  background: var(--sunk); border: 1.5px solid var(--line);
+}
+/* A card's own signposts: a short label next to each light -- metric title
+   + state -- not a bare dot a mouse has to find and hover (visual QA). The
+   state colour still rides `.scn-light` itself (the dot), the same element
+   the strip above colours; the chip around it is a plain, wrapping pill so
+   a long metric title never pushes the card wider (`white-space: normal`,
+   matching `.scn-chip`'s own fix just below). */
+.scn-card-signposts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.scn-signpost-chip {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%; white-space: normal;
+  font: 500 10.5px/1.4 var(--sans); padding: 2px 8px 2px 6px; border-radius: 10px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2);
+}
+.scn-signpost-chip .scn-light { margin-top: 0; }
+.scn-sp-quiet { background: var(--run); border-color: var(--run); }
+.scn-sp-not_yet_active { background: transparent; border-color: var(--faint); border-style: dashed; }
+.scn-sp-no_data { background: transparent; border-color: var(--muted); border-style: dotted; }
+.scn-sp-triggered {
+  background: var(--fault); border-color: var(--fault); box-shadow: 0 0 0 3px var(--fault-wash);
+  animation: scn-pulse 1.8s ease-in-out infinite;
+}
+@keyframes scn-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--fault-wash); }
+  50% { box-shadow: 0 0 0 6px var(--fault-wash); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scn-sp-triggered { animation: none; box-shadow: 0 0 0 4px var(--fault-wash); }
+}
+
+.scn-board { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; margin: 14px 0; }
+.scn-card { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px 14px; min-width: 0; }
+.scn-card-baseline { border-left: 3px solid var(--lvl6); }
+.scn-card-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.scn-card-head h3 { margin: 0; font: 600 14px/1.3 var(--cond); color: var(--ink); }
+.scn-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.scn-chip {
+  display: inline-block; max-width: 100%; font: 500 10px/1.6 var(--sans); padding: 1px 8px; border-radius: 10px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2);
+  /* A KR-probability chip's reason text ("not modelled -- ratio key
+     results...") is a sentence, not a word -- `nowrap` pushed it past the
+     card's own edge (visual QA). Wrapping needs `max-width` to have
+     anything to wrap against; `inline-block` (not the row's own
+     `inline-flex`) is what makes that width apply at all. */
+  white-space: normal; word-break: break-word;
+}
+.scn-chip.scn-assumption { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
+/* An authored driver override with no baseline value to be relative to --
+   `apply_overrides` silently drops it server-side, with no `Finding` to say
+   so; a dashed border is this page's one honest flag for it (see
+   `driverOverrideChipsHtml`'s own doc comment in `scenarios.js`). */
+.scn-chip.scn-chip-dropped { border-style: dashed; border-color: var(--faint); color: var(--faint); text-decoration: line-through; }
+/* The short inline reason on a dropped chip -- not struck through itself
+   (it is the explanation, not the ignored value), and not part of the
+   `title` tooltip alone, which a mouse-only affordance leaves a keyboard or
+   touch user without. */
+.scn-chip-reason { text-decoration: none; opacity: .85; }
+.scn-assumptions { margin-top: 8px; font-size: 12px; }
+.scn-assumptions summary { cursor: pointer; color: var(--ink-2); font-weight: 500; }
+.scn-assumptions p { margin: 6px 0 0; color: var(--ink-2); }
+
+/* The fan chart: an SVG whose only geometry comes from `fanGeometry`
+   (`scenarios-model.js`) -- this file only paints what that function
+   already laid out. The band is never a single line (the issue's own
+   guardrail); the backlog line and the two completion markers are each
+   optional per `fanGeometry`'s own doc comment.
+
+   A fixed-height placeholder for the two states worth saying in words
+   rather than drawing a flat, empty-looking chart: `clearedAlready`
+   (nothing left in the backlog) and `noSignal` (no throughput history to
+   sample from) -- see `fanGeometry`'s own doc comment on how each is told
+   apart, and `fanChartSvg`'s in `scenarios.js`. */
+.scn-fan-empty {
+  height: 140px; margin-top: 8px; display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: 10px 16px; color: var(--muted); font-size: 11.5px; line-height: 1.4;
+  background: var(--sunk); border: 1px dashed var(--line-soft); border-radius: 4px;
+}
+
+/* The y-axis (max at top, 0 at bottom) and the plot are flex siblings in
+   one row, not an axis absolutely positioned over the plot: a percentage
+   `left`/`top` on an absolutely-positioned element resolves against its
+   nearest positioned ancestor's *padding* box, which would put a marker
+   label's `left: 50%` under the y-axis column instead of the chart's own
+   midpoint. Two plain flex children of equal, adjoining widths need no such
+   arithmetic -- `.scn-fan-plot` *is* exactly as wide as `.scn-fan` itself,
+   so a percentage of one is a percentage of the other. `.scn-fan-xaxis-row`
+   repeats the same `36px` y-axis width as an empty spacer so its own ticks
+   land under the plot, not under where the y-axis labels are. */
+.scn-fan-row { display: flex; align-items: stretch; gap: 6px; margin-top: 8px; }
+.scn-fan-yaxis {
+  flex: 0 0 36px; display: flex; flex-direction: column; justify-content: space-between;
+  font: 400 9px/1.15 var(--mono); color: var(--faint); text-align: right; padding: 1px 0;
+}
+/* "N items" wraps onto its own second line rather than overflowing the
+   36px column; "0" alone never needs to. */
+.scn-fan-yaxis span:first-child { white-space: normal; }
+.scn-fan-plot { position: relative; flex: 1 1 auto; min-width: 0; }
+.scn-fan { width: 100%; height: 140px; display: block; }
+.scn-fan-mlabel {
+  position: absolute; top: 2px; transform: translateX(-50%); white-space: nowrap; pointer-events: none;
+  font: 600 9px/1 var(--mono); padding: 1px 3px; border-radius: 2px; background: var(--canvas);
+}
+.scn-fan-mlabel-p50 { color: var(--signal); }
+.scn-fan-mlabel-p90 { color: var(--faint); }
+.scn-fan-xaxis-row { display: flex; gap: 6px; margin-top: 3px; }
+.scn-fan-xaxis-spacer { flex: 0 0 36px; }
+.scn-fan-xaxis { position: relative; flex: 1 1 auto; min-width: 0; height: 11px; font: 400 9.5px/1 var(--mono); color: var(--faint); }
+.scn-fan-xtick { position: absolute; top: 0; white-space: nowrap; }
+.scn-fan-xtick-left { transform: translateX(0); }
+.scn-fan-xtick-center { transform: translateX(-50%); }
+.scn-fan-xtick-right { transform: translateX(-100%); }
+
+.scn-fan-band { fill: var(--signal-wash); stroke: none; }
+.scn-fan-median { stroke: var(--signal); stroke-width: 1.6; }
+.scn-fan-backlog { stroke: var(--wait); stroke-width: 1.2; stroke-dasharray: 4 3; }
+/* A full-height vertical line, not a dot -- see `fanChartSvg`'s own comment
+   on why a small circle disappears once `preserveAspectRatio="none"`
+   squashes a 600-wide viewBox down to a card's own width. One dash pattern
+   distinguishes the two percentiles from each other and from the solid
+   backlog line above; neither is ever animated, so there is no clash with
+   `stroke-dasharray` doing double duty for a dash style and a progress
+   indicator on the same element (the Goals tab's own SVG lesson). */
+.scn-fan-marker { stroke-width: 1.4; }
+.scn-fan-marker-p50 { stroke: var(--signal); stroke-dasharray: 2 2; }
+.scn-fan-marker-p90 { stroke: var(--faint); stroke-dasharray: 1 2; }
+.scn-leg-band { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 1px; background: var(--signal-wash); border: 1px solid var(--signal); }
+.scn-leg-median { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 1px; background: var(--signal); }
+.scn-leg-backlog { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 1px; background: var(--wait); }
+
+.scn-example {
+  background: var(--sunk); border: 1px solid var(--line-soft); border-radius: 4px; padding: 10px 12px; margin: 8px 0;
+  overflow-x: auto; font: 400 11.5px/1.6 var(--mono); color: var(--ink-2); white-space: pre;
+}
+
+/* The delta table and the policy matrix's own scroll wrapper -- deliberately
+   its own class, not `.role-matrix`: that one is the Roles tab's grant
+   matrix, whose `thead th { height: 96px }` makes room for a rotated
+   column-header label (`writing-mode: vertical-rl` on a `<span>` neither of
+   these tables wraps its header text in). Reusing it left a tall, empty
+   block above two plain horizontal header rows (visual QA) -- this table
+   never rotates anything, so its own header gets an ordinary height. */
+.scn-table { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+.scn-table table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.scn-table th, .scn-table td { padding: 6px 9px; border-bottom: 1px solid var(--line-soft); text-align: left; }
+.scn-table thead th { vertical-align: bottom; font: 600 9.5px/1.3 var(--cond); letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+
+/* -------------------------------------------------------------- delta table
+   `exact: true` (a driver, the one v1 outcome, a framework's open+stale
+   count) is a plain number; `exact: false` (the forecast's completion week,
+   collapsed from its own band to p50/p90 for one cell) is tagged, so a
+   number here is never mistaken for a band and vice versa -- the issue's
+   "exact vs probabilistic, drawn differently" rule read into a table cell
+   rather than a chart. */
+.scn-band-tag { font: 500 9px/1 var(--cond); letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-left: 6px; }
+.scn-delta-table td.scn-delta { font: 500 12px/1.4 var(--mono); text-align: right; border-radius: 3px; }
+.scn-tone-good { color: var(--run); }
+.scn-tone-bad { color: var(--fault); }
+.scn-tone-flat { color: var(--muted); }
+.scn-tone-unknown { color: var(--faint); }
+.scn-tone-good.scn-mag-2, .scn-tone-good.scn-mag-3 { background: var(--run-wash); }
+.scn-tone-bad.scn-mag-2, .scn-tone-bad.scn-mag-3 { background: var(--fault-wash); }
+
+/* ------------------------------------------------------------- driver panel */
+.scn-driver-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
+.scn-driver-row {
+  display: flex; align-items: center; gap: 8px; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 4px; padding: 8px 10px;
+}
+.scn-driver-disabled { opacity: .7; flex-direction: column; align-items: flex-start; gap: 3px; }
+.scn-driver-label { flex: 1 1 auto; font: 500 12px/1.3 var(--sans); color: var(--ink); min-width: 0; }
+/* The browser's own default is blue in both themes, which clashes with
+   `--fault` red in light theme's own palette and matches neither theme's
+   `--signal` on purpose otherwise (visual QA). */
+.scn-driver-row input[type=range] { flex: 1 1 100px; accent-color: var(--signal); }
+.scn-driver-row output { font: 600 12px/1 var(--mono); color: var(--ink); min-width: 42px; text-align: right; }
+.scn-outcome { font: 500 13px/1.4 var(--sans); }
+.scn-outcome.scn-tone-good { color: var(--run); }
+.scn-outcome.scn-tone-bad { color: var(--fault); }
+
+/* Horizontal bars, labelled on the left of the same viewBox, sorted by span
+   descending server-side and again in `tornadoLayout` -- a driver whose
+   span is zero still draws (`scn-tornado-hairline`), a thin marker rather
+   than a vanished row. */
+.scn-tornado { width: 100%; height: auto; display: block; margin-top: 6px; }
+.scn-tornado-bar { fill: var(--signal); }
+.scn-tornado-hairline { fill: var(--faint); }
+.scn-tornado-label { font: 500 10.5px/1 var(--mono); fill: var(--ink-2); dominant-baseline: middle; }
+
+.scn-matrix-table td button.linklike { font: 500 12px/1 var(--mono); }
+
+/* --------------------------------------------------------------- workshop */
+.scn-axes-label { font: 600 11px/1 var(--cond); letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin: 14px 0 8px; }
+.scn-quadrants { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.scn-quadrant { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px; min-width: 0; }
+.scn-quadrant h4 { margin: 0 0 8px; font: 600 12px/1.3 var(--cond); text-transform: uppercase; letter-spacing: .04em; color: var(--ink-2); }
+.scn-narrative-card { background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
+.scn-narrative-card:last-child { margin-bottom: 0; }
+.scn-narrative-card .title { font: 500 12.5px/1.3 var(--sans); color: var(--ink); }
+.scn-pestle-group { margin: 6px 0 12px; }
+.scn-pestle-group ul { margin: 4px 0 0; padding-left: 18px; font-size: 12px; color: var(--ink-2); }
+
+.scn-findings { margin: 0; padding-left: 18px; font-size: 12px; color: var(--ink-2); }
+.scn-findings li { margin: 3px 0; }
+
+@media (max-width: 720px) {
+  /* No flex-basis to reset here -- every scn- layout above is already a
+     grid, which collapses to one column under its own `minmax` floor
+     without a manual breakpoint (the Goals tab's own fix for the same
+     class of bug, applied here by construction instead of after the fact). */
+  .scn-driver-row { flex-wrap: wrap; }
+  .scn-driver-row output { text-align: left; }
+}
