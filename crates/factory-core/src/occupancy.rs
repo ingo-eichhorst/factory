@@ -88,6 +88,12 @@ pub struct OccupancyRow {
     /// doing several things at once, which the chart says in so many words.
     #[serde(default)]
     pub live: u32,
+    /// Seconds of the window at least one run spent blocked, waiting for a
+    /// human: the union of the blocks' `segments`, clipped like
+    /// `busy_seconds`. Reported beside it, never taken out of it -- whether a
+    /// held slot that does no work counts as busy is the owner's call (#121).
+    #[serde(default)]
+    pub blocked_seconds: i64,
 }
 
 fn one_lane() -> u32 {
@@ -115,6 +121,24 @@ pub struct OccupancyBlock {
     /// estimate outline is drawn in the same one.
     #[serde(default)]
     pub lane: u32,
+    /// The stretches of the run spent blocked, from its journal. The block's
+    /// `status` is how the run ended; these say what it waited on on the way,
+    /// which the run record forgets once it ends. Empty for a run that never
+    /// blocked, and then left out of the payload altogether.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<OccupancySegment>,
+}
+
+/// Part of a run, by what it was doing then. Only `blocked` is recorded so far:
+/// the rest of the run is its block, in the block's own status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OccupancySegment {
+    pub status: String,
+    pub from: DateTime<Utc>,
+    /// Absent while the run is still blocked -- it runs to now, the same
+    /// convention as the block's own `to`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<DateTime<Utc>>,
 }
 
 /// A run that has not happened yet. The width is the median of what this task

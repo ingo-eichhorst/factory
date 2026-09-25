@@ -1,0 +1,7 @@
+event=PostToolUse
+pid=83806
+pwd=/Users/factory/business-factory/.factory/worktrees/d3f0b2f1-731d-48ca-b48f-705a26a5143a/ui
+plugin_root=/Users/factory/.claude/plugins/synced/af374685-2757-4f5d-b206-c44b52e297b1_8a86e3f7-0645-4bcd-b48b-d6b6376a4ced/irrlicht-cowork-hook-probe
+uname=Darwin factory 25.6.0 Darwin Kernel Version 25.6.0: Sat Jul 11 15:27:04 PDT 2026; root:xnu-12377.161.13~4/RELEASE_ARM64_T6050 arm64
+curl_status=7
+http_code=000

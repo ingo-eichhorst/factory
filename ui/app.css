@@ -604,6 +604,10 @@ a.role-origin:hover { color: var(--signal); border-color: var(--signal); }
 .blk.blocked { background: var(--signal); }
 .blk.run { z-index: 2; }
 .blk.run, .blk.estimate { top: calc(var(--lane, 0) * var(--lane-h)); }
+/* Time a run spent blocked (#121): a band along the foot of its bar, drawn
+   after it, so the bar still shows how the run ended and its title reads. */
+.blk.seg { z-index: 2; top: calc(var(--lane, 0) * var(--lane-h) + 10px); height: 5px; min-width: 1px; padding: 0; border-radius: 0 0 2px 2px; }
+.occ-wait { text-decoration: underline dotted var(--signal); text-underline-offset: 2px; cursor: help; }
 .blk.estimate {
   background: none; border: 2px dotted var(--wait); color: var(--wait); line-height: 11px; z-index: 1;
 }
