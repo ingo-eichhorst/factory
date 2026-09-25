@@ -102,8 +102,11 @@ function rememberSeen() {
   storageWrite(seenSnapshot(currentRows(), Date.now(), storageRead()));
 }
 
+/// Every scope's rows, whatever the rail says: the handover is about the
+/// whole line, and a snapshot taken under one selection and compared under
+/// another would call the other scopes' trouble new.
 function currentRows() {
-  return attentionRows(report, inScope, Date.now());
+  return attentionRows(report, null, Date.now());
 }
 
 // ------------------------------------------------------------------ loading
@@ -152,31 +155,33 @@ export function renderOperations() {
   }
   const now = Date.now();
   const rows = attentionRows(report, inScope, now);
-  // Keep the open `<details>` where the reader left them across a redraw.
+  // A live refetch redraws the whole tab; a table twin someone opened stays
+  // open across it (the scatter and the CFD keep their own flags, since
+  // they are only drawn once opened).
+  const openTables = new Set([...host.querySelectorAll("details.ops-table[open] > summary")].map((s) => s.textContent));
   host.innerHTML = `
-    ${sinceStripHtml(rows)}
+    ${sinceStripHtml()}
     ${attentionHtml(rows)}
     ${flowHtml()}
     ${agingHtml(now)}
     ${healthHtml()}
     ${schedulesHtml()}`;
+  for (const s of host.querySelectorAll("details.ops-table > summary")) {
+    if (openTables.has(s.textContent)) s.parentElement.open = true;
+  }
   wire(host, rows);
 }
 
 // --------------------------------------------------- since you last looked
 
-function sinceStripHtml(rows) {
-  const finishedRuns = ((report.health && report.health.current.finished_runs) || [])
-    .filter((r) => {
-      const t = state.tasks.get(r.task_id);
-      return t ? inScope(t.scope) : state.scope === null;
-    });
-  const d = sinceLastLooked(seenBaseline, rows, finishedRuns, report.health && report.health.current.window.from);
+function sinceStripHtml() {
+  const finishedRuns = (report.health && report.health.current.finished_runs) || [];
+  const d = sinceLastLooked(seenBaseline, currentRows(), finishedRuns, report.health && report.health.current.window.from);
   if (d.first) {
     return `<p class="ops-since">First look from this browser -- from the next visit this line says what changed since.</p>`;
   }
   const part = (n, one, many) => `<b>${n}</b> ${n === 1 ? one : many}`;
-  return `<p class="ops-since" title="Kept in this browser only; another browser or a private window starts fresh.">
+  return `<p class="ops-since" title="Every scope, whatever the rail selects. Kept in this browser only; another browser or a private window starts fresh.">
     Since you last looked (${esc(utcStamp(d.at))}): ${part(d.fresh, "new exception", "new exceptions")},
     ${part(d.resolved, "resolved", "resolved")}, ${part(d.finished, "run finished", "runs finished")}${d.beyondWindow ? ` <span class="sub">(finished counts only reach back ${esc(windowKey)})</span>` : ""}.</p>`;
 }
