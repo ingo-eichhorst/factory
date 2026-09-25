@@ -153,6 +153,7 @@ fn router(engine: Arc<Engine>) -> Router {
         // The L6 Quality attributes tab (`#107`).
         .route("/api/quality", get(quality))
         .route("/api/quality/remediate", post(quality_remediate))
+        .route("/api/operations", get(operations))
         .route("/api/benchmarks", get(benchmarks))
         .route("/api/datasets", get(list_datasets).post(create_dataset))
         .route("/api/datasets/{name}", get(get_dataset).delete(delete_dataset))
@@ -188,6 +189,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/tasks/{id}", delete(delete_task))
         .route("/api/tasks/{id}/run", post(run_task))
         .route("/api/tasks/{id}/cancel", post(cancel_task))
+        .route("/api/tasks/{id}/skip-next", post(skip_next_task))
         .route("/api/tasks/{id}/report", post(report_task))
         .route("/api/tasks/{id}/entries", get(task_entries))
         .route("/api/tasks/{id}/output", get(task_output))
@@ -207,6 +209,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/runs/{id}/entries", get(run_entries))
         .route("/api/runs/{id}/output", get(run_output))
         .route("/api/runs/{id}/input", post(run_input))
+        .route("/api/runs/{id}/answer", post(run_answer))
         .with_state(engine)
 }
 
@@ -711,6 +714,27 @@ struct ScenarioPromoteBody {
     agent: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+struct OperationsQuery {
+    scope: Option<String>,
+    /// `7d` or `30d`; anything else is refused before the engine sees it.
+    #[serde(default)]
+    window: factory_core::operations::HealthWindow,
+}
+
+/// `GET /api/operations?scope=&window=7d|30d` -- the L4 Operations tab's
+/// whole answer, the same report `factory stats` prints (`#106`).
+async fn operations(State(engine): State<Arc<Engine>>, Query(q): Query<OperationsQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::Operations {
+            scope: q.scope,
+            window: q.window,
+        },
+    )
+    .await
+}
+
 /// `POST /api/scenarios/promote` -- turn a scenario into real work. Answers
 /// `{"kind":"scenario_promote","result":{...}}`; `result.created` is the
 /// same task shape `POST /api/tasks`/`POST /api/policy/remediate` answer
@@ -965,24 +989,110 @@ async fn get_task(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> 
     run(&engine, Request::TaskGet { id }).await
 }
 
+/// The patch, with an optional `reason` beside its fields: why, for the
+/// journal, when the edit is one that journals -- pausing or resuming a
+/// schedule (`#106`). Kept out of `TaskPatch` itself, which a store applies.
+#[derive(serde::Deserialize)]
+struct PatchBody {
+    #[serde(flatten)]
+    patch: TaskPatch,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 async fn update_task(
     State(engine): State<Arc<Engine>>,
     Path(id): Path<String>,
-    Json(patch): Json<TaskPatch>,
+    Json(body): Json<PatchBody>,
 ) -> AxumResponse {
-    run(&engine, Request::TaskUpdate { id, patch }).await
+    run(
+        &engine,
+        Request::TaskUpdate {
+            id,
+            patch: body.patch,
+            reason: body.reason,
+        },
+    )
+    .await
 }
 
 async fn delete_task(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
     run(&engine, Request::TaskDelete { id }).await
 }
 
-async fn run_task(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
-    run(&engine, Request::TaskRun { id }).await
+/// An action's optional body: `{"reason": "..."}`, or nothing at all.
+#[derive(serde::Deserialize, Default)]
+struct ReasonBody {
+    #[serde(default)]
+    reason: Option<String>,
 }
 
-async fn cancel_task(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
-    run(&engine, Request::TaskCancel { id }).await
+/// The body of an action that may say why, and may say nothing -- read by
+/// hand rather than through `Option<Json<_>>`, which refuses the empty body
+/// the web UI sends with its JSON content type on every POST.
+fn reason_of(body: &[u8]) -> std::result::Result<Option<String>, String> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    serde_json::from_slice::<ReasonBody>(body)
+        .map(|b| b.reason)
+        .map_err(|e| format!("not a reason body: {e}"))
+}
+
+/// A body refused before the engine saw it, in the same envelope every
+/// other refusal comes back in -- `core.js`'s `api()` reads `message`.
+fn refused(why: String) -> AxumResponse {
+    let response = Response::Error { code: "bad_request".into(), message: why };
+    (StatusCode::BAD_REQUEST, Json(response)).into_response()
+}
+
+async fn run_task(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> AxumResponse {
+    match reason_of(&body) {
+        Ok(reason) => run(&engine, Request::TaskRun { id, reason }).await,
+        Err(why) => refused(why),
+    }
+}
+
+async fn cancel_task(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> AxumResponse {
+    match reason_of(&body) {
+        Ok(reason) => run(&engine, Request::TaskCancel { id, reason }).await,
+        Err(why) => refused(why),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SkipBody {
+    #[serde(default)]
+    reason: Option<String>,
+    /// The `next_run_at` the caller means to skip; see `Request::TaskSkipNext`.
+    #[serde(default)]
+    slot: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// `POST /api/tasks/{id}/skip-next` -- pass over the schedule's next slot.
+/// Body `{reason?, slot?}`, or none at all.
+async fn skip_next_task(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> AxumResponse {
+    let parsed = if body.iter().all(u8::is_ascii_whitespace) {
+        Ok(SkipBody::default())
+    } else {
+        serde_json::from_slice::<SkipBody>(&body).map_err(|e| format!("not a skip body: {e}"))
+    };
+    match parsed {
+        Ok(b) => run(&engine, Request::TaskSkipNext { id, reason: b.reason, slot: b.slot }).await,
+        Err(why) => refused(why),
+    }
 }
 
 async fn report_task(
@@ -1333,6 +1443,29 @@ async fn run_input(
     .await
 }
 
+#[derive(serde::Deserialize)]
+struct AnswerBody {
+    text: String,
+    reason: String,
+}
+
+/// `POST /api/runs/{id}/answer` -- `{text, reason}`, both required.
+async fn run_answer(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<AnswerBody>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::RunAnswer {
+            id,
+            text: body.text,
+            reason: body.reason,
+        },
+    )
+    .await
+}
+
 async fn ws_upgrade(State(engine): State<Arc<Engine>>, ws: WebSocketUpgrade) -> AxumResponse {
     ws.on_upgrade(move |socket| ws_stream(engine, socket))
 }
@@ -1483,9 +1616,13 @@ async fn ws_stream(engine: Arc<Engine>, socket: WebSocket) {
 mod tests {
     //! The routes themselves, over a real socket: the router served on an
     //! ephemeral loopback port and spoken to in plain HTTP/1.1, so a route
-    //! test needs no client crate beyond tokio.
+    //! test needs no client crate beyond tokio. For the Operations routes
+    //! the query string and the optional reason body are what this file
+    //! adds, so they are what is checked here -- the report itself is
+    //! `operations.rs`'s to test.
 
     use super::*;
+    use factory_core::adapter::TaskStore;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
@@ -1564,5 +1701,106 @@ mod tests {
         let (status, json) = request(engine, "POST", "/api/quality/remediate", Some(body)).await;
         assert_eq!(status, 400, "{json}");
         assert!(json["message"].as_str().unwrap_or_default().contains("already met"), "{json}");
+    }
+
+    async fn serve() -> std::net::SocketAddr {
+        let root = std::env::temp_dir().join(format!("factory-http-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+            scope: None,
+            scopes: vec![serde_yaml_ng::from_str("id: demo-id\nname: demo\npath: .\n").unwrap()],
+            roles: Default::default(),
+            policies: Default::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(engine)).await.unwrap() });
+        addr
+    }
+
+    /// One HTTP/1.1 request, `Connection: close`; the status code and body.
+    async fn call(addr: std::net::SocketAddr, method: &str, path: &str, content_type: bool, body: &str) -> (u16, String) {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let ct = if content_type { "Content-Type: application/json\r\n" } else { "" };
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n{ct}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).await.unwrap();
+        let code = raw.split(' ').nth(1).unwrap().parse().unwrap();
+        let body = raw.split("\r\n\r\n").nth(1).unwrap_or_default().to_string();
+        (code, body)
+    }
+
+    #[tokio::test]
+    async fn the_operations_route_answers_the_report_for_either_window_and_refuses_another() {
+        let addr = serve().await;
+        let (code, body) = call(addr, "GET", "/api/operations", false, "").await;
+        assert_eq!(code, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["data"]["kind"], "operations", "{body}");
+        assert_eq!(v["data"]["report"]["health"]["window"], "7d");
+
+        let (code, body) = call(addr, "GET", "/api/operations?scope=demo&window=30d", false, "").await;
+        assert_eq!(code, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["data"]["report"]["health"]["window"], "30d");
+        assert_eq!(v["data"]["report"]["scope"], "demo");
+
+        let (code, _) = call(addr, "GET", "/api/operations?window=9d", false, "").await;
+        assert_eq!(code, 400);
+        let (code, _) = call(addr, "GET", "/api/operations?scope=nowhere", false, "").await;
+        assert_eq!(code, 404, "an unknown scope is not an empty report");
+    }
+
+    #[tokio::test]
+    async fn run_and_cancel_take_an_empty_body_or_a_reason_and_refuse_anything_else() {
+        let addr = serve().await;
+        // The web UI's POST: a JSON content type and no body at all. It must
+        // reach the engine, which then says there is no such task.
+        let (code, body) = call(addr, "POST", "/api/tasks/nope/run", true, "").await;
+        assert_eq!(code, 404, "{body}");
+        let (_, body) = call(addr, "POST", "/api/tasks/nope/cancel", true, r#"{"reason":"wrong branch"}"#).await;
+        assert!(body.contains("no run to cancel"), "the engine answered, not the body parser: {body}");
+        let (code, body) = call(addr, "POST", "/api/tasks/nope/skip-next", false, "").await;
+        assert_eq!(code, 404, "{body}");
+        let (code, body) = call(addr, "POST", "/api/tasks/nope/run", true, "not json").await;
+        assert_eq!(code, 400);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("the error envelope, not bare text");
+        assert_eq!(v["status"], "error");
+        assert!(v["message"].as_str().unwrap().contains("not a reason body"), "{body}");
+        let (code, body) =
+            call(addr, "POST", "/api/tasks/nope/skip-next", true, r#"{"reason":"r","slot":"2026-09-25T09:00:00Z"}"#).await;
+        assert_eq!(code, 404, "{body}");
+        // The task form's PATCH, with and without a reason beside the
+        // patch's own fields, reaches the engine: the flattened body
+        // must not refuse what a bare `TaskPatch` took.
+        let (code, body) = call(addr, "PATCH", "/api/tasks/nope", true, r#"{"title":"x"}"#).await;
+        assert_eq!(code, 404, "{body}");
+        let (code, body) = call(
+            addr,
+            "PATCH",
+            "/api/tasks/nope",
+            true,
+            r#"{"schedule_paused":true,"schedule":{"cron":{"expr":"0 9 * * 1","timezone":"Europe/Berlin"}},"reason":"r"}"#,
+        )
+        .await;
+        assert_eq!(code, 404, "{body}");
+        let (code, body) =
+            call(addr, "PATCH", "/api/tasks/nope", true, r#"{"schedule":{"cron":"0 7 * * 1"},"clear_estimate":true}"#).await;
+        assert_eq!(code, 404, "{body}");
+        // An answer's reason is not optional.
+        let (code, _) = call(addr, "POST", "/api/runs/nope/answer", true, r#"{"text":"yes"}"#).await;
+        assert_eq!(code, 422);
     }
 }

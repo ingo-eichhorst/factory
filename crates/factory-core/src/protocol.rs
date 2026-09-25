@@ -109,20 +109,67 @@ pub enum Request {
         keys: Vec<String>,
         id: String,
     },
+    /// `#106`: answer a blocked run -- `run.input` narrowed to the one case
+    /// the Operations tab offers it for. Only into the run's own session,
+    /// only while the run is `Blocked`, and never without a reason, which
+    /// is journaled as an intervention together with who gave it. The text
+    /// itself is typed, not journaled: a record is no place for whatever a
+    /// person had to type to unblock an agent. The run's status is left
+    /// alone -- whether the answer unblocked it is the agent's to report.
+    #[serde(rename = "run.answer")]
+    RunAnswer {
+        id: String,
+        text: String,
+        reason: String,
+    },
     #[serde(rename = "task.create")]
     TaskCreate(NewTask),
     #[serde(rename = "task.get")]
     TaskGet { id: String },
     #[serde(rename = "task.list")]
     TaskList(TaskFilter),
+    /// `reason` (`#106`) is why, in the asker's words. It is not part of the
+    /// patch -- a store applies a patch, and a reason is not a property of
+    /// the task -- and it is only written down where the edit already
+    /// journals something: pausing or resuming a schedule.
     #[serde(rename = "task.update")]
-    TaskUpdate { id: String, patch: TaskPatch },
+    TaskUpdate {
+        id: String,
+        patch: TaskPatch,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     #[serde(rename = "task.delete")]
     TaskDelete { id: String },
+    /// Journaled with who asked, and `reason` when there is one (`#106`).
     #[serde(rename = "task.run")]
-    TaskRun { id: String },
+    TaskRun {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// Journaled with who asked, and `reason` when there is one (`#106`).
     #[serde(rename = "task.cancel")]
-    TaskCancel { id: String },
+    TaskCancel {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// `#106`: pass over a scheduled task's next slot. `next_run_at` moves
+    /// to the slot after it, and the skip is journaled with who asked and
+    /// why -- as `slot_skipped`, never `schedule_skipped`, which is the
+    /// scheduler's record of slots that passed *without* anyone deciding so.
+    /// `slot`, when given, is the firing the caller means to skip (the
+    /// `next_run_at` it read); the skip is refused if the schedule has moved
+    /// on since, rather than landing on a firing nobody chose.
+    #[serde(rename = "task.skip_next")]
+    TaskSkipNext {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot: Option<chrono::DateTime<chrono::Utc>>,
+    },
     #[serde(rename = "task.report")]
     TaskReport { id: String, report: TaskReport },
     /// A harness's lifecycle hook saying the agent's turn ended. Its own
@@ -560,6 +607,20 @@ pub enum Request {
         #[serde(default)]
         agent: Option<String>,
     },
+    /// `#106`: the L4 Operations tab and `factory stats` -- what needs a
+    /// human now, where work is stuck, and how the line has been running
+    /// over `window`. A read projection over tasks, runs, standing agents
+    /// and the journal, computed fresh on every call like
+    /// `Request::Production` (`factory_core::operations`). `scope: None` is
+    /// every scope; a scope is matched by its own name, not its subtree --
+    /// production.rs's rule for the same join.
+    #[serde(rename = "operations")]
+    Operations {
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        window: crate::operations::HealthWindow,
+    },
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -735,6 +796,11 @@ pub enum Payload {
     Quality { report: QualityReport },
     /// The answer to `Request::QualityRemediate` -- see `QualityRemediation`.
     QualityRemediate { result: QualityRemediation },
+    /// The L4 Operations tab -- see `factory_core::operations::OperationsReport`.
+    /// Boxed: the report is several times the size of every other payload,
+    /// and would otherwise set the size of every `Response` (serde writes a
+    /// box as what it holds).
+    Operations { report: Box<crate::operations::OperationsReport> },
 }
 
 /// A request plus who is making it.

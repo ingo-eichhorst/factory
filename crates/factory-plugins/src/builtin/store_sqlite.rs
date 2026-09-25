@@ -56,6 +56,11 @@ CREATE TABLE IF NOT EXISTS task_entries (
 );
 CREATE INDEX IF NOT EXISTS entries_task ON task_entries(task_id, seq);
 CREATE INDEX IF NOT EXISTS entries_run ON task_entries(run_id, seq);
+-- `entries_of_kinds` reads a window of the journal by time. An index is
+-- not a change of shape a row could notice, and this whole script runs on
+-- every open with IF NOT EXISTS, so a database already at this version
+-- gains it on its next start -- no version bump, and so no drop.
+CREATE INDEX IF NOT EXISTS entries_at ON task_entries(at);
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
     id    TEXT PRIMARY KEY,
@@ -764,6 +769,44 @@ impl TaskStore for SqliteStore {
         .await
     }
 
+    async fn entries_of_kinds(
+        &self,
+        kinds: &[&str],
+        since: DateTime<Utc>,
+    ) -> Result<Vec<(String, TaskEntry)>> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
+        let since = since.to_rfc3339();
+        self.with_conn(move |conn| {
+            // The kind lives inside the JSON row, so it is matched there --
+            // after the `at` index has narrowed the scan to the window.
+            let marks: Vec<String> = (0..kinds.len()).map(|i| format!("?{}", i + 2)).collect();
+            let sql = format!(
+                "SELECT task_id, data FROM task_entries
+                 WHERE at > ?1 AND json_extract(data, '$.kind') IN ({})
+                 ORDER BY seq ASC",
+                marks.join(", ")
+            );
+            let mut stmt = conn.prepare(&sql).map_err(adapter_err)?;
+            let mut args: Vec<&dyn rusqlite::ToSql> = vec![&since];
+            for kind in &kinds {
+                args.push(kind);
+            }
+            let rows = stmt
+                .query_map(args.as_slice(), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(adapter_err)?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (task_id, data) = row.map_err(adapter_err)?;
+                out.push((task_id, decode(data)?));
+            }
+            Ok(out)
+        })
+        .await
+    }
+
     async fn runs_between(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<Run>> {
         let (from, to) = (from.to_rfc3339(), to.to_rfc3339());
         self.with_conn(move |conn| {
@@ -1208,5 +1251,32 @@ mod tests {
             .unwrap();
         assert!(!resumed.schedule_paused);
         assert_eq!(store.due(Utc::now()).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn entries_of_kinds_reads_a_window_of_named_kinds_across_tasks() {
+        let store = SqliteStore::in_memory().unwrap();
+        let now = Utc::now();
+        let at = |mins: i64, kind: &str| {
+            let mut e = TaskEntry::new("daemon", kind, format!("{kind} {mins}m ago"));
+            e.at = now - chrono::Duration::minutes(mins);
+            e
+        };
+        store.append_entry("a", &at(120, "schedule_skipped")).await.unwrap();
+        store.append_entry("a", &at(30, "schedule_skipped")).await.unwrap();
+        store.append_entry("a", &at(20, "transcript")).await.unwrap();
+        store.append_entry("b", &at(10, "answer")).await.unwrap();
+
+        let found = store
+            .entries_of_kinds(&["schedule_skipped", "answer"], now - chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        let seen: Vec<(String, String)> = found.into_iter().map(|(t, e)| (t, e.kind)).collect();
+        assert_eq!(
+            seen,
+            vec![("a".to_string(), "schedule_skipped".to_string()), ("b".to_string(), "answer".to_string())],
+            "only the named kinds, only inside the window, oldest first"
+        );
+        assert!(store.entries_of_kinds(&[], now - chrono::Duration::days(1)).await.unwrap().is_empty());
     }
 }

@@ -11,6 +11,7 @@ use factory_core::event::Event;
 use factory_core::goals::{self as goals_core, Band, CycleStatus, KrRef};
 use factory_core::knowledge::FindingKind;
 use factory_core::metrics::MetricId;
+use factory_core::operations::{self as ops, HealthWindow, OperationsReport};
 use factory_core::policy::{self, ControlRef};
 use factory_core::protocol::{
     GoalsReport, Payload, PolicyControlDetail, PolicyReport, Request, Response, ScenarioPromoteResult, ScenarioResult, ScenariosReport,
@@ -158,6 +159,22 @@ enum Command {
         #[command(subcommand)]
         command: Option<QualityCmd>,
     },
+    /// The L4 Operations tab (`#106`, design §12.5's `factory stats`): what
+    /// needs a human now, work in flight and how old it is, the process's
+    /// health over the last 7 or 30 days against the window before it, and
+    /// every schedule's state. A read projection over tasks, runs and the
+    /// journal, computed fresh on every call. With no subcommand, prints
+    /// the summary -- the same thing `factory stats summary` prints.
+    Stats {
+        /// Only this scope, by its own name (default: every scope).
+        #[arg(long)]
+        scope: Option<String>,
+        /// The health window: `7d` or `30d`.
+        #[arg(long, value_parser = parse_window)]
+        window: Option<HealthWindow>,
+        #[command(subcommand)]
+        command: Option<StatsCmd>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -194,6 +211,23 @@ enum QualityCmd {
         /// otherwise.
         #[arg(long)]
         agent: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum StatsCmd {
+    /// Attention, flow, aging, health and schedules, briefly.
+    Summary {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long, value_parser = parse_window)]
+        window: Option<HealthWindow>,
+    },
+    /// Only what needs a human: every exception, most severe and oldest
+    /// first, with its reason and the actions it allows.
+    Attention {
+        #[arg(long)]
+        scope: Option<String>,
     },
 }
 
@@ -544,6 +578,15 @@ enum RunCmd {
         #[arg(long, default_value_t = 200)]
         lines: u32,
     },
+    /// Answer a blocked run: type the text into its own session and press
+    /// enter. Only while the run is blocked. The reason is required and is
+    /// journaled, with who gave it, as an intervention; the text is not.
+    Answer {
+        id: String,
+        text: String,
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -675,13 +718,34 @@ enum TaskCmd {
         /// while paused are not caught up.
         #[arg(long)]
         resume_schedule: bool,
+        /// Why -- journaled with who asked when the edit pauses or resumes
+        /// the schedule.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Show one task.
     Show { id: Option<String> },
-    /// Dispatch a task now.
-    Run { id: Option<String> },
-    /// Stop a running task and close its session.
-    Cancel { id: Option<String> },
+    /// Dispatch a task now. Journaled with who asked, and why if you say.
+    Run {
+        id: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Stop a running task and close its session. Journaled with who
+    /// asked, and why if you say.
+    Cancel {
+        id: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Pass over a scheduled task's next slot: the one after it is the next
+    /// firing. A queued retry is the next slot, and is dropped. Journaled
+    /// with who asked, and why if you say.
+    SkipNext {
+        id: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Delete a task.
     Delete { id: Option<String> },
     /// The task's journal.
@@ -1127,6 +1191,17 @@ async fn main() -> Result<()> {
                 Some(other) => other,
             };
             quality_cmd(cli.json, &client, cmd).await
+        }
+
+        Command::Stats { scope, window, command } => {
+            // The same merge `Command::Scenario` does: flags before the
+            // subcommand name count for it too.
+            let cmd = match command {
+                None => StatsCmd::Summary { scope, window },
+                Some(StatsCmd::Summary { scope: s, window: w }) => StatsCmd::Summary { scope: s.or(scope), window: w.or(window) },
+                Some(StatsCmd::Attention { scope: s }) => StatsCmd::Attention { scope: s.or(scope) },
+            };
+            stats_cmd(cli.json, &client, cmd).await
         }
     }
 }
@@ -2369,6 +2444,264 @@ fn scenario_promote_text(r: &ScenarioPromoteResult) -> String {
     out.trim_end().to_string()
 }
 
+/// `--window 7d|30d`, spelled the way the wire spells it.
+fn parse_window(text: &str) -> Result<HealthWindow> {
+    serde_json::from_value(serde_json::Value::String(text.to_string()))
+        .map_err(|_| anyhow!("--window takes 7d or 30d, not {text:?}"))
+}
+
+async fn stats_cmd(json: bool, client: &Client, cmd: StatsCmd) -> Result<()> {
+    let (scope, window, attention_only) = match cmd {
+        StatsCmd::Summary { scope, window } => (scope, window, false),
+        StatsCmd::Attention { scope } => (scope, None, true),
+    };
+    let payload = client
+        .send(Request::Operations { scope, window: window.unwrap_or_default() })
+        .await?;
+    print(&payload, json, |p| match p {
+        Payload::Operations { report } if attention_only => Some(attention_text(report)),
+        Payload::Operations { report } => Some(stats_text(report)),
+        _ => None,
+    })
+}
+
+/// How many attention rows the summary shows before pointing at
+/// `factory stats attention` for the rest.
+const SUMMARY_ATTENTION_ROWS: usize = 5;
+
+fn severity_str(s: ops::Severity) -> &'static str {
+    match s {
+        ops::Severity::High => "high",
+        ops::Severity::Medium => "medium",
+        ops::Severity::Low => "low",
+    }
+}
+
+fn action_str(a: ops::Action) -> &'static str {
+    match a {
+        ops::Action::RunAgain => "run again",
+        ops::Action::Cancel => "cancel",
+        ops::Action::Answer => "answer",
+        ops::Action::RunNow => "run now",
+        ops::Action::SkipNext => "skip next",
+        ops::Action::PauseSchedule => "pause schedule",
+        ops::Action::ResumeSchedule => "resume schedule",
+    }
+}
+
+/// One exception as a line, then its reason and actions beneath it.
+fn exception_text(e: &ops::Exception) -> String {
+    let what = e
+        .title
+        .clone()
+        .or_else(|| e.agent.clone())
+        .unwrap_or_else(|| "-".into());
+    let mut flags = Vec::new();
+    if e.suspicion {
+        flags.push("suspicion, not a status".to_string());
+    }
+    if e.observation {
+        flags.push("observation".to_string());
+    }
+    if !e.also.is_empty() {
+        flags.push(format!("also {}", e.also.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
+    }
+    let mut out = format!(
+        "  {:<6} {:<18} {:<14} {:<32} {:>8}{}\n      {}\n",
+        severity_str(e.severity),
+        e.kind.as_str(),
+        e.scope.as_deref().unwrap_or("-"),
+        what,
+        duration(e.age_s as u64),
+        if flags.is_empty() { String::new() } else { format!("  [{}]", flags.join("; ")) },
+        e.reason,
+    );
+    let mut ids = Vec::new();
+    if let Some(run) = &e.run_id {
+        ids.push(format!("run {run}"));
+    } else if let Some(task) = &e.task_id {
+        ids.push(format!("task {task}"));
+    }
+    if !e.actions.is_empty() {
+        ids.push(format!("can: {}", e.actions.iter().map(|a| action_str(*a)).collect::<Vec<_>>().join(", ")));
+    }
+    if !ids.is_empty() {
+        out.push_str(&format!("      {}\n", ids.join("  ")));
+    }
+    out
+}
+
+/// `factory stats attention`: every exception, as the report sorted them.
+fn attention_text(report: &OperationsReport) -> String {
+    if report.attention.is_empty() {
+        return "Nothing needs you.".into();
+    }
+    let mut out = format!("NEEDS ATTENTION  {}\n", report.attention.len());
+    for e in &report.attention {
+        out.push_str(&exception_text(e));
+    }
+    out.trim_end().to_string()
+}
+
+/// A figure, or why there is none. `fmt` formats a present value.
+fn figure(f: &ops::Figure, fmt: impl Fn(f64) -> String) -> String {
+    match f.value {
+        Some(v) => fmt(v),
+        None => format!("-- ({})", f.reason.as_deref().unwrap_or("no data")),
+    }
+}
+
+fn secs(v: f64) -> String {
+    duration(v.round() as u64)
+}
+
+fn pct(v: f64) -> String {
+    format!("{:.0}%", v * 100.0)
+}
+
+/// `factory stats` / `factory stats summary`.
+fn stats_text(report: &OperationsReport) -> String {
+    let mut out = format!(
+        "OPERATIONS  {}  as of {}\n\n",
+        report.scope.as_deref().unwrap_or("every scope"),
+        report.generated_at.format("%Y-%m-%d %H:%M UTC")
+    );
+
+    if report.attention.is_empty() {
+        out.push_str("NEEDS ATTENTION  none -- nothing needs you\n");
+    } else {
+        out.push_str(&format!("NEEDS ATTENTION  {}\n", report.attention.len()));
+        for e in report.attention.iter().take(SUMMARY_ATTENTION_ROWS) {
+            out.push_str(&exception_text(e));
+        }
+        if report.attention.len() > SUMMARY_ATTENTION_ROWS {
+            out.push_str(&format!(
+                "  ... and {} more: factory stats attention\n",
+                report.attention.len() - SUMMARY_ATTENTION_ROWS
+            ));
+        }
+    }
+
+    out.push_str("\nFLOW NOW\n");
+    if report.flow.is_empty() {
+        out.push_str("  nothing in flight, queued or retrying\n");
+    } else {
+        out.push_str(&format!(
+            "  {:<14} {:>6} {:>6} {:>7} {:>7} {:>8}  {:<22} {}\n",
+            "scope", "queued", "disp.", "running", "blocked", "retrying", "wait p50 / p95", "sessions"
+        ));
+        for f in &report.flow {
+            out.push_str(&format!(
+                "  {:<14} {:>6} {:>6} {:>7} {:>7} {:>8}  {:<22} {}\n",
+                f.scope,
+                f.wip.queued,
+                f.wip.dispatching,
+                f.wip.running,
+                f.wip.blocked,
+                f.retrying,
+                format!(
+                    "{} / {}",
+                    f.wait_p50.value.map(secs).unwrap_or_else(|| "--".into()),
+                    f.wait_p95.value.map(secs).unwrap_or_else(|| "--".into())
+                ),
+                match f.sessions_max {
+                    Some(max) => format!("{} of {max}", f.sessions_in_use),
+                    None => format!("{} (no limit declared)", f.sessions_in_use),
+                },
+            ));
+        }
+    }
+
+    out.push_str("\nAGING WIP  oldest first\n");
+    if report.aging.items.is_empty() {
+        out.push_str("  nothing in progress\n");
+    }
+    for item in &report.aging.items {
+        let pace = match (item.pace, item.basis) {
+            (Some(p), basis) => format!(
+                "{} ({})",
+                serde_json::to_value(p).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(),
+                match basis {
+                    ops::PaceBasis::Task => "vs this task",
+                    _ => "vs its scope",
+                }
+            ),
+            (None, ops::PaceBasis::NotPaced) => "not paced yet".into(),
+            (None, _) => "not enough history".into(),
+        };
+        let stage = serde_json::to_value(item.stage).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        out.push_str(&format!(
+            "  {:<14} {:<32} {:<11} {:>8}  {}\n",
+            item.scope,
+            item.title,
+            stage,
+            secs(item.age_s),
+            pace
+        ));
+    }
+
+    let h = &report.health;
+    let days = h.window.days();
+    out.push_str(&format!("\nHEALTH  last {days}d  (the {days}d before it)\n"));
+    let row = |name: &str, now: String, before: String| format!("  {name:<20} {now:<36} ({before})\n");
+    // The window before only needs its number: why the current one has
+    // none is said once, beside it.
+    let was = |f: &ops::Figure, fmt: &dyn Fn(f64) -> String| f.value.map(fmt).unwrap_or_else(|| "--".into());
+    let (c, p) = (&h.current, &h.previous);
+    out.push_str(&row("finished", c.finished.to_string(), p.finished.to_string()));
+    out.push_str(&row("throughput / day", figure(&c.throughput_day, |v| format!("{v:.1}")), was(&p.throughput_day, &|v| format!("{v:.1}"))));
+    out.push_str(&row("cycle time p50", figure(&c.cycle_p50, secs), was(&p.cycle_p50, &secs)));
+    out.push_str(&row("cycle time p85", figure(&c.cycle_p85, secs), was(&p.cycle_p85, &secs)));
+    out.push_str(&row("first-pass yield", figure(&c.first_pass_yield, pct), was(&p.first_pass_yield, &pct)));
+    out.push_str(&row("rework rate", figure(&c.rework_rate, pct), was(&p.rework_rate, &pct)));
+    out.push_str(&row("scrap rate", figure(&c.scrap_rate, pct), was(&p.scrap_rate, &pct)));
+    out.push_str(&row("fail rate", figure(&c.fail_rate, pct), was(&p.fail_rate, &pct)));
+    out.push_str(&row("time to recover p50", figure(&c.recover_p50, secs), was(&p.recover_p50, &secs)));
+    out.push_str(&row("queue wait p95", figure(&c.queue_wait_p95, secs), was(&p.queue_wait_p95, &secs)));
+    out.push_str(&row(
+        "interventions / 100",
+        figure(&c.interventions_per_100, |v| format!("{v:.1} ({} in all)", c.interventions)),
+        was(&p.interventions_per_100, &|v| format!("{v:.1}")),
+    ));
+    if !c.fail_by_kind.is_empty() || c.unclassified > 0 {
+        let mut kinds: Vec<String> = c
+            .fail_by_kind
+            .iter()
+            .map(|(k, n)| format!("{} {n}", serde_json::to_value(k).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()))
+            .collect();
+        if c.unclassified > 0 {
+            kinds.push(format!("unclassified {}", c.unclassified));
+        }
+        out.push_str(&format!("  scrapped by why      {}\n", kinds.join(", ")));
+    }
+
+    if !report.schedules.is_empty() {
+        out.push_str("\nSCHEDULES\n");
+        for row in &report.schedules {
+            let state = serde_json::to_value(row.state).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+            out.push_str(&format!(
+                "  {:<14} {:<32} {:<8} {} ({})  next {}{}\n",
+                row.scope,
+                row.title,
+                state,
+                row.schedule,
+                row.timezone.as_deref().unwrap_or("UTC"),
+                row.next_run_at.map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_else(|| "--".into()),
+                if row.skipped > 0 { format!("  ({} slot(s) passed over)", row.skipped) } else { String::new() },
+            ));
+        }
+    }
+
+    match report.recorded_since {
+        Some(since) => out.push_str(&format!(
+            "\nqueue waits, slots and fail kinds are on record from {}\n",
+            since.format("%Y-%m-%d")
+        )),
+        None => out.push_str("\nno run records queue waits, slots or fail kinds yet\n"),
+    }
+    out.trim_end().to_string()
+}
+
 async fn bench_cmd(json: bool, client: &Client, cmd: BenchCmd) -> Result<()> {
     match cmd {
         BenchCmd::Run { dataset, agents, attempts, concurrency, cases } => {
@@ -2637,6 +2970,14 @@ async fn run_cmd(json: bool, client: &Client, cmd: RunCmd) -> Result<()> {
                 _ => None,
             })
         }
+        RunCmd::Answer { id, text, reason } => {
+            let payload = client.send(Request::RunAnswer { id: id.clone(), text, reason }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Ok => Some(format!("answered {id}")),
+                _ => None,
+            })
+        }
+
         RunCmd::Output { id, lines } => {
             let payload = client
                 .send(Request::RunOutput {
@@ -2740,6 +3081,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 client
                     .send(Request::TaskRun {
                         id: created.id.clone(),
+                        reason: None,
                     })
                     .await?;
             }
@@ -2776,6 +3118,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             no_knowledge_hints,
             pause_schedule,
             resume_schedule,
+            reason,
         } => {
             let retry = retry.as_deref().map(parse_retry).transpose()?;
             let patch = TaskPatch {
@@ -2820,6 +3163,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 .send(Request::TaskUpdate {
                     id: need_id(id)?,
                     patch,
+                    reason,
                 })
                 .await?;
             print(&payload, json, |p| match p {
@@ -2836,17 +3180,28 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             })
         }
 
-        TaskCmd::Run { id } => {
+        TaskCmd::Run { id, reason } => {
             let id = need_id(id)?;
-            client.send(Request::TaskRun { id: id.clone() }).await?;
+            client.send(Request::TaskRun { id: id.clone(), reason }).await?;
             println!("dispatching {id}");
             Ok(())
         }
 
-        TaskCmd::Cancel { id } => {
-            let payload = client.send(Request::TaskCancel { id: need_id(id)? }).await?;
+        TaskCmd::Cancel { id, reason } => {
+            let payload = client.send(Request::TaskCancel { id: need_id(id)?, reason }).await?;
             print(&payload, json, |p| match p {
                 Payload::Run { run } => Some(run_line(run)),
+                _ => None,
+            })
+        }
+
+        TaskCmd::SkipNext { id, reason } => {
+            let payload = client.send(Request::TaskSkipNext { id: need_id(id)?, reason, slot: None }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Task { task } => Some(match task.next_run_at {
+                    Some(next) => format!("skipped; next firing at {}", next.to_rfc3339()),
+                    None => "skipped".to_string(),
+                }),
                 _ => None,
             })
         }
@@ -3728,5 +4083,70 @@ mod tests {
         assert_eq!(duration(42), "42s");
         assert_eq!(duration(3 * 3600 + 12 * 60), "3h 12m");
         assert_eq!(duration(864_000 + 4 * 3600), "10d 4h");
+    }
+
+    // -- factory stats, and the actions' reasons (#106) --------------------
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("factory").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn stats_takes_its_flags_before_or_after_the_subcommand() {
+        match parse(&["stats"]).command {
+            Command::Stats { scope: None, window: None, command: None } => {}
+            _ => panic!("bare `factory stats`"),
+        }
+        match parse(&["stats", "--scope", "demo", "--window", "30d"]).command {
+            Command::Stats { scope: Some(s), window: Some(HealthWindow::Month), command: None } => assert_eq!(s, "demo"),
+            _ => panic!("flags before"),
+        }
+        match parse(&["stats", "attention", "--scope", "demo"]).command {
+            Command::Stats { command: Some(StatsCmd::Attention { scope: Some(s) }), .. } => assert_eq!(s, "demo"),
+            _ => panic!("attention"),
+        }
+        match parse(&["stats", "summary", "--window", "7d"]).command {
+            Command::Stats { command: Some(StatsCmd::Summary { window: Some(HealthWindow::Week), .. }), .. } => {}
+            _ => panic!("summary"),
+        }
+        assert!(Cli::try_parse_from(["factory", "stats", "--window", "9d"]).is_err());
+    }
+
+    #[test]
+    fn the_actions_carry_a_reason_and_an_answer_needs_one() {
+        match parse(&["task", "run", "t1", "--reason", "try again"]).command {
+            Command::Task(TaskCmd::Run { reason: Some(r), .. }) => assert_eq!(r, "try again"),
+            _ => panic!("run"),
+        }
+        match parse(&["task", "cancel", "t1"]).command {
+            Command::Task(TaskCmd::Cancel { reason: None, .. }) => {}
+            _ => panic!("cancel"),
+        }
+        match parse(&["task", "skip-next", "t1", "--reason", "holiday"]).command {
+            Command::Task(TaskCmd::SkipNext { id: Some(id), reason: Some(_) }) => assert_eq!(id, "t1"),
+            _ => panic!("skip-next"),
+        }
+        match parse(&["task", "edit", "t1", "--pause-schedule", "--reason", "stop the line"]).command {
+            Command::Task(TaskCmd::Edit { pause_schedule: true, reason: Some(_), .. }) => {}
+            _ => panic!("edit"),
+        }
+        match parse(&["run", "answer", "r1", "use staging", "--reason", "it asked"]).command {
+            Command::Run(RunCmd::Answer { id, text, reason }) => {
+                assert_eq!((id.as_str(), text.as_str(), reason.as_str()), ("r1", "use staging", "it asked"));
+            }
+            _ => panic!("answer"),
+        }
+        assert!(Cli::try_parse_from(["factory", "run", "answer", "r1", "yes"]).is_err(), "no reason, no answer");
+    }
+
+    #[test]
+    fn an_empty_report_reads_as_nothing_needing_anyone() {
+        let now = chrono::Utc::now();
+        let report = ops::report(&ops::OperationsInput { now, ..Default::default() });
+        assert_eq!(attention_text(&report), "Nothing needs you.");
+        let text = stats_text(&report);
+        assert!(text.contains("NEEDS ATTENTION  none"), "{text}");
+        assert!(text.contains("HEALTH  last 7d"), "{text}");
+        assert!(text.contains("no run records queue waits"), "{text}");
     }
 }

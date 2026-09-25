@@ -248,6 +248,15 @@ pub struct Engine {
     /// run history. An async lock, held across the judging itself, so that
     /// burst waits for one answer rather than computing it once each.
     pub(crate) quality_guide_cache: tokio::sync::Mutex<crate::quality::GuideCache>,
+    /// Serializes the two things that move a schedule's next slot on a
+    /// person's or the clock's account: the scheduler firing a due task, and
+    /// `task.skip_next`. Each re-reads the task under it, so a slot is
+    /// either fired or skipped, never both (`#106`).
+    pub(crate) schedule_lock: tokio::sync::Mutex<()>,
+    /// The Operations report's triggered signposts, kept for a minute --
+    /// computing them runs the metrics they name. See
+    /// `Engine::triggered_signposts_cached`.
+    pub(crate) signpost_cache: std::sync::Mutex<Option<crate::operations::SignpostCache>>,
 }
 
 impl Engine {
@@ -291,6 +300,8 @@ impl Engine {
             power,
             quality_seen: Default::default(),
             quality_guide_cache: Default::default(),
+            schedule_lock: tokio::sync::Mutex::new(()),
+            signpost_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -715,6 +726,12 @@ impl Engine {
             Request::Scenarios { scope } => Ok(Payload::Scenarios {
                 report: self.scenarios_report(scope.as_deref()).await?,
             }),
+            // No event of its own: every fact it reads changes through
+            // `TaskUpdated`, `RunUpdated`, `TaskEntry` or `AgentUpdated`
+            // already, and a viewer re-reads on those.
+            Request::Operations { scope, window } => Ok(Payload::Operations {
+                report: Box::new(self.operations_report(scope.as_deref(), window).await?),
+            }),
             // No event: promote creates ordinary tasks through `Engine::create`,
             // which already publishes `Event::TaskCreated` for each one --
             // the same "not published a second time here" rule
@@ -799,6 +816,11 @@ impl Engine {
                 self.run_input(&id, text.as_deref(), &keys).await?;
                 Ok(Payload::Ok)
             }
+            Request::RunAnswer { id, text, reason } => {
+                let asked = crate::operations::Asked::new(caller, Some(reason));
+                self.answer_run(&id, &text, &asked).await?;
+                Ok(Payload::Ok)
+            }
 
             Request::TaskCreate(new) => Ok(Payload::Task {
                 task: self.create(new).await?,
@@ -809,9 +831,18 @@ impl Engine {
             Request::TaskList(filter) => Ok(Payload::Tasks {
                 tasks: self.store.list(&filter).await?,
             }),
-            Request::TaskUpdate { id, patch } => Ok(Payload::Task {
-                task: self.update(&id, patch).await?,
-            }),
+            Request::TaskUpdate { id, patch, reason } => {
+                let asked = crate::operations::Asked::new(caller, reason);
+                Ok(Payload::Task {
+                    task: self.update(&id, patch, Some(&asked)).await?,
+                })
+            }
+            Request::TaskSkipNext { id, reason, slot } => {
+                let asked = crate::operations::Asked::new(caller, reason);
+                Ok(Payload::Task {
+                    task: self.skip_next(&id, slot, &asked).await?,
+                })
+            }
             Request::TaskDelete { id } => {
                 if let Some(run) = self.store.active_run(&id).await? {
                     self.close_session(&run).await;
@@ -822,7 +853,7 @@ impl Engine {
                 }
                 Ok(Payload::Deleted { deleted })
             }
-            Request::TaskRun { id } => {
+            Request::TaskRun { id, reason } => {
                 self.require(&id).await?;
                 // A task is a standing intent; a run is one attempt at it. Two
                 // attempts at once would race for the same working directory.
@@ -833,10 +864,26 @@ impl Engine {
                         run.status.as_str()
                     )));
                 }
-                let engine = self.clone();
+                // Who asked, written down before the run exists: the record
+                // otherwise says only that a run was `manual`, which a
+                // person and an agent both are (`#106`).
                 // Stamped here, not inside the spawned dispatch: the queue
                 // wait of a manual run starts when it was asked for.
                 let due = Due::now();
+                // `queued_at` is what ties this entry to the run it starts,
+                // which does not exist yet: the Operations report leaves a
+                // run an agent asked for out of the interventions by it.
+                let asked = crate::operations::Asked::new(caller, reason);
+                self.entry(
+                    &id,
+                    asked.entry(
+                        crate::operations::RUN_REQUESTED_KIND,
+                        format!("run requested {}", asked.words()),
+                        serde_json::json!({ "queued_at": due.queued_at }),
+                    ),
+                )
+                .await;
+                let engine = self.clone();
                 // Dispatch can take a minute: opening a pane, waiting for an
                 // agent to be ready. The caller gets its answer now.
                 tokio::spawn(async move {
@@ -844,7 +891,7 @@ impl Engine {
                 });
                 Ok(Payload::Ok)
             }
-            Request::TaskCancel { id } => {
+            Request::TaskCancel { id, reason } => {
                 // Who asked is the one thing that tells a person's
                 // intervention from an agent tidying up -- see `FailKind`
                 // for the limit of that.
@@ -853,6 +900,14 @@ impl Engine {
                     crate::access::Caller::Agent { .. } => FailKind::CancelledByAgent,
                 };
                 let run = self.cancel_task_run(&id, kind).await?;
+                let asked = crate::operations::Asked::new(caller, reason);
+                self.entry(
+                    &id,
+                    asked
+                        .entry("cancel_requested", format!("cancelled {}", asked.words()), serde_json::json!({}))
+                        .in_run(&run.id),
+                )
+                .await;
                 self.sync_workflow_for_task(&id).await;
                 self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
@@ -1547,7 +1602,15 @@ impl Engine {
     /// does not exist, and -- the one that is easy to miss -- a schedule set
     /// after creation, which would otherwise never fire because nothing
     /// recomputed when it is next due.
-    pub async fn update(&self, id: &str, mut patch: TaskPatch) -> Result<Task> {
+    /// `asked` is who made the request and why: pausing or resuming a
+    /// schedule is journaled with both (`#106`). `None` is the daemon
+    /// changing a task on its own account.
+    pub(crate) async fn update(
+        &self,
+        id: &str,
+        mut patch: TaskPatch,
+        asked: Option<&crate::operations::Asked>,
+    ) -> Result<Task> {
         let factory = self.factory_snapshot();
         let current = self.require(id).await?;
         // The bookkeeping is the daemon's, not a caller's.
@@ -1671,20 +1734,27 @@ impl Engine {
                     ),
                 ));
             }
+            // Who asked, and why when they said (`#106`); the daemon's own
+            // changes say nothing of the sort.
+            let by = asked.map(|a| format!(" {}", a.words())).unwrap_or_default();
             let (kind, message) = match (pause_dropped, paused, task.next_run_at) {
                 (true, _, _) => (
                     "schedule_pause_cleared",
-                    "schedule removed, and its pause with it; a schedule added later fires".to_string(),
+                    format!("schedule removed{by}, and its pause with it; a schedule added later fires"),
                 ),
                 (false, true, _) => {
-                    ("schedule_paused", "schedule paused; nothing fires until it is resumed".to_string())
+                    ("schedule_paused", format!("schedule paused{by}; nothing fires until it is resumed"))
                 }
                 (false, false, Some(next)) => {
-                    ("schedule_resumed", format!("schedule resumed; next firing at {}", next.to_rfc3339()))
+                    ("schedule_resumed", format!("schedule resumed{by}; next firing at {}", next.to_rfc3339()))
                 }
-                (false, false, None) => ("schedule_resumed", "schedule resumed".to_string()),
+                (false, false, None) => ("schedule_resumed", format!("schedule resumed{by}")),
             };
-            self.entry(&task.id, TaskEntry::new("daemon", kind, message)).await;
+            let entry = match asked {
+                Some(asked) => asked.entry(kind, message, serde_json::json!({})),
+                None => TaskEntry::new("daemon", kind, message),
+            };
+            self.entry(&task.id, entry).await;
         }
         self.bus.publish(Event::TaskUpdated { task: task.clone() });
         Ok(task)
@@ -2850,14 +2920,14 @@ impl Engine {
 
     // -- small helpers ------------------------------------------------------
 
-    async fn require(&self, id: &str) -> Result<Task> {
+    pub(crate) async fn require(&self, id: &str) -> Result<Task> {
         self.store
             .get(id)
             .await?
             .ok_or_else(|| FactoryError::TaskNotFound(id.to_string()))
     }
 
-    async fn require_run(&self, id: &str) -> Result<Run> {
+    pub(crate) async fn require_run(&self, id: &str) -> Result<Run> {
         self.store
             .get_run(id)
             .await?
@@ -3464,7 +3534,7 @@ mod tests {
         // Turned on by an edit, it takes effect on the next run; a task whose
         // words match nothing says so rather than staying silent.
         let patch = TaskPatch { knowledge_hints: Some(true), title: Some("unrelated".into()), ..Default::default() };
-        let task = match engine.handle_request(Request::TaskUpdate { id: task.id.clone(), patch }).await {
+        let task = match engine.handle_request(Request::TaskUpdate { id: task.id.clone(), patch, reason: None }).await {
             Response::Ok { data: Payload::Task { task } } => task,
             other => panic!("expected a task: {other:?}"),
         };
@@ -3866,7 +3936,7 @@ mod tests {
         // And by an edit, which leaves the task as it was.
         let task = engine.create(scheduled(Schedule::Cron("0 7 * * 1".into()))).await.unwrap();
         let err = engine
-            .update(&task.id, TaskPatch { schedule: Some(typo), ..Default::default() })
+            .update(&task.id, TaskPatch { schedule: Some(typo), ..Default::default() }, None)
             .await
             .unwrap_err()
             .to_string();
@@ -3881,7 +3951,7 @@ mod tests {
         let engine = test_engine(temp_dir("tz-edit"));
         let task = engine.create(scheduled(Schedule::Cron("0 7 * * 1".into()))).await.unwrap();
         let edited = engine
-            .update(&task.id, TaskPatch { schedule: Some(berlin_monday_nine()), ..Default::default() })
+            .update(&task.id, TaskPatch { schedule: Some(berlin_monday_nine()), ..Default::default() }, None)
             .await
             .unwrap();
         assert_eq!(edited.schedule, Some(berlin_monday_nine()));
@@ -4319,6 +4389,7 @@ mod tests {
                     retry: Some(RetryPolicy::Backoff { max_attempts: 3, backoff_seconds: 60 }),
                     ..Default::default()
                 },
+                None,
             )
             .await
             .unwrap_err();
@@ -4624,7 +4695,7 @@ mod tests {
         assert_eq!(reported.fail_kind, Some(FailKind::AgentFailed));
 
         let run = run_for(&engine, &task.id, Trigger::Manual).await;
-        let response = engine.handle_request(Request::TaskCancel { id: task.id.clone() }).await;
+        let response = engine.handle_request(Request::TaskCancel { id: task.id.clone(), reason: None }).await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
         let cancelled = engine.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(cancelled.status, RunStatus::Cancelled);
@@ -4792,7 +4863,7 @@ mod tests {
         assert!(engine.due_now().await.unwrap().iter().any(|t| t.id == task.id), "sanity: due before the pause");
 
         let paused = engine
-            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() })
+            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() }, None)
             .await
             .unwrap();
         assert!(paused.schedule_paused);
@@ -4800,7 +4871,7 @@ mod tests {
         assert!(!engine.due_now().await.unwrap().iter().any(|t| t.id == task.id), "nothing fires while paused");
 
         let resumed = engine
-            .update(&task.id, TaskPatch { schedule_paused: Some(false), ..Default::default() })
+            .update(&task.id, TaskPatch { schedule_paused: Some(false), ..Default::default() }, None)
             .await
             .unwrap();
         assert!(!resumed.schedule_paused);
@@ -4814,7 +4885,7 @@ mod tests {
 
         // Saying it again changes nothing and journals nothing.
         engine
-            .update(&task.id, TaskPatch { schedule_paused: Some(false), ..Default::default() })
+            .update(&task.id, TaskPatch { schedule_paused: Some(false), ..Default::default() }, None)
             .await
             .unwrap();
         let resumes = engine
@@ -4839,12 +4910,12 @@ mod tests {
         let engine = test_engine(scope_dir.clone());
         let task = weekly_task(&engine, None).await;
         engine
-            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() })
+            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() }, None)
             .await
             .unwrap();
 
         let cleared = engine
-            .update(&task.id, TaskPatch { clear_schedule: true, ..Default::default() })
+            .update(&task.id, TaskPatch { clear_schedule: true, ..Default::default() }, None)
             .await
             .unwrap();
         assert!(cleared.schedule.is_none());
@@ -4853,7 +4924,7 @@ mod tests {
         assert!(kinds.contains(&"schedule_pause_cleared".to_string()), "{kinds:?}");
 
         let rescheduled = engine
-            .update(&task.id, TaskPatch { schedule: Some(Schedule::Every { seconds: 60 }), ..Default::default() })
+            .update(&task.id, TaskPatch { schedule: Some(Schedule::Every { seconds: 60 }), ..Default::default() }, None)
             .await
             .unwrap();
         assert!(!rescheduled.schedule_paused);
@@ -4874,7 +4945,7 @@ mod tests {
         let engine = test_engine(scope_dir.clone());
         let task = weekly_task(&engine, None).await;
         engine
-            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() })
+            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() }, None)
             .await
             .unwrap();
         let replaced = engine
@@ -4885,6 +4956,7 @@ mod tests {
                     schedule: Some(Schedule::Every { seconds: 60 }),
                     ..Default::default()
                 },
+                None,
             )
             .await
             .unwrap();
@@ -4957,7 +5029,7 @@ mod tests {
             .await
             .unwrap();
         let err = engine
-            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() })
+            .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() }, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("only a scheduled task"), "{err}");

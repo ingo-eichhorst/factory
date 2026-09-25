@@ -53,6 +53,23 @@ pub trait TaskStore: Send + Sync {
     /// Only the entries from one run.
     async fn run_entries(&self, run_id: &str, limit: u32) -> Result<Vec<TaskEntry>>;
 
+    /// Every journal entry of one of `kinds` written after `since`, across
+    /// all tasks, oldest first, each with the id of the task it is in. What
+    /// the Operations projection reads its few journal-only facts from --
+    /// passed-over slots, answered blocks -- without walking every task's
+    /// whole journal, transcripts and all, on every read (`#106`).
+    ///
+    /// A store that cannot search its journal this way may answer nothing,
+    /// like `status_changes`: the report then shows no missed slots and
+    /// counts no answers, a floor rather than a wrong number.
+    async fn entries_of_kinds(
+        &self,
+        _kinds: &[&str],
+        _since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(String, TaskEntry)>> {
+        Ok(Vec::new())
+    }
+
     /// Tasks whose `next_run_at` has come.
     async fn due(&self, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Task>>;
 

@@ -38,15 +38,18 @@
 //! * **recovery** -- from the end of the first failed run of a failure
 //!   streak to the end of the same task's next run that ended `done`.
 //!   Cancelled runs neither start nor end a streak.
-//! * **intervention** -- what the record shows a person doing to keep the
+//! * **intervention** -- what the record shows the owner doing to keep the
 //!   line moving: a `manual` run of a task whose previous attempt ended
 //!   failed or cancelled (run again), a run cancelled by the owner
-//!   ([`FailKind::CancelledByPerson`]), and an answer typed into a blocked
-//!   run ([`OperationsInput::answers`]). Typing into a run leaves no record
-//!   today, so that list is empty until the Answer action journals one;
-//!   the count is a floor, never an estimate. `manual` is any `task.run`
-//!   request, and an agent can send one too; the record does not say
-//!   whose it was, so neither does this.
+//!   ([`FailKind::CancelledByPerson`]), and an answer the owner typed into
+//!   a blocked run through `run.answer` ([`OperationsInput::answers`]). A
+//!   `task.run` journals who asked, so a run an agent asked for is left
+//!   out ([`OperationsInput::agent_runs`]); so is a cancel an agent asked
+//!   for, which is `CancelledByAgent`. Two limits, pulling opposite ways:
+//!   an agent that leaves its token out *is* the owner to Factory and is
+//!   counted as one, and text typed straight into a run's terminal (not
+//!   through `run.answer`) leaves no record and is not counted. Runs from
+//!   before `task.run` journaled who asked count as the owner's.
 //!
 //! ## Percentiles and pace
 //!
@@ -536,9 +539,13 @@ pub struct OperationsInput<'a> {
     /// `schedule_skipped` entries recent enough to still need a look.
     pub skipped: Vec<SkippedSlots>,
     pub signposts: Vec<TriggeredSignpost>,
-    /// When a person typed an answer into a blocked run. Empty until the
-    /// Answer action journals it -- see "intervention" in the module doc.
+    /// When the owner answered a blocked run (`run.answer`, journaled as
+    /// `answer` by the owner) -- see "intervention" in the module doc.
     pub answers: Vec<DateTime<Utc>>,
+    /// Manual runs an agent asked for, as `(task id, queued_at)` -- the
+    /// `run_requested` entries an agent's `task.run` wrote. Not a person's
+    /// "run again", so not an intervention.
+    pub agent_runs: BTreeSet<(String, DateTime<Utc>)>,
     /// How long past its slot a due task may wait before it is late;
     /// `None` uses [`DEFAULT_LATE_AFTER_SECONDS`].
     pub late_after_seconds: Option<i64>,
@@ -613,8 +620,9 @@ impl ExceptionKind {
 }
 
 /// What a person may do about an exception from where it is shown. Each
-/// maps onto a request that already exists (or, for the schedule ones,
-/// `task.update`'s `schedule_paused`); none of them is taken here.
+/// maps onto a request (`task.run`, `task.cancel`, `run.answer`,
+/// `task.skip_next`, or `task.update`'s `schedule_paused`); none of them is
+/// taken here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
@@ -626,6 +634,8 @@ pub enum Action {
     Answer,
     /// `task.run` for a scheduled task, ahead of its slot.
     RunNow,
+    /// `task.skip_next`: pass over the schedule's next slot.
+    SkipNext,
     PauseSchedule,
     ResumeSchedule,
 }
@@ -1120,6 +1130,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             if !active {
                 a.push(Action::RunNow);
             }
+            a.push(Action::SkipNext);
             a.push(Action::PauseSchedule);
             a
         };
@@ -1279,8 +1290,8 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
         aging: Aging { items: aging_items, percentiles },
         health: HealthReport {
             window: input.window,
-            current: health(&owned, &current, since, &input.answers),
-            previous: health(&owned, &current.previous(), since, &input.answers),
+            current: health(&owned, &current, since, &input.answers, &input.agent_runs),
+            previous: health(&owned, &current.previous(), since, &input.answers, &input.agent_runs),
         },
         schedules,
         recorded_since: since,
@@ -1288,7 +1299,13 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
 }
 
 /// The health strip for one window.
-pub fn health(runs: &[Run], window: &Window, since: Option<DateTime<Utc>>, answers: &[DateTime<Utc>]) -> Health {
+pub fn health(
+    runs: &[Run],
+    window: &Window,
+    since: Option<DateTime<Utc>>,
+    answers: &[DateTime<Utc>],
+    agent_runs: &BTreeSet<(String, DateTime<Utc>)>,
+) -> Health {
     let finished: Vec<&Run> = runs.iter().filter(|r| ended_in(r, window)).collect();
     let n = finished.len();
     let prev = predecessors(runs);
@@ -1309,7 +1326,7 @@ pub fn health(runs: &[Run], window: &Window, since: Option<DateTime<Utc>>, answe
         }
     }
 
-    let interventions = interventions(runs, window, answers);
+    let interventions = interventions(runs, window, answers, agent_runs);
     let cycles = cycle_times(runs, window);
     let waits = queue_waits(runs, window);
     Health {
@@ -1341,12 +1358,20 @@ pub fn health(runs: &[Run], window: &Window, since: Option<DateTime<Utc>>, answe
 }
 
 /// Interventions in `window`, as the module doc defines them.
-pub fn interventions(runs: &[Run], window: &Window, answers: &[DateTime<Utc>]) -> u32 {
-    // A person's "run again" is exactly production.rs's manual rework.
+pub fn interventions(
+    runs: &[Run],
+    window: &Window,
+    answers: &[DateTime<Utc>],
+    agent_runs: &BTreeSet<(String, DateTime<Utc>)>,
+) -> u32 {
+    // A person's "run again" is exactly production.rs's manual rework --
+    // less the ones an agent asked for.
     let prev = predecessors(runs);
+    let by_agent = |r: &Run| r.queued_at.is_some_and(|q| agent_runs.contains(&(r.task_id.clone(), q)));
     let run_again = runs
         .iter()
         .filter(|r| r.trigger == Trigger::Manual && window.contains(r.started_at) && is_rework(r, &prev))
+        .filter(|r| !by_agent(r))
         .count();
     let cancels = runs
         .iter()
@@ -1746,7 +1771,7 @@ mod tests {
         let r = report(&input(&tasks, &[]));
         let late: Vec<_> = r.attention.iter().map(|e| (e.kind, e.task_id.clone().unwrap())).collect();
         assert_eq!(late, vec![(ExceptionKind::ScheduleLate, "late".to_string())]);
-        assert_eq!(r.attention[0].actions, vec![Action::RunNow, Action::PauseSchedule]);
+        assert_eq!(r.attention[0].actions, vec![Action::RunNow, Action::SkipNext, Action::PauseSchedule]);
         let state = |id: &str| r.schedules.iter().find(|s| s.task_id == id).unwrap().state;
         assert_eq!(state("late"), ScheduleState::Late);
         assert_eq!(state("paused"), ScheduleState::Paused);
@@ -1995,8 +2020,12 @@ mod tests {
         retry.trigger = Trigger::Retry;
         let prior = run("e", "v", 1, RunStatus::Failed, 60, Some(50));
         let runs = vec![failed, again, fresh, retry, prior];
-        assert_eq!(interventions(&runs, &window, &[]), 1, "the automatic retry is not a person");
-        assert_eq!(interventions(&runs, &window, &[ago(5), ago(20_000)]), 2, "answers count inside the window only");
+        let none = BTreeSet::new();
+        assert_eq!(interventions(&runs, &window, &[], &none), 1, "the automatic retry is not a person");
+        assert_eq!(interventions(&runs, &window, &[ago(5), ago(20_000)], &none), 2, "answers count inside the window only");
+        // The same run again, asked for by an agent: not a person's doing.
+        let asked: BTreeSet<_> = [("t".to_string(), ago(40))].into_iter().collect();
+        assert_eq!(interventions(&runs, &window, &[], &asked), 0, "an agent's run again is not an intervention");
     }
 
     #[test]

@@ -98,6 +98,20 @@ const TORNADO_SWING: f64 = 0.2;
 /// names until a second outcome exists to choose between.
 const KEY_OUTCOME: &str = "effective_throughput";
 
+/// The triggered ones among one scenario's evaluated signposts, flattened
+/// for `ScenariosReport::triggered` and the Operations attention queue.
+fn triggered_of(s: &Scenario, statuses: &[scenario::SignpostStatus]) -> Vec<TriggeredSignpost> {
+    statuses
+        .iter()
+        .filter(|status| status.state == scenario::SignpostState::Triggered)
+        .map(|status| TriggeredSignpost {
+            scenario: s.name.clone(),
+            metric: status.metric.clone(),
+            reason: status.reason.clone(),
+        })
+        .collect()
+}
+
 /// Sum `daily` (`production.rs`'s own 53-week grid, oldest first) into
 /// `weeks` non-overlapping 7-day buckets ending on the grid's own last day,
 /// oldest bucket first -- see the module doc comment for why this, not the
@@ -590,15 +604,7 @@ impl Engine {
                 .collect();
 
             let signposts = scenario::evaluate_signposts(&s.signposts, &values, now);
-            for status in &signposts {
-                if status.state == scenario::SignpostState::Triggered {
-                    triggered.push(TriggeredSignpost {
-                        scenario: s.name.clone(),
-                        metric: status.metric.clone(),
-                        reason: status.reason.clone(),
-                    });
-                }
-            }
+            triggered.extend(triggered_of(s, &signposts));
 
             let subject = format!("{}.yaml", s.name);
             let own_findings: Vec<scenario::Finding> = scenario_findings.iter().filter(|f| f.subject == subject).cloned().collect();
@@ -639,6 +645,36 @@ impl Engine {
             policy_findings,
             triggered,
         })
+    }
+
+    /// Every signpost that is past its threshold right now, across every
+    /// scenario on disk -- `ScenariosReport::triggered` without the rest of
+    /// the report. For the Operations attention queue (`#106`), which reads
+    /// it on every call and so cannot afford what the full report costs:
+    /// the policy overlay per scope and a Monte Carlo forecast per scenario.
+    /// Only the metrics the signposts name are computed, and none at all
+    /// when no scenario sets one. The same [`triggered_of`] the full report
+    /// uses, over the same `Engine::metrics`, so the two cannot disagree.
+    pub(crate) async fn triggered_signposts(self: &Arc<Self>, now: DateTime<Utc>) -> Result<Vec<TriggeredSignpost>> {
+        let dir = scenario::scenarios_dir(&self.factory_snapshot().root);
+        let (scenarios, _) = tokio::task::spawn_blocking(move || scenario::load(&dir))
+            .await
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("scenario directory walk: {e}")))?;
+        let mut metric_ids: Vec<MetricId> = Vec::new();
+        for s in &scenarios {
+            for sp in &s.signposts {
+                crate::metrics::push_if_known(&mut metric_ids, &sp.metric);
+            }
+        }
+        if metric_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let computed = self.metrics(&metric_ids, now).await?;
+        let values: BTreeMap<MetricId, MetricValue> = computed.values.into_iter().map(|v| (v.id.clone(), v)).collect();
+        Ok(scenarios
+            .iter()
+            .flat_map(|s| triggered_of(s, &scenario::evaluate_signposts(&s.signposts, &values, now)))
+            .collect())
     }
 
     /// Turn a scenario into real work: `Request::ScenarioPromote`. One task

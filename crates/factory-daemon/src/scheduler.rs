@@ -30,6 +30,15 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         match engine.due_now().await {
             Ok(due) => {
                 for task in due {
+                    // Held from the re-read to the move of `next_run_at`, so
+                    // a `task.skip_next` in between cannot be fired past: a
+                    // task whose slot changed since `due_now` read it is
+                    // somebody else's decision now, and waits for the next
+                    // tick to be looked at again.
+                    let _slot = engine.schedule_lock.lock().await;
+                    let Some(task) = engine.still_due(&task).await else {
+                        continue;
+                    };
                     // A task with a queued retry (`pending_retry`, set only by
                     // `Engine::queue_or_end_retry`) is due here because its
                     // backoff elapsed, not because the schedule's own next

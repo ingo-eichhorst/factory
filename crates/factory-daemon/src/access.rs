@@ -176,6 +176,9 @@ impl Engine {
             Request::TaskDelete { .. } => Grant::TaskDelete,
             Request::TaskRun { .. } => Grant::TaskRun,
             Request::TaskCancel { .. } => Grant::TaskCancel,
+            // Moving a schedule's next slot is editing the task, exactly as
+            // pausing it through `task.update` is (`#106`).
+            Request::TaskSkipNext { .. } => Grant::TaskEdit,
             // The harness saying a turn ended is a report on the run in
             // everything but who is speaking: same token, same authority.
             Request::TaskReport { .. } | Request::TaskTurnEnded { .. } => Grant::TaskReport,
@@ -184,6 +187,8 @@ impl Engine {
             Request::AgentStop { .. } => Grant::AgentStop,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
+            // Typing into a run's session, however narrowed (`#106`).
+            Request::RunAnswer { .. } => Grant::RunInput,
             Request::WorkflowCreate(_) => Grant::WorkflowCreate,
             Request::WorkflowUpdate { .. } => Grant::WorkflowEdit,
             Request::WorkflowDelete { .. } => Grant::WorkflowDelete,
@@ -247,6 +252,8 @@ impl Engine {
             // `drivers` say (`#100`).
             | Request::ScenarioWhatIf { .. }
             | Request::Scenarios { .. }
+            // A projection over what the reads below already return (`#106`).
+            | Request::Operations { .. }
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
@@ -377,7 +384,7 @@ impl Engine {
             // And for a quality scenario's remediation task (`#107`).
             Request::QualityRemediate { scope: s, .. } => in_scope(s),
 
-            Request::TaskUpdate { id, patch } => {
+            Request::TaskUpdate { id, patch, .. } => {
                 // Handing a task to somebody else is not editing it. A role
                 // that reaches only its own work may change what its task says,
                 // never whose it is.
@@ -395,7 +402,10 @@ impl Engine {
                 Ok(())
             }
 
-            Request::TaskDelete { id } | Request::TaskRun { id } | Request::TaskCancel { id } => {
+            Request::TaskDelete { id }
+            | Request::TaskRun { id, .. }
+            | Request::TaskCancel { id, .. }
+            | Request::TaskSkipNext { id, .. } => {
                 match self.store.get(id).await? {
                     Some(task) => task_in_reach(def, &task),
                     None => Ok(()), // let the engine report "no such task"
@@ -440,7 +450,7 @@ impl Engine {
                 Reach::Own => Err(deny("reach into another agent's session")),
             },
 
-            Request::RunInput { id, .. } => match def.reach {
+            Request::RunInput { id, .. } | Request::RunAnswer { id, .. } => match def.reach {
                 Reach::Scope => match self.task_of_run(id).await? {
                     Some(task) => in_scope(&task.scope),
                     None => Ok(()),
@@ -549,6 +559,7 @@ impl Engine {
             caller,
             &Request::TaskRun {
                 id: uuid::Uuid::new_v4().to_string(),
+                reason: None,
             },
         )
         .await
@@ -1200,6 +1211,10 @@ mod tests {
                     scenario: None,
                     drivers: Default::default(),
                 },
+                Request::Operations {
+                    scope: None,
+                    window: Default::default(),
+                },
                 Request::Subscribe,
             ] {
                 assert!(
@@ -1226,6 +1241,7 @@ mod tests {
                 Request::TaskUpdate {
                     id: "mine".into(),
                     patch: titled("a better title"),
+                    reason: None,
                 }
             )
             .await
@@ -1248,6 +1264,7 @@ mod tests {
                 Request::TaskUpdate {
                     id: "theirs".into(),
                     patch: titled("mine now"),
+                    reason: None,
                 }
             )
             .await
@@ -1305,6 +1322,7 @@ mod tests {
                     Request::TaskUpdate {
                         id: "mine".into(),
                         patch,
+                        reason: None,
                     }
                 )
                 .await
@@ -1371,6 +1389,19 @@ mod tests {
             )
             .await
         );
+        // An answer is typing into a session, and reaches exactly as far.
+        assert!(
+            !allowed(
+                &e,
+                &caller,
+                Request::RunAnswer {
+                    id: "somebody-elses-run".into(),
+                    text: "yes".into(),
+                    reason: "it asked".into(),
+                }
+            )
+            .await
+        );
     }
 
     #[tokio::test]
@@ -1380,8 +1411,8 @@ mod tests {
         for request in [
             Request::TaskCreate(NewTask::default()),
             Request::TaskDelete { id: "t".into() },
-            Request::TaskRun { id: "t".into() },
-            Request::TaskCancel { id: "t".into() },
+            Request::TaskRun { id: "t".into(), reason: None },
+            Request::TaskCancel { id: "t".into(), reason: None },
             Request::AgentStart {
                 scope: "demo".into(),
                 name: "w".into(),
@@ -1404,6 +1435,10 @@ mod tests {
                 "a worker should not be able to {request:?}"
             );
         }
+        // Skipping its own task's next slot is editing its own task, which a
+        // worker may do -- the same grant, and the same reach, as pausing
+        // that schedule through `task.update`.
+        assert!(allowed(&e, &worker("w"), Request::TaskSkipNext { id: "t".into(), reason: None, slot: None }).await);
     }
 
     // -- the foreman -------------------------------------------------------
@@ -1427,10 +1462,12 @@ mod tests {
             Request::TaskUpdate {
                 id: "here".into(),
                 patch: titled("renamed"),
+                reason: None,
             },
             Request::TaskDelete { id: "here".into() },
-            Request::TaskRun { id: "here".into() },
-            Request::TaskCancel { id: "here".into() },
+            Request::TaskRun { id: "here".into(), reason: None },
+            Request::TaskCancel { id: "here".into(), reason: None },
+            Request::TaskSkipNext { id: "here".into(), reason: None, slot: None },
             Request::TaskReport {
                 id: "here".into(),
                 report: report(),
@@ -1444,9 +1481,14 @@ mod tests {
                 agent: declaration(),
             },
             Request::RunInput {
-                id: run,
+                id: run.clone(),
                 text: Some("hi".into()),
                 keys: vec![],
+            },
+            Request::RunAnswer {
+                id: run,
+                text: "yes".into(),
+                reason: "it asked".into(),
             },
         ] {
             assert!(
@@ -1470,15 +1512,23 @@ mod tests {
             Request::TaskUpdate {
                 id: "elsewhere".into(),
                 patch: titled("renamed"),
+                reason: None,
             },
             Request::TaskDelete {
                 id: "elsewhere".into(),
             },
             Request::TaskRun {
                 id: "elsewhere".into(),
+                reason: None,
             },
             Request::TaskCancel {
                 id: "elsewhere".into(),
+                reason: None,
+            },
+            Request::TaskSkipNext {
+                id: "elsewhere".into(),
+                reason: None,
+                slot: None,
             },
             Request::TaskReport {
                 id: "elsewhere".into(),
@@ -1493,9 +1543,14 @@ mod tests {
                 agent: declaration(),
             },
             Request::RunInput {
-                id: run,
+                id: run.clone(),
                 text: Some("hi".into()),
                 keys: vec![],
+            },
+            Request::RunAnswer {
+                id: run,
+                text: "yes".into(),
+                reason: "it asked".into(),
             },
         ] {
             assert!(
@@ -1519,6 +1574,7 @@ mod tests {
                         scope: Some("other".into()),
                         ..Default::default()
                     },
+                    reason: None,
                 }
             )
             .await
@@ -1533,8 +1589,8 @@ mod tests {
             "roles:\n  runner:\n    grants: [task.run, task.cancel]\n    reach: scope\n",
         );
         task_in(&e, "here", "demo", "somebody").await;
-        assert!(allowed(&e, &wearing("runner"), Request::TaskRun { id: "here".into() }).await);
-        assert!(allowed(&e, &wearing("runner"), Request::TaskCancel { id: "here".into() }).await);
+        assert!(allowed(&e, &wearing("runner"), Request::TaskRun { id: "here".into(), reason: None }).await);
+        assert!(allowed(&e, &wearing("runner"), Request::TaskCancel { id: "here".into(), reason: None }).await);
         // Not granted: it may look at the board, and start what is on it.
         assert!(allowed(&e, &wearing("runner"), Request::TaskList(Default::default())).await);
         assert!(!allowed(&e, &wearing("runner"), Request::TaskCreate(NewTask::default())).await);
@@ -1545,6 +1601,7 @@ mod tests {
                 Request::TaskUpdate {
                     id: "here".into(),
                     patch: titled("renamed"),
+                    reason: None,
                 }
             )
             .await
@@ -1614,6 +1671,7 @@ mod tests {
                 Request::TaskUpdate {
                     id: "mine".into(),
                     patch: titled("renamed"),
+                    reason: None,
                 }
             )
             .await
@@ -1628,6 +1686,7 @@ mod tests {
                         agent: Some("somebody".into()),
                         ..Default::default()
                     },
+                    reason: None,
                 }
             )
             .await
@@ -1713,7 +1772,7 @@ mod tests {
             allowed(&e, &critic, Request::TaskReport { id: "mine".into(), report: report() }).await,
             "demo-app is below projects on disk, so it has engineering's reviewer"
         );
-        assert!(!allowed(&e, &critic, Request::TaskRun { id: "mine".into() }).await);
+        assert!(!allowed(&e, &critic, Request::TaskRun { id: "mine".into(), reason: None }).await);
     }
 
     #[tokio::test]
@@ -1745,13 +1804,13 @@ mod tests {
             task_in(&e, id, scope, "somebody").await;
         }
         let lead = in_scope("demo-app", "boss", "lead");
-        assert!(allowed(&e, &lead, Request::TaskRun { id: "here".into() }).await);
+        assert!(allowed(&e, &lead, Request::TaskRun { id: "here".into(), reason: None }).await);
         for elsewhere in ["parent", "sibling", "child"] {
             assert!(
-                !allowed(&e, &lead, Request::TaskRun { id: elsewhere.into() }).await,
+                !allowed(&e, &lead, Request::TaskRun { id: elsewhere.into(), reason: None }).await,
                 "inheriting lead from projects gives no authority over {elsewhere}"
             );
-            assert!(!allowed(&e, &lead, Request::TaskCancel { id: elsewhere.into() }).await);
+            assert!(!allowed(&e, &lead, Request::TaskCancel { id: elsewhere.into(), reason: None }).await);
         }
     }
 
