@@ -4605,6 +4605,8 @@ mod tests {
         let mid = engine.store.get(&task.id).await.unwrap().unwrap();
         assert!(mid.error.is_some(), "sanity: the failure is on the mirror before the retry runs");
         assert!(mid.pending_retry.is_some(), "sanity: a retry is queued before it runs");
+        assert_eq!(mid.status, TaskStatus::Pending, "a queued retry keeps the task scheduled (#122)");
+        assert!(mid.failure.is_some(), "and it says what it is retrying after");
 
         // The scheduler's own retry pickup (`resume_from_retry`) would run
         // here in production; a fresh run row is all `finish_run` needs.
@@ -4631,6 +4633,7 @@ mod tests {
             task.pending_retry.is_none(),
             "the streak is over; a stale `pending_retry` would misreport this task as still mid-retry"
         );
+        assert!(task.failure.is_none(), "nor may the failure it retried after outlive it (#122)");
         assert_eq!(
             task.next_run_at,
             Some(regular_next_run),
@@ -4673,11 +4676,19 @@ mod tests {
             "the task honestly shows the last thing that happened; nothing to clear here since nothing succeeded"
         );
 
+        assert_eq!(
+            task.status,
+            TaskStatus::Blocked,
+            "retries exhausted: blocked on the failure, never back in Scheduled looking healthy (#122)"
+        );
+        assert_eq!(task.failure.as_ref().and_then(|f| f.run_id.clone()), Some(retry.id.clone()));
+
         let entries = engine.store.entries(&task.id, 20).await.unwrap();
         assert!(
             entries.iter().any(|e| e.kind == "retry_settled" && e.message.contains("exhausted")),
             "exhausting the policy is visible in the journal too: {entries:?}"
         );
+        assert!(entries.iter().any(|e| e.kind == "blocked_on_failure"), "{entries:?}");
     }
 
     #[tokio::test]
@@ -4699,15 +4710,24 @@ mod tests {
         );
         assert_eq!(task.error.as_deref(), Some("boom"));
 
+        // Nothing will try again before the next regular firing, so the
+        // task is blocked on the failure (`#122`) rather than sitting in
+        // Scheduled looking healthy -- and still due at that firing.
+        assert_eq!(task.status, TaskStatus::Blocked);
+        assert!(task.blocked_by_failure());
+        assert_eq!(task.failure.as_ref().and_then(|f| f.kind), Some(FailKind::AgentFailed));
+        assert_eq!(task.failure.as_ref().and_then(|f| f.run_id.clone()), Some(run.id.clone()));
+
         // `mirror_to_task` stays silent on a `Failed` recurring task so it
         // never contradicts a retry that might follow -- for a policy that
         // never retries at all, `queue_or_end_retry` is the one that has to
-        // say the task is just waiting for its next turn.
+        // say what happens next.
         let entries = engine.store.entries(&task.id, 20).await.unwrap();
         assert!(
-            entries.iter().any(|e| e.kind == "rearmed"),
+            entries.iter().any(|e| e.kind == "blocked_on_failure" && e.message.contains("`none`")),
             "a task that will never retry still needs a line saying what happens next: {entries:?}"
         );
+        assert!(!entries.iter().any(|e| e.kind == "rearmed"), "it is not rearmed as if nothing happened");
     }
 
     #[tokio::test]

@@ -881,6 +881,8 @@ mod tests {
             schedule_paused: false,
             category: None,
             intake: None,
+            failure: None,
+            closure: None,
         };
         let task = engine.store.create(&task).await.unwrap();
         let run = engine
@@ -1292,6 +1294,8 @@ mod tests {
             schedule_paused: false,
             category: None,
             intake: None,
+            failure: None,
+            closure: None,
         };
         engine.store.create(&task).await.unwrap();
 

@@ -347,6 +347,8 @@ mod tests {
             schedule_paused: false,
             category: None,
             intake: None,
+            failure: None,
+            closure: None,
         }
     }
 
