@@ -259,6 +259,7 @@ impl Engine {
             identity_token: Some(identity),
             role,
             policy_frameworks,
+            goal: None,
         };
 
         let mut launch = match adapter.launch_spec(&ctx).await {

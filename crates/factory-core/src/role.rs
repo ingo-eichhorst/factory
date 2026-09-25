@@ -134,10 +134,16 @@ pub enum Grant {
     /// one project.
     #[serde(rename = "policy.attest")]
     PolicyAttest,
+    /// Record a check-in against a manual key result. The root scope is
+    /// the subject, for the same reason as `policy.attest`: a check-in
+    /// speaks for the company's own goals, not for one project, even when
+    /// the key result it moves belongs to an objective scoped to one.
+    #[serde(rename = "goals.checkin")]
+    GoalsCheckIn,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 20] = [
+    pub const ALL: [Grant; 21] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -158,6 +164,7 @@ impl Grant {
         Grant::DatasetEdit,
         Grant::BenchRun,
         Grant::PolicyAttest,
+        Grant::GoalsCheckIn,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -182,6 +189,7 @@ impl Grant {
             Self::DatasetEdit => "dataset.edit",
             Self::BenchRun => "bench.run",
             Self::PolicyAttest => "policy.attest",
+            Self::GoalsCheckIn => "goals.checkin",
         }
     }
 
@@ -208,6 +216,7 @@ impl Grant {
             Self::DatasetEdit => "create, edit, and delete datasets and their cases",
             Self::BenchRun => "start, cancel, and clean bench runs",
             Self::PolicyAttest => "record and withdraw policy attestations",
+            Self::GoalsCheckIn => "record check-ins against manual key results",
         }
     }
 
@@ -235,6 +244,7 @@ impl Grant {
             Self::DatasetEdit => "Datasets",
             Self::BenchRun => "Bench",
             Self::PolicyAttest => "Policy",
+            Self::GoalsCheckIn => "Goals",
         }
     }
 
@@ -595,7 +605,7 @@ mod tests {
     fn every_grant_belongs_to_a_group_a_person_reads() {
         for grant in Grant::ALL {
             assert!(
-                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy"]
+                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals"]
                     .contains(&grant.group()),
                 "{} has no group",
                 grant.as_str()
@@ -607,21 +617,24 @@ mod tests {
         assert_eq!(Grant::DatasetEdit.group(), "Datasets");
         assert_eq!(Grant::BenchRun.group(), "Bench");
         assert_eq!(Grant::PolicyAttest.group(), "Policy");
+        assert_eq!(Grant::GoalsCheckIn.group(), "Goals");
     }
 
     #[test]
-    fn dataset_edit_bench_run_and_policy_attest_are_appended_at_the_end_and_a_wildcard_still_catches_them() {
+    fn dataset_edit_bench_run_policy_attest_and_goals_checkin_are_appended_at_the_end_and_a_wildcard_still_catches_them() {
         // The task's own instructions: these land at the end of the enum
         // and of `Grant::ALL`, in the order each was added, so a parallel
         // track appending its own grant there too merges without a real
         // conflict.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::DatasetEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::BenchRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::PolicyAttest);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::DatasetEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::BenchRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::PolicyAttest);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::GoalsCheckIn);
         let all = Grant::expand("*").unwrap();
         assert!(all.contains(&Grant::DatasetEdit));
         assert!(all.contains(&Grant::BenchRun));
         assert!(all.contains(&Grant::PolicyAttest));
+        assert!(all.contains(&Grant::GoalsCheckIn));
     }
 
     #[test]

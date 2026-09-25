@@ -8,8 +8,10 @@ mod configuration;
 mod datasets;
 mod discovery;
 mod engine;
+mod goals;
 mod host;
 mod interfaces;
+mod metrics;
 mod occupancy;
 mod policies;
 mod power;
@@ -263,11 +265,13 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let workflow_store = workflows::WorkflowStore::open(&factory.database_path())?;
     let bench_store = bench::BenchStore::open(&factory.database_path())?;
     let policy_store = policies::PolicyStore::open(&factory.database_path())?;
+    let goals_store = goals::GoalsStore::open(&factory.database_path())?;
     let engine = Arc::new(
         Engine::new(factory.clone(), registry, store, factory_bin(), interface_names)
             .with_workflow_store(workflow_store)
             .with_bench_store(bench_store)
-            .with_policy_store(policy_store),
+            .with_policy_store(policy_store)
+            .with_goals_store(goals_store),
     );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

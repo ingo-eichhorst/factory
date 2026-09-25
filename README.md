@@ -192,7 +192,7 @@ rather than ignored, and so is an agent given a role the instance never defined
     task.create  task.edit  task.delete  task.run  task.cancel  task.report
     agent.start  agent.configure  agent.stop  agent.input  run.input
     workflow.create  workflow.edit  workflow.delete  workflow.run  workflow.cancel
-    knowledge.write  dataset.edit  bench.run  policy.attest
+    knowledge.write  dataset.edit  bench.run  policy.attest  goals.checkin
 
 Reading is not among them, because reading is open to every agent: one that
 cannot see the board cannot coordinate with anyone.
@@ -749,6 +749,110 @@ attachment; filename="policy-<scope|instance>-<date>.<format>"`, so a browser
 click downloads it directly. The L6 tab's header carries an "Export" link
 that does exactly that click, for the scope currently selected on the rail.
 
+## Goals
+
+L6 Direction's other tab: the company's **vision, mission and objectives**,
+where key results are computed from data Factory already records wherever
+possible rather than self-reported. **Goals enforce nothing** — the same
+deferral policies rest on (design §8): nothing here starts, stops, or gates
+any work. `factory_core::goals` (the catalogue loader, findings, scoring,
+evaluation) and `factory_core::metrics` (the shared registry, also read by
+the future Scenarios tab, `#100`) are pure and tested on their own; this
+section is what `factory-daemon` builds on top of them.
+
+**The catalogue.** `<root>/.factory/goals/` — authored content, the same
+pattern as the knowledge vault, datasets and policies: hand-written, re-read
+on every request, never written by Factory. `direction.yaml` is the
+long-term frame (vision, mission, values, the north star and its inputs,
+obstacles); one `<cycle-id>.yaml` per planning cycle carries that cycle's
+`objectives` (each a handful of key results) and its `roadmap` (Now/Next/
+Later lanes, ProdPad's confidence lanes rather than promised dates). See
+`examples/goals/` for a complete pair and `crates/factory-core/src/goals.rs`
+for every field. A key result names exactly one of `metric` (computed) or
+`manual: true` (recorded by check-in) — both or neither is a finding, never
+a hard failure that takes the rest of the file down with it.
+
+**The metric registry.** A metric is a named, documented projection over
+data that already exists — not a query language, so this stays inside
+design §8 the same way a policy check does. `factory metrics` (or `GET
+/api/metrics`) lists every id this instance can compute:
+
+| id | means | source |
+|---|---|---|
+| `throughput_week` | finished runs, trailing 7 days | `production.rs`'s daily grid |
+| `first_pass_yield` | `1 − reworked/finished`, trailing 28 days | `production.rs`'s daily grid |
+| `scrap_rate` | `scrapped/finished`, trailing 28 days | `production.rs`'s daily grid |
+| `compliance.<framework>` | share of counted controls satisfied, attested, or n/a | `policy_report(None)`'s subtree rollup |
+| `open_controls.<framework>` | count of counted controls still open or stale | `policy_report(None)`'s subtree rollup |
+| `bench.resolve_rate.<dataset>` | the newest settled bench run's resolve rate | `bench::aggregate` |
+| `goal_tasks_done.<objective>.<kr>` | count of tasks labelled `goal=<objective>/<kr>` whose status is `done` | task labels, through `TaskStore` |
+| `unit_cost`, `tokens_per_run` | cost/tokens per run | **unavailable**: a `Run` records no model, tokens or cost yet (design §12.6) |
+
+`throughput_week`/`first_pass_yield`/`scrap_rate` read `production.rs`'s own
+daily grid directly rather than re-deriving "finished"/"scrapped"/
+"reworked" a second time — that module's own doc comment is the one place
+those words are defined. Every metric is computed **lazily**, like a policy
+fact: `Request::Metrics { ids }` only touches `production`/`policy_report`/
+the bench store when some asked id actually needs it, and each is read at
+most once per call no matter how many ids ask for something behind it. An
+id the registry has never heard of refuses the whole call (a typo should
+not come back as a quiet `None`); `unit_cost`/`tokens_per_run` — named in
+the registry but not yet computable — come back as `value: None` with that
+reason, never an error. `ids` empty means every non-parameterised metric
+(available or not) plus whatever the loaded goals and policy catalogues
+themselves name. Only the three production-based metrics carry a history
+today: one point per day over the daily grid's own 53 weeks, each point
+that metric's own trailing-window definition evaluated as of that day — the
+series' own last point always equals the metric's current value.
+
+**Scoring.** A key result is scored linearly from `baseline` to `target`,
+clamped to `0.0..=1.0`, whichever direction the metric actually improves —
+`factory_core::goals::score`. Colour bands differ for the two OKR
+disciplines *Measure What Matters* names: a **committed** key result is a
+promise, green only once fully met; an **aspirational** one is a stretch,
+green once it is clearly winning (`≥ 0.7`). A key result nothing has
+computed yet — no metric value, no check-in — carries `score: None`, never
+a manufactured `0.0`: "unscored" and "scored red" are different facts.
+
+**Check-ins.** A manual key result's value moves only through an
+append-only check-in — `value`, `confidence` (`0..=10`), an optional note —
+the same audit-trail pattern policy attestations use: recording one inserts
+a row (`GoalsStore`, `crates/factory-daemon/src/goals/store.rs`), and
+nothing ever revises or removes it. Refused when `kr` (`objective/kr`)
+names no key result in any loaded cycle, when that key result is computed
+rather than `manual: true` (its value comes from its metric, never a
+check-in), when `confidence` is outside `0..=10`, or when `value` is not a
+finite number. `Grant::GoalsCheckIn` (`goals.checkin`) gates it — the same
+root-scope-only rule `policy.attest` follows: a check-in speaks for the
+company's own goals, not for one project, so only the owner or a foreman
+whose own scope *is* the instance root may record one.
+`factory goals checkin <objective>/<kr> --value V --confidence C [--note
+N]`, or `POST /api/goals/checkins`. `Event::GoalsChanged` publishes on
+every check-in, the same as `Event::PolicyChanged` on an attestation.
+
+**`goal=` labels.** A task serves a key result through the label
+`goal=<objective>/<kr>`, following the existing `policy=` label pattern —
+no new primitive. `goal_tasks_done` reads it back to count done tasks; the
+agent guide names the objective and key result a task serves, when it
+carries one, resolved from the goals catalogue once at dispatch.
+
+**Scope.** `Request::Goals { scope, cycle }` narrows to objectives (and
+roadmap items) whose own `scope:` is the asked scope or a descendant of it
+(`Scope::path`, `Config::ancestors_of` — the same "roll up the subtree"
+direction `Request::Policy`'s own scope filter runs); an objective with no
+`scope:` of its own belongs to the root. `cycle` names one cycle by id
+(refused if none loaded has it); left out, the current cycle (`now` inside
+its `[from, to]` window) is used, or none if there isn't one right now —
+every cycle still gets its own summary (id, window, status, score) either
+way.
+
+`factory goals [status] [--cycle C] [--scope S] [--json]` prints the
+status view: vision/mission, the north star and its inputs, then per
+objective its key results (value, target, score, band), then the roadmap
+by lane, then findings. `factory goals cycles` lists every cycle on disk
+with its own status and score. `GET /api/goals?scope=&cycle=` answers the
+same `GoalsReport`.
+
 ## Tasks and runs
 
 A **task** is the standing intent: what to do, where, with which agent, and on
@@ -1172,7 +1276,11 @@ limit), `GET /api/benchmarks`, dataset CRUD under `/api/datasets` (plus
 `POST /api/policy/attestations/{id}/withdraw`, closing a gap under
 `POST /api/policy/remediate`, an audit export under `GET
 /api/policy/export?scope=&format=` (a download, not the ordinary envelope —
-see "Policies" above), workflow CRUD under
+see "Policies" above), computed metrics under `GET /api/metrics?ids=a,b`
+(empty `ids` is every non-parameterised metric plus whatever the loaded
+goals and policy catalogues imply), the L6 Goals tab under
+`GET /api/goals?scope=&cycle=`, check-ins under
+`POST /api/goals/checkins` (see "Goals" above), workflow CRUD under
 `/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
 `POST /api/rpc` for the raw envelope. `GET /ws`

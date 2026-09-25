@@ -8,9 +8,11 @@ use clap::{Parser, Subcommand};
 use factory_core::bench::{BenchResult, BenchRun, Verdict};
 use factory_core::dataset::{Case, Dataset, DatasetFinding, DatasetSummary};
 use factory_core::event::Event;
+use factory_core::goals::{self as goals_core, Band, CycleStatus, KrRef};
 use factory_core::knowledge::FindingKind;
+use factory_core::metrics::MetricId;
 use factory_core::policy::{self, ControlRef};
-use factory_core::protocol::{Payload, PolicyControlDetail, PolicyReport, Request, Response};
+use factory_core::protocol::{GoalsReport, Payload, PolicyControlDetail, PolicyReport, Request, Response};
 use factory_core::run::{Run, RunStatus};
 use factory_core::task::{
     CronSchedule, NewTask, RetryPolicy, Schedule, Task, TaskFilter, TaskPatch, TaskReport, TaskStatus,
@@ -103,6 +105,53 @@ enum Command {
         framework: Option<String>,
         #[command(subcommand)]
         command: Option<PolicyCmd>,
+    },
+    /// Every named metric, computed fresh off data Factory already records
+    /// -- the shared vocabulary the L6 Goals tab's key results (and, later,
+    /// Scenarios) read from. With no ids, every non-parameterised metric
+    /// plus whatever the loaded goals and policy catalogues imply.
+    Metrics {
+        /// e.g. `throughput_week`, `compliance.cra`, `bench.resolve_rate.eval-set-a`.
+        ids: Vec<String>,
+    },
+    /// The L6 Goals tab: vision, mission, the north star and its inputs,
+    /// every cycle's own summary, the asked (or current) cycle's graded
+    /// report, and the roadmap. With no subcommand, prints the status view
+    /// -- the same thing `factory goals status` prints.
+    Goals {
+        #[command(subcommand)]
+        command: Option<GoalsCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GoalsCmd {
+    /// Vision, mission, north star, objectives and their key results,
+    /// roadmap, and findings.
+    Status {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        cycle: Option<String>,
+    },
+    /// Every cycle on disk, oldest first, with its own status and score.
+    Cycles,
+    /// Record a check-in against a manual key result -- the one way its
+    /// value ever moves. `goals.checkin`, owner or a root-scope foreman
+    /// only. Refused for a key result that is computed (backed by a
+    /// metric), that no loaded cycle defines, or for a confidence outside
+    /// `0..=10`.
+    #[command(name = "checkin")]
+    CheckIn {
+        /// `objective/kr`.
+        kr: String,
+        #[arg(long)]
+        value: f64,
+        /// 0..=10.
+        #[arg(long)]
+        confidence: u8,
+        #[arg(long)]
+        note: Option<String>,
     },
 }
 
@@ -896,6 +945,21 @@ async fn main() -> Result<()> {
             };
             policy_cmd(cli.json, &client, cmd).await
         }
+
+        Command::Metrics { ids } => {
+            let ids: std::result::Result<Vec<MetricId>, String> = ids.into_iter().map(|s| s.parse()).collect();
+            let ids = ids.map_err(|e| anyhow!(e))?;
+            let payload = client.send(Request::Metrics { ids }).await?;
+            print(&payload, cli.json, |p| match p {
+                Payload::Metrics { values, series, registry } => Some(metrics_text(values, series, registry)),
+                _ => None,
+            })
+        }
+
+        Command::Goals { command } => {
+            let cmd = command.unwrap_or(GoalsCmd::Status { scope: None, cycle: None });
+            goals_cmd(cli.json, &client, cmd).await
+        }
     }
 }
 
@@ -1548,6 +1612,195 @@ fn attestation_line(a: &factory_core::policy::Attestation) -> String {
         a.attested_at.to_rfc3339(),
         a.expires_at.to_rfc3339(),
     )
+}
+
+// ================================================================== metrics
+
+/// `factory metrics [ids…] [--json]`: one line per value, its trend if it
+/// has a series, and why it is `--` when it is `None`.
+fn metrics_text(values: &[factory_core::metrics::MetricValue], series: &[factory_core::metrics::MetricSeries], registry: &[factory_core::protocol::MetricDefView]) -> String {
+    if values.is_empty() {
+        return "no metrics computed".to_string();
+    }
+    let mut out = String::new();
+    for v in values {
+        let def = registry.iter().find(|d| d.id == v.id.as_str());
+        let title = def.map(|d| d.title.as_str()).unwrap_or(v.id.as_str());
+        let value = match v.value {
+            Some(n) => format!("{n:.4}"),
+            None => "--".to_string(),
+        };
+        let trend = series
+            .iter()
+            .find(|s| s.id == v.id)
+            .and_then(factory_core::metrics::trend)
+            .map(|t| {
+                format!(
+                    "  {}",
+                    match t {
+                        factory_core::metrics::Trend::Up => "up",
+                        factory_core::metrics::Trend::Down => "down",
+                        factory_core::metrics::Trend::Flat => "flat",
+                    }
+                )
+            })
+            .unwrap_or_default();
+        let reason = v.reason.as_deref().map(|r| format!("  ({r})")).unwrap_or_default();
+        out.push_str(&format!("{:<40} {:<12} {value:>10}{trend}{reason}\n", v.id.as_str(), title));
+    }
+    out.trim_end().to_string()
+}
+
+// =================================================================== goals
+
+async fn goals_cmd(json: bool, client: &Client, cmd: GoalsCmd) -> Result<()> {
+    match cmd {
+        GoalsCmd::Status { scope, cycle } => {
+            let payload = client.send(Request::Goals { scope, cycle }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Goals { report } => Some(goals_status_text(report)),
+                _ => None,
+            })
+        }
+        GoalsCmd::Cycles => {
+            let payload = client.send(Request::Goals { scope: None, cycle: None }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Goals { report } => Some(goals_cycles_text(report)),
+                _ => None,
+            })
+        }
+        GoalsCmd::CheckIn { kr, value, confidence, note } => {
+            let kr: KrRef = kr.parse().map_err(|e: String| anyhow!(e))?;
+            let payload = client
+                .send(Request::GoalsCheckIn { kr, value, confidence, note })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::GoalsCheckIn { checkin } => Some(format!(
+                    "{}  {}  value={}  confidence={}/10  by {} at {}{}",
+                    checkin.id,
+                    checkin.kr,
+                    checkin.value,
+                    checkin.confidence,
+                    checkin.by,
+                    checkin.at.to_rfc3339(),
+                    checkin.note.as_deref().map(|n| format!("  note={n}")).unwrap_or_default(),
+                )),
+                _ => None,
+            })
+        }
+    }
+}
+
+fn band_str(band: Band) -> &'static str {
+    match band {
+        Band::Green => "green",
+        Band::Yellow => "yellow",
+        Band::Red => "red",
+    }
+}
+
+fn cycle_status_str(status: CycleStatus) -> &'static str {
+    match status {
+        CycleStatus::Future => "future",
+        CycleStatus::Current => "current",
+        CycleStatus::Past => "past",
+    }
+}
+
+/// `factory goals [status]`: vision/mission, the north star and its inputs,
+/// then per objective its key results (value, target, score, band), then
+/// the roadmap by lane, then findings.
+fn goals_status_text(report: &GoalsReport) -> String {
+    let mut out = String::new();
+    if let Some(d) = &report.direction {
+        out.push_str(&format!("vision:  {}\nmission: {}\n", d.vision, d.mission));
+    }
+    if let Some(ns) = &report.north_star {
+        let value = ns.value.value.map(|v| format!("{v:.4}")).unwrap_or_else(|| "--".to_string());
+        out.push_str(&format!("\nnorth star: {} = {value}  ({})\n", ns.metric, ns.why));
+    }
+    if !report.inputs.is_empty() {
+        out.push_str("inputs:\n");
+        for i in &report.inputs {
+            let value = i.value.value.map(|v| format!("{v:.4}")).unwrap_or_else(|| "--".to_string());
+            out.push_str(&format!("  {:<30} {value}\n", i.metric.to_string()));
+        }
+    }
+
+    match &report.report {
+        Some(cr) => {
+            out.push_str(&format!(
+                "\ncycle {} ({}, {:.0}% elapsed)\n",
+                cr.cycle_id,
+                cycle_status_str(cr.status),
+                cr.elapsed * 100.0
+            ));
+            for objective in &cr.objectives {
+                let score = objective.score.map(|s| format!("{:.0}%", s * 100.0)).unwrap_or_else(|| "--".to_string());
+                out.push_str(&format!("  {} ({})  score {score}\n", objective.title, objective.objective));
+                for kr in &objective.key_results {
+                    let value = kr.value.map(|v| format!("{v:.4}")).unwrap_or_else(|| "--".to_string());
+                    let band = kr.band.map(band_str).unwrap_or("unscored");
+                    let kind = match kr.kind {
+                        goals_core::KrKind::Committed => "committed",
+                        goals_core::KrKind::Aspirational => "aspirational",
+                    };
+                    out.push_str(&format!(
+                        "    [{band:<8}] {:<40} {kind:<12} value={value}  {}\n",
+                        kr.title, kr.source
+                    ));
+                    for reason in &kr.reasons {
+                        out.push_str(&format!("               {reason}\n"));
+                    }
+                }
+            }
+        }
+        None => out.push_str("\nno current cycle\n"),
+    }
+
+    if !report.roadmap.is_empty() {
+        out.push_str("\nroadmap:\n");
+        for lane in [goals_core::Lane::Now, goals_core::Lane::Next, goals_core::Lane::Later] {
+            let items: Vec<&factory_core::goals::RoadmapItem> = report.roadmap.iter().filter(|r| r.lane == lane).collect();
+            if items.is_empty() {
+                continue;
+            }
+            let lane_name = match lane {
+                goals_core::Lane::Now => "now",
+                goals_core::Lane::Next => "next",
+                goals_core::Lane::Later => "later",
+            };
+            out.push_str(&format!("  {lane_name}\n"));
+            for item in items {
+                out.push_str(&format!("    {}  [{}]\n", item.title, item.objectives.join(", ")));
+            }
+        }
+    }
+
+    if !report.findings.is_empty() {
+        out.push_str("\nfindings:\n");
+        for f in &report.findings {
+            out.push_str(&format!("  {:?}  {}  {}\n", f.kind, f.subject, f.detail));
+        }
+    }
+
+    out.trim_end().to_string()
+}
+
+/// `factory goals cycles`: every cycle on disk with its own status and score.
+fn goals_cycles_text(report: &GoalsReport) -> String {
+    if report.cycles.is_empty() {
+        return "no cycles on disk".to_string();
+    }
+    report
+        .cycles
+        .iter()
+        .map(|c| {
+            let score = c.score.map(|s| format!("{:.0}%", s * 100.0)).unwrap_or_else(|| "--".to_string());
+            format!("{:<12} {}..{}  {:<8} score {score}", c.id, c.from, c.to, cycle_status_str(c.status))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn bench_cmd(json: bool, client: &Client, cmd: BenchCmd) -> Result<()> {
@@ -2556,6 +2809,9 @@ fn describe_event(e: &Event) -> String {
         }
         Event::PolicyChanged { scope, control } => {
             format!("policy   {control} in {scope}  changed")
+        }
+        Event::GoalsChanged { kr } => {
+            format!("goals    {kr}  checked in")
         }
         Event::AgentActivity {
             subject, status, ..

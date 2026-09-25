@@ -144,6 +144,9 @@ fn router(engine: Arc<Engine>) -> Router {
         )
         .route("/api/policy/remediate", post(policy_remediate))
         .route("/api/policy/export", get(policy_export))
+        .route("/api/metrics", get(metrics))
+        .route("/api/goals", get(goals))
+        .route("/api/goals/checkins", post(create_goals_checkin))
         .route("/api/benchmarks", get(benchmarks))
         .route("/api/datasets", get(list_datasets).post(create_dataset))
         .route("/api/datasets/{name}", get(get_dataset).delete(delete_dataset))
@@ -596,6 +599,83 @@ async fn policy_export(
         }
         other => (status_for(&other), Json(other)).into_response(),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct MetricsQuery {
+    /// Comma-separated, the same convention `KnowledgeSearchQuery::tags`
+    /// already uses for a query string's repeated-key limitation. Empty (or
+    /// absent) means `Request::Metrics`'s own default: every
+    /// non-parameterised metric plus whatever the loaded goals and policy
+    /// catalogues imply.
+    #[serde(default)]
+    ids: String,
+}
+
+/// `GET /api/metrics?ids=a,b` -- every named metric's computed value, its
+/// history where it has one, and the definition behind it.
+async fn metrics(State(engine): State<Arc<Engine>>, Query(q): Query<MetricsQuery>) -> AxumResponse {
+    let mut ids = Vec::new();
+    for raw in q.ids.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        match raw.parse() {
+            Ok(id) => ids.push(id),
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response(),
+        }
+    }
+    run(&engine, Request::Metrics { ids }).await
+}
+
+#[derive(serde::Deserialize)]
+struct GoalsQuery {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    cycle: Option<String>,
+}
+
+/// `GET /api/goals?scope=&cycle=` -- the L6 Goals tab's whole answer.
+async fn goals(State(engine): State<Arc<Engine>>, Query(q): Query<GoalsQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::Goals {
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+            cycle: q.cycle.filter(|s| !s.trim().is_empty()),
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct GoalsCheckInBody {
+    /// `objective/kr`.
+    kr: String,
+    value: f64,
+    confidence: u8,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// `POST /api/goals/checkins` -- record a check-in against a manual key
+/// result. `kr` is parsed before the request ever reaches the engine, the
+/// same up-front 400 `create_attestation`'s own `control` field gets.
+async fn create_goals_checkin(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<GoalsCheckInBody>,
+) -> AxumResponse {
+    let kr: factory_core::goals::KrRef = match body.kr.parse() {
+        Ok(kr) => kr,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response(),
+    };
+    run(
+        &engine,
+        Request::GoalsCheckIn {
+            kr,
+            value: body.value,
+            confidence: body.confidence,
+            note: body.note,
+        },
+    )
+    .await
 }
 
 async fn benchmarks(State(engine): State<Arc<Engine>>) -> AxumResponse {
