@@ -52,7 +52,7 @@
     <span class="lv-n">L5</span><span class="lv-name">Improvement</span><span class="lv-sub">Benchmarks and knowledge</span>
   </button>
   <button id="lv-proc" class="lvl" data-level="proc" data-lv="4">
-    <span class="lv-n">L4</span><span class="lv-name">Process</span><span class="lv-sub">Rules and runs</span>
+    <span class="lv-n">L4</span><span class="lv-name">Process</span><span class="lv-sub">Tasks, workflows, operations</span>
   </button>
   <button id="lv-harn" class="lvl" data-level="harn" data-lv="3">
     <span class="lv-n">L3</span><span class="lv-name">Agent</span><span class="lv-sub">Who may work</span>
@@ -79,6 +79,7 @@
   <button id="tab-scenarios" hidden>Scenarios</button>
   <button id="tab-tasks" hidden>Tasks</button>
   <button id="tab-workflows" hidden>Workflows</button>
+  <button id="tab-operations" hidden>Operations</button>
   <button id="tab-occupancy" hidden>Occupancy</button>
   <button id="tab-roster" hidden>Roster</button>
   <button id="tab-agent-runtime" hidden>Agent-runtime</button>
@@ -452,6 +453,20 @@
         </div>
       </aside>
     </div>
+  </div>
+
+  <!-- How the line is running: attention, flow, aging WIP, health and
+       schedules, from `GET /api/operations` (`operations.js`). The notes the
+       page cannot do without live beside each section, not here. -->
+  <div id="view-operations" hidden>
+    <div class="bar">
+      <h2>Operations</h2>
+      <span class="sub" id="ops-generated"></span>
+      <span class="sp"></span>
+      <button class="btn" id="ops-refresh">Refresh</button>
+    </div>
+    <p class="env-note bad" id="ops-error" hidden></p>
+    <div class="dash ops" id="ops">loading…</div>
   </div>
 
   <div id="view-occupancy" hidden>

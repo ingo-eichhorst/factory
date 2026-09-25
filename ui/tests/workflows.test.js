@@ -35,7 +35,9 @@ test("Workflows is a Process peer of Tasks with an accessible canvas and summary
   assert.match(page, /id="tab-tasks"[^>]*>Tasks<\/button>\s*<button id="tab-workflows"[^>]*>Workflows<\/button>/);
   assert.match(page, /id="workflow-canvas"[^>]*tabindex="0"/);
   assert.match(page, /id="workflow-summary"/);
-  assert.match(app, /proc: \["tasks", "workflows"\]/);
+  // Not anchored at the closing bracket: Operations follows (`#106`), and
+  // `operations.test.js` pins the whole row.
+  assert.match(app, /proc: \["tasks", "workflows"/);
 });
 
 // ------------------------------------------------------------------ R1: drag

@@ -12,7 +12,8 @@ import { legacyAgentRoute, loadRuntimeConnections, renderRuntimeConnections } fr
 import { loadRoles, wireRoles } from "./roles.js";
 import { openCreate } from "./task-form.js";
 import { acceptWorkflowEvent, loadWorkflows, readWorkflowTail, renderWorkflows, wireWorkflows, workflowTail } from "./workflows.js";
-import { loadDashboard, renderDashboard, renderInbox, wireDashboard } from "./dashboard.js";
+import { loadDashboard, renderDashboard, loadInbox, renderInbox, wireDashboard } from "./dashboard.js";
+import { loadOperations, showOperations, hideOperations, wireOperations } from "./operations.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 import { loadEnvironment, renderSandboxes } from "./sandboxes.js";
@@ -42,7 +43,10 @@ let activityStarted = false;
 
 const VIEWS = {
   dashboard: { onShow: loadDashboard },
-  inbox: { onShow: () => renderInbox([...state.tasks.values()]) },
+  // The daemon's attention list, every scope -- the same exceptions the
+  // Operations tab shows per scope (`#106`), so there is one list, filtered
+  // two ways, and not two derivations that can disagree.
+  inbox: { onShow: loadInbox },
   // No poll: a policy read is cheap (catalogues on disk, the knowledge index,
   // the attestations store -- see `Request::Policy`'s doc comment) and
   // changes only when somebody attests or withdraws, which arrives as
@@ -73,6 +77,10 @@ const VIEWS = {
     onShow: loadWorkflows,
     tail: { write: workflowTail, read: readWorkflowTail },
   },
+  // No poll: every fact the report reads changes with a task, run, journal
+  // or agent event, and `onEvent` refetches on those (`scheduleOpsRefresh`).
+  // `onHide` is where "since you last looked" is written down.
+  operations: { onShow: showOperations, onHide: hideOperations },
   occupancy: {
     onShow: startOccupancy,
     onHide: stopAgentPoll,
@@ -187,7 +195,8 @@ const LEVEL_VIEWS = {
   // long-term frame and this cycle's objectives before the control
   // catalogue that holds the company to what it already committed to.
   dir: ["goals", "policy", "scenarios"],
-  proc: ["tasks", "workflows"],
+  // The work first, then how it is running.
+  proc: ["tasks", "workflows", "operations"],
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets"],
   imp: ["benchmarks", "knowledge"],
@@ -266,7 +275,12 @@ function rerender(route) {
   // server (`/api/production` takes a scope), not just re-drawn narrower --
   // so a rail change has to refetch, not merely re-render.
   if (state.tab === "dashboard") { loadDashboard(); return; }
-  if (state.tab === "inbox") { renderInbox([...state.tasks.values()]); return; }
+  // The Inbox is every scope's, whatever the rail says -- nothing to redo.
+  if (state.tab === "inbox") { renderInbox(); return; }
+  // Attention, flow and aging are narrowed here from what is on hand, but
+  // health is a scoped read (`operations.js`'s header), so a rail change
+  // refetches.
+  if (state.tab === "operations") { loadOperations(); return; }
   // Everything already in the tail is still there; a scope change only
   // changes how much of it is drawn, the same re-render `renderTasks` does
   // below for the tasks it already holds.
@@ -537,6 +551,10 @@ async function boot() {
   $("newTask").onclick = () => openCreate();
   wireDashboard();
   wireWorkflows();
+  wireOperations();
+  // A page in a background browser tab skips its refetches; coming back is
+  // when it catches up, once.
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) scheduleOpsRefresh(); });
 
   // The hash is the boot route. Read here rather than in `initRail`, which runs
   // before any of the wiring above: a view cannot be shown until it can work.
@@ -562,7 +580,7 @@ async function boot() {
       state.tasks = new Map(tasks.map(t => [t.id, t]));
       renderTasks();
       if (state.tab === "dashboard") renderDashboard();
-      if (state.tab === "inbox") renderInbox(tasks);
+      scheduleOpsRefresh();
     },
     event: onEvent,
     open: markWatching,
@@ -586,7 +604,6 @@ function onEvent(ev) {
       renderTasks();
       if (state.open === ev.task.id) renderModal();
       if (state.tab === "dashboard") renderDashboard();
-      if (state.tab === "inbox") renderInbox([...state.tasks.values()]);
       // Judging is asynchronous: a bench attempt's task settles (this
       // event) well before its gate finishes and `bench_run_updated`
       // delivers the verdict. Without this, the selected run's matrix would
@@ -601,7 +618,6 @@ function onEvent(ev) {
       renderTasks();
       if (state.open === ev.id) { dropModal(); writeHash(true); }
       if (state.tab === "dashboard") renderDashboard();
-      if (state.tab === "inbox") renderInbox([...state.tasks.values()]);
       break;
     case "task_entry":
       if (state.open === ev.id) loadJournal();
@@ -668,6 +684,34 @@ function onEvent(ev) {
   // Refresh covers those, the same restraint the Scenarios tab's own `onShow`
   // comment explains.
   if ((ev.type === "policy_changed" || ev.type === "goals_changed") && state.tab === "scenarios") reloadScenarios();
+  // Every fact `/api/operations` reads arrives as one of these (PR #113 adds
+  // no event of its own). Not `agent_activity`, a runtime saying an agent is
+  // busy several times a minute, which changes nothing the report says.
+  if ((ev.type.startsWith("task_") || ev.type.startsWith("run_") || ev.type.startsWith("agent_")) && ev.type !== "agent_activity") {
+    scheduleOpsRefresh();
+  }
+}
+
+/// One refetch of `/api/operations` for a burst of events, at most one per
+/// `OPS_REFRESH_MS`, and none at all unless the Operations tab or the Inbox
+/// is what is on screen in a browser tab someone can see. The unscoped read
+/// walks sixty days of runs and the journal of every open one -- not free --
+/// and `task_entry` fires once per line an agent writes. The first event of
+/// a burst starts the clock and the rest ride along, so a steady stream
+/// still refreshes every interval rather than never, as a trailing debounce
+/// would.
+const OPS_REFRESH_MS = 1500;
+let opsTimer = null;
+
+function scheduleOpsRefresh() {
+  if (opsTimer) return;
+  if (state.tab !== "operations" && state.tab !== "inbox") return;
+  opsTimer = setTimeout(() => {
+    opsTimer = null;
+    if (document.hidden) return;
+    if (state.tab === "operations") loadOperations();
+    else if (state.tab === "inbox") loadInbox();
+  }, OPS_REFRESH_MS);
 }
 
 /// The site's halls are built from `state.scopes`, which only the Roster view
