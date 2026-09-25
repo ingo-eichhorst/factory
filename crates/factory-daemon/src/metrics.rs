@@ -168,10 +168,18 @@ impl Engine {
                 })?;
                 self.goal_tasks_done_value(&id, objective, kr, now).await?
             } else {
-                // `metrics::resolve` only ever returns `Ok` for the families
-                // matched above -- see its own doc comment -- so a fixed
-                // metric with a computation branch here is exhaustive.
-                unreachable!("resolve() returned Ok for an id metrics.rs has no computation for: {id}")
+                // Every family `metrics::resolve` returns `Ok` for today has
+                // a branch above; a future metric added to the registry
+                // without one here comes back honestly unresolved rather
+                // than panicking a request that merely asked for it --
+                // `factory-core` and `factory-daemon` are separate crates,
+                // so the compiler cannot force the two to be added together.
+                MetricValue {
+                    id: id.clone(),
+                    value: None,
+                    as_of: now,
+                    reason: Some("no computation wired for this metric yet".to_string()),
+                }
             };
             values.push(value);
             registry.push(def.into());
@@ -604,6 +612,58 @@ mod tests {
         let computed = engine.metrics(&[MetricId::new("compliance.nope").unwrap()], now).await.unwrap();
         assert_eq!(computed.values[0].value, None);
         assert!(computed.values[0].reason.as_deref().unwrap().contains("nope"));
+    }
+
+    // ------------------------------------------------------- bench.resolve_rate
+
+    /// A settled bench run with two attempts (one pass, one fail) across two
+    /// configurations, summed into one resolve rate for the whole run --
+    /// `bench.resolve_rate.<dataset>` names no agent or configuration of its
+    /// own, unlike `bench show`'s own per-configuration table.
+    #[tokio::test]
+    async fn bench_resolve_rate_sums_pass_and_fail_across_every_configuration_in_the_newest_settled_run() {
+        use factory_core::bench::{BenchAttempt, BenchRun, BenchRunStatus, Verdict};
+
+        let engine = test_engine(Vec::new());
+        let mut pass = BenchAttempt::pending("a1".into(), "case1".into(), "agent-a".into(), 1);
+        pass.verdict = Some(Verdict::Pass);
+        let mut fail = BenchAttempt::pending("a2".into(), "case2".into(), "agent-b".into(), 1);
+        fail.verdict = Some(Verdict::Fail);
+        let run = BenchRun {
+            id: "run-1".into(),
+            dataset: "eval-set-a".into(),
+            dataset_revision: 1,
+            cases: Vec::new(),
+            case_bases: Default::default(),
+            agents: vec!["agent-a".into(), "agent-b".into()],
+            attempts_per_case: 1,
+            concurrency: 1,
+            status: BenchRunStatus::Done,
+            attempts: vec![pass.clone(), fail.clone()],
+            started_at: Utc::now(),
+            ended_at: Some(Utc::now()),
+        };
+        // `put_run` never trusts `attempts` embedded on the struct -- they
+        // live in their own table (`BenchStore::attempts`), written
+        // separately, the same way `bench::engine` itself writes them.
+        engine.bench.put_run(&run).await.unwrap();
+        engine.bench.put_attempt(&run.id, &pass).await.unwrap();
+        engine.bench.put_attempt(&run.id, &fail).await.unwrap();
+
+        let now = Utc::now();
+        let id = MetricId::new("bench.resolve_rate.eval-set-a").unwrap();
+        let computed = engine.metrics(&[id], now).await.unwrap();
+        assert_eq!(computed.values[0].value, Some(0.5), "one pass and one fail across two configurations");
+    }
+
+    #[tokio::test]
+    async fn bench_resolve_rate_is_none_with_a_reason_when_no_settled_run_exists() {
+        let engine = test_engine(Vec::new());
+        let now = Utc::now();
+        let id = MetricId::new("bench.resolve_rate.eval-set-a").unwrap();
+        let computed = engine.metrics(&[id], now).await.unwrap();
+        assert_eq!(computed.values[0].value, None);
+        assert!(computed.values[0].reason.as_deref().unwrap().contains("no settled bench run"));
     }
 
     // ------------------------------------------------------- goal_tasks_done

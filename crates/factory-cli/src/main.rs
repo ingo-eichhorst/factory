@@ -119,6 +119,12 @@ enum Command {
     /// report, and the roadmap. With no subcommand, prints the status view
     /// -- the same thing `factory goals status` prints.
     Goals {
+        /// Only this scope and its descendants (default: the whole instance).
+        #[arg(long)]
+        scope: Option<String>,
+        /// The cycle to report on (default: the current one, if any).
+        #[arg(long)]
+        cycle: Option<String>,
         #[command(subcommand)]
         command: Option<GoalsCmd>,
     },
@@ -956,8 +962,22 @@ async fn main() -> Result<()> {
             })
         }
 
-        Command::Goals { command } => {
-            let cmd = command.unwrap_or(GoalsCmd::Status { scope: None, cycle: None });
+        Command::Goals { scope, cycle, command } => {
+            // `--scope`/`--cycle` before the subcommand name (or with none
+            // at all) are the same flags `status` itself takes after it --
+            // clap hands each occurrence to whichever level asked for it,
+            // the same merge `Command::Policy` does above.
+            let cmd = match command {
+                None => GoalsCmd::Status { scope, cycle },
+                Some(GoalsCmd::Status { scope: s, cycle: c }) => GoalsCmd::Status { scope: s.or(scope), cycle: c.or(cycle) },
+                Some(_) if scope.is_some() || cycle.is_some() => {
+                    return Err(anyhow!(
+                        "--scope/--cycle before the subcommand only apply to `status`; repeat \
+                         them after the subcommand name if it takes its own"
+                    ));
+                }
+                Some(other) => other,
+            };
             goals_cmd(cli.json, &client, cmd).await
         }
     }
