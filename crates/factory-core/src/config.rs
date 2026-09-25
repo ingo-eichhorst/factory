@@ -526,6 +526,70 @@ pub struct DaemonConfig {
     /// macOS, so this is safe to leave on everywhere.
     #[serde(default = "default_power_assertion")]
     pub power_assertion: bool,
+    /// Check a harness starts before handing it a task (`#131`).
+    #[serde(default)]
+    pub harness_health: HarnessHealthConfig,
+}
+
+/// How the daemon checks that a harness starts before dispatching to it.
+///
+/// ```yaml
+/// daemon:
+///   harness_health:
+///     enabled: true            # probe before dispatch (the default)
+///     timeout_seconds: 10      # how long `<harness> --version` may take
+///     cache_seconds: 180       # how long a healthy answer is trusted
+///     retry_seconds: 60        # how often an unhealthy one is probed again
+///     repair_script: /path/to/factory/scripts/repair-harness
+///     auto_repair: false       # opt-in: run repair_script on its own
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessHealthConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_probe_timeout")]
+    pub timeout_seconds: u64,
+    #[serde(default = "default_probe_cache")]
+    pub cache_seconds: u64,
+    #[serde(default = "default_probe_retry")]
+    pub retry_seconds: u64,
+    /// Where `scripts/repair-harness` is on this host. Named in a blocked
+    /// task's reason, and what `auto_repair` runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_script: Option<String>,
+    /// Run `repair_script <harness>` on its own when a harness stops
+    /// answering, once per unhealthy stretch. Off unless the owner turns it
+    /// on: the repair overrides a decision macOS is holding, so by default a
+    /// person runs it. Does nothing without `repair_script`, and the script's
+    /// own signature check applies either way.
+    #[serde(default)]
+    pub auto_repair: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_probe_timeout() -> u64 {
+    10
+}
+fn default_probe_cache() -> u64 {
+    180
+}
+fn default_probe_retry() -> u64 {
+    60
+}
+
+impl Default for HarnessHealthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            timeout_seconds: default_probe_timeout(),
+            cache_seconds: default_probe_cache(),
+            retry_seconds: default_probe_retry(),
+            repair_script: None,
+            auto_repair: false,
+        }
+    }
 }
 
 /// A foreman per scope, synthesised rather than written out.
@@ -630,6 +694,7 @@ impl Default for DaemonConfig {
             default_retry: default_retry(),
             foreman: ForemanConfig::default(),
             power_assertion: default_power_assertion(),
+            harness_health: HarnessHealthConfig::default(),
         }
     }
 }

@@ -82,6 +82,10 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
             Err(e) => tracing::warn!("could not look for due tasks: {e}"),
         }
 
+        // -- tasks held on a harness that did not start (#131) ---------------
+        // Rate-limited and backgrounded inside; this only ever starts it.
+        engine.recheck_harnesses();
+
         // -- bench runs ----------------------------------------------------
         // A periodic sweep, not just a reaction to a settle: it is what
         // actually moves a run past the one dispatch failure
@@ -150,6 +154,12 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 timeout_secs,
                 blocked_secs,
             ) {
+                // A run nobody acknowledged may be a harness that stopped
+                // starting since it was last probed: the next dispatch to
+                // it probes again rather than trusting the cache (#131).
+                if kind == FailKind::AckTimeout {
+                    engine.doubt_harness_of(task.as_ref());
+                }
                 engine.fail_run(&run.id, kind, &why).await;
                 continue;
             }

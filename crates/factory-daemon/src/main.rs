@@ -11,6 +11,7 @@ mod datasets;
 mod discovery;
 mod engine;
 mod goals;
+mod harness_health;
 mod host;
 mod intake;
 mod interfaces;

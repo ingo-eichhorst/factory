@@ -1637,7 +1637,7 @@ fn intake_item_text(task: &Task) -> String {
 /// declared provider with the agents it serves, then the model agents none
 /// claims. A fact the daemon could not read prints as `--`.
 fn infrastructure_text(payload: &Payload) -> Option<String> {
-    let Payload::Infrastructure { host, daemon, providers, unassigned } = payload else {
+    let Payload::Infrastructure { host, daemon, providers, unassigned, harnesses } = payload else {
         return None;
     };
     const UNKNOWN: &str = "--";
@@ -1739,6 +1739,30 @@ fn infrastructure_text(payload: &Payload) -> Option<String> {
         out.push_str("\nUNASSIGNED  model agents no provider claims\n");
         for a in unassigned {
             out.push_str(&format!("    {:<32} {}\n", format!("{}/{}", a.scope, a.agent), a.harness));
+        }
+    }
+
+    // #131: whether each harness starts, as the last probe before a
+    // dispatch found it. Nothing is probed to print this.
+    if !harnesses.is_empty() {
+        out.push_str("\nHARNESSES  checked with --version before a dispatch\n");
+        for h in harnesses {
+            let said = match h.state {
+                factory_core::harness::HarnessState::Healthy => h.version.clone().unwrap_or_default(),
+                factory_core::harness::HarnessState::Unprobed => "not probed since the daemon started".into(),
+                factory_core::harness::HarnessState::Unhealthy => h.reason.clone().unwrap_or_default(),
+            };
+            out.push_str(&format!("  {:<10} {:<10} {:<40} {said}\n", h.harness, h.state.as_str(), h.binary));
+            if let Some(repair) = &h.repair {
+                out.push_str(&format!("    repair: {repair}\n"));
+            }
+            if !h.held.is_empty() {
+                let held: Vec<String> = h.held.iter().map(|t| format!("{} ({})", t.task_id, t.title)).collect();
+                out.push_str(&format!("    held: {} task(s) -- {}\n", held.len(), held.join(", ")));
+            }
+            if let Some(auto) = &h.auto_repair {
+                out.push_str(&format!("    automatic repair: {auto}\n"));
+            }
         }
     }
     Some(out.trim_end().to_string())
@@ -5025,8 +5049,27 @@ mod tests {
                 }],
             }],
             unassigned: vec![UnassignedAgent { scope: "demo".into(), agent: "helper".into(), harness: "codex".into() }],
+            harnesses: vec![factory_core::harness::HarnessRow {
+                harness: "codex".into(),
+                binary: "/opt/homebrew/bin/codex".into(),
+                state: factory_core::harness::HarnessState::Unhealthy,
+                checked_at: Some(chrono::Utc::now()),
+                unhealthy_since: Some(chrono::Utc::now()),
+                version: None,
+                reason: Some("`/opt/homebrew/bin/codex --version` did not answer in 10s".into()),
+                repair: Some("scripts/repair-harness codex".into()),
+                held: vec![factory_core::harness::HeldTask {
+                    task_id: "t1".into(),
+                    scope: "demo".into(),
+                    title: "fix it".into(),
+                }],
+                auto_repair: None,
+            }],
         };
         let text = infrastructure_text(&payload).unwrap();
+        assert!(text.contains("HARNESSES") && text.contains("unhealthy"), "{text}");
+        assert!(text.contains("repair: scripts/repair-harness codex"), "{text}");
+        assert!(text.contains("held: 1 task(s) -- t1 (fix it)"), "{text}");
         assert!(text.contains("HOST  --"), "{text}");
         assert!(text.contains("chip        --"), "{text}");
         assert!(text.contains("-- (aarch64)"), "{text}");

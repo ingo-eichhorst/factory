@@ -17,7 +17,7 @@ the daemon cannot tell a built-in implementation from a plugin:
 
 | Adapter | What it decides | Ships with |
 | --- | --- | --- |
-| **Agent** | how a harness is started, and what a task sounds like to it | `claude-code`, `pi`, `codex`, `opencode`, `shell` |
+| **Agent** | how a harness is started, what a task sounds like to it, and how to check it starts | `claude-code`, `pi`, `codex`, `opencode`, `shell` |
 | **Agent runtime** | where agents actually run | `herdr` |
 | **Task store** | where tasks live — the CRUD contract, chosen per scope | `sqlite` |
 | **Interface** | how the outside reaches the daemon | `cli` (unix socket), `http` (REST + WebSocket + UI) |
@@ -1656,8 +1656,9 @@ conformance metrics are v3.
 1. `task.create` resolves the scope, agent, and runtime — from the request, then
    the scope's local config, then the instance defaults — and refuses right away
    if any of them names an adapter that does not exist.
-2. `task.run` opens a run, mints a callback token for it, and asks the runtime
-   for a session in the scope's directory.
+2. `task.run` checks the agent's harness starts (see "Harness health" below),
+   then opens a run, mints a callback token for it, and asks the runtime for a
+   session in the scope's directory.
 3. The agent adapter produces the prompt and, through the harness's own
    system-prompt mechanism, injects a short guide to Factory itself — what it
    is, who this agent is, and which commands its role allows. The prompt
@@ -1708,7 +1709,9 @@ Three timeouts catch the rest:
 
 - `ack_timeout_seconds` (180 by default) — the agent is up but has not said a
   word. This is what an agent sitting on a first-run trust prompt or a login
-  looks like.
+  looks like. A harness that never started at all is caught before this, by
+  the probe below; an acknowledgement timeout also makes the next dispatch to
+  that harness probe it again rather than trust an earlier answer.
 - `task_timeout_seconds` (3600 by default) — a cap on the whole run, counted
   from `started_at`: the run has not finished within this many seconds,
   however often it has reported in between.
@@ -1726,6 +1729,70 @@ active, released the moment the last one ends. macOS only for now
 no-ops); the host-level power settings that let this happen in the first
 place are a separate fix, and this is only ever the defence-in-depth for the
 moments that one does not reach.
+
+### Harness health (#131)
+
+A harness binary can stop starting without anything changing in Factory: on
+2026-09-25 a freshly installed codex hung in `_dyld_start` on `codex
+--version`, and every task handed to it sat in `dispatching` for three minutes
+and then failed as an `ack_timeout` that blamed the agent. So before a
+dispatch, the daemon checks the harness starts.
+
+- **The probe is declared, not run, by the adapter.** `Agent::health_probe()`
+  (a default method on the Agent seam, `None` unless overridden) names a
+  command; every built-in harness answers `<harness> --version`, `shell` and
+  plugins declare none. The daemon runs it -- its own process group, no stdin,
+  `SIGKILL`ed with its group at the timeout, in a task of its own so a panic is
+  a logged `JoinError` -- so a probe that hangs or panics cannot stall or take
+  down the daemon.
+- **Cached per binary, one probe at a time.** The program is resolved on the
+  daemon's `PATH` (a name with a `/` is used as it is), and the answer is kept
+  per resolved path: a healthy one for `cache_seconds`, an unhealthy one for
+  `retry_seconds`. Five dispatches in one tick probe once.
+- **A harness that does not answer, or exits non-zero, blocks the task before
+  a run exists.** No run row, no session, nothing failed: the task goes to
+  `blocked` with a reason naming the binary and the repair, e.g. ``codex does
+  not start: `/opt/homebrew/bin/codex --version` did not answer in 10s. A
+  person can repair it with `scripts/repair-harness codex` ``, and a
+  `harness_unhealthy` journal entry. Other tasks for it are held the same way,
+  not failed one by one. It is one `harness_unhealthy` exception per binary in
+  the Operations "needs a human" list, and a row under `HARNESSES` in `factory
+  infra` (and on the L1 Infrastructure page), with every task it holds.
+- **Held tasks are released on their own.** At most every `retry_seconds` the
+  daemon looks at every task `blocked` with no run whose newest journal entry
+  is a hold from the last seven days, probes its harness, and dispatches the
+  ones that answer, with the trigger they were held with. The journal is the
+  whole record of a hold, so a restart loses nothing. A person's own `task
+  run` never trusts a cached failure -- it probes again, since that is what
+  they do right after repairing it.
+- **Repair is a script a person runs.** `scripts/repair-harness <name>`
+  resolves the binary to its Homebrew cask folder, verifies the code signature
+  and the expected developer team (OpenAI `2DC432GLL2` for codex, Anthropic
+  `Q6L2SF6YDW` for Claude Code) and refuses on any mismatch, copies the folder
+  beside itself without extended attributes, checks the copy answers
+  `--version`, and swaps it in by rename, keeping the old folder as
+  `<version>.stuck`. It never deletes anything. It overrides a decision macOS
+  is holding, so the daemon runs it only when the owner sets `auto_repair:
+  true` with a `repair_script` -- once per unhealthy stretch, bounded, the
+  signature check applying all the same. v1 supports cask installs only:
+  Claude Code's own installer, npm packages and ad-hoc signed formulas are
+  refused with the reason.
+
+```yaml
+daemon:
+  harness_health:
+    enabled: true            # the default
+    timeout_seconds: 10      # how long `--version` may take
+    cache_seconds: 180       # how long a healthy answer is trusted
+    retry_seconds: 60        # how often an unhealthy one is probed again
+    repair_script: /Users/me/factory/scripts/repair-harness   # named in the reason
+    auto_repair: false       # opt-in: run it without a person
+```
+
+The probe runs with the daemon's own environment. A daemon started by launchd
+sees launchd's `PATH`, not a login shell's, so a harness a pane can find but
+the daemon cannot is reported as not found -- give the service the same `PATH`
+the panes have.
 
 ## Configuration
 
@@ -1752,6 +1819,9 @@ daemon:
   default_agent: claude-code
   default_runtime: herdr
   power_assertion: true        # hold the host awake while a run is active
+  harness_health:              # check a harness starts before a dispatch (#131)
+    enabled: true
+    timeout_seconds: 10
 
 infrastructure:              # optional: the AI accounts behind the agents, and backups
   providers:

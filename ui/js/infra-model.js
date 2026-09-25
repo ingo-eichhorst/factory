@@ -179,3 +179,37 @@ export function infraFailure(error) {
   const message = error && error.message ? String(error.message) : String(error ?? "");
   return /^404\b/.test(message) ? "unavailable" : "error";
 }
+
+// ------------------------------------------------------------------ harnesses
+
+/// A harness's state as the page says it (#131). `unprobed` is not a fault:
+/// nothing asked for that harness since the daemon started, and the page
+/// never probes anything to fill itself in.
+export const HARNESS_STATES = {
+  healthy: "starts",
+  unhealthy: "does not start",
+  unprobed: "not checked yet",
+};
+
+export function harnessStateLabel(state) {
+  return HARNESS_STATES[state] || fact(state);
+}
+
+/// The one line under a harness's name: what it answered, why it is down,
+/// or that nothing has asked for it yet.
+export function harnessDetail(row) {
+  if (!row) return MISSING;
+  if (row.state === "healthy") return row.version ? String(row.version) : "answered --version";
+  if (row.state === "unhealthy") return row.reason ? String(row.reason) : "its probe failed";
+  return "probed before the next dispatch to it";
+}
+
+/// The unhealthy ones first -- they are the reason to open the page -- then
+/// the rest in the order the daemon listed them.
+export function sortHarnesses(rows) {
+  const list = Array.isArray(rows) ? rows.slice() : [];
+  return list
+    .map((row, i) => ({ row, i }))
+    .sort((a, b) => (b.row.state === "unhealthy") - (a.row.state === "unhealthy") || a.i - b.i)
+    .map(x => x.row);
+}

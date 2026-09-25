@@ -14,6 +14,7 @@ pub mod dataset;
 pub mod error;
 pub mod event;
 pub mod goals;
+pub mod harness;
 pub mod intake;
 pub mod knowledge;
 pub mod metrics;

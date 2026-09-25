@@ -302,6 +302,7 @@ impl Engine {
             // Two ticks: a slot the next tick is about to fire is not late
             // -- what the model's own default means, at this instance's tick.
             late_after_seconds: Some(2 * snapshot.config.daemon.tick_seconds as i64),
+            harnesses: self.harness.rows(&[], snapshot.config.daemon.harness_health.repair_script.as_deref()),
         };
         Ok(operations::report(&input))
     }

@@ -26,6 +26,12 @@ pub enum FactoryError {
     #[error("not permitted: {0}")]
     Denied(String),
 
+    /// The harness a task would be handed to does not start (`#131`). The
+    /// message names the binary and the repair command. Not an adapter's
+    /// failure: the task is blocked before a run exists, never failed.
+    #[error("{0}")]
+    HarnessUnhealthy(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -47,6 +53,7 @@ impl FactoryError {
             Self::Adapter { .. } => "adapter_failed",
             Self::BadRequest(_) => "bad_request",
             Self::Denied(_) => "denied",
+            Self::HarnessUnhealthy(_) => "harness_unhealthy",
             Self::Other(_) => "internal",
         }
     }

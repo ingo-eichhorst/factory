@@ -822,6 +822,12 @@ pub enum Payload {
         daemon: DaemonFacts,
         providers: Vec<ProviderRow>,
         unassigned: Vec<UnassignedAgent>,
+        /// Whether each harness the config names starts (`#131`), as its
+        /// last probe before a dispatch found it. Read from the daemon's
+        /// cache: showing the page never probes anything. Left out when
+        /// the config names no harness with a probe.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        harnesses: Vec<crate::harness::HarnessRow>,
     },
     /// The L1 Backup page -- see `backup::BackupReport`. Boxed for the same
     /// reason `Operations` is.
@@ -2490,6 +2496,7 @@ mod tests {
                 agent: "model-lab".into(),
                 harness: "opencode".into(),
             }],
+            harnesses: vec![],
         }
     }
 
@@ -2529,6 +2536,7 @@ mod tests {
                 agents: vec![],
             }],
             unassigned: vec![],
+            harnesses: vec![],
         };
         let json = serde_json::to_value(&payload).unwrap();
         for field in [
