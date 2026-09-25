@@ -48,7 +48,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use factory_core::error::{FactoryError, Result};
 use factory_core::goals::GoalsCatalogue;
 use factory_core::metrics::{self, MetricDef, MetricError, MetricId, MetricSeries, MetricValue};
-use factory_core::protocol::{MetricDefView, PolicyReport, ProductionBin};
+use factory_core::protocol::{MetricDefView, PolicyReport, ProductionBin, QualityReport};
+use factory_core::quality::ScenarioStatus;
 use factory_core::task::{TaskFilter, TaskStatus};
 
 use crate::engine::Engine;
@@ -70,6 +71,10 @@ fn is_production_metric(id: &str) -> bool {
 
 fn is_policy_metric(id: &str) -> bool {
     id.starts_with("compliance.") || id.starts_with("open_controls.")
+}
+
+fn is_quality_metric(id: &str) -> bool {
+    id.starts_with("quality.")
 }
 
 impl Engine {
@@ -112,6 +117,17 @@ impl Engine {
         } else {
             None
         };
+        // `quality_report` itself calls back into this function for the
+        // metrics its scenarios measure by -- never a `quality.*` one (it
+        // filters them out, and `quality::load` flags any measure that names
+        // one), so the recursion is one level deep and ends there. Boxed
+        // because an `async fn` cannot hold its own future by value.
+        let needs_quality = resolved.iter().any(|(id, r)| r.is_ok() && is_quality_metric(id.as_str()));
+        let quality_report = if needs_quality {
+            Some(Box::pin(self.quality_report(None)).await?)
+        } else {
+            None
+        };
 
         let mut values = Vec::new();
         let mut series = Vec::new();
@@ -147,13 +163,13 @@ impl Engine {
             } else if id.as_str() == "first_pass_yield" {
                 let daily = &production.as_ref().expect("needs_production set").daily;
                 let s = first_pass_yield_series(daily);
-                let v = value_from_series(&s, now, "no finished runs in the trailing 28 days");
+                let v = ratio_as_of(value_from_series(&s, now, "no finished runs in the trailing 28 days"), daily, 28);
                 series.push(s);
                 v
             } else if id.as_str() == "scrap_rate" {
                 let daily = &production.as_ref().expect("needs_production set").daily;
                 let s = scrap_rate_series(daily);
-                let v = value_from_series(&s, now, "no finished runs in the trailing 28 days");
+                let v = ratio_as_of(value_from_series(&s, now, "no finished runs in the trailing 28 days"), daily, 28);
                 series.push(s);
                 v
             } else if let Some(framework) = id.as_str().strip_prefix("compliance.") {
@@ -162,6 +178,8 @@ impl Engine {
                 open_controls_value(&id, policy_report.as_ref().expect("needs_policy set"), framework, now)
             } else if let Some(dataset) = id.as_str().strip_prefix("bench.resolve_rate.") {
                 self.bench_resolve_rate_value(&id, dataset, now).await?
+            } else if let Some(characteristic) = id.as_str().strip_prefix("quality.") {
+                quality_value(&id, quality_report.as_ref().expect("needs_quality set"), characteristic, now)
             } else if let Some(rest) = id.as_str().strip_prefix("goal_tasks_done.") {
                 let (objective, kr) = rest.split_once('.').ok_or_else(|| {
                     FactoryError::Other(anyhow::anyhow!("malformed goal_tasks_done id {id}"))
@@ -207,14 +225,25 @@ impl Engine {
         let snapshot = self.factory_snapshot();
         let policies_dir = snapshot.policies_dir();
         let goals_dir = factory_core::goals::goals_dir(&snapshot.root);
-        let (frameworks, catalogue): (Vec<String>, GoalsCatalogue) = tokio::task::spawn_blocking(move || {
-            let (catalogues, _findings) = factory_core::policy::load_all(&policies_dir);
-            let frameworks = catalogues.into_iter().map(|c| c.framework).collect();
-            let catalogue = factory_core::goals::load(&goals_dir);
-            (frameworks, catalogue)
-        })
-        .await
-        .unwrap_or_default();
+        let quality_dir = snapshot.quality_dir();
+        let (frameworks, catalogue, characteristics): (Vec<String>, GoalsCatalogue, BTreeSet<String>) =
+            tokio::task::spawn_blocking(move || {
+                let (catalogues, _findings) = factory_core::policy::load_all(&policies_dir);
+                let frameworks = catalogues.into_iter().map(|c| c.framework).collect();
+                let catalogue = factory_core::goals::load(&goals_dir);
+                // Every characteristic any loaded profile declares an
+                // attribute under -- the `quality.<characteristic>` twin of
+                // one `compliance.<framework>` per loaded catalogue.
+                let characteristics = factory_core::quality::load(&quality_dir)
+                    .profiles
+                    .values()
+                    .flat_map(|p| &p.attributes)
+                    .map(|a| factory_core::quality::characteristic_of(&a.id).to_string())
+                    .collect();
+                (frameworks, catalogue, characteristics)
+            })
+            .await
+            .unwrap_or_default();
 
         for framework in &frameworks {
             if let Ok(id) = MetricId::new(format!("compliance.{framework}")) {
@@ -226,6 +255,11 @@ impl Engine {
         }
 
         ids.extend(goals_metric_ids(&catalogue));
+        for characteristic in &characteristics {
+            if let Ok(id) = MetricId::new(format!("quality.{characteristic}")) {
+                ids.push(id);
+            }
+        }
 
         let mut seen = BTreeSet::new();
         ids.retain(|id| seen.insert(id.clone()));
@@ -252,10 +286,15 @@ impl Engine {
                 reason: Some(format!("nothing gated in the newest settled run of {dataset:?}")),
             });
         }
+        // As of when that run settled, not when this was asked: a resolve
+        // rate is exactly as old as the run it came from, and a reader that
+        // holds it to a freshness window (a quality scenario's `max_age`)
+        // has to see that. A settled run with no end recorded falls back to
+        // its start, the older of the two, never to `now`.
         Ok(MetricValue {
             id: id.clone(),
             value: Some(f64::from(pass) / f64::from(pass + fail)),
-            as_of: now,
+            as_of: run.ended_at.unwrap_or(run.started_at),
             reason: None,
         })
     }
@@ -394,6 +433,29 @@ fn value_from_series(series: &MetricSeries, now: DateTime<Utc>, empty_reason: &s
     }
 }
 
+/// A production ratio's honest `as_of`: the end of the newest daily bucket
+/// in its trailing `window` that finished anything -- when the data behind
+/// the value actually stopped, to the day, rather than the moment it was
+/// asked for. A 28-day ratio whose last finished run was ten days ago is
+/// ten days old, and a freshness window (a quality scenario's `max_age`)
+/// has to be able to say so. The last bucket's `to` is already clipped to
+/// the query's own moment (`ProductionBucket::to`), so a run finished today
+/// reads as of now. A value that is `None` keeps `now`: there is nothing
+/// for it to be stale about.
+///
+/// `throughput_week` deliberately keeps `now`: it is a count over a window
+/// that ends now, so even a zero is a current fact, not an old one.
+fn ratio_as_of(mut value: MetricValue, daily: &[factory_core::protocol::ProductionBucket], window: usize) -> MetricValue {
+    if value.value.is_none() {
+        return value;
+    }
+    let start = daily.len().saturating_sub(window);
+    if let Some(newest) = daily[start..].iter().rev().find(|b| b.finished > 0) {
+        value.as_of = newest.to;
+    }
+    value
+}
+
 fn compliance_value(id: &MetricId, report: &PolicyReport, framework: &str, now: DateTime<Utc>) -> MetricValue {
     let Some(rollup) = report.rollup.iter().find(|r| r.framework == framework) else {
         return MetricValue {
@@ -415,6 +477,46 @@ fn compliance_value(id: &MetricId, report: &PolicyReport, framework: &str, now: 
     }
     let value = (c.satisfied + c.attested + c.not_applicable) as f64 / counted as f64;
     MetricValue { id: id.clone(), value: Some(value), as_of: now, reason: None }
+}
+
+/// `quality.<characteristic>`: of every declared scenario under
+/// `characteristic`, counted once per scope it applies in across the whole
+/// instance, the share that is `met`. A draft or `no_data` scenario counts
+/// in the denominator -- declared but not shown to be met is not met, the
+/// same "never green without evidence" rule the tab itself keeps. `None`,
+/// with the reason, for a characteristic ISO 25010 does not name or one no
+/// scope declares anything under: nothing declared is not "all met".
+fn quality_value(id: &MetricId, report: &QualityReport, characteristic: &str, now: DateTime<Utc>) -> MetricValue {
+    let unknown = factory_core::quality::CATALOGUE.iter().all(|c| c.id != characteristic);
+    if unknown {
+        return MetricValue {
+            id: id.clone(),
+            value: None,
+            as_of: now,
+            reason: Some(format!("{characteristic:?} is not an ISO 25010 characteristic")),
+        };
+    }
+    let (met, declared) = report
+        .scopes
+        .iter()
+        .flat_map(|s| &s.report.attributes)
+        .filter(|a| a.characteristic == characteristic)
+        .flat_map(|a| &a.scenarios)
+        .fold((0u32, 0u32), |(met, all), s| (met + u32::from(s.status == ScenarioStatus::Met), all + 1));
+    if declared == 0 {
+        return MetricValue {
+            id: id.clone(),
+            value: None,
+            as_of: now,
+            reason: Some(format!("no scope declares a quality scenario under {characteristic}")),
+        };
+    }
+    MetricValue {
+        id: id.clone(),
+        value: Some(f64::from(met) / f64::from(declared)),
+        as_of: now,
+        reason: None,
+    }
 }
 
 fn open_controls_value(id: &MetricId, report: &PolicyReport, framework: &str, now: DateTime<Utc>) -> MetricValue {
@@ -757,6 +859,54 @@ mod tests {
         let id = MetricId::new("bench.resolve_rate.eval-set-a").unwrap();
         let computed = engine.metrics(&[id], now).await.unwrap();
         assert_eq!(computed.values[0].value, Some(0.5), "one pass and one fail across two configurations");
+    }
+
+    /// `as_of` is when the data behind a value is from, not when it was
+    /// asked for -- otherwise a freshness window (a quality scenario's
+    /// `max_age`) could never read anything as stale.
+    #[tokio::test]
+    async fn a_ratio_and_a_resolve_rate_are_as_of_their_newest_data_not_the_moment_asked() {
+        use factory_core::bench::{BenchAttempt, BenchRun, BenchRunStatus, Verdict};
+
+        let engine = test_engine(Vec::new());
+        finished_run(&engine, "old", RunStatus::Done, Trigger::Manual, chrono::Duration::days(10)).await;
+        let settled = Utc::now() - chrono::Duration::days(3);
+        let mut pass = BenchAttempt::pending("a1".into(), "case1".into(), "agent-a".into(), 1);
+        pass.verdict = Some(Verdict::Pass);
+        let run = BenchRun {
+            id: "run-1".into(),
+            dataset: "smoke".into(),
+            dataset_revision: 1,
+            cases: Vec::new(),
+            case_bases: Default::default(),
+            agents: vec!["agent-a".into()],
+            attempts_per_case: 1,
+            concurrency: 1,
+            status: BenchRunStatus::Done,
+            attempts: vec![pass.clone()],
+            started_at: settled - chrono::Duration::hours(1),
+            ended_at: Some(settled),
+        };
+        engine.bench.put_run(&run).await.unwrap();
+        engine.bench.put_attempt(&run.id, &pass).await.unwrap();
+
+        let now = Utc::now();
+        let ids: Vec<MetricId> = ["first_pass_yield", "scrap_rate", "throughput_week", "bench.resolve_rate.smoke"]
+            .into_iter()
+            .map(|id| MetricId::new(id).unwrap())
+            .collect();
+        let computed = engine.metrics(&ids, now).await.unwrap();
+        let get = |id: &str| computed.values.iter().find(|v| v.id.as_str() == id).unwrap().clone();
+
+        for id in ["first_pass_yield", "scrap_rate"] {
+            let age = now - get(id).as_of;
+            assert!(
+                age >= chrono::Duration::days(9) && age <= chrono::Duration::days(10),
+                "{id} is as old as the day its newest finished run ended, to the day: {age}"
+            );
+        }
+        assert_eq!(get("throughput_week").as_of, now, "a trailing count ending now is a current fact, even a zero");
+        assert_eq!(get("bench.resolve_rate.smoke").as_of, settled, "as of the run it came from");
     }
 
     #[tokio::test]

@@ -199,6 +199,36 @@ pub struct AgentContext {
     /// same way `policy_frameworks` is, never re-read once the guide is
     /// built.
     pub goal: Option<GoalContext>,
+    /// The H-importance quality attributes this agent's scope declares
+    /// (`#107`), each with how its scenarios are measured and, when one is
+    /// not met, its status -- resolved once at launch from the scope's
+    /// merged utility tree, the same way `policy_frameworks` is. Empty for
+    /// a scope binding no quality profile, or none ranked H, and then
+    /// `factory_guide` says nothing about quality at all.
+    pub quality: Vec<QualityAttributeContext>,
+}
+
+/// One H-importance quality attribute, as `AgentContext::factory_guide`
+/// names it: the attribute id and each of its scenarios in one line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualityAttributeContext {
+    pub attribute: String,
+    pub scenarios: Vec<QualityScenarioContext>,
+}
+
+/// One scenario under a [`QualityAttributeContext`]. Carries only what
+/// changes when something real changes -- the measure's own wording and a
+/// status word -- never a metric's current value or when it was read, so
+/// the guide stays byte-for-byte the same from one dispatch to the next
+/// while nothing about the scope's quality moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualityScenarioContext {
+    pub scenario: String,
+    /// `quality::describe_measure`'s one line; `None` for a draft.
+    pub measure: Option<String>,
+    /// `not met`, `stale` or `no data` -- `None` when the scenario is met
+    /// (nothing to say) or a draft (`measure: None` already says it).
+    pub status: Option<String>,
 }
 
 /// What `AgentContext::factory_guide` says about a task's `goal=` label:
@@ -368,6 +398,32 @@ impl AgentContext {
                 kr = goal.kr_title,
                 kr_id = goal.kr_id,
             ));
+        }
+
+        if !self.quality.is_empty() {
+            out.push_str(&format!(
+                "What \"good\" means in {scope}: these quality attributes are ranked H \
+                 importance here, each with how it is measured. They are a picture, not a \
+                 gate -- nothing is blocked on them -- but a change that makes one worse \
+                 should say so. {bin} quality scope {scope} shows every scenario and its \
+                 evidence.\n",
+                scope = self.scope,
+            ));
+            for attr in &self.quality {
+                let scenarios: Vec<String> = attr
+                    .scenarios
+                    .iter()
+                    .map(|s| {
+                        let measure = s.measure.as_deref().unwrap_or("no measure yet");
+                        match &s.status {
+                            Some(status) => format!("{}: {measure} [{status}]", s.scenario),
+                            None => format!("{}: {measure}", s.scenario),
+                        }
+                    })
+                    .collect();
+                out.push_str(&format!("- {}: {}\n", attr.attribute, scenarios.join("; ")));
+            }
+            out.push('\n');
         }
 
         if let Some(def) = &self.role {
@@ -701,6 +757,7 @@ mod tests {
             role,
             policy_frameworks: Vec::new(),
             goal: None,
+            quality: Vec::new(),
         }
     }
 
@@ -823,6 +880,60 @@ mod tests {
     fn the_guide_says_nothing_about_a_goal_when_the_task_carries_no_label() {
         let guide = base(Some(worker())).factory_guide();
         assert!(!guide.contains("This task serves objective"), "{guide}");
+    }
+
+    fn quality_context() -> Vec<QualityAttributeContext> {
+        vec![
+            QualityAttributeContext {
+                attribute: "reliability.recoverability".into(),
+                scenarios: vec![
+                    QualityScenarioContext {
+                        scenario: "daemon-restart".into(),
+                        measure: Some("scrap_rate <= 0.05 within 7d".into()),
+                        status: Some("not met".into()),
+                    },
+                    QualityScenarioContext {
+                        scenario: "little-work-scrapped".into(),
+                        measure: Some("scrap_rate <= 0.1".into()),
+                        status: None,
+                    },
+                ],
+            },
+            QualityAttributeContext {
+                attribute: "security.confidentiality".into(),
+                scenarios: vec![QualityScenarioContext {
+                    scenario: "agents-sandboxed".into(),
+                    measure: None,
+                    status: None,
+                }],
+            },
+        ]
+    }
+
+    /// The quality block exactly, as a snapshot: the one place its wording
+    /// is pinned, so a change to it is a change someone meant to make.
+    #[test]
+    fn the_guide_names_a_scopes_h_importance_quality_attributes_one_line_each() {
+        let mut ctx = base(Some(worker()));
+        ctx.quality = quality_context();
+        let guide = ctx.factory_guide();
+        let expected = "What \"good\" means in demo: these quality attributes are ranked H \
+             importance here, each with how it is measured. They are a picture, not a gate -- \
+             nothing is blocked on them -- but a change that makes one worse should say so. \
+             /usr/local/bin/factory quality scope demo shows every scenario and its evidence.\n\
+             - reliability.recoverability: daemon-restart: scrap_rate <= 0.05 within 7d [not met]; \
+             little-work-scrapped: scrap_rate <= 0.1\n\
+             - security.confidentiality: agents-sandboxed: no measure yet\n\n";
+        assert!(guide.contains(expected), "{guide}");
+    }
+
+    #[test]
+    fn the_quality_block_is_byte_stable_and_absent_when_nothing_is_ranked_h() {
+        let mut ctx = base(Some(worker()));
+        ctx.quality = quality_context();
+        assert_eq!(ctx.factory_guide(), ctx.clone().factory_guide());
+        let guide = base(Some(worker())).factory_guide();
+        assert!(!guide.contains("quality"), "{guide}");
     }
 
     #[test]

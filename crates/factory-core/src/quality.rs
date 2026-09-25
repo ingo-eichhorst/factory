@@ -426,6 +426,11 @@ pub enum FindingKind {
     /// computed from quality scenarios' own statuses, so judging a scenario
     /// by it would be circular ([`is_quality_metric`]). Always `no_data`.
     SelfReferentialMetric,
+    /// A `task`/`workflow` check measure's name matches more than one task
+    /// title or workflow name in the scope -- `policy::evidence_findings`'
+    /// own `ambiguous_check_target`, carried over by `factory-daemon`, which
+    /// is the one that gathers the evidence it is found in.
+    AmbiguousCheckTarget,
     /// A `knowledge` check with no `tag:` under a dotted attribute id. Its
     /// default tag would be `control/quality/<attribute>/<scenario>`, and a
     /// knowledge tag cannot contain `.` (`knowledge::is_tag_char`), so no
