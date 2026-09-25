@@ -41,7 +41,7 @@
 //! offers an *unknown* id (nothing built it), but does offer an
 //! *unavailable* one, since "every non-parameterised metric" names both.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -49,6 +49,7 @@ use factory_core::error::{FactoryError, Result};
 use factory_core::goals::GoalsCatalogue;
 use factory_core::metrics::{self, MetricDef, MetricError, MetricId, MetricSeries, MetricValue};
 use factory_core::protocol::{MetricDefView, PolicyReport, ProductionBin};
+use factory_core::quality::ScenarioStatus;
 use factory_core::task::{TaskFilter, TaskStatus};
 
 use crate::engine::Engine;
@@ -70,6 +71,10 @@ fn is_production_metric(id: &str) -> bool {
 
 fn is_policy_metric(id: &str) -> bool {
     id.starts_with("compliance.") || id.starts_with("open_controls.")
+}
+
+fn is_quality_metric(id: &str) -> bool {
+    id.starts_with("quality.")
 }
 
 impl Engine {
@@ -99,8 +104,39 @@ impl Engine {
             }
         }
 
-        let needs_production = resolved.iter().any(|(id, r)| r.is_ok() && is_production_metric(id.as_str()));
-        let needs_policy = resolved.iter().any(|(id, r)| r.is_ok() && is_policy_metric(id.as_str()));
+        // `quality.<characteristic>` is computed from a quality evaluation,
+        // and that evaluation reads metrics of its own (a scenario on
+        // `scrap_rate`, `compliance.cra`). Those are folded into this same
+        // pass -- `extra` below -- rather than the evaluation calling back
+        // into this function, so `production`/`policy_report` are read at
+        // most once per call however the ids split between the caller and
+        // quality. A quality evaluation that cannot load or be judged fails
+        // only its own `quality.*` values, never the whole call: a dashboard
+        // or Goals read must not break over one bad profile.
+        let needs_quality = resolved.iter().any(|(id, r)| r.is_ok() && is_quality_metric(id.as_str()));
+        let quality_inputs = if needs_quality {
+            Some(self.quality_inputs(None, false).await.map_err(|e| e.to_string()))
+        } else {
+            None
+        };
+        let mut computing: Vec<(MetricId, std::result::Result<MetricDef, &'static str>)> =
+            resolved.iter().filter(|(id, _)| !is_quality_metric(id.as_str())).cloned().collect();
+        if let Some(Ok(inputs)) = &quality_inputs {
+            for id in inputs.metric_ids() {
+                if computing.iter().any(|(have, _)| have == &id) {
+                    continue;
+                }
+                match metrics::resolve(&id) {
+                    Ok(def) => computing.push((id, Ok(def))),
+                    Err(MetricError::Unavailable { reason, .. }) => computing.push((id, Err(reason))),
+                    // `metric_ids` already dropped every unknown id.
+                    Err(MetricError::Unknown(_)) => {}
+                }
+            }
+        }
+
+        let needs_production = computing.iter().any(|(id, r)| r.is_ok() && is_production_metric(id.as_str()));
+        let needs_policy = computing.iter().any(|(id, r)| r.is_ok() && is_policy_metric(id.as_str()));
 
         let production = if needs_production {
             Some(self.production(Some(5), Some(ProductionBin::Day), None).await?)
@@ -113,6 +149,38 @@ impl Engine {
             None
         };
 
+        let mut computed: BTreeMap<MetricId, MetricValue> = BTreeMap::new();
+        let mut computed_series: BTreeMap<MetricId, MetricSeries> = BTreeMap::new();
+        for (id, def_result) in &computing {
+            if def_result.is_err() {
+                continue;
+            }
+            let (value, series) = self.compute_one(id, production.as_ref(), policy_report.as_ref(), now).await?;
+            computed.insert(id.clone(), value);
+            if let Some(s) = series {
+                computed_series.insert(id.clone(), s);
+            }
+        }
+
+        let quality_report: Option<std::result::Result<QualityRollup, String>> = match &quality_inputs {
+            None => None,
+            Some(Err(e)) => Some(Err(e.clone())),
+            Some(Ok(inputs)) => {
+                let mut values = computed.clone();
+                for (id, def) in &computing {
+                    if let Err(reason) = def {
+                        values.insert(id.clone(), unavailable_value(id, reason, now));
+                    }
+                }
+                Some(
+                    self.judge_quality(inputs, &values, now)
+                        .await
+                        .map(|(reports, _)| QualityRollup(reports))
+                        .map_err(|e| e.to_string()),
+                )
+            }
+        };
+
         let mut values = Vec::new();
         let mut series = Vec::new();
         let mut registry = Vec::new();
@@ -121,12 +189,7 @@ impl Engine {
             let def = match def_result {
                 Ok(def) => def,
                 Err(reason) => {
-                    values.push(MetricValue {
-                        id: id.clone(),
-                        value: None,
-                        as_of: now,
-                        reason: Some(reason.to_string()),
-                    });
+                    values.push(unavailable_value(&id, reason, now));
                     // `metrics::registry()` lists the fixed, unbound family
                     // for a metric this module can name but not compute --
                     // v1 has no *parameterised* unavailable family, so an
@@ -137,55 +200,77 @@ impl Engine {
                     continue;
                 }
             };
-
-            let value = if id.as_str() == "throughput_week" {
-                let daily = &production.as_ref().expect("needs_production set").daily;
-                let s = throughput_week_series(daily);
-                let v = value_from_series(&s, now, "no finished runs recorded yet");
-                series.push(s);
-                v
-            } else if id.as_str() == "first_pass_yield" {
-                let daily = &production.as_ref().expect("needs_production set").daily;
-                let s = first_pass_yield_series(daily);
-                let v = value_from_series(&s, now, "no finished runs in the trailing 28 days");
-                series.push(s);
-                v
-            } else if id.as_str() == "scrap_rate" {
-                let daily = &production.as_ref().expect("needs_production set").daily;
-                let s = scrap_rate_series(daily);
-                let v = value_from_series(&s, now, "no finished runs in the trailing 28 days");
-                series.push(s);
-                v
-            } else if let Some(framework) = id.as_str().strip_prefix("compliance.") {
-                compliance_value(&id, policy_report.as_ref().expect("needs_policy set"), framework, now)
-            } else if let Some(framework) = id.as_str().strip_prefix("open_controls.") {
-                open_controls_value(&id, policy_report.as_ref().expect("needs_policy set"), framework, now)
-            } else if let Some(dataset) = id.as_str().strip_prefix("bench.resolve_rate.") {
-                self.bench_resolve_rate_value(&id, dataset, now).await?
-            } else if let Some(rest) = id.as_str().strip_prefix("goal_tasks_done.") {
-                let (objective, kr) = rest.split_once('.').ok_or_else(|| {
-                    FactoryError::Other(anyhow::anyhow!("malformed goal_tasks_done id {id}"))
-                })?;
-                self.goal_tasks_done_value(&id, objective, kr, now).await?
-            } else {
-                // Every family `metrics::resolve` returns `Ok` for today has
-                // a branch above; a future metric added to the registry
-                // without one here comes back honestly unresolved rather
-                // than panicking a request that merely asked for it --
-                // `factory-core` and `factory-daemon` are separate crates,
-                // so the compiler cannot force the two to be added together.
-                MetricValue {
-                    id: id.clone(),
-                    value: None,
-                    as_of: now,
-                    reason: Some("no computation wired for this metric yet".to_string()),
+            let value = if let Some(characteristic) = id.as_str().strip_prefix("quality.") {
+                match quality_report.as_ref().expect("needs_quality set") {
+                    Ok(rollup) => quality_value(&id, rollup, characteristic, now),
+                    Err(error) => MetricValue {
+                        id: id.clone(),
+                        value: None,
+                        as_of: now,
+                        reason: Some(format!("the quality evaluation failed: {error}")),
+                    },
                 }
+            } else {
+                if let Some(s) = computed_series.remove(&id) {
+                    series.push(s);
+                }
+                computed.remove(&id).expect("every available non-quality id was computed")
             };
             values.push(value);
             registry.push(def.into());
         }
 
         Ok(Metrics { values, series, registry })
+    }
+
+    /// One available, non-`quality.*` metric's value, and its series when
+    /// it has one, off the `production`/`policy_report` this call already
+    /// read (each `Some` exactly when some id needs it).
+    async fn compute_one(
+        &self,
+        id: &MetricId,
+        production: Option<&factory_core::protocol::Production>,
+        policy_report: Option<&PolicyReport>,
+        now: DateTime<Utc>,
+    ) -> Result<(MetricValue, Option<MetricSeries>)> {
+        let daily = || &production.expect("needs_production set").daily;
+        Ok(if id.as_str() == "throughput_week" {
+            let s = throughput_week_series(daily());
+            (value_from_series(&s, now, "no finished runs recorded yet"), Some(s))
+        } else if id.as_str() == "first_pass_yield" {
+            let s = first_pass_yield_series(daily());
+            (ratio_value(value_from_series(&s, now, NO_RECENT_RUNS), daily(), 28, now), Some(s))
+        } else if id.as_str() == "scrap_rate" {
+            let s = scrap_rate_series(daily());
+            (ratio_value(value_from_series(&s, now, NO_RECENT_RUNS), daily(), 28, now), Some(s))
+        } else if let Some(framework) = id.as_str().strip_prefix("compliance.") {
+            (compliance_value(id, policy_report.expect("needs_policy set"), framework, now), None)
+        } else if let Some(framework) = id.as_str().strip_prefix("open_controls.") {
+            (open_controls_value(id, policy_report.expect("needs_policy set"), framework, now), None)
+        } else if let Some(dataset) = id.as_str().strip_prefix("bench.resolve_rate.") {
+            (self.bench_resolve_rate_value(id, dataset, now).await?, None)
+        } else if let Some(rest) = id.as_str().strip_prefix("goal_tasks_done.") {
+            let (objective, kr) = rest
+                .split_once('.')
+                .ok_or_else(|| FactoryError::Other(anyhow::anyhow!("malformed goal_tasks_done id {id}")))?;
+            (self.goal_tasks_done_value(id, objective, kr, now).await?, None)
+        } else {
+            // Every family `metrics::resolve` returns `Ok` for today has
+            // a branch above; a future metric added to the registry
+            // without one here comes back honestly unresolved rather
+            // than panicking a request that merely asked for it --
+            // `factory-core` and `factory-daemon` are separate crates,
+            // so the compiler cannot force the two to be added together.
+            (
+                MetricValue {
+                    id: id.clone(),
+                    value: None,
+                    as_of: now,
+                    reason: Some("no computation wired for this metric yet".to_string()),
+                },
+                None,
+            )
+        })
     }
 
     /// The default `ids` for `Request::Metrics` when a caller's own list is
@@ -207,14 +292,25 @@ impl Engine {
         let snapshot = self.factory_snapshot();
         let policies_dir = snapshot.policies_dir();
         let goals_dir = factory_core::goals::goals_dir(&snapshot.root);
-        let (frameworks, catalogue): (Vec<String>, GoalsCatalogue) = tokio::task::spawn_blocking(move || {
-            let (catalogues, _findings) = factory_core::policy::load_all(&policies_dir);
-            let frameworks = catalogues.into_iter().map(|c| c.framework).collect();
-            let catalogue = factory_core::goals::load(&goals_dir);
-            (frameworks, catalogue)
-        })
-        .await
-        .unwrap_or_default();
+        let quality_dir = snapshot.quality_dir();
+        let (frameworks, catalogue, characteristics): (Vec<String>, GoalsCatalogue, BTreeSet<String>) =
+            tokio::task::spawn_blocking(move || {
+                let (catalogues, _findings) = factory_core::policy::load_all(&policies_dir);
+                let frameworks = catalogues.into_iter().map(|c| c.framework).collect();
+                let catalogue = factory_core::goals::load(&goals_dir);
+                // Every characteristic any loaded profile declares an
+                // attribute under -- the `quality.<characteristic>` twin of
+                // one `compliance.<framework>` per loaded catalogue.
+                let characteristics = factory_core::quality::load(&quality_dir)
+                    .profiles
+                    .values()
+                    .flat_map(|p| &p.attributes)
+                    .map(|a| factory_core::quality::characteristic_of(&a.id).to_string())
+                    .collect();
+                (frameworks, catalogue, characteristics)
+            })
+            .await
+            .unwrap_or_default();
 
         for framework in &frameworks {
             if let Ok(id) = MetricId::new(format!("compliance.{framework}")) {
@@ -226,6 +322,11 @@ impl Engine {
         }
 
         ids.extend(goals_metric_ids(&catalogue));
+        for characteristic in &characteristics {
+            if let Ok(id) = MetricId::new(format!("quality.{characteristic}")) {
+                ids.push(id);
+            }
+        }
 
         let mut seen = BTreeSet::new();
         ids.retain(|id| seen.insert(id.clone()));
@@ -252,10 +353,15 @@ impl Engine {
                 reason: Some(format!("nothing gated in the newest settled run of {dataset:?}")),
             });
         }
+        // As of when that run settled, not when this was asked: a resolve
+        // rate is exactly as old as the run it came from, and a reader that
+        // holds it to a freshness window (a quality scenario's `max_age`)
+        // has to see that. A settled run with no end recorded falls back to
+        // its start, the older of the two, never to `now`.
         Ok(MetricValue {
             id: id.clone(),
             value: Some(f64::from(pass) / f64::from(pass + fail)),
-            as_of: now,
+            as_of: run.ended_at.unwrap_or(run.started_at),
             reason: None,
         })
     }
@@ -394,6 +500,53 @@ fn value_from_series(series: &MetricSeries, now: DateTime<Utc>, empty_reason: &s
     }
 }
 
+const NO_RECENT_RUNS: &str = "no finished runs in the trailing 28 days";
+
+/// A production ratio as its registry entry defines it -- over the trailing
+/// `window` days -- with an honest `as_of`.
+///
+/// The rolling series skips a day whose own window finished nothing, so
+/// its last point can be a *weeks-old* day's ratio; taken as-is, a team
+/// that stopped running things 35 days ago would still read a value.
+/// When nothing in the trailing `window` finished, there is no value for
+/// "the trailing 28 days" at all: `None`, with the reason. Otherwise the
+/// value is `as_of` the end of the newest daily bucket in that window that
+/// finished anything -- when the data behind it stopped, to the day,
+/// rather than the moment it was asked for -- so a freshness window (a
+/// quality scenario's `max_age`) can read it as stale. The last bucket's
+/// `to` is already clipped to the query's own moment
+/// (`ProductionBucket::to`), so a run finished today reads as of now.
+///
+/// `throughput_week` deliberately keeps `now`: it is a count over a window
+/// that ends now, so even a zero is a current fact, not an old one.
+fn ratio_value(mut value: MetricValue, daily: &[factory_core::protocol::ProductionBucket], window: usize, now: DateTime<Utc>) -> MetricValue {
+    let start = daily.len().saturating_sub(window);
+    match daily[start..].iter().rev().find(|b| b.finished > 0) {
+        Some(newest) if value.value.is_some() => value.as_of = newest.to,
+        _ => {
+            value.value = None;
+            value.as_of = now;
+            value.reason = Some(NO_RECENT_RUNS.to_string());
+        }
+    }
+    value
+}
+
+fn unavailable_value(id: &MetricId, reason: &str, now: DateTime<Utc>) -> MetricValue {
+    MetricValue {
+        id: id.clone(),
+        value: None,
+        as_of: now,
+        reason: Some(reason.to_string()),
+    }
+}
+
+/// The per-scope reports a `quality.<characteristic>` value is summed
+/// from -- `QualityReport::scopes`' trees without the report around them,
+/// since `Engine::metrics` judges them itself (`judge_quality`) rather than
+/// asking for a whole report.
+struct QualityRollup(Vec<factory_core::quality::ScopeReport>);
+
 fn compliance_value(id: &MetricId, report: &PolicyReport, framework: &str, now: DateTime<Utc>) -> MetricValue {
     let Some(rollup) = report.rollup.iter().find(|r| r.framework == framework) else {
         return MetricValue {
@@ -415,6 +568,46 @@ fn compliance_value(id: &MetricId, report: &PolicyReport, framework: &str, now: 
     }
     let value = (c.satisfied + c.attested + c.not_applicable) as f64 / counted as f64;
     MetricValue { id: id.clone(), value: Some(value), as_of: now, reason: None }
+}
+
+/// `quality.<characteristic>`: of every declared scenario under
+/// `characteristic`, counted once per scope it applies in across the whole
+/// instance, the share that is `met`. A draft or `no_data` scenario counts
+/// in the denominator -- declared but not shown to be met is not met, the
+/// same "never green without evidence" rule the tab itself keeps. `None`,
+/// with the reason, for a characteristic ISO 25010 does not name or one no
+/// scope declares anything under: nothing declared is not "all met".
+fn quality_value(id: &MetricId, rollup: &QualityRollup, characteristic: &str, now: DateTime<Utc>) -> MetricValue {
+    let unknown = factory_core::quality::CATALOGUE.iter().all(|c| c.id != characteristic);
+    if unknown {
+        return MetricValue {
+            id: id.clone(),
+            value: None,
+            as_of: now,
+            reason: Some(format!("{characteristic:?} is not an ISO 25010 characteristic")),
+        };
+    }
+    let (met, declared) = rollup
+        .0
+        .iter()
+        .flat_map(|s| &s.attributes)
+        .filter(|a| a.characteristic == characteristic)
+        .flat_map(|a| &a.scenarios)
+        .fold((0u32, 0u32), |(met, all), s| (met + u32::from(s.status == ScenarioStatus::Met), all + 1));
+    if declared == 0 {
+        return MetricValue {
+            id: id.clone(),
+            value: None,
+            as_of: now,
+            reason: Some(format!("no scope declares a quality scenario under {characteristic}")),
+        };
+    }
+    MetricValue {
+        id: id.clone(),
+        value: Some(f64::from(met) / f64::from(declared)),
+        as_of: now,
+        reason: None,
+    }
 }
 
 fn open_controls_value(id: &MetricId, report: &PolicyReport, framework: &str, now: DateTime<Utc>) -> MetricValue {
@@ -757,6 +950,71 @@ mod tests {
         let id = MetricId::new("bench.resolve_rate.eval-set-a").unwrap();
         let computed = engine.metrics(&[id], now).await.unwrap();
         assert_eq!(computed.values[0].value, Some(0.5), "one pass and one fail across two configurations");
+    }
+
+    /// `as_of` is when the data behind a value is from, not when it was
+    /// asked for -- otherwise a freshness window (a quality scenario's
+    /// `max_age`) could never read anything as stale.
+    #[tokio::test]
+    async fn a_ratio_and_a_resolve_rate_are_as_of_their_newest_data_not_the_moment_asked() {
+        use factory_core::bench::{BenchAttempt, BenchRun, BenchRunStatus, Verdict};
+
+        let engine = test_engine(Vec::new());
+        finished_run(&engine, "old", RunStatus::Done, Trigger::Manual, chrono::Duration::days(10)).await;
+        let settled = Utc::now() - chrono::Duration::days(3);
+        let mut pass = BenchAttempt::pending("a1".into(), "case1".into(), "agent-a".into(), 1);
+        pass.verdict = Some(Verdict::Pass);
+        let run = BenchRun {
+            id: "run-1".into(),
+            dataset: "smoke".into(),
+            dataset_revision: 1,
+            cases: Vec::new(),
+            case_bases: Default::default(),
+            agents: vec!["agent-a".into()],
+            attempts_per_case: 1,
+            concurrency: 1,
+            status: BenchRunStatus::Done,
+            attempts: vec![pass.clone()],
+            started_at: settled - chrono::Duration::hours(1),
+            ended_at: Some(settled),
+        };
+        engine.bench.put_run(&run).await.unwrap();
+        engine.bench.put_attempt(&run.id, &pass).await.unwrap();
+
+        let now = Utc::now();
+        let ids: Vec<MetricId> = ["first_pass_yield", "scrap_rate", "throughput_week", "bench.resolve_rate.smoke"]
+            .into_iter()
+            .map(|id| MetricId::new(id).unwrap())
+            .collect();
+        let computed = engine.metrics(&ids, now).await.unwrap();
+        let get = |id: &str| computed.values.iter().find(|v| v.id.as_str() == id).unwrap().clone();
+
+        for id in ["first_pass_yield", "scrap_rate"] {
+            let age = now - get(id).as_of;
+            assert!(
+                age >= chrono::Duration::days(9) && age <= chrono::Duration::days(10),
+                "{id} is as old as the day its newest finished run ended, to the day: {age}"
+            );
+        }
+        assert_eq!(get("throughput_week").as_of, now, "a trailing count ending now is a current fact, even a zero");
+        assert_eq!(get("bench.resolve_rate.smoke").as_of, settled, "as of the run it came from");
+    }
+
+    /// The rolling series skips a day whose window finished nothing, so its
+    /// last point can be a weeks-old day's ratio. A ratio over "the
+    /// trailing 28 days" with nothing finished in them has no value.
+    #[tokio::test]
+    async fn a_ratio_with_nothing_finished_in_its_window_is_none_not_an_old_value() {
+        let engine = test_engine(Vec::new());
+        finished_run(&engine, "ancient", RunStatus::Done, Trigger::Manual, chrono::Duration::days(35)).await;
+        let now = Utc::now();
+        let ids = vec![MetricId::new("first_pass_yield").unwrap(), MetricId::new("scrap_rate").unwrap()];
+        let computed = engine.metrics(&ids, now).await.unwrap();
+        for v in &computed.values {
+            assert_eq!(v.value, None, "{}", v.id);
+            assert_eq!(v.reason.as_deref(), Some("no finished runs in the trailing 28 days"), "{}", v.id);
+            assert_eq!(v.as_of, now);
+        }
     }
 
     #[tokio::test]

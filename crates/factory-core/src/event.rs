@@ -91,6 +91,18 @@ pub enum Event {
     GoalsChanged {
         kr: KrRef,
     },
+    /// What `.factory/quality/` or a `quality:`/`scope.quality` declaration
+    /// says changed since the last `Request::Quality` read it. Quality has
+    /// no write of its own to publish on the way `GoalsChanged` follows a
+    /// check-in -- profiles are authored by hand and nothing in Factory
+    /// watches files -- so this is the issue's "on the next read": each
+    /// report fingerprints what it loaded, and publishes this when the
+    /// fingerprint moved. `profiles` is every profile id now on disk.
+    /// Evidence moving (a fitness-function task finishing) is not this
+    /// event; it already arrives as `RunUpdated`.
+    QualityChanged {
+        profiles: Vec<String>,
+    },
     /// A push from a runtime, mapped onto whichever standing agent or run's
     /// session it was about. This never moves a task or a run -- only the
     /// agent's own `factory task report` may do that -- so `task_id()` is
@@ -134,7 +146,8 @@ impl Event {
             | Event::AgentDeleted { .. }
             | Event::RolesChanged { .. }
             | Event::PolicyChanged { .. }
-            | Event::GoalsChanged { .. } => None,
+            | Event::GoalsChanged { .. }
+            | Event::QualityChanged { .. } => None,
             Event::WorkflowCreated { .. }
             | Event::WorkflowUpdated { .. }
             | Event::WorkflowDeleted { .. }

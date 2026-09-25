@@ -422,6 +422,15 @@ pub enum FindingKind {
     UnknownSecretsLocation,
     /// A trade-off between an attribute and itself.
     BadTradeoff,
+    /// A metric measure names a `quality.<characteristic>` metric -- one
+    /// computed from quality scenarios' own statuses, so judging a scenario
+    /// by it would be circular ([`is_quality_metric`]). Always `no_data`.
+    SelfReferentialMetric,
+    /// A `task`/`workflow` check measure's name matches more than one task
+    /// title or workflow name in the scope -- `policy::evidence_findings`'
+    /// own `ambiguous_check_target`, carried over by `factory-daemon`, which
+    /// is the one that gathers the evidence it is found in.
+    AmbiguousCheckTarget,
     /// A `knowledge` check with no `tag:` under a dotted attribute id. Its
     /// default tag would be `control/quality/<attribute>/<scenario>`, and a
     /// knowledge tag cannot contain `.` (`knowledge::is_tag_char`), so no
@@ -622,11 +631,30 @@ fn validate_profile(mut profile: Profile, subject: &str, findings: &mut Vec<Find
     profile
 }
 
+/// Whether `metric` is one of the `quality.<characteristic>` metrics this
+/// module's own results are summed into. A measure may never name one: the
+/// value would be computed from the very scenario being judged -- a loop,
+/// not a measurement ([`FindingKind::SelfReferentialMetric`]).
+pub fn is_quality_metric(metric: &MetricId) -> bool {
+    metric.as_str().split('.').next() == Some("quality")
+}
+
 /// A metric measure's own checks. `false` when a bound is not a finite
 /// number -- `.nan` compares false both ways, so it would read as met every
 /// time and could never be told apart from a tightening or a loosening --
-/// and the caller drops the measure, leaving an honest draft.
+/// and the caller drops the measure, leaving an honest draft. A measure on
+/// a `quality.*` metric is kept (it reads `no_data`, with the reason), but
+/// nothing else is checked about it: whatever its bounds say, it can never
+/// be judged.
 fn check_metric(m: &MetricMeasure, subject: &str, what: &str, findings: &mut Vec<Finding>) -> bool {
+    if is_quality_metric(&m.metric) {
+        findings.push(finding(
+            FindingKind::SelfReferentialMetric,
+            subject,
+            format!("{what} measures by {}, which is computed from quality scenarios themselves", m.metric),
+        ));
+        return true;
+    }
     match metrics::resolve(&m.metric) {
         Ok(_) => {}
         Err(MetricError::Unknown(_)) => {
@@ -701,14 +729,14 @@ pub struct Origin {
     pub profile: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppliedScenario {
     #[serde(flatten)]
     pub scenario: QualityScenario,
     pub declared_at: Origin,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppliedAttribute {
     pub id: String,
     pub importance: Level,
@@ -717,7 +745,7 @@ pub struct AppliedAttribute {
     pub scenarios: Vec<AppliedScenario>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppliedTradeoff {
     #[serde(flatten)]
     pub tradeoff: Tradeoff,
@@ -727,7 +755,7 @@ pub struct AppliedTradeoff {
 /// One scope's utility tree after folding its whole chain. Attributes keep
 /// the order they were first declared in, root first -- authored order is
 /// itself information, not something to alphabetise away.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QualityTree {
     pub scope: String,
     /// Every profile folded in, in the order it was, each once.
@@ -1065,23 +1093,23 @@ impl ScenarioStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioResult {
     #[serde(flatten)]
     pub scenario: AppliedScenario,
     pub status: ScenarioStatus,
     pub reasons: Vec<String>,
     /// For a metric measure, the value it was judged on, when there was one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub as_of: Option<DateTime<Utc>>,
     /// For a check measure, whatever `policy::evaluate` could point at.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<EvidenceRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttributeResult {
     pub id: String,
     pub characteristic: String,
@@ -1095,7 +1123,7 @@ pub struct AttributeResult {
 
 /// One scope's evaluated utility tree. Deliberately no score field -- see
 /// the module doc comment.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScopeReport {
     pub scope: String,
     pub profiles: Vec<String>,
@@ -1179,6 +1207,11 @@ fn evaluate_scenario(
 }
 
 fn evaluate_metric(m: &MetricMeasure, values: &BTreeMap<MetricId, MetricValue>, now: DateTime<Utc>, result: &mut ScenarioResult) {
+    if is_quality_metric(&m.metric) {
+        result.status = ScenarioStatus::NoData;
+        result.reasons.push(format!("{} is computed from quality scenarios themselves, so it cannot measure one", m.metric));
+        return;
+    }
     match metrics::resolve(&m.metric) {
         Err(MetricError::Unknown(_)) => {
             result.status = ScenarioStatus::NoData;
@@ -1242,23 +1275,20 @@ fn evaluate_metric(m: &MetricMeasure, values: &BTreeMap<MetricId, MetricValue>, 
 
 /// The control a check measure is evaluated as: framework `quality`, id
 /// `<attribute>/<scenario>`. `policy::evaluate` needs *some* `ControlRef`,
-/// and this one names the scenario exactly. An `attestation` check matches
-/// an `Attestation` recorded against this same ref; how one gets recorded
-/// is a later slice's question -- this ref is built with `ControlRef::new`
-/// and does not survive `ControlRef`'s own `FromStr` (its id holds `.` and
-/// `/`), so that slice cannot simply parse one off a command line.
+/// and this one names the scenario exactly. It is built with
+/// `ControlRef::new` and does not survive `ControlRef`'s own `FromStr` (its
+/// id holds `.` and `/`), which is why an `attestation` check measure reads
+/// `no_data` -- see [`ATTESTATION_UNSUPPORTED`].
 pub fn control_ref(attribute: &str, scenario: &str) -> ControlRef {
     ControlRef::new("quality", format!("{attribute}/{scenario}"))
 }
 
-fn evaluate_check(
-    attribute: &str,
-    scenario: &str,
-    check: &Check,
-    evidence: &Evidence,
-    now: DateTime<Utc>,
-) -> (ScenarioStatus, Vec<String>, Vec<EvidenceRef>) {
-    let applied = Applied {
+/// The one-control `Applied` a check measure is judged as -- built here
+/// and nowhere else, so what [`evaluate`] hands `policy::evaluate` and what
+/// [`applied_checks`] hands the daemon's evidence gathering can never
+/// disagree about which check is being asked.
+fn check_as_applied(attribute: &str, scenario: &str, check: &Check) -> Applied {
+    Applied {
         control: control_ref(attribute, scenario),
         title: format!("{attribute}/{scenario}"),
         kind: Kind::Standard,
@@ -1267,7 +1297,51 @@ fn evaluate_check(
         max_age: check_max_age(check),
         not_applicable: None,
         remediation: None,
-    };
+    }
+}
+
+/// Every check measure in `tree`, each as the one-control `Applied`
+/// [`evaluate`] judges it as. This is what `factory-daemon` hands Policy's
+/// own evidence gathering (`dataset_level_facts`/`evidence_for_scope`,
+/// which read nothing but each `Applied`'s checks), so a quality scenario's
+/// task, workflow, gate, roles, sandbox, secrets or daemon fact is gathered
+/// by exactly the code that gathers a policy control's -- lazily, only for
+/// the kinds some scenario actually asks -- with no second evidence path.
+pub fn applied_checks(tree: &QualityTree) -> Vec<Applied> {
+    tree.attributes
+        .iter()
+        .flat_map(|attr| {
+            attr.scenarios.iter().filter_map(move |s| match &s.scenario.measure {
+                Some(Measure::Check(check)) => Some(check_as_applied(&attr.id, &s.scenario.id, check)),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+/// Why an `attestation` check measure reads `no_data` rather than being
+/// judged: nothing can record one. An `Attestation` lives in the policy
+/// store keyed by its `ControlRef`, which is stored as the `framework/id`
+/// string and parsed back through `ControlRef::from_str` -- and
+/// [`control_ref`]'s id holds `.` and `/`, so a row written under it would
+/// be dropped as malformed on the very next read. Rather than a scenario
+/// that reads `not_met` forever because nothing could ever satisfy it,
+/// the honest answer is that there is no data, and why.
+pub const ATTESTATION_UNSUPPORTED: &str = "a quality scenario cannot be attested yet: an attestation is keyed by a policy \
+     control ref, and quality/<attribute>/<scenario> is not one the policy store can read back; \
+     measure it with a task, workflow or gate check instead";
+
+fn evaluate_check(
+    attribute: &str,
+    scenario: &str,
+    check: &Check,
+    evidence: &Evidence,
+    now: DateTime<Utc>,
+) -> (ScenarioStatus, Vec<String>, Vec<EvidenceRef>) {
+    if matches!(check, Check::Attestation) {
+        return (ScenarioStatus::NoData, vec![ATTESTATION_UNSUPPORTED.to_string()], Vec::new());
+    }
+    let applied = check_as_applied(attribute, scenario, check);
     let Some(status) = policy::evaluate(std::slice::from_ref(&applied), evidence, now).into_iter().next() else {
         return (ScenarioStatus::NoData, vec!["the check could not be evaluated".to_string()], Vec::new());
     };
@@ -2036,6 +2110,56 @@ mod tests {
         assert!(!attr.keys().any(|k| k.contains("score")), "{attr:?}");
         assert_eq!(json["attributes"][0]["status"], "no_data");
         assert_eq!(json["attributes"][0]["scenarios"][0]["status"], "no_data");
+    }
+
+    #[test]
+    fn an_attestation_measure_reads_no_data_with_the_reason_never_not_met() {
+        let tree = tree_with(&[("signed-off", Some("{ check: attestation }"))]);
+        let report = evaluate(&tree, &BTreeMap::new(), &Evidence::default(), now());
+        let s = &report.attributes[0].scenarios[0];
+        assert_eq!(s.status, ScenarioStatus::NoData);
+        assert_eq!(s.reasons, vec![ATTESTATION_UNSUPPORTED.to_string()]);
+    }
+
+    #[test]
+    fn a_measure_on_a_quality_metric_is_a_finding_and_reads_no_data() {
+        let q = catalogue_from(&[(
+            "p.yaml",
+            "attributes:\n  - id: reliability\n    importance: M\n    difficulty: M\n    scenarios:\n\
+             \x20     - { id: loop, measure: { metric: quality.reliability, above: 0.5 } }\n",
+        )]);
+        assert_eq!(kinds(&q.findings), vec![FindingKind::SelfReferentialMetric]);
+        let (tree, _) = applicable(&q, "demo", &[layer("demo", &["p"])]);
+        let values = BTreeMap::from([metric_value("quality.reliability", Some(1.0), now())]);
+        let report = evaluate(&tree, &values, &Evidence::default(), now());
+        assert_eq!(report.attributes[0].scenarios[0].status, ScenarioStatus::NoData, "even with a value on hand");
+    }
+
+    #[test]
+    fn applied_checks_is_exactly_the_check_measures_each_as_evaluate_judges_it() {
+        let tree = tree_with(&[
+            ("metric", Some("{ metric: scrap_rate, below: 0.1 }")),
+            ("draft", None),
+            ("gate", Some("{ check: task, task: quality-gate, max_age: 7d }")),
+            ("sandboxed", Some("{ check: sandbox }")),
+        ]);
+        let applied = applied_checks(&tree);
+        let ids: Vec<String> = applied.iter().map(|a| a.control.id.clone()).collect();
+        assert_eq!(ids, vec!["reliability.availability/gate", "reliability.availability/sandboxed"]);
+        assert_eq!(applied[0], check_as_applied("reliability.availability", "gate", &Check::Task {
+            task: "quality-gate".into(),
+            max_age: Some("7d".parse().unwrap()),
+        }));
+        assert_eq!(applied[0].max_age, Some("7d".parse().unwrap()), "the check's own freshness window carries over");
+    }
+
+    #[test]
+    fn a_scope_report_round_trips_through_json() {
+        let tree = tree_with(&[("metric", Some("{ metric: scrap_rate, below: 0.1 }")), ("draft", None)]);
+        let values = BTreeMap::from([metric_value("scrap_rate", Some(0.05), now())]);
+        let report = evaluate(&tree, &values, &Evidence::default(), now());
+        let back: ScopeReport = serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        assert_eq!(back, report);
     }
 
     // -- examples ------------------------------------------------------------------

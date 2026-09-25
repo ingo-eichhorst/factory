@@ -16,6 +16,7 @@ mod occupancy;
 mod policies;
 mod power;
 mod production;
+mod quality;
 mod roles;
 mod scenarios;
 mod scheduler;
