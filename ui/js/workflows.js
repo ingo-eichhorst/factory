@@ -21,6 +21,9 @@ import {
   freePosition,
   isDrag,
   nodeStatusClass,
+  nodeTitle,
+  reworkPath,
+  reworkTargets,
   rootIds,
   topologicalSummary,
 } from "./workflow-graph.js";
@@ -31,8 +34,13 @@ import {
   duplicateNode,
   editorButtons,
   newTaskNode,
+  nodeInputUsage,
   openTaskAction,
   readWorkflowRouteTail,
+  reworkBadge,
+  reworkProblems,
+  reworkSentence,
+  saveDraft,
   validate,
   workflowRouteTail,
 } from "./workflow-model.js";
@@ -217,6 +225,7 @@ function renderEditor() {
     $("workflow-nodes").innerHTML = ""; $("workflow-edges").innerHTML = "";
     $("workflow-summary").innerHTML = ""; $("workflow-edge-summary").innerHTML = "";
     $("workflow-revision").textContent = ""; $("workflow-run-status").innerHTML = "";
+    $("workflow-inputs").innerHTML = ""; $("workflow-input-add").disabled = true;
     inspectorRenderedFor = null;
     renderButtons(); renderProblems(); renderRunsList();
     return;
@@ -260,6 +269,7 @@ function renderCanvas() {
   $("workflow-edges").innerHTML = `<defs>
       <marker id="workflow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker>
       <marker id="workflow-arrow-done" class="wf-edge-done" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker>
+      <marker id="workflow-arrow-rework" class="wf-rework-marker" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker>
     </defs>` +
     graph.edges.map(edge => {
       const from = graph.nodes.find(node => node.id === edge.from), to = graph.nodes.find(node => node.id === edge.to);
@@ -271,11 +281,18 @@ function renderCanvas() {
           <path class="workflow-edge-hit" d="${d}"/>
           <path class="workflow-edge" data-id="${esc(edge.id)}" d="${d}" marker-end="url(#workflow-arrow)"/>
         </g>`;
-    }).join("");
+    }).join("") +
+    // `#143`: a node's `rework` is the one link that points backwards. It
+    // lives on the node, not among the edges, so it is no `data-edge`: it
+    // cannot be selected or deleted as a link -- the inspector's Rework
+    // field is where it changes. Its `d` waits for the cards to exist,
+    // since it is drawn to their rendered heights (`paintReworks`).
+    graph.nodes.filter(node => node.rework && graph.nodes.some(item => item.id === node.rework.to)).map(node => `
+      <path class="workflow-rework" data-rework-from="${esc(node.id)}" marker-end="url(#workflow-arrow-rework)"/>`).join("");
 
   $("workflow-nodes").innerHTML = graph.nodes.map(node => `
     <div class="workflow-node" data-node="${esc(node.id)}" tabindex="0" role="group"
-      aria-label="${esc(node.task.title || "Untitled task")}${roots.has(node.id) ? ", start node" : ""}"
+      aria-label="${esc(node.task.title || "Untitled task")}${roots.has(node.id) ? ", start node" : ""}${node.rework ? `, ${esc(reworkSentence(graph.nodes, node))}` : ""}"
       style="left:${node.position.x}px;top:${node.position.y}px">
       ${roots.has(node.id) ? `<span class="wf-start">START</span>` : ""}
       <span class="wf-port-in" aria-hidden="true"></span>
@@ -284,6 +301,7 @@ function renderCanvas() {
         : "TASK"}</span>
       <strong>${esc(node.task.title || "Untitled task")}</strong>
       <span class="wf-line">${esc(node.task.scope || "")} · ${esc(node.task.agent || "default agent")}</span>
+      ${node.rework ? `<span class="wf-line wf-rework-line" title="${esc(reworkSentence(graph.nodes, node))}">${esc(reworkBadge(graph.nodes, node))}</span>` : ""}
       <span class="wf-badge-row"><span class="wf-badge" data-role="badge"></span></span>
       <button type="button" class="wf-open-task" data-role="open-task" hidden>Open task ↗</button>
       <button type="button" class="wf-port-out" data-port="${esc(node.id)}" aria-label="Link from ${esc(node.task.title || "this node")}">+</button>
@@ -331,8 +349,22 @@ function paintStatuses() {
     path.setAttribute("class", cls.filter(Boolean).join(" "));
     path.setAttribute("marker-end", status === "done" ? "url(#workflow-arrow-done)" : "url(#workflow-arrow)");
   }
+  paintReworks(graph);
   paintSummaryStatuses();
   renderRunStatusChip();
+}
+
+/// Each rework curve, drawn to the cards' rendered heights -- which a run can
+/// change (an "Open task" link appears), so this is repainted with the
+/// statuses rather than once with the structure.
+function paintReworks(graph) {
+  const height = id => $("workflow-nodes").querySelector(`[data-node="${CSS.escape(id)}"]`)?.offsetHeight || undefined;
+  for (const path of $("workflow-edges")?.querySelectorAll("path[data-rework-from]") || []) {
+    const from = graph.nodes.find(node => node.id === path.dataset.reworkFrom);
+    const to = from && graph.nodes.find(node => node.id === from.rework?.to);
+    if (!to) continue;
+    path.setAttribute("d", reworkPath(from, to, height(from.id), height(to.id)));
+  }
 }
 
 function wireNode(element) {
@@ -474,7 +506,7 @@ function completeConnect(toId) {
   const error = connectionError(current.nodes, current.edges, fromId, toId);
   if (error) { clientErrors = [{ message: error }]; renderCanvas(); renderProblems(); return; }
   current.edges = addEdge(current.edges, uid("edge"), fromId, toId);
-  clientErrors = [];
+  clientErrors = reworkProblems(current); // a new link may be what a rework was missing
   markDirty();
   selectedNode = toId;
   renderEditor();
@@ -503,10 +535,16 @@ function renderInspector() {
     $(id).disabled = readOnly;
   }
   $("workflow-scope").value = graph.scope;
+  // Both depend on more than the selection -- the links, the other nodes'
+  // titles, the declared inputs -- so they are redrawn on every call, not
+  // only when the selection changes.
+  if (node) renderReworkField(node, graph, readOnly);
+  renderNodeUses();
   if (!selectionChanged) return;
   inspectorRenderedFor = key;
   $("workflow-name").value = graph.name;
   $("workflow-description").value = graph.description || "";
+  renderInputs();
   if (!node) return;
   const agents = state.scopes.find(scope => scope.name === graph.scope)?.agents || [];
   const options = agents.map(agent => agent.name);
@@ -525,6 +563,102 @@ function renderInspector() {
   $("workflow-node-ack").value = node.task.ack_timeout_seconds ?? "";
   $("workflow-node-timeout").value = node.task.timeout_seconds ?? "";
   $("workflow-node-blocked").value = node.task.blocked_timeout_seconds ?? "";
+}
+
+/// `#143`: the workflow's declared inputs, one editable row each. Rebuilt
+/// only when the list itself changes (or the workflow does) -- a keystroke
+/// writes straight into `current.inputs`, so the caret stays where it is.
+/// A rename does not rewrite `{{old}}` in any node's text; `validate` names
+/// the placeholder left behind instead, rather than editing instructions
+/// behind anyone's back.
+function renderInputs() {
+  const graph = activeGraph();
+  const readOnly = mode === "run";
+  const inputs = graph.inputs ?? [];
+  $("workflow-input-add").disabled = readOnly;
+  $("workflow-input-add").hidden = readOnly;
+  $("workflow-inputs").innerHTML = inputs.length ? inputs.map((input, i) => `
+    <div class="wf-input-row" data-input="${i}">
+      <label>Name<input type="text" data-field="name" value="${esc(input.name)}" spellcheck="false"${readOnly ? " disabled" : ""}></label>
+      <label>Description<input type="text" data-field="description" value="${esc(input.description || "")}"${readOnly ? " disabled" : ""}></label>
+      ${readOnly ? "" : `<button type="button" class="wf-input-remove" data-remove-input="${i}" aria-label="Remove input ${esc(input.name || i + 1)}">Remove</button>`}
+    </div>`).join("") : `<p class="wf-uses">None -- a run starts with nothing to fill in.</p>`;
+  if (readOnly) return;
+  for (const row of $("workflow-inputs").querySelectorAll("[data-input]")) {
+    const input = current.inputs[Number(row.dataset.input)];
+    for (const field of row.querySelectorAll("[data-field]")) {
+      field.oninput = () => { input[field.dataset.field] = field.value; markDirty(); renderNodeUses(); };
+    }
+  }
+  for (const button of $("workflow-inputs").querySelectorAll("[data-remove-input]")) {
+    button.onclick = () => {
+      current.inputs.splice(Number(button.dataset.removeInput), 1);
+      markDirty(); renderInputs(); renderNodeUses();
+      $("workflow-input-add").focus();
+    };
+  }
+}
+
+function addInput() {
+  if (mode === "run" || !current) return;
+  current.inputs = [...(current.inputs ?? []), { name: "", description: "" }];
+  markDirty(); renderInputs();
+  $("workflow-inputs").querySelector(`[data-input="${current.inputs.length - 1}"] [data-field="name"]`)?.focus();
+}
+
+/// Under Instructions: which inputs the selected node's text uses, with any
+/// the workflow does not declare marked -- the hint that `{{issue}}` is an
+/// input rather than literal braces.
+function renderNodeUses() {
+  const graph = activeGraph();
+  const node = graph?.nodes.find(item => item.id === selectedNode);
+  const { used, undeclared } = node ? nodeInputUsage(node, graph.inputs) : { used: [], undeclared: [] };
+  $("workflow-node-inputs").innerHTML = used.length ? `Uses ${used.map(name => undeclared.includes(name)
+    ? `<span class="wf-undeclared">{{${esc(name)}}} (not declared)</span>`
+    : `<code>{{${esc(name)}}}</code>`).join(", ")}` : "";
+}
+
+/// The Rework group: where the selected node may send its work back to --
+/// its ancestor task nodes, which change with every link -- and how often.
+/// A target that is no longer valid stays shown, named as what it now is,
+/// rather than silently reading as "none": the model still carries it, and
+/// `reworkProblems` says what is wrong with it.
+function renderReworkField(node, graph, readOnly) {
+  const to = $("workflow-node-rework-to");
+  const max = $("workflow-node-rework-max");
+  const gate = node.kind === "gate";
+  const targets = reworkTargets(graph.nodes, graph.edges, node.id);
+  const options = targets.map(target => [target.id, target.task.title || target.id]);
+  const chosen = node.rework?.to;
+  if (chosen && !targets.some(target => target.id === chosen)) {
+    const exists = graph.nodes.some(item => item.id === chosen);
+    options.push([chosen, `${nodeTitle(graph.nodes, chosen)} (${exists ? "does not come before this node" : "deleted"})`]);
+  }
+  to.innerHTML = `<option value="">none -- a failure fails the run</option>` +
+    options.map(([id, title]) => `<option value="${esc(id)}">${esc(title)}</option>`).join("");
+  to.value = chosen || "";
+  // Never overwritten mid-keystroke: a cleared field is briefly 0 rounds.
+  if (document.activeElement !== max) max.value = node.rework ? (node.rework.max_rounds ?? "") : "";
+  to.disabled = readOnly || gate;
+  max.disabled = readOnly || gate || !node.rework;
+  $("workflow-node-rework-note").textContent = gate
+    ? "A gate cannot send work back; only a task node can."
+    : !options.length ? "Nothing comes before this node, so there is nowhere to send work back to." : "";
+}
+
+/// The Rework fields into the model. Not part of `readEditor`: that runs on
+/// every keystroke in any field, and a select whose options no longer hold
+/// the stored target would read back as "none" and quietly drop it.
+function readRework() {
+  if (mode === "run") return;
+  const node = current.nodes.find(item => item.id === selectedNode);
+  if (!node) return;
+  const to = $("workflow-node-rework-to").value;
+  const typed = number("workflow-node-rework-max");
+  node.rework = to ? { to, max_rounds: typed ?? (node.rework ? 0 : 1) } : null;
+  markDirty();
+  clientErrors = reworkProblems(current);
+  renderCanvas(); renderSummary(); renderReworkField(node, current, false); renderProblems();
 }
 
 /// The model only, never `.trim()` -- trimming happens once, on save
@@ -585,7 +719,8 @@ function renderSummary() {
     return `<li data-summary-edge="${esc(edge.id)}">${from} → ${to}
         <button type="button" class="wf-edge-remove" data-remove-edge="${esc(edge.id)}"${mode === "run" ? " hidden" : ""}>Delete link</button>
       </li>`;
-  }).join("");
+  }).join("") + graph.nodes.filter(node => node.rework).map(node => `
+      <li data-summary-rework="${esc(node.id)}">${esc(nodeTitle(graph.nodes, node.id))} ${esc(reworkSentence(graph.nodes, node))}</li>`).join("");
   for (const button of $("workflow-summary").querySelectorAll("[data-select-node]")) {
     button.onclick = () => selectFromSummary(button.dataset.selectNode);
   }
@@ -739,18 +874,12 @@ async function save() {
   current.name = current.name.trim();
   current.description = current.description.trim();
   for (const node of current.nodes) node.task.title = node.task.title.trim();
+  for (const input of current.inputs ?? []) { input.name = input.name.trim(); input.description = (input.description || "").trim(); }
   const errors = validate(current);
   clientErrors = errors; serverError = null;
   if (errors.length) { renderCanvas(); renderProblems(); return; }
   setBusy(true);
-  // Everything the canvas does not edit rides along untouched -- the
-  // category (#118) and the declared inputs (#140) -- so saving a layout
-  // never drops what a file or the CLI put there.
-  const draft = {
-    name: current.name, description: current.description, scope: current.scope,
-    category: current.category ?? null, inputs: current.inputs ?? [],
-    nodes: current.nodes, edges: current.edges,
-  };
+  const draft = saveDraft(current);
   try {
     const answer = current.id ? await api(`/api/workflows/${current.id}`, { method: "PATCH", body: JSON.stringify(draft) })
       : await api("/api/workflows", { method: "POST", body: JSON.stringify(draft) });
@@ -854,6 +983,9 @@ function deleteNode(id = selectedNode) {
   current.edges = current.edges.filter(edge => edge.from !== id && edge.to !== id);
   if (selectedNode === id) selectedNode = null;
   selectedEdge = null; connectFrom = null;
+  // A rework that pointed at it, or through it, is shown broken now rather
+  // than at Save -- and left as it is, for its owner to repoint or remove.
+  clientErrors = reworkProblems(current);
   markDirty();
   renderEditor();
   $("workflow-canvas").focus();
@@ -863,6 +995,7 @@ function deleteEdge(id) {
   if (mode === "run") return;
   current.edges = current.edges.filter(edge => edge.id !== id);
   if (selectedEdge === id) selectedEdge = null;
+  clientErrors = reworkProblems(current);
   markDirty();
   renderEditor();
 }
@@ -956,6 +1089,9 @@ export function wireWorkflows() {
   $("workflow-duplicate").onclick = duplicate;
   $("workflow-delete-node").onclick = () => deleteNode();
   $("workflow-delete-edge").onclick = () => selectedEdge && deleteEdge(selectedEdge);
+  $("workflow-input-add").onclick = addInput;
+  $("workflow-node-rework-to").onchange = readRework;
+  $("workflow-node-rework-max").oninput = readRework;
   $("workflow-connect").onclick = () => { if (selectedNode && mode !== "run") { connectFrom = selectedNode; renderCanvas(); } };
   $("workflow-zoom-in").onclick = () => zoomBy(1.2);
   $("workflow-zoom-out").onclick = () => zoomBy(1 / 1.2);
@@ -965,7 +1101,7 @@ export function wireWorkflows() {
     button.onclick = () => setMode(button.dataset.mode);
   }
   for (const id of ["workflow-name", "workflow-description", "workflow-node-title", "workflow-node-instructions", "workflow-node-agent", "workflow-node-worktree", "workflow-node-estimate", "workflow-node-ack", "workflow-node-timeout", "workflow-node-blocked"]) {
-    $(id).oninput = () => { readEditor(); markDirty(); renderCanvas(); renderSummary(); };
+    $(id).oninput = () => { readEditor(); markDirty(); renderCanvas(); renderSummary(); renderNodeUses(); };
   }
   const canvas = $("workflow-canvas");
   canvas.onkeydown = event => {

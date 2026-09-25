@@ -13,17 +13,28 @@ import {
   reachable,
   removeEdge,
   removeNode,
+  reworkPath,
+  reworkTargets,
   rootIds,
   topologicalSummary,
+  ancestors,
 } from "../js/workflow-graph.js";
 import {
   addEdge,
   applyWorkflowEvent,
   duplicateNode,
   editorButtons,
+  inputProblems,
+  isInputName,
   newTaskNode,
+  nodeInputUsage,
   openTaskAction,
+  placeholders,
   readWorkflowRouteTail,
+  reworkBadge,
+  reworkProblems,
+  reworkSentence,
+  saveDraft,
   validate,
   workflowRouteTail,
 } from "../js/workflow-model.js";
@@ -415,4 +426,204 @@ test("a node run with a spawned task yields an action that opens it", () => {
 test("a node run with no spawned task yields no action", () => {
   assert.equal(openTaskAction({ node_id: "a", task_id: null }, () => {}), null);
   assert.equal(openTaskAction(undefined, () => {}), null);
+});
+
+// ------------------------------------------------- #143: inputs and rework
+
+/// `workflows/github-issue.yaml`'s shape, reduced to what these rules read:
+/// triage -> implement -> review -> ready, review sending work back to
+/// implement at most five times, and a gate hung off implement.
+function githubIssue() {
+  const n = (id, title, extra = {}) => ({ id, position: { x: 0, y: 0 }, kind: "task", task: { title, instructions: "", labels: {} }, ...extra });
+  return {
+    name: "github-issue", scope: "factory",
+    inputs: [{ name: "issue", description: "GitHub issue number" }],
+    nodes: [
+      n("triage", "Triage #{{issue}}"),
+      n("implement", "Implement #{{issue}}"),
+      n("review", "Review #{{issue}}", { rework: { to: "implement", max_rounds: 5 } }),
+      n("ready", "Mark PR for #{{issue}} ready"),
+      n("tests", "tests", { kind: "gate", gate: { step: "tests", command: "cargo test" } }),
+    ],
+    edges: [
+      { id: "ti", from: "triage", to: "implement" },
+      { id: "ir", from: "implement", to: "review" },
+      { id: "rr", from: "review", to: "ready" },
+      { id: "it", from: "implement", to: "tests" },
+      { id: "tr", from: "tests", to: "review" },
+    ],
+  };
+}
+
+test("#143 the github-issue shape validates clean", () => {
+  assert.deepEqual(validate(githubIssue()), []);
+});
+
+test("#143 placeholders: the same cases as workflow.rs -- spaces allowed, non-names left alone", () => {
+  assert.deepEqual(placeholders("Triage #{{issue}} and {{ issue }} for {{repo-name}}"), ["issue", "issue", "repo-name"]);
+  assert.deepEqual(placeholders("docker ps --format {{.Names}} {{}} {{ 9lives }}"), []);
+  assert.deepEqual(placeholders("{{{a}}"), [], "the scan starts at the first `{{`, so `{a` is no name");
+  assert.deepEqual(placeholders("{{a}} then {{unclosed"), ["a"]);
+  assert.deepEqual(placeholders(undefined), []);
+});
+
+test("#143 isInputName: a letter or `_` first, then letters, digits, `_` or `-`", () => {
+  for (const good of ["issue", "_x", "repo-name", "a1"]) assert.equal(isInputName(good), true, good);
+  for (const bad of ["", "1a", "-a", "a b", ".Names", "a.b"]) assert.equal(isInputName(bad), false, bad);
+});
+
+test("#143 inputs: a bad name and a duplicate are refused", () => {
+  const wf = githubIssue();
+  wf.inputs = [{ name: "issue" }, { name: "issue" }, { name: "9lives" }];
+  const messages = inputProblems(wf).map(e => e.message);
+  assert.ok(messages.some(m => /"issue" is declared twice/.test(m)), messages.join("\n"));
+  assert.ok(messages.some(m => /"9lives" is not a name/.test(m)), messages.join("\n"));
+});
+
+test("#143 inputs: an undeclared {{x}} in a title, instructions or label value is refused, keyed to its node", () => {
+  for (const place of ["title", "instructions", "label"]) {
+    const wf = githubIssue();
+    const triage = wf.nodes[0];
+    if (place === "title") triage.task.title = "Triage {{isue}}";
+    if (place === "instructions") triage.task.instructions = "Look at {{ isue }}";
+    if (place === "label") triage.task.labels = { issue: "{{isue}}" };
+    const errors = validate(wf);
+    const error = errors.find(e => /\{\{isue\}\}/.test(e.message));
+    assert.ok(error, `${place}: ${JSON.stringify(errors)}`);
+    assert.equal(error.nodeId, "triage");
+    assert.match(error.message, /"Triage/);
+  }
+});
+
+test("#143 inputs: with none declared, braces are left alone, as on the server", () => {
+  const wf = githubIssue();
+  wf.inputs = [];
+  wf.nodes[0].task.instructions = "{{isue}} and {{.Names}}";
+  assert.deepEqual(validate(wf), []);
+});
+
+test("#143 inputs: a gate's text is never checked for placeholders", () => {
+  const wf = githubIssue();
+  wf.nodes[4].task.title = "tests for {{nothing}}";
+  assert.deepEqual(inputProblems(wf), []);
+});
+
+test("#143 the inspector's uses line lists each input once and marks the undeclared", () => {
+  const n = { id: "a", kind: "task", task: { title: "{{issue}}", instructions: "{{ issue }} {{repo}}", labels: { x: "{{branch}}" } } };
+  assert.deepEqual(nodeInputUsage(n, [{ name: "issue" }]), { used: ["issue", "repo", "branch"], undeclared: ["repo", "branch"] });
+  assert.deepEqual(nodeInputUsage(n, undefined).undeclared, ["issue", "repo", "branch"]);
+});
+
+test("#143 ancestors: everything a node can be reached from, never itself", () => {
+  const { edges } = githubIssue();
+  assert.deepEqual([...ancestors(edges, "review")].sort(), ["implement", "tests", "triage"]);
+  assert.deepEqual([...ancestors(edges, "triage")], []);
+});
+
+test("#143 rework targets on github-issue: ancestor task nodes only, in definition order, never a gate", () => {
+  const { nodes, edges } = githubIssue();
+  const ids = id => reworkTargets(nodes, edges, id).map(n => n.id);
+  assert.deepEqual(ids("review"), ["triage", "implement"]);
+  assert.deepEqual(ids("implement"), ["triage"]);
+  assert.deepEqual(ids("triage"), []);
+});
+
+test("#143 rework targets: a node with no kind is a task, as the server's default has it", () => {
+  const nodes = [{ id: "a", task: { title: "a" } }, { id: "b", task: { title: "b" } }];
+  assert.deepEqual(reworkTargets(nodes, [{ id: "ab", from: "a", to: "b" }], "b").map(n => n.id), ["a"]);
+});
+
+test("#143 rework: a deleted target is refused, naming the node and keyed to it", () => {
+  const wf = githubIssue();
+  const cut = removeNode(wf.nodes, wf.edges, "implement");
+  const errors = reworkProblems({ ...wf, ...cut });
+  assert.equal(errors.length, 1, JSON.stringify(errors));
+  assert.equal(errors[0].nodeId, "review");
+  assert.match(errors[0].message, /"Review #\{\{issue\}\}" sends work back to a node that no longer exists/);
+  assert.ok(validate({ ...wf, ...cut }).some(e => e.nodeId === "review"), "validate refuses it too");
+});
+
+test("#143 rework: a target that no longer comes before the node is refused", () => {
+  const wf = githubIssue();
+  // Both paths from implement to review go: the direct link and the gate's.
+  wf.edges = removeEdge(removeEdge(wf.edges, "ir"), "tr");
+  const errors = reworkProblems(wf);
+  assert.equal(errors.length, 1, JSON.stringify(errors));
+  assert.equal(errors[0].nodeId, "review");
+  assert.match(errors[0].message, /"Implement #\{\{issue\}\}", which does not come before it/);
+});
+
+test("#143 rework: one remaining path is enough to keep the target an ancestor", () => {
+  const wf = githubIssue();
+  wf.edges = removeEdge(wf.edges, "ir"); // implement -> tests -> review still stands
+  assert.deepEqual(reworkProblems(wf), []);
+});
+
+test("#143 rework: a gate as target, a gate sending work back, and zero rounds are refused", () => {
+  const toGate = githubIssue();
+  toGate.nodes[2].rework = { to: "tests", max_rounds: 1 };
+  assert.match(reworkProblems(toGate)[0].message, /to the gate "tests"; name a task node/);
+
+  const fromGate = githubIssue();
+  fromGate.nodes[4].rework = { to: "implement", max_rounds: 1 };
+  const gateError = reworkProblems(fromGate).find(e => e.nodeId === "tests");
+  assert.match(gateError.message, /is a gate and cannot send work back/);
+
+  for (const rounds of [0, null, undefined, 1.5]) {
+    const zero = githubIssue();
+    zero.nodes[2].rework.max_rounds = rounds;
+    const errors = reworkProblems(zero);
+    assert.equal(errors.length, 1, `${rounds}: ${JSON.stringify(errors)}`);
+    assert.match(errors[0].message, /at least one round/);
+    assert.equal(errors[0].nodeId, "review");
+  }
+});
+
+test("#143 rework: how the canvas and the summary word it", () => {
+  const { nodes } = githubIssue();
+  assert.equal(reworkSentence(nodes, nodes[2]), "sends work back to Implement #{{issue}}, at most 5×");
+  assert.equal(reworkBadge(nodes, nodes[2]), "↺ Implement #{{issue}} ×5");
+  assert.equal(reworkSentence(nodes, nodes[0]), "");
+  assert.equal(reworkBadge(nodes, nodes[0]), "");
+});
+
+test("#143 the rework curve runs from the bottom of one card to the bottom of the other, below both", () => {
+  const from = { position: { x: 640, y: 0 } }, to = { position: { x: 320, y: 0 } };
+  const d = reworkPath(from, to, 100, 84);
+  const [x1, y1, , depth1, , depth2, x2, y2] = d.match(/-?[\d.]+/g).map(Number);
+  assert.equal(y1, 100, "starts on the sending card's rendered bottom");
+  assert.equal(y2, 84, "ends on the target card's rendered bottom");
+  assert.ok(x1 > x2, "runs back, right to left");
+  assert.ok(depth1 > 100 && depth2 > 100, "dips below both cards");
+});
+
+test("#143 duplicating a node leaves its rework behind: the copy has nothing before it", () => {
+  const { nodes } = githubIssue();
+  const copy = duplicateNode(nodes, "review");
+  assert.equal(copy.rework, undefined);
+  assert.equal(copy.task.title, "Review #{{issue}} copy");
+});
+
+test("#143 the save draft keeps inputs, each node's rework and the category exactly as they are", () => {
+  const wf = { ...githubIssue(), description: "", category: "delivery", id: "wf-1", revision: 3 };
+  const draft = JSON.parse(JSON.stringify(saveDraft(wf)));
+  assert.deepEqual(draft.inputs, wf.inputs);
+  assert.deepEqual(draft.nodes.find(n => n.id === "review").rework, { to: "implement", max_rounds: 5 });
+  assert.equal(draft.nodes.find(n => n.id === "triage").rework, undefined, "no rework is sent as none, not null");
+  assert.equal(draft.category, "delivery");
+  assert.deepEqual(draft.edges, wf.edges);
+  assert.equal(draft.id, undefined, "the id and revision are the URL's and the server's, not the draft's");
+});
+
+test("#143 a definition the server sent without inputs saves an empty list", () => {
+  const wf = githubIssue();
+  delete wf.inputs;
+  assert.deepEqual(saveDraft(wf).inputs, []);
+});
+
+test("#143 the page has the inputs list and the rework fields", () => {
+  assert.match(page, /id="workflow-inputs"/);
+  assert.match(page, /id="workflow-input-add"/);
+  assert.match(page, /id="workflow-node-rework-to"/);
+  assert.match(page, /id="workflow-node-rework-max"[^>]*min="1"/);
 });

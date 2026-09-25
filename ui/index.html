@@ -509,10 +509,19 @@
           <label>Name<input id="workflow-name" type="text"></label>
           <label>Description<textarea id="workflow-description" rows="3"></textarea></label>
           <label>Scope<input id="workflow-scope" type="text" readonly></label>
+          <!-- `#143`: what a run is started with, written `{{name}}` in a
+               node's text. Rows are rebuilt only when one is added or
+               removed, so typing in one never loses the caret. -->
+          <div class="wf-inputs" role="group" aria-labelledby="workflow-inputs-h">
+            <h3 id="workflow-inputs-h">Inputs</h3>
+            <div id="workflow-inputs"></div>
+            <button type="button" class="btn" id="workflow-input-add">Add input</button>
+          </div>
           <div id="workflow-node-fields" hidden>
             <h3>Task node</h3>
             <label>Title<input id="workflow-node-title" type="text"></label>
-            <label>Instructions<textarea id="workflow-node-instructions" rows="7"></textarea></label>
+            <label>Instructions<textarea id="workflow-node-instructions" rows="7" aria-describedby="workflow-node-inputs"></textarea></label>
+            <p class="wf-uses" id="workflow-node-inputs" aria-live="polite"></p>
             <label>Scope<input id="workflow-node-scope" type="text" readonly></label>
             <label>Agent<select id="workflow-node-agent"></select></label>
             <label class="check"><input id="workflow-node-worktree" type="checkbox" checked> Own worktree</label>
@@ -520,6 +529,14 @@
             <label>Acknowledgement timeout (seconds)<input id="workflow-node-ack" type="number" min="1"></label>
             <label>Run timeout (seconds)<input id="workflow-node-timeout" type="number" min="1"></label>
             <label>Blocked timeout (seconds)<input id="workflow-node-blocked" type="number" min="1"></label>
+            <!-- `#140`/`#143`: the one link that points backwards, kept on
+                 the node rather than among the edges. -->
+            <div class="wf-rework" id="workflow-node-rework" role="group" aria-labelledby="workflow-node-rework-h">
+              <h3 id="workflow-node-rework-h">Rework</h3>
+              <label>Sends work back to<select id="workflow-node-rework-to"></select></label>
+              <label>At most (rounds)<input id="workflow-node-rework-max" type="number" min="1" step="1"></label>
+              <p class="wf-uses" id="workflow-node-rework-note"></p>
+            </div>
           </div>
         </div>
         <div id="workflow-run-panel" hidden>

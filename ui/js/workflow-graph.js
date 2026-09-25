@@ -92,6 +92,54 @@ export function reachable(edges, start, target) {
   return false;
 }
 
+/// Every node `id` can be reached from by following edges forward -- the
+/// nodes that come before it. `id` itself is not among them. The server's
+/// `WorkflowDefinition::ancestors` answers the same question for
+/// `validate_rework`.
+export function ancestors(edges, id) {
+  const parents = new Map();
+  for (const edge of edges) {
+    if (!parents.has(edge.to)) parents.set(edge.to, []);
+    parents.get(edge.to).push(edge.from);
+  }
+  const seen = new Set();
+  const stack = [id];
+  while (stack.length) {
+    for (const parent of parents.get(stack.pop()) || []) {
+      if (!seen.has(parent)) {
+        seen.add(parent);
+        stack.push(parent);
+      }
+    }
+  }
+  seen.delete(id);
+  return seen;
+}
+
+/// The nodes `id` may send its work back to (`#140`): its ancestor task
+/// nodes, in the definition's own order. A gate is never one -- it only
+/// mirrors what its subject did, so there is nothing to run again there.
+/// A missing `kind` is a task, as the server's serde default has it.
+export function reworkTargets(nodes, edges, id) {
+  const before = ancestors(edges, id);
+  return nodes.filter(node => before.has(node.id) && node.kind !== "gate");
+}
+
+/// The dashed curve a node's `rework` draws back to its target: from the
+/// bottom of one card to the bottom of the other, dipping below both so it
+/// never runs along the forward edges between them. `fromHeight`/`toHeight`
+/// are the cards' rendered heights -- a card grows when a run gives it an
+/// "Open task" link -- so the arrowhead lands on the card's edge, not
+/// under it.
+export function reworkPath(from, to, fromHeight = NODE_H, toHeight = NODE_H) {
+  const x1 = from.position.x + NODE_W / 2 - 16;
+  const y1 = from.position.y + fromHeight;
+  const x2 = to.position.x + NODE_W / 2 + 16;
+  const y2 = to.position.y + toHeight;
+  const depth = Math.max(y1, y2) + 44 + Math.min(80, Math.abs(x2 - x1) * 0.08);
+  return `M${x1},${y1} C${x1},${depth} ${x2},${depth} ${x2},${y2}`;
+}
+
 /// Why linking `fromId -> toId` is refused, or `null` when it is fine --
 /// named by node title (U6: "the error names the node titles").
 export function connectionError(nodes, edges, fromId, toId) {
