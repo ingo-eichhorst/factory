@@ -34,7 +34,9 @@
 //!   ([`FailKind::CancelledByPerson`]), and an answer typed into a blocked
 //!   run ([`OperationsInput::answers`]). Typing into a run leaves no record
 //!   today, so that list is empty until the Answer action journals one;
-//!   the count is a floor, never an estimate.
+//!   the count is a floor, never an estimate. `manual` is any `task.run`
+//!   request, and an agent can send one too; the record does not say
+//!   whose it was, so neither does this.
 //!
 //! ## Percentiles and pace
 //!
@@ -511,7 +513,9 @@ pub enum ExceptionKind {
     /// The runtime's screen-read thinks the run may be waiting, or it has
     /// said nothing for longer than its p95 -- a suspicion, never a status.
     SuspectedStuck,
-    /// The newest run failed and no retry is left.
+    /// The newest run failed and no retry is left. It stays until a newer
+    /// run replaces it, so how far back a failure can surface here is the
+    /// history the daemon chooses to hand over.
     FailedExhausted,
     /// Running past the p85 (medium) or p95 (high) of its pace basis.
     Aging,
