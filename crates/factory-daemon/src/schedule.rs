@@ -16,7 +16,8 @@ pub fn next_after(schedule: &Schedule, after: DateTime<Utc>) -> Result<DateTime<
 /// per step.
 enum Parsed<'a> {
     Every(i64),
-    Cron { expr: &'a str, cron: Cron, tz: Option<Tz> },
+    // Boxed: a parsed cron is a few hundred bytes, an interval eight.
+    Cron { expr: &'a str, cron: Box<Cron>, tz: Option<Tz> },
 }
 
 impl<'a> Parsed<'a> {
@@ -29,7 +30,7 @@ impl<'a> Parsed<'a> {
                     FactoryError::BadRequest(format!("{expr:?} is not a cron expression: {e}"))
                 })?;
                 let tz = schedule.timezone.as_deref().map(timezone).transpose()?;
-                Ok(Self::Cron { expr, cron, tz })
+                Ok(Self::Cron { expr, cron: Box::new(cron), tz })
             }
         }
     }
