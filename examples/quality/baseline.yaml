@@ -1,0 +1,32 @@
+# A company-wide profile, bound at the instance root with `quality: [baseline]`
+# so every scope inherits it. `daemon-service.yaml` then raises
+# reliability.recoverability to H for the scope that binds it -- raising is
+# allowed down the chain, lowering is a finding. Loads with zero findings, on
+# its own and chained under `daemon-service` -- see
+# `examples_quality_load_with_zero_findings` in `quality.rs`.
+title: Company baseline
+attributes:
+  - id: security.integrity
+    importance: H
+    difficulty: M
+    scenarios:
+      - id: cra-controls-evidenced
+        kind: change
+        source: a release manager
+        stimulus: a release is cut
+        artifact: every shipped product
+        environment: normal operation
+        response: the CRA's controls are evidenced, not just claimed
+        measure: { metric: compliance.cra, above: 0.9 }
+  - id: reliability.recoverability
+    importance: M
+    difficulty: M
+    scenarios:
+      - id: little-work-scrapped
+        kind: usage
+        source: any agent
+        stimulus: a run goes wrong part way through
+        artifact: the task it was working on
+        environment: normal operation
+        response: the task is retried or recovered rather than scrapped
+        measure: { metric: scrap_rate, below: 0.1, window: 7d }
