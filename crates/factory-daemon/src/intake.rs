@@ -816,6 +816,7 @@ mod tests {
                         worktree: Some(false),
                         ..Default::default()
                     },
+                    gate: None,
                 }],
                 ..Default::default()
             })

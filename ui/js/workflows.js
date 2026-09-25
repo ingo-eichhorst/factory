@@ -278,7 +278,9 @@ function renderCanvas() {
       style="left:${node.position.x}px;top:${node.position.y}px">
       ${roots.has(node.id) ? `<span class="wf-start">START</span>` : ""}
       <span class="wf-port-in" aria-hidden="true"></span>
-      <span class="workflow-node-kind">TASK</span>
+      <span class="workflow-node-kind">${node.kind === "gate"
+        ? `GATE${node.gate && node.gate.locked ? " 🔒" : ""}${node.gate && node.gate.required_by && node.gate.required_by.length ? ` · required by ${esc(node.gate.required_by.join(", "))}` : ""}`
+        : "TASK"}</span>
       <strong>${esc(node.task.title || "Untitled task")}</strong>
       <span class="wf-line">${esc(node.task.scope || "")} · ${esc(node.task.agent || "default agent")}</span>
       <span class="wf-badge-row"><span class="wf-badge" data-role="badge"></span></span>

@@ -2195,6 +2195,7 @@ mod tests {
                 maps_to: Vec::new(),
                 remediation: None,
                 evidence: vec![Check::Knowledge { tag: None }],
+                requires: Vec::new(),
             }],
         }
     }
@@ -2212,6 +2213,7 @@ mod tests {
                 maps_to: Vec::new(),
                 remediation: None,
                 evidence: vec![Check::Attestation],
+                requires: Vec::new(),
             }],
         }
     }

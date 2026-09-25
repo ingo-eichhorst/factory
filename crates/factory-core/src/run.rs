@@ -20,6 +20,11 @@ pub enum RunStatus {
     Running,
     /// The agent needs a human.
     Blocked,
+    /// The agent reported `done`, and the steps its control plan requires
+    /// (`Run::required_steps`) are being run and attested before that
+    /// counts (`#118`). Not terminal: it ends `Done` when every required
+    /// attestation exists and passed, or goes to `Blocked` with the reason.
+    Verifying,
     Done,
     Failed,
     Cancelled,
@@ -35,6 +40,7 @@ impl RunStatus {
             Self::Dispatching => "dispatching",
             Self::Running => "running",
             Self::Blocked => "blocked",
+            Self::Verifying => "verifying",
             Self::Done => "done",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -48,6 +54,7 @@ impl RunStatus {
             Self::Dispatching => T::Dispatching,
             Self::Running => T::Running,
             Self::Blocked => T::Blocked,
+            Self::Verifying => T::Verifying,
             Self::Done => T::Done,
             Self::Failed => T::Failed,
             Self::Cancelled => T::Cancelled,
@@ -62,6 +69,7 @@ impl std::str::FromStr for RunStatus {
             "dispatching" => Self::Dispatching,
             "running" => Self::Running,
             "blocked" => Self::Blocked,
+            "verifying" => Self::Verifying,
             "done" => Self::Done,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
@@ -118,6 +126,10 @@ pub enum BlockSource {
     /// A runtime's lifecycle hook told Factory, with no report from the agent
     /// involved at all.
     Runtime,
+    /// The daemon's own `done` gate (`#118`): the agent said it was done and
+    /// a required step's attestation was missing or failed. The agent may
+    /// take it back by reporting again -- `done` re-runs the verification.
+    Verification,
 }
 
 impl BlockSource {
@@ -125,6 +137,7 @@ impl BlockSource {
         match self {
             Self::Agent => "agent",
             Self::Runtime => "runtime",
+            Self::Verification => "verification",
         }
     }
 }
@@ -292,6 +305,12 @@ pub struct Run {
     /// together with `turn_ended_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_end_reason: Option<String>,
+    /// The steps this run must pass before `done` counts, fixed at dispatch
+    /// from its task's control plan (`#118`) -- a catalogue edited while the
+    /// run works does not change what it is held to. Empty for a run with
+    /// nothing required, which reports `done` straight to `Done` as always.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_steps: Vec<crate::control_plan::RequiredStep>,
     /// What this run used, as of its newest usage snapshot -- derived from
     /// the append-only snapshots the store keeps (`TaskStore::usage_snapshots`)
     /// and rewritten whole each time one is added, so a reader of a run
@@ -386,6 +405,9 @@ pub struct RunPatch {
     /// clears it: a run ends once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail_kind: Option<FailKind>,
+    /// Set once, at dispatch -- see `Run::required_steps`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_steps: Option<Vec<crate::control_plan::RequiredStep>>,
     /// Replace the run's derived usage -- see `Run::usage`. Only ever set
     /// with a value freshly computed from every snapshot, so there is no
     /// "clear" to go with it.

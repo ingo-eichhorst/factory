@@ -141,7 +141,8 @@ export function freePosition(nodes, x, y) {
   return { x: px, y: py };
 }
 
-/// The 8 statuses a node run can carry, in the order the issue lists them.
+/// The statuses a node run can carry, in the order the issue lists them,
+/// plus `#118`'s `verifying`.
 /// `app.css`'s `.workflow-node.wf-s-*` rules give each a distinct look; this
 /// is just which class name a status maps to, defaulting an unknown one to
 /// `unstarted` rather than drawing nothing.
@@ -151,6 +152,7 @@ export const NODE_STATUSES = [
   "dispatching",
   "running",
   "blocked",
+  "verifying",
   "done",
   "failed",
   "cancelled",

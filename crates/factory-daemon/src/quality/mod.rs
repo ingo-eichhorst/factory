@@ -213,7 +213,7 @@ pub(crate) struct QualityInputs {
     /// fingerprints, so an older read can never overwrite a newer one.
     loaded_at: Instant,
     asked: Option<Scope>,
-    trees: Vec<(Scope, QualityTree)>,
+    pub(crate) trees: Vec<(Scope, QualityTree)>,
     findings: Vec<quality::Finding>,
 }
 

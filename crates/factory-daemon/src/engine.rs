@@ -199,6 +199,15 @@ pub struct Engine {
     /// to spawn it from.
     pub(crate) bench_judge_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
     pub(crate) dataset_locks: crate::datasets::DatasetLocks,
+    /// Run ids queued for, or in, verification (`#118`) -- the dedup that
+    /// keeps one run's gates from running twice at once. See
+    /// `verification.rs`.
+    pub(crate) verifying: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Where `report` hands a `done` that needs verifying. The verifier
+    /// (`spawn_verifier`) holds the other end; like `bench_judge_tx`, this is
+    /// how a gate that runs for minutes stays off the report's own path.
+    pub(crate) verify_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    pub(crate) verify_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
     pub bus: EventBus,
     pub factory_bin: PathBuf,
     started: Instant,
@@ -279,6 +288,7 @@ impl Engine {
         interfaces: Vec<String>,
     ) -> Self {
         let (bench_judge_tx, bench_judge_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
         let power = crate::power::PowerAssertions::new(factory.config.daemon.power_assertion);
         Self {
             factory: std::sync::RwLock::new(factory),
@@ -303,6 +313,9 @@ impl Engine {
             bench_judge_tx,
             bench_judge_rx: std::sync::Mutex::new(Some(bench_judge_rx)),
             dataset_locks: Default::default(),
+            verifying: Default::default(),
+            verify_tx,
+            verify_rx: std::sync::Mutex::new(Some(verify_rx)),
             bus: EventBus::default(),
             factory_bin,
             started: Instant::now(),
@@ -1033,6 +1046,12 @@ impl Engine {
             Request::WorkflowRunCancel { id } => Ok(Payload::WorkflowRun {
                 run: self.cancel_workflow(&id).await?,
             }),
+            Request::WorkflowLint { workflow, task, scope, category } => Ok(Payload::WorkflowLint {
+                lint: self.workflow_lint(workflow, task, scope, category).await?,
+            }),
+            Request::RunAttestations { id } => Ok(Payload::Attestations {
+                attestations: self.run_attestations(&id).await?,
+            }),
 
             Request::RunList { task_id, limit } => Ok(Payload::Runs {
                 runs: self
@@ -1713,6 +1732,9 @@ impl Engine {
                 "a task estimate must be at least one second".into(),
             ));
         }
+        if let Some(category) = &patch.category {
+            factory_core::control_plan::check_category(category).map_err(FactoryError::BadRequest)?;
+        }
 
         let scope = patch.scope.clone().unwrap_or_else(|| current.scope.clone());
         if patch.scope.is_some() {
@@ -1919,6 +1941,9 @@ impl Engine {
                 "a retry policy only means something for a scheduled task; add a schedule too, or drop retry".into(),
             ));
         }
+        if let Some(category) = &new.category {
+            factory_core::control_plan::check_category(category).map_err(FactoryError::BadRequest)?;
+        }
 
         let scope = match new.scope.clone() {
             Some(s) => s,
@@ -2056,6 +2081,11 @@ impl Engine {
             )));
         }
 
+        // What `done` will need, fixed now (`#118`) -- before the run row
+        // exists, so a plan that cannot be resolved fails the dispatch
+        // rather than letting the work start unplanned.
+        let required_steps = self.required_steps_for_task(&task).await?;
+
         let token = factory_core::new_token();
         let run = self
             .store
@@ -2081,6 +2111,14 @@ impl Engine {
         // could stall inside, which is the case this issue is about.
         self.power.acquire(&run.id).await;
 
+        let run = if required_steps.is_empty() {
+            run
+        } else {
+            self.store
+                .update_run(&run.id, &RunPatch { required_steps: Some(required_steps), ..Default::default() })
+                .await?
+        };
+
         self.bus.publish(Event::RunStarted { run: run.clone() });
         self.publish_task(task_id).await;
         self.entry(
@@ -2093,6 +2131,31 @@ impl Engine {
             .in_run(&run.id),
         )
         .await;
+        if !run.required_steps.is_empty() {
+            let steps: Vec<String> = run
+                .required_steps
+                .iter()
+                .map(|s| match s.required_by.is_empty() {
+                    true => s.step.clone(),
+                    false => format!("{} ({})", s.step, s.required_by.join(", ")),
+                })
+                .collect();
+            self.entry(
+                task_id,
+                TaskEntry::new(
+                    "daemon",
+                    "plan",
+                    format!(
+                        "planned as {}; done needs: {}",
+                        factory_core::control_plan::effective_category(task.category.as_deref()),
+                        steps.join(", ")
+                    ),
+                )
+                .in_run(&run.id)
+                .with_data(serde_json::json!({ "required_steps": run.required_steps })),
+            )
+            .await;
+        }
 
         // A worktree of its own, made now rather than left to the harness --
         // the run row already exists, so it is named after it. Nothing below
@@ -2141,6 +2204,7 @@ impl Engine {
                 worktree_branch: run.worktree_branch.clone(),
                 upstream,
                 knowledge,
+                required_steps: run.required_steps.clone(),
             }),
             identity_token: None,
             role,
@@ -2372,6 +2436,23 @@ impl Engine {
 
         self.check_run_token(&run, report.token.as_deref(), task_id)?;
 
+        // While its gates run, a run's status is the verifier's to set. The
+        // agent may still add a note, or give the run up; nothing else.
+        if run.status == RunStatus::Verifying
+            && report.status.is_some_and(|s| !matches!(s, RunStatus::Failed | RunStatus::Cancelled))
+        {
+            return Err(FactoryError::BadRequest(format!(
+                "attempt {} of task {task_id} is being verified -- its required steps are running; \
+                 the run becomes done or blocked when they finish",
+                run.attempt
+            )));
+        }
+        if report.status == Some(RunStatus::Verifying) {
+            return Err(FactoryError::BadRequest(
+                "verifying is the daemon's to set; report done and it verifies the run".into(),
+            ));
+        }
+
         let message = report.message.clone().unwrap_or_else(|| {
             report
                 .result
@@ -2430,6 +2511,12 @@ impl Engine {
         }
 
         match report.status {
+            // `#118`'s done gate: a run held to required steps is not done on
+            // its agent's word. The session stays open -- see
+            // `verification.rs`.
+            Some(RunStatus::Done) if !run.required_steps.is_empty() => {
+                self.begin_verification(&run, patch).await
+            }
             Some(status) if status.is_terminal() => {
                 self.close_session(&run).await;
                 self.finish_run(&run.id, status, patch, &format!("attempt {} ended", run.attempt))
@@ -2477,7 +2564,7 @@ impl Engine {
     /// End a run and settle the task behind it. A task with a schedule goes
     /// back to `pending` so the scheduler will pick it up again; one without
     /// keeps the run's own outcome.
-    async fn finish_run(
+    pub(crate) async fn finish_run(
         &self,
         run_id: &str,
         status: RunStatus,
@@ -2786,7 +2873,7 @@ impl Engine {
     /// comes through here, which is what makes this the one place that
     /// actually knows a run is over rather than guessing from one caller's
     /// reason for closing it.
-    async fn close_session(&self, run: &Run) {
+    pub(crate) async fn close_session(&self, run: &Run) {
         // First and unconditional, ahead of the early `return` below for a
         // run that never got as far as a session (a dispatch failure) --
         // `power.release` is the counterpart to `dispatch`'s own
@@ -4980,6 +5067,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            required_steps: Vec::new(),
             usage: None,
         };
         let first = t0 + chrono::Duration::minutes(5);
@@ -5142,6 +5230,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            required_steps: Vec::new(),
             usage: None,
         };
         let slot = t(60);

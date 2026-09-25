@@ -20,6 +20,9 @@ pub enum TaskStatus {
     Running,
     /// The agent needs a human before it can go on.
     Blocked,
+    /// The agent said it is done; the steps its control plan requires are
+    /// being checked before that counts (`#118`). Not terminal.
+    Verifying,
     Done,
     Failed,
     Cancelled,
@@ -37,6 +40,7 @@ impl TaskStatus {
             Self::Dispatching => "dispatching",
             Self::Running => "running",
             Self::Blocked => "blocked",
+            Self::Verifying => "verifying",
             Self::Done => "done",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -53,6 +57,7 @@ impl std::str::FromStr for TaskStatus {
             "dispatching" => Self::Dispatching,
             "running" => Self::Running,
             "blocked" => Self::Blocked,
+            "verifying" => Self::Verifying,
             "done" => Self::Done,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
@@ -315,6 +320,12 @@ pub struct Task {
     /// running -- exactly what those tasks were doing.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub schedule_paused: bool,
+    /// What kind of work this is -- `feature`, `bugfix`, `release`, `docs`
+    /// (`#118`). Keys the control plan its runs are held to. `None` is
+    /// planned as `control_plan::DEFAULT_CATEGORY`, never as "no plan": a
+    /// task cannot get round the plan by leaving this out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     /// The intake record (`#119`), on a task that was handed in through the
     /// gate rather than created straight onto the line. It stays after
     /// release -- the triage verdict and who decided belong to the task's
@@ -369,6 +380,9 @@ pub struct NewTask {
     /// means "use the default" -- see `RetryPolicy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryPolicy>,
+    /// See `Task::category`. Absent is the default category.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 /// A partial update. `None` means "leave alone" throughout, so a store can
@@ -457,6 +471,11 @@ pub struct TaskPatch {
     /// `clear_` twin is needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule_paused: Option<bool>,
+    /// Set the category; `clear_category` goes back to the default one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_category: bool,
     /// The whole intake record, replaced -- only the engine's intake
     /// transitions write it. Never cleared: a released item keeps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -450,7 +450,7 @@ function byScopeTable(tasks, scopes) {
   if (!scopes.length) return `<div class="empty">No scopes declared.</div>`;
   const rows = scopes.map((s) => {
     const ts = tasks.filter((t) => t.scope === s.name);
-    const active = ts.filter((t) => t.status === "running" || t.status === "dispatching" || t.status === "blocked").length;
+    const active = ts.filter((t) => t.status === "running" || t.status === "dispatching" || t.status === "verifying" || t.status === "blocked").length;
     const failed = ts.filter((t) => t.status === "failed").length;
     return `<tr>
       <td><div class="title">${esc(s.name)}</div><div class="sub">${esc(s.path)}</div></td>

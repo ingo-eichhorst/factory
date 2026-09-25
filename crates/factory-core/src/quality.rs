@@ -352,6 +352,13 @@ pub struct Attribute {
     pub difficulty: Level,
     #[serde(default)]
     pub scenarios: Vec<QualityScenario>,
+    /// The steps work of a given category must pass for this attribute
+    /// (`#118`) -- the same `requires:` a policy control carries, folded
+    /// into the same control plan (`control_plan::resolve`, via
+    /// [`requirements_of`]). A descendant may add requirements to an
+    /// inherited attribute, never remove one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<crate::control_plan::Requirement>,
 }
 
 /// An ATAM trade-off point: one design decision that is a sensitivity point
@@ -444,6 +451,9 @@ pub enum FindingKind {
     /// `above`, raise a `below`, or lengthen a `max_age`. The
     /// inherited, stricter value is kept.
     Loosening,
+    /// A `requires:` entry that cannot do what it says -- see
+    /// `control_plan::Requirement::problems`. Kept, never dropped.
+    BadRequirement,
     /// A descendant restated something that is neither an addition nor a
     /// tightening -- a different metric, a different check, different
     /// scenario text. The inherited one is kept.
@@ -554,6 +564,11 @@ fn validate_profile(mut profile: Profile, subject: &str, findings: &mut Vec<Find
         if !seen.insert(attr.id.clone()) {
             findings.push(finding(FindingKind::DuplicateId, subject, format!("attribute {:?} is declared twice", attr.id)));
             return false;
+        }
+        for requirement in &attr.requires {
+            for detail in requirement.problems() {
+                findings.push(finding(FindingKind::BadRequirement, subject, format!("{} {detail}", attr.id)));
+            }
         }
         let mut scenario_ids = BTreeSet::new();
         attr.scenarios.retain(|s| {
@@ -744,6 +759,9 @@ pub struct AppliedAttribute {
     pub difficulty: Level,
     pub declared_at: Origin,
     pub scenarios: Vec<AppliedScenario>,
+    /// Every layer's `requires:` for this attribute, unioned -- add only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<crate::control_plan::Requirement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -880,9 +898,15 @@ fn merge_attribute(tree: &mut QualityTree, attr: &Attribute, origin: &Origin, fi
                 .iter()
                 .map(|s| AppliedScenario { scenario: s.clone(), declared_at: origin.clone() })
                 .collect(),
+            requires: attr.requires.clone(),
         });
         return;
     };
+    for requirement in &attr.requires {
+        if !have.requires.contains(requirement) {
+            have.requires.push(requirement.clone());
+        }
+    }
 
     let scope = tree.scope.as_str();
     let from = format!("profile {} at {}", origin.profile, origin.scope);
@@ -1298,7 +1322,19 @@ fn check_as_applied(attribute: &str, scenario: &str, check: &Check) -> Applied {
         max_age: check_max_age(check),
         not_applicable: None,
         remediation: None,
+        requires: Vec::new(),
     }
+}
+
+/// Every attribute's `requires:` in `tree`, as the `(source, requirements)`
+/// pairs `control_plan::resolve` takes -- the source named
+/// `quality/<attribute>`, the way a policy control is `<framework>/<id>`.
+pub fn requirements_of(tree: &QualityTree) -> Vec<(String, Vec<crate::control_plan::Requirement>)> {
+    tree.attributes
+        .iter()
+        .filter(|a| !a.requires.is_empty())
+        .map(|a| (format!("quality/{}", a.id), a.requires.clone()))
+        .collect()
 }
 
 /// Every check measure in `tree`, each as the one-control `Applied`

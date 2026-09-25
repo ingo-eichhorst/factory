@@ -13,7 +13,7 @@ use crate::occupancy::Occupancy;
 use crate::role::{RoleOrigin, RoleSpec};
 use crate::run::Run;
 use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TurnEnded};
-use crate::workflow::{WorkflowDefinition, WorkflowDraft, WorkflowRun};
+use crate::workflow::{WorkflowDefinition, WorkflowDraft, WorkflowLint, WorkflowRun};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +228,24 @@ pub enum Request {
     },
     #[serde(rename = "workflow_run.cancel")]
     WorkflowRunCancel { id: String },
+    /// `#118`'s author-facing preview: the control plan a stored workflow,
+    /// a task (as its implicit one-node workflow) or a bare scope and
+    /// category is held to, and what a run of it would get injected.
+    /// `category` overrides the one the workflow or task names.
+    #[serde(rename = "workflow.lint")]
+    WorkflowLint {
+        #[serde(default)]
+        workflow: Option<String>,
+        #[serde(default)]
+        task: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        category: Option<String>,
+    },
+    /// Every attestation a run's required steps left behind (`#118`).
+    #[serde(rename = "run.attestations")]
+    RunAttestations { id: String },
     #[serde(rename = "run.list")]
     RunList {
         task_id: String,
@@ -751,6 +769,8 @@ pub enum Payload {
     Workflows { workflows: Vec<WorkflowDefinition> },
     WorkflowRun { run: WorkflowRun },
     WorkflowRuns { runs: Vec<WorkflowRun> },
+    WorkflowLint { lint: WorkflowLint },
+    Attestations { attestations: Vec<crate::control_plan::StepAttestation> },
     Run { run: Run },
     Runs { runs: Vec<Run> },
     Agent { agent: AgentSession },

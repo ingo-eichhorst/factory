@@ -451,6 +451,13 @@ pub struct Control {
     pub remediation: Option<String>,
     #[serde(default)]
     pub evidence: Vec<Check>,
+    /// The steps work of a given category must pass through for this
+    /// control to hold (`#118`): folded into a scope's control plan by
+    /// `control_plan::resolve`, injected at dispatch, and proved by an
+    /// attestation before a run counts as `done`. Evidence says the plant
+    /// is compliant; `requires` says what every run on it must carry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<crate::control_plan::Requirement>,
 }
 
 /// One framework's whole catalogue, exactly as authored at
@@ -493,6 +500,10 @@ pub enum FindingKind {
     /// A `secrets` check's `absent` named a location outside
     /// [`KNOWN_SECRETS_LOCATIONS`].
     UnknownSecretsLocation,
+    /// A `requires:` entry that cannot do what it says -- a gate with no
+    /// command, a category that is not a name. Kept, never dropped: see
+    /// `control_plan::Requirement::problems`.
+    BadRequirement,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,6 +641,15 @@ pub fn load_all(dir: &Path) -> (Vec<Catalogue>, Vec<Finding>) {
                     });
                 }
             }
+            for requirement in &control.requires {
+                for detail in requirement.problems() {
+                    findings.push(Finding {
+                        kind: FindingKind::BadRequirement,
+                        subject: file_name.clone(),
+                        detail: format!("{}/{} {detail}", catalogue.framework, control.id),
+                    });
+                }
+            }
             controls.push(control);
         }
 
@@ -751,6 +771,11 @@ pub struct Applied {
     /// an `Applied` (or a `PolicyControlDetail` built from one) never needs
     /// a second pass over the catalogue just for this field.
     pub remediation: Option<String>,
+    /// The catalogue's own `requires:` for this control, unchanged -- like
+    /// `remediation`, no layer edits it. `control_plan::resolve` reads it,
+    /// and a control `n/a` here waives it there, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<crate::control_plan::Requirement>,
 }
 
 fn min_duration(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
@@ -911,6 +936,7 @@ pub fn applicable(catalogues: &[Catalogue], chain: &[PolicyLayer]) -> (Vec<Appli
                 max_age,
                 not_applicable,
                 remediation: control.remediation.clone(),
+                requires: control.requires.clone(),
             });
         }
     }
@@ -2421,6 +2447,7 @@ mod tests {
             maps_to: Vec::new(),
             remediation: None,
             evidence: vec![Check::Knowledge { tag: None }],
+            requires: Vec::new(),
         }
     }
 
@@ -2594,6 +2621,7 @@ mod tests {
             max_age: None,
             not_applicable: None,
             remediation: None,
+            requires: Vec::new(),
         }
     }
 

@@ -5,8 +5,10 @@ use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
 use factory_core::run::Trigger;
 use factory_core::task::{TaskStatus, WorkflowOrigin};
+use factory_core::control_plan::AttestationVerdict;
+use factory_core::run::RunStatus;
 use factory_core::workflow::{
-    WorkflowDefinition, WorkflowDraft, WorkflowNodeStatus, WorkflowRun, WorkflowRunStatus,
+    WorkflowDefinition, WorkflowDraft, WorkflowNodeKind, WorkflowNodeStatus, WorkflowRun, WorkflowRunStatus,
 };
 use std::sync::Arc;
 
@@ -269,6 +271,7 @@ mod tests {
                 worktree: Some(false),
                 ..Default::default()
             },
+            gate: None,
         }
     }
 
@@ -291,6 +294,7 @@ mod tests {
                 worktree: Some(false),
                 ..Default::default()
             },
+            gate: None,
         }
     }
 
@@ -1129,6 +1133,7 @@ fn node_status(status: TaskStatus) -> WorkflowNodeStatus {
         TaskStatus::Dispatching => WorkflowNodeStatus::Dispatching,
         TaskStatus::Running => WorkflowNodeStatus::Running,
         TaskStatus::Blocked => WorkflowNodeStatus::Blocked,
+        TaskStatus::Verifying => WorkflowNodeStatus::Verifying,
         TaskStatus::Done => WorkflowNodeStatus::Done,
         TaskStatus::Failed => WorkflowNodeStatus::Failed,
         TaskStatus::Cancelled => WorkflowNodeStatus::Cancelled,
@@ -1215,10 +1220,16 @@ impl Engine {
         // `task.run` by hand, checked before anything is persisted -- a
         // `workflow.run` grant is not a way to launder a caller into
         // authority over tasks it could not otherwise touch. See
-        // `Engine::authorize_workflow_spawn`.
-        for node in &definition.nodes {
+        // `Engine::authorize_workflow_spawn`. A gate node spawns nothing.
+        for node in definition.nodes.iter().filter(|n| n.kind == WorkflowNodeKind::Task) {
             self.authorize_workflow_spawn(caller, &node.task).await?;
         }
+        // `#118`: the control plan's required steps merge into this run's
+        // immutable snapshot as locked gate nodes. The stored definition is
+        // untouched -- a later plan applies to later runs, never this one.
+        let plans = self.control_plans(&definition).await?;
+        let (definition, _) = definition.inject(&plans);
+        definition.validate().map_err(FactoryError::BadRequest)?;
         let run = WorkflowRun::new(definition, caller.as_workflow_actor());
         self.workflows.put_run(&run).await?;
         self.bus
@@ -1324,6 +1335,8 @@ impl Engine {
             }
         }
 
+        self.mirror_gate_nodes(&mut run).await;
+
         if run.status.is_terminal() {
             // A terminal run never spawns again, and nothing above may
             // rewrite its own status or failure node -- only the per-node
@@ -1377,15 +1390,33 @@ impl Engine {
             .filter(|node| node.status == WorkflowNodeStatus::Unstarted)
             .filter(|node| {
                 run.definition
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == node.node_id && n.kind == WorkflowNodeKind::Task)
+            })
+            .filter(|node| {
+                run.definition
                     .edges
                     .iter()
                     .filter(|edge| edge.to == node.node_id)
                     .all(|edge| {
-                        run.nodes
-                            .iter()
-                            .find(|parent| parent.node_id == edge.from)
-                            .map(|parent| parent.status == WorkflowNodeStatus::Done)
-                            .unwrap_or(false)
+                        let done = |id: &str| {
+                            run.nodes
+                                .iter()
+                                .find(|n| n.node_id == id)
+                                .is_some_and(|n| n.status == WorkflowNodeStatus::Done)
+                        };
+                        // A gate parent counts only once the work it judged
+                        // is itself done -- a step that passed in a round
+                        // that then blocked on another step is not a
+                        // verified run to build on.
+                        done(&edge.from)
+                            && match run.definition.nodes.iter().find(|n| n.id == edge.from) {
+                                Some(n) if n.kind == WorkflowNodeKind::Gate => {
+                                    run.definition.gate_subject(&n.id).is_some_and(|subject| done(&subject))
+                                }
+                                _ => true,
+                            }
                     })
             })
             .map(|node| node.node_id.clone())
@@ -1400,14 +1431,16 @@ impl Engine {
                 break;
             }
 
-            let template = run
+            let snapshot_node = run
                 .definition
                 .nodes
                 .iter()
                 .find(|node| node.id == node_id)
-                .expect("run nodes come from the snapshot")
-                .task
-                .clone();
+                .expect("run nodes come from the snapshot");
+            let mut template = snapshot_node.task.clone();
+            // The spawned task carries the category it was planned as, so
+            // its own record says what its run was held to.
+            template.category = Some(run.definition.node_category(snapshot_node));
 
             // Re-resolve who this run runs for, every time: a role can
             // change between the click that started it and a node it spawns
@@ -1495,6 +1528,74 @@ impl Engine {
             });
         }
         Ok(())
+    }
+
+    /// A gate node's status is what its subject's newest run found
+    /// (`#118`): the verifier writes attestations, and this reads them back
+    /// onto the node. A gate never spawns anything of its own.
+    ///
+    /// * the subject's run is `done` -- verified, so every gate passed;
+    /// * it is `verifying` -- the gate is running, or waiting its turn;
+    /// * it is blocked by verification -- this round's newest attestation
+    ///   for the step says which: passed, or failed (`blocked`: the line is
+    ///   stopped, not given up on), or none (never reached: `unstarted`);
+    /// * it failed or was cancelled -- the gate never will run: `skipped`;
+    /// * anything else -- not reached yet.
+    async fn mirror_gate_nodes(&self, run: &mut WorkflowRun) {
+        let gates: Vec<(String, String, String)> = run
+            .definition
+            .nodes
+            .iter()
+            .filter(|n| n.kind == WorkflowNodeKind::Gate)
+            .filter_map(|n| {
+                let subject = run.definition.gate_subject(&n.id)?;
+                Some((n.id.clone(), subject, n.gate.as_ref()?.step.clone()))
+            })
+            .collect();
+        for (gate_id, subject, step) in gates {
+            let Some(task_id) = run.nodes.iter().find(|n| n.node_id == subject).and_then(|n| n.task_id.clone()) else {
+                continue;
+            };
+            let Ok(Some(subject_run)) = self.store.runs(&task_id, 1).await.map(|r| r.into_iter().next()) else {
+                continue;
+            };
+            let (status, error) = match subject_run.status {
+                RunStatus::Done => (WorkflowNodeStatus::Done, None),
+                RunStatus::Verifying => (WorkflowNodeStatus::Verifying, None),
+                RunStatus::Failed | RunStatus::Cancelled => (WorkflowNodeStatus::Skipped, None),
+                RunStatus::Blocked
+                    if subject_run.blocked_source == Some(factory_core::run::BlockSource::Verification) =>
+                {
+                    let since = subject_run.blocked_since.unwrap_or(subject_run.started_at);
+                    let newest = self
+                        .policies
+                        .step_attestations(&subject_run.id)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|a| a.step == step && a.at <= since)
+                        .max_by_key(|a| a.at);
+                    match newest {
+                        Some(a) if a.verdict == AttestationVerdict::Pass => (WorkflowNodeStatus::Done, None),
+                        Some(a) => (
+                            WorkflowNodeStatus::Blocked,
+                            Some(format!(
+                                "{step} failed ({})",
+                                a.exit_code.map(|c| format!("exit {c}")).unwrap_or_else(|| "did not finish".into())
+                            )),
+                        ),
+                        None => (WorkflowNodeStatus::Unstarted, None),
+                    }
+                }
+                _ => (WorkflowNodeStatus::Unstarted, None),
+            };
+            if let Some(node) = run.nodes.iter_mut().find(|n| n.node_id == gate_id) {
+                if node.status != WorkflowNodeStatus::Skipped || status != WorkflowNodeStatus::Unstarted {
+                    node.status = status;
+                    node.error = error;
+                }
+            }
+        }
     }
 
     pub(crate) async fn sync_workflow_for_task(self: &Arc<Self>, task_id: &str) {

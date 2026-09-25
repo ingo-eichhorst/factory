@@ -460,6 +460,12 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.schedule_paused {
                 task.schedule_paused = v;
             }
+            if patch.clear_category {
+                task.category = None;
+            }
+            if let Some(v) = patch.category {
+                task.category = Some(v);
+            }
             if let Some(v) = patch.intake {
                 task.intake = Some(v);
             }
@@ -533,6 +539,7 @@ impl TaskStore for SqliteStore {
                 block_suspected_since: None,
                 turn_ended_at: None,
                 turn_end_reason: None,
+                required_steps: Vec::new(),
                 usage: None,
             };
             write_run(&tx, &run)?;
@@ -640,6 +647,9 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.fail_kind {
                 run.fail_kind = Some(v);
+            }
+            if let Some(v) = patch.required_steps {
+                run.required_steps = v;
             }
             if let Some(v) = patch.usage {
                 run.usage = Some(v);
@@ -1018,6 +1028,7 @@ mod tests {
             retry: None,
             pending_retry: None,
             schedule_paused: false,
+            category: None,
             intake: None,
         }
     }

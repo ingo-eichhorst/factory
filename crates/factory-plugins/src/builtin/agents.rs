@@ -458,6 +458,7 @@ mod tests {
             retry: None,
             pending_retry: None,
             schedule_paused: false,
+            category: None,
             intake: None,
         }
     }
@@ -484,6 +485,7 @@ mod tests {
                 worktree_branch,
                 upstream: Vec::new(),
                 knowledge: None,
+                required_steps: Vec::new(),
             }),
             identity_token: None,
             role: None,

@@ -175,6 +175,7 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         retry: new.retry,
         pending_retry: None,
         schedule_paused: false,
+        category: new.category,
         intake: None,
     }
 }
