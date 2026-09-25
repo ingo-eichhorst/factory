@@ -298,6 +298,7 @@ test("checkTarget is exact, from the Check itself, not parsed out of a reason", 
   assert.equal(daemon.label, "Infrastructure");
   assert.match(daemon.href, /^#demo\/infrastructure$/);
   assert.equal(checkTarget("demo", "cra/annex-i-2-1", { check: "gate", dataset: "d" }).label, "Benchmarks");
+  assert.equal(checkTarget("demo", "cra/annex-i-2-1", { check: "dependencies" }).label, "Dependencies");
 });
 
 test("describeCheck matches the CLI's own describe_check, one line per check kind", () => {
@@ -312,6 +313,10 @@ test("describeCheck matches the CLI's own describe_check, one line per check kin
   assert.equal(describeCheck({ check: "secrets" }), "secrets");
   assert.equal(describeCheck({ check: "secrets", absent: ["anthropic", "scope_env"] }), "secrets: absent anthropic, scope_env");
   assert.equal(describeCheck({ check: "daemon", fact: "power_assertion" }), "daemon: power_assertion");
+  assert.equal(
+    describeCheck({ check: "dependencies", sbom_max_age: "30d", max_open: { critical: 0, high: 1 }, exploited_open: 0 }),
+    "dependencies: SBOM max_age 30d, critical <= 0, high <= 1, exploited <= 0",
+  );
 });
 
 test("looksLikeExpiry accepts policy::Duration's grammar and the two absolute forms, softly", () => {

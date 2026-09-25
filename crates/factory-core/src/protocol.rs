@@ -7,6 +7,7 @@ use crate::benchmark::Configuration;
 use crate::building::{Activity, Cues, RepoMetrics, Shape};
 use crate::agent::AgentSession;
 use crate::config::ScopeAgent;
+use crate::dependencies::{Attachment, AttachmentKind, DependenciesReport};
 use crate::event::Event;
 use crate::knowledge::{Document, Finding, Gap, Page, Refusal, Tag};
 use crate::occupancy::Occupancy;
@@ -178,6 +179,14 @@ pub enum Request {
     },
     #[serde(rename = "task.report")]
     TaskReport { id: String, report: TaskReport },
+    #[serde(rename = "task.attach")]
+    TaskAttach {
+        id: String,
+        token: String,
+        kind: AttachmentKind,
+        filename: String,
+        bytes: Vec<u8>,
+    },
     /// A harness's lifecycle hook saying the agent's turn ended. Its own
     /// request rather than a kind of `TaskReport`, so nothing can mistake the
     /// harness speaking for the agent reporting.
@@ -306,6 +315,10 @@ pub enum Request {
     /// changing anything.
     #[serde(rename = "environment")]
     Environment,
+    #[serde(rename = "dependencies")]
+    Dependencies { scope: String },
+    #[serde(rename = "dependencies.vex")]
+    DependenciesVex { scope: String },
     /// The L1 Infrastructure page: what everything runs on -- the host and
     /// the daemon on it, read live on every request, and the AI accounts the
     /// root config declares with the agents each one pays for. Read-only,
@@ -813,6 +826,8 @@ pub enum Payload {
         sandboxes: Vec<SandboxRow>,
         credentials: Vec<CredentialRow>,
     },
+    Attachment { attachment: Attachment },
+    Dependencies { report: DependenciesReport },
     /// The L1 Infrastructure page, read from the bottom up: the host, the
     /// daemon on it, the declared AI accounts above that with the agents
     /// each one serves, and the model agents no account claims yet. A host

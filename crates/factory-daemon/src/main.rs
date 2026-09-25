@@ -8,6 +8,7 @@ mod bench;
 mod configuration;
 mod costs;
 mod datasets;
+mod dependencies;
 mod discovery;
 mod engine;
 mod goals;
@@ -151,6 +152,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         roles: Default::default(),
         policies: Default::default(),
         quality: Default::default(),
+        dependencies: Default::default(),
     };
     let config = Config {
         version: 1,

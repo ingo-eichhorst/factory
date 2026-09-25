@@ -120,6 +120,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/production", get(production))
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
+        .route("/api/dependencies", get(dependencies))
         .route("/api/infrastructure", get(infrastructure))
         .route("/api/backup", get(backup))
         .route("/api/backup/run", post(backup_run))
@@ -337,6 +338,16 @@ async fn site_footprint(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn environment(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Environment).await
+}
+
+#[derive(serde::Deserialize)]
+struct DependenciesQuery { scope: String }
+
+async fn dependencies(
+    State(engine): State<Arc<Engine>>,
+    Query(query): Query<DependenciesQuery>,
+) -> AxumResponse {
+    run(&engine, Request::Dependencies { scope: query.scope }).await
 }
 
 async fn infrastructure(State(engine): State<Arc<Engine>>) -> AxumResponse {

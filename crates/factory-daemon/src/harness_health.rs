@@ -910,6 +910,7 @@ pub(crate) mod tests {
                     roles: Default::default(),
                     policies: Default::default(),
                     quality: Default::default(),
+                    dependencies: Default::default(),
                 }],
                 infrastructure: Default::default(),
                 plugins_dir: None,

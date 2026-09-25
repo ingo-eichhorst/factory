@@ -14,10 +14,13 @@ test("agent screens are peer header tabs without an Agents wrapper", () => {
   assert.doesNotMatch(page, /id="view-agents"/);
 });
 
-test("L2 Environment is live, with a Sandboxes tab and a Secrets tab", () => {
+test("L2 Environment has Sandboxes, Secrets and Dependencies", () => {
   assert.doesNotMatch(page, /id="lv-env"[^>]*disabled/);
   assert.match(page, /id="tab-sandboxes"[^>]*>Sandboxes<\/button>/);
   assert.match(page, /id="tab-secrets"[^>]*>Secrets<\/button>/);
+  assert.match(page, /id="tab-dependencies"[^>]*>Dependencies<\/button>/);
+  assert.match(page, /Sandboxes, secrets and dependencies/);
   assert.match(page, /id="view-sandboxes"/);
   assert.match(page, /id="view-secrets"/);
+  assert.match(page, /id="view-dependencies"/);
 });

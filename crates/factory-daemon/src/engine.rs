@@ -540,6 +540,12 @@ impl Engine {
                     credentials,
                 })
             }
+            Request::Dependencies { scope } => Ok(Payload::Dependencies {
+                report: self.dependencies_report(&scope).await?,
+            }),
+            Request::DependenciesVex { scope } => Ok(Payload::Text {
+                text: self.dependencies_vex(&scope).await?,
+            }),
             Request::Infrastructure => Ok(self.infrastructure().await),
             Request::Backup => Ok(Payload::Backup {
                 report: Box::new(self.backup_report().await?),
@@ -980,6 +986,10 @@ impl Engine {
                 self.sync_workflow_for_task(&id).await;
                 self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
+            }
+            Request::TaskAttach { id, token, kind, filename: _, bytes } => {
+                let attachment = self.attach_dependency(&id, kind, bytes, Some(&token)).await?;
+                Ok(Payload::Attachment { attachment })
             }
             Request::TaskTurnEnded { id, turn } => {
                 self.turn_ended(&id, turn).await?;
@@ -3375,6 +3385,7 @@ mod tests {
                 roles: Default::default(),
                 policies: Default::default(),
                 quality: Default::default(),
+                dependencies: Default::default(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,

@@ -11,6 +11,7 @@ pub mod building;
 pub mod config;
 pub mod control_plan;
 pub mod dataset;
+pub mod dependencies;
 pub mod error;
 pub mod event;
 pub mod goals;
