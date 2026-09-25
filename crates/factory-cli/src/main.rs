@@ -2260,6 +2260,7 @@ fn action_str(a: ops::Action) -> &'static str {
         ops::Action::Cancel => "cancel",
         ops::Action::Answer => "answer",
         ops::Action::RunNow => "run now",
+        ops::Action::SkipNext => "skip next",
         ops::Action::PauseSchedule => "pause schedule",
         ops::Action::ResumeSchedule => "resume schedule",
     }

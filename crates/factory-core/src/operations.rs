@@ -579,8 +579,9 @@ impl ExceptionKind {
 }
 
 /// What a person may do about an exception from where it is shown. Each
-/// maps onto a request that already exists (or, for the schedule ones,
-/// `task.update`'s `schedule_paused`); none of them is taken here.
+/// maps onto a request (`task.run`, `task.cancel`, `run.answer`,
+/// `task.skip_next`, or `task.update`'s `schedule_paused`); none of them is
+/// taken here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
@@ -592,6 +593,8 @@ pub enum Action {
     Answer,
     /// `task.run` for a scheduled task, ahead of its slot.
     RunNow,
+    /// `task.skip_next`: pass over the schedule's next slot.
+    SkipNext,
     PauseSchedule,
     ResumeSchedule,
 }
@@ -1086,6 +1089,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             if !active {
                 a.push(Action::RunNow);
             }
+            a.push(Action::SkipNext);
             a.push(Action::PauseSchedule);
             a
         };
@@ -1712,7 +1716,7 @@ mod tests {
         let r = report(&input(&tasks, &[]));
         let late: Vec<_> = r.attention.iter().map(|e| (e.kind, e.task_id.clone().unwrap())).collect();
         assert_eq!(late, vec![(ExceptionKind::ScheduleLate, "late".to_string())]);
-        assert_eq!(r.attention[0].actions, vec![Action::RunNow, Action::PauseSchedule]);
+        assert_eq!(r.attention[0].actions, vec![Action::RunNow, Action::SkipNext, Action::PauseSchedule]);
         let state = |id: &str| r.schedules.iter().find(|s| s.task_id == id).unwrap().state;
         assert_eq!(state("late"), ScheduleState::Late);
         assert_eq!(state("paused"), ScheduleState::Paused);
