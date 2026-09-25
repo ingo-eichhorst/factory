@@ -141,6 +141,24 @@ the daemon is *adopted* rather than restarted, so it keeps whatever guide it
 started with; a role given to it afterward with `factory agent role` is not
 reflected in a guide already sitting in a launched session.
 
+**`codex` commands do not see their own session's environment (#147).** Codex
+CLI runs every interactive session on one shared background app-server, and
+runs shell commands in that server's host process. Both are started once, by
+whichever `codex` session comes first, and keep *its* environment. A later
+run's commands therefore see an earlier run's `FACTORY_*` values, with a
+token that died when that run ended, and an earlier run's `HERDR_*` values,
+possibly those of the company's live herdr session. So a `codex` task run's
+reporting contract writes the socket and the run token into every command
+(`factory --socket … --token … task report <id> --run-token … --status …`,
+and `task attach --id … --run-token …`). Flags beat the variables in the CLI,
+so reporting works whatever the host inherited. The token is in the prompt,
+and so in the harness transcript. It is good only while the run is active.
+Everything else a codex agent runs still sees the stale variables, so
+**never start a throwaway instance's codex run while a live one might own
+the shared server**: its herdr calls can land in the live session.
+`codex --no-daemon` would avoid the shared server, but on Codex 0.157 its
+fresh command host timed out on this machine, so it is not used.
+
 Every agent has a **role**, and a task names a **concrete agent**, not a
 harness. `assistant` and `scratch` are different agents even when both are pi.
 

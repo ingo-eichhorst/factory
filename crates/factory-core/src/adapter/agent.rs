@@ -93,6 +93,16 @@ pub struct UpstreamOutput {
 /// caller skips the first truncation.
 pub const UPSTREAM_RESULT_BYTE_CAP: usize = 16 * 1024;
 
+/// `s` as one shell word: bare when it is only safe characters, otherwise in
+/// single quotes. For paths written into a command an agent types.
+fn shell_word(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+:@%=,".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
 /// Keep at most `max_bytes` of `s`'s tail, marking the cut so truncated text
 /// reads as a cut rather than as the whole thing. The marker is budgeted
 /// inside `max_bytes` rather than added on top of it, which is what makes
@@ -272,11 +282,47 @@ impl AgentContext {
     /// prompt. Adapters are free to phrase it differently, but the commands
     /// have to be these.
     pub fn reporting_contract(&self) -> String {
+        self.contract(false)
+    }
+
+    /// The same contract with the socket and the run token written into
+    /// every command as flags (`#147`), for a harness whose commands do not
+    /// run in the environment its session was started with. Codex runs them
+    /// in a shared background host that keeps the environment of whichever
+    /// session started it first, so `FACTORY_TOKEN` there is some earlier
+    /// run's -- dead -- token. A flag beats the variable in the CLI, so a
+    /// stale one can no longer win. The token is only good while the run is
+    /// active and is cleared when it ends.
+    pub fn reporting_contract_explicit(&self) -> String {
+        self.contract(true)
+    }
+
+    fn contract(&self, explicit: bool) -> String {
         let Some(binding) = &self.task else {
             return String::new();
         };
-        let bin = self.factory_bin.display();
-        let id = &binding.task.id;
+        let bin = if explicit {
+            let token = &binding.token;
+            format!(
+                "{} --socket {} --token {token}",
+                shell_word(&self.factory_bin.display().to_string()),
+                shell_word(&self.socket.display().to_string())
+            )
+        } else {
+            self.factory_bin.display().to_string()
+        };
+        let id = if explicit {
+            format!("{} --run-token {}", binding.task.id, binding.token)
+        } else {
+            binding.task.id.clone()
+        };
+        // `task attach` otherwise reads the task from FACTORY_TASK_ID, which
+        // is just as stale there as the token.
+        let attach_to = if explicit {
+            format!(" --id {} --run-token {}", binding.task.id, binding.token)
+        } else {
+            String::new()
+        };
         let checks: Vec<String> = binding
             .required_steps
             .iter()
@@ -309,7 +355,7 @@ impl AgentContext {
              - Finished:        {bin} task report {id} --status done --result \"<what you did>\"\n\
              - Gave up:         {bin} task report {id} --status failed --error \"<why>\"\n\
              \n\
-             Dependency scans attach CycloneDX documents with `{bin} task attach --kind sbom|vulnerabilities <file>`. \
+             Dependency scans attach CycloneDX documents with `{bin} task attach{attach_to} --kind sbom|vulnerabilities <file>`. \
              Authored VEX is available with `{bin} dependencies vex {scope}`.\n\
              \n\
              Report running first, then finish with exactly one of done, failed, or \
@@ -317,7 +363,14 @@ impl AgentContext {
              without one of them, and nothing is still running in the background to \
              wake you, Factory may end the run as failed."
         );
-        contract + &verification
+        let explicit_note = if explicit {
+            "\n\nRun these commands exactly as written, flags included. Your shell may \
+             carry another run's FACTORY_* variables, and the flags are what say which \
+             run is reporting."
+        } else {
+            ""
+        };
+        contract + explicit_note + &verification
     }
 
     /// A short, adapter-neutral guide to Factory itself: what it is, who this
@@ -1026,6 +1079,29 @@ mod tests {
         assert_eq!(ctx.factory_guide(), ctx.clone().factory_guide());
         let guide = base(Some(worker())).factory_guide();
         assert!(!guide.contains("quality"), "{guide}");
+    }
+
+    #[test]
+    fn the_explicit_contract_names_the_socket_and_run_token_in_every_command() {
+        let ctx = with_task(base(Some(worker())));
+        let explicit = ctx.reporting_contract_explicit();
+        let id = &ctx.task.as_ref().unwrap().task.id;
+        let report = format!("--socket /tmp/factory.sock --token tok task report {id} --run-token tok --status");
+        // All five report lines, and attach, carry both flags.
+        assert_eq!(explicit.matches(&report).count(), 4, "{explicit}");
+        assert!(explicit.contains(&format!("--token tok task report {id} --run-token tok --message")), "{explicit}");
+        assert!(explicit.contains(&format!("task attach --id {id} --run-token tok --kind")), "{explicit}");
+        assert!(explicit.contains("exactly as written"), "{explicit}");
+        // The ordinary contract leaves all of it to the environment.
+        let plain = ctx.reporting_contract();
+        assert!(!plain.contains("--run-token") && !plain.contains("--socket") && !plain.contains("tok "), "{plain}");
+    }
+
+    #[test]
+    fn shell_word_quotes_only_what_needs_it() {
+        assert_eq!(shell_word("/tmp/factory.sock"), "/tmp/factory.sock");
+        assert_eq!(shell_word("/Users/a b/f.sock"), "'/Users/a b/f.sock'");
+        assert_eq!(shell_word("/it's"), "'/it'\\''s'");
     }
 
     #[test]

@@ -195,7 +195,14 @@ impl Agent for HarnessAgent {
              ---\n\
              {contract}",
             instructions = instructions,
-            contract = ctx.reporting_contract(),
+            // `#147`: codex runs commands in a shared host that keeps some
+            // earlier session's environment, so its contract carries the
+            // socket and run token as flags rather than trusting FACTORY_*.
+            contract = if self.harness == "codex" {
+                ctx.reporting_contract_explicit()
+            } else {
+                ctx.reporting_contract()
+            },
         ));
         Ok(prompt)
     }
@@ -559,6 +566,19 @@ mod tests {
     }
 
     // -- upstream outputs, in the prompt for a harness agent -----------------
+
+    #[tokio::test]
+    async fn only_codex_gets_the_socket_and_run_token_written_into_its_contract() {
+        // `#147`: codex's commands run where FACTORY_* may be another run's.
+        let codex = HarnessAgent::codex().prompt(&ctx(None)).await.unwrap();
+        assert!(codex.contains(&ctx(None).reporting_contract_explicit()), "{codex}");
+        assert!(codex.contains("--run-token"), "{codex}");
+        for agent in [HarnessAgent::claude_code(), HarnessAgent::opencode()] {
+            let prompt = agent.prompt(&ctx(None)).await.unwrap();
+            assert!(prompt.contains(&ctx(None).reporting_contract()), "{prompt}");
+            assert!(!prompt.contains("--run-token"), "{prompt}");
+        }
+    }
 
     #[tokio::test]
     async fn a_root_nodes_prompt_is_unchanged_by_this_feature() {
