@@ -22,8 +22,8 @@ use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
 use factory_core::run::{BlockSource, FailKind, NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
-    NewTask, PendingRetry, RetryPolicy, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus,
-    WorkflowOrigin,
+    NewTask, PendingRetry, RetryPolicy, Task, TaskEntry, TaskFailure, TaskFilter, TaskPatch, TaskReport,
+    TaskStatus, WorkflowOrigin,
 };
 use factory_plugins::registry::Registry;
 use std::path::{Path, PathBuf};
@@ -970,6 +970,20 @@ impl Engine {
                 self.sync_workflow_for_task(&id).await;
                 self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
+            }
+            Request::TaskClose { id, reason, duplicate_of, note } => {
+                let asked = crate::operations::Asked::new(caller, note);
+                let task = self.close_task(&id, reason, duplicate_of, &asked).await?;
+                self.sync_workflow_for_task(&id).await;
+                self.sync_bench_for_task(&id).await;
+                Ok(Payload::Task { task })
+            }
+            Request::TaskReopen { id, reason } => {
+                let asked = crate::operations::Asked::new(caller, reason);
+                let task = self.reopen_task(&id, &asked).await?;
+                self.sync_workflow_for_task(&id).await;
+                self.sync_bench_for_task(&id).await;
+                Ok(Payload::Task { task })
             }
             Request::TaskReport { id, report } => {
                 let run = self.report(&id, report).await?;
@@ -2041,17 +2055,30 @@ impl Engine {
                         TaskEntry::new("daemon", "failed", format!("dispatch failed: {e}")),
                     )
                     .await;
+                    // Refused before any run existed, so there is no run
+                    // to mirror: the task is blocked on the failure itself
+                    // (`#122`), exactly as if a run had failed to dispatch.
                     let _ = self
                         .store
                         .update(
                             task_id,
                             &TaskPatch {
-                                status: Some(TaskStatus::Failed),
+                                status: Some(TaskStatus::Blocked),
                                 error: Some(e.to_string()),
+                                clear_result: true,
+                                failure: Some(TaskFailure {
+                                    kind: Some(FailKind::DispatchFailed),
+                                    run_id: None,
+                                    attempt: None,
+                                    at: Utc::now(),
+                                }),
+                                clear_closure: true,
+                                clear_pending_retry: true,
                                 ..Default::default()
                             },
                         )
                         .await;
+                    self.publish_task(task_id).await;
                 }
                 self.record_workflow_task_state(task_id).await;
                 self.record_bench_task_state(task_id).await;
@@ -2612,8 +2639,8 @@ impl Engine {
 
     /// After the task's mirror is updated, decide what a scheduled task's
     /// retry state should be. Only a task with a `schedule` retries at all --
-    /// a one-off task that fails just stays failed, exactly as before this
-    /// existed.
+    /// a one-off task that fails is left blocked on the failure by
+    /// `mirror_to_task` (`#122`), and nothing here touches it.
     ///
     /// A run that finished by succeeding or by being cancelled ends any
     /// retry streak in progress: `pending_retry` is the mirror `AGENTS.md`
@@ -2674,20 +2701,12 @@ impl Engine {
                     // `mirror_to_task` deliberately left this task without a
                     // "what happens next" line -- see its own comment on why
                     // it stays silent for a `Failed` recurring task -- and
-                    // this is the one place that knows the answer is "just
-                    // its next regular firing".
-                    None => {
-                        self.entry(
-                            &task.id,
-                            TaskEntry::new(
-                                "daemon",
-                                "rearmed",
-                                "recurring task is pending again, waiting for its next turn",
-                            ),
-                        )
-                        .await;
-                    }
+                    // this is the one place that knows the answer: nothing
+                    // will try again before its next regular firing.
+                    None => {}
                 }
+                self.block_on_failure(&task.id, &format!("attempt {} failed and the retry policy is `none`", run.attempt))
+                    .await;
                 return;
             }
             RetryPolicy::Backoff { max_attempts, backoff_seconds } => (max_attempts, backoff_seconds),
@@ -2709,15 +2728,12 @@ impl Engine {
         let attempts = task.pending_retry.as_ref().map(|p| p.attempts).unwrap_or(0) + 1;
 
         if attempts > max_attempts {
-            self.end_retry_streak(
-                task,
-                resume_at,
-                &format!(
-                    "retries exhausted after {max_attempts} attempt{}",
-                    if max_attempts == 1 { "" } else { "s" }
-                ),
-            )
-            .await;
+            let why = format!(
+                "retries exhausted after {max_attempts} attempt{}",
+                if max_attempts == 1 { "" } else { "s" }
+            );
+            self.end_retry_streak(task, resume_at, &why).await;
+            self.block_on_failure(&task.id, &why).await;
             return;
         }
 
@@ -2796,6 +2812,11 @@ impl Engine {
             .and_then(|t| t.schedule)
             .is_some();
 
+        // A recurring task that failed goes back to `Pending` here only for
+        // the moment until `settle_retry` -- which `finish_run` calls right
+        // after this -- decides: a queued retry keeps it there, and anything
+        // else blocks it on the failure (`block_on_failure`), so it can
+        // never fall back into Scheduled looking healthy (`#122`).
         let status = if run.status.is_terminal() && recurring {
             TaskStatus::Pending
         } else {
@@ -2824,16 +2845,46 @@ impl Engine {
 
         // The task mirrors the newest run, not the union of every run: an
         // attempt that succeeded must not leave the previous one's error
-        // standing next to its own result.
+        // standing next to its own result -- nor its failure, nor a close
+        // record from before it ran (`#122`).
+        let failed = run.status == RunStatus::Failed;
         let patch = TaskPatch {
             status: Some(status),
             result: run.result.clone(),
             clear_result: run.result.is_none(),
             error: run.error.clone(),
             clear_error: run.error.is_none(),
+            failure: failed.then(|| TaskFailure {
+                kind: run.fail_kind,
+                run_id: Some(run.id.clone()),
+                attempt: Some(run.attempt),
+                at: run.ended_at.unwrap_or_else(Utc::now),
+            }),
+            clear_failure: !failed,
+            clear_closure: true,
             ..Default::default()
         };
         if let Ok(task) = self.store.update(&run.task_id, &patch).await {
+            self.bus.publish(Event::TaskUpdated { task });
+        }
+    }
+
+    /// A scheduled task whose failure nothing will retry: block it on that
+    /// failure (`#122`), and say so. Its schedule keeps firing -- the
+    /// intent still stands, and the next run that succeeds clears the block
+    /// -- but it is never left in Scheduled looking like a task that works.
+    async fn block_on_failure(&self, task_id: &str, why: &str) {
+        self.entry(
+            task_id,
+            TaskEntry::new(
+                "daemon",
+                "blocked_on_failure",
+                format!("{why}; blocked until someone looks -- the schedule keeps firing, and a run that succeeds clears it"),
+            ),
+        )
+        .await;
+        let patch = TaskPatch { status: Some(TaskStatus::Blocked), ..Default::default() };
+        if let Ok(task) = self.store.update(task_id, &patch).await {
             self.bus.publish(Event::TaskUpdated { task });
         }
     }
@@ -2984,6 +3035,77 @@ impl Engine {
 
     pub async fn active_runs(&self) -> Result<Vec<Run>> {
         self.store.active_runs().await
+    }
+
+    /// Every task still stored as `failed` -- written before `#122`, when a
+    /// failed run closed its task -- moved to `Blocked` on that failure, so
+    /// the board shows it where a person has to act instead of in a column
+    /// it no longer has. The failure is read off the newest run; a task
+    /// that never got a run (dispatch refused) has none to read, and is
+    /// blocked on a dispatch failure, which is the only way that happened.
+    ///
+    /// Blocked, not closed as not planned: the rule this exists for is that
+    /// a failure is an open item until a person disposes of it, and a bulk
+    /// close would be the daemon disposing of every one at once. A
+    /// scheduled one picks its schedule up from now -- its slots stopped
+    /// firing the moment it failed, and must not come back as a burst.
+    ///
+    /// Idempotent and cheap: once a row is moved, nothing writes `failed`
+    /// again, so later starts find none. Returns how many were moved.
+    pub async fn migrate_failed_tasks(&self) -> usize {
+        let filter = TaskFilter { status: Some(TaskStatus::Failed), ..Default::default() };
+        let Ok(tasks) = self.store.list(&filter).await else {
+            return 0;
+        };
+        let mut moved = 0;
+        for task in tasks {
+            let newest = self.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
+            let failure = match &newest {
+                Some(run) => TaskFailure {
+                    kind: run.fail_kind,
+                    run_id: Some(run.id.clone()),
+                    attempt: Some(run.attempt),
+                    at: run.ended_at.unwrap_or(task.updated_at),
+                },
+                None => TaskFailure {
+                    kind: Some(FailKind::DispatchFailed),
+                    run_id: None,
+                    attempt: None,
+                    at: task.updated_at,
+                },
+            };
+            let next_run_at = match &task.schedule {
+                Some(s) if !task.schedule_paused => schedule::next_after(s, Utc::now()).ok(),
+                _ => None,
+            };
+            let patch = TaskPatch {
+                status: Some(TaskStatus::Blocked),
+                failure: Some(failure),
+                next_run_at,
+                ..Default::default()
+            };
+            match self.store.update(&task.id, &patch).await {
+                Ok(updated) => {
+                    moved += 1;
+                    self.entry(
+                        &task.id,
+                        TaskEntry::new(
+                            "daemon",
+                            "migrated",
+                            "stored as failed before failures stopped closing tasks (#122): now blocked on that \
+                             failure until someone runs it again or closes it with a reason",
+                        ),
+                    )
+                    .await;
+                    self.bus.publish(Event::TaskUpdated { task: updated });
+                }
+                Err(e) => tracing::warn!(task = %task.id, error = %e, "could not move a failed task to blocked"),
+            }
+        }
+        if moved > 0 {
+            tracing::info!(moved, "moved tasks stored as failed to blocked (#122)");
+        }
+        moved
     }
 
     /// Move a scheduled task's next firing forward so it is not picked up twice

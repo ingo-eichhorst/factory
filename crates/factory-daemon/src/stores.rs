@@ -179,6 +179,8 @@ impl TaskStore for ScopedStores {
                     runs: Some(run.attempt),
                     status: Some(RunStatus::Dispatching.as_task_status()),
                     last_run_at: Some(run.started_at),
+                    clear_failure: true,
+                    clear_closure: true,
                     ..Default::default()
                 };
                 // Best effort: the run itself is already durable on the

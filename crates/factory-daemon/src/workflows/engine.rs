@@ -4,7 +4,7 @@ use chrono::Utc;
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
 use factory_core::run::Trigger;
-use factory_core::task::{TaskStatus, WorkflowOrigin};
+use factory_core::task::{Task, TaskStatus, WorkflowOrigin};
 use factory_core::control_plan::AttestationVerdict;
 use factory_core::run::RunStatus;
 use factory_core::workflow::{
@@ -1125,8 +1125,14 @@ mod tests {
     }
 }
 
-fn node_status(status: TaskStatus) -> WorkflowNodeStatus {
-    match status {
+/// A node's status, read off its task. A task blocked by a failure is a
+/// failed node (`#122`): the task waits for a person, but the workflow's
+/// step did fail, and its on-failure edges and retries must see that.
+fn node_status(task: &Task) -> WorkflowNodeStatus {
+    if task.has_failed() {
+        return WorkflowNodeStatus::Failed;
+    }
+    match task.status {
         // A node's task is created straight onto the line and never goes
         // through intake; were one ever to, it is not started yet either.
         TaskStatus::Intake | TaskStatus::Pending => WorkflowNodeStatus::Pending,
@@ -1273,7 +1279,7 @@ impl Engine {
         for node in &mut run.nodes {
             if let Some(task_id) = &node.task_id {
                 if let Some(task) = self.store.get(task_id).await? {
-                    node.status = node_status(task.status);
+                    node.status = node_status(&task);
                     node.error = task.error;
                 }
             }
@@ -1304,7 +1310,7 @@ impl Engine {
             };
             match self.store.get(&task_id).await {
                 Ok(Some(task)) => {
-                    node.status = node_status(task.status);
+                    node.status = node_status(&task);
                     node.error = task.error;
                 }
                 Ok(None) if !node.status.is_terminal() => {
@@ -1628,7 +1634,7 @@ impl Engine {
         let Ok(Some(task)) = self.store.get(task_id).await else {
             return;
         };
-        let Some(origin) = task.workflow_origin else {
+        let Some(origin) = task.workflow_origin.clone() else {
             return;
         };
         let _guard = self.workflow_edit.lock().await;
@@ -1642,7 +1648,7 @@ impl Engine {
         else {
             return;
         };
-        node.status = node_status(task.status);
+        node.status = node_status(&task);
         node.error = task.error;
         if !run.status.is_terminal() && node.status == WorkflowNodeStatus::Failed {
             run.status = WorkflowRunStatus::Failed;

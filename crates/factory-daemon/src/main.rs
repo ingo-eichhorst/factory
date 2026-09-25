@@ -340,6 +340,10 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // the poll below as the floor underneath it.
     engine.watch_runtimes().await;
 
+    // Tasks stored as `failed` before `#122` go to blocked before anything
+    // reads them -- the scheduler, a workflow's node overlay, the board.
+    engine.migrate_failed_tasks().await;
+
     // Reconcile persisted workflow decisions only after runtimes and standing
     // agents are available. Recovery reuses task ids recorded before a crash.
     engine.recover_workflows().await;

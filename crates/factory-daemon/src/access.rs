@@ -181,6 +181,9 @@ impl Engine {
             Request::TaskDelete { .. } => Grant::TaskDelete,
             Request::TaskRun { .. } => Grant::TaskRun,
             Request::TaskCancel { .. } => Grant::TaskCancel,
+            // Closing a task and taking that back are one decision, made
+            // about the task rather than a run (`#122`).
+            Request::TaskClose { .. } | Request::TaskReopen { .. } => Grant::TaskClose,
             // Moving a schedule's next slot is editing the task, exactly as
             // pausing it through `task.update` is (`#106`).
             Request::TaskSkipNext { .. } => Grant::TaskEdit,
@@ -468,6 +471,8 @@ impl Engine {
             Request::TaskDelete { id }
             | Request::TaskRun { id, .. }
             | Request::TaskCancel { id, .. }
+            | Request::TaskClose { id, .. }
+            | Request::TaskReopen { id, .. }
             | Request::TaskSkipNext { id, .. } => {
                 match self.store.get(id).await? {
                     Some(task) => task_in_reach(def, &task),

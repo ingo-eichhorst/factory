@@ -506,6 +506,9 @@ impl AgentContext {
                 Grant::TaskDelete => format!("task.delete -> {bin} task delete <id>"),
                 Grant::TaskRun => format!("task.run -> {bin} task run <id>"),
                 Grant::TaskCancel => format!("task.cancel -> {bin} task cancel <id>"),
+                Grant::TaskClose => format!(
+                    "task.close -> {bin} task close <id> --reason completed|not_planned|duplicate [--duplicate-of <id>] [--note <why>], {bin} task reopen <id>"
+                ),
                 Grant::TaskReport => match &self.task {
                     // Not repeated here: the exact commands for this run are
                     // already in the task prompt.

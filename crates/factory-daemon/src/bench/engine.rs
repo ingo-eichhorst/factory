@@ -469,7 +469,10 @@ impl Engine {
             // Dispatch never even created a run row: `resolve_agent`, the
             // registry, or the scope-path check refused before
             // `store.create_run` was ever called.
-            if !task.status.is_terminal() {
+            // Settled, not merely closed: a dispatch that failed leaves the
+            // task blocked on that failure (`#122`), and that is the end of
+            // this attempt.
+            if !task.is_settled() {
                 return Ok(());
             }
             attempt.verdict = Some(if task.status == TaskStatus::Cancelled {

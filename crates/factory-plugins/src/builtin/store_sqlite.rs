@@ -13,7 +13,7 @@ use factory_core::error::{FactoryError, Result};
 use factory_core::agent::AgentSession;
 use factory_core::occupancy::StatusChange;
 use factory_core::run::{NewRun, Run, RunPatch, RunStatus};
-use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch};
+use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus};
 use factory_core::usage::UsageSnapshot;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -469,6 +469,18 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.intake {
                 task.intake = Some(v);
             }
+            if patch.clear_failure {
+                task.failure = None;
+            }
+            if let Some(v) = patch.failure {
+                task.failure = Some(v);
+            }
+            if patch.clear_closure {
+                task.closure = None;
+            }
+            if let Some(v) = patch.closure {
+                task.closure = Some(v);
+            }
             task.updated_at = Utc::now();
 
             write_task(conn, &task)?;
@@ -553,6 +565,10 @@ impl TaskStore for SqliteStore {
                 task.runs = attempt;
                 task.status = RunStatus::Dispatching.as_task_status();
                 task.last_run_at = Some(run.started_at);
+                // A new attempt is newer than whatever failed or closed the
+                // task before it (`#122`): neither mirror may outlive it.
+                task.failure = None;
+                task.closure = None;
                 task.updated_at = Utc::now();
                 write_task(&tx, &task)?;
             }
@@ -975,17 +991,24 @@ impl TaskStore for SqliteStore {
             let mut stmt = conn
                 .prepare(
                     "SELECT data FROM tasks
-                     WHERE next_run_at IS NOT NULL AND next_run_at <= ?1 AND status = 'pending'
+                     WHERE next_run_at IS NOT NULL AND next_run_at <= ?1 AND status IN ('pending', 'blocked')
                      ORDER BY next_run_at ASC",
                 )
                 .map_err(adapter_err)?;
+            // A scheduled task blocked by a failure keeps firing (`#122`):
+            // its schedule is still the intent, and the next run that
+            // succeeds clears the block. One blocked on a question has an
+            // active run and is not due -- `failure` is only ever set on a
+            // task whose newest run has ended. It lives only in the JSON
+            // row, like `schedule_paused` below, so it is sorted out after
+            // decoding.
             // `schedule_paused` lives only in the JSON row -- no column, so
             // no schema change, and a schema change here drops the whole
             // database (see the module comment). Due tasks are a handful
             // per tick, so passing over the paused ones after decoding
             // costs nothing.
             let mut due: Vec<Task> = collect(&mut stmt, params![now])?;
-            due.retain(|t| !t.schedule_paused);
+            due.retain(|t| !t.schedule_paused && (t.status == TaskStatus::Pending || t.blocked_by_failure()));
             Ok(due)
         })
         .await

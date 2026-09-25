@@ -12,7 +12,7 @@ use crate::knowledge::{Document, Finding, Gap, Page, Refusal, Tag};
 use crate::occupancy::Occupancy;
 use crate::role::{RoleOrigin, RoleSpec};
 use crate::run::Run;
-use crate::task::{NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TurnEnded};
+use crate::task::{CloseReason, NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TurnEnded};
 use crate::workflow::{WorkflowDefinition, WorkflowDraft, WorkflowLint, WorkflowRun};
 use serde::{Deserialize, Serialize};
 
@@ -160,6 +160,30 @@ pub enum Request {
         /// started in the meantime.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run: Option<String>,
+    },
+    /// `#122`: close a task on purpose, with a reason -- `completed` makes
+    /// it `Done`, `not_planned` and `duplicate` make it `Cancelled` -- and
+    /// an optional note, journaled with who closed it. Works with no run at
+    /// all, and on a task blocked by a failure; refused while a run is
+    /// active (cancel it first) and on a task already closed (reopen it
+    /// first).
+    #[serde(rename = "task.close")]
+    TaskClose {
+        id: String,
+        reason: CloseReason,
+        /// The task this one duplicates. Only with `duplicate`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duplicate_of: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// `#122`: put a closed task back to `Pending`, its close record gone.
+    /// Journaled with who asked, and `reason` when there is one.
+    #[serde(rename = "task.reopen")]
+    TaskReopen {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// `#106`: pass over a scheduled task's next slot. `next_run_at` moves
     /// to the slot after it, and the skip is journaled with who asked and
