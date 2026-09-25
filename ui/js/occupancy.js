@@ -47,6 +47,7 @@ export async function loadOccupancy() {
   const now = Date.now();
   // A fixed window the clock has walked into starts following it.
   state.occView = settle(resolveWindow(view(), now), now);
+  syncControls();
   const query = isPreset(state.occView, presetMinutes())
     ? `minutes=${presetMinutes()}`
     : windowQuery(resolveWindow(state.occView, now));
