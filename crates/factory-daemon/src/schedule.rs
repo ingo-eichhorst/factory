@@ -8,29 +8,48 @@ use factory_core::task::Schedule;
 use std::str::FromStr;
 
 pub fn next_after(schedule: &Schedule, after: DateTime<Utc>) -> Result<DateTime<Utc>> {
-    match schedule {
-        Schedule::Every { seconds } => {
-            let seconds = (*seconds).max(1) as i64;
-            Ok(after + Duration::seconds(seconds))
+    Parsed::new(schedule)?.next_after(after)
+}
+
+/// A schedule with its cron expression and timezone already parsed, so a
+/// walk over many slots (`skipped_between`) parses once rather than once
+/// per step.
+enum Parsed<'a> {
+    Every(i64),
+    Cron { expr: &'a str, cron: Cron, tz: Option<Tz> },
+}
+
+impl<'a> Parsed<'a> {
+    fn new(schedule: &'a Schedule) -> Result<Self> {
+        match schedule {
+            Schedule::Every { seconds } => Ok(Self::Every((*seconds).max(1) as i64)),
+            Schedule::Cron(schedule) => {
+                let expr = schedule.expr.as_str();
+                let cron = Cron::from_str(expr).map_err(|e| {
+                    FactoryError::BadRequest(format!("{expr:?} is not a cron expression: {e}"))
+                })?;
+                let tz = schedule.timezone.as_deref().map(timezone).transpose()?;
+                Ok(Self::Cron { expr, cron, tz })
+            }
         }
-        Schedule::Cron(schedule) => {
-            let expr = &schedule.expr;
-            let cron = Cron::from_str(expr).map_err(|e| {
-                FactoryError::BadRequest(format!("{expr:?} is not a cron expression: {e}"))
-            })?;
-            let never = |e| FactoryError::BadRequest(format!("{expr:?} never fires again: {e}"));
-            match schedule.timezone.as_deref() {
-                None => cron.find_next_occurrence(&after, false).map_err(never),
-                // The fields are that wall clock's, so the search runs on
-                // it. croner handles the two days a year the clock jumps:
-                // a firing that lands in a spring-forward gap runs at the
-                // first minute after it, and one in an autumn overlap runs
-                // once, not twice.
-                Some(name) => {
-                    let tz = timezone(name)?;
-                    cron.find_next_occurrence(&after.with_timezone(&tz), false)
+    }
+
+    fn next_after(&self, after: DateTime<Utc>) -> Result<DateTime<Utc>> {
+        match self {
+            Self::Every(seconds) => Ok(after + Duration::seconds(*seconds)),
+            Self::Cron { expr, cron, tz } => {
+                let never = |e| FactoryError::BadRequest(format!("{expr:?} never fires again: {e}"));
+                match tz {
+                    None => cron.find_next_occurrence(&after, false).map_err(never),
+                    // The fields are that wall clock's, so the search runs on
+                    // it. croner handles the two days a year the clock jumps:
+                    // a firing that lands in a spring-forward gap runs at the
+                    // first minute after it, and one in an autumn overlap runs
+                    // once, not twice.
+                    Some(tz) => cron
+                        .find_next_occurrence(&after.with_timezone(tz), false)
                         .map(|next| next.with_timezone(&Utc))
-                        .map_err(never)
+                        .map_err(never),
                 }
             }
         }
@@ -61,10 +80,11 @@ const SKIP_WALK_CAP: u32 = 10_000;
 /// A schedule that no longer parses skips nothing here; `next_after`
 /// refuses it on its own a moment later.
 pub fn skipped_between(schedule: &Schedule, fired: DateTime<Utc>, now: DateTime<Utc>) -> Option<Skipped> {
+    let parsed = Parsed::new(schedule).ok()?;
     let mut found: Option<Skipped> = None;
     let mut cursor = fired;
     loop {
-        let Ok(next) = next_after(schedule, cursor) else { break };
+        let Ok(next) = parsed.next_after(cursor) else { break };
         if next > now || next <= cursor {
             break;
         }
@@ -82,6 +102,21 @@ pub fn skipped_between(schedule: &Schedule, fired: DateTime<Utc>, now: DateTime<
         cursor = next;
     }
     found
+}
+
+/// `skipped_between`, less what the scheduler's own tick could never have
+/// fired: an `Every` schedule shorter than the tick passes a slot or two
+/// between any two ticks, however healthy the daemon is, and journalling
+/// that on every firing would bury the real gaps. So slots that all fall
+/// within one tick of the slot that fired are not a skip worth recording;
+/// once any lies beyond it, every one of them is reported.
+pub fn skipped_beyond_tick(
+    schedule: &Schedule,
+    fired: DateTime<Utc>,
+    now: DateTime<Utc>,
+    tick: Duration,
+) -> Option<Skipped> {
+    skipped_between(schedule, fired, now).filter(|s| s.last > fired + tick)
 }
 
 /// An IANA timezone by name. Every path that sets a schedule computes its
@@ -142,6 +177,26 @@ mod tests {
         assert_eq!(skipped.count, 2);
         assert_eq!(skipped.first, t("2026-09-11T10:10:00Z"));
         assert_eq!(skipped.last, t("2026-09-11T10:20:00Z"));
+    }
+
+    #[test]
+    fn an_every_schedule_shorter_than_the_tick_is_not_a_skip_on_every_firing() {
+        // Every 10s, ticking every 30s: two slots pass between ticks as a
+        // matter of course.
+        let every = Schedule::Every { seconds: 10 };
+        let tick = Duration::seconds(30);
+        let fired = t("2026-09-11T10:00:00Z");
+        assert!(skipped_between(&every, fired, t("2026-09-11T10:00:25Z")).is_some(), "sanity: slots did pass");
+        assert_eq!(skipped_beyond_tick(&every, fired, t("2026-09-11T10:00:25Z"), tick), None);
+        assert_eq!(skipped_beyond_tick(&every, fired, t("2026-09-11T10:00:30Z"), tick), None);
+        // A real gap reports every slot, the jitter ones included.
+        let gap = skipped_beyond_tick(&every, fired, t("2026-09-11T10:05:00Z"), tick).unwrap();
+        assert_eq!(gap.count, 30);
+        assert_eq!(gap.first, t("2026-09-11T10:00:10Z"));
+        // An hourly schedule with a normal tick is unaffected.
+        let hourly = Schedule::Cron("0 * * * *".into());
+        let skipped = skipped_beyond_tick(&hourly, fired, t("2026-09-11T13:20:00Z"), tick).unwrap();
+        assert_eq!(skipped.count, 3);
     }
 
     #[test]

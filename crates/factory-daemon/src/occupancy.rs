@@ -79,10 +79,7 @@ impl Engine {
         // history says it usually takes.
         let mut planned: BTreeMap<(String, String), Vec<OccupancyPlan>> = BTreeMap::new();
         for task in &tasks {
-            let Some(at) = task.next_run_at else { continue };
-            if at < now || at > to {
-                continue;
-            }
+            let Some(at) = planned_firing(task, now, to) else { continue };
             let historical = if task.estimate_seconds.is_some() {
                 (None, 0)
             } else {
@@ -817,9 +814,40 @@ fn trim_to_window(series: &mut Vec<StatusChange>, from: DateTime<Utc>) {
     }
 }
 
+/// The firing a task's schedule will draw on the chart, if it has one in
+/// `[now, to]`. A paused schedule keeps its slot but will not fire it, so
+/// there is nothing coming to draw.
+fn planned_firing(task: &factory_core::task::Task, now: DateTime<Utc>, to: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let at = task.next_run_at?;
+    (at >= now && at <= to && !task.schedule_paused).then_some(at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paused_schedule_plans_no_firing() {
+        let now = Utc::now();
+        let mut task = factory_core::adapter::store::task_from_new(
+            factory_core::task::NewTask {
+                title: "every ten minutes".into(),
+                schedule: Some(factory_core::task::Schedule::Every { seconds: 600 }),
+                ..Default::default()
+            },
+            "demo".into(),
+            "shell".into(),
+            "herdr".into(),
+        );
+        task.next_run_at = Some(now + Duration::minutes(10));
+        let to = now + Duration::hours(1);
+        assert_eq!(planned_firing(&task, now, to), task.next_run_at, "sanity: drawn while running");
+        task.schedule_paused = true;
+        assert_eq!(planned_firing(&task, now, to), None);
+        task.schedule_paused = false;
+        task.next_run_at = Some(now + Duration::hours(2));
+        assert_eq!(planned_firing(&task, now, to), None, "past the chart's edge");
+    }
 
     fn at(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap()
