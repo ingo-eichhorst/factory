@@ -786,6 +786,7 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `open_controls.<framework>` | count of counted controls still open or stale | `policy_report(None)`'s subtree rollup |
 | `bench.resolve_rate.<dataset>` | the newest settled bench run's resolve rate | `bench::aggregate` |
 | `goal_tasks_done.<objective>.<kr>` | count of tasks labelled `goal=<objective>/<kr>` whose status is `done` | task labels, through `TaskStore` |
+| `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met, across every scope | `quality_report(None)` — see "Quality attributes" |
 | `unit_cost`, `tokens_per_run` | cost/tokens per run | **unavailable**: a `Run` records no model, tokens or cost yet (design §12.6) |
 
 `throughput_week`/`first_pass_yield`/`scrap_rate` read `production.rs`'s own
@@ -804,6 +805,13 @@ themselves name. Only the three production-based metrics carry a history
 today: one point per day over the daily grid's own 53 weeks, each point
 that metric's own trailing-window definition evaluated as of that day — the
 series' own last point always equals the metric's current value.
+A value's `as_of` is when the data behind it is from, not when it was asked
+for: `first_pass_yield`/`scrap_rate` are as of the end of the newest day in
+their window that finished anything, `bench.resolve_rate.<dataset>` as of
+the run it came from settling. `throughput_week` stays as of now — a count
+over a window ending now is a current fact even when it is zero. This is
+what lets a freshness window (a quality scenario's `max_age`) read a value
+as stale at all.
 
 **Scoring.** A key result is scored linearly from `baseline` to `target`,
 clamped to `0.0..=1.0`, whichever direction the metric actually improves —
@@ -1079,6 +1087,146 @@ signpost, then findings. `factory scenario show <name> [--scope S]
 overridden, outcomes, tornado), policy delta (subtree and per scope), goal
 scenarios, signposts. `GET /api/scenarios?scope=` answers the same
 `ScenariosReport` both read from.
+
+## Quality attributes
+
+L6 Direction's fourth tab (`#107`): which qualities matter for each scope,
+how much, what they trade off against, and whether they are being met —
+**measured, never claimed**. Goals say where the company is heading and
+Policy which external rules it follows; quality attributes say how *good*
+the thing has to be on the way. `factory_core::quality` (the compiled-in
+ISO/IEC 25010:2023 catalogue plus the ISO/IEC 25059 AI pack, the profile
+loader, the add-or-tighten merge and the evaluator) is pure and tested on
+its own; this section is what `factory-daemon` builds on top of it.
+
+**Profiles.** `<root>/.factory/quality/<profile>.yaml` — authored content,
+hand-written, re-read on every request, never written by Factory; the file
+stem is the profile's id. A profile is an ATAM utility tree: at most seven
+attributes, each an ISO 25010 id (`characteristic` or
+`characteristic.sub-characteristic`) ranked for importance and difficulty
+as H/M/L only, each with SEI six-part scenarios. See `examples/quality/`
+for two and `crates/factory-core/src/quality.rs` for every field:
+
+```yaml
+# .factory/quality/daemon-service.yaml
+attributes:
+  - id: reliability.recoverability
+    importance: H                    # H | M | L -- never finer
+    difficulty: M
+    scenarios:
+      - id: daemon-restart
+        kind: usage                  # usage | change
+        source: launchd
+        stimulus: daemon restarted while 3 runs are active
+        artifact: factory-daemon
+        environment: normal operation
+        response: runs resume reporting; no run is lost or double-dispatched
+        measure:                     # the response measure; without one, a draft
+          metric: scrap_rate         # continual: a registry metric and a threshold
+          below: 0.05                # above/below, inclusive; both is a band
+          max_age: 7d                # how old the value may be before it reads stale
+  - id: maintainability.modifiability
+    importance: H
+    difficulty: H
+    scenarios:
+      - id: agent-diff-health
+        measure: { check: task, task: quality-gate, max_age: 7d }   # triggered: a Policy check, as a catalogue writes it
+tradeoffs:
+  - between: [security.confidentiality, performance-efficiency.time-behaviour]
+    point: every agent runs in a sandbox; start-up cost accepted
+    decision: knowledge/adr-sandbox.md
+```
+
+**Declaration.** The instance root's top-level `quality: [profile, …]`
+applies everywhere; a scope's own `scope.quality: [profile, …]` adds
+profiles for itself and every scope below it by path — the policy chain
+exactly (`Config::quality_chain_for_scope`, ancestry by `Scope.path`, never
+by name). Down the chain a descendant may only **add** (attributes,
+scenarios) or **tighten** (raise importance, raise `above`, lower `below`,
+shorten `max_age`); anything looser is a finding and the inherited value is
+kept. A scope whose chain binds nothing is left out of the report: an
+undeclared attribute is "not a stated concern", never "failing".
+
+**Statuses.** Each scenario is `met`, `not_met`, `stale`, `no_data` or
+`draft`; an attribute is the **worst** of its scenarios. There is no score
+anywhere — per scope or company-wide — because an average is how a failing
+H attribute hides behind three green L ones.
+
+- A **metric** measure reads the metric registry (the same
+  `Engine::metrics` Goals and Scenarios read). An unknown or unavailable
+  metric (`unit_cost`) is `no_data` with the registry's reason; a value
+  whose `as_of` is older than `max_age` is `stale`, never green.
+- A **check** measure is judged by `policy::evaluate` itself, as a
+  one-control catalogue, on evidence gathered by the Policy tab's own
+  `dataset_level_facts`/`evidence_for_scope` — lazily, only for the check
+  kinds some scenario asks. `task`/`workflow` name one in the evaluated
+  scope; a name that matches more than one is an `ambiguous_check_target`
+  finding. "Never gathered" and "nothing finished yet" are `no_data`, not
+  `not_met`.
+- An **`attestation`** check is `no_data`, with the reason. The attestation
+  store keys a row by a policy `ControlRef` it parses back on every read,
+  and a quality scenario's `quality/<attribute>/<scenario>` does not parse,
+  so there is no honest way to record one yet. Measure such a scenario
+  with a task, workflow or gate check instead.
+- A measure naming a `quality.*` metric is a `self_referential_metric`
+  finding and always `no_data`: it would be computed from the scenario
+  being judged.
+
+**`quality.<characteristic>`.** The registry's own metric for a Goals key
+result or a Scenario signpost to target: of every declared scenario under
+one ISO 25010 characteristic, counted once per scope it applies in across
+the whole instance, the share that is `met`. Drafts and `no_data` count
+against it — declared but not shown to be met is not met. `None`, with the
+reason, when nothing is declared under it (that is not "all met").
+Company-wide only: a scope name may hold `/`, which a metric id segment
+cannot, so there is no per-scope parameter. `quality_report` never asks for
+a `quality.*` metric itself, so computing one never loops.
+
+**The agent guide.** A task's run is told its scope's H-importance
+attributes, one line each: every scenario's measure in words, and a status
+word (`not met`, `stale`, `no data`) only when it is not met — never a value
+or a time, so the guide stays byte-for-byte the same from one dispatch to
+the next while nothing moved. Judged once at dispatch, like the policy
+frameworks line; a scope with nothing ranked H gets no block at all, and a
+profile that cannot be read never stops a dispatch. A standing agent's
+guide carries no block: it is written once for the agent's whole life, and
+any status in it would soon be stale.
+
+**Remediation.** `factory quality remediate <attribute>/<scenario> --scope
+S [--agent A]` (or `POST /api/quality/remediate`, `{scope, attribute,
+scenario, agent?}`) creates an ordinary task through the exact path `factory
+task create`/`policy remediate` use, labelled
+`quality=<scope>/<attribute>/<scenario>`, with the scenario's six parts, its
+measure and why it is not met as instructions. It needs `task.create` in
+`S`. It is refused for a `met` scenario and for a `draft` (with no measure
+there is no gap, only a measure to write). When a non-terminal task with
+that label is already open in `S`, that task comes back with `created:
+false` and nothing new is made (`#98`); the report's `open_tasks` names it
+per scenario so a reader can show it up front.
+
+**`quality_changed`.** Goals and Policy publish their events on their own
+writes; quality has none (a remediation task already fires `TaskCreated`),
+and nothing in Factory watches files. So every report fingerprints the
+profiles and every scope's chain it loaded, and publishes
+`Event::QualityChanged` when that moved since the last read — the issue's
+"on the next read". The first read after a start publishes nothing.
+Evidence changing (a fitness-function task finishing) is not this event;
+it arrives as `RunUpdated`.
+
+**Enforces nothing.** A quality attribute starts, stops and blocks nothing
+(design §8). Whether a fitness function gates a workflow is that
+workflow's business.
+
+`factory quality [status] [--scope S] [--json]` prints one line per scope
+and attribute — (importance, difficulty) and its rollup. `factory quality
+scope <name>` is one scope's whole tree: every scenario with its measure,
+status, reasons and any open remediation task, then its trade-offs.
+`factory quality findings [--scope S]` lists what is wrong with the
+profiles or the chains that bind them. `GET /api/quality?scope=` answers
+the `QualityReport` all three read from: per scope, its evaluated tree and
+open tasks; the findings; the nine-characteristic catalogue (every column a
+heatmap draws); and the history of any metric a scenario reads, for a
+sparkline.
 
 ## Tasks and runs
 
@@ -1510,7 +1658,10 @@ goals and policy catalogues imply), the L6 Goals tab under
 `POST /api/goals/checkins` (see "Goals" above), the L6 Scenarios tab under
 `GET /api/scenarios?scope=`, turning one into real work under
 `POST /api/scenarios/promote`, and recomputing driver outcomes and the
-forecast under `POST /api/scenarios/whatif` (see "Scenarios" above),
+forecast under `POST /api/scenarios/whatif` (see "Scenarios" above), the
+L6 Quality attributes tab under `GET /api/quality?scope=` and a scenario's
+remediation task under `POST /api/quality/remediate` (see "Quality
+attributes" above),
 workflow CRUD under
 `/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
