@@ -1,0 +1,17 @@
+# A stand-in for the Irrlicht herdr plugin, for Factory's own tests (#117).
+# It answers the `usage` action the way the real one must: herdr hands it
+# the pane it is asked about as HERDR_PANE_ID, and it prints one schema-1
+# document on stdout -- usage fields only, cumulative per harness session,
+# `null` (with a reason under `unavailable`) for anything it cannot see.
+id = "factory-usage-fixture"
+name = "factory-usage-fixture"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Answers #117's usage action with a fixed schema-1 document"
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "usage"
+title = "Usage (fixture)"
+contexts = ["pane"]
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/usage.sh\""]

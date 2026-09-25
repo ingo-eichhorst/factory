@@ -6,6 +6,7 @@ mod agents;
 mod backup;
 mod bench;
 mod configuration;
+mod costs;
 mod datasets;
 mod discovery;
 mod engine;

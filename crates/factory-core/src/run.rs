@@ -292,6 +292,15 @@ pub struct Run {
     /// together with `turn_ended_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_end_reason: Option<String>,
+    /// What this run used, as of its newest usage snapshot -- derived from
+    /// the append-only snapshots the store keeps (`TaskStore::usage_snapshots`)
+    /// and rewritten whole each time one is added, so a reader of a run
+    /// never has to know they exist. `None` on a run that has no snapshot
+    /// at all, including every run from before #117; a run whose runtime
+    /// could not answer has `Some` with `state: unknown` and the reason.
+    /// Never mirrored onto the task: a task's usage is a sum over its runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage::RunUsage>,
 }
 
 impl Run {
@@ -377,6 +386,11 @@ pub struct RunPatch {
     /// clears it: a run ends once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail_kind: Option<FailKind>,
+    /// Replace the run's derived usage -- see `Run::usage`. Only ever set
+    /// with a value freshly computed from every snapshot, so there is no
+    /// "clear" to go with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage::RunUsage>,
 }
 
 #[cfg(test)]

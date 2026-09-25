@@ -1272,7 +1272,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unavailable_metric_on_a_key_result_is_a_finding_naming_the_reason() {
+    fn a_cost_metric_on_a_key_result_is_no_longer_a_finding() {
+        // `unit_cost` was the example of an unavailable metric until #117
+        // gave runs their usage; no metric is unavailable now, so a key
+        // result over it loads clean. `FindingKind::UnavailableMetric`
+        // stays for the next metric named before it can be computed.
         let dir = tempdir("unavailable-metric");
         write(
             &dir,
@@ -1283,8 +1287,11 @@ mod tests {
              \x20\x20\x20\x20\x20\x20- {id: kr, title: K, kind: committed, metric: unit_cost, baseline: 0, target: 1}\n",
         );
         let catalogue = load(&dir);
-        let f = catalogue.findings.iter().find(|f| f.kind == FindingKind::UnavailableMetric).unwrap();
-        assert!(f.detail.contains("design §12.6"), "{}", f.detail);
+        assert!(
+            !catalogue.findings.iter().any(|f| f.kind == FindingKind::UnavailableMetric),
+            "{:?}",
+            catalogue.findings
+        );
         cleanup(&dir);
     }
 

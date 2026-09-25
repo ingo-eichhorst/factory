@@ -23,6 +23,10 @@ import { routeHref } from "./scopes.js";
 
 // ------------------------------------------------------------------ drivers
 
+/// Why the cost drivers are disabled though their metrics are measured.
+const COST_DRIVER_NOT_MODELLED =
+  "measured per run since #117, but the forecast does not model cost yet (#117 v3)";
+
 /// The v1 built-in driver set (`factory_core::scenario::driver_defs()`),
 /// mirrored here because it is fixed vocabulary compiled into the daemon,
 /// never sent on the wire -- `ScenarioDrivers` only ever carries values keyed
@@ -38,14 +42,18 @@ export const DRIVER_DEFS = [
   // `unavailable: true` is fixed vocabulary, the same as `assumption` --
   // never derived from whether `GET /api/metrics` happened to answer this
   // load, so a slider for either of these is disabled even when that second
-  // fetch fails outright, not just when it succeeds and says so.
-  { id: "unit_cost", title: "Unit cost", description: "Cost per finished unit -- named by the registry but not yet computable (design §12.6).", unit: "ratio", assumption: false, unavailable: true, metric: "unit_cost", better: "lower" },
-  { id: "tokens_per_run", title: "Tokens per run", description: "Tokens spent per run -- same §12.6 unavailability as unit cost.", unit: "count", assumption: false, unavailable: true, metric: "tokens_per_run", better: "lower" },
+  // fetch fails outright, not just when it succeeds and says so. Both
+  // metrics are measured since #117 v1; what is missing is the forecast
+  // using them, which is #117 v3 -- `unavailableReason` says so.
+  { id: "unit_cost", title: "Unit cost", description: "API-equivalent USD per finished unit, from each run's measured usage.", unit: "usd", assumption: false, unavailable: true, unavailableReason: COST_DRIVER_NOT_MODELLED, metric: "unit_cost", better: "lower" },
+  { id: "tokens_per_run", title: "Tokens per run", description: "Tokens spent per run, from each run's measured usage.", unit: "count", assumption: false, unavailable: true, unavailableReason: COST_DRIVER_NOT_MODELLED, metric: "tokens_per_run", better: "lower" },
 ];
 
-const UNAVAILABLE_REASON_FALLBACK = "a Run records no model, tokens or cost yet (design §12.6)";
+const UNAVAILABLE_REASON_FALLBACK = "this driver has no data source yet";
 
-/// The reason a `def.unavailable` driver is disabled -- preferring
+/// The reason a `def.unavailable` driver is disabled -- its own fixed
+/// `unavailableReason` when it has one (a driver whose metric is fine but
+/// which the forecast does not use yet), then
 /// `baseline.metrics`' own `reason` (on the wire on every `GET /api/scenarios`
 /// answer, regardless of whether the second `GET /api/metrics?ids=…` fetch a
 /// driver panel also makes ever succeeds), then the registry def that second
@@ -53,6 +61,7 @@ const UNAVAILABLE_REASON_FALLBACK = "a Run records no model, tokens or cost yet 
 /// disabled slider always says why, never a blank reason from a fetch that
 /// happened to fail.
 export function driverUnavailableReason(def, baselineMetrics, metricDefs) {
+  if (def.unavailableReason) return def.unavailableReason;
   const fromBaseline = (baselineMetrics || []).find((m) => m.id === def.metric);
   if (fromBaseline && fromBaseline.reason) return fromBaseline.reason;
   const fromRegistry = metricDefs && metricDefs[def.metric];

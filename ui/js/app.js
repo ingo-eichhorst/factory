@@ -5,7 +5,7 @@
 import { $, api, state, connect, setTheme, currentTheme, toggleTheme, TERMINAL } from "./core.js";
 import { initRail, writeHash, setRouter, readHash, applyRoute } from "./scopes.js";
 import { closeModal, dropModal } from "./modal.js";
-import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyTasksView, currentTasksView, setTasksView } from "./tasks.js";
+import { openTask, renderTasks, renderModal, loadJournal, retimeTerminal, applyTasksView, currentTasksView, setTasksView, loadTaskUsage } from "./tasks.js";
 import { loadAgents, renderAgents } from "./agents.js";
 import { loadOccupancy, renderOccupancy } from "./occupancy.js";
 import { legacyAgentRoute, loadRuntimeConnections, renderRuntimeConnections } from "./agent-runtime.js";
@@ -653,7 +653,11 @@ function onEvent(ev) {
     case "run_updated":
       if (state.open === ev.run.task_id) {
         const i = state.runs.findIndex(r => r.id === ev.run.id);
+        // A new usage reading moves the task's sum too (#117); re-read it
+        // only then, not on every status flicker.
+        const usageMoved = JSON.stringify(i >= 0 ? state.runs[i].usage : null) !== JSON.stringify(ev.run.usage || null);
         if (i >= 0) state.runs[i] = ev.run; else state.runs.unshift(ev.run);
+        if (usageMoved) loadTaskUsage().then(renderModal);
         // A new run is the one worth watching.
         if (ev.type === "run_started") state.run = ev.run.id;
         renderModal();

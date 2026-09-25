@@ -267,6 +267,11 @@ impl Engine {
             | Request::RunGet { .. }
             | Request::RunEntries { .. }
             | Request::RunOutput { .. }
+            // Usage and cost (#117): read off runs and their snapshots,
+            // nothing written.
+            | Request::RunUsage { .. }
+            | Request::TaskUsage { .. }
+            | Request::Costs { .. }
             | Request::AgentOutput { .. }
             | Request::AgentScreen { .. }
             | Request::RunScreen { .. }

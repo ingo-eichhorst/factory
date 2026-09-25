@@ -787,7 +787,8 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `bench.resolve_rate.<dataset>` | the newest settled bench run's resolve rate | `bench::aggregate` |
 | `goal_tasks_done.<objective>.<kr>` | count of tasks labelled `goal=<objective>/<kr>` whose status is `done` | task labels, through `TaskStore` |
 | `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met, across every scope | `quality_report(None)` — see "Quality attributes" |
-| `unit_cost`, `tokens_per_run` | cost/tokens per run | **unavailable**: a `Run` records no model, tokens or cost yet (design §12.6) |
+| `unit_cost` | API-equivalent USD spent per run ended `done` (failed and cancelled runs' cost included), trailing 28 days | each run's measured usage (`Run.usage`, #117) |
+| `tokens_per_run` | mean tokens of every type per finished run, trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 
 `throughput_week`/`first_pass_yield`/`scrap_rate` read `production.rs`'s own
 daily grid directly rather than re-deriving "finished"/"scrapped"/
@@ -797,9 +798,11 @@ fact: `Request::Metrics { ids }` only touches `production`/`policy_report`/
 the bench store when some asked id actually needs it, and each is read at
 most once per call no matter how many ids ask for something behind it. An
 id the registry has never heard of refuses the whole call (a typo should
-not come back as a quiet `None`); `unit_cost`/`tokens_per_run` — named in
-the registry but not yet computable — come back as `value: None` with that
-reason, never an error. `ids` empty means every non-parameterised metric
+not come back as a quiet `None`); a metric named in the registry but not
+yet computable would come back as `value: None` with its reason, never an
+error — none is today. `unit_cost`/`tokens_per_run` count only runs whose
+usage the runtime measured start to end; an unmeasured run is left out,
+never taken as free, and with none left the value is `None` with a reason. `ids` empty means every non-parameterised metric
 (available or not) plus whatever the loaded goals and policy catalogues
 themselves name. Only the three production-based metrics carry a history
 today: one point per day over the daily grid's own 53 weeks, each point
@@ -982,9 +985,9 @@ fan chart can draw the baseline band and a scenario's band on one axis.
 **Drivers.** A small, built-in tree tied to the metric registry where one
 exists: `throughput_week`, `first_pass_yield`, `scrap_rate`, `rework_rate`
 (registry-backed); `capacity_factor` (an assumption — no data source, a
-person's own what-if); `unit_cost`, `tokens_per_run` (named, but **unavailable** —
-design §12.6, a `Run` records no cost yet; only `=N`, a pure assumption
-needing no baseline, may override one). The one v1 formula:
+person's own what-if); `unit_cost`, `tokens_per_run` (registry-backed since
+#117, but not in the forecast formula until #117 v3, so the What-if panel
+keeps their sliders disabled). The one v1 formula:
 `effective_throughput = throughput_week × capacity_factor × first_pass_yield`.
 An override is authored `×2`/`x2` (multiply), `+20%`/`-20%` (percent
 change), `+5`/`-5` **quoted** (delta — YAML reads a bare `+5` as an
@@ -1444,6 +1447,61 @@ Only one run of a task can be in progress at a time — two attempts at once
 would race for the same working directory — so starting a second is refused
 until the first ends or is cancelled.
 
+### What a run used (#117)
+
+Every run records what it used — tokens by type, API-equivalent cost with the
+price table it was priced by, the model — as the **agent runtime** observed
+it. Factory is the process layer: it never reads a harness transcript, never
+learns a harness's file layout, and never talks to an observability tool
+directly. Usage reaches it through one door, `AgentRuntime::usage`, which
+answers in the versioned contract `factory_core::usage::SessionUsage`
+(schema 1, cumulative per harness session). A runtime with no source for it
+answers `None`.
+
+herdr answers through a plugin: whichever installed herdr plugin offers an
+action called `usage` (Irrlicht's) is invoked over herdr's socket API with the
+run's pane as `context.focused_pane_id` — the pane reaches the plugin as
+`HERDR_PANE_ID` — and its stdout is read back from the plugin command log.
+`herdr plugin action invoke` itself cannot be used: it has no pane argument
+and acts on whichever pane is focused. Nothing names the plugin; installing or
+removing it takes effect on the next run. With two plugins offering `usage`,
+`FACTORY_HERDR_USAGE_PLUGIN` picks one. A read is bounded to five seconds.
+
+A run is read three times: once its session is up and before the task is
+handed over (the **baseline**), at every turn end the harness reports, and as
+it ends, before the session is closed. Each reading is kept append-only
+(`factory run usage <run-id>`), answered or not, and the run's `usage` is the
+difference between the baseline and the newest reading that answered — so a
+pane reused from an earlier run is never billed twice. Rules:
+
+- **Never a guessed number.** A count the runtime could not see is `?`, and a
+  total with one unknown part is unknown. A run whose runtime had no answer is
+  `unknown` with the reason, never `$0.00`; so is a pane with no harness
+  session in it at all.
+- **A lower bound says so.** Figures as of a turn end because the last
+  reading failed are marked partial ("at least").
+- **Prices are snapshotted.** Every cost carries its `pricing_source`.
+- Subagents are listed apart from their parent in the contract and are added
+  to it.
+
+```sh
+factory run show <run-id>        # the usage block
+factory task show <id>           # every run's usage and the sum
+factory cost --by issue --since 7d   # task | issue | scope | agent
+factory cost --by agent --scope projects/factory --since 2026-09-01
+```
+
+`GET /api/costs?group_by=&from=&to=&scope=`, `GET /api/tasks/{id}/usage` and
+`GET /api/runs/{id}/usage` answer the same. Grouping by `issue` reads the
+task's `issue=<n>` label. Sums are over the runs that knew the number, and
+beside them is how many did not: an unmeasured run is counted, never dropped
+and never free. The registry metrics `unit_cost` and `tokens_per_run` read
+the same usage (see "Goals").
+
+Not yet (v2 and later): plan share of a subscription's rate-limit window
+(the snapshots already keep the windows), estimate vs actual, the provider
+and workflow groupings, and cost drivers in the Scenarios forecast.
+
 ## Workflows
 
 A workflow is reusable Process-level intent: a scoped, finite DAG of ordinary
@@ -1895,7 +1953,9 @@ echo '{"op":"task.list","params":{}}' | nc -U .factory/factory.sock
 HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`,
 `GET /api/runs/{id}/entries`, `GET /api/tasks/{id}/entries` (`?task_only=true`
-for only the task's own lines, none of its runs'), `GET /api/runs/{id}/output`, `GET /api/agents`,
+for only the task's own lines, none of its runs'), `GET /api/runs/{id}/output`,
+`GET /api/runs/{id}/usage`, `GET /api/tasks/{id}/usage`,
+`GET /api/costs?group_by=&from=&to=&scope=`, `GET /api/agents`,
 `GET /api/agent-runtime`, `GET /api/environment`, `GET /api/infrastructure`,
 `GET /api/backup`, `POST /api/backup/run`, `POST /api/backup/verify?snapshot=`,
 `GET /api/knowledge`,
