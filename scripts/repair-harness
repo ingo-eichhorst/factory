@@ -1,0 +1,213 @@
+#!/bin/bash
+# repair-harness <name> -- put a fresh copy of a harness's install in place
+# of one that stalls before running any code (issue #131).
+#
+# What happened: a Homebrew cask install of codex hung in `_dyld_start` on
+# `codex --version`. Clearing the quarantine flag changed nothing; a copy of
+# the very same bytes, verified and signed, started at once. So this makes
+# that copy, the careful way:
+#
+#   1. resolve the harness's binary to its install folder -- a Homebrew
+#      cask's `<prefix>/Caskroom/<cask>/<version>`;
+#   2. verify the binary's code signature, and that it was signed by the
+#      developer team this harness is expected to come from (OpenAI for
+#      codex, Anthropic for Claude Code) -- refuse on any mismatch;
+#   3. copy the folder beside itself, without extended attributes, and
+#      verify the copy's signature the same way;
+#   4. check the copy answers `--version` in time;
+#   5. swap it in by rename, keeping the old folder as `<version>.stuck`;
+#   6. check the harness answers `--version` from where it always was.
+#
+# Nothing of the install is ever deleted: a failed copy is left where it is, named, and the
+# old folder is kept beside the new one. It overrides a decision macOS is
+# holding about that folder, which is why a person runs it by default --
+# Factory's own `daemon.harness_health.auto_repair` runs it only when the
+# owner switched that on, and the signature check applies either way.
+#
+# Options:
+#   --dry-run    say what would be done, change nothing
+#
+# Environment (for a person, or a test):
+#   REPAIR_HARNESS_TIMEOUT   seconds `--version` may take (default 10)
+#
+# Supported in v1: a harness installed as a Homebrew cask with a Developer ID
+# signature from the team in the table below. Anything else -- Claude Code's
+# own installer, an npm package, an ad-hoc signed formula -- is refused with
+# the reason, never guessed at.
+
+set -euo pipefail
+
+usage() {
+    echo "usage: repair-harness [--dry-run] <name>" >&2
+    echo "  names: codex, claude (claude-code)" >&2
+    exit 2
+}
+
+dry_run=0
+name=""
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) dry_run=1 ;;
+        -h|--help) usage ;;
+        -*) echo "repair-harness: unknown option $arg" >&2; usage ;;
+        *) [ -z "$name" ] || usage; name="$arg" ;;
+    esac
+done
+[ -n "$name" ] || usage
+
+say() { echo "repair-harness: $*"; }
+refuse() { echo "repair-harness: refusing: $*" >&2; exit 1; }
+
+# The binary a harness goes by, and the developer team its signature must
+# name. A harness not in this table is refused: there is nothing to check
+# its signature against.
+case "$name" in
+    codex)
+        program=codex
+        team=2DC432GLL2 # OpenAI OpCo, LLC
+        ;;
+    claude|claude-code)
+        program=claude
+        team=Q6L2SF6YDW # Anthropic PBC
+        ;;
+    *)
+        refuse "no expected developer team is known for '$name'; add it to the table in $0 before repairing it"
+        ;;
+esac
+
+timeout_s="${REPAIR_HARNESS_TIMEOUT:-10}"
+
+# `--version`, bounded: there is no GNU `timeout` on macOS. Answers 0 when it
+# exited zero in time, 124 when it did not answer, its status otherwise, and
+# leaves its first line of output (or why not) in `answered`.
+answered=""
+answers() {
+    local bin="$1" out pid waited=0 status=0
+    out="$(mktemp "${TMPDIR:-/tmp}/repair-harness-XXXXXX")"
+    "$bin" --version >"$out" 2>&1 </dev/null &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge $((timeout_s * 10)) ]; then
+            kill -9 "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            rm -f "$out" # our own scratch file, not the harness's
+            answered="did not answer in ${timeout_s}s"
+            return 124
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    wait "$pid" || status=$?
+    answered="$(head -n 1 "$out")"
+    rm -f "$out"
+    [ "$status" = 0 ] || answered="exited with status $status${answered:+: $answered}"
+    return "$status"
+}
+
+# Follow every symlink to the real file. `realpath` is only on newer macOS.
+real_path() {
+    local p="$1" dir
+    while [ -L "$p" ]; do
+        dir="$(cd -P "$(dirname "$p")" && pwd)"
+        p="$(readlink "$p")"
+        case "$p" in /*) ;; *) p="$dir/$p" ;; esac
+    done
+    dir="$(cd -P "$(dirname "$p")" && pwd)"
+    echo "$dir/$(basename "$p")"
+}
+
+# The signature must verify, and name the expected team.
+verify_signature() {
+    local bin="$1" what="$2" details found
+    if ! codesign --verify --strict "$bin" 2>/dev/null; then
+        refuse "the code signature of $what ($bin) does not verify"
+    fi
+    details="$(codesign -dv --verbose=2 "$bin" 2>&1 || true)"
+    found="$(printf '%s\n' "$details" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
+    if [ "$found" != "$team" ]; then
+        refuse "$what ($bin) is signed by team '${found:-none}', not $team as expected for $name"
+    fi
+}
+
+# -- 1. where it is -----------------------------------------------------------
+
+link="$(command -v "$program" || true)"
+[ -n "$link" ] || refuse "$program is not on PATH"
+bin="$(real_path "$link")"
+say "$program is $link -> $bin"
+
+case "$bin" in
+    */Caskroom/*/*/*) ;;
+    *) refuse "$bin is not inside a Homebrew cask (Caskroom/<cask>/<version>/...); only cask installs are supported" ;;
+esac
+# `<prefix>/Caskroom/<cask>/<version>` and the binary's path inside it.
+caskroom="${bin%%/Caskroom/*}/Caskroom"
+rest="${bin#"$caskroom"/}"
+cask="${rest%%/*}"
+rest="${rest#*/}"
+version="${rest%%/*}"
+inside="${rest#*/}"
+folder="$caskroom/$cask/$version"
+[ -d "$folder" ] || refuse "$folder is not a directory"
+case "$version" in
+    *.stuck|*.stuck.*|*.upgrading|*.repair.*)
+        refuse "$bin resolves into $folder, which is itself a leftover; fix the link before repairing" ;;
+esac
+say "install folder: $folder (cask $cask, version $version)"
+
+# -- 2. is it what it says it is --------------------------------------------
+
+verify_signature "$bin" "$program"
+say "signature verifies, team $team"
+
+if answers "$bin"; then
+    say "$program already answers --version ($answered); nothing to repair"
+    exit 0
+fi
+say "$program does not answer --version: ${answered:-no output}"
+
+stamp="$(date +%Y%m%d%H%M%S)"
+copy="$folder.repair.$stamp"
+stuck="$folder.stuck"
+[ -e "$stuck" ] && stuck="$folder.stuck.$stamp"
+[ -e "$copy" ] && refuse "$copy already exists"
+
+if [ "$dry_run" = 1 ]; then
+    say "dry run: would copy $folder to $copy, check it, move $folder to $stuck and $copy to $folder"
+    exit 0
+fi
+
+# -- 3. a fresh copy, beside it ------------------------------------------------
+
+# Same parent, so the renames below are renames on one filesystem. `-X`
+# leaves the extended attributes (the quarantine flag among them) behind;
+# the signature lives in the binary, not in an attribute.
+cp -R -X "$folder" "$copy"
+say "copied to $copy"
+verify_signature "$copy/$inside" "the copy of $program"
+
+# -- 4. does the copy start --------------------------------------------------
+
+if ! answers "$copy/$inside"; then
+    refuse "the copy does not answer --version either (${answered:-no output}); left it at $copy, changed nothing else"
+fi
+say "the copy answers: $answered"
+
+# -- 5. swap it in -----------------------------------------------------------
+
+mv "$folder" "$stuck"
+if ! mv "$copy" "$folder"; then
+    mv "$stuck" "$folder" || true
+    refuse "could not move $copy into place; put the old folder back"
+fi
+say "swapped in; the old folder is kept at $stuck"
+
+# -- 6. and from where it always was ----------------------------------------
+
+if answers "$link"; then
+    say "repaired: $link --version answers ($answered)"
+else
+    echo "repair-harness: swapped, but $link still does not answer --version (${answered:-no output})." >&2
+    echo "  the old folder is at $stuck; nothing was deleted" >&2
+    exit 1
+fi

@@ -253,6 +253,9 @@ pub struct Engine {
     /// (`dispatch`), released for every run `close_session` ever sees,
     /// terminal outcome or not.
     pub(crate) power: crate::power::PowerAssertions,
+    /// Whether each harness binary starts, probed before a dispatch and
+    /// cached -- see `crate::harness_health` and issue #131.
+    pub(crate) harness: crate::harness_health::HarnessHealth,
     /// The fingerprint of what the last successful `Request::Quality`
     /// loaded -- every profile in `.factory/quality/` and every scope's
     /// quality chain -- with when it loaded them, so the next read can tell
@@ -326,6 +329,7 @@ impl Engine {
             worktree_caps: Default::default(),
             site_memory: Default::default(),
             power,
+            harness: crate::harness_health::HarnessHealth::new(),
             quality_seen: Default::default(),
             quality_guide_cache: Default::default(),
             schedule_lock: tokio::sync::Mutex::new(()),
@@ -1300,11 +1304,31 @@ impl Engine {
             }
         }
 
+        // One row per harness any scope's agents run on, whether or not it
+        // has been probed yet -- plus anything probed since that the config
+        // no longer names.
+        let mut known: Vec<(String, factory_core::harness::HealthProbe)> = Vec::new();
+        for scope in &factory.config.scopes {
+            for agent in scope.agents_with(&daemon_config.foreman) {
+                let Some(probe) = self.registry.agent(&agent.harness).ok().and_then(|a| a.health_probe()) else {
+                    continue;
+                };
+                let harness = crate::harness_health::harness_name(&probe);
+                if !known.iter().any(|(_, p)| *p == probe) {
+                    known.push((harness, probe));
+                }
+            }
+        }
+        let harnesses = self
+            .harness
+            .rows(&known, daemon_config.harness_health.repair_script.as_deref());
+
         Payload::Infrastructure {
             host,
             daemon,
             providers,
             unassigned,
+            harnesses,
         }
     }
 
@@ -2030,6 +2054,14 @@ impl Engine {
         }
         let run = match self.dispatch(task_id, trigger, due).await {
             Ok(run) => run,
+            // Blocked, not failed: `harness_gate` has already said why on
+            // the task, and there is no run to close.
+            Err(FactoryError::HarnessUnhealthy(reason)) => {
+                tracing::warn!(task = task_id, "held on its harness: {reason}");
+                self.record_workflow_task_state(task_id).await;
+                self.record_bench_task_state(task_id).await;
+                return;
+            }
             Err(e) => {
                 // The run may or may not exist yet; if it does, close it.
                 if let Ok(Some(run)) = self.store.active_run(task_id).await {
@@ -2071,6 +2103,11 @@ impl Engine {
             self.resolve_agent(&task.scope, &task.agent)?;
         let agent = self.registry.agent(&adapter_name)?;
         let runtime = self.registry.runtime(&task.runtime)?;
+        // Before anything else exists (`#131`): a harness that does not
+        // start blocks the task here, with no run row and no session, rather
+        // than dispatching into a pane nobody answers and failing it as an
+        // `ack_timeout` three minutes later.
+        self.harness_gate(&task, agent.as_ref(), trigger).await?;
         let factory = self.factory_snapshot();
         let scope_path = factory.scope_path(&task.scope)?;
         if !scope_path.is_dir() {
@@ -3167,7 +3204,7 @@ impl Engine {
             .ok_or_else(|| FactoryError::TaskNotFound(format!("run {id}")))
     }
 
-    async fn publish_task(&self, id: &str) {
+    pub(crate) async fn publish_task(&self, id: &str) {
         if let Ok(Some(task)) = self.store.get(id).await {
             self.bus.publish(Event::TaskUpdated { task });
         }
@@ -3451,7 +3488,7 @@ mod tests {
             .unwrap();
         }
 
-        let Payload::Infrastructure { host, daemon, providers, unassigned } = engine.infrastructure().await else {
+        let Payload::Infrastructure { host, daemon, providers, unassigned, .. } = engine.infrastructure().await else {
             panic!("not an infrastructure payload");
         };
 

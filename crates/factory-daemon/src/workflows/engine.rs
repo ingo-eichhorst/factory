@@ -134,8 +134,19 @@ mod tests {
             },
             // `power_assertion` off -- these tests dispatch real runs
             // through the real `Engine`, and the default would fork a
-            // real `caffeinate` on whatever machine runs the tests.
-            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+            // real `caffeinate` on whatever machine runs the tests. The
+            // harness probe off too: a `claude-code` node here is about the
+            // prompt it is built, and must not depend on `claude` being
+            // installed where the tests run (#131; `harness_health` has its
+            // own tests, against fake harnesses).
+            daemon: DaemonConfig {
+                power_assertion: false,
+                harness_health: factory_core::config::HarnessHealthConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..DaemonConfig::default()
+            },
             roles: Default::default(),
             policies: Default::default(),
             quality: Default::default(),
@@ -208,8 +219,16 @@ mod tests {
             },
             // `power_assertion` off -- these tests dispatch real runs
             // through the real `Engine`, and the default would fork a
-            // real `caffeinate` on whatever machine runs the tests.
-            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+            // real `caffeinate` on whatever machine runs the tests. The
+            // harness probe off too: see `engine()`.
+            daemon: DaemonConfig {
+                power_assertion: false,
+                harness_health: factory_core::config::HarnessHealthConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..DaemonConfig::default()
+            },
             roles: Default::default(),
             policies: Default::default(),
             quality: Default::default(),

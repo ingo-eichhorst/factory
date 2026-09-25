@@ -748,6 +748,16 @@ pub trait Agent: Send + Sync {
     /// The text submitted to the agent once it is up. Only called when there
     /// is a task: a standing agent is started and then left alone.
     async fn prompt(&self, ctx: &AgentContext) -> Result<String>;
+
+    /// How the daemon checks, before a task is handed over, that the program
+    /// this agent starts starts at all (`#131`). Declared, never run, by the
+    /// adapter: the daemon runs it, with a timeout, so a harness that hangs
+    /// cannot stall a dispatch and an adapter has nothing it could panic
+    /// in. `None` -- the default, and what a plugin gets -- means there is
+    /// nothing to check, and the task is dispatched as it always was.
+    fn health_probe(&self) -> Option<crate::harness::HealthProbe> {
+        None
+    }
 }
 
 #[cfg(test)]
