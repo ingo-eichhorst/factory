@@ -312,6 +312,7 @@ mod tests {
             scopes: vec![company, projects, demo, sibling],
             roles: Default::default(),
             policies: PolicyDeclaration::default(),
+            quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
         };

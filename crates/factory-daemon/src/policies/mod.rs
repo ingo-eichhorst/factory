@@ -1002,6 +1002,7 @@ mod tests {
                 frameworks: vec!["cra".to_string()],
                 ..Default::default()
             },
+            quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
         };
@@ -1424,6 +1425,7 @@ mod tests {
             scopes: Vec::new(),
             roles: Default::default(),
             policies: PolicyDeclaration { frameworks: vec!["house".to_string()], ..Default::default() },
+            quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
         };

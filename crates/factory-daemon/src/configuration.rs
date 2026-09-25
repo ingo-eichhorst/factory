@@ -1273,6 +1273,7 @@ mod tests {
                 scopes: vec![scope],
                 roles: Default::default(),
                 policies: Default::default(),
+                quality: Default::default(),
                 infrastructure,
                 plugins_dir: None,
             },

@@ -2702,6 +2702,7 @@ mod tests {
             },
             roles: Default::default(),
             policies: Default::default(),
+            quality: Default::default(),
             scope: None,
             scopes: vec![Scope {
                 id: "scope-id".into(),
@@ -2714,6 +2715,7 @@ mod tests {
                 task_store: None,
                 roles: Default::default(),
                 policies: Default::default(),
+                quality: Default::default(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,
