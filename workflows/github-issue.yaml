@@ -34,6 +34,9 @@ nodes:
     task:
       title: "Triage #{{issue}}"
       agent: builder
+      # Reads code and runs gh; changes nothing -- no worktree, as intake's
+      # own triage (#119).
+      worktree: false
       timeout_seconds: 2700
       labels: { issue: "{{issue}}", workflow: github-issue, step: triage }
       instructions: |
@@ -90,6 +93,8 @@ nodes:
     task:
       title: "Review #{{issue}}"
       agent: builder
+      # It detaches HEAD onto the PR branch: never in the primary checkout.
+      worktree: true
       timeout_seconds: 5400
       labels: { issue: "{{issue}}", workflow: github-issue, step: review }
       instructions: |
