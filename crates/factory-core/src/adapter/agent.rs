@@ -369,7 +369,9 @@ impl AgentContext {
              agents; {bin} run list [task-id], run show <run-id>, run log \
              <run-id>, run output <run-id>; {bin} adapters; {bin} infra, \
              which shows the host, the daemon and which AI account each \
-             agent's model calls go to.\n\n\
+             agent's model calls go to; {bin} backup status, backup list, \
+             which show whether the instance's state is backed up, how \
+             recently and whether a backup has been verified.\n\n\
              The company's knowledge base is part of that: {bin} knowledge \
              search <words> [--tag <tag>] lists the pages that match, best \
              first, as file paths with the reason each matched. It never \
@@ -526,6 +528,9 @@ impl AgentContext {
                 ),
                 Grant::GoalsCheckIn => format!(
                     "goals.checkin -> {bin} goals checkin <objective>/<kr> --value <n> --confidence <0-10> [--note \"...\"]; only for a manual key result, and the grant itself is company-wide, not scoped to {scope}"
+                ),
+                Grant::BackupRun => format!(
+                    "backup.run -> {bin} backup run; {bin} backup verify [<snapshot>]; a backup is of the whole instance, not scoped to {scope}"
                 ),
             });
         }

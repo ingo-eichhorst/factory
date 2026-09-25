@@ -9,6 +9,7 @@ import { openEdit, scheduleText } from "./task-form.js";
 import { scheduleLabel } from "./schedule.js";
 import { describeWorkflowOrigin } from "./workflows.js";
 import { entryKindLabel, entryTone } from "./operations-model.js";
+import { runUsageView, taskUsageLine } from "./usage-model.js";
 
 export { scheduleLabel };
 
@@ -199,6 +200,29 @@ export async function loadRuns() {
       state.run = state.runs.length ? state.runs[0].id : null;
     }
   } catch { state.runs = []; }
+  await loadTaskUsage();
+}
+
+/// The open task's usage summed over every run (#117) -- read from the
+/// daemon rather than re-added here, so the modal and `factory task show`
+/// can never disagree about what counts. A daemon without the endpoint
+/// leaves it blank.
+export async function loadTaskUsage() {
+  const open = state.open;
+  try {
+    const usage = (await api(`/api/tasks/${open}/usage`)).usage;
+    if (state.open === open) state.taskUsage = usage;
+  } catch { state.taskUsage = null; }
+}
+
+/// A run's usage block: tokens, cost and what they rest on, or why there
+/// is none. See `usage-model.js`.
+function usageHtml(usage) {
+  const v = runUsageView(usage);
+  let h = `<label>Usage</label><div class="usage usage-${v.tone}"><div${v.tone === "known" ? "" : ` class="sub"`}>${esc(v.headline)}</div>`;
+  for (const line of v.lines) h += `<div class="sub">${esc(line)}</div>`;
+  for (const note of v.notes) h += `<div class="sub warn">${esc(note)}</div>`;
+  return h + `</div>`;
 }
 
 /// Point the terminal at whichever run is selected. Lives here and not in
@@ -249,6 +273,9 @@ export function renderModal() {
     if (r.worktree_path) meta += ` at <code>${esc(r.worktree_path)}</code>`;
     meta += `</div>`;
   }
+  if (r) meta += usageHtml(r.usage);
+  const total = state.taskUsage && state.taskUsage.task_id === t.id ? taskUsageLine(state.taskUsage.total) : null;
+  if (total) meta += `<div class="sub">${esc(total)}</div>`;
   if (r && r.result) meta += `<label>Result</label><pre>${esc(r.result)}</pre>`;
   if (r && r.error) meta += `<label>Error</label><pre>${esc(r.error)}</pre>`;
   $("m-meta").innerHTML = meta;

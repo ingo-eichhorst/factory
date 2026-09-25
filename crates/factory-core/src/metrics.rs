@@ -146,6 +146,9 @@ pub enum Unit {
     /// A count already expressed as a weekly rate (`throughput_week`).
     PerWeek,
     Seconds,
+    /// US dollars, API-equivalent (`unit_cost`) -- what the run's usage
+    /// would have cost at the price table it was snapshotted with.
+    Usd,
 }
 
 /// Which direction is an improvement for this metric -- display and
@@ -187,8 +190,6 @@ pub struct MetricDef {
     pub unavailable_reason: Option<&'static str>,
 }
 
-const NOT_YET_A_RUN_RECORDS_NO_COST: &str = "a Run records no model, tokens or cost yet (design §12.6)";
-
 fn fixed(
     id: &str,
     title: &str,
@@ -206,19 +207,6 @@ fn fixed(
         source,
         available: true,
         unavailable_reason: None,
-    }
-}
-
-fn unavailable(id: &str, title: &str, description: &str, unit: Unit, better: Better) -> MetricDef {
-    MetricDef {
-        id: id.to_string(),
-        title: title.to_string(),
-        description: description.to_string(),
-        unit,
-        better,
-        source: "none -- see unavailable_reason",
-        available: false,
-        unavailable_reason: Some(NOT_YET_A_RUN_RECORDS_NO_COST),
     }
 }
 
@@ -332,12 +320,36 @@ fn time_to_recover_p50_def() -> MetricDef {
     )
 }
 
+/// The cost metrics' shared source (#117): each run's usage, measured by
+/// the agent runtime and mirrored on the run.
+const USAGE_SOURCE: &str =
+    "each run's usage (Run.usage, from AgentRuntime::usage snapshots) over runs that ended in the trailing 28 days \
+     (usage::usage_metric over TaskStore::runs_between)";
+
 fn unit_cost_def() -> MetricDef {
-    unavailable("unit_cost", "Unit cost", "Cost per finished unit.", Unit::Ratio, Better::Lower)
+    fixed(
+        "unit_cost",
+        "Unit cost",
+        "API-equivalent USD spent per finished unit: the cost of every run that finished in the \
+         trailing 28 days -- failed and cancelled ones included, scrap is part of the price -- over \
+         how many of them ended done. Only runs whose usage the runtime measured start to end count \
+         on either side; an unmeasured run is left out, never taken as free.",
+        Unit::Usd,
+        Better::Lower,
+        USAGE_SOURCE,
+    )
 }
 
 fn tokens_per_run_def() -> MetricDef {
-    unavailable("tokens_per_run", "Tokens per run", "Tokens spent per run.", Unit::Count, Better::Lower)
+    fixed(
+        "tokens_per_run",
+        "Tokens per run",
+        "The mean of every token type summed (input, output, cache read and write), over runs that \
+         finished in the trailing 28 days with their usage measured start to end.",
+        Unit::Count,
+        Better::Lower,
+        USAGE_SOURCE,
+    )
 }
 
 fn compliance_def(framework: &str) -> MetricDef {
@@ -443,7 +455,11 @@ pub enum MetricError {
     #[error("{0} is not a known metric")]
     Unknown(MetricId),
     /// The family exists, and `id` is shaped correctly, but
-    /// `factory-daemon` cannot compute it yet.
+    /// `factory-daemon` cannot compute it yet. No metric is unavailable
+    /// today -- `unit_cost` and `tokens_per_run`, the last two, became
+    /// computable with #117 -- but the variant stays, and everything that
+    /// handles it, so the next metric named before it can be computed has
+    /// an honest place to go.
     #[error("{id} is not available yet: {reason}")]
     Unavailable { id: MetricId, reason: &'static str },
 }
@@ -467,18 +483,8 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         ["fail_rate"] => fail_rate_def(),
         ["rework_rate"] => rework_rate_def(),
         ["time_to_recover_p50"] => time_to_recover_p50_def(),
-        ["unit_cost"] => {
-            return Err(MetricError::Unavailable {
-                id: id.clone(),
-                reason: NOT_YET_A_RUN_RECORDS_NO_COST,
-            })
-        }
-        ["tokens_per_run"] => {
-            return Err(MetricError::Unavailable {
-                id: id.clone(),
-                reason: NOT_YET_A_RUN_RECORDS_NO_COST,
-            })
-        }
+        ["unit_cost"] => unit_cost_def(),
+        ["tokens_per_run"] => tokens_per_run_def(),
         ["compliance", framework] => compliance_def(framework),
         ["open_controls", framework] => open_controls_def(framework),
         ["bench", "resolve_rate", dataset] => bench_resolve_rate_def(dataset),
@@ -632,12 +638,16 @@ mod tests {
     }
 
     #[test]
-    fn unit_cost_and_tokens_per_run_are_listed_unavailable() {
-        for id in ["unit_cost", "tokens_per_run"] {
-            let def = registry().into_iter().find(|d| d.id == id).unwrap();
-            assert!(!def.available);
-            assert_eq!(def.unavailable_reason, Some(NOT_YET_A_RUN_RECORDS_NO_COST));
+    fn unit_cost_and_tokens_per_run_are_available_since_runs_record_usage() {
+        // #117: a run carries its usage now, so the two metrics that used
+        // to be named but uncomputable (design §12.6) resolve like any other.
+        for (id, unit) in [("unit_cost", Unit::Usd), ("tokens_per_run", Unit::Count)] {
+            let def = resolve(&MetricId::new(id).unwrap()).unwrap();
+            assert!(def.available, "{id}");
+            assert_eq!(def.unavailable_reason, None, "{id}");
+            assert_eq!((def.unit, def.better), (unit, Better::Lower), "{id}");
         }
+        assert_eq!(serde_json::to_value(Unit::Usd).unwrap(), serde_json::json!("usd"));
     }
 
     #[test]
@@ -709,21 +719,6 @@ mod tests {
         assert!(matches!(
             resolve(&MetricId::new("goal_tasks_done").unwrap()),
             Err(MetricError::Unknown(_))
-        ));
-    }
-
-    #[test]
-    fn resolve_refuses_unit_cost_and_tokens_per_run_as_unavailable() {
-        assert_eq!(
-            resolve(&MetricId::new("unit_cost").unwrap()),
-            Err(MetricError::Unavailable {
-                id: MetricId::new("unit_cost").unwrap(),
-                reason: NOT_YET_A_RUN_RECORDS_NO_COST,
-            })
-        );
-        assert!(matches!(
-            resolve(&MetricId::new("tokens_per_run").unwrap()),
-            Err(MetricError::Unavailable { .. })
         ));
     }
 

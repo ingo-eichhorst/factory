@@ -3,8 +3,10 @@
 
 mod access;
 mod agents;
+mod backup;
 mod bench;
 mod configuration;
+mod costs;
 mod datasets;
 mod discovery;
 mod engine;
@@ -201,6 +203,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let discovery_started = std::time::Instant::now();
     discovery::apply(&mut factory)?;
     factory.config.validate()?;
+    backup::validate_schedule(&factory)?;
     tracing::info!(
         instance = %factory.config.instance.name,
         root = %factory.root.display(),
@@ -272,12 +275,14 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let bench_store = bench::BenchStore::open(&factory.database_path())?;
     let policy_store = policies::PolicyStore::open(&factory.database_path())?;
     let goals_store = goals::GoalsStore::open(&factory.database_path())?;
+    let backup_store = backup::BackupStore::open(&factory.database_path())?;
     let engine = Arc::new(
         Engine::new(factory.clone(), registry, store, factory_bin(), interface_names)
             .with_workflow_store(workflow_store)
             .with_bench_store(bench_store)
             .with_policy_store(policy_store)
-            .with_goals_store(goals_store),
+            .with_goals_store(goals_store)
+            .with_backup_store(backup_store),
     );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -344,6 +349,9 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     engine.recover_bench_runs().await;
 
     let sched = tokio::spawn(scheduler::run(engine.clone(), shutdown_rx.clone()));
+    // Its own loop rather than a slot in the scheduler's: a backup can take
+    // minutes, and nothing the scheduler fires should wait behind one.
+    let backups = tokio::spawn(backup::run(engine.clone(), shutdown_rx.clone()));
 
     engine.bus.publish(Event::DaemonStarted {
         at: chrono::Utc::now(),
@@ -380,6 +388,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
         }
     }
     sched.abort();
+    backups.abort();
     engine.registry.shutdown().await;
     Ok(())
 }

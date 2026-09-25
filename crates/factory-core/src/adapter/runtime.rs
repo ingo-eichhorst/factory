@@ -325,6 +325,17 @@ pub trait AgentRuntime: Send + Sync {
         Ok(None)
     }
 
+    /// What the harness sessions in this session have used so far --
+    /// cumulative per harness session, in the #117 contract's shape
+    /// (`crate::usage::SessionUsage`). This is the only way usage reaches
+    /// Factory: never a transcript, never an observability tool asked
+    /// directly. `None` is the honest answer of a runtime with no source
+    /// for it; an error is one that has a source which did not answer, and
+    /// its message is kept as the reason the run's usage is unknown.
+    async fn usage(&self, _session: &SessionRef) -> Result<Option<crate::usage::SessionUsage>> {
+        Ok(None)
+    }
+
     async fn stop(&self, session: &SessionRef) -> Result<()>;
 }
 
@@ -396,6 +407,11 @@ mod tests {
             StatusSource::Unknown,
             "a runtime that never says how it knows must not come out Reported"
         );
+    }
+
+    #[tokio::test]
+    async fn a_runtime_that_never_learned_about_usage_answers_none() {
+        assert_eq!(BareRuntime.usage(&session()).await.unwrap(), None);
     }
 
     #[tokio::test]

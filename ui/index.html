@@ -61,7 +61,7 @@
     <span class="lv-n">L2</span><span class="lv-name">Environment</span><span class="lv-sub">Sandboxes and secrets</span>
   </button>
   <button id="lv-infra" class="lvl" data-level="infra" data-lv="1">
-    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Host, daemon and AI accounts</span>
+    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Host, daemon, AI accounts and backup</span>
   </button>
 </nav>
 
@@ -91,6 +91,7 @@
   <button id="tab-benchmarks" hidden>Benchmarks</button>
   <button id="tab-knowledge" hidden>Knowledge</button>
   <button id="tab-infrastructure" hidden>Infrastructure</button>
+  <button id="tab-backup" hidden>Backup</button>
 </nav>
 </div>
 
@@ -871,6 +872,28 @@
       see the host, the daemon and the AI accounts here.</p>
     <p class="env-note bad" id="infrastructure-error" hidden></p>
     <div class="infra-stack" id="infrastructure" hidden></div>
+  </div>
+
+  <div id="view-backup" hidden>
+    <div class="bar">
+      <h2>Backup</h2>
+      <span class="sp"></span>
+      <button class="btn" id="backup-refresh">Refresh</button>
+      <button class="btn" id="backup-verify" disabled>Verify newest</button>
+      <button class="btn primary" id="backup-run" disabled>Back up now</button>
+    </div>
+    <!-- In the markup, not the fetched answer, so it goes on being said when
+         the request fails. -->
+    <p class="env-note">A backup is the instance's own state: the database, copied consistently while the daemon
+      runs, the configs, and the authored content nothing regenerates. Secrets are never read or copied, and scope
+      source code is backed up by pushing each repository to its git remote, not here. A backup is only claimed
+      once its manifest verifies.</p>
+    <!-- A daemon built before this page existed answers a bare 404: said
+         calmly, apart from the red error element. -->
+    <p class="env-note" id="backup-unavailable" hidden>Backup is not available on this daemon: it was built before
+      <code>/api/backup</code> existed. Rebuild and restart the daemon to see backups here.</p>
+    <p class="env-note bad" id="backup-error" hidden></p>
+    <div class="bk-page" id="backup" hidden></div>
   </div>
   </div>
 </main>

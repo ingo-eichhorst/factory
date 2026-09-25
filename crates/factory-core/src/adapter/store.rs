@@ -117,6 +117,20 @@ pub trait TaskStore: Send + Sync {
         Ok(None)
     }
 
+    // -- usage (#117) --------------------------------------------------------
+
+    /// Keep one usage snapshot, append-only. A store that keeps none may
+    /// drop it -- every run's usage then reads as unknown, with the reason
+    /// `run_usage` gives for a run with no snapshots, which is the truth.
+    async fn append_usage(&self, _snapshot: &crate::usage::UsageSnapshot) -> Result<()> {
+        Ok(())
+    }
+
+    /// One run's snapshots, in the order they were taken.
+    async fn usage_snapshots(&self, _run_id: &str) -> Result<Vec<crate::usage::UsageSnapshot>> {
+        Ok(Vec::new())
+    }
+
     /// Every run that overlaps the window, whatever task it belongs to.
     async fn runs_between(
         &self,

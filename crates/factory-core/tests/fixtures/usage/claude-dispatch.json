@@ -1,0 +1,8 @@
+{ "schema": 1, "pane_id": "w3:p1", "sampled_at": "2026-09-25T12:00:00Z",
+  "sessions": [ { "session_id": "s1", "adapter": "claude-code", "model": "claude-opus-5",
+      "tokens": { "input": 20000, "output": 1000, "cache_read": 100000, "cache_write": null },
+      "cost": { "usd": 0.50, "pricing_source": "litellm@2026-09-01" },
+      "elapsed_seconds": 600, "active_seconds": null,
+      "subagents": [],
+      "unavailable": { "tokens.cache_write": "not reported by this harness version",
+                       "active_seconds": "not tracked for this adapter" } } ] }

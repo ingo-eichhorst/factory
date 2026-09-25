@@ -71,7 +71,7 @@ fn load() -> Option<[f64; 3]> {
 }
 
 #[cfg(unix)]
-fn disk(mount: &str) -> Option<DiskFacts> {
+pub(crate) fn disk(mount: &str) -> Option<DiskFacts> {
     let path = std::ffi::CString::new(mount).ok()?;
     // SAFETY: a zeroed statvfs is a valid out-parameter, `path` is a valid
     // NUL-terminated string, and the struct is only read when the call
@@ -91,7 +91,7 @@ fn disk(mount: &str) -> Option<DiskFacts> {
 }
 
 #[cfg(not(unix))]
-fn disk(_mount: &str) -> Option<DiskFacts> {
+pub(crate) fn disk(_mount: &str) -> Option<DiskFacts> {
     None
 }
 

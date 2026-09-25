@@ -158,11 +158,22 @@ pub struct Engine {
     /// a goals request is stateful: the direction and cycle catalogues are
     /// read fresh off disk on every call, like the policy catalogues.
     pub(crate) goals: crate::goals::GoalsStore,
+    /// What happened to backups -- see `backup::BackupStore`. The archives
+    /// themselves are the destination's, listed fresh on every request.
+    pub(crate) backups: crate::backup::BackupStore,
+    /// Held for the whole of a backup or a verification, so the job and a
+    /// person can never run two at once over one destination. Taken with
+    /// `try_lock`: a second request is refused, never queued.
+    pub(crate) backup_busy: tokio::sync::Mutex<()>,
     /// Serializes a bench run's own read-modify-write: choosing which
     /// pending attempts to start, and recomputing the run's own status once
     /// every attempt has settled. Coarse -- one lock for every run, the same
     /// trade `workflow_edit` already makes -- rather than one per run.
     pub(crate) bench_edit: tokio::sync::Mutex<()>,
+    /// Serializes a run's usage read-modify-write -- append a snapshot, read
+    /// them all back, write the derived `usage` -- so two snapshots landing
+    /// together never leave the older sum on the run (`costs.rs`).
+    pub(crate) usage_edit: tokio::sync::Mutex<()>,
     /// Task ids already enqueued for judgement, or currently being judged by
     /// the worker: the guard that keeps a report and a cancel racing each
     /// other (or a live enqueue racing recovery's own sweep) from queuing
@@ -283,7 +294,11 @@ impl Engine {
                 .expect("an in-memory policy store should open"),
             goals: crate::goals::GoalsStore::in_memory()
                 .expect("an in-memory goals store should open"),
+            backups: crate::backup::BackupStore::in_memory()
+                .expect("an in-memory backup store should open"),
+            backup_busy: tokio::sync::Mutex::new(()),
             bench_edit: tokio::sync::Mutex::new(()),
+            usage_edit: tokio::sync::Mutex::new(()),
             bench_judging: Default::default(),
             bench_judge_tx,
             bench_judge_rx: std::sync::Mutex::new(Some(bench_judge_rx)),
@@ -328,6 +343,12 @@ impl Engine {
     /// The same, for goals check-ins.
     pub fn with_goals_store(mut self, goals: crate::goals::GoalsStore) -> Self {
         self.goals = goals;
+        self
+    }
+
+    /// The same, for the backup history.
+    pub fn with_backup_store(mut self, backups: crate::backup::BackupStore) -> Self {
+        self.backups = backups;
         self
     }
 
@@ -503,6 +524,24 @@ impl Engine {
                 })
             }
             Request::Infrastructure => Ok(self.infrastructure().await),
+            Request::Backup => Ok(Payload::Backup {
+                report: Box::new(self.backup_report().await?),
+            }),
+            // `backup_completed`/`backup_failed`/`backup_verified` are
+            // published inside, where the job's own backups publish them too.
+            Request::BackupRun => Ok(Payload::BackupRun {
+                snapshot: self
+                    .backup_run(
+                        factory_core::backup::BackupTrigger::Manual,
+                        crate::policies::caller_name(caller),
+                    )
+                    .await?,
+            }),
+            Request::BackupVerify { snapshot } => Ok(Payload::BackupVerify {
+                verification: self
+                    .backup_verify(snapshot, crate::policies::caller_name(caller))
+                    .await?,
+            }),
             Request::Knowledge => {
                 let root = self.factory_snapshot().root;
                 let index = tokio::task::spawn_blocking(move || factory_core::knowledge::index(&root))
@@ -1006,6 +1045,18 @@ impl Engine {
             }),
             Request::RunGet { id } => Ok(Payload::Run {
                 run: self.require_run(&id).await?.redacted(),
+            }),
+            Request::RunUsage { id } => {
+                let run = self.require_run(&id).await?;
+                Ok(Payload::UsageSnapshots {
+                    snapshots: self.store.usage_snapshots(&run.id).await?,
+                })
+            }
+            Request::TaskUsage { id } => Ok(Payload::TaskUsage {
+                usage: self.task_usage(&id).await?,
+            }),
+            Request::Costs { group_by, from, to, scope } => Ok(Payload::Costs {
+                report: self.costs_report(group_by, from, to, scope.as_deref()).await?,
             }),
             Request::RunEntries { id, limit } => Ok(Payload::Entries {
                 entries: self.store.run_entries(&id, limit.unwrap_or(200)).await?,
@@ -2137,6 +2188,13 @@ impl Engine {
             .await?;
         self.bus.publish(Event::RunUpdated { run: run.clone() });
 
+        // The baseline, before the task is handed over: whatever the session
+        // had already used -- a pane an earlier run left behind, a harness
+        // that spent tokens coming up -- is not this run's (#117). Never a
+        // `?`: a runtime with no usage to give must not fail the run.
+        self.snapshot_usage(&run, factory_core::usage::SnapshotPoint::Dispatch)
+            .await;
+
         let prompt = agent.prompt(&ctx).await?;
         runtime.submit(&session, &prompt).await?;
 
@@ -2790,6 +2848,9 @@ impl Engine {
                     .await;
                 }
             }
+            // The last reading, while the session is still there to ask.
+            self.snapshot_usage(run, factory_core::usage::SnapshotPoint::RunEnd)
+                .await;
             let _ = runtime.stop(session).await;
         }
     }
@@ -4919,6 +4980,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            usage: None,
         };
         let first = t0 + chrono::Duration::minutes(5);
         assert_eq!(skip_reason_of(Some(&run), first), SkipReason::StillActive);
@@ -5080,6 +5142,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            usage: None,
         };
         let slot = t(60);
         let booted = t(1000);

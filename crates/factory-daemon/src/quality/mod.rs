@@ -917,14 +917,20 @@ mod tests {
              \x20     - { id: cheap, measure: { metric: unit_cost, below: 1 } }\n\
              \x20     - { id: gate, measure: { check: task, task: quality-gate } }\n",
         );
-        for scenario in ["signed-off", "cheap"] {
-            let err = engine
-                .quality_remediate("demo".into(), "maintainability.modifiability".into(), scenario.into(), None)
-                .await
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("no task can change that") && err.contains("profile"), "{scenario}: {err}");
-        }
+        let err = engine
+            .quality_remediate("demo".into(), "maintainability.modifiability".into(), "signed-off".into(), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no task can change that") && err.contains("profile"), "{err}");
+        // `unit_cost` was the unavailable-metric case here until #117 made it
+        // computable: with no finished runs it is ordinary no_data now, the
+        // kind a task can change, so it is remediated like `scrap_rate`.
+        let cheap = engine
+            .quality_remediate("demo".into(), "maintainability.modifiability".into(), "cheap".into(), None)
+            .await
+            .unwrap();
+        assert!(cheap.created);
         let ok = engine
             .quality_remediate("demo".into(), "maintainability.modifiability".into(), "gate".into(), None)
             .await

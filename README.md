@@ -787,7 +787,8 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `bench.resolve_rate.<dataset>` | the newest settled bench run's resolve rate | `bench::aggregate` |
 | `goal_tasks_done.<objective>.<kr>` | count of tasks labelled `goal=<objective>/<kr>` whose status is `done` | task labels, through `TaskStore` |
 | `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met, across every scope | `quality_report(None)` — see "Quality attributes" |
-| `unit_cost`, `tokens_per_run` | cost/tokens per run | **unavailable**: a `Run` records no model, tokens or cost yet (design §12.6) |
+| `unit_cost` | API-equivalent USD spent per run ended `done` (failed and cancelled runs' cost included), trailing 28 days | each run's measured usage (`Run.usage`, #117) |
+| `tokens_per_run` | mean tokens of every type per finished run, trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 
 `throughput_week`/`first_pass_yield`/`scrap_rate` read `production.rs`'s own
 daily grid directly rather than re-deriving "finished"/"scrapped"/
@@ -797,9 +798,11 @@ fact: `Request::Metrics { ids }` only touches `production`/`policy_report`/
 the bench store when some asked id actually needs it, and each is read at
 most once per call no matter how many ids ask for something behind it. An
 id the registry has never heard of refuses the whole call (a typo should
-not come back as a quiet `None`); `unit_cost`/`tokens_per_run` — named in
-the registry but not yet computable — come back as `value: None` with that
-reason, never an error. `ids` empty means every non-parameterised metric
+not come back as a quiet `None`); a metric named in the registry but not
+yet computable would come back as `value: None` with its reason, never an
+error — none is today. `unit_cost`/`tokens_per_run` count only runs whose
+usage the runtime measured start to end; an unmeasured run is left out,
+never taken as free, and with none left the value is `None` with a reason. `ids` empty means every non-parameterised metric
 (available or not) plus whatever the loaded goals and policy catalogues
 themselves name. Only the three production-based metrics carry a history
 today: one point per day over the daily grid's own 53 weeks, each point
@@ -982,9 +985,9 @@ fan chart can draw the baseline band and a scenario's band on one axis.
 **Drivers.** A small, built-in tree tied to the metric registry where one
 exists: `throughput_week`, `first_pass_yield`, `scrap_rate`, `rework_rate`
 (registry-backed); `capacity_factor` (an assumption — no data source, a
-person's own what-if); `unit_cost`, `tokens_per_run` (named, but **unavailable** —
-design §12.6, a `Run` records no cost yet; only `=N`, a pure assumption
-needing no baseline, may override one). The one v1 formula:
+person's own what-if); `unit_cost`, `tokens_per_run` (registry-backed since
+#117, but not in the forecast formula until #117 v3, so the What-if panel
+keeps their sliders disabled). The one v1 formula:
 `effective_throughput = throughput_week × capacity_factor × first_pass_yield`.
 An override is authored `×2`/`x2` (multiply), `+20%`/`-20%` (percent
 change), `+5`/`-5` **quoted** (delta — YAML reads a bare `+5` as an
@@ -1444,6 +1447,61 @@ Only one run of a task can be in progress at a time — two attempts at once
 would race for the same working directory — so starting a second is refused
 until the first ends or is cancelled.
 
+### What a run used (#117)
+
+Every run records what it used — tokens by type, API-equivalent cost with the
+price table it was priced by, the model — as the **agent runtime** observed
+it. Factory is the process layer: it never reads a harness transcript, never
+learns a harness's file layout, and never talks to an observability tool
+directly. Usage reaches it through one door, `AgentRuntime::usage`, which
+answers in the versioned contract `factory_core::usage::SessionUsage`
+(schema 1, cumulative per harness session). A runtime with no source for it
+answers `None`.
+
+herdr answers through a plugin: whichever installed herdr plugin offers an
+action called `usage` (Irrlicht's) is invoked over herdr's socket API with the
+run's pane as `context.focused_pane_id` — the pane reaches the plugin as
+`HERDR_PANE_ID` — and its stdout is read back from the plugin command log.
+`herdr plugin action invoke` itself cannot be used: it has no pane argument
+and acts on whichever pane is focused. Nothing names the plugin; installing or
+removing it takes effect on the next run. With two plugins offering `usage`,
+`FACTORY_HERDR_USAGE_PLUGIN` picks one. A read is bounded to five seconds.
+
+A run is read three times: once its session is up and before the task is
+handed over (the **baseline**), at every turn end the harness reports, and as
+it ends, before the session is closed. Each reading is kept append-only
+(`factory run usage <run-id>`), answered or not, and the run's `usage` is the
+difference between the baseline and the newest reading that answered — so a
+pane reused from an earlier run is never billed twice. Rules:
+
+- **Never a guessed number.** A count the runtime could not see is `?`, and a
+  total with one unknown part is unknown. A run whose runtime had no answer is
+  `unknown` with the reason, never `$0.00`; so is a pane with no harness
+  session in it at all.
+- **A lower bound says so.** Figures as of a turn end because the last
+  reading failed are marked partial ("at least").
+- **Prices are snapshotted.** Every cost carries its `pricing_source`.
+- Subagents are listed apart from their parent in the contract and are added
+  to it.
+
+```sh
+factory run show <run-id>        # the usage block
+factory task show <id>           # every run's usage and the sum
+factory cost --by issue --since 7d   # task | issue | scope | agent
+factory cost --by agent --scope projects/factory --since 2026-09-01
+```
+
+`GET /api/costs?group_by=&from=&to=&scope=`, `GET /api/tasks/{id}/usage` and
+`GET /api/runs/{id}/usage` answer the same. Grouping by `issue` reads the
+task's `issue=<n>` label. Sums are over the runs that knew the number, and
+beside them is how many did not: an unmeasured run is counted, never dropped
+and never free. The registry metrics `unit_cost` and `tokens_per_run` read
+the same usage (see "Goals").
+
+Not yet (v2 and later): plan share of a subscription's rate-limit window
+(the snapshots already keep the windows), estimate vs actual, the provider
+and workflow groupings, and cost drivers in the Scenarios forecast.
+
 ## Workflows
 
 A workflow is reusable Process-level intent: a scoped, finite DAG of ordinary
@@ -1604,13 +1662,16 @@ daemon:
   default_runtime: herdr
   power_assertion: true        # hold the host awake while a run is active
 
-infrastructure:              # optional: the AI accounts behind the agents
+infrastructure:              # optional: the AI accounts behind the agents, and backups
   providers:
     - name: claude-max
       vendor: anthropic
       kind: subscription       # subscription | api-key
       plan: Max 20x            # free text, optional
       harnesses: [claude-code] # default binding for every agent on these
+  backup:                    # see "Backup" below
+    destination: /Volumes/Backup/factory
+    schedule: { cron: "0 3 * * *", timezone: Europe/Berlin }
 
 scope:                       # optional: make the instance root a scope too
   id: cc23161d-82b9-4e75-8d88-e5195bc6d6e8
@@ -1736,6 +1797,96 @@ uptime, load and the root filesystem. Any of those that cannot be read is
 `null`, never a failed request, and only macOS answers all of them. Usage and
 spend per provider are not shown: Factory does not record tokens yet.
 
+### Backup
+
+`.factory/` holds the only copy of the company's operating history -- the
+database, the knowledge vault, the policies, goals, scenarios and quality
+profiles -- and git tracks none of it. The root config names where a copy
+goes, and the daemon takes one on a schedule:
+
+```yaml
+# root .factory/config.yaml
+infrastructure:
+  backup:
+    destination: /Volumes/Backup/factory     # an external disk, NAS mount or synced folder
+    schedule: { cron: "0 3 * * *", timezone: Europe/Berlin }
+    keep: { daily: 7, weekly: 4, monthly: 6 } # grandfather-father-son
+    include_logs: false                       # also .factory/guides/ and .factory/logs/
+```
+
+A snapshot is one `factory-backup-<instance>-<utc>.tar.zst` holding:
+
+- `.factory/factory.sqlite`, copied with `VACUUM INTO` on a connection of its
+  own -- one read transaction, so the copy is consistent while the daemon
+  writes, and never a file copy, which WAL would make torn -- then checked with
+  `PRAGMA integrity_check` before anything is archived;
+- the root `.factory/config.yaml` and every registered scope's own;
+- `.factory/{knowledge,datasets,policies,goals,scenarios,quality}/`, whole;
+- a `manifest.json`, written last: instance, daemon version (there is no
+  build commit compiled in, so none is claimed), the database's
+  `user_version`, tables and integrity result, and the path, size and sha256
+  of every other file.
+
+Never in it: `.factory/secrets.yaml` or anything under a `secrets/`
+directory (not even opened), `.env` files, symbolic links (not followed --
+each is named in the manifest instead), the `-wal`/`-shm` files, the socket,
+`.factory/worktrees/`, and scope source code, which is backed up by pushing
+it to its git remote. Each file is read once and hashed and archived from the
+same bytes, so the manifest cannot disagree with the archive. The archive is
+written as a hidden `.partial` and renamed into place only when complete and
+synced.
+
+    factory backup [status]          the hero: age against the schedule, destination, last verify, warnings
+    factory backup list              every snapshot, verified or not, and the rule that keeps it
+    factory backup run               take one now, then apply retention
+    factory backup verify [<name>]   prove one would restore; exits non-zero on a failed check
+
+`GET /api/backup`, `POST /api/backup/run` and
+`POST /api/backup/verify?snapshot=` are the same three over HTTP, and the
+**L1 › Backup** page draws them. `run` and `verify` need `backup.run`, which
+only an agent in the root scope may hold, like `policy.attest`; reading is
+open to every agent.
+
+**Verify** unpacks a snapshot into a temporary directory -- never over the
+instance -- refusing any entry that would land outside it, then checks every
+sha256 against the manifest (a file missing, changed or unlisted fails it),
+runs `integrity_check` on the database copy and compares its schema version,
+loads the root config, and loads every authored-content directory with the
+loader the daemon uses: policies and drafts, goals, scenarios, quality
+profiles, datasets and the knowledge index. A file one of those loaders
+cannot parse is a warning, not a failure: the checksums have already proved
+it is byte for byte what was backed up, so it is broken in the live
+instance too. Every verification is recorded; the page's "last verified"
+only counts snapshots still in the destination.
+
+**The job.** Once a minute the daemon looks whether the schedule's next slot
+after the later of the last attempt and the newest archive has passed, so a
+daemon that was down at 03:00 takes that night's backup as soon as it is
+back, once. **Retention** runs only after a backup succeeded, only on file
+names that are this instance's archives -- nothing else in a shared folder is
+ever listed or deleted -- and never deletes the newest. Each rule keeps the
+newest snapshot of each of its most recent days, ISO weeks or months (in the
+schedule's timezone) that have one.
+
+**Warnings are facts, not guesses:** no backup configured; the last attempt
+failed, with its reason; the destination missing (only its last component is
+ever created -- a missing parent is most likely an unmounted disk, and
+creating `/Volumes/Backup/factory` on the system disk would be the backup that
+looks fine and is not); the destination on the **same device** as the
+instance (same `st_dev`), which is a copy, not a backup; the newest backup
+stale (one slot missed, plus two hours' grace) or overdue (two); no schedule;
+and no snapshot in the destination verified, or the last verification
+failed. A destination inside the instance's own `.factory/` is refused.
+
+Every backup and verification is an event -- `backup_completed`,
+`backup_failed`, `backup_verified` -- and a row in an append-only
+`backup_events` table. A failure is never a crash: a full disk or an
+unmounted volume is a `backup_failed` with the reason, a warning on the page
+and a line in the log. Not yet: `age` encryption (a config asking for
+`encrypt_to` is refused at load rather than given plaintext it thinks is
+encrypted), `restore --into`, the policy facts and metrics, the scope-repo
+remote report and the Time Machine fact are the issue's v2.
+
 ## Writing a plugin
 
 A plugin is any program that reads one JSON object per line on stdin and writes
@@ -1802,8 +1953,11 @@ echo '{"op":"task.list","params":{}}' | nc -U .factory/factory.sock
 HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`,
 `GET /api/runs/{id}/entries`, `GET /api/tasks/{id}/entries` (`?task_only=true`
-for only the task's own lines, none of its runs'), `GET /api/runs/{id}/output`, `GET /api/agents`,
+for only the task's own lines, none of its runs'), `GET /api/runs/{id}/output`,
+`GET /api/runs/{id}/usage`, `GET /api/tasks/{id}/usage`,
+`GET /api/costs?group_by=&from=&to=&scope=`, `GET /api/agents`,
 `GET /api/agent-runtime`, `GET /api/environment`, `GET /api/infrastructure`,
+`GET /api/backup`, `POST /api/backup/run`, `POST /api/backup/verify?snapshot=`,
 `GET /api/knowledge`,
 `GET /api/knowledge/search?q=&tags=&scope=&limit=`,
 `PUT /api/knowledge/files?path=&overwrite=` (raw bytes, its own 50 MiB body
@@ -2065,5 +2219,6 @@ unchanged.
     ui/js/{sandboxes,secrets}.js                                 L2's two tabs
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
+    ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter

@@ -124,7 +124,7 @@ pub fn skipped_beyond_tick(
 /// next firing through `next_after`, so a name this refuses is refused when
 /// the schedule is set -- with the name in the message -- rather than
 /// accepted and then never firing.
-fn timezone(name: &str) -> Result<Tz> {
+pub(crate) fn timezone(name: &str) -> Result<Tz> {
     Tz::from_str(name.trim()).map_err(|_| {
         FactoryError::BadRequest(format!(
             "{name:?} is not a timezone Factory knows; use an IANA name such as Europe/Berlin or UTC"
