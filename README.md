@@ -1079,6 +1079,100 @@ overridden, outcomes, tornado), policy delta (subtree and per scope), goal
 scenarios, signposts. `GET /api/scenarios?scope=` answers the same
 `ScenariosReport` both read from.
 
+## Operations
+
+L4 Process's third tab (`#106`), next to Tasks and Workflows: how the line
+is running, exception first. **A picture, not a controller** (design §8):
+nothing here starts, stops or retries anything on its own; the only new
+lever is that a person can pause a schedule. `factory_core::operations` is
+the pure model -- every word below is defined there, and tested on its own;
+`crates/factory-daemon/src/operations.rs` gathers what it reads.
+
+**The projection.** `GET /api/operations?scope=&window=7d|30d` and
+`factory stats` answer one `OperationsReport`, computed on read from the
+store like `/api/production`, with no store of its own:
+
+- `attention` -- what needs a human now, most severe first, then oldest.
+- `flow` -- per scope, work in flight by state (queued, dispatching,
+  running, blocked), queue depth, queue wait p50/p95, sessions in use and
+  how many runs are waiting on a retry. Nothing in Factory limits a scope's
+  sessions -- the `max_sessions` older configs carry is read and ignored --
+  so `sessions_max` is absent, never a made-up limit.
+- `aging` -- every run in progress with its age against the p50/p70/p85/p95
+  of the same task's finished runs (five or more), else its scope's, else
+  "not enough history" and no colour at all.
+- `health` -- over the window and the one before it: throughput per day,
+  cycle time p50/p85, first-pass yield, rework, scrap and fail rates,
+  scrap by `fail_kind`, time to recover, queue wait, and interventions per
+  100 runs. A figure that cannot be computed says why instead of reading
+  zero, and one read off a fact older runs do not record says from when it
+  is on record.
+- `schedules` -- every scheduled task: due, late, missed or paused, with its
+  timezone.
+
+It reads runs overlapping the last 60 days (or two windows, if longer) --
+open runs included -- open runs' own journals for their last word and a
+blocked run's reason, `schedule_skipped` entries from the last day, and
+answers over both windows (`TaskStore::entries_of_kinds`, one query rather
+than a walk over every journal; a store that cannot search returns nothing
+and the counts are floors).
+
+**Exceptions.** Only what a person can act on:
+
+| kind | when | severity |
+|---|---|---|
+| `blocked` | the run is `Blocked`, said by its agent or a lifecycle hook; the reason is its own words | high |
+| `suspected_stuck` | the runtime suspects the run is waiting, or it has said nothing past the p95 of its history -- always marked a **suspicion**, never a status | medium |
+| `failed_exhausted` | the newest run failed and no retry is left; a failing run that will be retried is a `retrying` count in Flow instead | high |
+| `aging` | running past the p85 (medium) or p95 (high) of its history | medium/high |
+| `schedule_late` | a slot passed two ticks ago and nothing was dispatched | medium |
+| `schedule_missed` | slots the scheduler passed over (`schedule_skipped`) in the last day | medium |
+| `liveness_lost` | a **permanent** agent's session is gone -- never judged on being quiet | high |
+| `triggered_signpost` | a scenario signpost is past its threshold -- an observation, on the unscoped report only | low |
+
+A run appears once, as its most severe kind, with any other kinds it matched
+in `also`. Each exception lists the actions it allows.
+
+**Actions.** Each is an existing request, or a narrow one beside it, and
+each is journaled with who asked (`source: owner` or `agent`, `data.by`) and
+why (`data.reason`, when given):
+
+```sh
+factory task run <id> --reason "..."          # run again; journals run_requested
+factory task cancel <id> --reason "..."       # journals cancel_requested; counts as scrap
+factory task edit <id> --pause-schedule --reason "stop the line"
+factory task skip-next <id> --reason "..."    # task.skip_next; journals slot_skipped
+factory run answer <run-id> "text" --reason "..."   # run.answer
+```
+
+`task.skip_next` moves the schedule to the slot after the next one -- or the
+first one after now, when the next has already passed -- and a queued retry,
+being the next thing that would fire, is what it drops. It is journaled as
+`slot_skipped`, never as `schedule_skipped`: a person's decision is not a
+missed slot. `run.answer` types the text into the blocked run's own session
+and presses enter; it is refused unless the run is `Blocked` and has a
+session, the reason is required, and only the reason is journaled
+(`answer`), not the text. The run stays blocked until its agent reports
+otherwise. Over HTTP: `POST /api/tasks/{id}/run`, `.../cancel` and
+`.../skip-next` take an optional `{"reason": ...}` body, `PATCH
+/api/tasks/{id}` a `reason` beside the patch's fields, and `POST
+/api/runs/{id}/answer` `{text, reason}`. Skipping is `task.edit`, like
+pausing; answering is `run.input`, with the same reach -- no new grants.
+
+**Interventions** are what the record shows a person doing: a manual run of
+a task whose previous attempt failed or was cancelled, a cancel by the
+owner, and an answer. An agent that leaves its token out is the owner, so
+this is a floor.
+
+**Live updates.** No event of its own: everything the report reads changes
+through `task_updated`, `run_updated`, `task_entry` or `agent_updated`, and
+a viewer re-reads on those.
+
+`factory stats [summary] [--scope S] [--window 7d|30d] [--json]` prints the
+attention queue's first five rows, flow, aging, health against the previous
+window, and schedules; `factory stats attention [--scope S]` prints every
+exception with its reason and actions.
+
 ## Tasks and runs
 
 A **task** is the standing intent: what to do, where, with which agent, and on
@@ -1523,7 +1617,10 @@ goals and policy catalogues imply), the L6 Goals tab under
 `POST /api/goals/checkins` (see "Goals" above), the L6 Scenarios tab under
 `GET /api/scenarios?scope=`, turning one into real work under
 `POST /api/scenarios/promote`, and recomputing driver outcomes and the
-forecast under `POST /api/scenarios/whatif` (see "Scenarios" above),
+forecast under `POST /api/scenarios/whatif` (see "Scenarios" above), the
+L4 Operations tab under `GET /api/operations?scope=&window=`, skipping a
+schedule's next slot under `POST /api/tasks/{id}/skip-next` and answering
+a blocked run under `POST /api/runs/{id}/answer` (see "Operations" above),
 workflow CRUD under
 `/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and

@@ -45,7 +45,10 @@ default no-op implementations on the trait itself, and the daemon's plugin
 proxy never overrides them. A scope backed by a plugin store like this one
 simply never gets asked; its occupancy chart draws runs only, with no
 liveness strip underneath, which is the honest picture of what the store
-actually knows.
+actually knows. `entries_of_kinds` -- the journal search the Operations
+report reads passed-over slots and answers through -- is the same: a
+default of nothing, so a ledger kept by a plugin shows no missed slots and
+counts no answers rather than guessing at them.
 
 ## Trying it by hand
 
