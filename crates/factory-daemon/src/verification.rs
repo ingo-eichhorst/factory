@@ -397,3 +397,332 @@ impl Engine {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The done gate end to end through the real `Engine`: a report, the
+    //! verifier, the attestation store, the Inbox and the workflow graph.
+    //! Every run uses the `shell` agent on a runtime that does nothing, so no
+    //! model and no terminal is involved -- only the gate commands run.
+
+    use super::*;
+    use crate::access::Caller;
+    use factory_core::adapter::{AgentRuntime, StartRequest};
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
+    use factory_core::operations::{ExceptionKind, HealthWindow};
+    use factory_core::run::Trigger;
+    use factory_core::task::{NewTask, SessionRef, TaskReport};
+    use factory_core::workflow::{CanvasPoint, WorkflowDraft, WorkflowEdge, WorkflowNode, WorkflowNodeKind, WorkflowNodeStatus};
+    use factory_plugins::{Registry, SqliteStore};
+    use std::path::PathBuf;
+
+    struct QuietRuntime;
+    #[async_trait::async_trait]
+    impl AgentRuntime for QuietRuntime {
+        fn name(&self) -> &str {
+            "quiet"
+        }
+        async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
+            Ok(SessionRef { runtime: "quiet".into(), handle: req.id.clone(), meta: Default::default() })
+        }
+        async fn submit(&self, _: &SessionRef, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn status(&self, _: &SessionRef) -> Result<factory_core::adapter::RuntimeStatus> {
+            Ok(factory_core::adapter::RuntimeStatus::Working)
+        }
+        async fn send_text(&self, _: &SessionRef, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_keys(&self, _: &SessionRef, _: &[String]) -> Result<()> {
+            Ok(())
+        }
+        async fn read(&self, _: &SessionRef, _: u32) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn stop(&self, _: &SessionRef) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An instance committed to one framework, `house`, whose single control
+    /// requires `requires` -- YAML for one `requires:` list -- and whose
+    /// only scope, `demo`, is a plain directory the gates run in.
+    fn engine(requires: &str) -> (Arc<Engine>, PathBuf) {
+        let root = std::env::temp_dir().join(format!("factory-verify-test-{}", uuid::Uuid::new_v4()));
+        let work = root.join("demo");
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/house.yaml"),
+            format!(
+                "framework: house\ntitle: House rules\nkind: best-practice\ncontrols:\n  - id: tested\n    title: Changes are tested\n    requires:\n{requires}\n"
+            ),
+        )
+        .unwrap();
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+            roles: Default::default(),
+            policies: PolicyDeclaration { frameworks: vec!["house".into()], ..Default::default() },
+            quality: Default::default(),
+            scope: None,
+            scopes: vec![Scope {
+                id: "demo-id".into(),
+                name: "demo".into(),
+                path: work.clone(),
+                agent: None,
+                agents: Vec::new(),
+                runtime: Some("quiet".into()),
+                git: None,
+                task_store: None,
+                roles: Default::default(),
+                policies: Default::default(),
+                quality: Default::default(),
+            }],
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let mut registry = Registry::with_builtins();
+        registry.add_runtime(Arc::new(QuietRuntime), "test");
+        let engine = Arc::new(Engine::new(
+            Factory { root, config },
+            registry,
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+        engine.spawn_verifier();
+        (engine, work)
+    }
+
+    const TESTS_FOR_FEATURES: &str = "      - { applies_to: [feature], step: tests, gate: \"test -f built.txt\" }";
+
+    async fn task(engine: &Arc<Engine>, category: Option<&str>) -> Task {
+        engine
+            .create(NewTask {
+                title: "add the thing".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                runtime: Some("quiet".into()),
+                worktree: Some(false),
+                category: category.map(str::to_string),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn report_done(engine: &Arc<Engine>, task_id: &str) -> Run {
+        let run = engine.store.active_run(task_id).await.unwrap().expect("an active run");
+        let run = engine
+            .report(
+                task_id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some("built it".into()),
+                    error: None,
+                    token: run.token,
+                },
+            )
+            .await
+            .unwrap();
+        engine.sync_workflow_for_task(task_id).await;
+        run
+    }
+
+    /// Poll until the run leaves `verifying` -- the verifier works on a task
+    /// of its own.
+    async fn settled(engine: &Arc<Engine>, run_id: &str) -> Run {
+        for _ in 0..400 {
+            let run = engine.require_run(run_id).await.unwrap();
+            if run.status != RunStatus::Verifying {
+                return run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("run {run_id} is still verifying");
+    }
+
+    #[tokio::test]
+    async fn done_waits_for_the_gate_blocks_on_its_failure_and_verifies_again_on_the_next_done() {
+        let (engine, work) = engine(TESTS_FOR_FEATURES);
+        let task = task(&engine, Some("feature")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let run = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        assert_eq!(run.required_steps.len(), 1, "fixed at dispatch");
+        assert_eq!(run.required_steps[0].required_by, vec!["house/tested"]);
+
+        // Nothing built yet: the gate fails, and the run stops rather than fails.
+        let verifying = report_done(&engine, &task.id).await;
+        assert_eq!(verifying.status, RunStatus::Verifying, "done is not done yet");
+        let blocked = settled(&engine, &run.id).await;
+        assert_eq!(blocked.status, RunStatus::Blocked);
+        assert_eq!(blocked.blocked_source, Some(BlockSource::Verification));
+        assert!(blocked.session.is_some(), "the session stays, so the agent can be answered");
+        let entries = engine.store.run_entries(&run.id, 100).await.unwrap();
+        let reason = entries.iter().rev().find(|e| e.kind == "blocked").expect("a block reason").message.clone();
+        assert!(reason.contains("tests exit 1"), "{reason}");
+        assert!(reason.contains("house/tested"), "{reason}");
+
+        // Fixed, and reported done again: verified, and done.
+        std::fs::write(work.join("built.txt"), "ok").unwrap();
+        report_done(&engine, &task.id).await;
+        let done = settled(&engine, &run.id).await;
+        assert_eq!(done.status, RunStatus::Done);
+        assert_eq!(done.result.as_deref(), Some("built it"));
+
+        let attestations = engine.run_attestations(&run.id).await.unwrap();
+        let verdicts: Vec<_> = attestations.iter().map(|a| a.verdict).collect();
+        assert_eq!(verdicts, vec![AttestationVerdict::Fail, AttestationVerdict::Pass], "append-only: both rounds kept");
+        assert!(attestations.iter().all(|a| a.actor == GATE_ACTOR && a.category == "feature"));
+        assert_eq!(engine.require(&task.id).await.unwrap().status, factory_core::task::TaskStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn a_verification_block_is_in_the_inbox_with_its_reason() {
+        let (engine, _) = engine(TESTS_FOR_FEATURES);
+        let task = task(&engine, Some("feature")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let run = report_done(&engine, &task.id).await;
+        settled(&engine, &run.id).await;
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
+        let item = report
+            .attention
+            .iter()
+            .find(|e| e.kind == ExceptionKind::Blocked && e.run_id.as_deref() == Some(run.id.as_str()))
+            .expect("the blocked run is in the Inbox");
+        assert!(item.reason.contains("verification did not pass"), "{}", item.reason);
+    }
+
+    #[tokio::test]
+    async fn work_of_a_category_nothing_requires_anything_for_is_done_on_its_report() {
+        let (engine, _) = engine(TESTS_FOR_FEATURES);
+        let task = task(&engine, Some("docs")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let run = report_done(&engine, &task.id).await;
+        assert!(run.required_steps.is_empty());
+        assert_eq!(run.status, RunStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn leaving_the_category_out_is_the_default_category_not_a_way_round_the_plan() {
+        let (engine, work) = engine("      - { applies_to: [default], step: tests, gate: \"test -f built.txt\" }");
+        std::fs::write(work.join("built.txt"), "ok").unwrap();
+        let task = task(&engine, None).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let run = report_done(&engine, &task.id).await;
+        assert_eq!(run.status, RunStatus::Verifying);
+        assert_eq!(settled(&engine, &run.id).await.status, RunStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn a_required_gate_with_no_command_blocks_as_missing_evidence() {
+        let (engine, _) = engine("      - { applies_to: [feature], step: sbom }");
+        let task = task(&engine, Some("feature")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let run = report_done(&engine, &task.id).await;
+        let blocked = settled(&engine, &run.id).await;
+        assert_eq!(blocked.status, RunStatus::Blocked);
+        let entries = engine.store.run_entries(&run.id, 100).await.unwrap();
+        let reason = &entries.iter().rev().find(|e| e.kind == "blocked").unwrap().message;
+        assert!(reason.contains("no evidence for: sbom"), "{reason}");
+        assert!(engine.run_attestations(&run.id).await.unwrap().is_empty(), "nothing ran, nothing is attested");
+    }
+
+    #[tokio::test]
+    async fn while_it_verifies_the_agent_may_not_report_its_way_out() {
+        let (engine, _) = engine("      - { applies_to: [feature], step: slow, gate: \"sleep 1\" }");
+        let task = task(&engine, Some("feature")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let run = report_done(&engine, &task.id).await;
+        let error = engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: None,
+                    error: None,
+                    token: engine.require_run(&run.id).await.unwrap().token,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("being verified"), "{error}");
+        assert_eq!(settled(&engine, &run.id).await.status, RunStatus::Done);
+    }
+
+    fn node(id: &str) -> WorkflowNode {
+        WorkflowNode {
+            id: id.into(),
+            position: CanvasPoint::default(),
+            kind: WorkflowNodeKind::Task,
+            task: NewTask {
+                title: id.into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                runtime: Some("quiet".into()),
+                worktree: Some(false),
+                ..Default::default()
+            },
+            gate: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_workflow_run_gets_locked_gates_and_a_node_downstream_waits_for_verified_work() {
+        let (engine, work) = engine(TESTS_FOR_FEATURES);
+        std::fs::write(work.join("built.txt"), "ok").unwrap();
+        let definition = engine
+            .create_workflow(WorkflowDraft {
+                name: "ship".into(),
+                scope: "demo".into(),
+                category: Some("feature".into()),
+                nodes: vec![node("a"), node("b")],
+                edges: vec![WorkflowEdge { id: "ab".into(), from: "a".into(), to: "b".into() }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let stored_nodes = definition.nodes.len();
+
+        let lint = engine.workflow_lint(Some(definition.id.clone()), None, None, None).await.unwrap();
+        assert_eq!(lint.injections.len(), 2, "one gate after each task node: {:#?}", lint.injections);
+
+        let wf = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        assert_eq!(wf.definition.nodes.len(), 4, "the snapshot carries the gates");
+        assert_eq!(engine.workflow_definition(&definition.id).await.unwrap().nodes.len(), stored_nodes, "the stored workflow does not");
+
+        let a_task = loop {
+            let run = engine.workflow_run(&wf.id).await.unwrap();
+            if let Some(id) = run.nodes.iter().find(|n| n.node_id == "a").and_then(|n| n.task_id.clone()) {
+                if engine.store.active_run(&id).await.unwrap().is_some() {
+                    break id;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert_eq!(engine.require(&a_task).await.unwrap().category.as_deref(), Some("feature"));
+        let run = report_done(&engine, &a_task).await;
+        assert_eq!(run.required_steps.len(), 1);
+        assert_eq!(run.required_steps[0].node_id.as_deref(), Some("a.tests"));
+        let wf_now = engine.workflow_run(&wf.id).await.unwrap();
+        assert!(
+            wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().task_id.is_none(),
+            "b does not start on a's word alone"
+        );
+
+        settled(&engine, &run.id).await;
+        engine.sync_workflow_for_task(&a_task).await;
+        let wf_now = engine.workflow_run(&wf.id).await.unwrap();
+        let gate = wf_now.nodes.iter().find(|n| n.node_id == "a.tests").unwrap();
+        assert_eq!(gate.status, WorkflowNodeStatus::Done, "the gate mirrors its attestation");
+        assert!(gate.task_id.is_none(), "a gate never spawns a task");
+        assert!(wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().task_id.is_some(), "b starts on verified work");
+    }
+}
