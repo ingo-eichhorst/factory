@@ -229,25 +229,33 @@ pub struct Run {
     pub started_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
-    /// The moment this attempt became due -- the start of its queue wait,
-    /// so `started_at - queued_at` is how long it waited to be dispatched:
+    /// The moment this attempt could first have been dispatched -- the
+    /// start of its queue wait, so `started_at - queued_at` is how long the
+    /// daemon took to get it going once nothing stood in the way:
     ///
-    /// * a schedule's firing: the slot itself (`scheduled_for`), not the
-    ///   tick that noticed it;
-    /// * a queued retry: when its backoff ran out (`next_run_at` as
-    ///   `queue_or_end_retry` left it);
+    /// * a schedule's firing: the latest of its slot (`scheduled_for`), the
+    ///   moment this daemon came up if it was down at the slot, and the end
+    ///   of the task's previous run if that was still going at the slot
+    ///   (only a pending task fires). Time lost to those two is schedule
+    ///   *lateness*, measured separately as `started_at - scheduled_for`,
+    ///   and never counted as queue wait;
+    /// * a queued retry: the same, from when its backoff ran out;
     /// * a manual `task.run`: when the request arrived;
     /// * a workflow node, an agent's request, a bench attempt: when the
     ///   daemon made it eligible and asked for it to start.
     ///
-    /// `None` on every run made before the field existed -- an unknown
-    /// wait, never a zero one.
+    /// A host asleep with the daemon still running leaves no record, so
+    /// that stretch still counts as queue wait. `None` on every run made
+    /// before the field existed -- an unknown wait, never a zero one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_at: Option<DateTime<Utc>>,
     /// The schedule slot that fired this run, for a `Trigger::Schedule` run
     /// and nothing else. Captured before `advance_schedule` moves
     /// `next_run_at` on, which is the only moment the slot still exists;
-    /// `started_at - scheduled_for` is how late the firing was.
+    /// `started_at - scheduled_for` is the firing's *lateness* -- every
+    /// second between the slot and the dispatch, whatever held it up --
+    /// which includes the queue wait (`started_at - queued_at`) and
+    /// whatever came before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_for: Option<DateTime<Utc>>,
     /// Why the run ended `Failed` or `Cancelled` -- see [`FailKind`]. Set

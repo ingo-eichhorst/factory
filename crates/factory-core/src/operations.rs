@@ -22,8 +22,15 @@
 //! * **cycle time** -- `started_at` to `ended_at` of a run that ended
 //!   `done`. Done only: a failed or cancelled run did not complete the
 //!   work, so its length says nothing about how long the work takes.
-//! * **queue wait** -- `queued_at` to `started_at`. Only for a run that
-//!   records `queued_at`; see "No data is not zero" below.
+//! * **queue wait** -- `queued_at` to `started_at`: how long a run waited
+//!   once it could have been dispatched. For a scheduled firing `queued_at`
+//!   is already past any downtime and past the previous run's end (see
+//!   `Run::queued_at`), so a daemon that was down or a task still running
+//!   at its slot does not show up here. Only for a run that records
+//!   `queued_at`; see "No data is not zero" below.
+//! * **schedule lateness** -- `scheduled_for` to `started_at`: every second
+//!   between a slot and its dispatch, whatever the cause. Reported apart
+//!   from queue wait ([`ScheduleRow::last_late_s`]), never folded into it.
 //! * **age** -- how long a run in progress has been going: `now -
 //!   started_at`, the same clock cycle time uses, so an age and a
 //!   percentile of cycle times can be compared honestly. A task that is
@@ -1083,10 +1090,17 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             a
         };
         if let Some(at) = late_at {
-            let reason = if active {
-                format!("the slot at {} passed while the previous run was still going", at.to_rfc3339())
+            // With a retry queued, `next_run_at` is the retry's time, not
+            // one of the schedule's slots -- say which it is.
+            let what = if task.pending_retry.is_some() {
+                format!("the retry due at {}", at.to_rfc3339())
             } else {
-                format!("the slot at {} passed and nothing was dispatched", at.to_rfc3339())
+                format!("the slot at {}", at.to_rfc3339())
+            };
+            let reason = if active {
+                format!("{what} passed while the previous run was still going")
+            } else {
+                format!("{what} passed and nothing was dispatched")
             };
             attention.push(Exception {
                 kind: ExceptionKind::ScheduleLate,
@@ -1109,11 +1123,22 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             let first = entries.iter().map(|s| s.first).min().expect("non-empty");
             let last = entries.iter().map(|s| s.last).max().expect("non-empty");
             let at = entries.iter().map(|s| s.at).max().expect("non-empty");
-            let still_active = entries.iter().any(|s| s.reason.as_deref() == Some("still_active"));
-            let why = if still_active {
-                "the previous run was still going"
+            // Counted per reason rather than letting one entry's reason
+            // speak for all of them: a night of downtime and one long run
+            // are different stories, and a person should see both.
+            let mut by_reason: BTreeMap<&str, u32> = BTreeMap::new();
+            for s in entries.iter() {
+                let why = match s.reason.as_deref() {
+                    Some("still_active") => "the previous run was still going",
+                    Some("not_running") => "nothing was running to fire them",
+                    _ => "no reason recorded",
+                };
+                *by_reason.entry(why).or_default() += s.count;
+            }
+            let why = if by_reason.len() == 1 {
+                by_reason.keys().next().expect("non-empty").to_string()
             } else {
-                "nothing was running to fire them"
+                by_reason.iter().map(|(why, n)| format!("{n} as {why}")).collect::<Vec<_>>().join("; ")
             };
             attention.push(Exception {
                 kind: ExceptionKind::ScheduleMissed,
@@ -1702,6 +1727,32 @@ mod tests {
     }
 
     #[test]
+    fn an_overdue_retry_is_named_a_retry_not_a_slot() {
+        let mut t = scheduled(task("t", "demo"), ago(10));
+        t.pending_retry = Some(PendingRetry { attempts: 1, resume_at: ago(-600) });
+        let tasks = vec![t];
+        let r = report(&input(&tasks, &[]));
+        let e = r.attention.iter().find(|e| e.kind == ExceptionKind::ScheduleLate).unwrap();
+        assert!(e.reason.starts_with("the retry due at"), "{}", e.reason);
+    }
+
+    #[test]
+    fn missed_slots_with_one_reason_say_it_plainly() {
+        let tasks = vec![scheduled(task("t", "demo"), ago(-60))];
+        let mut inp = input(&tasks, &[]);
+        inp.skipped = vec![SkippedSlots {
+            task_id: "t".into(),
+            at: ago(50),
+            count: 2,
+            first: ago(120),
+            last: ago(60),
+            reason: Some("not_running".into()),
+        }];
+        let r = report(&inp);
+        assert!(r.attention[0].reason.ends_with("never fired: nothing was running to fire them"), "{}", r.attention[0].reason);
+    }
+
+    #[test]
     fn a_slot_within_the_grace_is_not_late_yet() {
         let tasks = vec![scheduled(task("t", "demo"), now() - Duration::seconds(30))];
         let r = report(&input(&tasks, &[]));
@@ -1723,7 +1774,9 @@ mod tests {
         let e = &r.attention[0];
         assert_eq!(e.kind, ExceptionKind::ScheduleMissed);
         assert!(e.reason.starts_with("3 slots"), "{}", e.reason);
-        assert!(e.reason.contains("still going"), "{}", e.reason);
+        // Both reasons, each with its own count -- one does not speak for all.
+        assert!(e.reason.contains("1 as the previous run was still going"), "{}", e.reason);
+        assert!(e.reason.contains("2 as nothing was running to fire them"), "{}", e.reason);
         assert_eq!(r.schedules[0].state, ScheduleState::Missed);
         assert_eq!(r.schedules[0].skipped, 3);
     }
