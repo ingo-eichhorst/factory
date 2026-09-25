@@ -954,6 +954,9 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 #workflow-edges marker.wf-rework-marker path { fill: var(--wait); }
 .workflow-node .wf-rework-line { color: var(--wait); font-weight: 600; }
 .workflow-rework.wf-rework-used { stroke-width: 2.6; stroke-dasharray: 10 3; }
+.workflow-exit { stroke: var(--wait); }
+.workflow-exit-label { fill: var(--muted); font: 600 9px/1 var(--cond); pointer-events: none; }
+.workflow-exit-label textPath { dominant-baseline: -4px; }
 .wf-badge.wf-round { color: var(--wait); border-color: var(--wait); }
 .wf-request { font: 400 9px/1.3 var(--mono); color: var(--wait); }
 .wf-earlier { display: inline-flex; flex-wrap: wrap; gap: 2px 6px; align-items: baseline; font: 400 9px/1.3 var(--mono); color: var(--faint); }
@@ -1010,6 +1013,7 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 }
 .workflow-node.wf-s-cancelled { border-left: 3px solid var(--fault); background: var(--fault-wash); opacity: .75; }
 .workflow-node.wf-s-skipped { border-left: 3px solid var(--faint); opacity: .55; }
+.workflow-node.wf-s-skipped_by_route { border-left: 3px solid var(--wait); opacity: .72; }
 .workflow-node.wf-invalid { box-shadow: 0 0 0 2px var(--fault); }
 
 .wf-badge-row { display: flex; gap: 4px; }
@@ -1026,6 +1030,7 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 .wf-badge.wf-s-failed { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
 .wf-badge.wf-s-cancelled { color: var(--fault); border-color: transparent; background: var(--fault-wash); opacity: .7; }
 .wf-badge.wf-s-skipped { color: var(--faint); opacity: .7; }
+.wf-badge.wf-s-skipped_by_route { color: var(--wait); }
 
 .workflow-inspector h3 { margin: 5px 0 10px; font: 700 10px/1 var(--cond); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
 .workflow-inspector label { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; font: 600 9px/1 var(--cond); letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
@@ -1034,6 +1039,10 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 .workflow-inspector .check { flex-direction: row; align-items: center; }
 .workflow-inspector .check input { width: auto; }
 .wf-inputs, .wf-rework { margin: 14px 0 10px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+.wf-exit-row { display: grid; grid-template-columns: 24px 1fr; gap: 6px 8px; padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+.wf-exit-row > strong { grid-row: 1 / span 3; color: var(--wait); }
+.wf-exit-row label { margin: 0; }
+.wf-exit-actions { display: flex; gap: 5px; }
 .wf-input-row { display: grid; grid-template-columns: 1fr; gap: 0; padding: 8px 0 4px; border-bottom: 1px dashed var(--line-soft); }
 .wf-input-row label { margin-bottom: 6px; }
 .wf-input-remove { justify-self: start; margin-bottom: 4px; border: 0; background: none; padding: 0; font: 500 10px/1 var(--mono); color: var(--fault); text-decoration: underline; cursor: pointer; }

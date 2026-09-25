@@ -101,36 +101,54 @@ export function inputProblems(workflow) {
   return errors;
 }
 
-// ------------------------------------------------------------------ rework
+// -------------------------------------------------------------------- exits
 
-/// The server's `validate_rework`, named by title: only a task node sends
-/// work back, at least once, to a task node that comes before it. Kept
+/// The server normalizes legacy `rework` while loading. Keeping the same
+/// normalization here makes an older cached/test object readable too.
+export function exitsOf(node) {
+  if (Array.isArray(node?.exits)) return node.exits;
+  return node?.rework ? [{
+    to: node.rework.to,
+    agent: "work needs changes this node can describe for the target agent",
+    max_rounds: node.rework.max_rounds,
+  }] : [];
+}
+
+/// The server's exit validation, named by title: only a task node routes
+/// work, and every conditional target agrees with the graph. Kept
 /// apart from `validate` so deleting a node or a link can show what it
 /// broke straight away, without the rest of `validate`'s opinions about a
 /// workflow that is still being drawn.
 export function reworkProblems(workflow) {
   const errors = [];
   for (const node of workflow.nodes) {
-    const rework = node.rework;
-    if (!rework) continue;
     const from = nodeLabel(node);
-    if (node.kind === "gate") {
-      errors.push({ nodeId: node.id, message: `${from} is a gate and cannot send work back; only a task node can` });
-      continue;
-    }
-    if (!(Number.isInteger(rework.max_rounds) && rework.max_rounds >= 1)) {
-      errors.push({ nodeId: node.id, message: `${from} sends work back at most zero times; use at least one round` });
-    }
-    const target = workflow.nodes.find(item => item.id === rework.to);
-    if (!target) {
-      errors.push({ nodeId: node.id, message: `${from} sends work back to a node that no longer exists (${rework.to})` });
-    } else if (target.kind === "gate") {
-      errors.push({ nodeId: node.id, message: `${from} sends work back to the gate ${nodeLabel(target)}; name a task node` });
-    } else if (!ancestors(workflow.edges, node.id).has(rework.to)) {
-      errors.push({
-        nodeId: node.id,
-        message: `${from} sends work back to ${nodeLabel(target)}, which does not come before it`,
-      });
+    for (const [index, exit] of exitsOf(node).entries()) {
+      const label = `${from} exit ${index + 1}`;
+      if (node.kind === "gate") {
+        errors.push({ nodeId: node.id, message: `${from} is a gate and cannot declare exits; only a task node can` });
+        continue;
+      }
+      const hasCheck = exit.check != null;
+      const hasAgent = exit.agent != null;
+      if (hasCheck === hasAgent) {
+        errors.push({ nodeId: node.id, message: `${label} must declare exactly one of check or agent` });
+      } else if (!String(hasCheck ? exit.check : exit.agent).trim()) {
+        errors.push({ nodeId: node.id, message: `${label} has an empty condition` });
+      }
+      const target = workflow.nodes.find(item => item.id === exit.to);
+      const backward = ancestors(workflow.edges, node.id).has(exit.to);
+      if (!target) {
+        errors.push({ nodeId: node.id, message: `${label} targets a node that no longer exists (${exit.to})` });
+      } else if (backward && target.kind === "gate") {
+        errors.push({ nodeId: node.id, message: `${label} points back to the gate ${nodeLabel(target)}; name a task node` });
+      } else if (backward && !(Number.isInteger(exit.max_rounds) && exit.max_rounds >= 1)) {
+        errors.push({ nodeId: node.id, message: `${label} points backward and needs at least one round` });
+      } else if (!backward && !workflow.edges.some(edge => edge.from === node.id && edge.to === exit.to)) {
+        errors.push({ nodeId: node.id, message: `${label} points forward to ${nodeLabel(target)} without an explicit link` });
+      } else if (!backward && exit.max_rounds != null) {
+        errors.push({ nodeId: node.id, message: `${label} points forward and must not declare rounds` });
+      }
     }
   }
   return errors;
@@ -139,22 +157,25 @@ export function reworkProblems(workflow) {
 /// "sends work back to implement, at most 5×" -- the summary's wording, and
 /// the one the acceptance names.
 export function reworkSentence(nodes, node) {
-  if (!node.rework) return "";
-  const rounds = node.rework.max_rounds;
-  return `sends work back to ${nodeTitle(nodes, node.rework.to)}, at most ${rounds}×`;
+  return exitsOf(node).map((exit, index) => {
+    const condition = exit.check ? `check ${exit.check}` : `agent ${exit.agent}`;
+    const rounds = exit.max_rounds ? `, at most ${exit.max_rounds}×` : "";
+    return `exit ${index + 1} → ${nodeTitle(nodes, exit.to)} (${condition}${rounds})`;
+  }).join("; ");
 }
 
 /// "↺ implement ×5" -- the same fact, short enough for a card.
 export function reworkBadge(nodes, node) {
-  if (!node.rework) return "";
-  return `↺ ${nodeTitle(nodes, node.rework.to)} ×${node.rework.max_rounds}`;
+  const exits = exitsOf(node);
+  if (!exits.length) return "";
+  return exits.map((exit, index) => `${index + 1}. ${exit.check ? "check" : "agent"} → ${nodeTitle(nodes, exit.to)}${exit.max_rounds ? ` ×${exit.max_rounds}` : ""}`).join(" · ");
 }
 
 // ------------------------------------------------------------------- saving
 
 /// What Save sends. Everything the canvas does not edit rides along
 /// untouched -- the category (#118) -- and what it does edit goes as it
-/// stands: the declared inputs and each node's `rework` (#140), so saving a
+/// stands: the declared inputs and each node's ordered exits, so saving a
 /// layout never drops what a file or the CLI put there.
 export function saveDraft(workflow) {
   return {

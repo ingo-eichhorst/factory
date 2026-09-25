@@ -525,6 +525,7 @@ mod tests {
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some("built it".into()),
+                    send_to: None,
                     error: None,
                     token: run.token,
                 },
@@ -647,6 +648,7 @@ mod tests {
                     status: Some(RunStatus::Done),
                     message: None,
                     result: None,
+                    send_to: None,
                     error: None,
                     token: engine.require_run(&run.id).await.unwrap().token,
                 },
@@ -672,7 +674,7 @@ mod tests {
                 ..Default::default()
             },
             gate: None,
-            rework: None,
+            exits: Vec::new(),
         }
     }
 

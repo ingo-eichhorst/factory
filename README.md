@@ -1695,11 +1695,13 @@ appears to be doing. A "Recent runs" list beside the definitions picks which
 run Run mode shows; starting a run switches to it. The ordered textual
 summary and keyboard node/edge controls carry the same graph for people who
 do not use the canvas, including a link to any node's spawned task. The
-workflow panel edits the declared **inputs**, and a task node's inspector sets
-where it **sends work back to** (one of its ancestor task nodes) and how many
-rounds, drawn as a dashed back edge; Run mode shows each node's rework round,
-links to the tasks earlier rounds superseded, who sent the work back, and the
-values the run was started with.
+workflow panel edits the declared **inputs**, and a task node's inspector
+edits its ordered `check:` and `agent:` **exits**. The canvas draws each exit
+as a labelled conditional edge with its order, condition and (for a backward
+exit) round budget. Run mode distinguishes nodes skipped by a route, shows a
+routed node as `done → target`, and still shows each backward round, links to
+the tasks earlier rounds superseded, who sent the work back, and the values
+the run was started with.
 
 A node's task is dispatched with its **direct parents'** outputs, never a
 transitive ancestor's — computed at dispatch from that moment's workflow-run
@@ -1714,7 +1716,7 @@ parents said — the acceptance bar is that literal command. Either way, each
 parent's result is tail-truncated to a byte budget first, so one noisy
 upstream step can't blow up every prompt downstream of it.
 
-### Inputs and rework loops (#140)
+### Inputs and ordered exits (#140, #149)
 
 A workflow can be told what to work on, and a review step can send work back.
 
@@ -1729,7 +1731,8 @@ nodes:
     task: { title: "Implement #{{issue}}", instructions: "...", labels: { issue: "{{issue}}" } }
   - id: review
     task: { title: "Review #{{issue}}", instructions: "..." }
-    rework: { to: implement, max_rounds: 5 }
+    exits:
+      - { to: implement, agent: "concrete findings the implementer can fix alone", max_rounds: 5 }
 edges:
   - { id: e1, from: implement, to: review }
 ```
@@ -1746,19 +1749,34 @@ edges:
   other tool). A gate's command is never substituted -- the daemon runs it
   itself. A label `issue={{issue}}` is what `factory cost --by issue` groups
   by.
-- **Rework.** `rework: { to, max_rounds }` on a task node is the one edge that
-  points backwards, kept off `edges` so the graph stays acyclic; `to` must be
-  a task node before it. When that node's run ends `failed` **because its own
-  agent reported it** (`FailKind::AgentFailed` -- a timeout, a session that
-  went away or a failed dispatch is not a verdict), and rounds are left, the
-  path from `to` down to it -- gates included -- goes back to `unstarted` and
-  runs again; whatever waited below it waits on. Each re-spawned task is
+- **Ordered exits.** A task node's `exits:` are checked top to bottom after
+  its agent reports `done`; the first match wins. `check:` runs a bounded
+  shell command in that node's worktree (`0` holds, `1` does not, any other
+  result blocks the node with its output). `agent:` holds only when the agent
+  reports `done --send-to <to>`; the reporting contract lists the allowed
+  targets, their exact rules, and rounds left. If nothing matches, all plain
+  outgoing edges remain the default. A forward exit needs a matching plain
+  edge. A backward exit points to an ancestor task node, stays off `edges` so
+  the graph remains acyclic, and requires `max_rounds`.
+
+  Taking an exit is exclusive. A forward skip marks bypassed nodes
+  `skipped_by_route` with a reason such as `skipped (review -> ready)`; those
+  nodes count as finished, and a child is eligible when every predecessor is
+  done or skipped by route and at least one is done. A backward exit sends the
+  path from `to` through the reporting node back to `unstarted`. Each
+  re-spawned task is
   titled `(... rework k)`, the node run keeps its earlier tasks in
   `superseded_task_ids`, and `to`'s new task is dispatched with the sender's
-  error and result as an extra upstream entry, "... sent this work back --
-  rework round k of N". Once every round is used, the next agent-reported
-  failure fails the run with an error that says it needs a person. A
-  superseded task's late state changes are ignored.
+  `--result` as an extra upstream entry, "... sent this work back -- rework
+  round k of N". Once every round is used, another `--send-to` is refused and
+  tells the agent to report `blocked` with the open findings. A superseded
+  task's late state changes are ignored. Stored legacy
+  `rework: { to, max_rounds }` definitions and run snapshots load as one
+  `agent:` exit, so an in-flight loop keeps its remaining rounds.
+- **Failures do not route.** `failed` means the attempt broke and fails the
+  workflow node like any other failure. Review findings that should go back
+  are a successful `done --send-to`, so the review task closes completed and
+  is not counted as a failure or left in the attention queue.
 - **Escalating to a person** is what it always was: the agent reports
   `blocked`. The node, and so the run, waits, and the block shows in the
   Inbox until someone answers.

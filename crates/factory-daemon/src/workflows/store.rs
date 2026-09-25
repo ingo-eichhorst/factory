@@ -266,7 +266,11 @@ impl WorkflowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use factory_core::workflow::WorkflowDraft;
+    use factory_core::task::NewTask;
+    use factory_core::workflow::{
+        CanvasPoint, SendBack, WorkflowActor, WorkflowDraft, WorkflowEdge, WorkflowExit,
+        WorkflowNode, WorkflowNodeKind, WorkflowNodeStatus,
+    };
 
     #[tokio::test]
     async fn definitions_and_runs_round_trip() {
@@ -342,5 +346,112 @@ mod tests {
         assert_eq!(listed[0].id, good.id);
         assert!(store.get_run("bad-run").await.is_err());
         assert!(store.get_run(&good.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_legacy_stored_run_mid_rework_loads_and_can_take_its_next_round() {
+        let store = WorkflowStore::in_memory().unwrap();
+        let task = |id: &str, exits| WorkflowNode {
+            id: id.into(),
+            position: CanvasPoint::default(),
+            kind: WorkflowNodeKind::Task,
+            task: NewTask {
+                title: id.into(),
+                scope: Some("demo".into()),
+                ..Default::default()
+            },
+            gate: None,
+            exits,
+        };
+        let definition = WorkflowDefinition::from_draft(WorkflowDraft {
+            name: "legacy review loop".into(),
+            scope: "demo".into(),
+            nodes: vec![
+                task("implement", Vec::new()),
+                task(
+                    "review",
+                    vec![WorkflowExit {
+                        to: "implement".into(),
+                        check: None,
+                        agent: Some("fixable review findings".into()),
+                        max_rounds: Some(3),
+                    }],
+                ),
+            ],
+            edges: vec![WorkflowEdge {
+                id: "implement-review".into(),
+                from: "implement".into(),
+                to: "review".into(),
+            }],
+            ..Default::default()
+        });
+        let mut run = WorkflowRun::new(definition, WorkflowActor::Owner);
+        for node in &mut run.nodes {
+            node.status = WorkflowNodeStatus::Done;
+            node.task_id = Some(format!("{}-task-1", node.node_id));
+        }
+        assert_eq!(
+            run.send_back("review", "implement"),
+            SendBack::Sent {
+                round: 1,
+                max_rounds: 3
+            }
+        );
+
+        // This is the exact durable pre-#149 shape: the immutable definition
+        // inside a run still says `rework`, while the node-run state already
+        // records one used round.
+        let mut json = serde_json::to_value(&run).unwrap();
+        let review = json["definition"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["id"] == "review")
+            .unwrap();
+        review.as_object_mut().unwrap().remove("exits");
+        review["rework"] = serde_json::json!({ "to": "implement", "max_rounds": 3 });
+        let data = serde_json::to_string(&json).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, scope, status, updated_at, data) VALUES (?1, ?2, ?3, 'running', ?4, ?5)",
+                params![run.id, run.workflow_id, run.scope, run.updated_at.to_rfc3339(), data],
+            )
+            .unwrap();
+        }
+
+        let mut loaded = store.get_run(&run.id).await.unwrap().unwrap();
+        let exit = &loaded
+            .definition
+            .nodes
+            .iter()
+            .find(|node| node.id == "review")
+            .unwrap()
+            .exits[0];
+        assert_eq!(exit.to, "implement");
+        assert!(exit.agent.is_some());
+        assert_eq!(exit.max_rounds, Some(3));
+        assert_eq!(
+            loaded
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "review")
+                .unwrap()
+                .round,
+            1
+        );
+
+        for node in &mut loaded.nodes {
+            node.status = WorkflowNodeStatus::Done;
+            node.task_id = Some(format!("{}-task-2", node.node_id));
+        }
+        assert_eq!(
+            loaded.send_back("review", "implement"),
+            SendBack::Sent {
+                round: 2,
+                max_rounds: 3
+            },
+            "the restored round budget continues instead of restarting"
+        );
     }
 }

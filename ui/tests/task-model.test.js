@@ -52,6 +52,12 @@ test("Closed holds only done and deliberately closed tasks, each with its reason
   assert.equal(standing(wont).text, "won't do", "closed on purpose: the close wins over the old failure");
 });
 
+test("a routed workflow task reads done with its selected target", () => {
+  assert.deepEqual(standing({ status: "done", routed_to: "implement" }), {
+    tone: "closed", text: "done → implement", detail: null,
+  });
+});
+
 test("a scheduled task mid-retry stays in Scheduled and says it is retrying", () => {
   const t = { status: "pending", schedule: { every: { seconds: 60 } }, pending_retry: { attempts: 2 }, failure: failure("run_timeout") };
   assert.equal(columnFor(t), "scheduled");

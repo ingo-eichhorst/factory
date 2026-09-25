@@ -340,6 +340,7 @@ mod tests {
             session: None,
             token: None,
             result: None,
+            routed_to: None,
             error: None,
             started_at: started,
             ended_at: ended,

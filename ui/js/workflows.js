@@ -33,6 +33,7 @@ import {
   blankWorkflow,
   duplicateNode,
   editorButtons,
+  exitsOf,
   newTaskNode,
   nodeInputUsage,
   openTaskAction,
@@ -290,17 +291,28 @@ function renderCanvas() {
           <path class="workflow-edge" data-id="${esc(edge.id)}" d="${d}" marker-end="url(#workflow-arrow)"/>
         </g>`;
     }).join("") +
-    // `#143`: a node's `rework` is the one link that points backwards. It
-    // lives on the node, not among the edges, so it is no `data-edge`: it
-    // cannot be selected or deleted as a link -- the inspector's Rework
-    // field is where it changes. Its `d` waits for the cards to exist,
-    // since it is drawn to their rendered heights (`paintReworks`).
-    graph.nodes.filter(node => node.rework && graph.nodes.some(item => item.id === node.rework.to)).map(node => `
-      <path class="workflow-rework" data-rework-from="${esc(node.id)}" marker-end="url(#workflow-arrow-rework)"/>`).join("");
+    // Ordered conditional exits live on the node rather than in the DAG's
+    // plain edges. Draw each separately and label it with order + condition.
+    graph.nodes.flatMap(node => exitsOf(node).map((exit, index) => ({ node, exit, index })))
+      .filter(({ exit }) => graph.nodes.some(item => item.id === exit.to))
+      .map(({ node, exit, index }) => {
+        const target = graph.nodes.find(item => item.id === exit.to);
+        const id = `wf-exit-${node.id}-${index}`;
+        const backward = reworkTargets(graph.nodes, graph.edges, node.id).some(item => item.id === exit.to);
+        const d = backward ? reworkPath(node, target) : (() => {
+          const x1 = node.position.x + 184, y1 = node.position.y + 42, x2 = target.position.x, y2 = target.position.y + 42;
+          const bend = Math.max(45, Math.abs(x2 - x1) * .45);
+          return `M${x1},${y1} C${x1 + bend},${y1} ${x2 - bend},${y2} ${x2},${y2}`;
+        })();
+        const condition = exit.check ? `check: ${exit.check}` : `agent: ${exit.agent}`;
+        const rounds = exit.max_rounds ? ` · ${exit.max_rounds} rounds` : "";
+        return `<path id="${esc(id)}" class="workflow-rework workflow-exit" data-exit-from="${esc(node.id)}" data-exit-index="${index}" d="${d}" marker-end="url(#workflow-arrow-rework)"/>
+          <text class="workflow-exit-label"><textPath href="#${esc(id)}" startOffset="52%">${index + 1}. ${esc(condition + rounds)}</textPath></text>`;
+      }).join("");
 
   $("workflow-nodes").innerHTML = graph.nodes.map(node => `
     <div class="workflow-node" data-node="${esc(node.id)}" tabindex="0" role="group"
-      aria-label="${esc(node.task.title || "Untitled task")}${roots.has(node.id) ? ", start node" : ""}${node.rework ? `, ${esc(reworkSentence(graph.nodes, node))}` : ""}"
+      aria-label="${esc(node.task.title || "Untitled task")}${roots.has(node.id) ? ", start node" : ""}${exitsOf(node).length ? `, ${esc(reworkSentence(graph.nodes, node))}` : ""}"
       style="left:${node.position.x}px;top:${node.position.y}px">
       ${roots.has(node.id) ? `<span class="wf-start">START</span>` : ""}
       <span class="wf-port-in" aria-hidden="true"></span>
@@ -309,7 +321,7 @@ function renderCanvas() {
         : "TASK"}</span>
       <strong>${esc(node.task.title || "Untitled task")}</strong>
       <span class="wf-line">${esc(node.task.scope || "")} · ${esc(node.task.agent || "default agent")}</span>
-      ${node.rework ? `<span class="wf-line wf-rework-line" title="${esc(reworkSentence(graph.nodes, node))}">${esc(reworkBadge(graph.nodes, node))}</span>` : ""}
+      ${exitsOf(node).length ? `<span class="wf-line wf-rework-line" title="${esc(reworkSentence(graph.nodes, node))}">${esc(reworkBadge(graph.nodes, node))}</span>` : ""}
       <span class="wf-badge-row"><span class="wf-badge" data-role="badge"></span><span class="wf-badge wf-round" data-role="round" hidden></span></span>
       <span class="wf-request" data-role="request" hidden></span>
       <button type="button" class="wf-open-task" data-role="open-task" hidden>Open task ↗</button>
@@ -341,7 +353,11 @@ function paintStatuses() {
     if (selectedNode === node.id) el.classList.add("selected");
     if (connectFrom === node.id) el.classList.add("wf-connecting");
     const badge = el.querySelector('[data-role="badge"]');
-    if (badge) { badge.className = `wf-badge ${nodeStatusClass(status)}`; badge.textContent = status; }
+    if (badge) {
+      badge.className = `wf-badge ${nodeStatusClass(status)}`;
+      badge.textContent = execution?.routed_to ? `${status} → ${execution.routed_to}` : status;
+      if (status === "skipped_by_route" && execution?.skip_reason) badge.title = execution.skip_reason;
+    }
     const openBtn = el.querySelector('[data-role="open-task"]');
     if (openBtn) {
       const action = openTaskAction(execution, openTask);
@@ -395,11 +411,14 @@ function paintRound(el, execution, nodes) {
 /// statuses rather than once with the structure.
 function paintReworks(graph) {
   const height = id => $("workflow-nodes").querySelector(`[data-node="${CSS.escape(id)}"]`)?.offsetHeight || undefined;
-  for (const path of $("workflow-edges")?.querySelectorAll("path[data-rework-from]") || []) {
-    const from = graph.nodes.find(node => node.id === path.dataset.reworkFrom);
-    const to = from && graph.nodes.find(node => node.id === from.rework?.to);
+  for (const path of $("workflow-edges")?.querySelectorAll("path[data-exit-from]") || []) {
+    const from = graph.nodes.find(node => node.id === path.dataset.exitFrom);
+    const exit = from && exitsOf(from)[Number(path.dataset.exitIndex)];
+    const to = exit && graph.nodes.find(node => node.id === exit.to);
     if (!to) continue;
+    if (reworkTargets(graph.nodes, graph.edges, from.id).some(node => node.id === to.id)) {
     path.setAttribute("d", reworkPath(from, to, height(from.id), height(to.id)));
+    }
     path.classList.toggle("wf-rework-used", (runNode(from.id)?.round || 0) > 0);
   }
 }
@@ -675,40 +694,90 @@ function renderNodeUses() {
 /// rather than silently reading as "none": the model still carries it, and
 /// `reworkProblems` says what is wrong with it.
 function renderReworkField(node, graph, readOnly) {
-  const to = $("workflow-node-rework-to");
-  const max = $("workflow-node-rework-max");
   const gate = node.kind === "gate";
-  const targets = reworkTargets(graph.nodes, graph.edges, node.id);
-  const options = targets.map(target => [target.id, target.task.title || target.id]);
-  const chosen = node.rework?.to;
-  if (chosen && !targets.some(target => target.id === chosen)) {
-    const exists = graph.nodes.some(item => item.id === chosen);
-    options.push([chosen, `${nodeTitle(graph.nodes, chosen)} (${exists ? "does not come before this node" : "deleted"})`]);
-  }
-  to.innerHTML = `<option value="">none -- a failure fails the run</option>` +
-    options.map(([id, title]) => `<option value="${esc(id)}">${esc(title)}</option>`).join("");
-  to.value = chosen || "";
-  // Never overwritten mid-keystroke: a cleared field is briefly 0 rounds.
-  if (document.activeElement !== max) max.value = node.rework ? (node.rework.max_rounds ?? "") : "";
-  to.disabled = readOnly || gate;
-  max.disabled = readOnly || gate || !node.rework;
+  const exits = exitsOf(node);
+  const targets = graph.nodes.filter(item => item.id !== node.id);
+  $("workflow-node-exits-list").innerHTML = exits.length ? exits.map((exit, index) => {
+    const backward = reworkTargets(graph.nodes, graph.edges, node.id).some(item => item.id === exit.to);
+    const options = targets.map(target => `<option value="${esc(target.id)}"${target.id === exit.to ? " selected" : ""}>${esc(target.task.title || target.id)}</option>`).join("");
+    const kind = exit.check != null ? "check" : "agent";
+    const rule = exit.check ?? exit.agent ?? "";
+    return `<div class="wf-exit-row" data-exit="${index}">
+      <strong>${index + 1}</strong>
+      <label>To<select data-exit-field="to"${readOnly || gate ? " disabled" : ""}>${options}</select></label>
+      <label>Condition<select data-exit-field="kind"${readOnly || gate ? " disabled" : ""}>
+        <option value="check"${kind === "check" ? " selected" : ""}>check command</option>
+        <option value="agent"${kind === "agent" ? " selected" : ""}>agent choice</option>
+      </select></label>
+      <label>${kind === "check" ? "Command" : "Rule"}<textarea rows="2" data-exit-field="rule"${readOnly || gate ? " disabled" : ""}>${esc(rule)}</textarea></label>
+      ${backward ? `<label>Max rounds<input type="number" min="1" step="1" data-exit-field="max_rounds" value="${esc(exit.max_rounds ?? "")}"${readOnly || gate ? " disabled" : ""}></label>` : ""}
+      ${readOnly || gate ? "" : `<span class="wf-exit-actions"><button type="button" data-exit-up="${index}"${index === 0 ? " disabled" : ""}>↑</button><button type="button" data-exit-down="${index}"${index === exits.length - 1 ? " disabled" : ""}>↓</button><button type="button" data-exit-remove="${index}">Remove</button></span>`}
+    </div>`;
+  }).join("") : `<p class="wf-uses">None -- plain edges are the default.</p>`;
+  $("workflow-node-exit-add").hidden = readOnly;
+  $("workflow-node-exit-add").disabled = gate;
   $("workflow-node-rework-note").textContent = gate
-    ? "A gate cannot send work back; only a task node can."
-    : !options.length ? "Nothing comes before this node, so there is nowhere to send work back to." : "";
+    ? "A gate cannot declare exits; only a task node can."
+    : "Checked top to bottom; the first match wins. No match follows every plain edge.";
+  if (readOnly || gate) return;
+  for (const row of $("workflow-node-exits-list").querySelectorAll("[data-exit]")) {
+    const index = Number(row.dataset.exit);
+    for (const field of row.querySelectorAll("[data-exit-field]")) {
+      const event = field.tagName === "SELECT" ? "onchange" : "oninput";
+      field[event] = () => readExit(index, row);
+    }
+  }
+  for (const button of $("workflow-node-exits-list").querySelectorAll("[data-exit-remove]")) button.onclick = () => editExitList(Number(button.dataset.exitRemove), "remove");
+  for (const button of $("workflow-node-exits-list").querySelectorAll("[data-exit-up]")) button.onclick = () => editExitList(Number(button.dataset.exitUp), "up");
+  for (const button of $("workflow-node-exits-list").querySelectorAll("[data-exit-down]")) button.onclick = () => editExitList(Number(button.dataset.exitDown), "down");
 }
 
 /// The Rework fields into the model. Not part of `readEditor`: that runs on
 /// every keystroke in any field, and a select whose options no longer hold
 /// the stored target would read back as "none" and quietly drop it.
-function readRework() {
+function readExit(index, row) {
   if (mode === "run") return;
   const node = current.nodes.find(item => item.id === selectedNode);
   if (!node) return;
-  const to = $("workflow-node-rework-to").value;
-  const typed = number("workflow-node-rework-max");
-  node.rework = to ? { to, max_rounds: typed ?? (node.rework ? 0 : 1) } : null;
+  node.exits = exitsOf(node).map(exit => ({ ...exit })); delete node.rework;
+  const exit = node.exits[index];
+  if (!exit) return;
+  const get = field => row.querySelector(`[data-exit-field="${field}"]`);
+  exit.to = get("to")?.value || "";
+  const kind = get("kind")?.value || "check";
+  const rule = get("rule")?.value || "";
+  exit.check = kind === "check" ? rule : undefined;
+  exit.agent = kind === "agent" ? rule : undefined;
+  const max = get("max_rounds");
+  exit.max_rounds = max ? (max.value.trim() ? Number(max.value) : 0) : undefined;
   markDirty();
   clientErrors = reworkProblems(current);
+  renderCanvas(); renderSummary(); renderProblems();
+}
+
+function editExitList(index, action) {
+  if (mode === "run") return;
+  const node = current.nodes.find(item => item.id === selectedNode);
+  if (!node) return;
+  node.exits = exitsOf(node).map(exit => ({ ...exit })); delete node.rework;
+  if (action === "remove") node.exits.splice(index, 1);
+  if (action === "up" && index > 0) [node.exits[index - 1], node.exits[index]] = [node.exits[index], node.exits[index - 1]];
+  if (action === "down" && index + 1 < node.exits.length) [node.exits[index + 1], node.exits[index]] = [node.exits[index], node.exits[index + 1]];
+  markDirty(); clientErrors = reworkProblems(current);
+  renderCanvas(); renderSummary(); renderReworkField(node, current, false); renderProblems();
+}
+
+function addExit() {
+  if (mode === "run") return;
+  const node = current.nodes.find(item => item.id === selectedNode);
+  if (!node || node.kind === "gate") return;
+  node.exits = exitsOf(node).map(exit => ({ ...exit })); delete node.rework;
+  const target = current.edges.find(edge => edge.from === node.id)?.to
+    || reworkTargets(current.nodes, current.edges, node.id)[0]?.id
+    || current.nodes.find(item => item.id !== node.id)?.id
+    || "";
+  node.exits.push({ to: target, check: "true" });
+  markDirty(); clientErrors = reworkProblems(current);
   renderCanvas(); renderSummary(); renderReworkField(node, current, false); renderProblems();
 }
 
@@ -778,7 +847,7 @@ function renderSummary() {
     return `<li data-summary-edge="${esc(edge.id)}">${from} → ${to}
         <button type="button" class="wf-edge-remove" data-remove-edge="${esc(edge.id)}"${mode === "run" ? " hidden" : ""}>Delete link</button>
       </li>`;
-  }).join("") + graph.nodes.filter(node => node.rework).map(node => `
+  }).join("") + graph.nodes.filter(node => exitsOf(node).length).map(node => `
       <li data-summary-rework="${esc(node.id)}">${esc(nodeTitle(graph.nodes, node.id))} ${esc(reworkSentence(graph.nodes, node))}</li>`).join("");
   for (const button of $("workflow-summary").querySelectorAll("[data-select-node]")) {
     button.onclick = () => selectFromSummary(button.dataset.selectNode);
@@ -1151,8 +1220,7 @@ export function wireWorkflows() {
   $("workflow-delete-node").onclick = () => deleteNode();
   $("workflow-delete-edge").onclick = () => selectedEdge && deleteEdge(selectedEdge);
   $("workflow-input-add").onclick = addInput;
-  $("workflow-node-rework-to").onchange = readRework;
-  $("workflow-node-rework-max").oninput = readRework;
+  $("workflow-node-exit-add").onclick = addExit;
   $("workflow-connect").onclick = () => { if (selectedNode && mode !== "run") { connectFrom = selectedNode; renderCanvas(); } };
   $("workflow-zoom-in").onclick = () => zoomBy(1.2);
   $("workflow-zoom-out").onclick = () => zoomBy(1 / 1.2);

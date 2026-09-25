@@ -821,7 +821,7 @@ mod tests {
                         ..Default::default()
                     },
                     gate: None,
-                    rework: None,
+                    exits: Vec::new(),
                 }],
                 ..Default::default()
             })

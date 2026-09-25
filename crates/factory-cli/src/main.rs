@@ -731,7 +731,7 @@ enum WorkflowCmd {
         #[arg(long)]
         scope: Option<String>,
     },
-    /// One definition: its inputs, nodes, edges and rework loops.
+    /// One definition: its inputs, nodes, edges and ordered exits.
     Show { id: String },
     /// Create a workflow from a YAML or JSON file shaped like
     /// `WorkflowDraft` -- `name`, `scope`, `inputs`, `nodes`, `edges`.
@@ -758,7 +758,7 @@ enum WorkflowCmd {
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
-    /// One run: every node's status, task, and rework round.
+    /// One run: every node's status, task, route, and repeated round.
     Run { run_id: String },
     /// Cancel a run and every task of it still going.
     Cancel { run_id: String },
@@ -1022,6 +1022,9 @@ enum TaskCmd {
         message: Option<String>,
         #[arg(long)]
         result: Option<String>,
+        /// On `done`, select one declared `agent:` exit of this workflow node.
+        #[arg(long = "send-to", requires = "status")]
+        send_to: Option<String>,
         /// Read the result's body from a file instead of (or alongside)
         /// --result -- the `shell` agent's own report line uses this to
         /// carry a command's captured stdout, which can hold quotes, `$`,
@@ -4027,6 +4030,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             status,
             message,
             result,
+            send_to,
             result_file,
             error,
             token,
@@ -4034,6 +4038,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             if status.is_none()
                 && message.is_none()
                 && result.is_none()
+                && send_to.is_none()
                 && result_file.is_none()
                 && error.is_none()
             {
@@ -4049,6 +4054,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                         status,
                         message,
                         result,
+                        send_to,
                         error,
                         token,
                     },
@@ -4581,8 +4587,21 @@ fn workflow_text(w: &factory_core::workflow::WorkflowDefinition) -> String {
         if !after.is_empty() {
             s.push_str(&format!("  after {}", after.join(", ")));
         }
-        if let Some(rework) = &node.rework {
-            s.push_str(&format!("  sends work back to {} (at most {}x)", rework.to, rework.max_rounds));
+        for (index, exit) in node.exits.iter().enumerate() {
+            let condition = exit
+                .check
+                .as_ref()
+                .map(|check| format!("check {check:?}"))
+                .unwrap_or_else(|| format!("agent {}", exit.agent.as_deref().unwrap_or("")));
+            let rounds = exit
+                .max_rounds
+                .map(|rounds| format!(", at most {rounds}x"))
+                .unwrap_or_default();
+            s.push_str(&format!(
+                "  exit {} -> {} ({condition}{rounds})",
+                index + 1,
+                exit.to
+            ));
         }
         s.push('\n');
     }
@@ -4604,6 +4623,12 @@ fn workflow_run_text(r: &factory_core::workflow::WorkflowRun) -> String {
         }
         if node.round > 0 {
             s.push_str(&format!("  rework {}", node.round));
+        }
+        if let Some(to) = &node.routed_to {
+            s.push_str(&format!("  -> {to}"));
+        }
+        if let Some(reason) = &node.skip_reason {
+            s.push_str(&format!("  -- {reason}"));
         }
         if let Some(error) = &node.error {
             s.push_str(&format!("  -- {error}"));

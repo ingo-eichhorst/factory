@@ -100,6 +100,9 @@ export function standing(t) {
     const kind = t.failure ? failKindLabel(t.failure.kind) : "a failure";
     return { tone: "wait", text: `retrying after ${kind} (retry ${t.pending_retry.attempts})`, detail: t.error || null };
   }
+  if (t.status === "done" && t.routed_to) {
+    return { tone: "closed", text: `done → ${t.routed_to}`, detail: null };
+  }
   const reason = closeReason(t);
   if (reason) {
     const c = t.closure || {};

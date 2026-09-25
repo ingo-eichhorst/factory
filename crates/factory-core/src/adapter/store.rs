@@ -153,6 +153,7 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         schedule: new.schedule,
         estimate_seconds: new.estimate_seconds,
         result: None,
+        routed_to: None,
         error: None,
         runs: 0,
         ack_timeout_seconds: new.ack_timeout_seconds,

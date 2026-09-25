@@ -397,6 +397,7 @@ mod tests {
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some("ok".into()),
+                    send_to: None,
                     error: None,
                     token: run.token.clone(),
                 },

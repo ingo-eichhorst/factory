@@ -1181,6 +1181,7 @@ mod tests {
             schedule: None,
             estimate_seconds: None,
             result: None,
+            routed_to: None,
             error: None,
             runs: 0,
             ack_timeout_seconds: None,
@@ -1229,6 +1230,7 @@ mod tests {
             status: Some(RunStatus::Running),
             message: Some("working".into()),
             result: None,
+            send_to: None,
             error: None,
             token: None,
         }

@@ -1248,6 +1248,7 @@ mod tests {
             session: None,
             token: None,
             result: None,
+            routed_to: None,
             error: None,
             started_at: at(0),
             ended_at: to.map(at),

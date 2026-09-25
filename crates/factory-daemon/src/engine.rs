@@ -4,7 +4,8 @@
 use chrono::Utc;
 use factory_core::adapter::agent::{
     knowledge_hints_path, run_guide_path, run_hook_settings_path, run_shell_script_path, truncate_tail,
-    upstream_output_path, AgentContext, LaunchSpec, TaskBinding, UpstreamOutput, UPSTREAM_RESULT_BYTE_CAP,
+    upstream_output_path, AgentContext, AgentExitContext, LaunchSpec, TaskBinding, UpstreamOutput,
+    UPSTREAM_RESULT_BYTE_CAP,
 };
 use factory_core::adapter::runtime::{
     RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
@@ -2250,6 +2251,7 @@ impl Engine {
         // pass, which dispatches through this same function, needs no
         // change of its own to pick this up.
         let upstream = self.upstream_outputs(&task).await;
+        let agent_exits = self.agent_exit_context(&task).await;
         let knowledge = self.knowledge_hints(&task, &run.id).await;
         // Same chain the L6 tab and `policy attest` fold against
         // (`Engine::policy_chain`), reduced to just the names the guide
@@ -2279,6 +2281,7 @@ impl Engine {
                 upstream,
                 knowledge,
                 required_steps: run.required_steps.clone(),
+                agent_exits,
             }),
             identity_token: None,
             role,
@@ -2476,9 +2479,9 @@ impl Engine {
                 ),
             }
         }
-        // `#140`: work sent back here comes with what the node that sent it
-        // said -- its error (the findings a `failed` report carries) and
-        // its result, whichever it gave.
+        // Work sent back here comes with what the node that sent it said:
+        // the result from `done --send-to`, or the error/results retained by
+        // an in-flight run loaded from the legacy failure-routing format.
         let request = run
             .nodes
             .iter()
@@ -2511,6 +2514,38 @@ impl Engine {
         outputs
     }
 
+    /// Agent-selectable exits for this exact workflow-node round. This is
+    /// computed once at dispatch so the reporting contract cannot change
+    /// underneath a running agent.
+    async fn agent_exit_context(&self, task: &Task) -> Vec<AgentExitContext> {
+        let Some(origin) = &task.workflow_origin else {
+            return Vec::new();
+        };
+        let Ok(Some(run)) = self.workflows.get_run(&origin.workflow_run_id).await else {
+            return Vec::new();
+        };
+        let used = run
+            .nodes
+            .iter()
+            .find(|node| node.node_id == origin.node_id)
+            .map_or(0, |node| node.round);
+        run.definition
+            .nodes
+            .iter()
+            .find(|node| node.id == origin.node_id)
+            .into_iter()
+            .flat_map(|node| &node.exits)
+            .filter_map(|exit| {
+                exit.agent.as_ref().map(|rule| AgentExitContext {
+                    to: exit.to.clone(),
+                    rule: rule.clone(),
+                    max_rounds: exit.max_rounds,
+                    rounds_used: used,
+                })
+            })
+            .collect()
+    }
+
     /// The token is what makes a call about a run come from that run --
     /// the agent's own report, or its harness's turn-end hook -- rather than
     /// from anyone on the socket closing anyone's run.
@@ -2541,6 +2576,8 @@ impl Engine {
         })?;
 
         self.check_run_token(&run, report.token.as_deref(), task_id)?;
+        self.validate_workflow_send_to(task_id, report.status, report.send_to.as_deref())
+            .await?;
 
         // While its gates run, a run's status is the verifier's to set. The
         // agent may still add a note, or give the run up; nothing else.
@@ -2584,12 +2621,28 @@ impl Engine {
         let mut patch = RunPatch {
             status: report.status,
             result: report.result,
+            routed_to: report.send_to.clone(),
+            clear_routed_to: report.status == Some(RunStatus::Done) && report.send_to.is_none(),
             error: report.error,
             // The agent is talking, so whatever turn a `Stop` hook said had
             // ended has not -- see `occupancy::settle_turn_end`.
             clear_turn_ended: true,
             ..Default::default()
         };
+
+        if let Some(to) = &report.send_to {
+            self.entry(
+                task_id,
+                TaskEntry::new(
+                    "agent",
+                    "routed_to",
+                    format!("reported done; routed to {to}"),
+                )
+                .in_run(&run.id)
+                .with_data(serde_json::json!({ "routed_to": to })),
+            )
+            .await;
+        }
 
         // The agent's own report is the one thing that may set or clear
         // `Blocked` honestly for its own sake -- see `AGENTS.md` and issue
@@ -2934,7 +2987,9 @@ impl Engine {
         let patch = TaskPatch {
             status: Some(status),
             result: run.result.clone(),
+            routed_to: run.routed_to.clone(),
             clear_result: run.result.is_none(),
+            clear_routed_to: run.routed_to.is_none(),
             error: run.error.clone(),
             clear_error: run.error.is_none(),
             failure: failed.then(|| TaskFailure {
@@ -4555,6 +4610,7 @@ mod tests {
                     status: None,
                     message: Some("the hook was wrong, I am still here".into()),
                     result: None,
+                    send_to: None,
                     error: None,
                     token: Some("tok".into()),
                 },
@@ -4608,6 +4664,7 @@ mod tests {
                 TaskReport {
                     status: Some(RunStatus::Done),
                     result: Some("did it".into()),
+                    send_to: None,
                     token: Some("tok".into()),
                     message: None,
                     error: None,
@@ -5168,6 +5225,7 @@ mod tests {
                     status: Some(RunStatus::Failed),
                     message: None,
                     result: None,
+                    send_to: None,
                     error: Some("the tests do not pass".into()),
                     token: Some("tok".into()),
                 },
@@ -5196,6 +5254,7 @@ mod tests {
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some("fine".into()),
+                    send_to: None,
                     error: None,
                     token: Some("tok".into()),
                 },
@@ -5306,6 +5365,7 @@ mod tests {
             session: None,
             token: None,
             result: None,
+            routed_to: None,
             error: None,
             started_at: t0,
             ended_at: Some(t0 + chrono::Duration::minutes(10)),
@@ -5469,6 +5529,7 @@ mod tests {
             session: None,
             token: None,
             result: None,
+            routed_to: None,
             error: None,
             started_at: t(90),
             ended_at: Some(t(80)),

@@ -69,6 +69,21 @@ pub struct TaskBinding {
     /// Absent on the wire when empty, like `upstream`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_steps: Vec<crate::control_plan::RequiredStep>,
+    /// This workflow node's agent-selectable exits, fixed at dispatch with
+    /// the current round counts. Empty outside a workflow node and then the
+    /// reporting contract never mentions `--send-to`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_exits: Vec<AgentExitContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentExitContext {
+    pub to: String,
+    pub rule: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<u32>,
+    #[serde(default)]
+    pub rounds_used: u32,
 }
 
 /// One direct parent's contribution to a downstream workflow node's dispatch:
@@ -344,6 +359,30 @@ impl AgentContext {
                 checks.concat()
             )
         };
+        let routing = if binding.agent_exits.is_empty() {
+            String::new()
+        } else {
+            let choices = binding
+                .agent_exits
+                .iter()
+                .map(|exit| match exit.max_rounds {
+                    Some(max) => format!(
+                        "- {}: {} ({} used, {} left of {})\n",
+                        exit.to,
+                        exit.rule,
+                        exit.rounds_used,
+                        max.saturating_sub(exit.rounds_used),
+                        max
+                    ),
+                    None => format!("- {}: {}\n", exit.to, exit.rule),
+                })
+                .collect::<String>();
+            format!(
+                "\n- Finished and route: {bin} task report {id} --status done --send-to <node> --result \"<findings for that node>\"\n\
+                 \nThis workflow node may choose one of these declared routes when it finishes:\n{choices}\
+                 Use `--send-to` only when its rule holds. Otherwise report plain `done`; check exits and the default route are Factory's to choose.\n"
+            )
+        };
         let scope = &self.scope;
         let contract = format!(
             "Report progress by running these commands in your shell. They are how \
@@ -353,6 +392,7 @@ impl AgentContext {
              - A useful update: {bin} task report {id} --message \"<the update>\"\n\
              - Need a human:    {bin} task report {id} --status blocked --message \"<what you need>\"\n\
              - Finished:        {bin} task report {id} --status done --result \"<what you did>\"\n\
+             {routing}\
              - Gave up:         {bin} task report {id} --status failed --error \"<why>\"\n\
              \n\
              Dependency scans attach CycloneDX documents with `{bin} task attach{attach_to} --kind sbom|vulnerabilities <file>`. \
@@ -843,6 +883,7 @@ mod tests {
             schedule: None,
             estimate_seconds: None,
             result: None,
+            routed_to: None,
             error: None,
             runs: 1,
             ack_timeout_seconds: None,
@@ -894,6 +935,7 @@ mod tests {
             upstream: Vec::new(),
             knowledge: None,
             required_steps: Vec::new(),
+            agent_exits: Vec::new(),
         });
         ctx.identity_token = None;
         ctx
@@ -1095,6 +1137,32 @@ mod tests {
         // The ordinary contract leaves all of it to the environment.
         let plain = ctx.reporting_contract();
         assert!(!plain.contains("--run-token") && !plain.contains("--socket") && !plain.contains("tok "), "{plain}");
+    }
+
+    #[test]
+    fn send_to_appears_only_for_a_node_with_agent_exits_and_names_rules_and_rounds() {
+        let plain = with_task(base(Some(worker()))).reporting_contract();
+        assert!(!plain.contains("--send-to"), "{plain}");
+
+        let mut routed = with_task(base(Some(worker())));
+        routed.task.as_mut().unwrap().agent_exits = vec![AgentExitContext {
+            to: "implement".into(),
+            rule: "concrete findings the implementer can fix alone".into(),
+            max_rounds: Some(5),
+            rounds_used: 2,
+        }];
+        let contract = routed.reporting_contract();
+        assert!(
+            contract.contains("--status done --send-to <node>"),
+            "{contract}"
+        );
+        assert!(
+            contract.contains(
+                "implement: concrete findings the implementer can fix alone (2 used, 3 left of 5)"
+            ),
+            "{contract}"
+        );
+        assert!(contract.contains("Factory's to choose.\n- Gave up:"), "{contract}");
     }
 
     #[test]

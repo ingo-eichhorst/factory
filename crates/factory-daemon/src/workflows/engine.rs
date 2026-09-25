@@ -1,17 +1,26 @@
 use crate::access::Caller;
 use crate::engine::Engine;
+use crate::verification::run_shell_capture;
+#[cfg(not(test))]
+use crate::verification::DEFAULT_GATE_TIMEOUT_SECS;
 use chrono::Utc;
+use factory_core::control_plan::AttestationVerdict;
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
-use factory_core::run::{FailKind, Trigger};
+#[cfg(test)]
+use factory_core::run::FailKind;
+use factory_core::run::{RunStatus, Trigger};
 use factory_core::task::{Task, TaskEntry, TaskStatus, WorkflowOrigin};
-use factory_core::control_plan::AttestationVerdict;
-use factory_core::run::RunStatus;
 use factory_core::workflow::{
     SendBack, WorkflowDefinition, WorkflowDraft, WorkflowNodeKind, WorkflowNodeStatus, WorkflowRun, WorkflowRunStatus,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+#[cfg(not(test))]
+const EXIT_CHECK_TIMEOUT_SECS: u64 = DEFAULT_GATE_TIMEOUT_SECS;
+#[cfg(test)]
+const EXIT_CHECK_TIMEOUT_SECS: u64 = 1;
 
 fn missing(kind: &str, id: &str) -> FactoryError {
     FactoryError::BadRequest(format!("no such {kind}: {id}"))
@@ -28,7 +37,7 @@ mod tests {
     use factory_core::run::RunStatus;
     use factory_core::task::{NewTask, SessionRef, TaskFilter, TaskReport};
     use factory_core::workflow::{
-        CanvasPoint, WorkflowActor, WorkflowEdge, WorkflowNode, WorkflowNodeKind,
+        CanvasPoint, WorkflowActor, WorkflowEdge, WorkflowExit, WorkflowNode, WorkflowNodeKind,
     };
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
@@ -294,7 +303,7 @@ mod tests {
                 ..Default::default()
             },
             gate: None,
-            rework: None,
+            exits: Vec::new(),
         }
     }
 
@@ -318,7 +327,7 @@ mod tests {
                 ..Default::default()
             },
             gate: None,
-            rework: None,
+            exits: Vec::new(),
         }
     }
 
@@ -376,6 +385,7 @@ mod tests {
                     status: Some(status),
                     message: Some("reported by test".into()),
                     result: None,
+                    send_to: None,
                     error: (status == RunStatus::Failed).then(|| "boom".into()),
                     token: run.token,
                 },
@@ -401,6 +411,7 @@ mod tests {
                     status: Some(RunStatus::Done),
                     message: Some("reported by test".into()),
                     result: Some(result.into()),
+                    send_to: None,
                     error: None,
                     token: run.token,
                 },
@@ -947,6 +958,7 @@ mod tests {
                     status: Some(RunStatus::Running),
                     message: Some("working".into()),
                     result: None,
+                    send_to: None,
                     error: None,
                     token: active.token.clone(),
                 },
@@ -1149,7 +1161,7 @@ mod tests {
         );
     }
 
-    // --- #140: bounded rework loops and run inputs -----------------------
+    // --- #149: ordered exits, bounded backwards routes, and run inputs ---
 
     fn of_node<'a>(tasks: &'a [factory_core::Task], node: &str) -> Vec<&'a factory_core::Task> {
         tasks.iter().filter(|t| t.workflow_origin.as_ref().unwrap().node_id == node).collect()
@@ -1164,7 +1176,12 @@ mod tests {
     /// so the prompt it is re-dispatched with can be read back.
     async fn review_loop(engine: &Arc<Engine>, max_rounds: u32) -> WorkflowDefinition {
         let mut review = node("review");
-        review.rework = Some(factory_core::workflow::ReworkSpec { to: "implement".into(), max_rounds });
+        review.exits = vec![WorkflowExit {
+            to: "implement".into(),
+            check: None,
+            agent: Some("concrete findings the implementer can fix alone".into()),
+            max_rounds: Some(max_rounds),
+        }];
         create(
             engine,
             vec![harness_node("implement"), review, node("ship")],
@@ -1184,10 +1201,11 @@ mod tests {
             .report(
                 task_id,
                 TaskReport {
-                    status: Some(RunStatus::Failed),
+                    status: Some(RunStatus::Done),
                     message: None,
-                    result: None,
-                    error: Some(findings.into()),
+                    result: Some(findings.into()),
+                    send_to: Some("implement".into()),
+                    error: None,
                     token: run.token,
                 },
             )
@@ -1197,7 +1215,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_review_that_fails_sends_the_work_back_with_its_findings_until_it_passes() {
+    async fn a_done_review_can_send_the_work_back_with_its_findings_until_it_passes() {
         let (engine, recorder) = engine_with_recorder();
         let definition = review_loop(&engine, 5).await;
         let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
@@ -1205,7 +1223,35 @@ mod tests {
         let first = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish_with_result(&engine, &first.id, "PR https://example.test/pr/1").await;
         let review = of_node(&wait_for_tasks(&engine, 2).await, "review")[0].clone();
+        let active = loop {
+            if let Some(active) = engine.store.active_run(&review.id).await.unwrap() {
+                break active;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        let refused = engine.report(&review.id, TaskReport {
+            status: Some(RunStatus::Done), message: None, result: Some("findings".into()),
+            send_to: Some("nowhere".into()), error: None, token: active.token,
+        }).await.unwrap_err().to_string();
+        assert!(refused.contains("implement (concrete findings the implementer can fix alone)"), "{refused}");
         review_fails(&engine, &review.id, "the parser test is missing").await;
+
+        let routed_review = engine.store.get(&review.id).await.unwrap().unwrap();
+        assert_eq!(
+            routed_review.status,
+            TaskStatus::Done,
+            "sending work back is a successful review verdict"
+        );
+        assert_eq!(routed_review.routed_to.as_deref(), Some("implement"));
+        assert!(routed_review.failure.is_none());
+        let review_entries = engine.store.entries(&review.id, 20).await.unwrap();
+        assert!(review_entries.iter().any(|entry| {
+            entry.kind == "routed_to"
+                && entry
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data["routed_to"] == "implement")
+        }));
 
         let all = wait_for_tasks(&engine, 3).await;
         let again = of_node(&all, "implement").into_iter().find(|t| t.id != first.id).unwrap().clone();
@@ -1239,12 +1285,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn once_the_rounds_are_used_up_a_failed_review_fails_the_run_and_says_it_needs_a_person() {
+    async fn once_the_rounds_are_used_up_send_to_is_refused_and_the_run_waits_for_a_person() {
         let engine = engine();
         let mut review = node("review");
-        review.rework = Some(factory_core::workflow::ReworkSpec { to: "implement".into(), max_rounds: 1 });
-        let definition = create(&engine, vec![node("implement"), review], vec![edge("implement", "review")]).await;
-        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        review.exits = vec![WorkflowExit {
+            to: "implement".into(),
+            check: None,
+            agent: Some("fixable findings".into()),
+            max_rounds: Some(1),
+        }];
+        let definition = create(
+            &engine,
+            vec![node("implement"), review],
+            vec![edge("implement", "review")],
+        )
+        .await;
+        let run = engine
+            .start_workflow(&definition.id, Default::default(), &Caller::Owner)
+            .await
+            .unwrap();
 
         let implement = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &implement.id, RunStatus::Done).await;
@@ -1254,25 +1313,62 @@ mod tests {
         let again = of_node(&all, "implement").into_iter().find(|t| t.id != implement.id).unwrap().clone();
         finish(&engine, &again.id, RunStatus::Done).await;
         let all = wait_for_tasks(&engine, 4).await;
-        let last = of_node(&all, "review").into_iter().find(|t| t.id != review.id).unwrap().clone();
-        review_fails(&engine, &last.id, "still wrong, twice").await;
-
+        let last = of_node(&all, "review")
+            .into_iter()
+            .find(|t| t.id != review.id)
+            .unwrap()
+            .clone();
+        let active = loop {
+            if let Some(active) = engine.store.active_run(&last.id).await.unwrap() {
+                break active;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        let error = engine
+            .report(
+                &last.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some("still wrong, twice".into()),
+                    send_to: Some("implement".into()),
+                    error: None,
+                    token: active.token,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no rounds left"), "{error}");
         let run = engine.workflow_run(&run.id).await.unwrap();
-        assert_eq!(run.status, WorkflowRunStatus::Failed);
-        assert_eq!(run.failure_node_id.as_deref(), Some("review"));
-        let error = run.error.unwrap();
-        assert!(error.contains("sent the work back 1 time and still failed it; it needs a person"), "{error}");
-        assert!(error.contains("still wrong, twice"), "{error}");
-        assert_eq!(tasks(&engine).await.len(), 4, "nothing spawned past the budget");
+        assert_eq!(run.status, WorkflowRunStatus::Running);
+        assert_eq!(
+            tasks(&engine).await.len(),
+            4,
+            "nothing spawned past the budget"
+        );
     }
 
     #[tokio::test]
     async fn a_review_that_timed_out_is_not_a_verdict_and_sends_nothing_back() {
         let engine = engine();
         let mut review = node("review");
-        review.rework = Some(factory_core::workflow::ReworkSpec { to: "implement".into(), max_rounds: 5 });
-        let definition = create(&engine, vec![node("implement"), review], vec![edge("implement", "review")]).await;
-        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        review.exits = vec![WorkflowExit {
+            to: "implement".into(),
+            check: None,
+            agent: Some("fixable findings".into()),
+            max_rounds: Some(5),
+        }];
+        let definition = create(
+            &engine,
+            vec![node("implement"), review],
+            vec![edge("implement", "review")],
+        )
+        .await;
+        let run = engine
+            .start_workflow(&definition.id, Default::default(), &Caller::Owner)
+            .await
+            .unwrap();
 
         let implement = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &implement.id, RunStatus::Done).await;
@@ -1290,6 +1386,209 @@ mod tests {
         assert_eq!(run.status, WorkflowRunStatus::Failed);
         assert_eq!(node_run(&run, "review").round, 0);
         assert_eq!(tasks(&engine).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_agent_reported_failure_never_takes_an_agent_exit() {
+        let engine = engine();
+        let definition = review_loop(&engine, 5).await;
+        let run = engine
+            .start_workflow(&definition.id, Default::default(), &Caller::Owner)
+            .await
+            .unwrap();
+        let implement = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        finish(&engine, &implement.id, RunStatus::Done).await;
+        let review = of_node(&wait_for_tasks(&engine, 2).await, "review")[0].clone();
+        finish(&engine, &review.id, RunStatus::Failed).await;
+        let settled = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(settled.status, WorkflowRunStatus::Failed);
+        assert_eq!(node_run(&settled, "review").round, 0);
+        assert_eq!(
+            tasks(&engine).await.len(),
+            2,
+            "failure spawned no new implementation task"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_exits_hold_do_not_hold_and_error_with_output() {
+        async fn setup(command: &str) -> (Arc<Engine>, WorkflowRun) {
+            let engine = engine();
+            let mut a = node("a");
+            a.exits = vec![WorkflowExit {
+                to: "c".into(),
+                check: Some(command.into()),
+                agent: None,
+                max_rounds: None,
+            }];
+            let definition = create(
+                &engine,
+                vec![a, node("b"), node("c")],
+                vec![edge("a", "b"), edge("b", "c"), edge("a", "c")],
+            )
+            .await;
+            let run = engine
+                .start_workflow(&definition.id, Default::default(), &Caller::Owner)
+                .await
+                .unwrap();
+            (engine, run)
+        }
+
+        let (engine, run) = setup("true").await;
+        let a = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        finish(&engine, &a.id, RunStatus::Done).await;
+        let all = wait_for_tasks(&engine, 2).await;
+        assert_eq!(
+            of_node(&all, "b").len(),
+            0,
+            "the default branch was exclusive and skipped"
+        );
+        let c = of_node(&all, "c")[0].clone();
+        let state = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(
+            node_run(&state, "b").status,
+            WorkflowNodeStatus::SkippedByRoute
+        );
+        assert_eq!(
+            node_run(&state, "b").skip_reason.as_deref(),
+            Some("skipped (a -> c)")
+        );
+        finish(&engine, &c.id, RunStatus::Done).await;
+        assert_eq!(
+            engine.workflow_run(&run.id).await.unwrap().status,
+            WorkflowRunStatus::Done
+        );
+
+        let (engine, _) = setup("false").await;
+        let a = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        finish(&engine, &a.id, RunStatus::Done).await;
+        let all = wait_for_tasks(&engine, 2).await;
+        assert_eq!(
+            of_node(&all, "b").len(),
+            1,
+            "exit 1 did not hold, so plain edges remained the default"
+        );
+        assert_eq!(of_node(&all, "c").len(), 0, "fan-in still waits for b");
+
+        let (engine, run) = setup("printf 'broken check'; exit 2").await;
+        let a = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        finish(&engine, &a.id, RunStatus::Done).await;
+        let state = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(node_run(&state, "a").status, WorkflowNodeStatus::Blocked);
+        assert!(node_run(&state, "a")
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("broken check"));
+        let entries = engine.store.entries(&a.id, 20).await.unwrap();
+        assert!(entries.iter().any(|entry| entry.kind == "exit_checked"
+            && entry
+                .data
+                .as_ref()
+                .is_some_and(|data| data.to_string().contains("broken check"))));
+
+        let (engine, run) = setup("sleep 2").await;
+        let a = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        finish(&engine, &a.id, RunStatus::Done).await;
+        let state = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(node_run(&state, "a").status, WorkflowNodeStatus::Blocked);
+        assert!(node_run(&state, "a").error.as_deref().unwrap().contains("did not finish within 1s"));
+        let entries = engine.store.entries(&a.id, 20).await.unwrap();
+        assert!(entries.iter().any(|entry| entry.kind == "exit_checked"
+            && entry.data.as_ref().is_some_and(|data| data.to_string().contains("did not finish within 1s"))));
+    }
+
+    #[tokio::test]
+    async fn exits_are_first_match_wins_and_send_to_refusals_name_alternatives() {
+        let standalone_engine = engine();
+        let plain = standalone_engine.create(NewTask { title: "plain".into(), scope: Some("demo".into()), ..Default::default() }).await.unwrap();
+        let standalone = standalone_engine.validate_workflow_send_to(&plain.id, Some(RunStatus::Done), Some("b"))
+            .await.unwrap_err().to_string();
+        assert!(standalone.contains("only available on a workflow node"), "{standalone}");
+
+        let engine = engine();
+        let mut a = node("a");
+        a.exits = vec![
+            WorkflowExit {
+                to: "b".into(),
+                check: Some("true".into()),
+                agent: None,
+                max_rounds: None,
+            },
+            WorkflowExit {
+                to: "c".into(),
+                check: Some("true".into()),
+                agent: None,
+                max_rounds: None,
+            },
+        ];
+        let definition = create(
+            &engine,
+            vec![a, node("b"), node("c")],
+            vec![edge("a", "b"), edge("a", "c")],
+        )
+        .await;
+        let run = engine
+            .start_workflow(&definition.id, Default::default(), &Caller::Owner)
+            .await
+            .unwrap();
+        let task = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        let active = loop {
+            if let Some(active) = engine.store.active_run(&task.id).await.unwrap() {
+                break active;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        let wrong_status = engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: Some(RunStatus::Failed),
+                    message: None,
+                    result: None,
+                    send_to: Some("b".into()),
+                    error: Some("broke".into()),
+                    token: active.token.clone(),
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            wrong_status.contains("only with --status done"),
+            "{wrong_status}"
+        );
+        let wrong_target = engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: None,
+                    send_to: Some("nowhere".into()),
+                    error: None,
+                    token: active.token,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            wrong_target.contains("no agent exits") && wrong_target.contains("plain done"),
+            "{wrong_target}"
+        );
+        finish(&engine, &task.id, RunStatus::Done).await;
+        let tasks = wait_for_tasks(&engine, 2).await;
+        assert_eq!(of_node(&tasks, "b").len(), 1, "first true exit won");
+        assert_eq!(
+            of_node(&tasks, "c").len(),
+            0,
+            "the second true exit was not evaluated as another route"
+        );
+        assert_eq!(
+            node_run(&engine.workflow_run(&run.id).await.unwrap(), "c").status,
+            WorkflowNodeStatus::SkippedByRoute
+        );
     }
 
     #[tokio::test]
@@ -1349,6 +1648,72 @@ fn node_status(task: &Task) -> WorkflowNodeStatus {
 }
 
 impl Engine {
+    /// Validate the agent-selected half of ordered exits before accepting a
+    /// report. Checks are the daemon's choice and need no flag; only an
+    /// `agent:` exit may be named here.
+    pub(crate) async fn validate_workflow_send_to(
+        &self,
+        task_id: &str,
+        status: Option<RunStatus>,
+        send_to: Option<&str>,
+    ) -> Result<()> {
+        let Some(to) = send_to else { return Ok(()) };
+        if status != Some(RunStatus::Done) {
+            return Err(FactoryError::BadRequest(
+                "--send-to is accepted only with --status done; report blocked for a person or failed when the attempt broke"
+                    .into(),
+            ));
+        }
+        let task = self.require(task_id).await?;
+        let Some(origin) = &task.workflow_origin else {
+            return Err(FactoryError::BadRequest(
+                "--send-to is only available on a workflow node with declared agent exits; report plain done instead"
+                    .into(),
+            ));
+        };
+        let run = self.workflow_run(&origin.workflow_run_id).await?;
+        let definition_node = run
+            .definition
+            .nodes
+            .iter()
+            .find(|node| node.id == origin.node_id)
+            .ok_or_else(|| {
+                FactoryError::BadRequest("this task's workflow node no longer exists".into())
+            })?;
+        let choices: Vec<_> = definition_node
+            .exits
+            .iter()
+            .filter(|exit| exit.agent.is_some())
+            .collect();
+        let allowed = choices
+            .iter()
+            .map(|exit| format!("{} ({})", exit.to, exit.agent.as_deref().unwrap_or("")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let Some(exit) = choices.into_iter().find(|exit| exit.to == to) else {
+            let alternative = if allowed.is_empty() {
+                "this node has no agent exits; report plain done instead".to_string()
+            } else {
+                format!("allowed agent exits: {allowed}; otherwise report plain done")
+            };
+            return Err(FactoryError::BadRequest(format!(
+                "node {:?} has no agent exit to {to:?}; {alternative}",
+                origin.node_id
+            )));
+        };
+        let used = run
+            .nodes
+            .iter()
+            .find(|node| node.node_id == origin.node_id)
+            .map_or(0, |node| node.round);
+        if exit.max_rounds.is_some_and(|max| used >= max) {
+            return Err(FactoryError::BadRequest(format!(
+                "agent exit to {to} has no rounds left: report `blocked` with the open findings"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn workflow_definition(&self, id: &str) -> Result<WorkflowDefinition> {
         self.workflows
             .get_definition(id)
@@ -1518,8 +1883,16 @@ impl Engine {
             };
             match self.store.get(&task_id).await {
                 Ok(Some(task)) => {
-                    node.status = node_status(&task);
-                    node.error = task.error;
+                    // A check-exit error blocks the workflow node after its
+                    // task has already completed. Preserve that orchestration
+                    // block instead of mirroring the task's `done` over it.
+                    if !(node.status == WorkflowNodeStatus::Blocked
+                        && node.exits_evaluated
+                        && task.status == TaskStatus::Done)
+                    {
+                        node.status = node_status(&task);
+                        node.error = task.error;
+                    }
                 }
                 Ok(None) if !node.status.is_terminal() => {
                     // The decision was made (or a task once existed) and now
@@ -1561,49 +1934,18 @@ impl Engine {
             return Ok(());
         }
 
-        // `#140`: a node that may send its work back, whose agent reported
-        // it `failed`, sends it back instead of failing the run -- while it
-        // has rounds left. Its reset nodes read `unstarted` again and the
-        // eligibility pass below spawns them.
-        let mut exhausted = BTreeMap::new();
-        for failed in run
+        // A completed task and its route are separate facts (#149). Evaluate
+        // each done node's ordered exits exactly once. A backwards match
+        // resets its bounded loop; a forward match skips the default branch;
+        // no match leaves the ordinary outgoing edges as the default.
+        for done in run
             .nodes
             .iter()
-            .filter(|n| n.status == WorkflowNodeStatus::Failed)
+            .filter(|n| n.status == WorkflowNodeStatus::Done && !n.exits_evaluated)
             .map(|n| n.node_id.clone())
             .collect::<Vec<_>>()
         {
-            if !self.failed_by_its_agent(&run, &failed).await {
-                continue;
-            }
-            let from_task = run.nodes.iter().find(|n| n.node_id == failed).and_then(|n| n.task_id.clone());
-            match run.send_back(&failed) {
-                SendBack::NoRework => {}
-                SendBack::Sent { round, max_rounds } => {
-                    let to = run
-                        .definition
-                        .nodes
-                        .iter()
-                        .find(|n| n.id == failed)
-                        .and_then(|n| n.rework.as_ref())
-                        .map(|r| r.to.clone())
-                        .unwrap_or_default();
-                    if let Some(task) = from_task {
-                        self.entry(
-                            &task,
-                            TaskEntry::new(
-                                "daemon",
-                                "rework_requested",
-                                format!("sent the work back to {to}: round {round} of {max_rounds}"),
-                            ),
-                        )
-                        .await;
-                    }
-                }
-                SendBack::Exhausted { max_rounds } => {
-                    exhausted.insert(failed, max_rounds);
-                }
-            }
+            self.evaluate_node_exits(&mut run, &done).await?;
         }
 
         if let Some(failed) = run
@@ -1613,15 +1955,12 @@ impl Engine {
         {
             run.status = WorkflowRunStatus::Failed;
             run.failure_node_id = Some(failed.node_id.clone());
-            let error = failed.error.clone().unwrap_or_else(|| "a task node failed".into());
-            run.error = Some(match exhausted.get(&failed.node_id) {
-                Some(max) => format!(
-                    "{} sent the work back {max} time{} and still failed it; it needs a person: {error}",
-                    failed.node_id,
-                    if *max == 1 { "" } else { "s" }
-                ),
-                None => error,
-            });
+            run.error = Some(
+                failed
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "a task node failed".into()),
+            );
         } else if let Some(cancelled) = run
             .nodes
             .iter()
@@ -1629,11 +1968,12 @@ impl Engine {
         {
             run.status = WorkflowRunStatus::Cancelled;
             run.failure_node_id = Some(cancelled.node_id.clone());
-        } else if run
-            .nodes
-            .iter()
-            .all(|node| node.status == WorkflowNodeStatus::Done)
-        {
+        } else if run.nodes.iter().all(|node| {
+            matches!(
+                node.status,
+                WorkflowNodeStatus::Done | WorkflowNodeStatus::SkippedByRoute
+            )
+        }) {
             run.status = WorkflowRunStatus::Done;
         }
         if run.status.is_terminal() {
@@ -1670,17 +2010,49 @@ impl Engine {
                                 .find(|n| n.node_id == id)
                                 .is_some_and(|n| n.status == WorkflowNodeStatus::Done)
                         };
+                        let finished = |id: &str| {
+                            run.nodes.iter().find(|n| n.node_id == id).is_some_and(|n| {
+                                matches!(
+                                    n.status,
+                                    WorkflowNodeStatus::Done | WorkflowNodeStatus::SkippedByRoute
+                                )
+                            })
+                        };
                         // A gate parent counts only once the work it judged
                         // is itself done -- a step that passed in a round
                         // that then blocked on another step is not a
                         // verified run to build on.
-                        done(&edge.from)
+                        finished(&edge.from)
                             && match run.definition.nodes.iter().find(|n| n.id == edge.from) {
                                 Some(n) if n.kind == WorkflowNodeKind::Gate => {
-                                    run.definition.gate_subject(&n.id).is_some_and(|subject| done(&subject))
+                                    run.nodes
+                                        .iter()
+                                        .find(|node| node.node_id == edge.from)
+                                        .is_some_and(|node| {
+                                            node.status == WorkflowNodeStatus::SkippedByRoute
+                                        })
+                                        || run
+                                            .definition
+                                            .gate_subject(&n.id)
+                                            .is_some_and(|subject| done(&subject))
                                 }
                                 _ => true,
                             }
+                    })
+            })
+            .filter(|node| {
+                let parents: Vec<_> = run
+                    .definition
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.to == node.node_id)
+                    .collect();
+                parents.is_empty()
+                    || parents.iter().any(|edge| {
+                        run.nodes
+                            .iter()
+                            .find(|n| n.node_id == edge.from)
+                            .is_some_and(|n| n.status == WorkflowNodeStatus::Done)
                     })
             })
             .map(|node| node.node_id.clone())
@@ -1798,19 +2170,150 @@ impl Engine {
         Ok(())
     }
 
-    /// Whether `node_id`'s current task failed because its own agent said
-    /// so (`FailKind::AgentFailed`) -- the one failure that is a verdict
-    /// and may send work back (`#140`). A timeout, a session that went
-    /// away or a dispatch that never reached an agent is not a review
-    /// finding, and fails the run like any other failure.
-    async fn failed_by_its_agent(&self, run: &WorkflowRun, node_id: &str) -> bool {
-        let Some(task_id) = run.nodes.iter().find(|n| n.node_id == node_id).and_then(|n| n.task_id.as_deref()) else {
-            return false;
+    async fn evaluate_node_exits(&self, run: &mut WorkflowRun, from: &str) -> Result<()> {
+        let exits = run
+            .definition
+            .nodes
+            .iter()
+            .find(|node| node.id == from)
+            .map(|node| node.exits.clone())
+            .unwrap_or_default();
+        let task_id = run
+            .nodes
+            .iter()
+            .find(|node| node.node_id == from)
+            .and_then(|node| node.task_id.clone());
+        let task = match task_id.as_deref() {
+            Some(id) => self.store.get(id).await?,
+            None => None,
         };
-        matches!(
-            self.store.runs(task_id, 1).await.map(|r| r.into_iter().next()),
-            Ok(Some(newest)) if newest.status == RunStatus::Failed && newest.fail_kind == Some(FailKind::AgentFailed)
-        )
+        let mut selected = None;
+
+        for (index, exit) in exits.iter().enumerate() {
+            let holds = if let Some(command) = &exit.check {
+                let dir = if let Some(task) = &task {
+                    let latest = self.store.runs(&task.id, 1).await?.into_iter().next();
+                    latest
+                        .and_then(|attempt| attempt.worktree_path.map(std::path::PathBuf::from))
+                        .unwrap_or(self.factory_snapshot().scope_path(&task.scope)?)
+                } else {
+                    self.factory_snapshot().scope_path(&run.scope)?
+                };
+                let (code, output) = run_shell_capture(&dir, command, EXIT_CHECK_TIMEOUT_SECS).await;
+                if let Some(task_id) = &task_id {
+                    let code_words = code
+                        .map(|n| format!("exit {n}"))
+                        .unwrap_or_else(|| "did not finish".into());
+                    self.entry(
+                        task_id,
+                        TaskEntry::new(
+                            "daemon",
+                            "exit_checked",
+                            format!("exit {} to {}: {code_words}", index + 1, exit.to),
+                        )
+                        .with_data(serde_json::json!({
+                            "exit": index + 1,
+                            "to": exit.to,
+                            "command": command,
+                            "exit_code": code,
+                            "output": factory_core::bench::tail_4kib(&output),
+                        })),
+                    )
+                    .await;
+                }
+                match code {
+                    Some(0) => true,
+                    Some(1) => false,
+                    other => {
+                        let detail = other
+                            .map(|code| format!("exit {code}"))
+                            .unwrap_or_else(|| "timeout or launch error".into());
+                        if let Some(node) = run.nodes.iter_mut().find(|node| node.node_id == from) {
+                            node.status = WorkflowNodeStatus::Blocked;
+                            node.exits_evaluated = true;
+                            node.error = Some(format!(
+                                "exit {} check could not decide ({detail}): {}",
+                                index + 1,
+                                factory_core::bench::tail_4kib(&output)
+                            ));
+                        }
+                        return Ok(());
+                    }
+                }
+            } else {
+                task.as_ref().and_then(|task| task.routed_to.as_deref()) == Some(exit.to.as_str())
+            };
+            if holds {
+                selected = Some(exit.clone());
+                break;
+            }
+        }
+
+        if let Some(exit) = selected {
+            let backwards = run.definition.ancestors(from).contains(&exit.to);
+            if backwards {
+                match run.send_back(from, &exit.to) {
+                    SendBack::Sent { round, max_rounds } => {
+                        if let Some(task_id) = &task_id {
+                            self.entry(
+                                task_id,
+                                TaskEntry::new(
+                                    "daemon",
+                                    "routed_to",
+                                    format!("sent the work back to {}: round {round} of {max_rounds}", exit.to),
+                                )
+                                .with_data(serde_json::json!({ "routed_to": exit.to, "round": round, "max_rounds": max_rounds })),
+                            )
+                            .await;
+                        }
+                    }
+                    SendBack::Exhausted { .. } => {
+                        if let Some(node) = run.nodes.iter_mut().find(|node| node.node_id == from) {
+                            node.status = WorkflowNodeStatus::Blocked;
+                            node.exits_evaluated = true;
+                            node.error = Some(format!(
+                                "agent exit to {} has no rounds left: report blocked with the open findings",
+                                exit.to
+                            ));
+                        }
+                    }
+                    SendBack::NoExit => {}
+                }
+            } else {
+                run.route_forward(from, &exit.to);
+                if let Some(node) = run.nodes.iter_mut().find(|node| node.node_id == from) {
+                    node.exits_evaluated = true;
+                }
+            }
+            if let Some(task_id) = &task_id {
+                let _ = self
+                    .store
+                    .update(
+                        task_id,
+                        &factory_core::task::TaskPatch {
+                            routed_to: Some(exit.to),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+            }
+        } else if let Some(node) = run.nodes.iter_mut().find(|node| node.node_id == from) {
+            node.exits_evaluated = true;
+            node.routed_to = None;
+            if let Some(task_id) = &task_id {
+                let _ = self
+                    .store
+                    .update(
+                        task_id,
+                        &factory_core::task::TaskPatch {
+                            clear_routed_to: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+            }
+        }
+        Ok(())
     }
 
     /// A gate node's status is what its subject's newest run found
@@ -1873,7 +2376,11 @@ impl Engine {
                 _ => (WorkflowNodeStatus::Unstarted, None),
             };
             if let Some(node) = run.nodes.iter_mut().find(|n| n.node_id == gate_id) {
-                if node.status != WorkflowNodeStatus::Skipped || status != WorkflowNodeStatus::Unstarted {
+                if !matches!(
+                    node.status,
+                    WorkflowNodeStatus::Skipped | WorkflowNodeStatus::SkippedByRoute
+                ) || status != WorkflowNodeStatus::Unstarted
+                {
                     node.status = status;
                     node.error = error;
                 }
@@ -1923,11 +2430,6 @@ impl Engine {
         if run.nodes.iter().all(|node| node.node_id != origin.node_id || node.task_id.as_deref() != Some(task_id)) {
             return;
         }
-        // Whether the run fails here or the work is sent back is
-        // `advance_workflow`'s decision, which the report path makes next.
-        let sends_back = task.has_failed()
-            && run.definition.nodes.iter().any(|n| n.id == origin.node_id && n.rework.is_some())
-            && self.failed_by_its_agent(&run, &origin.node_id).await;
         let Some(node) = run
             .nodes
             .iter_mut()
@@ -1937,7 +2439,7 @@ impl Engine {
         };
         node.status = node_status(&task);
         node.error = task.error;
-        if !run.status.is_terminal() && node.status == WorkflowNodeStatus::Failed && !sends_back {
+        if !run.status.is_terminal() && node.status == WorkflowNodeStatus::Failed {
             run.status = WorkflowRunStatus::Failed;
             run.failure_node_id = Some(node.node_id.clone());
             run.error = node
