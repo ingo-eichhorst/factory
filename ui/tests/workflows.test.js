@@ -30,6 +30,8 @@ import {
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
+const css = readFileSync(new URL("../app.css", import.meta.url), "utf8");
+const view = readFileSync(new URL("../js/workflows.js", import.meta.url), "utf8");
 
 test("Workflows is a Process peer of Tasks with an accessible canvas and summary", () => {
   // Intake (`#119`) sits between them -- the queue in front of the line --
@@ -224,6 +226,42 @@ test("an edge reflects progress: a done parent draws in the run colour, anything
   for (const status of NODE_STATUSES.filter(s => s !== "done")) {
     assert.equal(edgeStatusClass(status), "");
   }
+});
+
+test("running and verifying are blue while done and completed edges stay green", () => {
+  const rule = selector => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`${escaped}\\s*\\{([^}]*)\\}`).exec(css)?.[1] || "";
+  };
+  const runningNode = rule(".workflow-node.wf-s-running");
+  const verifyingNode = rule(".workflow-node.wf-s-verifying");
+  const runningBadge = rule(".wf-badge.wf-s-running");
+  const verifyingBadge = rule(".wf-badge.wf-s-verifying");
+  const doneNode = rule(".workflow-node.wf-s-done");
+  const doneBadge = rule(".wf-badge.wf-s-done");
+  const doneEdge = rule(".workflow-edge.wf-edge-done");
+
+  assert.match(runningNode, /border-left:\s*4px solid var\(--signal\)/);
+  assert.match(runningNode, /background:\s*var\(--signal-wash\)/);
+  assert.match(runningNode, /box-shadow:\s*0 0 0 1px var\(--signal\)/);
+  assert.match(verifyingNode, /border-left:\s*3px dotted var\(--signal\)/);
+  assert.match(verifyingNode, /background:\s*var\(--signal-wash\)/);
+  for (const badge of [runningBadge, verifyingBadge]) {
+    assert.match(badge, /color:\s*var\(--signal-ink\)/);
+    assert.match(badge, /background:\s*var\(--signal-wash\)/);
+  }
+  assert.match(doneNode, /var\(--run\)/);
+  assert.match(doneBadge, /var\(--run\)/);
+  assert.match(doneEdge, /var\(--run\)/);
+});
+
+test("every Workflows run-status surface uses the workflow badge classes", () => {
+  assert.match(view, /class="wf-badge \$\{nodeStatusClass\(run\.status\)\}"/);
+  assert.equal(
+    view.match(/class="wf-badge \$\{nodeStatusClass\(currentRun\.status\)\}"/g)?.length,
+    2,
+    "the toolbar and inspector statuses must both share the workflow badge palette",
+  );
 });
 
 test("fit-to-content frames every node inside the viewport", () => {

@@ -553,7 +553,7 @@ function renderRunPanel() {
   const failedTitle = failed && currentRun.definition.nodes.find(node => node.id === failed.node_id)?.task.title;
   $("workflow-run-meta").innerHTML = `<dl>
       <dt>Run</dt><dd>${esc(currentRun.id)}</dd>
-      <dt>Status</dt><dd>${esc(currentRun.status)}</dd>
+      <dt>Status</dt><dd><span class="wf-badge ${nodeStatusClass(currentRun.status)}">${esc(currentRun.status)}</span></dd>
       <dt>Revision</dt><dd>${esc(currentRun.revision)}</dd>
       ${currentRun.failure_node_id ? `<dt>Failed node</dt><dd>${esc(failedTitle || currentRun.failure_node_id)}</dd>` : ""}
       ${currentRun.error ? `<dt>Error</dt><dd>${esc(currentRun.error)}</dd>` : ""}
@@ -689,7 +689,8 @@ async function loadRuns(selectRunId) {
 function renderRunsList() {
   $("workflow-runs").innerHTML = runs.length ? runs.map(run => `
     <button type="button" class="wf-run-item${currentRun?.id === run.id ? " on" : ""}" data-run="${esc(run.id)}">
-      ${esc(run.status)} · r${esc(run.revision)}<span class="sub">${esc(new Date(run.created_at).toLocaleString())}</span>
+      <span class="wf-badge ${nodeStatusClass(run.status)}">${esc(run.status)}</span> · r${esc(run.revision)}
+      <span class="sub">${esc(new Date(run.created_at).toLocaleString())}</span>
     </button>`).join("") : `<div class="empty">No runs yet.</div>`;
   for (const button of $("workflow-runs").querySelectorAll("[data-run]")) {
     button.onclick = () => selectRun(button.dataset.run);
