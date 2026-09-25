@@ -1,0 +1,38 @@
+# A small, realistic direction file for a company that builds Factory
+# itself and runs client products on it, in the shape
+# `factory_core::goals::load` reads from
+# `<root>/.factory/goals/direction.yaml`. Loads with zero findings --
+# see `examples_goals_load_with_zero_findings` in `goals.rs`.
+#
+# Every metric named below (`north_star`, `inputs`) is a real, available
+# v1 metric from `factory_core::metrics::registry` -- unlike the issue's
+# own sketch, which names `first_pass_throughput` (not a real metric) and
+# a bare `bench.resolve_rate` (a family with no dataset bound), both of
+# which `metrics::resolve` would refuse.
+vision: >-
+  Every product this company ships can prove, on demand, that it is
+  compliant and that the work behind it was done well.
+mission: >-
+  Run agents that build and operate real products, and let the operating
+  data those agents produce carry the evidence -- for compliance, for
+  quality, and for the company's own judgement of its work.
+values:
+  - Evidence over assertion
+  - Compliance is closed at the level that causes it, never claimed at the top
+  - An agent's run is the record, not a person's summary of it
+north_star:
+  metric: first_pass_yield
+  why: >-
+    A run that needed no rework is the clearest sign the whole pipeline --
+    from task design through the agent's own judgement -- is working. Every
+    other v1 metric is either an input to this one or a guardrail around it.
+inputs:
+  - throughput_week
+  - first_pass_yield
+  - scrap_rate
+  - compliance.cra
+obstacles:
+  - Unit cost and tokens-per-run stay invisible until a Run records what it
+    spent (design §12.6), so cost cannot yet be a key result.
+  - ISO/IEC 27001's own control text is copyrighted, so that framework's
+    catalogue can only ever carry our own wording of it, never the norm.

@@ -1,0 +1,73 @@
+# A small, realistic Q4 cycle, alongside this directory's direction.yaml.
+# Loads with zero findings -- see `examples_goals_load_with_zero_findings`
+# in `goals.rs`.
+cycle:
+  id: 2026-q4
+  from: 2026-10-01
+  to: 2026-12-31
+objectives:
+  - id: ship-compliant
+    title: Every product can ship CRA- and GDPR-compliant
+    scope: projects
+    key_results:
+      - id: cra-open-zero
+        title: No open CRA controls, instance-wide
+        kind: committed
+        metric: compliance.cra
+        baseline: 0.2
+        target: 1.0
+      - id: dsgvo-open-zero
+        title: No open GDPR controls, instance-wide
+        kind: committed
+        metric: compliance.dsgvo
+        baseline: 0.0
+        target: 1.0
+      - id: dpa-signed
+        title: All processor agreements signed
+        kind: aspirational
+        manual: true
+        baseline: 0
+        target: 12
+  - id: raise-quality
+    title: Raise first-pass quality without slowing down
+    aligns_to: ship-compliant
+    key_results:
+      - id: fpy-90
+        title: First-pass yield at or above 90%
+        kind: committed
+        metric: first_pass_yield
+        baseline: 0.72
+        target: 0.9
+      - id: scrap-below-5
+        title: Scrap rate below 5%
+        kind: aspirational
+        metric: scrap_rate
+        baseline: 0.11
+        target: 0.05
+      - id: sbom-pipeline-done
+        title: SBOM pipeline ships and stays green
+        kind: committed
+        metric: goal_tasks_done
+        baseline: 0
+        target: 1
+roadmap:
+  - id: sbom-pipeline
+    title: SBOM export pipeline
+    lane: now
+    objectives: [ship-compliant, raise-quality]
+    why: >-
+      Closes the CRA's Annex I SBOM control, and gives the quality key
+      results a concrete, scheduled task to point at.
+    scope: projects
+  - id: dpa-tracker
+    title: Processor agreement tracker
+    lane: next
+    objectives: [ship-compliant]
+    why: A knowledge page per processor, attested until it can be automatic.
+  - id: cost-visibility
+    title: Per-run cost and token accounting
+    lane: later
+    objectives: [raise-quality]
+    why: >-
+      Blocked on design §12.6; kept on the roadmap so a future unit_cost
+      key result has somewhere to attach once a Run records what it spent.
