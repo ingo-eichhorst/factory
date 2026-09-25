@@ -33,7 +33,7 @@ const FAIL_KINDS = {
 
 export function failKindLabel(kind) {
   if (!kind) return "unclassified";
-  return FAIL_KINDS[kind] || kind.replace(/_/g, " ");
+  return FAIL_KINDS[kind] || kind.replaceAll("_", " ");
 }
 
 export function closeReasonLabel(reason) {
@@ -116,7 +116,7 @@ export function standing(t) {
 /// decides again.
 export function taskActions(t, activeRun) {
   const active = !!activeRun;
-  const intakeWontfix = !!(t && t.intake && t.intake.stage === "wontfix");
+  const intakeWontfix = t?.intake?.stage === "wontfix";
   return {
     run: !active,
     cancel: active,

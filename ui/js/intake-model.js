@@ -110,17 +110,19 @@ export function triageEnded(card) {
   return ["done", "failed", "cancelled"].includes(card.triage_task_status);
 }
 
+/// The note for a card whose triage run has not assessed it: still going,
+/// or ended without an assessment.
+function triageRunNote(card) {
+  const run = card.triage_task_status;
+  if (!triageEnded(card)) return `triage run ${run || "starting"}`;
+  const how = run === "blocked" ? "failed" : run;
+  return `the triage run ended (${how}) without an assessment -- triage it again or assess it by hand`;
+}
+
 /// One line under a card saying what is happening to it, or null.
 export function cardNote(card) {
   if (!card) return null;
-  const run = card.triage_task_status;
-  if (card.stage === "triaging" && !card.triage && card.triage_task) {
-    if (triageEnded(card)) {
-      const how = run === "blocked" ? "failed" : run;
-      return `the triage run ended (${how}) without an assessment -- triage it again or assess it by hand`;
-    }
-    return `triage run ${run || "starting"}`;
-  }
+  if (card.stage === "triaging" && !card.triage && card.triage_task) return triageRunNote(card);
   if (card.stage === "triaging" && card.triage) {
     return card.triage.verdict.verdict === "ready"
       ? "assessed ready -- waiting for release"

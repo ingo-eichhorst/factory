@@ -76,8 +76,16 @@ const KANBAN_COLUMNS = [
 export function standingHtml(t, { full = false } = {}) {
   const s = standing(t);
   if (!s) return "";
-  const detail = s.detail ? (full ? s.detail : s.detail.split("\n")[0].slice(0, 140)) : "";
-  return `<div class="standing st-${esc(s.tone)}">${esc(s.text)}${detail ? `<div class="sub">${esc(detail)}</div>` : ""}</div>`;
+  const detail = standingDetail(s.detail, full);
+  const sub = detail ? `<div class="sub">${esc(detail)}</div>` : "";
+  return `<div class="standing st-${esc(s.tone)}">${esc(s.text)}${sub}</div>`;
+}
+
+/// The standing line's detail: all of it in the modal, its first line
+/// (cut to 140 characters) on a card.
+function standingDetail(detail, full) {
+  if (!detail) return "";
+  return full ? detail : detail.split("\n")[0].slice(0, 140);
 }
 
 /// Only what `/api/tasks` already serves: title, short id, status, scope,
@@ -221,7 +229,8 @@ export async function openTask(id, runId) {
 /// it. This is what makes a trust dialog or a login something you can get past
 
 /// One of the modal's actions. `true` when the daemon took it.
-export async function act(path, method = "POST", body) {
+export async function act(path, method, body) {
+  method = method || "POST";
   $("m-err").textContent = "";
   try {
     await api(path, body === undefined ? { method } : { method, body: JSON.stringify(body) });
