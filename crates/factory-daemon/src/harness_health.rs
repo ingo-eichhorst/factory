@@ -518,7 +518,7 @@ impl Engine {
         };
         // Oldest first, so the newest hold of each task is the one kept.
         let newest: BTreeMap<String, TaskEntry> = entries.into_iter().collect();
-        let mut still_held: BTreeMap<String, Vec<HeldTask>> = BTreeMap::new();
+        let mut held: Vec<(Task, Trigger, Option<HealthProbe>)> = Vec::new();
         for (task_id, entry) in newest {
             let Ok(Some(task)) = self.store.get(&task_id).await else {
                 continue;
@@ -534,18 +534,31 @@ impl Engine {
                 .unwrap_or(Trigger::Manual);
             // The task may have been moved to an agent with nothing to
             // check since; then there is nothing to wait for.
-            let verdict = match self.probe_for(&task.scope, &task.agent) {
+            let probe = self.probe_for(&task.scope, &task.agent);
+            held.push((task, trigger, probe));
+        }
+        // This is the recheck: every binary something waits on is probed
+        // once now, whatever the cache says, and every task on it shares
+        // that one answer.
+        let binaries: std::collections::BTreeSet<String> =
+            held.iter().filter_map(|(_, _, p)| p.as_ref().map(binary_of)).collect();
+        for binary in &binaries {
+            self.harness.doubt(binary);
+        }
+        let mut still_held: BTreeMap<String, Vec<HeldTask>> = BTreeMap::new();
+        for (task, trigger, probe) in held {
+            let verdict = match &probe {
                 Some(probe) => {
-                    let harness = harness_name(&probe);
-                    self.harness.check(&harness, &probe, config, true).await
+                    let harness = harness_name(probe);
+                    self.harness.check(&harness, probe, config, true).await
                 }
                 None => Verdict::Healthy,
             };
             match verdict {
                 Verdict::Healthy => self.release_held(&task, trigger).await,
                 Verdict::Unhealthy { binary, .. } => {
-                    if let Some(probe) = self.probe_for(&task.scope, &task.agent) {
-                        self.maybe_auto_repair(&harness_name(&probe), &binary, config);
+                    if let Some(probe) = &probe {
+                        self.maybe_auto_repair(&harness_name(probe), &binary, config);
                     }
                     still_held.entry(binary).or_default().push(HeldTask {
                         task_id: task.id.clone(),
@@ -558,24 +571,45 @@ impl Engine {
         self.harness.set_held(still_held);
     }
 
+    /// Back to `pending`, and dispatched by exactly one thing. A task whose
+    /// `next_run_at` has already come -- a scheduled one held past its next
+    /// slot, or a queued retry -- is the scheduler's to fire: it is `due()`
+    /// the moment it is pending again, and the scheduler knows how to fire
+    /// it (retry or slot) and journals the slots it passed over. Dispatching
+    /// it here as well would start two runs of one task. Anything else is
+    /// dispatched here, with the trigger it was held with. Under the
+    /// schedule lock, so the scheduler's own look at the task cannot fall
+    /// between the decision and the change.
     async fn release_held(self: &Arc<Self>, task: &Task, trigger: Trigger) {
-        self.entry(
-            &task.id,
-            TaskEntry::new("daemon", RELEASED_ENTRY, "its harness answers again; dispatching it"),
-        )
-        .await;
-        if let Err(e) = self
-            .store
-            .update(
-                &task.id,
-                &TaskPatch { status: Some(TaskStatus::Pending), clear_error: true, ..Default::default() },
-            )
-            .await
-        {
-            tracing::warn!(task = task.id, "could not release a task held on its harness: {e}");
+        let scheduler_fires = {
+            let _slot = self.schedule_lock.lock().await;
+            let Ok(Some(current)) = self.store.get(&task.id).await else {
+                return;
+            };
+            let scheduler_fires = current.next_run_at.is_some_and(|at| at <= Utc::now());
+            let said = if scheduler_fires {
+                "its harness answers again; the scheduler fires it on its next tick"
+            } else {
+                "its harness answers again; dispatching it"
+            };
+            self.entry(&task.id, TaskEntry::new("daemon", RELEASED_ENTRY, said)).await;
+            if let Err(e) = self
+                .store
+                .update(
+                    &task.id,
+                    &TaskPatch { status: Some(TaskStatus::Pending), clear_error: true, ..Default::default() },
+                )
+                .await
+            {
+                tracing::warn!(task = task.id, "could not release a task held on its harness: {e}");
+                return;
+            }
+            scheduler_fires
+        };
+        self.publish_task(&task.id).await;
+        if scheduler_fires {
             return;
         }
-        self.publish_task(&task.id).await;
         let engine = self.clone();
         let id = task.id.clone();
         tokio::spawn(async move { engine.start_run(&id, trigger).await });
@@ -1060,6 +1094,43 @@ pub(crate) mod tests {
             assert!(task.error.is_none(), "the reason does not outlive the hold: {:?}", task.error);
             assert!(kinds(&engine, &t.id).await.contains(&RELEASED_ENTRY.to_string()));
             assert!(engine.harness.rows(&[], None)[0].held.is_empty());
+            std::fs::remove_dir_all(dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_scheduled_task_held_past_its_slot_is_left_to_the_scheduler_not_dispatched_twice() {
+            let dir = scratch("gate-slot");
+            let marker = dir.join("stuck");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(&marker, "").unwrap();
+            let bin = fake_harness(&dir, "codex", &format!("[ -e '{}' ] && exit 1; echo ok", marker.display()));
+            let engine = engine(&dir, &bin, HarnessHealthConfig { retry_seconds: 0, ..fast() });
+            let t = engine
+                .create(NewTask {
+                    title: "every second".into(),
+                    instructions: "true".into(),
+                    scope: Some("demo".into()),
+                    agent: Some("fake".into()),
+                    worktree: Some(false),
+                    schedule: Some(factory_core::task::Schedule::Every { seconds: 1 }),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            engine.start_run(&t.id, Trigger::Schedule).await;
+            assert_eq!(engine.store.get(&t.id).await.unwrap().unwrap().status, TaskStatus::Blocked);
+            // Held past its next slot.
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            std::fs::remove_file(&marker).unwrap();
+
+            let config = engine.factory_snapshot().config.daemon.harness_health.clone();
+            engine.release_recovered(&config).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let task = engine.store.get(&t.id).await.unwrap().unwrap();
+            assert_eq!(task.status, TaskStatus::Pending);
+            assert!(engine.store.runs(&t.id, 10).await.unwrap().is_empty(), "the release did not dispatch it");
+            let due = engine.due_now().await.unwrap();
+            assert!(due.iter().any(|d| d.id == t.id), "the scheduler fires it, once, on its next tick");
             std::fs::remove_dir_all(dir).ok();
         }
 

@@ -1760,8 +1760,10 @@ dispatch, the daemon checks the harness starts.
   infra` (and on the L1 Infrastructure page), with every task it holds.
 - **Held tasks are released on their own.** At most every `retry_seconds` the
   daemon looks at every task `blocked` with no run whose newest journal entry
-  is a hold from the last seven days, probes its harness, and dispatches the
-  ones that answer, with the trigger they were held with. The journal is the
+  is a hold from the last seven days, probes its harness once, and releases
+  the ones that answer: dispatched with the trigger they were held with, or --
+  for a scheduled task held past its slot -- set back to `pending` for the
+  scheduler to fire, so it never starts twice. The journal is the
   whole record of a hold, so a restart loses nothing. A person's own `task
   run` never trusts a cached failure -- it probes again, since that is what
   they do right after repairing it.
