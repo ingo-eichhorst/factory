@@ -1,0 +1,549 @@
+{
+ "generated_at": "2026-09-25T12:39:03.947135Z",
+ "attention": [
+  {
+   "kind": "aging",
+   "severity": "high",
+   "scope": "gamma",
+   "task_id": "998fd04d-2a46-a4bd-2c05-e9f388e6dae8",
+   "title": "tidy stale branches",
+   "run_id": "f596f211-1c71-4eb8-c970-e408eb474bbf",
+   "since": "2026-09-25T10:24:15.983734Z",
+   "age_s": 8087.963,
+   "reason": "running for 2.2h, past the p95 of this task's finished runs (21m)",
+   "actions": [
+    "cancel"
+   ]
+  },
+  {
+   "kind": "failed_exhausted",
+   "severity": "high",
+   "scope": "alpha",
+   "task_id": "a8b40292-02d0-b65e-6754-ddec3dd33e89",
+   "title": "refresh pricing page",
+   "run_id": "de87b81b-ad54-c2e9-b5b4-48b8d505dd8e",
+   "since": "2026-09-25T10:29:15.983734Z",
+   "age_s": 7787.963,
+   "reason": "attempt 12 failed: failed: run_timeout",
+   "actions": [
+    "run_again"
+   ]
+  },
+  {
+   "kind": "blocked",
+   "severity": "high",
+   "scope": "alpha",
+   "task_id": "c466c462-9542-99db-74c2-19b22a34639e",
+   "title": "summarise support inbox",
+   "run_id": "872a6083-598b-fbc4-e542-bccf1855b537",
+   "since": "2026-09-25T12:08:15.983734Z",
+   "age_s": 1847.963,
+   "reason": "I need the staging API key to reach the ticket export -- which vault entry should I use?",
+   "actions": [
+    "answer",
+    "cancel"
+   ]
+  },
+  {
+   "kind": "schedule_missed",
+   "severity": "medium",
+   "scope": "alpha",
+   "task_id": "7aaf4542-e6ae-fc3c-fa6b-b9c4b5ef5e70",
+   "title": "nightly dependency audit",
+   "since": "2026-09-25T07:34:15.983734Z",
+   "age_s": 18287.963,
+   "reason": "2 slots between 2026-09-25T05:34:15.983734+00:00 and 2026-09-25T06:34:15.983734+00:00 never fired: the previous run was still going",
+   "actions": [
+    "skip_next",
+    "pause_schedule"
+   ]
+  }
+ ],
+ "flow": [
+  {
+   "scope": "alpha",
+   "wip": {
+    "queued": 0,
+    "dispatching": 0,
+    "running": 1,
+    "blocked": 1
+   },
+   "queue_depth": 0,
+   "wait_p50": {
+    "value": 42.0,
+    "samples": 11
+   },
+   "wait_p95": {
+    "value": 72.0,
+    "samples": 11
+   },
+   "sessions_in_use": 2,
+   "retrying": 0
+  },
+  {
+   "scope": "beta",
+   "wip": {
+    "queued": 0,
+    "dispatching": 0,
+    "running": 1,
+    "blocked": 0
+   },
+   "queue_depth": 0,
+   "wait_p50": {
+    "value": 54.0,
+    "samples": 6
+   },
+   "wait_p95": {
+    "value": 77.0,
+    "samples": 6
+   },
+   "sessions_in_use": 1,
+   "retrying": 0
+  },
+  {
+   "scope": "gamma",
+   "wip": {
+    "queued": 0,
+    "dispatching": 0,
+    "running": 2,
+    "blocked": 0
+   },
+   "queue_depth": 0,
+   "wait_p50": {
+    "value": 46.0,
+    "samples": 12
+   },
+   "wait_p95": {
+    "value": 79.0,
+    "samples": 12
+   },
+   "sessions_in_use": 2,
+   "retrying": 0
+  }
+ ],
+ "aging": {
+  "items": [
+   {
+    "run_id": "f596f211-1c71-4eb8-c970-e408eb474bbf",
+    "task_id": "998fd04d-2a46-a4bd-2c05-e9f388e6dae8",
+    "title": "tidy stale branches",
+    "scope": "gamma",
+    "stage": "running",
+    "age_s": 8087.963,
+    "pace": "above_p95",
+    "basis": "task"
+   },
+   {
+    "run_id": "581aae01-88ff-5bee-e9c2-cdcf4473a1c7",
+    "task_id": "7aaf4542-e6ae-fc3c-fa6b-b9c4b5ef5e70",
+    "title": "nightly dependency audit",
+    "scope": "alpha",
+    "stage": "running",
+    "age_s": 3407.963,
+    "pace": "above_p95",
+    "basis": "task"
+   },
+   {
+    "run_id": "872a6083-598b-fbc4-e542-bccf1855b537",
+    "task_id": "c466c462-9542-99db-74c2-19b22a34639e",
+    "title": "summarise support inbox",
+    "scope": "alpha",
+    "stage": "blocked",
+    "age_s": 2747.963,
+    "pace": "above_p95",
+    "basis": "task"
+   },
+   {
+    "run_id": "0390162e-a440-0d08-b928-c718a8db9459",
+    "task_id": "9275c9b8-32a5-2b1d-64b1-e2c1ab79a47d",
+    "title": "migrate label taxonomy",
+    "scope": "beta",
+    "stage": "running",
+    "age_s": 2327.963,
+    "pace": "above_p95",
+    "basis": "task"
+   },
+   {
+    "run_id": "af84202c-90a6-43d5-0219-2b7f557e6fd3",
+    "task_id": "4b8a5b35-5b2d-82d1-cc90-58e77d3dccf2",
+    "title": "rebuild search index",
+    "scope": "gamma",
+    "stage": "running",
+    "age_s": 527.963,
+    "pace": "below_p50",
+    "basis": "task"
+   }
+  ],
+  "percentiles": [
+   {
+    "scope": "alpha",
+    "lines": {
+     "p50": 1027.938,
+     "p70": 1621.57,
+     "p85": 2029.137,
+     "p95": 2332.547,
+     "samples": 59
+    }
+   },
+   {
+    "scope": "beta",
+    "lines": {
+     "p50": 428.261,
+     "p70": 697.975,
+     "p85": 1112.225,
+     "p95": 1405.581,
+     "samples": 44
+    }
+   },
+   {
+    "scope": "gamma",
+    "lines": {
+     "p50": 848.129,
+     "p70": 996.342,
+     "p85": 1123.185,
+     "p95": 1157.572,
+     "samples": 73
+    }
+   }
+  ]
+ },
+ "health": {
+  "window": "7d",
+  "current": {
+   "window": {
+    "from": "2026-09-18T12:39:03.947135Z",
+    "to": "2026-09-25T12:39:03.947135Z"
+   },
+   "finished": 24,
+   "throughput_day": {
+    "value": 3.4285714285714284,
+    "samples": 24
+   },
+   "cycle_p50": {
+    "value": 810.119,
+    "samples": 17
+   },
+   "cycle_p85": {
+    "value": 1190.954,
+    "samples": 17
+   },
+   "first_pass_yield": {
+    "value": 0.7083333333333334,
+    "samples": 24
+   },
+   "rework_rate": {
+    "value": 0.125,
+    "samples": 24
+   },
+   "scrap_rate": {
+    "value": 0.2916666666666667,
+    "samples": 24
+   },
+   "fail_rate": {
+    "value": 0.25,
+    "samples": 24
+   },
+   "fail_by_kind": {
+    "ack_timeout": 1,
+    "run_timeout": 1,
+    "session_gone": 1,
+    "dispatch_failed": 1,
+    "agent_failed": 2,
+    "cancelled_by_person": 1
+   },
+   "unclassified": 0,
+   "recover_p50": {
+    "value": 119880.0,
+    "samples": 1
+   },
+   "queue_wait_p50": {
+    "value": 47.0,
+    "samples": 29
+   },
+   "queue_wait_p95": {
+    "value": 79.0,
+    "samples": 29
+   },
+   "interventions": 2,
+   "interventions_per_100": {
+    "value": 8.333333333333334,
+    "samples": 24
+   },
+   "days": [
+    {
+     "to": "2026-09-19T12:39:03.947135Z",
+     "finished": 3,
+     "done": 3,
+     "scrapped": 0,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 3,
+     "waiting": 0,
+     "in_progress": 0
+    },
+    {
+     "to": "2026-09-20T12:39:03.947135Z",
+     "finished": 3,
+     "done": 3,
+     "scrapped": 0,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 3,
+     "waiting": 0,
+     "in_progress": 0
+    },
+    {
+     "to": "2026-09-21T12:39:03.947135Z",
+     "finished": 4,
+     "done": 4,
+     "scrapped": 0,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 4,
+     "waiting": 0,
+     "in_progress": 0
+    },
+    {
+     "to": "2026-09-22T12:39:03.947135Z",
+     "finished": 1,
+     "done": 1,
+     "scrapped": 0,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 1,
+     "waiting": 0,
+     "in_progress": 0
+    },
+    {
+     "to": "2026-09-23T12:39:03.947135Z",
+     "finished": 3,
+     "done": 3,
+     "scrapped": 0,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 3,
+     "waiting": 0,
+     "in_progress": 0
+    },
+    {
+     "to": "2026-09-24T12:39:03.947135Z",
+     "finished": 4,
+     "done": 3,
+     "scrapped": 1,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 3,
+     "waiting": 0,
+     "in_progress": 1
+    },
+    {
+     "to": "2026-09-25T12:39:03.947135Z",
+     "finished": 6,
+     "done": 0,
+     "scrapped": 6,
+     "failed": 6,
+     "reworked": 3,
+     "first_pass": 0,
+     "waiting": 0,
+     "in_progress": 5
+    }
+   ],
+   "finished_runs": [
+    {
+     "run_id": "bd5b0661-6b45-43c9-8a17-9a6964131c00",
+     "task_id": "22083ebb-bfb9-37c0-ec37-409e30324ff5",
+     "ended_at": "2026-09-25T12:38:09.938848Z",
+     "status": "failed"
+    },
+    {
+     "run_id": "de87b81b-ad54-c2e9-b5b4-48b8d505dd8e",
+     "task_id": "a8b40292-02d0-b65e-6754-ddec3dd33e89",
+     "ended_at": "2026-09-25T10:29:15.983734Z",
+     "status": "failed"
+    },
+    {
+     "run_id": "856eb5af-61d7-5b1f-1407-eea25a953121",
+     "task_id": "a8b40292-02d0-b65e-6754-ddec3dd33e89",
+     "ended_at": "2026-09-25T09:54:15.983734Z",
+     "status": "failed"
+    }
+   ]
+  },
+  "previous": {
+   "window": {
+    "from": "2026-09-11T12:39:03.947135Z",
+    "to": "2026-09-18T12:39:03.947135Z"
+   },
+   "finished": 26,
+   "throughput_day": {
+    "value": 3.7142857142857144,
+    "samples": 26
+   },
+   "cycle_p50": {
+    "value": 666.621,
+    "samples": 25
+   },
+   "cycle_p85": {
+    "value": 1364.657,
+    "samples": 25
+   },
+   "first_pass_yield": {
+    "value": 0.9615384615384616,
+    "samples": 26
+   },
+   "rework_rate": {
+    "value": 0.0,
+    "samples": 26
+   },
+   "scrap_rate": {
+    "value": 0.038461538461538464,
+    "samples": 26
+   },
+   "fail_rate": {
+    "value": 0.038461538461538464,
+    "samples": 26
+   },
+   "fail_by_kind": {
+    "session_gone": 1
+   },
+   "unclassified": 0,
+   "recover_p50": {
+    "value": null,
+    "samples": 0,
+    "reason": "no failure streak ended in a success in the window"
+   },
+   "queue_wait_p50": {
+    "value": 55.0,
+    "samples": 26
+   },
+   "queue_wait_p95": {
+    "value": 79.0,
+    "samples": 26
+   },
+   "interventions": 0,
+   "interventions_per_100": {
+    "value": 0.0,
+    "samples": 26
+   },
+   "days": [
+    {
+     "to": "2026-09-12T12:39:03.947135Z",
+     "finished": 4,
+     "done": 4,
+     "scrapped": 0,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 4,
+     "waiting": 0,
+     "in_progress": 0
+    },
+    {
+     "to": "2026-09-13T12:39:03.947135Z",
+     "finished": 3,
+     "done": 3,
+     "scrapped": 0,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 3,
+     "waiting": 0,
+     "in_progress": 0
+    },
+    {
+     "to": "2026-09-14T12:39:03.947135Z",
+     "finished": 5,
+     "done": 5,
+     "scrapped": 0,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 5,
+     "waiting": 0,
+     "in_progress": 0
+    },
+    {
+     "to": "2026-09-15T12:39:03.947135Z",
+     "finished": 3,
+     "done": 3,
+     "scrapped": 0,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 3,
+     "waiting": 0,
+     "in_progress": 0
+    },
+    {
+     "to": "2026-09-16T12:39:03.947135Z",
+     "finished": 3,
+     "done": 3,
+     "scrapped": 0,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 3,
+     "waiting": 0,
+     "in_progress": 0
+    },
+    {
+     "to": "2026-09-17T12:39:03.947135Z",
+     "finished": 4,
+     "done": 4,
+     "scrapped": 0,
+     "failed": 0,
+     "reworked": 0,
+     "first_pass": 4,
+     "waiting": 0,
+     "in_progress": 0
+    },
+    {
+     "to": "2026-09-18T12:39:03.947135Z",
+     "finished": 4,
+     "done": 3,
+     "scrapped": 1,
+     "failed": 1,
+     "reworked": 0,
+     "first_pass": 3,
+     "waiting": 0,
+     "in_progress": 0
+    }
+   ],
+   "finished_runs": []
+  }
+ },
+ "schedules": [
+  {
+   "task_id": "4b8a5b35-5b2d-82d1-cc90-58e77d3dccf2",
+   "title": "rebuild search index",
+   "scope": "gamma",
+   "schedule": "30 */6 * * *",
+   "next_run_at": "2026-09-25T16:34:15.983734Z",
+   "state": "due"
+  },
+  {
+   "task_id": "6ba9246d-b6f5-e86c-94ca-c910f3e31629",
+   "title": "weekly changelog",
+   "scope": "beta",
+   "schedule": "0 9 * * 1",
+   "timezone": "Europe/Berlin",
+   "next_run_at": "2026-09-28T14:34:15.983734Z",
+   "state": "paused"
+  },
+  {
+   "task_id": "7aaf4542-e6ae-fc3c-fa6b-b9c4b5ef5e70",
+   "title": "nightly dependency audit",
+   "scope": "alpha",
+   "schedule": "0 2 * * *",
+   "timezone": "Europe/Berlin",
+   "next_run_at": "2026-09-26T00:00:00Z",
+   "state": "missed",
+   "skipped": 2,
+   "last_late_s": 60.0
+  },
+  {
+   "task_id": "c9804e9d-70e0-4098-71bd-5146103b4a5f",
+   "title": "triage GitHub issues",
+   "scope": "beta",
+   "schedule": "every 3600s",
+   "next_run_at": "2026-09-25T13:37:50.930012Z",
+   "state": "due"
+  }
+ ],
+ "recorded_since": "2026-07-29T10:13:49.651654Z"
+}
