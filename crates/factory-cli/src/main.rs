@@ -2233,7 +2233,7 @@ async fn stats_cmd(json: bool, client: &Client, cmd: StatsCmd) -> Result<()> {
         StatsCmd::Attention { scope } => (scope, None, true),
     };
     let payload = client
-        .send(Request::Operations { scope, window: window.unwrap_or_default() })
+        .send(Request::Operations { scope, window: window.unwrap_or_default(), detail: false })
         .await?;
     print(&payload, json, |p| match p {
         Payload::Operations { report } if attention_only => Some(attention_text(report)),
@@ -2965,7 +2965,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
         }
 
         TaskCmd::Cancel { id, reason } => {
-            let payload = client.send(Request::TaskCancel { id: need_id(id)?, reason }).await?;
+            let payload = client.send(Request::TaskCancel { id: need_id(id)?, reason, run: None }).await?;
             print(&payload, json, |p| match p {
                 Payload::Run { run } => Some(run_line(run)),
                 _ => None,
@@ -3001,6 +3001,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 .send(Request::TaskEntries {
                     id: need_id(id)?,
                     limit: Some(limit),
+                    task_only: false,
                 })
                 .await?;
             print(&payload, json, |p| match p {

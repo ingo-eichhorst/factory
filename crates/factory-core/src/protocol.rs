@@ -154,6 +154,12 @@ pub enum Request {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// The run the caller means to cancel. When given, the cancel is
+        /// refused unless it is still the task's active run -- so a person
+        /// cancelling the attempt they were shown never ends a retry that
+        /// started in the meantime.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<String>,
     },
     /// `#106`: pass over a scheduled task's next slot. `next_run_at` moves
     /// to the slot after it, and the skip is journaled with who asked and
@@ -182,6 +188,10 @@ pub enum Request {
         id: String,
         #[serde(default)]
         limit: Option<u32>,
+        /// Only the task's own entries, the ones that belong to no run
+        /// (`TaskStore::task_own_entries`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        task_only: bool,
     },
     /// Terminal output for the task's most recent run.
     #[serde(rename = "task.output")]
@@ -591,6 +601,11 @@ pub enum Request {
         scope: Option<String>,
         #[serde(default)]
         window: crate::operations::HealthWindow,
+        /// Include the charts' per-step and per-run detail
+        /// (`Health::days`, `Health::finished_runs`). The Operations tab
+        /// asks for it; the Inbox and `factory stats` do not.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        detail: bool,
     },
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.

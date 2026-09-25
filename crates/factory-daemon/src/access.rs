@@ -1127,6 +1127,7 @@ mod tests {
                 Request::TaskEntries {
                     id: "t".into(),
                     limit: None,
+                    task_only: true,
                 },
                 Request::TaskOutput {
                     id: "t".into(),
@@ -1166,6 +1167,7 @@ mod tests {
                 Request::Operations {
                     scope: None,
                     window: Default::default(),
+                    detail: true,
                 },
                 Request::Subscribe,
             ] {
@@ -1364,7 +1366,7 @@ mod tests {
             Request::TaskCreate(NewTask::default()),
             Request::TaskDelete { id: "t".into() },
             Request::TaskRun { id: "t".into(), reason: None },
-            Request::TaskCancel { id: "t".into(), reason: None },
+            Request::TaskCancel { id: "t".into(), reason: None, run: None },
             Request::AgentStart {
                 scope: "demo".into(),
                 name: "w".into(),
@@ -1418,7 +1420,7 @@ mod tests {
             },
             Request::TaskDelete { id: "here".into() },
             Request::TaskRun { id: "here".into(), reason: None },
-            Request::TaskCancel { id: "here".into(), reason: None },
+            Request::TaskCancel { id: "here".into(), reason: None, run: None },
             Request::TaskSkipNext { id: "here".into(), reason: None, slot: None },
             Request::TaskReport {
                 id: "here".into(),
@@ -1476,6 +1478,7 @@ mod tests {
             Request::TaskCancel {
                 id: "elsewhere".into(),
                 reason: None,
+                run: None,
             },
             Request::TaskSkipNext {
                 id: "elsewhere".into(),
@@ -1542,7 +1545,7 @@ mod tests {
         );
         task_in(&e, "here", "demo", "somebody").await;
         assert!(allowed(&e, &wearing("runner"), Request::TaskRun { id: "here".into(), reason: None }).await);
-        assert!(allowed(&e, &wearing("runner"), Request::TaskCancel { id: "here".into(), reason: None }).await);
+        assert!(allowed(&e, &wearing("runner"), Request::TaskCancel { id: "here".into(), reason: None, run: None }).await);
         // Not granted: it may look at the board, and start what is on it.
         assert!(allowed(&e, &wearing("runner"), Request::TaskList(Default::default())).await);
         assert!(!allowed(&e, &wearing("runner"), Request::TaskCreate(NewTask::default())).await);
@@ -1762,7 +1765,7 @@ mod tests {
                 !allowed(&e, &lead, Request::TaskRun { id: elsewhere.into(), reason: None }).await,
                 "inheriting lead from projects gives no authority over {elsewhere}"
             );
-            assert!(!allowed(&e, &lead, Request::TaskCancel { id: elsewhere.into(), reason: None }).await);
+            assert!(!allowed(&e, &lead, Request::TaskCancel { id: elsewhere.into(), reason: None, run: None }).await);
         }
     }
 

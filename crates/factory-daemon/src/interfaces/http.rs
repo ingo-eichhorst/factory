@@ -717,16 +717,28 @@ struct OperationsQuery {
     /// `7d` or `30d`; anything else is refused before the engine sees it.
     #[serde(default)]
     window: factory_core::operations::HealthWindow,
+    /// `charts` adds the per-step and per-run detail the tab draws; any
+    /// other value is refused like a bad window.
+    #[serde(default)]
+    detail: Option<OperationsDetail>,
 }
 
-/// `GET /api/operations?scope=&window=7d|30d` -- the L4 Operations tab's
-/// whole answer, the same report `factory stats` prints (`#106`).
+#[derive(serde::Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum OperationsDetail {
+    Charts,
+}
+
+/// `GET /api/operations?scope=&window=7d|30d[&detail=charts]` -- the L4
+/// Operations tab's whole answer, the same report `factory stats` prints
+/// (`#106`). The Inbox asks without `detail`.
 async fn operations(State(engine): State<Arc<Engine>>, Query(q): Query<OperationsQuery>) -> AxumResponse {
     run(
         &engine,
         Request::Operations {
             scope: q.scope,
             window: q.window,
+            detail: matches!(q.detail, Some(OperationsDetail::Charts)),
         },
     )
     .await
@@ -1014,10 +1026,26 @@ async fn cancel_task(
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> AxumResponse {
-    match reason_of(&body) {
-        Ok(reason) => run(&engine, Request::TaskCancel { id, reason }).await,
+    // Body `{reason?, run_id?}`, or none at all: `run_id` names the attempt
+    // the caller means, so one that has since been replaced is not ended.
+    let parsed = if body.iter().all(u8::is_ascii_whitespace) {
+        Ok(CancelBody::default())
+    } else {
+        serde_json::from_slice::<CancelBody>(&body).map_err(|e| format!("not a cancel body: {e}"))
+    };
+    match parsed {
+        Ok(b) => run(&engine, Request::TaskCancel { id, reason: b.reason, run: b.run_id }).await,
         Err(why) => refused(why),
     }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CancelBody {
+    #[serde(default)]
+    reason: Option<String>,
+    /// The run the caller means to cancel; see `Request::TaskCancel`.
+    #[serde(default)]
+    run_id: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1059,6 +1087,10 @@ async fn report_task(
 struct Lines {
     lines: Option<u32>,
     limit: Option<u32>,
+    /// `GET /api/tasks/{id}/entries?task_only=true`: only the task's own
+    /// entries, the ones that belong to no run.
+    #[serde(default)]
+    task_only: bool,
 }
 
 async fn task_entries(
@@ -1066,7 +1098,7 @@ async fn task_entries(
     Path(id): Path<String>,
     Query(q): Query<Lines>,
 ) -> AxumResponse {
-    run(&engine, Request::TaskEntries { id, limit: q.limit }).await
+    run(&engine, Request::TaskEntries { id, limit: q.limit, task_only: q.task_only }).await
 }
 
 async fn task_output(
@@ -1632,6 +1664,10 @@ mod tests {
 
         let (code, _) = call(addr, "GET", "/api/operations?window=9d", false, "").await;
         assert_eq!(code, 400);
+        let (code, _) = call(addr, "GET", "/api/operations?detail=charts", false, "").await;
+        assert_eq!(code, 200);
+        let (code, _) = call(addr, "GET", "/api/operations?detail=everything", false, "").await;
+        assert_eq!(code, 400, "only `charts` is a detail");
         let (code, _) = call(addr, "GET", "/api/operations?scope=nowhere", false, "").await;
         assert_eq!(code, 404, "an unknown scope is not an empty report");
     }
@@ -1655,6 +1691,10 @@ mod tests {
         let (code, body) =
             call(addr, "POST", "/api/tasks/nope/skip-next", true, r#"{"reason":"r","slot":"2026-09-25T09:00:00Z"}"#).await;
         assert_eq!(code, 404, "{body}");
+        let (_, body) = call(addr, "POST", "/api/tasks/nope/cancel", true, r#"{"reason":"r","run_id":"r1"}"#).await;
+        assert!(body.contains("no run to cancel"), "a cancel naming its run reaches the engine: {body}");
+        let (code, _) = call(addr, "POST", "/api/tasks/nope/cancel", true, r#"{"run_id":5}"#).await;
+        assert_eq!(code, 400);
         // The task form's PATCH, with and without a reason beside the
         // patch's own fields, reaches the engine: the flattened body
         // must not refuse what a bare `TaskPatch` took.

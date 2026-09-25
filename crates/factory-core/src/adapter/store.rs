@@ -53,6 +53,23 @@ pub trait TaskStore: Send + Sync {
     /// Only the entries from one run.
     async fn run_entries(&self, run_id: &str, limit: u32) -> Result<Vec<TaskEntry>>;
 
+    /// The newest `limit` entries that belong to the task itself and to no
+    /// run -- a schedule paused, a slot skipped, a run asked for -- oldest
+    /// first. The task modal shows them beside a run's own lines; read
+    /// through `entries`, a chatty run's transcript would crowd them out.
+    /// The default reads the newest thousand entries and filters them, so
+    /// a store without an index for it still answers, if less far back.
+    async fn task_own_entries(&self, task_id: &str, limit: u32) -> Result<Vec<TaskEntry>> {
+        let own: Vec<TaskEntry> = self
+            .entries(task_id, 1000)
+            .await?
+            .into_iter()
+            .filter(|e| e.run_id.is_none())
+            .collect();
+        let skip = own.len().saturating_sub(limit as usize);
+        Ok(own.into_iter().skip(skip).collect())
+    }
+
     /// Every journal entry of one of `kinds` written after `since`, across
     /// all tasks, oldest first, each with the id of the task it is in. What
     /// the Operations projection reads its few journal-only facts from --
