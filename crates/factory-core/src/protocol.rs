@@ -593,8 +593,9 @@ pub enum Request {
     /// over `window`. A read projection over tasks, runs, standing agents
     /// and the journal, computed fresh on every call like
     /// `Request::Production` (`factory_core::operations`). `scope: None` is
-    /// every scope; a scope is matched by its own name, not its subtree --
-    /// production.rs's rule for the same join.
+    /// every scope; a scope means its whole subtree, resolved by
+    /// `Scope.path` like the policy and scenario reports -- unlike
+    /// production.rs, which matches a scope by its own name only.
     #[serde(rename = "operations")]
     Operations {
         #[serde(default)]

@@ -153,7 +153,7 @@ enum Command {
     /// journal, computed fresh on every call. With no subcommand, prints
     /// the summary -- the same thing `factory stats summary` prints.
     Stats {
-        /// Only this scope, by its own name (default: every scope).
+        /// Only this scope and the scopes below it (default: every scope).
         #[arg(long)]
         scope: Option<String>,
         /// The health window: `7d` or `30d`.
