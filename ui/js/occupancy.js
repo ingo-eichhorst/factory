@@ -5,6 +5,7 @@
 import { $, esc, api, state, shortSpan } from "./core.js";
 import { inScope, scopeLabel } from "./scopes.js";
 import { openTask } from "./tasks.js";
+import { rowStyle, laneStyle, concurrency } from "./occupancy-model.js";
 
 export const OCC_STEPS = [
   [2 * 60, 15], [6 * 60, 30], [12 * 60, 60], [24 * 60, 120], [3 * 1440, 360], [Infinity, 1440],
@@ -64,15 +65,18 @@ export function renderOccupancy() {
           title="runtime saw: ${esc(sp.status)}"></div>`);
       }
 
+      // Runs of one agent that overlap are stacked, one lane each, as the
+      // daemon packed them. The liveness strip stays along the bottom.
       for (const b of r.blocks) {
         const l = clamp(pct(b.from));
+        const lane = laneStyle(b);
         if (b.estimate_seconds) {
           const expected = new Date(new Date(b.from).getTime() + b.estimate_seconds * 1000);
           const ew = clamp(pct(expected)) - l;
           if (ew > 0) {
             parts.push(`<div class="blk estimate${ew < 6 ? " tiny" : ""}"
               data-task="${esc(b.task_id)}"
-              style="left:${l.toFixed(3)}%;width:${Math.min(Math.max(0.4, ew), 100 - l).toFixed(3)}%"
+              style="${lane}left:${l.toFixed(3)}%;width:${Math.min(Math.max(0.4, ew), 100 - l).toFixed(3)}%"
               title="estimated: ${esc(b.title)} — user estimate ${shortSpan(b.estimate_seconds)}, expected until ${esc(expected.toLocaleString())}">${esc(b.title)}</div>`);
           }
         }
@@ -80,7 +84,7 @@ export function renderOccupancy() {
         const secs = ((b.to ? new Date(b.to) : new Date(now)) - new Date(b.from)) / 1000;
         parts.push(`<div class="blk run ${esc(b.status)}${w < 6 ? " tiny" : ""}"
           data-task="${esc(b.task_id)}" data-run="${esc(b.run_id)}"
-          style="left:${l.toFixed(3)}%;width:${w.toFixed(3)}%"
+          style="${lane}left:${l.toFixed(3)}%;width:${w.toFixed(3)}%"
           title="${esc(b.title)} — attempt ${b.attempt}, ${esc(b.trigger)}, ${esc(b.status)}, ${shortSpan(secs)}">${esc(b.title)}</div>`);
       }
 
@@ -104,14 +108,18 @@ export function renderOccupancy() {
       const busy = r.busy_seconds > 0
         ? `${Math.min(100, Math.round((r.busy_seconds / elapsed) * 100))}%`
         : (r.spans.some(s => s.status === "working") ? "—" : "idle");
+      const conc = concurrency(r);
+      const util = conc
+        ? `<span class="occ-conc" title="${esc(conc.title)}">${esc(conc.tag)}</span> ${busy}`
+        : busy;
 
-      return `<div class="occ-row">
+      return `<div class="occ-row"${rowStyle(r)}>
         <span class="occ-lab${r.blocks.length ? "" : " free"}"
           title="${esc(r.agent)} — ${esc(r.adapter || "no adapter")}, ${esc(r.lifetime)}, ${esc(r.role)}">
           <b>${esc(r.agent)}</b> <span class="h">${esc(r.adapter && r.adapter !== r.agent ? r.adapter : r.lifetime)}</span>
         </span>
         <span class="occ-track">${parts.join("")}</span>
-        <span class="occ-util">${busy}</span>
+        <span class="occ-util">${util}</span>
       </div>`;
     }).join("");
 
