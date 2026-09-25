@@ -100,13 +100,24 @@ export function verdictChips(card) {
   };
 }
 
+/// The card's triage task has ended and nothing is running it. The daemon
+/// says so in `triage_task_ended` since #122 -- a failed triage run leaves
+/// its task `blocked`, which the status alone cannot tell from one waiting
+/// on a question; an older daemon without the field is read off the status.
+export function triageEnded(card) {
+  if (!card) return false;
+  if (typeof card.triage_task_ended === "boolean") return card.triage_task_ended;
+  return ["done", "failed", "cancelled"].includes(card.triage_task_status);
+}
+
 /// One line under a card saying what is happening to it, or null.
 export function cardNote(card) {
   if (!card) return null;
   const run = card.triage_task_status;
   if (card.stage === "triaging" && !card.triage && card.triage_task) {
-    if (run === "done" || run === "failed" || run === "cancelled") {
-      return `the triage run ended (${run}) without an assessment -- triage it again or assess it by hand`;
+    if (triageEnded(card)) {
+      const how = run === "blocked" ? "failed" : run;
+      return `the triage run ended (${how}) without an assessment -- triage it again or assess it by hand`;
     }
     return `triage run ${run || "starting"}`;
   }
@@ -128,8 +139,7 @@ export function cardNote(card) {
 /// is worked.
 export function cardActions(card) {
   if (!card || card.stage === "ready" || card.stage === "wontfix") return [];
-  const triageRunning =
-    card.triage_task && !card.triage && !["done", "failed", "cancelled"].includes(card.triage_task_status);
+  const triageRunning = card.triage_task && !card.triage && !triageEnded(card);
   const out = [];
   if (card.stage === "needs_info") out.push("info");
   if (!triageRunning) out.push("triage");
