@@ -1650,6 +1650,65 @@ parents said — the acceptance bar is that literal command. Either way, each
 parent's result is tail-truncated to a byte budget first, so one noisy
 upstream step can't blow up every prompt downstream of it.
 
+### Inputs and rework loops (#140)
+
+A workflow can be told what to work on, and a review step can send work back.
+
+```yaml
+# factory workflow create --file ticket.yaml
+name: ticket
+scope: factory
+inputs:
+  - { name: issue, description: "GitHub issue number" }
+nodes:
+  - id: implement
+    task: { title: "Implement #{{issue}}", instructions: "...", labels: { issue: "{{issue}}" } }
+  - id: review
+    task: { title: "Review #{{issue}}", instructions: "..." }
+    rework: { to: implement, max_rounds: 5 }
+edges:
+  - { id: e1, from: implement, to: review }
+```
+
+- **Inputs.** A definition declares `inputs:`; a run is started with a value
+  for each (`factory workflow start <id> --input issue=42`, or
+  `POST /api/workflows/{id}/run` with `{"inputs": {"issue": "42"}}`, or the
+  form the UI's Run button opens). A missing or undeclared one refuses the
+  start. `{{name}}` in a task node's title, instructions and label values is
+  replaced verbatim in the run's snapshot, so the run shows what actually ran
+  and the stored definition keeps its placeholders. Once a definition
+  declares any input, a `{{name}}` it does not declare is refused as a typo;
+  with none declared, braces are left alone (`{{.Names}}` belongs to some
+  other tool). A gate's command is never substituted -- the daemon runs it
+  itself. A label `issue={{issue}}` is what `factory cost --by issue` groups
+  by.
+- **Rework.** `rework: { to, max_rounds }` on a task node is the one edge that
+  points backwards, kept off `edges` so the graph stays acyclic; `to` must be
+  a task node before it. When that node's run ends `failed` **because its own
+  agent reported it** (`FailKind::AgentFailed` -- a timeout, a session that
+  went away or a failed dispatch is not a verdict), and rounds are left, the
+  path from `to` down to it -- gates included -- goes back to `unstarted` and
+  runs again; whatever waited below it waits on. Each re-spawned task is
+  titled `(... rework k)`, the node run keeps its earlier tasks in
+  `superseded_task_ids`, and `to`'s new task is dispatched with the sender's
+  error and result as an extra upstream entry, "... sent this work back --
+  rework round k of N". Once every round is used, the next agent-reported
+  failure fails the run with an error that says it needs a person. A
+  superseded task's late state changes are ignored.
+- **Escalating to a person** is what it always was: the agent reports
+  `blocked`. The node, and so the run, waits, and the block shows in the
+  Inbox until someone answers.
+
+```sh
+factory workflow list
+factory workflow show <id>
+factory workflow update <id> --file ticket.yaml
+factory workflow start <id> --input issue=42
+factory workflow runs <id>
+factory workflow run <run-id>        # nodes, tasks, rework rounds
+factory workflow cancel <run-id>
+```
+
 ## Compliant workflows
 
 A run used to be `done` the moment its own agent said so. Policy controls and

@@ -1386,8 +1386,29 @@ async fn delete_workflow(
     run(&engine, Request::WorkflowDelete { id }).await
 }
 
-async fn start_workflow(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
-    run(&engine, Request::WorkflowStart { id }).await
+/// `POST /api/workflows/{id}/run`, with an optional `{"inputs": {...}}`
+/// body (`#140`). An empty body starts a workflow that declares no inputs.
+async fn start_workflow(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> AxumResponse {
+    #[derive(serde::Deserialize, Default)]
+    struct Start {
+        #[serde(default)]
+        inputs: std::collections::BTreeMap<String, String>,
+    }
+    let start = if body.iter().all(u8::is_ascii_whitespace) {
+        Start::default()
+    } else {
+        match serde_json::from_slice::<Start>(&body) {
+            Ok(start) => start,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e.to_string()))).into_response()
+            }
+        }
+    };
+    run(&engine, Request::WorkflowStart { id, inputs: start.inputs }).await
 }
 
 async fn workflow_runs(
