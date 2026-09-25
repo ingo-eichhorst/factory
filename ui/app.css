@@ -1466,6 +1466,9 @@ button.linklike:hover { color: var(--signal); }
    of zero (which still draws as a small but real, solidly-coloured red
    sliver). */
 .goal-ring-unscored { stroke: var(--faint); stroke-dasharray: 3 4; opacity: .8; }
+/* Aspirational is told apart by a dashed *track*: the fill arc's own dasharray
+   is what animates the score, so it cannot also carry a dash pattern. */
+.goal-ring-track.goal-ring-track-aspirational { stroke: var(--muted); }
 .goal-ring-text { font: 700 13px/1 var(--cond); fill: var(--ink); }
 .goal-ring-text-unscored { fill: var(--faint); font-weight: 600; }
 .goal-obj-ring-svg { --ring-stroke: 4; }
@@ -1535,12 +1538,18 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
    past twenty key results, so this view only ever has to draw a readable
    wheel, never scroll one. */
 .goal-orbit-svg { display: block; width: 100%; max-width: 640px; height: auto; margin: 0 auto; }
-.goal-orbit-centre { fill: var(--ink-2); }
+.goal-orbit-centre { fill: var(--signal); }
 .goal-orbit-centre-label {
   font: 600 9px/1 var(--cond); letter-spacing: .12em; text-transform: uppercase; fill: var(--muted);
 }
 .goal-orbit-edge { stroke: var(--line); stroke-width: 1; }
-.goal-orbit-obj { fill: var(--panel-2); stroke: var(--signal); stroke-width: 2; }
+.goal-orbit-obj { fill: var(--panel-2); stroke: var(--line); stroke-width: 3; }
+.goal-orbit-obj-arc { fill: none; stroke: var(--signal); stroke-width: 3; stroke-linecap: round; }
+.goal-orbit-score { font: 600 9px/1 var(--mono); fill: var(--ink); text-anchor: middle; }
+.goal-orbit-guide { fill: none; stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 5; }
+.goal-orbit-spoke { stroke: var(--signal); stroke-width: 1; opacity: .35; }
+.goal-orbit-halo { fill: var(--signal-wash); stroke: none; }
+.goal-orbit-kr-label { font: 500 9px/1 var(--sans); fill: var(--muted); }
 .goal-orbit-label { font: 500 9px/1 var(--sans); fill: var(--ink-2); text-anchor: middle; }
 .goal-orbit-kr { cursor: pointer; }
 .goal-orbit-kr:hover { opacity: .8; }
@@ -1553,8 +1562,10 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
 @media (max-width: 720px) {
   .goal-northstar-row { flex-direction: column; }
   .goal-ns-arrow { display: none; }
-  .goal-layer { flex-direction: column; }
-  .goal-obj { flex-basis: auto; }
+  /* nowrap: a wrapping column sizes its items before their width is known. */
+  .goal-layer { flex-direction: column; flex-wrap: nowrap; }
+  /* A flex-basis written for a row is a height once the row stacks. */
+  .goal-obj, .goal-progress, .goal-ns-hero, .goal-inputs { flex-basis: auto; }
   .goal-cycle-row { flex-direction: column; align-items: stretch; }
   .goal-spine { display: none; }
   .goal-map-flow { gap: 0; }

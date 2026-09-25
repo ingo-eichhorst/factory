@@ -44,8 +44,8 @@ import {
   objectiveLayers,
   orbitLayout,
   registryIndex,
-  ringDashArray,
   ringGeometry,
+  ringDashArray,
   roadmapLanes,
   seriesIndex,
   sparklinePointsAttr,
@@ -283,12 +283,13 @@ const OBJ_RING_R = 16;
 /// "—" centred, so "no evidence yet" can never be mistaken for "scored
 /// zero" at a glance. The faint track circle is drawn underneath every
 /// state, scored or not.
-function ringSvgCore({ size, radius, score, dashArray, color, outerClass, textClass }) {
+function ringSvgCore({ size, radius, score, dashedTrack, color, outerClass, textClass }) {
   const c = size / 2;
   const unscored = score === null || score === undefined;
   const centerText = unscored ? "—" : `${Math.round(score * 100)}%`;
   const textClasses = ["goal-ring-text", textClass, unscored ? "goal-ring-text-unscored" : ""].filter(Boolean).join(" ");
-  const track = `<circle class="goal-ring-track" cx="${c}" cy="${c}" r="${radius}"></circle>`;
+  const trackDash = dashedTrack ? ringDashArray("aspirational", 2 * Math.PI * radius) : null;
+  const track = `<circle class="goal-ring-track${dashedTrack ? " goal-ring-track-aspirational" : ""}" cx="${c}" cy="${c}" r="${radius}"${trackDash ? ` stroke-dasharray="${trackDash}"` : ""}></circle>`;
   const text = `<text class="${textClasses}" x="${c}" y="${c}" dy="0.32em" text-anchor="middle">${centerText}</text>`;
   let body;
   if (unscored) {
@@ -296,7 +297,7 @@ function ringSvgCore({ size, radius, score, dashArray, color, outerClass, textCl
   } else {
     const { circumference, offset } = ringGeometry(score, radius);
     body = `<circle class="goal-ring-fill" cx="${c}" cy="${c}" r="${radius}" stroke="${color}"
-      stroke-dasharray="${dashArray || circumference}" stroke-dashoffset="${circumference}"
+      stroke-dasharray="${circumference}" stroke-dashoffset="${circumference}"
       data-target-offset="${offset}" transform="rotate(-90 ${c} ${c})"></circle>`;
   }
   return `<svg class="goal-ring-svg${outerClass ? ` ${outerClass}` : ""}" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" aria-hidden="true">
@@ -305,9 +306,7 @@ function ringSvgCore({ size, radius, score, dashArray, color, outerClass, textCl
 }
 
 function ringSvg(kr) {
-  const { circumference } = ringGeometry(kr.score, RING_R);
-  const dash = ringDashArray(kr.kind, circumference);
-  return ringSvgCore({ size: RING_SIZE, radius: RING_R, score: kr.score, dashArray: dash, color: bandColorVar(kr.band) });
+  return ringSvgCore({ size: RING_SIZE, radius: RING_R, score: kr.score, dashedTrack: kr.kind === "aspirational", color: bandColorVar(kr.band) });
 }
 
 /// An objective's own score has no band (committed/aspirational is a key
@@ -319,7 +318,7 @@ function objectiveRingSvg(score) {
     size: OBJ_RING_SIZE,
     radius: OBJ_RING_R,
     score,
-    dashArray: null,
+    dashedTrack: false,
     color: "var(--signal)",
     outerClass: "goal-obj-ring-svg",
     textClass: "goal-obj-ring-text",
@@ -443,7 +442,7 @@ function northStarRowHtml(report) {
 
 function legendHtml() {
   return `<span class="goal-legend-item"><span class="goal-legend-ring goal-legend-solid"></span>committed (solid ring, green only once met)</span>
-    <span class="goal-legend-item"><span class="goal-legend-ring goal-legend-dashed"></span>aspirational (dashed ring, green once clearly winning)</span>
+    <span class="goal-legend-item"><span class="goal-legend-ring goal-legend-dashed"></span>aspirational (dashed track, green once clearly winning)</span>
     <span class="goal-legend-item"><span class="goal-legend-ring goal-legend-unscored"></span>unscored (no evidence yet)</span>
     <span class="goal-legend-item"><span class="badge s-green">green</span><span class="badge s-yellow">yellow</span><span class="badge s-red">red</span><span class="badge s-unscored">unscored</span></span>`;
 }
@@ -634,20 +633,40 @@ function renderOrbit(report) {
   const nodes = layout.nodes
     .map((n) => {
       if (n.kind === "objective") {
+        // The objective's own score as an arc around its node.
+        const r = 18;
+        const circ = 2 * Math.PI * r;
+        const score = typeof n.score === "number" ? Math.max(0, Math.min(1, n.score)) : 0;
         return `<g class="goal-orbit-node" transform="translate(${n.x},${n.y})">
-          <circle r="16" class="goal-orbit-obj"></circle>
-          <text class="goal-orbit-label" y="28">${esc(truncate(n.title, 22))}</text>
+          <circle r="${r}" class="goal-orbit-obj"></circle>
+          <circle r="${r}" class="goal-orbit-obj-arc" stroke-dasharray="${(circ * score).toFixed(1)} ${circ.toFixed(1)}"
+            transform="rotate(-90)"></circle>
+          <text class="goal-orbit-score" dy="0.32em">${Math.round(score * 100)}%</text>
+          <text class="goal-orbit-label" y="32">${esc(truncate(n.title, 26))}</text>
+          <title>${esc(n.title)}</title>
         </g>`;
       }
-      return `<circle class="goal-orbit-kr" data-kr="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(n.title)}"
-        cx="${n.x}" cy="${n.y}" r="7" fill="${bandColorVar(n.band)}"
-        stroke="${n.krKind === "aspirational" ? bandColorVar(n.band) : "none"}"
-        stroke-dasharray="${n.krKind === "aspirational" ? "2 2" : "none"}"></circle>`;
+      // KR labels sit outside the ring, anchored away from the centre.
+      const lx = n.x + 14 * Math.cos(n.angle);
+      const ly = n.y + 14 * Math.sin(n.angle);
+      const anchor = Math.cos(n.angle) > 0.2 ? "start" : Math.cos(n.angle) < -0.2 ? "end" : "middle";
+      return `<g class="goal-orbit-kr-g">
+        <circle class="goal-orbit-kr" data-kr="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(n.title)}"
+          cx="${n.x}" cy="${n.y}" r="8" fill="${bandColorVar(n.band)}"
+          stroke="${n.krKind === "aspirational" ? bandColorVar(n.band) : "none"}"
+          stroke-dasharray="${n.krKind === "aspirational" ? "2 2" : "none"}"><title>${esc(n.title)}</title></circle>
+        <text class="goal-orbit-kr-label" x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" dy="0.32em" text-anchor="${anchor}">${esc(truncate(n.title, 20))}</text>
+      </g>`;
     })
     .join("");
   el.innerHTML = `<svg class="goal-orbit-svg" viewBox="0 0 640 640" role="img" aria-label="Radial strategy map">
-    <circle class="goal-orbit-centre" cx="${layout.cx}" cy="${layout.cy}" r="10"></circle>
-    <text class="goal-orbit-centre-label" x="${layout.cx}" y="${layout.cy + 26}" text-anchor="middle">vision</text>
+    <circle class="goal-orbit-guide" cx="${layout.cx}" cy="${layout.cy}" r="${(640 * 0.28).toFixed(1)}"></circle>
+    <circle class="goal-orbit-guide" cx="${layout.cx}" cy="${layout.cy}" r="${(640 * 0.46).toFixed(1)}"></circle>
+    ${layout.nodes.filter((n) => n.kind === "objective").map((n) =>
+      `<line class="goal-orbit-spoke" x1="${layout.cx}" y1="${layout.cy}" x2="${n.x}" y2="${n.y}"></line>`).join("")}
+    <circle class="goal-orbit-halo" cx="${layout.cx}" cy="${layout.cy}" r="30"></circle>
+    <circle class="goal-orbit-centre" cx="${layout.cx}" cy="${layout.cy}" r="14"></circle>
+    <text class="goal-orbit-centre-label" x="${layout.cx}" y="${layout.cy + 46}" text-anchor="middle">vision</text>
     ${edges}
     ${nodes}
   </svg>`;
