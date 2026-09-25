@@ -1395,6 +1395,15 @@ kept with their own journal, their own outcome, and their own terminal
 transcript. The task itself mirrors the newest run, so a list stays cheap to
 read; the history lives on the runs.
 
+Creating a task does not start it. There is no queue behind `pending` and no
+capacity for a task to wait on: the scheduler starts only a scheduled slot
+that has come due (or a queued retry), so an unscheduled task stays `pending`
+until someone runs it -- `--run` on create, `factory task run <id>` later, or
+the Run button. `task create` says which it is, the task's page says so while
+nothing has started it, and the dashboard's **Due** figure counts only what
+the scheduler will actually fire -- the same number as Operations'
+`flow.queue_depth` -- with manual tasks named beside it, not in it (`#124`).
+
 Everything a task carries can be set when it is created and changed afterwards
 — scope, agent, schedule, labels, and how patient the daemon is with it:
 

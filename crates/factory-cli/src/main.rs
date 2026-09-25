@@ -770,7 +770,9 @@ enum TaskCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
-    /// Create a task.
+    /// Create a task. Creating does not start it: nothing dispatches a
+    /// pending task on its own, so pass `--run`, give it a `--schedule`, or
+    /// run it later with `factory task run <id>`.
     Create {
         title: String,
         /// What the agent is being asked to do.
@@ -3692,9 +3694,10 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             }
             print(&payload, json, |p| match p {
                 Payload::Task { task } => Some(format!(
-                    "{}\n{}",
+                    "{}\n{}\n{}",
                     task.id,
-                    one_line(task)
+                    one_line(task),
+                    created_note(task, run)
                 )),
                 _ => None,
             })
@@ -4141,6 +4144,28 @@ fn parse_retry(text: &str) -> Result<RetryPolicy> {
         .map_err(|_| anyhow!("retry's attempt count must be a number, as in `3x5m`"))?;
     let backoff_seconds = parse_duration_seconds(backoff.trim())?;
     Ok(RetryPolicy::Backoff { max_attempts, backoff_seconds })
+}
+
+/// What `task create` says after the task line: whether anything will start
+/// it. Nothing dispatches a pending task on its own -- there is no queue
+/// (`#124`) -- so a task created without `--run` or a schedule sits there
+/// until someone runs it, and the output has to say so rather than let
+/// `pending` read as "waiting its turn".
+fn created_note(t: &Task, dispatched: bool) -> String {
+    if dispatched {
+        return format!("dispatched; `factory task show {}` follows it", t.id);
+    }
+    match (&t.schedule, t.next_run_at) {
+        (Some(_), Some(next)) => format!(
+            "created, not dispatched; its schedule first fires it at {} -- `factory task run {}` runs it now",
+            next.to_rfc3339(),
+            t.id
+        ),
+        _ => format!(
+            "created, not dispatched; run it with `factory task run {}` -- nothing starts it on its own",
+            t.id
+        ),
+    }
 }
 
 fn one_line(t: &Task) -> String {
@@ -4748,6 +4773,41 @@ mod tests {
         let path = std::env::temp_dir().join(format!("factory-cli-test-{}", uuid::Uuid::new_v4()));
         std::fs::write(&path, bytes).unwrap();
         path
+    }
+
+    fn created(schedule: Option<factory_core::task::Schedule>) -> Task {
+        let mut t = factory_core::adapter::store::task_from_new(
+            NewTask { title: "t".into(), schedule, ..Default::default() },
+            "demo".into(),
+            "shell".into(),
+            "herdr".into(),
+        );
+        t.id = "abc123".into();
+        t
+    }
+
+    #[test]
+    fn creating_an_unscheduled_task_says_it_is_not_dispatched_and_how_to_run_it() {
+        let note = created_note(&created(None), false);
+        assert!(note.starts_with("created, not dispatched"), "{note}");
+        assert!(note.contains("`factory task run abc123`"), "{note}");
+    }
+
+    #[test]
+    fn creating_a_scheduled_task_names_its_first_firing() {
+        let mut t = created(Some(factory_core::task::Schedule::Every { seconds: 300 }));
+        let at = chrono::DateTime::parse_from_rfc3339("2026-09-25T18:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        t.next_run_at = Some(at);
+        let note = created_note(&t, false);
+        assert!(note.contains("first fires it at 2026-09-25T18:00:00+00:00"), "{note}");
+        assert!(note.contains("`factory task run abc123`"), "{note}");
+    }
+
+    #[test]
+    fn creating_with_run_says_it_was_dispatched() {
+        let note = created_note(&created(None), true);
+        assert!(note.starts_with("dispatched"), "{note}");
+        assert!(!note.contains("not dispatched"), "{note}");
     }
 
     #[test]
