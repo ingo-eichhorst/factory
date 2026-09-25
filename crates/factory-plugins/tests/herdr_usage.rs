@@ -10,10 +10,11 @@
 //!   reads its usage. Skipped when there is no `herdr` on `PATH`.
 //! * `an_installed_usage_plugin_answers_in_the_contract` asks the herdr
 //!   session this test process is pointed at (`HERDR_SESSION`) for the
-//!   usage of one pane -- `FACTORY_USAGE_TEST_PANE`, or its first -- through
-//!   whichever installed plugin offers `usage` (Irrlicht's). Skipped when
-//!   that session is not running or no plugin offers the action; with
-//!   `HERDR_SESSION=qa-none`, as Factory's tests are run, it always is.
+//!   usage of the pane `FACTORY_USAGE_TEST_PANE` names, through whichever
+//!   installed plugin offers `usage` (Irrlicht's). Skipped unless that pane
+//!   is named -- a test run must never pick some real agent's pane on its
+//!   own -- and when that session is not running or no plugin offers the
+//!   action.
 
 use factory_core::adapter::AgentRuntime;
 use factory_core::task::SessionRef;
@@ -141,6 +142,10 @@ async fn an_installed_usage_plugin_answers_in_the_contract() {
         eprintln!("skipped: no herdr on PATH");
         return;
     }
+    let Ok(pane) = std::env::var("FACTORY_USAGE_TEST_PANE") else {
+        eprintln!("skipped: set FACTORY_USAGE_TEST_PANE to the herdr pane to read usage for");
+        return;
+    };
     let listed = Command::new("herdr").args(["plugin", "action", "list"]).output().unwrap();
     let offers_usage = listed.status.success()
         && serde_json::from_slice::<Value>(&listed.stdout)
@@ -154,14 +159,6 @@ async fn an_installed_usage_plugin_answers_in_the_contract() {
         );
         return;
     }
-    let pane = match std::env::var("FACTORY_USAGE_TEST_PANE") {
-        Ok(p) => p,
-        Err(_) => {
-            let panes = Command::new("herdr").args(["pane", "list"]).output().unwrap();
-            let v: Value = serde_json::from_slice(&panes.stdout).unwrap();
-            v.pointer("/result/panes/0/pane_id").and_then(Value::as_str).expect("a pane").to_string()
-        }
-    };
     let usage = HerdrRuntime::new()
         .usage(&session(&pane))
         .await

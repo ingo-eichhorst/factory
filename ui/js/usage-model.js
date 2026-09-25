@@ -73,5 +73,7 @@ export function taskUsageLine(total) {
   const tokens = total.tokens || {};
   const sum = (tokens.input || 0) + (tokens.output || 0) + (tokens.cache_read || 0) + (tokens.cache_write || 0);
   if (total.runs_unknown === total.runs) return `All ${runs}: usage unknown`;
-  return `All ${runs}: ${fmtTokens(sum)} tokens · ${fmtUsd(total.cost_usd)}${missing.length ? ` (not in the sum: ${missing.join(", ")})` : ""}`;
+  // A sum over no costed run is not $0.00.
+  const costed = total.runs - (total.runs_unknown || 0) - (total.runs_cost_unknown || 0);
+  return `All ${runs}: ${fmtTokens(sum)} tokens · ${costed ? fmtUsd(total.cost_usd) : "?"}${missing.length ? ` (not in the sum: ${missing.join(", ")})` : ""}`;
 }

@@ -42,4 +42,9 @@ test("a task's line says which runs are not in its sum", () => {
   });
   assert.equal(line, "All 3 runs: 1.5k tokens · $0.42 (not in the sum: 1 unmeasured, 1 partial)");
   assert.equal(taskUsageLine({ runs: 2, runs_unknown: 2, tokens: {}, cost_usd: 0 }), "All 2 runs: usage unknown");
+  assert.equal(
+    taskUsageLine({ runs: 1, runs_unknown: 0, runs_cost_unknown: 1, tokens: { input: 10 }, cost_usd: 0 }),
+    "All 1 run: 10 tokens · ? (not in the sum: 1 without a cost)",
+    "tokens but no measured cost is ?, not free"
+  );
 });
