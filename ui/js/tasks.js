@@ -8,6 +8,7 @@ import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openEdit, scheduleText } from "./task-form.js";
 import { scheduleLabel } from "./schedule.js";
 import { describeWorkflowOrigin } from "./workflows.js";
+import { entryKindLabel, entryTone } from "./operations-model.js";
 
 export { scheduleLabel };
 
@@ -37,6 +38,15 @@ export function setTasksView(view) {
   applyTasksView(view);
   try { localStorage.setItem(VIEW_KEY, tasksView); } catch (e) { /* private window */ }
   renderTasks();
+}
+
+/// A paused schedule, wherever a scheduled task is drawn (`#106`): the rule
+/// is still there and shown, and nothing fires until someone resumes it --
+/// a stopped line that reads as a running one is worse than no badge.
+export function pausedTag(t) {
+  return t.schedule && t.schedule_paused
+    ? ` <span class="tag paused" title="schedule paused: nothing fires until it is resumed">paused</span>`
+    : "";
 }
 
 // -------------------------------------------------------------- the board
@@ -75,7 +85,7 @@ function taskCard(t) {
       <div class="kbc-top">${statusBadge(t.status)}<code class="id">${esc(t.id.slice(0, 8))}</code></div>
       <div class="title">${esc(t.title)}</div>
       <div class="sub">${esc(t.scope)} · ${esc(t.agent)}${wt}</div>
-      <div class="sub">${esc(bits.join(" · "))}</div>
+      <div class="sub">${esc(bits.join(" · "))}${pausedTag(t)}</div>
     </div>`;
 }
 
@@ -108,7 +118,7 @@ export function renderTasks() {
   $("tasks").innerHTML = rows.map(t => `
     <tr class="row" data-id="${esc(t.id)}">
       <td><div class="title">${esc(t.title)}</div>
-          <div class="sub">${esc(scheduleLabel(t.schedule))}</div></td>
+          <div class="sub">${esc(scheduleLabel(t.schedule))}${pausedTag(t)}</div></td>
       <td>${statusBadge(t.status)}</td>
       <td class="sub">${t.runs || 0}</td>
       <td class="sub">${esc(t.scope)}</td>
@@ -207,8 +217,8 @@ export function renderModal() {
   $("m-run").disabled = !!active;
   $("m-cancel").disabled = !active;
 
-  let meta = `<div class="sub">${esc(t.scope)} · ${esc(t.agent)} on ${esc(t.runtime)} · ${esc(scheduleLabel(t.schedule))}`;
-  if (t.next_run_at) meta += ` · next ${new Date(t.next_run_at).toLocaleString()}`;
+  let meta = `<div class="sub">${esc(t.scope)} · ${esc(t.agent)} on ${esc(t.runtime)} · ${esc(scheduleLabel(t.schedule))}${pausedTag(t)}`;
+  if (t.next_run_at && !t.schedule_paused) meta += ` · next ${new Date(t.next_run_at).toLocaleString()}`;
   if (t.estimate_seconds) meta += ` · estimate ${shortSpan(t.estimate_seconds)}`;
   if (t.ack_timeout_seconds) meta += ` · ack ${t.ack_timeout_seconds}s`;
   if (t.timeout_seconds) meta += ` · timeout ${t.timeout_seconds}s`;
@@ -259,19 +269,41 @@ export function renderModal() {
   }
 }
 
+/// One journal line. `owner` is a person acting through Factory -- the
+/// Operations actions and `--reason` on the CLI (`#106`) -- and is marked
+/// apart from the daemon and the agent, since "who did this" is the point
+/// of those entries. The message already carries who asked and why; an
+/// answer's own text is never in it, and the line says so.
+function entryHtml(e) {
+  const tone = entryTone(e);
+  const note = e.kind === "answer" ? `<div class="sub">What was typed is not recorded -- only that someone answered, and why.</div>` : "";
+  return `
+        <div class="entry${tone ? ` e-${tone}` : ""}">
+          <div class="when">${esc(new Date(e.at).toLocaleTimeString())} · <span class="who" data-source="${esc(e.source)}">${esc(e.source)}</span> · ${esc(entryKindLabel(e.kind))}</div>
+          <div>${esc(e.message)}</div>${note}
+        </div>`;
+}
+
 export async function loadJournal() {
   if (!$("m-journal")) return;
-  const path = state.run
-    ? `/api/runs/${state.run}/entries?limit=200`
-    : `/api/tasks/${state.open}/entries?limit=200`;
   try {
-    const entries = (await api(path)).entries;
+    let entries;
+    if (state.run) {
+      // A run's own lines, and the task's lines that belong to no run --
+      // a schedule paused or resumed, a slot skipped, a run asked for before
+      // it existed. Without the second read those never show once the task
+      // has run, since a run is always selected then.
+      const [run, task] = await Promise.all([
+        api(`/api/runs/${state.run}/entries?limit=200`),
+        api(`/api/tasks/${state.open}/entries?limit=200`).catch(() => ({ entries: [] })),
+      ]);
+      entries = [...run.entries, ...(task.entries || []).filter(e => !e.run_id)]
+        .sort((a, b) => a.at.localeCompare(b.at));
+    } else {
+      entries = (await api(`/api/tasks/${state.open}/entries?limit=200`)).entries;
+    }
     $("m-journal").innerHTML = entries.length
-      ? entries.slice().reverse().map(e => `
-        <div class="entry">
-          <div class="when">${esc(new Date(e.at).toLocaleTimeString())} · <span class="who">${esc(e.source)}</span> · ${esc(e.kind)}</div>
-          <div>${esc(e.message)}</div>
-        </div>`).join("")
+      ? entries.slice().reverse().map(entryHtml).join("")
       : `<div class="entry sub">No entries yet.</div>`;
   } catch (e) {
     $("m-journal").innerHTML = `<div class="err">${esc(e.message)}</div>`;
