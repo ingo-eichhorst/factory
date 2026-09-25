@@ -5,13 +5,163 @@
 //! then paints exactly what comes back, so every decision here is testable
 //! without a browser at all.
 
-import { freePosition, topologicalSummary } from "./workflow-graph.js";
+import { ancestors, freePosition, nodeTitle, topologicalSummary } from "./workflow-graph.js";
 
 const uid = prefix =>
   `${prefix}-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
 
 export function blankWorkflow(scope) {
-  return { id: null, name: "Untitled workflow", description: "", scope, revision: null, nodes: [], edges: [] };
+  return { id: null, name: "Untitled workflow", description: "", scope, revision: null, inputs: [], nodes: [], edges: [] };
+}
+
+// ------------------------------------------------------------------ inputs
+
+/// An input's name, `[A-Za-z_][A-Za-z0-9_-]*` -- `is_input_name` in
+/// `workflow.rs`.
+export function isInputName(name) {
+  return /^[A-Za-z_][A-Za-z0-9_-]*$/.test(name ?? "");
+}
+
+/// Every `{{name}}` in `text`, in order, with spaces inside the braces
+/// allowed; braces around anything that is not a name (`{{.Names}}`, `{{}}`)
+/// are not placeholders. The same scan as `placeholders` in `workflow.rs`,
+/// not a regex, so the edge cases (`{{{a}}`, an unclosed `{{`) agree too.
+export function placeholders(text) {
+  const out = [];
+  let rest = text ?? "";
+  for (;;) {
+    const open = rest.indexOf("{{");
+    if (open < 0) break;
+    const after = rest.slice(open + 2);
+    const close = after.indexOf("}}");
+    if (close < 0) break;
+    const name = after.slice(0, close).trim();
+    if (isInputName(name)) out.push(name);
+    rest = after.slice(close + 2);
+  }
+  return out;
+}
+
+/// The texts of a task node the server writes a run's inputs into: title,
+/// instructions and label values.
+function nodeTexts(node) {
+  return [node.task.title, node.task.instructions, ...Object.values(node.task.labels ?? {})];
+}
+
+/// Which inputs a node's text uses, once each, in order -- and which of
+/// those the workflow does not declare. The inspector's "uses" line.
+/// With no input declared, nothing is undeclared: the server leaves braces
+/// alone then (see `inputProblems`), so marking them would flag an error
+/// Save never raises.
+export function nodeInputUsage(node, inputs) {
+  const declared = new Set((inputs ?? []).map(input => input.name));
+  const used = [...new Set(nodeTexts(node).flatMap(placeholders))];
+  return { used, undeclared: declared.size ? used.filter(name => !declared.has(name)) : [] };
+}
+
+/// One keystroke in the Inputs list, written into whatever `workflow` is
+/// *now* -- the caller passes the live `current` and an index, never an
+/// input object it captured earlier, since `current` is replaced by a fresh
+/// clone on a reload without the rows being rebuilt (#145 review).
+export function setInputField(workflow, index, field, value) {
+  const input = workflow?.inputs?.[index];
+  if (!input || (field !== "name" && field !== "description")) return false;
+  input[field] = value;
+  return true;
+}
+
+/// The server's `validate_inputs`: names are names and are declared once,
+/// and -- only once any input is declared -- every `{{name}}` in a task
+/// node names one. A workflow with no inputs leaves braces alone, since
+/// they may be meant for some other tool.
+export function inputProblems(workflow) {
+  const errors = [];
+  const declared = new Set();
+  for (const input of workflow.inputs ?? []) {
+    if (!isInputName(input.name)) {
+      errors.push({
+        message: `input ${JSON.stringify(input.name)} is not a name: use letters, digits, "_" or "-", starting with a letter or "_"`,
+      });
+    } else if (declared.has(input.name)) {
+      errors.push({ message: `input ${JSON.stringify(input.name)} is declared twice` });
+    }
+    declared.add(input.name);
+  }
+  if (!declared.size) return errors;
+  for (const node of workflow.nodes) {
+    if (node.kind === "gate") continue;
+    const unknown = [...new Set(nodeTexts(node).flatMap(placeholders))].filter(name => !declared.has(name));
+    for (const name of unknown) {
+      errors.push({
+        nodeId: node.id,
+        message: `${nodeLabel(node)} uses {{${name}}}, but the workflow declares no input "${name}"`,
+      });
+    }
+  }
+  return errors;
+}
+
+// ------------------------------------------------------------------ rework
+
+/// The server's `validate_rework`, named by title: only a task node sends
+/// work back, at least once, to a task node that comes before it. Kept
+/// apart from `validate` so deleting a node or a link can show what it
+/// broke straight away, without the rest of `validate`'s opinions about a
+/// workflow that is still being drawn.
+export function reworkProblems(workflow) {
+  const errors = [];
+  for (const node of workflow.nodes) {
+    const rework = node.rework;
+    if (!rework) continue;
+    const from = nodeLabel(node);
+    if (node.kind === "gate") {
+      errors.push({ nodeId: node.id, message: `${from} is a gate and cannot send work back; only a task node can` });
+      continue;
+    }
+    if (!(Number.isInteger(rework.max_rounds) && rework.max_rounds >= 1)) {
+      errors.push({ nodeId: node.id, message: `${from} sends work back at most zero times; use at least one round` });
+    }
+    const target = workflow.nodes.find(item => item.id === rework.to);
+    if (!target) {
+      errors.push({ nodeId: node.id, message: `${from} sends work back to a node that no longer exists (${rework.to})` });
+    } else if (target.kind === "gate") {
+      errors.push({ nodeId: node.id, message: `${from} sends work back to the gate ${nodeLabel(target)}; name a task node` });
+    } else if (!ancestors(workflow.edges, node.id).has(rework.to)) {
+      errors.push({
+        nodeId: node.id,
+        message: `${from} sends work back to ${nodeLabel(target)}, which does not come before it`,
+      });
+    }
+  }
+  return errors;
+}
+
+/// "sends work back to implement, at most 5×" -- the summary's wording, and
+/// the one the acceptance names.
+export function reworkSentence(nodes, node) {
+  if (!node.rework) return "";
+  const rounds = node.rework.max_rounds;
+  return `sends work back to ${nodeTitle(nodes, node.rework.to)}, at most ${rounds}×`;
+}
+
+/// "↺ implement ×5" -- the same fact, short enough for a card.
+export function reworkBadge(nodes, node) {
+  if (!node.rework) return "";
+  return `↺ ${nodeTitle(nodes, node.rework.to)} ×${node.rework.max_rounds}`;
+}
+
+// ------------------------------------------------------------------- saving
+
+/// What Save sends. Everything the canvas does not edit rides along
+/// untouched -- the category (#118) -- and what it does edit goes as it
+/// stands: the declared inputs and each node's `rework` (#140), so saving a
+/// layout never drops what a file or the CLI put there.
+export function saveDraft(workflow) {
+  return {
+    name: workflow.name, description: workflow.description, scope: workflow.scope,
+    category: workflow.category ?? null, inputs: workflow.inputs ?? [],
+    nodes: workflow.nodes, edges: workflow.edges,
+  };
 }
 
 /// A fresh task node with an id nothing else has and Factory's ordinary
@@ -38,6 +188,8 @@ export function newTaskNode(scope, x = 80, y = 80) {
 
 /// A copy of `sourceId` with a new id and a position that does not overlap
 /// any existing card (U11) -- `null` if the source node no longer exists.
+/// Its `rework` stays behind: the copy has no incoming links, so nothing
+/// comes before it for work to go back to.
 export function duplicateNode(nodes, sourceId) {
   const source = nodes.find(node => node.id === sourceId);
   if (!source) return null;
@@ -110,6 +262,7 @@ export function validate(workflow) {
   const summary = topologicalSummary(workflow);
   if (summary.error) errors.push({ message: summary.error });
 
+  errors.push(...inputProblems(workflow), ...reworkProblems(workflow));
   return errors;
 }
 
@@ -142,6 +295,35 @@ export function editorButtons({ hasWorkflow, hasId, dirty, saving, run, mode }) 
 export function openTaskAction(nodeRun, openTask) {
   if (!nodeRun?.task_id) return null;
   return () => openTask(nodeRun.task_id);
+}
+
+// ------------------------------------------------------ #143: run-mode rework
+
+/// "rework 2" on a node run that work has been sent back through, "" on its
+/// first pass. The engine titles that round's task "<title> (rework 2)", so
+/// the canvas and the task list say the same thing.
+export function roundLabel(nodeRun) {
+  return nodeRun?.round > 0 ? `rework ${nodeRun.round}` : "";
+}
+
+/// The tasks earlier rounds spawned on this node, oldest first.
+export function supersededTasks(nodeRun) {
+  return nodeRun?.superseded_task_ids ?? [];
+}
+
+/// On the node work was sent back to: "sent back by Review, round 1 of 5".
+/// `nodes` is the run's own definition -- `from_node` is an id, named here
+/// by the title that run gave it.
+export function reworkRequestText(nodeRun, nodes) {
+  const request = nodeRun?.rework_request;
+  if (!request) return "";
+  return `sent back by ${nodeTitle(nodes, request.from_node)}, round ${request.round} of ${request.max_rounds}`;
+}
+
+/// What a run was started with, as `[name, value]` pairs -- empty for a
+/// workflow that declares none, whose run the server sends without the key.
+export function runInputs(run) {
+  return Object.entries(run?.inputs ?? {});
 }
 
 // ------------------------------------------------------------------ events

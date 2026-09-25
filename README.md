@@ -1694,7 +1694,12 @@ read-only, so a canvas edited since a run started is never what the run
 appears to be doing. A "Recent runs" list beside the definitions picks which
 run Run mode shows; starting a run switches to it. The ordered textual
 summary and keyboard node/edge controls carry the same graph for people who
-do not use the canvas, including a link to any node's spawned task.
+do not use the canvas, including a link to any node's spawned task. The
+workflow panel edits the declared **inputs**, and a task node's inspector sets
+where it **sends work back to** (one of its ancestor task nodes) and how many
+rounds, drawn as a dashed back edge; Run mode shows each node's rework round,
+links to the tasks earlier rounds superseded, who sent the work back, and the
+values the run was started with.
 
 A node's task is dispatched with its **direct parents'** outputs, never a
 transitive ancestor's — computed at dispatch from that moment's workflow-run
