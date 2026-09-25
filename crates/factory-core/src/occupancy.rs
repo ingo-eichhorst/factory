@@ -75,8 +75,23 @@ pub struct OccupancyRow {
     pub planned: Vec<OccupancyPlan>,
     /// Liveness as the runtime reported it. Weaker evidence than a block.
     pub spans: Vec<OccupancySpan>,
-    /// Seconds of the window covered by a run.
+    /// Seconds of the window covered by at least one run. The union of the
+    /// blocks, not their sum: three runs side by side for a minute are one
+    /// busy minute, never three.
     pub busy_seconds: i64,
+    /// How many lanes the row's blocks need so no two overlap: 1 for an agent
+    /// that ran one thing at a time. Taken from the blocks, never from
+    /// config -- nothing caps how many sessions one agent runs at once.
+    #[serde(default = "one_lane")]
+    pub lanes: u32,
+    /// Runs of this agent still open at `now`. More than one is an agent
+    /// doing several things at once, which the chart says in so many words.
+    #[serde(default)]
+    pub live: u32,
+}
+
+fn one_lane() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +111,10 @@ pub struct OccupancyBlock {
     /// is open. It is a projection for the chart, never a completion signal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_seconds: Option<u64>,
+    /// Which of the row's lanes the block is drawn in, from 0 at the top. Its
+    /// estimate outline is drawn in the same one.
+    #[serde(default)]
+    pub lane: u32,
 }
 
 /// A run that has not happened yet. The width is the median of what this task

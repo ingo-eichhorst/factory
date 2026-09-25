@@ -127,7 +127,7 @@ impl Engine {
             let mut rows = Vec::new();
             for agent in &view.agents {
                 let key = (view.name.clone(), agent.name.clone());
-                let blocks = blocks.remove(&key).unwrap_or_default();
+                let mut blocks = blocks.remove(&key).unwrap_or_default();
                 let planned = planned.remove(&key).unwrap_or_default();
                 // A row draws the standing agent's own session and nothing
                 // else. A run's liveness is recorded too, but the run already
@@ -136,7 +136,7 @@ impl Engine {
                     .remove(&format!("{}/{}", view.name, agent.name))
                     .map(|series| spans_from(&series, now))
                     .unwrap_or_default();
-                let busy_seconds = busy_seconds(&blocks, from, now);
+                let (busy_seconds, lanes, live) = lay_out(&mut blocks, from, now);
                 rows.push(OccupancyRow {
                     agent: agent.name.clone(),
                     adapter: agent.adapter.clone(),
@@ -147,6 +147,8 @@ impl Engine {
                     planned,
                     spans,
                     busy_seconds,
+                    lanes,
+                    live,
                 });
             }
             out.push(OccupancyScope {
@@ -159,8 +161,8 @@ impl Engine {
         // A run whose agent the config no longer declares still happened. Give
         // it a row rather than dropping it: a chart that hides work because
         // somebody edited a config is worse than one with an extra line.
-        for ((scope, agent), blocks) in blocks {
-            let busy_seconds = busy_seconds(&blocks, from, now);
+        for ((scope, agent), mut blocks) in blocks {
+            let (busy_seconds, lanes, live) = lay_out(&mut blocks, from, now);
             let row = OccupancyRow {
                 agent,
                 adapter: String::new(),
@@ -171,6 +173,8 @@ impl Engine {
                 planned: Vec::new(),
                 spans: Vec::new(),
                 busy_seconds,
+                lanes,
+                live,
             };
             match out.iter_mut().find(|s| s.name == scope) {
                 Some(existing) => existing.rows.push(row),
@@ -791,20 +795,73 @@ fn block_of(run: &Run, title: Option<&str>, estimate_seconds: Option<u64>) -> Oc
         } else {
             None
         },
+        // Settled once the whole row is known, by `pack_lanes`.
+        lane: 0,
     }
 }
 
-/// Seconds of the window a run held. Clipped to the window at both ends, so a
-/// run that started yesterday counts only the part that is on the chart.
+/// Everything a row says about its blocks as a whole: how busy it was, how
+/// many lanes it needs, and how many runs are still open. One call, so neither
+/// place that builds a row can lay its blocks out and forget the rest.
+fn lay_out(blocks: &mut [OccupancyBlock], from: DateTime<Utc>, now: DateTime<Utc>) -> (i64, u32, u32) {
+    let lanes = pack_lanes(blocks, now);
+    let live = blocks.iter().filter(|b| b.to.is_none()).count() as u32;
+    (busy_seconds(blocks, from, now), lanes, live)
+}
+
+/// Give every block a lane so that no two in one lane overlap, and say how many
+/// lanes that took. Greedy interval packing: in start order, each block goes
+/// into the first lane whose last block has ended by the time it starts -- a
+/// run that begins the moment another ends shares its lane. An open run holds
+/// its lane up to `now`. The blocks are left in start order.
+///
+/// The count comes from the blocks alone. An agent's `max_sessions` is parsed
+/// and not enforced, so config cannot say how many runs will overlap.
+fn pack_lanes(blocks: &mut [OccupancyBlock], now: DateTime<Utc>) -> u32 {
+    blocks.sort_by(|a, b| a.from.cmp(&b.from).then_with(|| a.run_id.cmp(&b.run_id)));
+    let mut ends: Vec<DateTime<Utc>> = Vec::new();
+    for block in blocks.iter_mut() {
+        let end = block.to.unwrap_or(now).max(block.from);
+        let lane = match ends.iter().position(|&e| e <= block.from) {
+            Some(free) => free,
+            None => {
+                ends.push(end);
+                ends.len() - 1
+            }
+        };
+        ends[lane] = end;
+        block.lane = lane as u32;
+    }
+    ends.len().max(1) as u32
+}
+
+/// Seconds of the window at least one run held: the union of the blocks, so
+/// runs side by side never count the same wall-clock second twice. Clipped to
+/// the window at both ends, so a run that started yesterday counts only the
+/// part that is on the chart.
 fn busy_seconds(blocks: &[OccupancyBlock], from: DateTime<Utc>, to: DateTime<Utc>) -> i64 {
-    blocks
+    let mut spans: Vec<(DateTime<Utc>, DateTime<Utc>)> = blocks
         .iter()
-        .map(|b| {
-            let start = b.from.max(from);
-            let end = b.to.unwrap_or(to).min(to);
-            (end - start).num_seconds().max(0)
-        })
-        .sum()
+        .map(|b| (b.from.max(from), b.to.unwrap_or(to).min(to)))
+        .filter(|(start, end)| end > start)
+        .collect();
+    spans.sort();
+    let mut total = Duration::zero();
+    let mut open: Option<(DateTime<Utc>, DateTime<Utc>)> = None;
+    for (start, end) in spans {
+        open = match open {
+            Some((s, e)) if start <= e => Some((s, e.max(end))),
+            Some((s, e)) => {
+                total += e - s;
+                Some((start, end))
+            }
+            None => Some((start, end)),
+        };
+    }
+    if let Some((s, e)) = open {
+        total += e - s;
+    }
+    total.num_seconds()
 }
 
 /// Drop everything before the window except the last state it was in, moved to
@@ -882,7 +939,19 @@ mod tests {
             from: at(from),
             to: to.map(at),
             estimate_seconds: None,
+            lane: 0,
         }
+    }
+
+    fn named(id: &str, from: i64, to: Option<i64>) -> OccupancyBlock {
+        OccupancyBlock {
+            run_id: id.into(),
+            ..block(from, to)
+        }
+    }
+
+    fn lanes_of(blocks: &[OccupancyBlock]) -> Vec<(String, u32)> {
+        blocks.iter().map(|b| (b.run_id.clone(), b.lane)).collect()
     }
 
     fn run(to: Option<i64>) -> Run {
@@ -982,6 +1051,116 @@ mod tests {
     #[test]
     fn an_open_run_counts_up_to_now() {
         assert_eq!(busy_seconds(&[block(10, None)], at(0), at(60)), 50);
+    }
+
+    #[test]
+    fn three_runs_side_by_side_are_one_busy_stretch_not_three() {
+        // The #120 shape: three dispatched together and still going, after an
+        // earlier run that finished on its own.
+        let blocks = [
+            block(0, Some(100)),
+            block(200, None),
+            block(200, None),
+            block(201, None),
+        ];
+        assert_eq!(busy_seconds(&blocks, at(0), at(300)), 100 + 100);
+    }
+
+    #[test]
+    fn overlapping_and_nested_runs_count_each_second_once() {
+        // 0..50 and 30..80 overlap into 0..80; 10..20 sits inside it; 90..100
+        // is apart. 80 + 10.
+        let blocks = [
+            block(30, Some(80)),
+            block(0, Some(50)),
+            block(10, Some(20)),
+            block(90, Some(100)),
+        ];
+        assert_eq!(busy_seconds(&blocks, at(0), at(200)), 90);
+        // And the window still clips the union.
+        assert_eq!(busy_seconds(&blocks, at(40), at(95)), 40 + 5);
+    }
+
+    #[test]
+    fn runs_one_after_another_all_share_the_first_lane() {
+        let mut blocks = vec![
+            named("c", 60, None),
+            named("a", 0, Some(30)),
+            // Starts the moment `a` ends: that is not an overlap.
+            named("b", 30, Some(60)),
+        ];
+        assert_eq!(pack_lanes(&mut blocks, at(100)), 1);
+        assert_eq!(
+            lanes_of(&blocks),
+            vec![("a".into(), 0), ("b".into(), 0), ("c".into(), 0)],
+            "a row without overlap is drawn exactly as before, in start order"
+        );
+    }
+
+    #[test]
+    fn three_concurrent_runs_get_three_lanes() {
+        let mut blocks = vec![
+            named("r119", 2, None),
+            named("r116", -100, Some(-10)),
+            named("r117", 0, None),
+            named("r118", 1, None),
+        ];
+        assert_eq!(pack_lanes(&mut blocks, at(60)), 3);
+        assert_eq!(
+            lanes_of(&blocks),
+            vec![
+                ("r116".into(), 0),
+                ("r117".into(), 0),
+                ("r118".into(), 1),
+                ("r119".into(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_freed_lane_is_reused_before_a_new_one_is_opened() {
+        let mut blocks = vec![
+            named("long", 0, Some(100)),
+            named("short", 10, Some(20)),
+            // Lane 1 is free again at 30; lane 0 is still taken.
+            named("next", 30, Some(40)),
+            // Both taken at 35 -- `next` holds lane 1 until 40.
+            named("third", 35, Some(50)),
+        ];
+        assert_eq!(pack_lanes(&mut blocks, at(200)), 3);
+        assert_eq!(
+            lanes_of(&blocks),
+            vec![
+                ("long".into(), 0),
+                ("short".into(), 1),
+                ("next".into(), 1),
+                ("third".into(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_open_run_holds_its_lane_up_to_now() {
+        // Still running at 50, so a run that started at 40 cannot share it.
+        let mut blocks = vec![named("open", 0, None), named("later", 40, Some(45))];
+        assert_eq!(pack_lanes(&mut blocks, at(50)), 2);
+        assert_eq!(blocks[1].lane, 1);
+    }
+
+    #[test]
+    fn a_row_with_no_runs_still_has_one_lane() {
+        assert_eq!(pack_lanes(&mut [], at(0)), 1);
+    }
+
+    #[test]
+    fn a_rows_layout_counts_what_is_still_open() {
+        let mut blocks = vec![
+            named("done", 0, Some(10)),
+            named("a", 20, None),
+            named("b", 20, None),
+        ];
+        let (busy, lanes, live) = lay_out(&mut blocks, at(0), at(30));
+        assert_eq!((busy, lanes, live), (10 + 10, 2, 2));
     }
 
     fn report(status: RuntimeStatus, source: StatusSource) -> StatusReport {

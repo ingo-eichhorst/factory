@@ -570,7 +570,11 @@ a.role-origin:hover { color: var(--signal); border-color: var(--signal); }
 }
 .occ-grp:first-child { margin-top: 9px; padding-top: 0; border-top: 0; }
 .occ-grp .p { text-transform: none; letter-spacing: 0; font: 400 10px/1 var(--mono); }
-.occ-row { display: flex; align-items: center; height: 26px; }
+/* A row is as many lanes tall as its busiest moment needed (#120). One lane
+   is 15px of block and a 2px gap; `--lanes` is only set above one, so a row
+   that never overlapped is the 26px row with a 19px track it always was. */
+.occ { --lane-h: 17px; }
+.occ-row { display: flex; align-items: center; height: calc(var(--lanes, 1) * var(--lane-h) + 9px); }
 .occ-lab {
   flex: 0 0 var(--lab); padding-right: 10px; font: 400 10.5px/1.3 var(--mono); color: var(--ink-2);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -580,12 +584,13 @@ a.role-origin:hover { color: var(--signal); border-color: var(--signal); }
 .occ-lab.free { color: var(--faint); }
 .occ-lab.free b { color: var(--faint); font-weight: 400; }
 .occ-track {
-  flex: 1; position: relative; height: 19px; min-width: 0; border-radius: 2px; background: var(--sunk);
+  flex: 1; position: relative; height: calc(var(--lanes, 1) * var(--lane-h) + 2px); min-width: 0; border-radius: 2px; background: var(--sunk);
 }
 .occ-util {
   flex: 0 0 58px; text-align: right; padding-left: 10px; font: 500 10px/1 var(--mono);
   color: var(--muted); font-variant-numeric: tabular-nums;
 }
+.occ-conc { color: var(--wait); font-weight: 600; }
 .blk {
   position: absolute; top: 0; height: 15px; border-radius: 2px; min-width: 2px; cursor: pointer;
   font: 500 9.5px/15px var(--mono); color: #fff;
@@ -598,6 +603,7 @@ a.role-origin:hover { color: var(--signal); border-color: var(--signal); }
 .blk.cancelled { background: var(--idle); background-image: repeating-linear-gradient(135deg, rgba(255,255,255,.26) 0 4px, transparent 4px 8px); }
 .blk.blocked { background: var(--signal); }
 .blk.run { z-index: 2; }
+.blk.run, .blk.estimate { top: calc(var(--lane, 0) * var(--lane-h)); }
 .blk.estimate {
   background: none; border: 2px dotted var(--wait); color: var(--wait); line-height: 11px; z-index: 1;
 }
