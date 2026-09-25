@@ -517,8 +517,9 @@ impl Engine {
     /// close record gone. A scheduled one picks its schedule up from now --
     /// the slots that passed while it was closed were not missed, and never
     /// fire as a burst of catch-up runs -- exactly as resuming a paused one
-    /// does. Its last run's result, error and failure stay: they are still
-    /// what happened last.
+    /// does. Its last run's result and error stay: they are still what
+    /// happened last. The failure it may have been closed on goes -- a
+    /// pending task carrying one would read as a task waiting on a retry.
     pub(crate) async fn reopen_task(&self, id: &str, asked: &Asked) -> Result<Task> {
         let _slot = self.schedule_lock.lock().await;
         let task = self.require(id).await?;
@@ -528,6 +529,13 @@ impl Engine {
                 task.status.as_str()
             )));
         };
+        // Intake's `wontfix` is a triage verdict; reopening past it would
+        // put an item on the line that was never released (`#119`).
+        if task.intake.as_ref().is_some_and(|i| i.stage == factory_core::intake::IntakeStage::Wontfix) {
+            return Err(FactoryError::BadRequest(
+                "this task was closed in intake as wontfix; intake decides it again, not reopen".into(),
+            ));
+        }
         let next_run_at = match &task.schedule {
             Some(s) if !task.schedule_paused => Some(schedule::next_after(s, Utc::now())?),
             _ => None,
@@ -539,6 +547,10 @@ impl Engine {
                 &TaskPatch {
                     status: Some(TaskStatus::Pending),
                     clear_closure: true,
+                    // Somebody looked at it and put it back: a failure it
+                    // was closed on is dealt with, and must not make the
+                    // pending task read as one mid-retry.
+                    clear_failure: true,
                     next_run_at,
                     ..Default::default()
                 },
@@ -567,7 +579,10 @@ impl Engine {
         let same = now.next_run_at == seen.next_run_at
             && now.pending_retry == seen.pending_retry
             && !now.schedule_paused
-            && now.schedule.is_some();
+            && now.schedule.is_some()
+            // Closed in between (`close_task` holds the same lock) --
+            // nothing fires a closed task, or dispatch would undo the close.
+            && now.fires();
         same.then_some(now)
     }
 

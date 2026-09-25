@@ -302,7 +302,7 @@ pub struct TaskClosure {
     /// A short note in the closer's words. Journaled too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// Who closed it, as the journal names them: `owner`, or an agent.
+    /// Who closed it, as the journal names them: `the owner`, or an agent.
     pub by: String,
     pub at: DateTime<Utc>,
 }
@@ -484,6 +484,13 @@ impl Task {
     /// startup migration reaches it.
     pub fn is_settled(&self) -> bool {
         self.status.is_terminal() || self.blocked_by_failure() || self.status == TaskStatus::Failed
+    }
+
+    /// Whether its schedule may fire it: pending, or blocked by a failure,
+    /// which a later success clears (`#122`). Never a closed task, and
+    /// never one blocked on a question -- that one has a run.
+    pub fn fires(&self) -> bool {
+        self.status == TaskStatus::Pending || self.blocked_by_failure()
     }
 
     /// Did it end in failure? Blocked by one, or a legacy `Failed` row.

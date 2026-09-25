@@ -13,7 +13,7 @@ use factory_core::error::{FactoryError, Result};
 use factory_core::agent::AgentSession;
 use factory_core::occupancy::StatusChange;
 use factory_core::run::{NewRun, Run, RunPatch, RunStatus};
-use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus};
+use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch};
 use factory_core::usage::UsageSnapshot;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -1008,7 +1008,7 @@ impl TaskStore for SqliteStore {
             // per tick, so passing over the paused ones after decoding
             // costs nothing.
             let mut due: Vec<Task> = collect(&mut stmt, params![now])?;
-            due.retain(|t| !t.schedule_paused && (t.status == TaskStatus::Pending || t.blocked_by_failure()));
+            due.retain(|t| !t.schedule_paused && t.fires());
             Ok(due)
         })
         .await
