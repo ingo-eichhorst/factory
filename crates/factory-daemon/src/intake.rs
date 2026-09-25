@@ -283,7 +283,7 @@ impl Engine {
                     // left to do itself. `start_workflow` checks the caller
                     // could create and run every node by hand.
                     Some(workflow) => {
-                        let run = self.start_workflow(workflow, caller).await?;
+                        let run = self.start_workflow(workflow, Default::default(), caller).await?;
                         decided.workflow_run = Some(run.id.clone());
                         patch.status = Some(TaskStatus::Done);
                         patch.result = Some(format!(
@@ -817,6 +817,7 @@ mod tests {
                         ..Default::default()
                     },
                     gate: None,
+                    rework: None,
                 }],
                 ..Default::default()
             })

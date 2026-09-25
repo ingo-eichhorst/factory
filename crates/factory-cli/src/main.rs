@@ -80,7 +80,8 @@ enum Command {
     /// Create, run, and report on tasks.
     #[command(subcommand)]
     Task(TaskCmd),
-    /// Workflows: `lint` previews the control plan a run is held to.
+    /// Workflows: define, start (with `--input`), follow and cancel runs;
+    /// `lint` previews the control plan a run is held to.
     #[command(subcommand)]
     Workflow(WorkflowCmd),
     /// The L5 Knowledge tab: an index of the instance's knowledge vault,
@@ -717,6 +718,42 @@ enum WorkflowCmd {
         #[arg(long)]
         category: Option<String>,
     },
+    /// Every workflow definition, or a scope's.
+    List {
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// One definition: its inputs, nodes, edges and rework loops.
+    Show { id: String },
+    /// Create a workflow from a YAML or JSON file shaped like
+    /// `WorkflowDraft` -- `name`, `scope`, `inputs`, `nodes`, `edges`.
+    Create {
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    /// Replace a workflow's definition with a file's. A run already going
+    /// keeps the revision it started with.
+    Update {
+        id: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    /// Start a run. Each input the workflow declares is `--input name=value`.
+    Start {
+        id: String,
+        #[arg(long = "input", value_name = "NAME=VALUE")]
+        inputs: Vec<String>,
+    },
+    /// A workflow's runs, newest first -- or every run, without an id.
+    Runs {
+        id: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// One run: every node's status, task, and rework round.
+    Run { run_id: String },
+    /// Cancel a run and every task of it still going.
+    Cancel { run_id: String },
 }
 
 #[derive(Subcommand)]
@@ -4105,12 +4142,16 @@ fn tail_lossy(bytes: &[u8], max_bytes: usize) -> String {
 }
 
 fn parse_labels(pairs: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    parse_pairs(pairs, "labels")
+}
+
+fn parse_pairs(pairs: &[String], what: &str) -> Result<std::collections::BTreeMap<String, String>> {
     pairs
         .iter()
         .map(|p| {
             p.split_once('=')
                 .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-                .ok_or_else(|| anyhow!("labels look like key=value, not {p:?}"))
+                .ok_or_else(|| anyhow!("{what} look like key=value, not {p:?}"))
         })
         .collect()
 }
@@ -4229,7 +4270,144 @@ async fn workflow_cmd(json: bool, client: &Client, cmd: WorkflowCmd) -> Result<(
                 _ => None,
             })
         }
+        WorkflowCmd::List { scope } => {
+            let payload = client.send(Request::WorkflowList { scope }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Workflows { workflows } => Some(
+                    workflows
+                        .iter()
+                        .map(|w| format!("{}  {}  r{}  {} nodes  ({})", w.id, w.name, w.revision, w.nodes.len(), w.scope))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Show { id } => {
+            let payload = client.send(Request::WorkflowGet { id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Workflow { workflow } => Some(workflow_text(workflow)),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Create { file } => {
+            let draft = read_workflow_file(&file)?;
+            let payload = client.send(Request::WorkflowCreate(draft)).await?;
+            print(&payload, json, |p| match p {
+                Payload::Workflow { workflow } => Some(format!("created {}\n\n{}", workflow.id, workflow_text(workflow))),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Update { id, file } => {
+            let workflow = read_workflow_file(&file)?;
+            let payload = client.send(Request::WorkflowUpdate { id, workflow }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Workflow { workflow } => Some(format!("updated to r{}\n\n{}", workflow.revision, workflow_text(workflow))),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Start { id, inputs } => {
+            let inputs = parse_pairs(&inputs, "inputs")?;
+            let payload = client.send(Request::WorkflowStart { id, inputs }).await?;
+            print(&payload, json, |p| match p {
+                Payload::WorkflowRun { run } => Some(workflow_run_text(run)),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Runs { id, limit } => {
+            let payload =
+                client.send(Request::WorkflowRunList { workflow_id: id, scope: None, limit: Some(limit) }).await?;
+            print(&payload, json, |p| match p {
+                Payload::WorkflowRuns { runs } => Some(
+                    runs.iter()
+                        .map(|r| {
+                            format!(
+                                "{}  {:?}  {}  r{}  {}",
+                                r.id,
+                                r.status,
+                                r.definition.name,
+                                r.revision,
+                                r.created_at.to_rfc3339()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Run { run_id } => {
+            let payload = client.send(Request::WorkflowRunGet { id: run_id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::WorkflowRun { run } => Some(workflow_run_text(run)),
+                _ => None,
+            })
+        }
+        WorkflowCmd::Cancel { run_id } => {
+            let payload = client.send(Request::WorkflowRunCancel { id: run_id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::WorkflowRun { run } => Some(workflow_run_text(run)),
+                _ => None,
+            })
+        }
     }
+}
+
+/// A workflow file: YAML, which JSON also is.
+fn read_workflow_file(path: &std::path::Path) -> Result<factory_core::workflow::WorkflowDraft> {
+    let text = std::fs::read_to_string(path).map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
+    serde_yaml_ng::from_str(&text).map_err(|e| anyhow!("{} is not a workflow: {e}", path.display()))
+}
+
+fn workflow_text(w: &factory_core::workflow::WorkflowDefinition) -> String {
+    let mut s = format!("{}  {}  r{}  (scope {})\n", w.id, w.name, w.revision, w.scope);
+    if !w.description.trim().is_empty() {
+        s.push_str(&format!("{}\n", w.description.trim()));
+    }
+    for input in &w.inputs {
+        s.push_str(&format!("input {}  {}\n", input.name, input.description));
+    }
+    let order = w.validate().unwrap_or_else(|_| w.nodes.iter().map(|n| n.id.clone()).collect());
+    for id in order {
+        let Some(node) = w.nodes.iter().find(|n| n.id == id) else { continue };
+        let after: Vec<&str> = w.edges.iter().filter(|e| e.to == id).map(|e| e.from.as_str()).collect();
+        s.push_str(&format!("  {}  {}", node.id, node.task.title));
+        if let Some(agent) = &node.task.agent {
+            s.push_str(&format!("  [{agent}]"));
+        }
+        if !after.is_empty() {
+            s.push_str(&format!("  after {}", after.join(", ")));
+        }
+        if let Some(rework) = &node.rework {
+            s.push_str(&format!("  sends work back to {} (at most {}x)", rework.to, rework.max_rounds));
+        }
+        s.push('\n');
+    }
+    s
+}
+
+fn workflow_run_text(r: &factory_core::workflow::WorkflowRun) -> String {
+    let mut s = format!("{}  {:?}  {}  r{}\n", r.id, r.status, r.definition.name, r.revision);
+    for (name, value) in &r.inputs {
+        s.push_str(&format!("input {name}={value}\n"));
+    }
+    if let Some(error) = &r.error {
+        s.push_str(&format!("error: {error}\n"));
+    }
+    for node in &r.nodes {
+        s.push_str(&format!("  {}  {:?}", node.node_id, node.status));
+        if let Some(task) = &node.task_id {
+            s.push_str(&format!("  task {task}"));
+        }
+        if node.round > 0 {
+            s.push_str(&format!("  rework {}", node.round));
+        }
+        if let Some(error) = &node.error {
+            s.push_str(&format!("  -- {error}"));
+        }
+        s.push('\n');
+    }
+    s
 }
 
 /// `factory workflow lint`, for a person: each category's plan, then what a

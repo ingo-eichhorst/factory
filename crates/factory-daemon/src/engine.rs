@@ -1038,8 +1038,8 @@ impl Engine {
             Request::WorkflowDelete { id } => Ok(Payload::Deleted {
                 deleted: self.delete_workflow(&id).await?,
             }),
-            Request::WorkflowStart { id } => Ok(Payload::WorkflowRun {
-                run: self.start_workflow(&id, caller).await?,
+            Request::WorkflowStart { id, inputs } => Ok(Payload::WorkflowRun {
+                run: self.start_workflow(&id, inputs, caller).await?,
             }),
             Request::WorkflowRunGet { id } => Ok(Payload::WorkflowRun {
                 run: self.workflow_run(&id).await?,
@@ -2437,6 +2437,38 @@ impl Engine {
                     parent_task = parent_task_id,
                     "reading parent task for upstream output: {error}"
                 ),
+            }
+        }
+        // `#140`: work sent back here comes with what the node that sent it
+        // said -- its error (the findings a `failed` report carries) and
+        // its result, whichever it gave.
+        let request = run
+            .nodes
+            .iter()
+            .find(|node| node.node_id == origin.node_id && node.task_id.as_deref() == Some(task.id.as_str()))
+            .and_then(|node| node.rework_request.clone());
+        if let Some(request) = request {
+            match self.store.get(&request.from_task).await {
+                Ok(Some(reviewer)) => {
+                    let said: Vec<&str> = [reviewer.error.as_deref(), reviewer.result.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    outputs.push(UpstreamOutput {
+                        node_id: request.from_node.clone(),
+                        task_id: reviewer.id.clone(),
+                        title: format!(
+                            "{} sent this work back -- rework round {} of {}",
+                            reviewer.title, request.round, request.max_rounds
+                        ),
+                        result: (!said.is_empty())
+                            .then(|| truncate_tail(&said.join("\n\n"), UPSTREAM_RESULT_BYTE_CAP).into_owned()),
+                    });
+                }
+                Ok(None) => tracing::warn!(task = task.id, from_task = request.from_task, "rework source no longer exists"),
+                Err(error) => tracing::warn!(task = task.id, from_task = request.from_task, "reading rework source: {error}"),
             }
         }
         outputs

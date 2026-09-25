@@ -538,7 +538,7 @@ impl Engine {
                 }
                 Reach::Own => Err(deny("manage workflows; that requires scope reach")),
             },
-            Request::WorkflowDelete { id } | Request::WorkflowStart { id } => match def.reach {
+            Request::WorkflowDelete { id } | Request::WorkflowStart { id, .. } => match def.reach {
                 Reach::Scope => match self.workflows.get_definition(id).await? {
                     Some(found) => in_scope(&found.scope),
                     None => Ok(()),
@@ -786,7 +786,7 @@ mod tests {
             !allowed(
                 &own_reach,
                 &wearing("workflow-author"),
-                Request::WorkflowStart { id: "missing".into() }
+                Request::WorkflowStart { id: "missing".into(), inputs: Default::default() }
             )
             .await,
             "starting a workflow is refused for reach alone, before any id is even looked up"

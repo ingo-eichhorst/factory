@@ -214,7 +214,12 @@ pub enum Request {
     #[serde(rename = "workflow.delete")]
     WorkflowDelete { id: String },
     #[serde(rename = "workflow.run")]
-    WorkflowStart { id: String },
+    WorkflowStart {
+        id: String,
+        /// The values its declared inputs are started with (`#140`).
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        inputs: std::collections::BTreeMap<String, String>,
+    },
     #[serde(rename = "workflow_run.get")]
     WorkflowRunGet { id: String },
     #[serde(rename = "workflow_run.list")]

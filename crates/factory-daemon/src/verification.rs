@@ -671,6 +671,7 @@ mod tests {
                 ..Default::default()
             },
             gate: None,
+            rework: None,
         }
     }
 
@@ -694,7 +695,7 @@ mod tests {
         let lint = engine.workflow_lint(Some(definition.id.clone()), None, None, None).await.unwrap();
         assert_eq!(lint.injections.len(), 2, "one gate after each task node: {:#?}", lint.injections);
 
-        let wf = engine.start_workflow(&definition.id, &Caller::Owner).await.unwrap();
+        let wf = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
         assert_eq!(wf.definition.nodes.len(), 4, "the snapshot carries the gates");
         assert_eq!(engine.workflow_definition(&definition.id).await.unwrap().nodes.len(), stored_nodes, "the stored workflow does not");
 

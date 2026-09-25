@@ -11,6 +11,7 @@
 //! steals focus from a canvas node or an inspector field mid-edit.
 
 import { $, api, esc, state } from "./core.js";
+import { closeModal, dropModal, scrim } from "./modal.js";
 import { inScope, writeHash } from "./scopes.js";
 import { openTask } from "./tasks.js";
 import {
@@ -742,7 +743,14 @@ async function save() {
   clientErrors = errors; serverError = null;
   if (errors.length) { renderCanvas(); renderProblems(); return; }
   setBusy(true);
-  const draft = { name: current.name, description: current.description, scope: current.scope, nodes: current.nodes, edges: current.edges };
+  // Everything the canvas does not edit rides along untouched -- the
+  // category (#118) and the declared inputs (#140) -- so saving a layout
+  // never drops what a file or the CLI put there.
+  const draft = {
+    name: current.name, description: current.description, scope: current.scope,
+    category: current.category ?? null, inputs: current.inputs ?? [],
+    nodes: current.nodes, edges: current.edges,
+  };
   try {
     const answer = current.id ? await api(`/api/workflows/${current.id}`, { method: "PATCH", body: JSON.stringify(draft) })
       : await api("/api/workflows", { method: "POST", body: JSON.stringify(draft) });
@@ -755,11 +763,40 @@ async function save() {
   finally { setBusy(false); }
 }
 
+/// A workflow that declares inputs (#140) asks for them before it starts;
+/// one that declares none starts straight away, as it always has.
+function askInputs(inputs) {
+  if (!inputs?.length) return Promise.resolve({});
+  return new Promise((resolve) => {
+    dropModal();
+    scrim(`
+      <header><div><h2>Start ${esc(current.name)}</h2></div><button class="x" id="wi-close">&times;</button></header>
+      <div class="body">
+        ${inputs.map((input, i) => `
+          <label for="wi-${i}">${esc(input.name)}${input.description ? ` <span class="sub" style="text-transform:none">${esc(input.description)}</span>` : ""}</label>
+          <input id="wi-${i}">`).join("")}
+        <div class="err" id="wi-err"></div>
+        <div class="row-btns" style="margin-top:16px"><button class="btn primary" id="wi-start">Start</button></div>
+      </div>`);
+    const cancel = () => { closeModal(); resolve(null); };
+    $("wi-close").onclick = cancel;
+    $("wi-start").onclick = () => {
+      const values = Object.fromEntries(inputs.map((input, i) => [input.name, $(`wi-${i}`).value.trim()]));
+      const missing = inputs.filter(input => !values[input.name]).map(input => input.name);
+      if (missing.length) { $("wi-err").textContent = `needs ${missing.join(", ")}`; return; }
+      closeModal(); resolve(values);
+    };
+    $("wi-0").focus();
+  });
+}
+
 async function run() {
   if (!current?.id) return;
+  const inputs = await askInputs(current.inputs);
+  if (inputs === null) return;
   setBusy(true); serverError = null;
   try {
-    currentRun = (await api(`/api/workflows/${current.id}/run`, { method: "POST" })).run;
+    currentRun = (await api(`/api/workflows/${current.id}/run`, { method: "POST", body: JSON.stringify({ inputs }) })).run;
     mode = "run";
     await loadRuns(currentRun.id);
     writeHash();
