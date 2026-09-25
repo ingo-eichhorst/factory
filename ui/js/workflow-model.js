@@ -50,10 +50,24 @@ function nodeTexts(node) {
 
 /// Which inputs a node's text uses, once each, in order -- and which of
 /// those the workflow does not declare. The inspector's "uses" line.
+/// With no input declared, nothing is undeclared: the server leaves braces
+/// alone then (see `inputProblems`), so marking them would flag an error
+/// Save never raises.
 export function nodeInputUsage(node, inputs) {
   const declared = new Set((inputs ?? []).map(input => input.name));
   const used = [...new Set(nodeTexts(node).flatMap(placeholders))];
-  return { used, undeclared: used.filter(name => !declared.has(name)) };
+  return { used, undeclared: declared.size ? used.filter(name => !declared.has(name)) : [] };
+}
+
+/// One keystroke in the Inputs list, written into whatever `workflow` is
+/// *now* -- the caller passes the live `current` and an index, never an
+/// input object it captured earlier, since `current` is replaced by a fresh
+/// clone on a reload without the rows being rebuilt (#145 review).
+export function setInputField(workflow, index, field, value) {
+  const input = workflow?.inputs?.[index];
+  if (!input || (field !== "name" && field !== "description")) return false;
+  input[field] = value;
+  return true;
 }
 
 /// The server's `validate_inputs`: names are names and are declared once,

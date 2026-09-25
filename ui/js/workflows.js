@@ -44,6 +44,7 @@ import {
   roundLabel,
   runInputs,
   saveDraft,
+  setInputField,
   supersededTasks,
   validate,
   workflowRouteTail,
@@ -149,7 +150,9 @@ export async function loadWorkflows(wanted, wantedRun) {
       if (found) await open(found, false, wantedRun);
     } else if (current?.id && !dirty) {
       const fresh = workflows.find(workflow => workflow.id === current.id);
-      if (fresh) current = structuredClone(fresh);
+      // A new object under the same selection key: the inspector's rows
+      // must be rebuilt against it, not left bound to the one it replaces.
+      if (fresh) { current = structuredClone(fresh); inspectorRenderedFor = null; }
     }
     renderWorkflows();
   } catch (error) { showServerError(error); }
@@ -193,6 +196,7 @@ function guardDirty(proceed) {
 
 async function open(workflow, navigate = true, runId) {
   current = structuredClone(workflow);
+  inspectorRenderedFor = null; // re-opening the same workflow keeps the key
   currentRun = null;
   selectedNode = null; selectedEdge = null; connectFrom = null;
   clearDirty(); notice = null; clientErrors = []; serverError = null; pendingDiscard = null;
@@ -617,10 +621,15 @@ function renderInputs() {
       ${readOnly ? "" : `<button type="button" class="wf-input-remove" data-remove-input="${i}" aria-label="Remove input ${esc(input.name || i + 1)}">Remove</button>`}
     </div>`).join("") : `<p class="wf-uses">None -- a run starts with nothing to fill in.</p>`;
   if (readOnly) return;
+  // Only the index is captured: `current` is looked up when the key is
+  // pressed, so a reload that replaced it since cannot swallow the edit.
   for (const row of $("workflow-inputs").querySelectorAll("[data-input]")) {
-    const input = current.inputs[Number(row.dataset.input)];
+    const index = Number(row.dataset.input);
     for (const field of row.querySelectorAll("[data-field]")) {
-      field.oninput = () => { input[field.dataset.field] = field.value; markDirty(); renderNodeUses(); };
+      field.oninput = () => {
+        if (!setInputField(current, index, field.dataset.field, field.value)) return;
+        markDirty(); renderNodeUses();
+      };
     }
   }
   for (const button of $("workflow-inputs").querySelectorAll("[data-remove-input]")) {
@@ -646,9 +655,18 @@ function renderNodeUses() {
   const graph = activeGraph();
   const node = graph?.nodes.find(item => item.id === selectedNode);
   const { used, undeclared } = node ? nodeInputUsage(node, graph.inputs) : { used: [], undeclared: [] };
-  $("workflow-node-inputs").innerHTML = used.length ? `Uses ${used.map(name => undeclared.includes(name)
+  const list = used.map(name => undeclared.includes(name)
     ? `<span class="wf-undeclared">{{${esc(name)}}} (not declared)</span>`
-    : `<code>{{${esc(name)}}}</code>`).join(", ")}` : "";
+    : `<code>{{${esc(name)}}}</code>`).join(", ");
+  const html = !used.length ? ""
+    : graph.inputs?.length ? `Uses ${list}`
+    : `${list} stay${used.length === 1 ? "s" : ""} as written -- this workflow declares no inputs`;
+  // Written only when it changes: the line is `aria-live`, and this runs on
+  // every keystroke in every inspector field.
+  // Compared with what was last written rather than with `innerHTML`, which
+  // the browser re-serializes and so need not read back the same.
+  const line = $("workflow-node-inputs");
+  if (line.dataset.html !== html) { line.dataset.html = html; line.innerHTML = html; }
 }
 
 /// The Rework group: where the selected node may send its work back to --
@@ -919,7 +937,8 @@ async function save() {
   for (const input of current.inputs ?? []) { input.name = input.name.trim(); input.description = (input.description || "").trim(); }
   const errors = validate(current);
   clientErrors = errors; serverError = null;
-  if (errors.length) { renderCanvas(); renderProblems(); return; }
+  // The rows show the trimmed names too, not what was typed before Save.
+  if (errors.length) { renderCanvas(); renderInputs(); renderProblems(); return; }
   setBusy(true);
   const draft = saveDraft(current);
   try {

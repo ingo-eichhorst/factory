@@ -38,6 +38,7 @@ import {
   roundLabel,
   runInputs,
   saveDraft,
+  setInputField,
   supersededTasks,
   validate,
   workflowRouteTail,
@@ -515,7 +516,27 @@ test("#143 inputs: a gate's text is never checked for placeholders", () => {
 test("#143 the inspector's uses line lists each input once and marks the undeclared", () => {
   const n = { id: "a", kind: "task", task: { title: "{{issue}}", instructions: "{{ issue }} {{repo}}", labels: { x: "{{branch}}" } } };
   assert.deepEqual(nodeInputUsage(n, [{ name: "issue" }]), { used: ["issue", "repo", "branch"], undeclared: ["repo", "branch"] });
-  assert.deepEqual(nodeInputUsage(n, undefined).undeclared, ["issue", "repo", "branch"]);
+  // No input declared: the server leaves braces as literal text, so none
+  // is marked -- a mark would name an error Save never raises.
+  assert.deepEqual(nodeInputUsage(n, undefined), { used: ["issue", "repo", "branch"], undeclared: [] });
+  assert.deepEqual(nodeInputUsage(n, []).undeclared, []);
+});
+
+test("#145 an input edit lands in the workflow passed in, not one captured before a reload", () => {
+  const before = { inputs: [{ name: "issue", description: "old" }] };
+  const reloaded = structuredClone(before); // what loadWorkflows() puts in `current`
+  assert.equal(setInputField(reloaded, 0, "description", "new"), true);
+  assert.equal(reloaded.inputs[0].description, "new");
+  assert.equal(before.inputs[0].description, "old");
+  assert.deepEqual(saveDraft({ ...githubIssue(), inputs: reloaded.inputs }).inputs, [{ name: "issue", description: "new" }]);
+});
+
+test("#145 setInputField refuses a row or field that is not there", () => {
+  const wf = { inputs: [{ name: "issue", description: "" }] };
+  assert.equal(setInputField(wf, 1, "name", "x"), false);
+  assert.equal(setInputField(wf, 0, "nodes", "x"), false);
+  assert.equal(setInputField({}, 0, "name", "x"), false);
+  assert.deepEqual(wf.inputs, [{ name: "issue", description: "" }]);
 });
 
 test("#143 ancestors: everything a node can be reached from, never itself", () => {
