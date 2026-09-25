@@ -2234,12 +2234,27 @@ synced.
     factory backup list              every snapshot, verified or not, and the rule that keeps it
     factory backup run               take one now, then apply retention
     factory backup verify [<name>]   prove one would restore; exits non-zero on a failed check
+    factory backup restore <name> --into <new-root>
+                                      verify, then restore into a new root
 
 `GET /api/backup`, `POST /api/backup/run` and
 `POST /api/backup/verify?snapshot=` are the same three over HTTP, and the
 **L1 › Backup** page draws them. `run` and `verify` need `backup.run`, which
 only an agent in the root scope may hold, like `policy.attest`; reading is
 open to every agent.
+
+**Restore** is CLI-only and owner-only; there is deliberately no HTTP or UI
+endpoint and no role grant for it. It runs the same archive-path, manifest,
+checksum, database-schema and authored-content checks as `verify`, staging the
+exact checked files in a temporary sibling of `<new-root>`. Only after every
+required check passes does one rename make the root visible. `<new-root>` must
+not exist or must be empty, and may never be the running instance. A corrupt,
+incomplete, unsafe or database-incompatible archive leaves neither a partial
+root nor a staging directory. The command prints the exact
+`factory-daemon --root <new-root> run` and `factory --root <new-root> status`
+commands for a switch-over, but never stops a daemon, switches roots or starts
+the restored instance itself. V1 plaintext archives are supported; encrypted
+input belongs to the separate encryption follow-up.
 
 **Verify** unpacks a snapshot into a temporary directory -- never over the
 instance -- refusing any entry that would land outside it, then checks every
@@ -2278,8 +2293,8 @@ Every backup and verification is an event -- `backup_completed`,
 unmounted volume is a `backup_failed` with the reason, a warning on the page
 and a line in the log. Not yet: `age` encryption (a config asking for
 `encrypt_to` is refused at load rather than given plaintext it thinks is
-encrypted), `restore --into`, the policy facts and metrics, the scope-repo
-remote report and the Time Machine fact are the issue's v2.
+encrypted), the policy facts and metrics, the scope-repo remote report and the
+Time Machine fact.
 
 ## Writing a plugin
 

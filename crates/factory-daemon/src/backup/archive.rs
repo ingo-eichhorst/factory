@@ -1,6 +1,7 @@
-//! Taking a snapshot and proving one would restore. Blocking file work and
-//! nothing else -- the engine moves every call here onto `spawn_blocking`,
-//! and decides nothing about schedules, retention or warnings.
+//! Taking a snapshot, proving one would restore, and atomically materializing
+//! a proved snapshot as a new root. Blocking file work and nothing else --
+//! the engine moves every call here onto `spawn_blocking`, and decides
+//! nothing about schedules, retention or warnings.
 //!
 //! **Taking one.** The database is copied with `VACUUM INTO` on a connection
 //! of its own: one read transaction, so the copy is a consistent snapshot
@@ -67,6 +68,17 @@ impl Scratch {
     fn new(what: &str) -> Result<Self> {
         let dir = std::env::temp_dir().join(format!("factory-{what}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).map_err(|e| fail(format!("making a temporary directory {}: {e}", dir.display())))?;
+        Ok(Self(dir))
+    }
+
+    /// A fresh directory on the destination's own filesystem, so committing
+    /// a restore is one rename rather than a cross-device copy.
+    fn sibling(target: &Path) -> Result<Self> {
+        let parent = target
+            .parent()
+            .ok_or_else(|| fail(format!("{} has no parent directory", target.display())))?;
+        let dir = parent.join(format!(".factory-restore-{}.partial", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).map_err(|e| fail(format!("making restore staging directory {}: {e}", dir.display())))?;
         Ok(Self(dir))
     }
 }
@@ -357,15 +369,20 @@ fn safe_relative(path: &Path) -> Option<PathBuf> {
 /// Every step of proving `archive` would restore, in the order they ran.
 /// `instance_id` is this instance's own, which the manifest is compared to.
 pub fn verify(archive: &Path, instance_id: &str) -> Vec<VerifyCheck> {
-    let mut checks = Vec::new();
     let scratch = match Scratch::new("verify") {
         Ok(s) => s,
         Err(e) => {
-            checks.push(check("archive", CheckStatus::Fail, e.to_string()));
-            return checks;
+            return vec![check("archive", CheckStatus::Fail, e.to_string())];
         }
     };
-    let tmp = &scratch.0;
+    verify_into(archive, instance_id, &scratch.0)
+}
+
+/// The verification shared by `verify` and restore. `tmp` must be an empty,
+/// private directory: archive entries are materialized there while they are
+/// hashed, then all loaders inspect those exact bytes.
+fn verify_into(archive: &Path, instance_id: &str, tmp: &Path) -> Vec<VerifyCheck> {
+    let mut checks = Vec::new();
 
     // -- unpack, hashing every entry on its way to disk ---------------------
     let mut unpacked: BTreeMap<String, (u64, String)> = BTreeMap::new();
@@ -480,7 +497,15 @@ pub fn verify(archive: &Path, instance_id: &str) -> Vec<VerifyCheck> {
     let configs: Vec<&ManifestFile> = manifest.files.iter().filter(|f| f.group == Group::Config).collect();
     let mut bad = Vec::new();
     match factory_core::config::Factory::load(tmp) {
-        Ok(_) => {}
+        Ok(mut factory) => {
+            if let Err(e) = crate::discovery::apply(&mut factory) {
+                bad.push(format!("scope discovery: {e}"));
+            } else if let Err(e) = factory.config.validate() {
+                bad.push(format!("instance config: {e}"));
+            } else if let Err(e) = super::validate_schedule(&factory) {
+                bad.push(format!("backup schedule: {e}"));
+            }
+        }
         Err(e) => bad.push(format!("the root config: {e}")),
     }
     for f in &configs {
@@ -492,7 +517,14 @@ pub fn verify(archive: &Path, instance_id: &str) -> Vec<VerifyCheck> {
         }
     }
     checks.push(if bad.is_empty() {
-        check("config", CheckStatus::Ok, format!("the root config loads; {} config files parse", configs.len()))
+        check(
+            "config",
+            CheckStatus::Ok,
+            format!(
+                "the root config loads; {} config files parse; scope discovery and validation pass",
+                configs.len()
+            ),
+        )
     } else {
         check("config", CheckStatus::Fail, summarize(&bad))
     });
@@ -500,6 +532,157 @@ pub fn verify(archive: &Path, instance_id: &str) -> Vec<VerifyCheck> {
     // -- every authored-content loader ------------------------------------------
     checks.extend(verify_loaders(tmp));
     checks
+}
+
+/// A staged snapshot that was made visible as a new instance root.
+#[derive(Debug)]
+pub struct Restored {
+    pub into: PathBuf,
+    pub files: u64,
+    pub checks: Vec<VerifyCheck>,
+}
+
+/// Validate, stage and atomically commit a plaintext snapshot as a new root.
+/// Nothing is written under `into` until all of `verify`'s required checks
+/// pass. The staging directory is a sibling so the last operation is a rename
+/// on one filesystem; its guard removes every failed attempt.
+pub fn restore(archive: &Path, instance_id: &str, active_root: &Path, into: &Path) -> Result<Restored> {
+    let (target, existed) = restore_target(active_root, into)?;
+    let stage = Scratch::sibling(&target)?;
+    let checks = verify_into(archive, instance_id, &stage.0);
+    let failures: Vec<String> = checks
+        .iter()
+        .filter(|c| c.status == CheckStatus::Fail)
+        .map(|c| format!("{}: {}", c.name, c.detail))
+        .collect();
+    if !failures.is_empty() {
+        return Err(fail(format!(
+            "verification failed; no restored root was committed: {}",
+            summarize(&failures)
+        )));
+    }
+
+    // Re-check after the potentially long verification. If somebody created
+    // or populated the destination meanwhile, preserving it wins over the
+    // restore; the staging guard removes our private copy.
+    let (commit_target, exists_now) = restore_target(active_root, &target)?;
+    if commit_target != target || exists_now != existed {
+        return Err(fail(format!(
+            "the restore destination {} changed while the snapshot was being verified; nothing was committed",
+            target.display()
+        )));
+    }
+
+    let files = regular_file_count(&stage.0)?;
+    if existed {
+        fs::remove_dir(&target)
+            .map_err(|e| fail(format!("preparing the empty restore destination {}: {e}", target.display())))?;
+    }
+    if let Err(e) = fs::rename(&stage.0, &target) {
+        if existed {
+            let _ = fs::create_dir(&target);
+        }
+        return Err(fail(format!("committing the restored root at {}: {e}", target.display())));
+    }
+    let into = target.canonicalize().unwrap_or(target);
+    Ok(Restored { into, files, checks })
+}
+
+/// The canonical destination and whether an empty directory already occupies
+/// it. Canonicalizing the parent also catches aliases of the active root even
+/// when the last component does not exist yet.
+fn restore_target(active_root: &Path, into: &Path) -> Result<(PathBuf, bool)> {
+    if !into.is_absolute() {
+        return Err(fail(format!(
+            "the restore destination {} must be an absolute path",
+            into.display()
+        )));
+    }
+    let active = active_root
+        .canonicalize()
+        .map_err(|e| fail(format!("resolving the running instance root {}: {e}", active_root.display())))?;
+    let existing = match fs::symlink_metadata(into) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(fail(format!(
+                "reading the restore destination {}: {e}",
+                into.display()
+            )))
+        }
+    };
+    let exists = existing.is_some();
+    let target = if let Some(meta) = existing {
+        if meta.file_type().is_symlink() {
+            return Err(fail(format!(
+                "the restore destination {} is a symbolic link; name a new or empty directory directly",
+                into.display()
+            )));
+        }
+        if !meta.is_dir() {
+            return Err(fail(format!("the restore destination {} is not a directory", into.display())));
+        }
+        let resolved = into
+            .canonicalize()
+            .map_err(|e| fail(format!("resolving the restore destination {}: {e}", into.display())))?;
+        if resolved == active {
+            return Err(fail(format!(
+                "{} is the running instance root; restore only into a different new root",
+                resolved.display()
+            )));
+        }
+        let mut entries = fs::read_dir(into)
+            .map_err(|e| fail(format!("reading the restore destination {}: {e}", into.display())))?;
+        if entries.next().is_some() {
+            return Err(fail(format!(
+                "the restore destination {} is not empty; restore only into a new or empty directory",
+                into.display()
+            )));
+        }
+        resolved
+    } else {
+        let parent = into
+            .parent()
+            .ok_or_else(|| fail(format!("the restore destination {} has no parent", into.display())))?;
+        let name = into
+            .file_name()
+            .ok_or_else(|| fail(format!("the restore destination {} is not a new root path", into.display())))?;
+        let parent = parent.canonicalize().map_err(|e| {
+            fail(format!(
+                "the restore destination's parent {} does not exist or cannot be resolved: {e}",
+                parent.display()
+            ))
+        })?;
+        if !parent.is_dir() {
+            return Err(fail(format!("the restore destination's parent {} is not a directory", parent.display())));
+        }
+        parent.join(name)
+    };
+    if target == active {
+        return Err(fail(format!(
+            "{} is the running instance root; restore only into a different new root",
+            target.display()
+        )));
+    }
+    Ok((target, exists))
+}
+
+fn regular_file_count(root: &Path) -> Result<u64> {
+    let mut count = 0;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = fs::read_dir(&dir).map_err(|e| fail(format!("reading restored files under {}: {e}", dir.display())))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| fail(format!("reading restored files under {}: {e}", dir.display())))?;
+            let ty = entry.file_type().map_err(|e| fail(format!("reading {}: {e}", entry.path().display())))?;
+            if ty.is_dir() {
+                pending.push(entry.path());
+            } else if ty.is_file() {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
 }
 
 fn verify_database(path: &Path, manifest: &Manifest) -> VerifyCheck {
@@ -537,6 +720,17 @@ fn verify_database(path: &Path, manifest: &Manifest) -> VerifyCheck {
             format!("schema {} where the manifest says {}", facts.user_version, manifest.database.user_version),
         );
     };
+    if facts.user_version != factory_plugins::SQLITE_SCHEMA_VERSION {
+        return check(
+            "database",
+            CheckStatus::Fail,
+            format!(
+                "schema {} is incompatible with this daemon (expects {}); restoring it would discard task data on startup",
+                facts.user_version,
+                factory_plugins::SQLITE_SCHEMA_VERSION
+            ),
+        );
+    }
     check(
         "database",
         CheckStatus::Ok,
@@ -694,7 +888,11 @@ mod tests {
             fs::create_dir_all(f.join("logs")).unwrap();
             fs::create_dir_all(root.join("projects/demo/.factory")).unwrap();
             fs::write(f.join("config.yaml"), "version: 1\ninstance:\n  id: inst-1\n  name: Test Instance\n").unwrap();
-            fs::write(root.join("projects/demo/.factory/config.yaml"), "version: 1\nscope:\n  name: demo\n").unwrap();
+            fs::write(
+                root.join("projects/demo/.factory/config.yaml"),
+                "version: 1\nscope:\n  id: demo-id\n  name: demo\n",
+            )
+            .unwrap();
             fs::write(f.join("knowledge/company/README.md"), "---\ntitle: readme\n---\n# Company\n").unwrap();
             fs::write(f.join("knowledge/data/secrets/token.txt"), "hunter2").unwrap();
             fs::write(f.join("knowledge/.env"), "KEY=hunter2").unwrap();
@@ -816,6 +1014,100 @@ mod tests {
         fs::write(&taken.path, &bytes).unwrap();
         let checks = verify(&taken.path, "inst-1");
         assert!(checks.iter().any(|c| c.status == CheckStatus::Fail), "{checks:?}");
+    }
+
+    #[test]
+    fn a_verified_snapshot_restores_into_a_new_or_empty_root() {
+        let instance = Instance::new("restore");
+        let taken = instance.take(false);
+        let base = instance.root.parent().unwrap();
+
+        let into = base.join("restored");
+        let restored = restore(&taken.path, "inst-1", &instance.root, &into).unwrap();
+        assert_eq!(restored.into, into.canonicalize().unwrap());
+        assert_eq!(restored.files, 5);
+        assert!(!restored.checks.iter().any(|c| c.status == CheckStatus::Fail));
+        assert!(factory_core::config::Factory::load(&into).is_ok());
+        assert_eq!(fs::read_to_string(into.join(".factory/knowledge/company/README.md")).unwrap(), "---\ntitle: readme\n---\n# Company\n");
+        assert!(into.join("projects/demo/.factory/config.yaml").is_file());
+        assert!(!into.join(".factory/secrets.yaml").exists());
+        assert!(!into.join(".factory/knowledge/data/secrets/token.txt").exists());
+        let conn = Connection::open_with_flags(
+            into.join(DATABASE_ENTRY),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+
+        let empty = base.join("restored-empty");
+        fs::create_dir(&empty).unwrap();
+        restore(&taken.path, "inst-1", &instance.root, &empty).unwrap();
+        assert!(empty.join(DATABASE_ENTRY).is_file());
+    }
+
+    #[test]
+    fn restore_refuses_the_active_or_populated_root_without_changing_it() {
+        let instance = Instance::new("restore-refuse");
+        let taken = instance.take(false);
+        let active = restore(&taken.path, "inst-1", &instance.root, &instance.root)
+            .unwrap_err()
+            .to_string();
+        assert!(active.contains("running instance root"), "{active}");
+
+        let occupied = instance.root.parent().unwrap().join("occupied");
+        fs::create_dir(&occupied).unwrap();
+        fs::write(occupied.join("keep.txt"), "untouched").unwrap();
+        let error = restore(&taken.path, "inst-1", &instance.root, &occupied)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not empty"), "{error}");
+        assert_eq!(fs::read_to_string(occupied.join("keep.txt")).unwrap(), "untouched");
+
+        let dangling = instance.root.parent().unwrap().join("dangling");
+        std::os::unix::fs::symlink("missing", &dangling).unwrap();
+        let error = restore(&taken.path, "inst-1", &instance.root, &dangling)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert!(fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn a_failed_restore_never_commits_a_root_or_leaves_its_staging_directory() {
+        let instance = Instance::new("restore-damaged");
+        let taken = instance.take(false);
+        let mut bytes = fs::read(&taken.path).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0xff;
+        fs::write(&taken.path, bytes).unwrap();
+        let parent = instance.root.parent().unwrap();
+        let into = parent.join("not-committed");
+        let error = restore(&taken.path, "inst-1", &instance.root, &into)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("verification failed"), "{error}");
+        assert!(!into.exists());
+        let staging: Vec<_> = fs::read_dir(parent)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".factory-restore-"))
+            .collect();
+        assert!(staging.is_empty(), "failed restore left staging directories");
+    }
+
+    #[test]
+    fn a_database_schema_this_daemon_would_discard_is_not_restorable() {
+        let instance = Instance::new("restore-schema");
+        let taken = instance.take(false);
+        let mut manifest = Instance::manifest(&taken.path);
+        let database = instance.root.join(DATABASE_ENTRY);
+        let conn = Connection::open(&database).unwrap();
+        conn.pragma_update(None, "user_version", 999i64).unwrap();
+        manifest.database.user_version = 999;
+        let result = verify_database(&database, &manifest);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.detail.contains("incompatible"), "{}", result.detail);
+        assert!(result.detail.contains("discard task data"), "{}", result.detail);
     }
 
     #[test]

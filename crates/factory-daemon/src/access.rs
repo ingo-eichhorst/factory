@@ -308,6 +308,10 @@ impl Engine {
             // Explicit, destructive, and rare: only the owner cleans a bench
             // run's worktrees and branches away.
             Request::BenchRunClean { .. } => return Needs::Owner,
+            // Restore materializes the whole company into a new root. Unlike
+            // run/verify, no role grant opens it: choosing a cutover candidate
+            // is the owner's decision alone (#153).
+            Request::BackupRestore { .. } => return Needs::Owner,
         })
     }
 
@@ -994,6 +998,19 @@ mod tests {
         assert!(!allowed(&e, &worker("w"), verify).await, "a worker holds no backup.run");
         assert!(allowed(&e, &worker("w"), Request::Backup).await, "reading the status is open to every agent");
         assert!(allowed(&e, &Caller::Owner, Request::BackupRun).await);
+    }
+
+    #[tokio::test]
+    async fn backup_restore_is_the_owners_alone_even_when_a_role_has_every_grant() {
+        let e = engine_with_roles("roles:\n  everything:\n    grants: ['*']\n    reach: scope\n");
+        let request = Request::BackupRestore {
+            snapshot: "factory-backup-demo-20260925T030000Z.tar.zst".into(),
+            into: PathBuf::from("/tmp/restored-factory"),
+        };
+        assert!(allowed(&e, &Caller::Owner, request.clone()).await);
+        assert!(!allowed(&e, &wearing("everything"), request.clone()).await);
+        assert!(!allowed(&e, &foreman(), request.clone()).await);
+        assert!(!allowed(&e, &worker("w"), request).await);
     }
 
     /// `goals.checkin` is checked against the configured root scope exactly
