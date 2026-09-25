@@ -14,10 +14,10 @@
 //! Everything here is pure: no store, no clock but the one passed in. The
 //! daemon (`factory-daemon/src/intake.rs`) owns the transitions.
 //!
-//! What v1 leaves out, on purpose: the GitHub-issue source, duplicate
-//! detection, the security fast lane with its CRA clock, the `triager` role
-//! and the metrics -- all `#119` v2 -- and every outbound effect. An
-//! assessment is never posted anywhere; it is only journaled.
+//! What this slice leaves out, on purpose: duplicate candidate detection,
+//! the security fast lane with its CRA clock, the `triager` role, metrics and
+//! every outbound effect. An assessment is never posted anywhere; it is only
+//! journaled.
 
 use crate::task::{Task, TaskStatus};
 use chrono::{DateTime, Utc};
@@ -62,8 +62,7 @@ impl IntakeStage {
     }
 }
 
-/// Which way an item came in. v1 has the three the daemon itself can see;
-/// the GitHub issue, email and chat sources are v2 and v3.
+/// Which way an item came in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceKind {
@@ -74,6 +73,9 @@ pub enum SourceKind {
     /// An agent handing work on instead of creating a task directly -- the
     /// delegation path. Set by the daemon from the caller, never claimed.
     Agent,
+    /// An open GitHub issue carrying `needs-triage`. Set only by the daemon's
+    /// read-only poller, never accepted as caller-supplied provenance.
+    Github,
 }
 
 impl SourceKind {
@@ -82,6 +84,7 @@ impl SourceKind {
             Self::Cli => "cli",
             Self::Ui => "ui",
             Self::Agent => "agent",
+            Self::Github => "github",
         }
     }
 }
@@ -105,7 +108,8 @@ pub struct NewIntake {
     /// it; absent means the instance's first scope, as for a task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    /// `cli` or `ui`. An agent's request is always `agent`, whatever it says.
+    /// `cli` or `ui`. An agent's request is always `agent`, whatever it says,
+    /// and trusted external-source kinds are never accepted from callers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -940,6 +944,13 @@ mod tests {
 
     fn at() -> DateTime<Utc> {
         "2026-09-25T10:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn github_source_kind_has_a_stable_wire_name() {
+        let json = serde_json::to_string(&SourceKind::Github).unwrap();
+        assert_eq!(json, "\"github\"");
+        assert_eq!(serde_json::from_str::<SourceKind>(&json).unwrap(), SourceKind::Github);
     }
 
     #[test]

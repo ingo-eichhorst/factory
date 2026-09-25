@@ -12,6 +12,7 @@ mod dependencies;
 mod discovery;
 mod engine;
 mod goals;
+mod github_intake;
 mod harness_health;
 mod host;
 mod intake;
@@ -360,6 +361,9 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     engine.recover_bench_runs().await;
 
     let sched = tokio::spawn(scheduler::run(engine.clone(), shutdown_rx.clone()));
+    // GitHub receipt is independent of dispatch: network or authentication
+    // trouble must never hold up the scheduler.
+    let github_intake = tokio::spawn(github_intake::run(engine.clone(), shutdown_rx.clone()));
     // Its own loop rather than a slot in the scheduler's: a backup can take
     // minutes, and nothing the scheduler fires should wait behind one.
     let backups = tokio::spawn(backup::run(engine.clone(), shutdown_rx.clone()));
@@ -399,6 +403,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
         }
     }
     sched.abort();
+    github_intake.abort();
     backups.abort();
     engine.registry.shutdown().await;
     Ok(())
