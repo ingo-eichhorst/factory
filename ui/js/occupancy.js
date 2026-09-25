@@ -13,7 +13,7 @@ import { inScope, scopeLabel } from "./scopes.js";
 import { openTask } from "./tasks.js";
 import {
   rowStyle, laneStyle, concurrency, blockedStretches, blockedNote, waitingShare,
-  OCC_STEPS, tickStep, liveView, resolveWindow, settle, isPreset, zoomAround, panByPixels,
+  OCC_STEPS, tickStep, tickTimes, liveView, resolveWindow, settle, isPreset, zoomAround, panByPixels,
   wheelFactor, fractionAt, buttonAnchor, windowQuery, overlaps,
 } from "./occupancy-model.js";
 
@@ -153,7 +153,7 @@ export function wireOccupancy() {
   const gesture = () => {
     const pts = [...down.values()];
     const ext = trackExtent();
-    if (!ext) return null;
+    if (!ext || pts.length === 0) return null;
     if (pts.length === 1) return { x: pts[0].x, dist: 0, ext };
     const [a, b] = pts;
     return { x: (a.x + b.x) / 2, dist: Math.abs(a.x - b.x), ext };
@@ -238,8 +238,8 @@ export function renderOccupancy() {
 
   // Ticks on round clock times, not on the window's ragged edges.
   let ticks = "";
-  const step = stepMin * 60000;
-  for (let t = Math.ceil(from / step) * step; t <= to; t += step) {
+  const shift = -new Date(from).getTimezoneOffset() * 60000;
+  for (const t of tickTimes(from, to, stepMin * 60000, shift)) {
     ticks += `<span style="left:${((t - from) / span * 100).toFixed(3)}%">${clockLabel(new Date(t), coarse)}</span>`;
   }
 

@@ -110,6 +110,18 @@ export function tickStep(spanMs) {
   return OCC_STEPS.find(([limit]) => minutes <= limit)[1];
 }
 
+/// Tick times across `[from, to]`, every `stepMs`, on round times of the
+/// local clock: `shiftMs` is how far that clock is ahead of UTC (minus
+/// `getTimezoneOffset`, in milliseconds). Without it a daily tick lands on
+/// UTC midnight, which in Berlin is labelled 02:00. One shift for the whole
+/// window -- the day the clock changes is off by an hour, and says so by
+/// its label rather than by drawing a tick in the wrong place.
+export function tickTimes(from, to, stepMs, shiftMs = 0) {
+  const out = [];
+  for (let t = Math.ceil((from + shiftMs) / stepMs) * stepMs - shiftMs; t <= to; t += stepMs) out.push(t);
+  return out;
+}
+
 /// The window the select's preset means: `minutes` back and a quarter of
 /// that ahead -- the daemon's default, `window_bounds` with no from/to.
 export function liveView(minutes) {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   rowLanes, rowStyle, laneStyle, concurrency, blockedStretches, blockedNote, waitingShare,
-  MIN_SPAN, MAX_SPAN, tickStep, liveView, resolveWindow, settle, isPreset, zoomAround, pan,
+  MIN_SPAN, MAX_SPAN, tickStep, tickTimes, liveView, resolveWindow, settle, isPreset, zoomAround, pan,
   panByPixels, wheelFactor, fractionAt, buttonAnchor, windowQuery, overlaps,
 } from "../js/occupancy-model.js";
 
@@ -216,4 +216,19 @@ test("only what reaches into the window is drawn", () => {
   assert.equal(overlaps(150, 160, win), true);
   assert.equal(overlaps(200, 300, win), true);
   assert.equal(overlaps(201, 300, win), false);
+});
+
+test("ticks fall on round times of the local clock, not of UTC", () => {
+  const day = 24 * HOUR;
+  const from = Date.UTC(2026, 8, 24, 12);
+  const to = Date.UTC(2026, 8, 27, 12);
+  assert.deepEqual(tickTimes(from, to, day), [Date.UTC(2026, 8, 25), Date.UTC(2026, 8, 26), Date.UTC(2026, 8, 27)]);
+  // Two hours ahead of UTC: local midnight is 22:00 UTC the day before.
+  assert.deepEqual(tickTimes(from, to, day, 2 * HOUR), [
+    Date.UTC(2026, 8, 24, 22), Date.UTC(2026, 8, 25, 22), Date.UTC(2026, 8, 26, 22),
+  ]);
+  // A tick exactly on an edge is kept; an hourly step is the same either way.
+  assert.deepEqual(tickTimes(NOW, NOW + 2 * HOUR, HOUR, 2 * HOUR), [NOW, NOW + HOUR, NOW + 2 * HOUR]);
+  // Five-and-a-half hours ahead (India): hourly ticks land on the half hour in UTC.
+  assert.equal(tickTimes(NOW, NOW + 2 * HOUR, HOUR, 5.5 * HOUR)[0], NOW + 30 * MIN);
 });

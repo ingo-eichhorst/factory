@@ -15,6 +15,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/app.js               the wiring: which page shows, what an event means
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
     ui/js/schedule.js          a task's schedule between the wire and the form, pure
+    ui/js/occupancy-model.js   the occupancy chart's window: live or fixed, zoom, pan, ticks, pure
     ui/js/{dashboard,activity,site,site-render}.js               the new views
     ui/js/{sandboxes,secrets,dependencies}.js                    L2's three tabs
     ui/js/dependencies-model.js                                  Dependencies' pure shaping logic
