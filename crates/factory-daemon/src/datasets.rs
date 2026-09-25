@@ -323,6 +323,7 @@ mod tests {
             daemon: DaemonConfig::default(),
             roles: Default::default(),
             policies: Default::default(),
+            quality: Default::default(),
             scope: None,
             scopes: Vec::new(),
             infrastructure: Default::default(),

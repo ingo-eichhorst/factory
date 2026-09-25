@@ -15,8 +15,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use factory_core::config::{
-    refuse_misplaced_scope_infrastructure, refuse_misplaced_scope_policies, refuse_misplaced_scope_roles,
-    Factory, Scope, CONFIG_FILE, FACTORY_DIR,
+    refuse_misplaced_scope_infrastructure, refuse_misplaced_scope_policies, refuse_misplaced_scope_quality,
+    refuse_misplaced_scope_roles, Factory, Scope, CONFIG_FILE, FACTORY_DIR,
 };
 use factory_core::error::{FactoryError, Result};
 use serde::Deserialize;
@@ -120,6 +120,10 @@ fn read_scope(path: &Path) -> Result<Scope> {
     refuse_misplaced_scope_roles(&document, path)?;
     // Same failure mode, for a top-level `policies:` block.
     refuse_misplaced_scope_policies(&document, path)?;
+    // And for a top-level `quality:` block. Deliberately not also in
+    // `configuration.rs`'s `read_document`, which reads the instance root's
+    // own file too -- where a top-level `quality:` is exactly right.
+    refuse_misplaced_scope_quality(&document, path)?;
     // And for `infrastructure:`, which only the instance root's file reads.
     // Only nested files come through here -- the root's own config is parsed
     // whole by `Factory::load` -- so this never refuses the one place the
@@ -247,6 +251,7 @@ mod tests {
                 scopes: vec![legacy],
                 roles: Default::default(),
                 policies: Default::default(),
+                quality: Default::default(),
                 infrastructure: Default::default(),
                 plugins_dir: None,
             },

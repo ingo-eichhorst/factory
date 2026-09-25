@@ -143,6 +143,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         task_store: None,
         roles: Default::default(),
         policies: Default::default(),
+        quality: Default::default(),
     };
     let config = Config {
         version: 1,
@@ -155,6 +156,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         scopes: Vec::new(),
         roles: Default::default(),
         policies: Default::default(),
+        quality: Default::default(),
         infrastructure: Default::default(),
         plugins_dir: None,
     };

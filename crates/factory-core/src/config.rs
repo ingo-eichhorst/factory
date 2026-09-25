@@ -1,5 +1,6 @@
 use crate::agent::Lifetime;
 use crate::policy::{ControlRef, NotApplicable, PolicyLayer, Tighten};
+use crate::quality::QualityLayer;
 use crate::role::{Role, RoleOrigin, RoleSpec, Roles};
 use crate::error::{FactoryError, Result};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -88,6 +89,15 @@ pub struct Config {
     /// (`refuse_root_scope_policies`).
     #[serde(default, skip_serializing_if = "PolicyDeclaration::is_empty")]
     pub policies: PolicyDeclaration,
+    /// Which quality profiles (`.factory/quality/<profile>.yaml`) hold
+    /// everywhere -- the top of every chain `quality_chain_for_scope`
+    /// builds, exactly as `policies` above is for policy layers. Just a list
+    /// of profile ids: a profile is itself the utility tree, so there is
+    /// nothing else for a declaration to say. A nested scope adds its own
+    /// under `scope.quality`; the root refuses that block
+    /// (`refuse_root_scope_quality`), the same as `scope.policies`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quality: Vec<String>,
     /// What everything runs on that Factory does not run itself: today, the
     /// AI accounts behind the agents. Only the instance root declares these
     /// -- a nested scope's file refuses the block
@@ -203,6 +213,46 @@ impl Config {
         chain
     }
 
+    /// The instance root's own quality layer, if it binds any profile --
+    /// named exactly as `root_policy_layer` names the root's policy layer,
+    /// and for the same reason (`refuse_root_scope_quality` keeps
+    /// `self.quality` the root scope's only layer).
+    fn root_quality_layer(&self) -> Option<QualityLayer> {
+        if self.quality.is_empty() {
+            return None;
+        }
+        let root_name = self
+            .scope
+            .as_ref()
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| self.instance.name.clone());
+        Some(QualityLayer {
+            scope: root_name,
+            profiles: self.quality.clone(),
+        })
+    }
+
+    /// Every quality layer that applies to `scope`, root first: the root's
+    /// top-level `quality:`, then each ancestor's own `scope.quality` down to
+    /// `scope` itself -- `policy_chain_for_scope`'s walk exactly (ancestry by
+    /// `Scope.path`, never by name; empty layers skipped, so the root's own
+    /// `Scope` entry in `self.scopes` never appears twice). Folding the
+    /// chain -- add or tighten only -- is `quality::applicable`'s job, not
+    /// this method's.
+    pub fn quality_chain_for_scope(&self, scope: &Scope) -> Vec<QualityLayer> {
+        let mut chain: Vec<QualityLayer> = self.root_quality_layer().into_iter().collect();
+        for layer in self.ancestors_of(scope).into_iter().chain(std::iter::once(scope)) {
+            if layer.quality.is_empty() {
+                continue;
+            }
+            chain.push(QualityLayer {
+                scope: layer.name.clone(),
+                profiles: layer.quality.clone(),
+            });
+        }
+        chain
+    }
+
     /// Refuse a config that gives an agent a role nothing in its scope's chain
     /// defines, and say which agent it was and what that scope does have.
     /// Falling back to the default instead would demote an agent on a typo
@@ -211,6 +261,7 @@ impl Config {
         self.roles()?;
         self.refuse_root_scope_roles()?;
         self.refuse_root_scope_policies()?;
+        self.refuse_root_scope_quality()?;
         self.infrastructure.validate()?;
         for scope in self.scope.iter().chain(&self.scopes) {
             let roles = self.roles_for_scope(scope)?;
@@ -244,6 +295,7 @@ impl Config {
         let roles = self.roles()?;
         self.refuse_root_scope_roles()?;
         self.refuse_root_scope_policies()?;
+        self.refuse_root_scope_quality()?;
         self.infrastructure.validate()?;
         if let Some(scope) = &self.scope {
             for agent in scope.declared_agents() {
@@ -288,6 +340,21 @@ impl Config {
                 "the instance root's config gives its scope {:?} a `scope.policies` block. \
                  The root's policies belong in its top-level `policies:`; move them there",
                 scope.name,
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// The instance root already has a quality layer, its top-level
+    /// `quality:` -- `refuse_root_scope_policies`'s reasoning, for quality
+    /// profiles instead.
+    fn refuse_root_scope_quality(&self) -> Result<()> {
+        match &self.scope {
+            Some(scope) if !scope.quality.is_empty() => Err(FactoryError::BadRequest(format!(
+                "the instance root's config gives its scope {:?} a `scope.quality` block. \
+                 The root's quality profiles belong in its top-level `quality:`; move {} there",
+                scope.name,
+                scope.quality.join(", ")
             ))),
             _ => Ok(()),
         }
@@ -346,6 +413,24 @@ pub fn refuse_misplaced_scope_policies(document: &serde_yaml_ng::Value, path: &P
         return Err(FactoryError::BadRequest(format!(
             "scope config {} has a top-level `policies:` block, which a scope's own file does not read. \
              Move it under `scope.policies`",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse a `quality:` block written at the top of a nested scope's own
+/// config -- `refuse_misplaced_scope_policies`'s mistake, for quality
+/// profiles: serde would drop it without a word, and a scope would then be
+/// held to nothing while its author believes otherwise.
+pub fn refuse_misplaced_scope_quality(document: &serde_yaml_ng::Value, path: &Path) -> Result<()> {
+    let misplaced = document
+        .as_mapping()
+        .is_some_and(|root| root.contains_key(serde_yaml_ng::Value::String("quality".into())));
+    if misplaced {
+        return Err(FactoryError::BadRequest(format!(
+            "scope config {} has a top-level `quality:` block, which a scope's own file does not read. \
+             Move it under `scope.quality`",
             path.display()
         )));
     }
@@ -1000,6 +1085,13 @@ pub struct Scope {
     /// refuses this block, exactly like `roles` above.
     #[serde(default, skip_serializing_if = "PolicyDeclaration::is_empty")]
     pub policies: PolicyDeclaration,
+    /// Quality profiles this scope binds for itself and every scope below it
+    /// by path, layered under the root's `quality:` and every ancestor's own
+    /// `scope.quality` -- see `Config::quality_chain_for_scope`. Only a
+    /// nested scope writes these; the instance root refuses this block, the
+    /// same as `policies` above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quality: Vec<String>,
 }
 
 /// The last `/`-separated segment of `s`, or all of `s` when it has none.
@@ -1335,6 +1427,23 @@ impl Factory {
         }
     }
 
+    /// Every quality layer that applies to the scope a name resolves to,
+    /// root first -- `policy_chain`'s fallback exactly: a name that resolves
+    /// to no scope gets only the root's layer.
+    pub fn quality_chain(&self, scope: &str) -> Vec<QualityLayer> {
+        match self.scope(scope) {
+            Ok(found) => self.config.quality_chain_for_scope(found),
+            Err(_) => self.config.root_quality_layer().into_iter().collect(),
+        }
+    }
+
+    /// Where quality profiles live: `<root>/.factory/quality/<profile>.yaml`
+    /// -- authored content like `policies_dir`, delegating to
+    /// `quality::quality_dir` for the same reason.
+    pub fn quality_dir(&self) -> PathBuf {
+        crate::quality::quality_dir(&self.root)
+    }
+
     /// The absolute working directory for a scope.
     pub fn scope_path(&self, name: &str) -> Result<PathBuf> {
         let scope = self.scope(name)?;
@@ -1397,6 +1506,7 @@ mod tests {
                 scopes: vec![],
                 roles: BTreeMap::new(),
                 policies: PolicyDeclaration::default(),
+                quality: Vec::new(),
                 infrastructure: Infrastructure::default(),
                 plugins_dir: None,
             },
@@ -1857,6 +1967,146 @@ mod tests {
     fn policies_dir_delegates_to_the_policy_modules_path() {
         let f = factory("/inst");
         assert_eq!(f.policies_dir(), crate::policy::policies_dir(&f.root));
+    }
+
+    // -- quality_chain_for_scope ---------------------------------------------
+
+    /// A scope at `path` named `name`, binding `profiles` under
+    /// `scope.quality` -- `scope_with_policies`, for quality profiles.
+    fn scope_with_quality(name: &str, path: &str, profiles: &str) -> Scope {
+        let mut yaml = format!("id: {name}-id\nname: {name}\n");
+        if !profiles.is_empty() {
+            yaml.push_str(&format!("quality: {profiles}\n"));
+        }
+        let mut scope: Scope = serde_yaml_ng::from_str(&yaml).unwrap();
+        scope.path = PathBuf::from(path);
+        scope
+    }
+
+    /// `policy_tree()`'s shape: the root binds `baseline`, `engineering`
+    /// (`projects`) adds `service`, `demo-app` (`projects/demo`) adds
+    /// `latency` -- plus the same lookalike and sideways scopes, so the
+    /// chain is proven to follow the path and nothing else.
+    fn quality_tree() -> Config {
+        let mut c = config_with("quality: [baseline]\n");
+        c.scopes = vec![
+            scope_with_quality("company", ".", ""),
+            scope_with_quality("engineering", "projects", "[service]"),
+            scope_with_quality("demo-app", "projects/demo", "[latency, service]"),
+            scope_with_quality("engineering/tools", "projects/tools", ""),
+            scope_with_quality("engineering/other", "elsewhere", ""),
+            scope_with_quality("lookalike", "projects-x", ""),
+        ];
+        c
+    }
+
+    fn chain_of(chain: &[QualityLayer]) -> Vec<(String, Vec<String>)> {
+        chain.iter().map(|l| (l.scope.clone(), l.profiles.clone())).collect()
+    }
+
+    #[test]
+    fn the_quality_chain_is_root_first_then_each_ancestor_down_to_the_scope_itself() {
+        let c = quality_tree();
+        let chain = c.quality_chain_for_scope(scope_named(&c, "demo-app"));
+        assert_eq!(
+            chain_of(&chain),
+            vec![
+                ("n".to_string(), vec!["baseline".to_string()]),
+                ("engineering".to_string(), vec!["service".to_string()]),
+                ("demo-app".to_string(), vec!["latency".to_string(), "service".to_string()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_nested_scope_inherits_quality_down_the_path_tree_and_never_up_or_sideways() {
+        let c = quality_tree();
+        let tools = c.quality_chain_for_scope(scope_named(&c, "engineering/tools"));
+        let scopes: Vec<&str> = tools.iter().map(|l| l.scope.as_str()).collect();
+        assert_eq!(scopes, vec!["n", "engineering"]);
+
+        for elsewhere in ["company", "engineering/other", "lookalike"] {
+            let chain = c.quality_chain_for_scope(scope_named(&c, elsewhere));
+            let scopes: Vec<&str> = chain.iter().map(|l| l.scope.as_str()).collect();
+            assert_eq!(scopes, vec!["n"], "{elsewhere} is not below projects by path, whatever its name says");
+        }
+    }
+
+    #[test]
+    fn the_root_quality_layer_is_named_from_its_own_registered_scope_and_never_appears_twice() {
+        let mut c = config_with("quality: [baseline]\n");
+        let root_scope: Scope = serde_yaml_ng::from_str("id: root-id\nname: company\npath: .\n").unwrap();
+        c.scope = Some(root_scope.clone());
+        c.scopes = vec![root_scope, scope_with_quality("demo", "projects/demo", "[latency]")];
+
+        let chain = c.quality_chain_for_scope(scope_named(&c, "demo"));
+        assert_eq!(
+            chain_of(&chain),
+            vec![
+                ("company".to_string(), vec!["baseline".to_string()]),
+                ("demo".to_string(), vec!["latency".to_string()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn factory_quality_chain_matches_config_and_falls_back_to_the_root_for_an_unknown_name() {
+        let mut f = factory_with(vec![scope_with_quality("demo", "demo", "[latency]")]);
+        f.config.quality = vec!["baseline".to_string()];
+        let expected = f.config.quality_chain_for_scope(f.scope("demo").unwrap());
+        assert_eq!(f.quality_chain("demo"), expected);
+        assert_eq!(chain_of(&f.quality_chain("gone")), vec![("n".to_string(), vec!["baseline".to_string()])]);
+    }
+
+    #[test]
+    fn a_quality_declaration_round_trips_through_yaml_on_the_root_and_on_a_scope() {
+        let c = config_with("quality: [daemon-service, baseline]\n");
+        assert_eq!(c.quality, vec!["daemon-service".to_string(), "baseline".to_string()]);
+        let reparsed: Config = serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&c).unwrap()).unwrap();
+        assert_eq!(reparsed.quality, c.quality);
+
+        let s: Scope = serde_yaml_ng::from_str("id: s\nname: demo\nquality: [latency]\n").unwrap();
+        let reparsed: Scope = serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&s).unwrap()).unwrap();
+        assert_eq!(reparsed.quality, vec!["latency".to_string()]);
+    }
+
+    #[test]
+    fn a_config_and_scope_binding_no_quality_round_trip_with_no_quality_key() {
+        let c: Config = serde_yaml_ng::from_str("instance:\n  id: i\n  name: n\n").unwrap();
+        assert!(!serde_yaml_ng::to_string(&c).unwrap().contains("quality"));
+        let s: Scope = serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap();
+        assert!(!serde_yaml_ng::to_string(&s).unwrap().contains("quality"));
+    }
+
+    #[test]
+    fn the_root_config_refuses_scope_quality_and_points_at_its_own_quality() {
+        let c = config_with("scope:\n  name: company\n  quality: [baseline]\n");
+        let e = c.validate_instance().unwrap_err().to_string();
+        assert!(e.contains("scope.quality"), "{e}");
+        assert!(e.contains("top-level `quality:`"), "{e}");
+        assert!(e.contains("baseline"), "{e}");
+        assert!(c.validate().is_err(), "validate() calls the same guard");
+    }
+
+    #[test]
+    fn a_top_level_quality_block_in_a_nested_scope_file_is_refused() {
+        let document: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("scope:\n  id: s\n  name: demo\nquality: [latency]\n").unwrap();
+        let e = refuse_misplaced_scope_quality(&document, Path::new("/x/projects/demo/.factory/config.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("scope.quality"), "{e}");
+        assert!(e.contains("projects/demo"), "{e}");
+
+        let fine: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("scope:\n  id: s\n  name: demo\n  quality: [latency]\n").unwrap();
+        refuse_misplaced_scope_quality(&fine, Path::new("x")).unwrap();
+    }
+
+    #[test]
+    fn quality_dir_delegates_to_the_quality_modules_path() {
+        let f = factory("/inst");
+        assert_eq!(f.quality_dir(), crate::quality::quality_dir(&f.root));
     }
 
     #[test]

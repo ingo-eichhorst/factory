@@ -473,6 +473,7 @@ mod tests {
             scopes: vec![root_scope],
             roles: Default::default(),
             policies: PolicyDeclaration { frameworks, ..Default::default() },
+            quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
         };
