@@ -65,6 +65,10 @@ pub struct Engine {
     /// off disk on every call, like `.factory/knowledge/` and
     /// `.factory/datasets/`.
     pub(crate) policies: crate::policies::PolicyStore,
+    /// The check-ins audit trail -- see `goals::GoalsStore`. Nothing else in
+    /// a goals request is stateful: the direction and cycle catalogues are
+    /// read fresh off disk on every call, like the policy catalogues.
+    pub(crate) goals: crate::goals::GoalsStore,
     /// Serializes a bench run's own read-modify-write: choosing which
     /// pending attempts to start, and recomputing the run's own status once
     /// every attempt has settled. Coarse -- one lock for every run, the same
@@ -161,6 +165,8 @@ impl Engine {
                 .expect("an in-memory bench store should open"),
             policies: crate::policies::PolicyStore::in_memory()
                 .expect("an in-memory policy store should open"),
+            goals: crate::goals::GoalsStore::in_memory()
+                .expect("an in-memory goals store should open"),
             bench_edit: tokio::sync::Mutex::new(()),
             bench_judging: Default::default(),
             bench_judge_tx,
@@ -195,6 +201,12 @@ impl Engine {
     /// The same, for policy attestations.
     pub fn with_policy_store(mut self, policies: crate::policies::PolicyStore) -> Self {
         self.policies = policies;
+        self
+    }
+
+    /// The same, for goals check-ins.
+    pub fn with_goals_store(mut self, goals: crate::goals::GoalsStore) -> Self {
+        self.goals = goals;
         self
     }
 
@@ -571,6 +583,24 @@ impl Engine {
             Request::PolicyExport { scope, format } => {
                 let (filename, body) = self.policy_export_render(scope.as_deref(), &format).await?;
                 Ok(Payload::PolicyExport { format, filename, body })
+            }
+            Request::Metrics { ids } => {
+                let now = Utc::now();
+                let ids = if ids.is_empty() { self.default_metric_ids().await } else { ids };
+                let metrics = self.metrics(&ids, now).await?;
+                Ok(Payload::Metrics {
+                    values: metrics.values,
+                    series: metrics.series,
+                    registry: metrics.registry,
+                })
+            }
+            Request::Goals { scope, cycle } => Ok(Payload::Goals {
+                report: self.goals_report(scope.as_deref(), cycle.as_deref()).await?,
+            }),
+            Request::GoalsCheckIn { kr, value, confidence, note } => {
+                let checkin = self.goals_checkin(caller, kr, value, confidence, note).await?;
+                self.bus.publish(Event::GoalsChanged { kr: checkin.kr.clone() });
+                Ok(Payload::GoalsCheckIn { checkin })
             }
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),
@@ -1652,6 +1682,10 @@ impl Engine {
         // (`Engine::policy_chain`), reduced to just the names the guide
         // names -- see `factory_core::policy::frameworks_in_chain`.
         let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.policy_chain(&task.scope));
+        // The one sentence the guide says about a `goal=` label -- resolved
+        // once here, the same as `policy_frameworks`, never re-read once the
+        // guide is built.
+        let goal = self.goal_context(factory.root.clone(), task.labels.get("goal").cloned()).await;
 
         let ctx = AgentContext {
             scope: task.scope.clone(),
@@ -1672,6 +1706,7 @@ impl Engine {
             identity_token: None,
             role,
             policy_frameworks,
+            goal,
         };
 
         let mut launch = agent.launch_spec(&ctx).await?;
@@ -4192,6 +4227,7 @@ mod tests {
                     .clone(),
             ),
             policy_frameworks: Vec::new(),
+            goal: None,
         };
         let agent = HarnessAgent::pi().with_args(vec!["--model".into(), "sonnet".into()]);
         let mut launch = agent.launch_spec(&ctx).await.unwrap();

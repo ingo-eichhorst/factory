@@ -837,6 +837,26 @@ pub fn elapsed_fraction(cycle: &Cycle, now: DateTime<Utc>) -> f64 {
     (elapsed as f64 / total as f64).clamp(0.0, 1.0)
 }
 
+/// The objective and key result a `goal=<objective>/<kr>` task label names,
+/// searched for across every cycle (a label does not say which one) --
+/// `(objective_id, objective_title, kr_id, kr_title)`, or `None` when
+/// `label` does not parse as `objective/kr` or names a pair no cycle
+/// defines. The daemon calls this once per dispatch to build the guide's
+/// `GoalContext`; nothing else in this crate needs it, and it stays a
+/// read-only lookup rather than validation -- a check-in's own rules
+/// (manual-only, a real cycle) are checked where the write happens, not
+/// here.
+pub fn resolve_label(cycles: &[Cycle], label: &str) -> Option<(String, String, String, String)> {
+    let wanted: KrRef = label.parse().ok()?;
+    cycles.iter().flat_map(|c| &c.objectives).find(|o| o.id == wanted.objective).and_then(|objective| {
+        objective
+            .key_results
+            .iter()
+            .find(|kr| kr.id == wanted.kr)
+            .map(|kr| (objective.id.clone(), objective.title.clone(), kr.id.clone(), kr.title.clone()))
+    })
+}
+
 /// The cycle whose window contains `now`, choosing the earliest-starting
 /// one (then lowest id) if more than one does -- which only happens when
 /// [`load`] has already reported an [`FindingKind::OverlappingCycles`]
@@ -851,7 +871,10 @@ pub fn current_cycle(cycles: &[Cycle], now: DateTime<Utc>) -> Option<&Cycle> {
 
 /// One key result, evaluated: its current value, score and band if it has
 /// one, and why not if it does not.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+// `Deserialize` too, since this crosses the wire whole inside
+// `protocol::GoalsReport` -- the daemon builds it, but the CLI has to
+// decode it back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KrResult {
     pub kr: KrRef,
     pub title: String,
@@ -877,7 +900,7 @@ pub struct KrResult {
     pub confidence: Option<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectiveResult {
     pub objective: String,
     pub title: String,
@@ -887,7 +910,7 @@ pub struct ObjectiveResult {
     pub key_results: Vec<KrResult>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CycleReport {
     pub cycle_id: String,
     pub status: CycleStatus,

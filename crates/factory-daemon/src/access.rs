@@ -208,6 +208,9 @@ impl Engine {
             // The same grant `TaskCreate` itself needs -- this is not a way
             // around it, it is the same door (`#83`).
             Request::PolicyRemediate { .. } => Grant::TaskCreate,
+            // Checked against the root scope for the same reason
+            // `policy.attest` is -- see `in_root_scope`.
+            Request::GoalsCheckIn { .. } => Grant::GoalsCheckIn,
 
             Request::Status
             | Request::Adapters
@@ -228,6 +231,8 @@ impl Engine {
             | Request::Policy { .. }
             | Request::PolicyControl { .. }
             | Request::PolicyExport { .. }
+            | Request::Metrics { .. }
+            | Request::Goals { .. }
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
@@ -306,27 +311,29 @@ impl Engine {
             }
         };
 
-        // The subject `knowledge.write`, `dataset.edit`, `bench.run` and
-        // `policy.attest` are checked against: the knowledge base, datasets,
-        // bench runs and policy attestations are company-wide, not one
-        // project's, so only a caller whose own scope *is* the instance's
-        // configured root scope may hold any of them -- resolved from the
-        // live config, never from a literal name like "root", which is only
-        // ever a convention for what somebody chose to call theirs. An
-        // instance that declares no root scope at all grants none of them to
-        // any agent, however it is named.
+        // The subject `knowledge.write`, `dataset.edit`, `bench.run`,
+        // `policy.attest` and `goals.checkin` are checked against: the
+        // knowledge base, datasets, bench runs, policy attestations and
+        // goals check-ins are company-wide, not one project's, so only a
+        // caller whose own scope *is* the instance's configured root scope
+        // may hold any of them -- resolved from the live config, never from
+        // a literal name like "root", which is only ever a convention for
+        // what somebody chose to call theirs. An instance that declares no
+        // root scope at all grants none of them to any agent, however it is
+        // named.
         let in_root_scope = || -> Result<()> {
             match &self.factory_snapshot().config.scope {
                 Some(root) if root.name == *scope => Ok(()),
                 Some(root) => Err(FactoryError::Denied(format!(
-                    "{} works in {scope}; the knowledge base, datasets, bench runs and policy \
-                     attestations are company-wide and belong to the root scope ({:?}) alone",
+                    "{} works in {scope}; the knowledge base, datasets, bench runs, policy \
+                     attestations and goals check-ins are company-wide and belong to the root \
+                     scope ({:?}) alone",
                     caller.describe(),
                     root.name
                 ))),
                 None => Err(FactoryError::Denied(format!(
-                    "{} may not write knowledge, manage datasets, run benchmarks or attest to a \
-                     policy control; this instance declares no root scope",
+                    "{} may not write knowledge, manage datasets, run benchmarks, attest to a \
+                     policy control, or check in a goal; this instance declares no root scope",
                     caller.describe()
                 ))),
             }
@@ -478,6 +485,10 @@ impl Engine {
             Request::PolicyAttest { .. } | Request::PolicyWithdraw { .. } => match def.reach {
                 Reach::Scope => in_root_scope(),
                 Reach::Own => Err(deny("record or withdraw a policy attestation; that requires scope reach")),
+            },
+            Request::GoalsCheckIn { .. } => match def.reach {
+                Reach::Scope => in_root_scope(),
+                Reach::Own => Err(deny("record a goals check-in; that requires scope reach")),
             },
 
             // Reads returned above, and anything needing a grant nobody holds
@@ -842,6 +853,51 @@ mod tests {
             )
             .await
         );
+    }
+
+    /// `goals.checkin` is checked against the configured root scope exactly
+    /// like `policy.attest` -- the same `in_root_scope` closure, since a
+    /// check-in speaks for the company's own goals, not for one project.
+    #[tokio::test]
+    async fn goals_checkin_is_checked_against_the_configured_root_scope() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  checker:\n    grants: [goals.checkin]\n    reach: scope\n",
+        );
+
+        let checkin = || Request::GoalsCheckIn {
+            kr: "ship-compliant/dpa-signed".parse().unwrap(),
+            value: 3.0,
+            confidence: 7,
+            note: None,
+        };
+        let in_root = Caller::Agent {
+            scope: "demo".into(),
+            name: "w".into(),
+            role: Role::new("checker"),
+            run_id: None,
+        };
+        let outside_root = Caller::Agent {
+            scope: "other".into(),
+            name: "w".into(),
+            role: Role::new("checker"),
+            run_id: None,
+        };
+
+        assert!(
+            allowed(&e, &in_root, checkin()).await,
+            "the root scope's own caller, holding the grant, may check in"
+        );
+        assert!(
+            !allowed(&e, &outside_root, checkin()).await,
+            "the same grant held outside the root scope is refused -- goals check-ins are \
+             company-wide, not scoped to wherever the caller works"
+        );
+        assert!(
+            !allowed(&e, &worker("w"), checkin()).await,
+            "a caller in the root scope but without the grant at all is refused the ordinary way"
+        );
+        assert!(allowed(&e, &Caller::Owner, checkin()).await, "the owner is never subject to any of this");
     }
 
     /// `policy.remediate` is checked exactly like `TaskCreate` itself: the

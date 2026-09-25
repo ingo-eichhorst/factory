@@ -1,5 +1,6 @@
 use crate::adapter::RuntimeStatus;
 use crate::agent::AgentSession;
+use crate::goals::KrRef;
 use crate::policy::ControlRef;
 use crate::run::Run;
 use crate::task::{Task, TaskEntry};
@@ -84,6 +85,12 @@ pub enum Event {
         scope: String,
         control: ControlRef,
     },
+    /// A check-in was recorded against a manual key result. Published on
+    /// `Request::GoalsCheckIn`, the same way `PolicyChanged` follows an
+    /// attestation.
+    GoalsChanged {
+        kr: KrRef,
+    },
     /// A push from a runtime, mapped onto whichever standing agent or run's
     /// session it was about. This never moves a task or a run -- only the
     /// agent's own `factory task report` may do that -- so `task_id()` is
@@ -126,7 +133,8 @@ impl Event {
             | Event::AgentConfigured { .. }
             | Event::AgentDeleted { .. }
             | Event::RolesChanged { .. }
-            | Event::PolicyChanged { .. } => None,
+            | Event::PolicyChanged { .. }
+            | Event::GoalsChanged { .. } => None,
             Event::WorkflowCreated { .. }
             | Event::WorkflowUpdated { .. }
             | Event::WorkflowDeleted { .. }

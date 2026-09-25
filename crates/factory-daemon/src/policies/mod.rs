@@ -854,7 +854,10 @@ impl Engine {
 /// `attested_by`/`Withdrawal.by`: the owner speaks as `"owner"`, an agent as
 /// its own name -- not `scope/name`, since an attestation's `scope` field
 /// already says where it was recorded for.
-fn caller_name(caller: &Caller) -> String {
+/// Who a request is recorded as coming from, in words fit for an audit
+/// trail -- shared with `goals/mod.rs`'s check-ins, the same "who" a
+/// `CheckIn.by`/`Attestation.attested_by` both want.
+pub(crate) fn caller_name(caller: &Caller) -> String {
     match caller {
         Caller::Owner => "owner".to_string(),
         Caller::Agent { name, .. } => name.clone(),

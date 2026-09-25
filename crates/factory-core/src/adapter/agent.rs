@@ -192,6 +192,24 @@ pub struct AgentContext {
     /// which is the common case and not an error; `factory_guide` then says
     /// nothing about policy at all rather than naming an empty list.
     pub policy_frameworks: Vec<String>,
+    /// The objective and key result a `goal=<objective>/<kr>` label names,
+    /// with both titles resolved from the goals catalogue at dispatch --
+    /// `None` for a task carrying no such label, or naming one the
+    /// catalogue does not (currently) define. Resolved once at launch, the
+    /// same way `policy_frameworks` is, never re-read once the guide is
+    /// built.
+    pub goal: Option<GoalContext>,
+}
+
+/// What `AgentContext::factory_guide` says about a task's `goal=` label:
+/// the objective and key result it names, already resolved to their
+/// authored titles so the guide never has to repeat raw ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalContext {
+    pub objective_id: String,
+    pub objective_title: String,
+    pub kr_id: String,
+    pub kr_title: String,
 }
 
 /// Where a task run's guide file lives, given only its task id and the
@@ -340,6 +358,18 @@ impl AgentContext {
             ));
         }
 
+        if let Some(goal) = &self.goal {
+            out.push_str(&format!(
+                "This task serves objective \"{objective}\" ({objective_id}), key result \
+                 \"{kr}\" ({objective_id}/{kr_id}) -- goals enforce nothing, so this is context, \
+                 not an instruction on top of your own.\n\n",
+                objective = goal.objective_title,
+                objective_id = goal.objective_id,
+                kr = goal.kr_title,
+                kr_id = goal.kr_id,
+            ));
+        }
+
         if let Some(def) = &self.role {
             let lines = self.granted_command_lines(def);
             if !lines.is_empty() {
@@ -430,6 +460,9 @@ impl AgentContext {
                 ),
                 Grant::PolicyAttest => format!(
                     "policy.attest -> {bin} policy attest <framework>/<id> --scope <scope> --evidence <pointer> --expires <30d|2027-01-01> [--note \"...\"]; also {bin} policy withdraw <attestation-id> --reason \"...\"; the subject is whichever scope the attestation is recorded for, but the grant itself is company-wide, not scoped to {scope}"
+                ),
+                Grant::GoalsCheckIn => format!(
+                    "goals.checkin -> {bin} goals checkin <objective>/<kr> --value <n> --confidence <0-10> [--note \"...\"]; only for a manual key result, and the grant itself is company-wide, not scoped to {scope}"
                 ),
             });
         }
@@ -667,6 +700,7 @@ mod tests {
             identity_token: Some("identity".into()),
             role,
             policy_frameworks: Vec::new(),
+            goal: None,
         }
     }
 
@@ -768,6 +802,27 @@ mod tests {
             !guide.contains("policy status"),
             "no policies apply, so nothing should point at the command: {guide}"
         );
+    }
+
+    #[test]
+    fn the_guide_names_the_objective_and_key_result_a_goal_label_resolved_to() {
+        let mut ctx = base(Some(worker()));
+        ctx.goal = Some(GoalContext {
+            objective_id: "ship-compliant".into(),
+            objective_title: "Every product can ship CRA-compliant".into(),
+            kr_id: "cra-open-zero".into(),
+            kr_title: "No open CRA controls".into(),
+        });
+        let guide = ctx.factory_guide();
+        assert!(guide.contains("Every product can ship CRA-compliant"), "{guide}");
+        assert!(guide.contains("No open CRA controls"), "{guide}");
+        assert!(guide.contains("ship-compliant/cra-open-zero"), "{guide}");
+    }
+
+    #[test]
+    fn the_guide_says_nothing_about_a_goal_when_the_task_carries_no_label() {
+        let guide = base(Some(worker())).factory_guide();
+        assert!(!guide.contains("This task serves objective"), "{guide}");
     }
 
     #[test]

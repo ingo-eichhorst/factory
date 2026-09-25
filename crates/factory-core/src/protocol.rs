@@ -448,6 +448,44 @@ pub enum Request {
         scope: Option<String>,
         format: String,
     },
+    /// Every named metric, computed fresh (`factory-daemon`'s `metrics.rs`)
+    /// -- lazy like a policy fact: only the ids actually asked are computed.
+    /// `ids` empty means every non-parameterised metric plus whatever the
+    /// loaded goals catalogue and policy catalogues imply (see
+    /// `Engine::metrics`'s own doc comment). Read-only.
+    #[serde(rename = "metrics")]
+    Metrics {
+        #[serde(default)]
+        ids: Vec<crate::metrics::MetricId>,
+    },
+    /// The L6 Goals tab: vision, mission, the north star and its inputs,
+    /// every cycle's own summary, the asked-for (or current) cycle's full
+    /// graded report, and the roadmap -- narrowed to `scope` (and its
+    /// descendants) when given, the whole instance otherwise. Read-only,
+    /// evaluated fresh from `.factory/goals/` on every call, like `Policy`.
+    #[serde(rename = "goals")]
+    Goals {
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        cycle: Option<String>,
+    },
+    /// Record a check-in against a manual key result -- the one way a
+    /// manual key result's value ever moves, the same append-only pattern
+    /// `PolicyAttest` writes attestations with. `goals.checkin`, checked
+    /// against the root scope for the same reason `policy.attest` is: a
+    /// check-in speaks for the company's own goals. Refused when `kr` names
+    /// no key result in any loaded cycle, or one that is not `manual: true`
+    /// -- a computed key result cannot be checked in -- or when
+    /// `confidence` is outside `0..=10` or `value` is not finite.
+    #[serde(rename = "goals.checkin")]
+    GoalsCheckIn {
+        kr: crate::goals::KrRef,
+        value: f64,
+        confidence: u8,
+        #[serde(default)]
+        note: Option<String>,
+    },
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -597,6 +635,22 @@ pub enum Payload {
         filename: String,
         body: String,
     },
+    /// The answer to `Request::Metrics`: every requested (or implied)
+    /// metric's computed value, a history series for the ones that have
+    /// one, and the definition behind each value -- exactly the ids in
+    /// `values`, not the whole registry (`crate::metrics::registry()`,
+    /// which a caller wanting the full vocabulary reads directly, off the
+    /// wire in no request at all -- it is fixed and compiled in, not
+    /// something the daemon computes).
+    Metrics {
+        values: Vec<crate::metrics::MetricValue>,
+        series: Vec<crate::metrics::MetricSeries>,
+        registry: Vec<MetricDefView>,
+    },
+    /// The L6 Goals tab -- see `GoalsReport`.
+    Goals { report: GoalsReport },
+    /// The answer to `Request::GoalsCheckIn`: the check-in as recorded.
+    GoalsCheckIn { checkin: crate::goals::CheckIn },
 }
 
 /// A request plus who is making it.
@@ -935,6 +989,103 @@ pub struct PolicyControlDetail {
     /// included, since this is the audit trail, not just what currently
     /// holds.
     pub attestations: Vec<crate::policy::Attestation>,
+}
+
+/// `crate::metrics::MetricDef`, with its two `&'static str` fields turned
+/// into owned `String`s so it can cross the wire and come back --
+/// `MetricDef` itself stays `Serialize`-only (see its own doc comment: it
+/// is a fixed, compiled-in vocabulary, never something a caller builds),
+/// so this is the view `Payload::Metrics::registry` actually carries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricDefView {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub unit: crate::metrics::Unit,
+    pub better: crate::metrics::Better,
+    pub source: String,
+    pub available: bool,
+    pub unavailable_reason: Option<String>,
+}
+
+impl From<crate::metrics::MetricDef> for MetricDefView {
+    fn from(d: crate::metrics::MetricDef) -> Self {
+        Self {
+            id: d.id,
+            title: d.title,
+            description: d.description,
+            unit: d.unit,
+            better: d.better,
+            source: d.source.to_string(),
+            available: d.available,
+            unavailable_reason: d.unavailable_reason.map(str::to_string),
+        }
+    }
+}
+
+/// One cycle's place in `GoalsReport::cycles`: enough to draw a picker or a
+/// timeline without evaluating every cycle's full report, which
+/// `Request::Goals` only ever does for the one asked (or current) cycle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CycleSummary {
+    pub id: String,
+    pub from: chrono::NaiveDate,
+    pub to: chrono::NaiveDate,
+    pub status: crate::goals::CycleStatus,
+    /// The mean of every scope-filtered objective's own score in this
+    /// cycle -- `None` when none of them are scored yet, the same
+    /// "unscored, not zero" rule `goals::ObjectiveResult::score` follows.
+    pub score: Option<f64>,
+}
+
+/// The north star metric, as `Request::Goals` shows it: `direction.yaml`'s
+/// own `why`, plus its current computed value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NorthStarView {
+    pub metric: crate::metrics::MetricId,
+    pub why: String,
+    pub value: crate::metrics::MetricValue,
+}
+
+/// One of `direction.yaml`'s `inputs`, with its current computed value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputView {
+    pub metric: crate::metrics::MetricId,
+    pub value: crate::metrics::MetricValue,
+}
+
+/// The L6 Goals tab's whole answer: `Request::Goals`'s response. Goals
+/// enforce nothing (design §8) -- this is a read of what is authored and
+/// what the data says about it, never a status this itself computes and
+/// keeps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GoalsReport {
+    /// `None` when the whole instance was asked about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<crate::goals::Direction>,
+    /// Every cycle on disk, oldest first, whatever cycle was asked for.
+    pub cycles: Vec<CycleSummary>,
+    /// The asked cycle's (or, with none named, the current one's) full
+    /// graded report, scope-filtered the same way `cycles`' own scores are.
+    /// `None` when no cycle was asked for and none is current right now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<crate::goals::CycleReport>,
+    pub findings: Vec<crate::goals::Finding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub north_star: Option<NorthStarView>,
+    pub inputs: Vec<InputView>,
+    /// Scope-filtered the same way `report`'s own objectives are -- an item
+    /// with no `scope` of its own belongs to the root, exactly like an
+    /// objective without one.
+    pub roadmap: Vec<crate::goals::RoadmapItem>,
+    /// Every manual key result's own check-in history, oldest first, for a
+    /// sparkline -- across every cycle, not narrowed to `report`'s own one,
+    /// since a key result's history outlives the cycle it happens to be
+    /// asked about. `goals::KrResult::confidence` already carries the
+    /// latest one; this is the series behind it.
+    pub checkins: std::collections::BTreeMap<crate::goals::KrRef, Vec<crate::goals::CheckIn>>,
 }
 
 /// A scope and everything that runs in it.
