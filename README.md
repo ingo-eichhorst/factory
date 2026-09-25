@@ -1969,6 +1969,17 @@ A harness binary can stop starting without anything changing in Factory: on
 and then failed as an `ack_timeout` that blamed the agent. So before a
 dispatch, the daemon checks the harness starts.
 
+Factory also disables each built-in harness's own launch-time update check for
+both task runs and standing agents: codex gets `-c` with
+`check_for_update_on_startup=false`, Claude Code gets `DISABLE_AUTOUPDATER=1`,
+pi gets `PI_SKIP_VERSION_CHECK=1`, and OpenCode gets
+`OPENCODE_DISABLE_AUTOUPDATE=true`. These are ephemeral adapter defaults;
+Factory does not rewrite a person's harness configuration, and scope-declared
+arguments still follow the codex default so an explicit declaration can
+override it. Scheduled host upgrades, including the active-run guard,
+serialization, post-upgrade checks, and alerting, are separate work tracked in
+[#173](https://github.com/ingo-eichhorst/factory/issues/173).
+
 - **The probe is declared, not run, by the adapter.** `Agent::health_probe()`
   (a default method on the Agent seam, `None` unless overridden) names a
   command; every built-in harness answers `<harness> --version`, `shell` and
