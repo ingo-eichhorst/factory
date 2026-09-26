@@ -20,7 +20,7 @@ use factory_core::config::{Factory, ForemanConfig, Scope};
 use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
 use factory_core::policy_export;
-use factory_core::protocol::{CatalogueSummary, CredentialRow, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy};
+use factory_core::protocol::{CatalogueSummary, CredentialRow, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy, WorkflowEnforcement, WorkflowEnforcementFinding};
 use factory_core::role::Roles;
 use factory_core::task::{NewTask, Task, TaskFilter};
 use factory_core::workflow::WorkflowDefinition;
@@ -520,6 +520,61 @@ impl Engine {
         })
     }
 
+    async fn policy_workflow_enforcement(
+        &self,
+        target_scopes: &[factory_core::config::Scope],
+    ) -> Result<(Vec<WorkflowEnforcement>, Vec<WorkflowEnforcementFinding>)> {
+        let target_names: BTreeSet<_> = target_scopes.iter().map(|scope| scope.name.as_str()).collect();
+        let mut enforcement = Vec::new();
+        let mut findings = Vec::new();
+        for definition in self.workflows.definitions(None).await? {
+            if !target_names.contains(definition.scope.as_str()) {
+                continue;
+            }
+            let lint = match self.workflow_lint(Some(definition.id.clone()), None, None, None).await {
+                Ok(lint) => lint,
+                Err(error) => {
+                    findings.push(WorkflowEnforcementFinding {
+                        workflow: definition.id.clone(),
+                        name: definition.name.clone(),
+                        scope: definition.scope.clone(),
+                        detail: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            if let Some(injected) = lint.injected.as_ref() {
+                for injection in &lint.injections {
+                    let Some(control) = injected.nodes.iter().find(|node| node.id == injection.gate_node_id) else { continue };
+                    let Some(spec) = control.gate.as_ref() else { continue };
+                    let kind = match control.kind {
+                        factory_core::workflow::WorkflowNodeKind::Gate => factory_core::control_plan::StepKind::Gate,
+                        factory_core::workflow::WorkflowNodeKind::Review => factory_core::control_plan::StepKind::Review,
+                        factory_core::workflow::WorkflowNodeKind::Approval => factory_core::control_plan::StepKind::Approval,
+                        factory_core::workflow::WorkflowNodeKind::Task => continue,
+                    };
+                    enforcement.push(WorkflowEnforcement {
+                        workflow: definition.id.clone(),
+                        name: definition.name.clone(),
+                        scope: definition.scope.clone(),
+                        node: injection.node_id.clone(),
+                        step: injection.step.clone(),
+                        kind,
+                        required_by: injection.required_by.clone(),
+                        actor: spec.actor.clone(),
+                    });
+                }
+            }
+            findings.extend(lint.violations.into_iter().map(|detail| WorkflowEnforcementFinding {
+                workflow: definition.id.clone(),
+                name: definition.name.clone(),
+                scope: definition.scope.clone(),
+                detail,
+            }));
+        }
+        Ok((enforcement, findings))
+    }
+
     /// The L6 Policy tab: `Request::Policy`.
     pub(crate) async fn policy_report(&self, scope: Option<&str>) -> Result<PolicyReport> {
         let snapshot = self.factory_snapshot();
@@ -623,6 +678,12 @@ impl Engine {
             })
             .collect();
 
+        // Show what policy `requires:` entries do to stored workflows. Box
+        // this sizeable lint pass so `handle_request`'s future stays small --
+        // every request shares that future's stack layout.
+        let (workflow_enforcement, workflow_findings) =
+            Box::pin(self.policy_workflow_enforcement(&target_scopes)).await?;
+
         Ok(PolicyReport {
             // The canonical name, like `RoleBoard.scope` -- a caller that
             // asked by a legacy bare name still gets back exactly what
@@ -635,6 +696,8 @@ impl Engine {
                 .map(|(control, scope, rationale)| NotApplicableEntry { control, scope, rationale })
                 .collect(),
             findings,
+            workflow_enforcement,
+            workflow_findings,
             catalogues: catalogues_summary,
         })
     }

@@ -284,6 +284,13 @@ pub enum Request {
     /// Every attestation a run's required steps left behind (`#118`).
     #[serde(rename = "run.attestations")]
     RunAttestations { id: String },
+    /// Person/functionary decisions for enforced approval and rework.
+    #[serde(rename = "run.approve")]
+    RunApprove { id: String, reason: String },
+    #[serde(rename = "run.reject")]
+    RunReject { id: String, reason: String },
+    #[serde(rename = "run.rework")]
+    RunRework { id: String },
     #[serde(rename = "run.list")]
     RunList {
         task_id: String,
@@ -1308,7 +1315,36 @@ pub struct PolicyReport {
     /// same finding reached by walking two different scopes' chains is
     /// reported once.
     pub findings: Vec<crate::policy::Finding>,
+    /// Required workflow controls as they would be injected now. This is
+    /// advisory preview data; immutable run snapshots remain authoritative.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_enforcement: Vec<WorkflowEnforcement>,
+    /// Ordering and functionary gaps from the same workflow lint pass.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_findings: Vec<WorkflowEnforcementFinding>,
     pub catalogues: Vec<CatalogueSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowEnforcement {
+    pub workflow: String,
+    pub name: String,
+    pub scope: String,
+    pub node: String,
+    pub step: String,
+    pub kind: crate::control_plan::StepKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowEnforcementFinding {
+    pub workflow: String,
+    pub name: String,
+    pub scope: String,
+    pub detail: String,
 }
 
 /// One control's full detail: its catalogue data as it applies at the scope

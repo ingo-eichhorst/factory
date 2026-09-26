@@ -158,6 +158,23 @@ test("the Inbox lists the attention queue, every scope, with the reason inline",
   state.scope = null;
 });
 
+test("the Inbox exposes approval decisions and evidence-backed rework", async () => {
+  const el = stubPage(["inbox"]);
+  const decisions = {
+    ...REPORT,
+    attention: [
+      { ...REPORT.attention[0], actions: ["approve", "reject"] },
+      { ...REPORT.attention[1], actions: ["accept_rework"] },
+    ],
+  };
+  globalThis.fetch = answering(decisions, []);
+  await loadInbox();
+  assert.match(el.inbox.innerHTML, /data-action="approve"[^>]*>Approve/);
+  assert.match(el.inbox.innerHTML, /data-action="reject"[^>]*>Reject/);
+  assert.match(el.inbox.innerHTML, /data-action="accept_rework"[^>]*>Accept rework/);
+  assert.match(dashboard, /window\.prompt\(`\$\{ACTION_LABELS\[action\]\} reason:`\)/, "approval and rejection capture evidence");
+});
+
 test("the Inbox says when there is nothing, and when it could not ask", async () => {
   const el = stubPage(["inbox"]);
   globalThis.fetch = answering({ ...REPORT, attention: [] }, []);

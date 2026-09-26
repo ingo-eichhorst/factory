@@ -198,6 +198,7 @@ impl Engine {
             Request::RunInput { .. } => Grant::RunInput,
             // Typing into a run's session, however narrowed (`#106`).
             Request::RunAnswer { .. } => Grant::RunInput,
+            Request::RunApprove { .. } | Request::RunReject { .. } | Request::RunRework { .. } => Grant::RunApprove,
             Request::WorkflowCreate(_) => Grant::WorkflowCreate,
             Request::WorkflowUpdate { .. } => Grant::WorkflowEdit,
             Request::WorkflowDelete { .. } => Grant::WorkflowDelete,
@@ -532,6 +533,13 @@ impl Engine {
                     Some(own) if own == id => Ok(()),
                     _ => Err(deny("type into another agent's session")),
                 },
+            },
+
+            Request::RunApprove { id, .. }
+            | Request::RunReject { id, .. }
+            | Request::RunRework { id } => match self.task_of_run(id).await? {
+                Some(task) => task_in_reach(def, &task),
+                None => Ok(()),
             },
 
             Request::WorkflowCreate(draft) => match def.reach {
@@ -1223,6 +1231,30 @@ mod tests {
             .await
             .unwrap()
             .id
+    }
+
+    #[tokio::test]
+    async fn run_approval_is_a_central_grant_and_follows_the_subject_tasks_reach() {
+        let e =
+            engine_with_roles("roles:\n  approver:\n    grants: [run.approve]\n    reach: scope\n");
+        task_in(&e, "mine", "demo", "maker").await;
+        task_in(&e, "theirs", "other", "maker").await;
+        let mine = run_of(&e, "mine", "maker").await;
+        let theirs = run_of(&e, "theirs", "maker").await;
+        let request = |id: &str| Request::RunApprove {
+            id: id.into(),
+            reason: "checked".into(),
+        };
+        assert!(
+            !allowed(&e, &worker("maker"), request(&mine)).await,
+            "worker has no run.approve"
+        );
+        assert!(allowed(&e, &wearing("approver"), request(&mine)).await);
+        assert!(
+            !allowed(&e, &wearing("approver"), request(&theirs)).await,
+            "scope reach stops at demo"
+        );
+        assert!(allowed(&e, &Caller::Owner, request(&theirs)).await);
     }
 
     fn report() -> TaskReport {

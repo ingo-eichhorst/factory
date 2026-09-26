@@ -46,6 +46,8 @@ import {
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
+const view = readFileSync(new URL("../js/workflows.js", import.meta.url), "utf8");
+const css = readFileSync(new URL("../app.css", import.meta.url), "utf8");
 
 test("Workflows is a Process peer of Tasks with an accessible canvas and summary", () => {
   // Intake (`#119`) sits between them -- the queue in front of the line --
@@ -551,6 +553,28 @@ test("#143 rework targets on github-issue: ancestor task nodes only, in definiti
   assert.deepEqual(ids("review"), ["triage", "implement"]);
   assert.deepEqual(ids("implement"), ["triage"]);
   assert.deepEqual(ids("triage"), []);
+});
+
+test("injected controls stay locked and visually distinct from ordinary work", () => {
+  const nodes = [
+    node("work"),
+    { id: "gate", kind: "gate", task: { title: "tests" }, gate: { locked: true } },
+    { id: "review", kind: "review", task: { title: "review" }, gate: { locked: true } },
+    { id: "approval", kind: "approval", task: { title: "approval" }, gate: { locked: true } },
+  ];
+  const edges = [
+    { id: "wg", from: "work", to: "gate" },
+    { id: "gr", from: "gate", to: "review" },
+    { id: "ra", from: "review", to: "approval" },
+  ];
+  assert.deepEqual(reworkTargets(nodes, edges, "approval").map(n => n.id), ["work"]);
+  assert.match(view, /\(node\.kind \|\| "gate"\)\.toUpperCase\(\)/);
+  assert.match(view, /node\.gate\?\.actor/);
+  assert.match(view, /no independent functionary/);
+  assert.match(view, /🔒/);
+  for (const kind of ["gate", "review", "approval"]) {
+    assert.match(css, new RegExp(`\\.workflow-node\\.wf-k-${kind}`));
+  }
 });
 
 test("#143 rework targets: a node with no kind is a task, as the server's default has it", () => {

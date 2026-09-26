@@ -113,6 +113,10 @@ pub enum Grant {
     AgentInput,
     #[serde(rename = "run.input")]
     RunInput,
+    /// Decide a required approval, reject one, or accept a verifier's
+    /// evidence-backed rework proposal.
+    #[serde(rename = "run.approve")]
+    RunApprove,
     #[serde(rename = "workflow.create")]
     WorkflowCreate,
     #[serde(rename = "workflow.edit")]
@@ -155,7 +159,7 @@ pub enum Grant {
 }
 
 impl Grant {
-    pub const ALL: [Grant; 24] = [
+    pub const ALL: [Grant; 25] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -169,6 +173,7 @@ impl Grant {
         Grant::AgentStop,
         Grant::AgentInput,
         Grant::RunInput,
+        Grant::RunApprove,
         Grant::WorkflowCreate,
         Grant::WorkflowEdit,
         Grant::WorkflowDelete,
@@ -197,6 +202,7 @@ impl Grant {
             Self::AgentStop => "agent.stop",
             Self::AgentInput => "agent.input",
             Self::RunInput => "run.input",
+            Self::RunApprove => "run.approve",
             Self::WorkflowCreate => "workflow.create",
             Self::WorkflowEdit => "workflow.edit",
             Self::WorkflowDelete => "workflow.delete",
@@ -227,6 +233,7 @@ impl Grant {
             Self::AgentStop => "stop agents",
             Self::AgentInput => "type into an agent's session",
             Self::RunInput => "type into a run's session",
+            Self::RunApprove => "approve, reject, or accept rework for runs",
             Self::WorkflowCreate => "create workflows",
             Self::WorkflowEdit => "change workflows",
             Self::WorkflowDelete => "delete workflows",
@@ -257,7 +264,7 @@ impl Grant {
             Self::AgentStart | Self::AgentConfigure | Self::AgentStop | Self::AgentInput => {
                 "Agents"
             }
-            Self::RunInput => "Runs",
+            Self::RunInput | Self::RunApprove => "Runs",
             Self::WorkflowCreate
             | Self::WorkflowEdit
             | Self::WorkflowDelete

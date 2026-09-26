@@ -43,7 +43,7 @@
 
 import { $, esc, api, state } from "./core.js";
 import { inScope, routeHref, scopeLabel } from "./scopes.js";
-import { fmtAge, inboxItems } from "./operations-model.js";
+import { ACTION_LABELS, actionRequest, fmtAge, inboxItems } from "./operations-model.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 import { hasFailed } from "./task-model.js";
@@ -540,6 +540,7 @@ export function renderInbox() {
         <span class="sub">${esc(it.reason)}${it.scope ? ` · ${esc(it.scope)}` : ""}</span>
       </span>
       <span class="it-age">${esc(fmtAge(it.age))}</span>
+      ${(it.actions || []).filter(a => ["approve", "reject", "accept_rework"].includes(a)).map(a => `<button type="button" class="inbox-action" data-action="${esc(a)}">${esc(ACTION_LABELS[a] || a)}</button>`).join("")}
     </div>`;
   }).join("");
 
@@ -547,6 +548,29 @@ export function renderInbox() {
     row.onclick = () => {
       if (row.dataset.task) openTask(row.dataset.task, row.dataset.run);
       else if (row.dataset.href) location.hash = row.dataset.href;
+    };
+  }
+  for (const button of host.querySelectorAll(".inbox-action")) {
+    button.onclick = async (event) => {
+      event.stopPropagation();
+      const row = button.closest(".inbox-item");
+      const item = items.find(it => it.run_id === row?.dataset.run);
+      if (!item) return;
+      const action = button.dataset.action;
+      const reason = ["approve", "reject"].includes(action)
+        ? window.prompt(`${ACTION_LABELS[action]} reason:`)
+        : "";
+      if (["approve", "reject"].includes(action) && !reason?.trim()) return;
+      const req = actionRequest(action, item, { reason });
+      if (!req) return;
+      button.disabled = true;
+      try {
+        await api(req.path, { method: req.method, body: JSON.stringify(req.body) });
+        await loadInbox();
+      } catch (error) {
+        button.disabled = false;
+        window.alert(error.message || String(error));
+      }
     };
   }
 }

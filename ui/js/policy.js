@@ -132,6 +132,18 @@ function findingsHtml(findings) {
     .join("");
 }
 
+function workflowEnforcementHtml(report) {
+  const controls = (report.workflow_enforcement || []).map((row) => `<li>
+    <code>${esc(row.name)}</code> · ${esc(row.kind)} <b>${esc(row.step)}</b> on ${esc(row.node)}
+    ${row.actor ? ` · ${esc(row.actor)}` : row.kind === "review" ? " · no independent functionary" : ""}
+    ${(row.required_by || []).length ? ` · required by ${esc(row.required_by.join(", "))}` : ""}
+  </li>`).join("");
+  const findings = (report.workflow_findings || []).map((row) => `<li class="fault">
+    <code>${esc(row.name)}</code> · ${esc(row.detail)}
+  </li>`).join("");
+  return controls || findings ? `<ul>${controls}${findings}</ul>` : "";
+}
+
 // -------------------------------------------------------------- remediate
 //
 // One "Create task" button, in two places -- a gap row and the control-detail
@@ -218,6 +230,7 @@ export function renderPolicy() {
   const gapsBody = $("policy-gaps");
   const naBody = $("policy-na");
   const findingsEl = $("policy-findings");
+  const workflowEnforcementEl = $("policy-workflow-enforcement");
 
   if (!report) {
     if (cardsEl) cardsEl.innerHTML = "";
@@ -225,7 +238,8 @@ export function renderPolicy() {
     if (gapsBody) gapsBody.innerHTML = "";
     if (naBody) naBody.innerHTML = "";
     if (findingsEl) findingsEl.innerHTML = "";
-    for (const id of ["policy-empty", "policy-no-gaps", "policy-no-na", "policy-no-findings"]) {
+    if (workflowEnforcementEl) workflowEnforcementEl.innerHTML = "";
+    for (const id of ["policy-empty", "policy-no-gaps", "policy-no-na", "policy-no-findings", "policy-no-workflow-enforcement"]) {
       const el = $(id);
       if (el) el.hidden = true;
     }
@@ -256,6 +270,12 @@ export function renderPolicy() {
   if (findingsEl) findingsEl.innerHTML = findingsHtml(report.findings);
   const noFindings = $("policy-no-findings");
   if (noFindings) noFindings.hidden = (report.findings || []).length !== 0;
+  if (workflowEnforcementEl) workflowEnforcementEl.innerHTML = workflowEnforcementHtml(report);
+  const noWorkflowEnforcement = $("policy-no-workflow-enforcement");
+  if (noWorkflowEnforcement) {
+    noWorkflowEnforcement.hidden = (report.workflow_enforcement || []).length !== 0
+      || (report.workflow_findings || []).length !== 0;
+  }
 }
 
 export async function loadPolicy() {

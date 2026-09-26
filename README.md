@@ -1799,7 +1799,8 @@ security scan, tests -- but nothing obliged a run to go through those steps or
 to prove it had (`#118`). Now a control, or a quality attribute, can say which
 steps a **category** of work must pass, and the line enforces it: a run that
 owes a step is only `done` once the step has left evidence, produced by the
-daemon rather than by the agent that did the work.
+daemon, an independent agent, or a person rather than by the agent that did
+the work.
 
 ```yaml
 # .factory/policies/house.yaml -- a control's `requires:`
@@ -1807,6 +1808,8 @@ daemon rather than by the agent that did the work.
   title: Changes are tested
   requires:
     - { applies_to: [feature, bugfix], step: tests, gate: "cargo test --workspace" }
+    - { applies_to: [feature, bugfix], step: review, by: independent }
+    - { applies_to: [release], step: approval, by: person }
     - { applies_to: [release], step: sbom, gate: "make sbom", before: publish }
     - { applies_to: ["*"], step: lint, gate: "cargo clippy -- -D warnings", timeout_seconds: 900 }
 ```
@@ -1828,9 +1831,10 @@ The same `requires:` list goes on an attribute of a quality profile
   shortens. The one way a requirement leaves the plan is an `n/a` with a
   rationale on its control, and the plan lists that as a waiver.
 - **Injection at dispatch.** When a workflow run starts, each task node's plan
-  is merged into the run's immutable snapshot as **locked `gate` nodes**,
-  chained after that node in the plan's `before:`/`after:` order; whatever
-  followed the node now follows its last gate. Gates go after *every* task
+  is merged into the run's immutable snapshot as locked control nodes.
+  `approval` is a prerequisite before the task launches; deterministic `gate`
+  nodes and then `review` nodes follow the task in plan order; whatever
+  followed the node now follows its last control. Gates go after *every* task
   node, not only the last ones, because every node works in a worktree of its
   own. An authored gate node for the same step satisfies the requirement
   instead. A standalone task is planned as an implicit one-node workflow
@@ -1862,25 +1866,37 @@ The same `requires:` list goes on an attribute of a quality profile
   category, which steps a run would get injected and which authored gates
   already satisfy one, waivers, findings (a gate step with no command -- it
   can never pass, so every such run blocks), and ordering violations (a
-  `before: publish` whose `publish` node can start with no scan before it).
+  `before: publish` whose `publish` node can start with no scan before it), and
+  any review for which the scope has no independent functionary. The Policy
+  tab shows the same injected placement and functionary gaps for stored
+  workflows.
 
 ```sh
 factory workflow lint <workflow-id>                 # what a run of it gets
 factory workflow lint --task <task-id>              # a task, as its one-node workflow
 factory workflow lint --scope demo --category release
 factory run attestations <run-id>                   # the evidence a run carries
+factory run approve <run-id> --reason "release owner checked it"
+factory run reject <run-id> --reason "missing release evidence"
+factory run rework <run-id>                         # accept the verifier's proposal
 ```
 
-The same over HTTP: `GET /api/workflow-lint?workflow=|task=|scope=&category=`
-and `GET /api/runs/{id}/attestations`. Attestations live in the append-only
-`run_attestations` table next to `policy_attestations`.
+The same over HTTP: `GET /api/workflow-lint?workflow=|task=|scope=&category=`,
+`GET /api/runs/{id}/attestations`, and `POST /api/runs/{id}/{approve,reject,rework}`.
+Attestations live in the append-only `run_attestations` table next to
+`policy_attestations`.
 
-**Not in v1.** `review` and `approval` steps parse and show in the plan and in
-`lint`, marked not enforced -- they need a functionary other than the daemon
-(another agent, a person), which is v2 along with a rework task proposed on a
-failed gate and a canvas that draws injected nodes distinctly (the Workflows
-canvas only labels them `GATE 🔒` today). The `attested` policy check and the
-conformance metrics are v3.
+An approval holds the run before an agent session starts. A review is assigned
+to the first declared concrete task agent in stable scope order whose name is
+not the subject executor; that choice is frozen in the run snapshot. The
+reviewer reports plain `done` to pass or `done --send-to <subject-node>` with
+concrete findings to reject. A failed gate or rejected review blocks with an
+evidence-backed rework proposal. Accepting it uses the workflow's bounded
+send-back path, or a same-task retry for standalone work, for at most five
+rounds before a person must resolve it. Gate, Review, and Approval are distinct
+locked cards on the Workflows canvas, and approval/rejection/rework decisions
+are available in the Inbox. The `attested` policy check, conformance metrics,
+Goals/Scenarios wiring, and release provenance remain v3 (#158).
 
 ## How a task actually runs
 

@@ -120,6 +120,11 @@ pub enum WorkflowNodeKind {
     /// attestation behind. Never spawns a task and never runs an agent --
     /// its status mirrors the attestations its subject's run collected.
     Gate,
+    /// An independent agent judges the subject's result after deterministic
+    /// gates. The verifier spawns its task; the node mirrors that evidence.
+    Review,
+    /// A person decides before the subject is dispatched.
+    Approval,
 }
 
 /// A `Gate` node's check. Injected ones are `locked` -- the control plan put
@@ -146,6 +151,13 @@ pub struct GateSpec {
     /// Injected by the control plan at run start.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub locked: bool,
+    /// `independent` for review, `person` for approval. Absent on v1 gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// Concrete functionary frozen into a run snapshot. A missing review
+    /// actor is a visible lint/execution gap, never permission to self-review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 /// What [`WorkflowDefinition::inject`] did for one required step of one
@@ -299,17 +311,20 @@ impl WorkflowDefinition {
                 (WorkflowNodeKind::Task, Some(_)) => {
                     return Err(format!("node {:?} is a task node but carries a gate; make it a gate node", node.id));
                 }
-                (WorkflowNodeKind::Gate, None) => {
-                    return Err(format!("gate node {:?} needs a gate: a step and a command", node.id));
+                (WorkflowNodeKind::Gate | WorkflowNodeKind::Review | WorkflowNodeKind::Approval, None) => {
+                    return Err(format!("control node {:?} needs a gate spec naming its step", node.id));
                 }
-                (WorkflowNodeKind::Gate, Some(gate)) => {
+                (WorkflowNodeKind::Gate | WorkflowNodeKind::Review | WorkflowNodeKind::Approval, Some(gate)) => {
                     if !control_plan::is_name(&gate.step) {
                         return Err(format!("gate node {:?} names step {:?}, which is not a step name", node.id, gate.step));
                     }
                     // A locked gate is the plan's, and a plan may require a
                     // gate nobody gave a command -- it blocks, which is the
                     // point. An author placing one by hand says what it runs.
-                    if !gate.locked && gate.command.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    if node.kind == WorkflowNodeKind::Gate
+                        && !gate.locked
+                        && gate.command.as_deref().map(str::trim).unwrap_or("").is_empty()
+                    {
                         return Err(format!("gate node {:?} needs a command to run", node.id));
                     }
                     if gate.timeout_seconds == Some(0) {
@@ -453,7 +468,11 @@ impl WorkflowDefinition {
     /// acyclic.
     fn validate_exits(&self) -> Result<(), String> {
         for node in &self.nodes {
-            if !node.exits.is_empty() && node.kind != WorkflowNodeKind::Task {
+            if !node.exits.is_empty()
+                && node.kind != WorkflowNodeKind::Task
+                && !(matches!(node.kind, WorkflowNodeKind::Review | WorkflowNodeKind::Gate)
+                    && node.gate.as_ref().is_some_and(|g| g.locked))
+            {
                 return Err(format!(
                     "gate node {:?} cannot declare exits; only a task node can",
                     node.id
@@ -615,7 +634,7 @@ impl WorkflowDefinition {
                 WorkflowNodeKind::Task => {
                     subjects.insert(parent.id.clone());
                 }
-                WorkflowNodeKind::Gate => {
+                WorkflowNodeKind::Gate | WorkflowNodeKind::Review | WorkflowNodeKind::Approval => {
                     subjects.insert(self.gate_subject_inner(&parent.id, seen)?);
                 }
             }
@@ -635,16 +654,28 @@ impl WorkflowDefinition {
         order
             .iter()
             .filter_map(|id| self.node(id))
-            .filter(|n| n.kind == WorkflowNodeKind::Gate)
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    WorkflowNodeKind::Gate | WorkflowNodeKind::Review | WorkflowNodeKind::Approval
+                )
+            })
             .filter(|n| self.gate_subject(&n.id).as_deref() == Some(node_id))
             .filter_map(|n| {
                 let gate = n.gate.as_ref()?;
                 Some(RequiredStep {
                     step: gate.step.clone(),
-                    kind: StepKind::Gate,
+                    kind: match n.kind {
+                        WorkflowNodeKind::Gate => StepKind::Gate,
+                        WorkflowNodeKind::Review => StepKind::Review,
+                        WorkflowNodeKind::Approval => StepKind::Approval,
+                        WorkflowNodeKind::Task => return None,
+                    },
                     command: gate.command.clone(),
                     timeout_seconds: gate.timeout_seconds,
                     required_by: gate.required_by.clone(),
+                    by: gate.by.clone(),
+                    actor: gate.actor.clone(),
                     node_id: Some(n.id.clone()),
                 })
             })
@@ -731,7 +762,10 @@ impl WorkflowDefinition {
 
             let mut to_inject: Vec<&PlanStep> = Vec::new();
             for step in plan.enforced() {
-                if let Some(existing) = authored.iter().find(|g| g.gate.as_ref().is_some_and(|g| g.step == step.step)) {
+                let existing = (step.kind == StepKind::Gate)
+                    .then(|| authored.iter().find(|g| g.gate.as_ref().is_some_and(|g| g.step == step.step)))
+                    .flatten();
+                if let Some(existing) = existing {
                     if let Some(node) = out.nodes.iter_mut().find(|n| n.id == existing.id) {
                         let gate = node.gate.get_or_insert_with(Default::default);
                         for by in &step.required_by {
@@ -756,30 +790,51 @@ impl WorkflowDefinition {
                 continue;
             }
 
+            let approvals: Vec<_> = to_inject
+                .iter()
+                .copied()
+                .filter(|s| s.kind == StepKind::Approval)
+                .collect();
+            let after: Vec<_> = to_inject
+                .iter()
+                .copied()
+                .filter(|s| s.kind != StepKind::Approval)
+                .collect();
+
+            // Approval is a prerequisite: every former parent reaches the
+            // approval chain, whose last node reaches the work. A root task
+            // simply starts at its approval.
+            let mut approval_first: Option<String> = None;
+            let mut approval_previous: Option<String> = None;
+            for (i, step) in approvals.iter().enumerate() {
+                let node_id = fresh(format!("{}.{}", work.id, step.id), &mut ids);
+                approval_first.get_or_insert_with(|| node_id.clone());
+                out.nodes.push(control_node(self, work, step, &node_id, i, true));
+                if let Some(previous) = approval_previous.replace(node_id.clone()) {
+                    out.edges.push(WorkflowEdge {
+                        id: fresh(format!("{previous}->{node_id}"), &mut edge_ids),
+                        from: previous,
+                        to: node_id.clone(),
+                    });
+                }
+                notes.push(injection(work, &category, step, &node_id));
+            }
+            if let (Some(first), Some(last)) = (approval_first, approval_previous) {
+                for edge in out.edges.iter_mut().filter(|e| e.to == work.id) {
+                    edge.to = first.clone();
+                }
+                out.edges.push(WorkflowEdge {
+                    id: fresh(format!("{last}->{}", work.id), &mut edge_ids),
+                    from: last,
+                    to: work.id.clone(),
+                });
+            }
+
             let mut previous = work.id.clone();
             let mut chain_edges = Vec::new();
-            for (i, step) in to_inject.iter().enumerate() {
+            for (i, step) in after.iter().enumerate() {
                 let gate_id = fresh(format!("{}.{}", work.id, step.id), &mut ids);
-                out.nodes.push(WorkflowNode {
-                    id: gate_id.clone(),
-                    position: CanvasPoint { x: work.position.x + 40.0, y: work.position.y + 90.0 * (i as f64 + 1.0) },
-                    kind: WorkflowNodeKind::Gate,
-                    task: NewTask {
-                        title: format!("gate: {}", step.step),
-                        instructions: step.command.clone().unwrap_or_default(),
-                        scope: Some(self.scope.clone()),
-                        ..Default::default()
-                    },
-                    gate: Some(GateSpec {
-                        step: step.id.clone(),
-                        command: step.command.clone(),
-                        timeout_seconds: step.timeout_seconds,
-                        subject: Some(work.id.clone()),
-                        required_by: step.required_by.clone(),
-                        locked: true,
-                    }),
-                    exits: Vec::new(),
-                });
+                out.nodes.push(control_node(self, work, step, &gate_id, i, false));
                 chain_edges.push(WorkflowEdge {
                     id: fresh(format!("{previous}->{gate_id}"), &mut edge_ids),
                     from: previous.clone(),
@@ -802,6 +857,70 @@ impl WorkflowDefinition {
             out.edges.extend(chain_edges);
         }
         (out, notes)
+    }
+}
+
+fn injection(work: &WorkflowNode, category: &str, step: &PlanStep, node_id: &str) -> Injection {
+    Injection {
+        node_id: work.id.clone(),
+        category: category.to_string(),
+        step: step.id.clone(),
+        required_by: step.required_by.clone(),
+        gate_node_id: node_id.to_string(),
+        satisfied_by_authored: false,
+    }
+}
+
+fn control_node(
+    definition: &WorkflowDefinition,
+    work: &WorkflowNode,
+    step: &PlanStep,
+    id: &str,
+    index: usize,
+    before: bool,
+) -> WorkflowNode {
+    let kind = match step.kind {
+        StepKind::Gate => WorkflowNodeKind::Gate,
+        StepKind::Review => WorkflowNodeKind::Review,
+        StepKind::Approval => WorkflowNodeKind::Approval,
+    };
+    let noun = step.kind.as_str();
+    WorkflowNode {
+        id: id.to_string(),
+        position: CanvasPoint {
+            x: work.position.x + if before { -40.0 } else { 40.0 },
+            y: work.position.y + if before { -90.0 } else { 90.0 } * (index as f64 + 1.0),
+        },
+        kind,
+        task: NewTask {
+            title: format!("{noun}: {}", step.step),
+            instructions: step.command.clone().unwrap_or_default(),
+            scope: Some(definition.scope.clone()),
+            ..Default::default()
+        },
+        gate: Some(GateSpec {
+            step: step.id.clone(),
+            command: step.command.clone(),
+            timeout_seconds: step.timeout_seconds,
+            subject: Some(work.id.clone()),
+            required_by: step.required_by.clone(),
+            locked: true,
+            by: step.by.clone(),
+            actor: None,
+        }),
+        exits: if matches!(kind, WorkflowNodeKind::Review | WorkflowNodeKind::Gate) {
+            vec![WorkflowExit {
+                to: work.id.clone(),
+                check: None,
+                agent: Some(
+                    "the independent review found concrete changes the subject agent must make"
+                        .into(),
+                ),
+                max_rounds: Some(5),
+            }]
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -1475,11 +1594,54 @@ mod tests {
     }
 
     #[test]
-    fn review_steps_are_not_injected_in_v1() {
+    fn review_steps_are_injected_after_gates_with_a_bounded_rework_exit() {
         let def = definition(vec![node("a")], vec![]);
-        let (out, notes) = def.inject(&plan("default", &[("review", None, None)]));
-        assert!(notes.is_empty());
-        assert_eq!(out.nodes.len(), 1);
+        let (out, notes) = def.inject(&plan(
+            "default",
+            &[("tests", Some("true"), None), ("review", None, None)],
+        ));
+        assert_eq!(notes.len(), 2);
+        let review = out
+            .nodes
+            .iter()
+            .find(|n| n.kind == WorkflowNodeKind::Review)
+            .unwrap();
+        assert_eq!(review.exits[0].to, "a");
+        assert_eq!(review.exits[0].max_rounds, Some(5));
+        let steps = out.required_steps_for("a");
+        assert_eq!(
+            steps.iter().map(|s| s.kind).collect::<Vec<_>>(),
+            vec![StepKind::Gate, StepKind::Review]
+        );
+    }
+
+    #[test]
+    fn approval_is_injected_before_the_subject_and_review_after_its_gate() {
+        let def = definition(vec![node("a"), node("b")], vec![e("a", "b")]);
+        let (out, _) = def.inject(&plan(
+            "default",
+            &[
+                ("approval", None, None),
+                ("tests", Some("true"), None),
+                ("review", None, None),
+            ],
+        ));
+        let approval = out
+            .nodes
+            .iter()
+            .find(|n| n.kind == WorkflowNodeKind::Approval)
+            .unwrap();
+        let review = out
+            .nodes
+            .iter()
+            .find(|n| n.kind == WorkflowNodeKind::Review)
+            .unwrap();
+        assert!(out
+            .edges
+            .iter()
+            .any(|e| e.from == approval.id && e.to == "a"));
+        assert!(out.ancestors(&review.id).contains("a"));
+        assert!(out.descendants(&review.id).contains("b"));
     }
 
     #[test]

@@ -339,6 +339,8 @@ mod tests {
             kind: StepKind::Gate,
             actor: "factory-daemon".into(),
             verdict,
+            findings: None,
+            round: 0,
             required_by: vec![],
             command: Some("true".into()),
             exit_code: Some(0),
