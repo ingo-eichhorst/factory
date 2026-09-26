@@ -1013,22 +1013,22 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
   font: 500 9px/1 var(--mono); color: var(--run); cursor: pointer; text-decoration: underline;
 }
 
-/* -- the 8 visual categories the issue asks for (9 statuses: pending and
-   dispatching share one). Each combines a left accent with a background
-   treatment so the difference reads even to someone who cannot tell two
-   hues apart -- solid vs dashed vs hatched vs faint, not colour alone. */
+/* -- the visual categories: pending/dispatching are dashed blue, running is
+   solid blue with a ring, and verifying is dotted blue. Done alone is green.
+   Every category also has a non-colour cue so progress is still legible when
+   the blue and green hues cannot be told apart. */
 .workflow-node.wf-s-unstarted { border-left: 3px solid var(--faint); }
 .workflow-node.wf-s-pending, .workflow-node.wf-s-dispatching {
   border-left: 3px dashed var(--signal); background: var(--signal-wash);
 }
 .workflow-node.wf-s-running {
-  border-left: 4px solid var(--run); background: var(--run-wash);
-  box-shadow: 0 0 0 1px var(--run), 0 5px 16px rgba(0,0,0,.18);
+  border-left: 4px solid var(--signal); background: var(--signal-wash);
+  box-shadow: 0 0 0 1px var(--signal), 0 5px 16px rgba(0,0,0,.18);
 }
 .workflow-node.wf-s-blocked { border-left: 3px solid var(--wait); background: var(--wait-wash); }
 /* `#118`: a task node whose done is being checked, or a gate running. Dotted,
    so it reads apart from running's solid accent without relying on hue. */
-.workflow-node.wf-s-verifying { border-left: 3px dotted var(--run); background: var(--run-wash); }
+.workflow-node.wf-s-verifying { border-left: 3px dotted var(--signal); background: var(--signal-wash); }
 .workflow-node.wf-s-done { border-left: 4px solid var(--run); background: var(--run-wash); }
 .workflow-node.wf-s-failed {
   border-left: 3px solid var(--fault); background:
@@ -1046,9 +1046,9 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 }
 .wf-badge.wf-s-unstarted { color: var(--faint); }
 .wf-badge.wf-s-pending, .wf-badge.wf-s-dispatching { color: var(--signal); border-color: transparent; background: var(--signal-wash); }
-.wf-badge.wf-s-running { color: var(--run); border-color: transparent; background: var(--run-wash); font-weight: 700; }
+.wf-badge.wf-s-running { color: var(--signal-ink); border-color: transparent; background: var(--signal-wash); font-weight: 700; }
 .wf-badge.wf-s-blocked { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
-.wf-badge.wf-s-verifying { color: var(--run); border-color: transparent; background: var(--run-wash); }
+.wf-badge.wf-s-verifying { color: var(--signal-ink); border-color: transparent; background: var(--signal-wash); }
 .wf-badge.wf-s-done { color: var(--run); border-color: transparent; background: var(--run-wash); }
 .wf-badge.wf-s-failed { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
 .wf-badge.wf-s-cancelled { color: var(--fault); border-color: transparent; background: var(--fault-wash); opacity: .7; }
