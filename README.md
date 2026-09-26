@@ -881,21 +881,39 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `throughput_week` | finished runs, trailing 7 days | `production.rs`'s daily grid |
 | `first_pass_yield` | `first_pass/finished` (done and not rework, over finished), trailing 28 days | `production.rs`'s daily grid |
 | `scrap_rate` | `scrapped/finished`, trailing 28 days | `production.rs`'s daily grid |
-| `compliance.<framework>` | share of counted controls satisfied, attested, or n/a | `policy_report(None)`'s subtree rollup |
-| `open_controls.<framework>` | count of counted controls still open or stale | `policy_report(None)`'s subtree rollup |
+| `agent_hours` | hours covered by run blocks, with overlaps for one agent counted once | occupancy `busy_seconds` |
+| `blocked_hours` | blocked hours inside those run blocks, included in rather than subtracted from agent hours | occupancy `blocked_seconds` |
+| `compliance.<framework>` | share of counted controls satisfied, attested, or n/a | the selected scope's policy subtree rollup |
+| `open_controls.<framework>` | count of counted controls still open or stale | the selected scope's policy subtree rollup |
 | `bench.resolve_rate.<dataset>` | the newest settled bench run's resolve rate | `bench::aggregate` |
 | `goal_tasks_done.<objective>.<kr>` | count of tasks labelled `goal=<objective>/<kr>` whose status is `done` | task labels, through `TaskStore` |
-| `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met, across every scope | `quality_report(None)` — see "Quality attributes" |
+| `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met | the selected scope's quality subtree — see "Quality attributes" |
 | `unit_cost` | API-equivalent USD spent per run ended `done` (failed and cancelled runs' cost included), trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 | `tokens_per_run` | mean tokens of every type per finished run, trailing 28 days | each run's measured usage (`Run.usage`, #117) |
+
+`factory metrics --scope <name> --window day|14d|90d [ids…]` and `GET
+/api/metrics?ids=a,b&scope=<name>&window=day|14d|90d` select one scope plus
+its descendants and one trailing interval. Both parameters are optional.
+Without `scope`, scope-aware metrics cover the whole instance. Without
+`window`, established defaults stay unchanged: seven days for throughput,
+28 days for production ratios, operations, and usage, and 14 days for the
+new hour metrics. An explicit window overrides all run-backed families.
+Unknown scopes and unsupported windows are errors, not empty reports.
+
+Every definition in the response registry carries `coverage`:
+`scope_aware` means it follows that subtree; `instance_wide` means it does
+not. `bench.*` and `goal_tasks_done.*` are deliberately instance-wide
+because neither underlying record belongs to a scope. All other current
+families are scope-aware.
 
 `throughput_week`/`first_pass_yield`/`scrap_rate` read `production.rs`'s own
 daily grid directly rather than re-deriving "finished"/"scrapped"/
 "reworked" a second time — that module's own doc comment is the one place
 those words are defined. Every metric is computed **lazily**, like a policy
-fact: `Request::Metrics { ids }` only touches `production`/`policy_report`/
-the bench store when some asked id actually needs it, and each is read at
-most once per call no matter how many ids ask for something behind it. An
+fact: `Request::Metrics { ids, scope, window }` only touches `production`/`policy_report`/
+the bench store when some asked id actually needs it, and shares each
+backing read across all ids that need it (production reads each exact scope
+once when it aggregates a subtree). An
 id the registry has never heard of refuses the whole call (a typo should
 not come back as a quiet `None`); a metric named in the registry but not
 yet computable would come back as `value: None` with its reason, never an

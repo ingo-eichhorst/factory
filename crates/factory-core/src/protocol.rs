@@ -605,6 +605,13 @@ pub enum Request {
     Metrics {
         #[serde(default)]
         ids: Vec<crate::metrics::MetricId>,
+        /// Only this scope and its descendants. Absent means the whole
+        /// instance; definitions marked `instance_wide` ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// Override the run-backed metrics' established default intervals.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<crate::metrics::MetricsWindow>,
     },
     /// The L6 Goals tab: vision, mission, the north star and its inputs,
     /// every cycle's own summary, the asked-for (or current) cycle's full
@@ -1367,6 +1374,7 @@ pub struct MetricDefView {
     pub description: String,
     pub unit: crate::metrics::Unit,
     pub better: crate::metrics::Better,
+    pub coverage: crate::metrics::MetricCoverage,
     pub source: String,
     pub available: bool,
     pub unavailable_reason: Option<String>,
@@ -1380,6 +1388,7 @@ impl From<crate::metrics::MetricDef> for MetricDefView {
             description: d.description,
             unit: d.unit,
             better: d.better,
+            coverage: d.coverage,
             source: d.source.to_string(),
             available: d.available,
             unavailable_reason: d.unavailable_reason.map(str::to_string),

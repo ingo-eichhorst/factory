@@ -11,7 +11,7 @@ use factory_core::dependencies::{AttachmentKind, DependenciesReport};
 use factory_core::event::Event;
 use factory_core::goals::{self as goals_core, Band, CycleStatus, KrRef};
 use factory_core::knowledge::FindingKind;
-use factory_core::metrics::MetricId;
+use factory_core::metrics::{MetricId, MetricsWindow};
 use factory_core::operations::{self as ops, HealthWindow, OperationsReport};
 use factory_core::policy::{self, ControlRef};
 use factory_core::protocol::{
@@ -137,6 +137,13 @@ enum Command {
     Metrics {
         /// e.g. `throughput_week`, `compliance.cra`, `bench.resolve_rate.eval-set-a`.
         ids: Vec<String>,
+        /// Only this scope and its descendants (instance-wide metrics say so
+        /// in their registry definition and ignore this selection).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Override run-backed metric intervals: day, 14d, or 90d.
+        #[arg(long)]
+        window: Option<MetricsWindow>,
     },
     /// What runs used and cost, summed per task, GitHub issue (`issue=<n>`
     /// label), scope or agent (#117). Usage comes from the agent runtime;
@@ -1433,10 +1440,10 @@ async fn main() -> Result<()> {
             policy_cmd(cli.json, &client, cmd).await
         }
 
-        Command::Metrics { ids } => {
+        Command::Metrics { ids, scope, window } => {
             let ids: std::result::Result<Vec<MetricId>, String> = ids.into_iter().map(|s| s.parse()).collect();
             let ids = ids.map_err(|e| anyhow!(e))?;
-            let payload = client.send(Request::Metrics { ids }).await?;
+            let payload = client.send(Request::Metrics { ids, scope, window }).await?;
             print(&payload, cli.json, |p| match p {
                 Payload::Metrics { values, series, registry } => Some(metrics_text(values, series, registry)),
                 _ => None,
@@ -5644,6 +5651,31 @@ mod tests {
             _ => panic!("summary"),
         }
         assert!(Cli::try_parse_from(["factory", "stats", "--window", "9d"]).is_err());
+    }
+
+    #[test]
+    fn metrics_takes_scope_and_dashboard_window_presets() {
+        match parse(&[
+            "metrics",
+            "agent_hours",
+            "--scope",
+            "demo",
+            "--window",
+            "14d",
+        ])
+        .command
+        {
+            Command::Metrics {
+                ids,
+                scope: Some(scope),
+                window: Some(MetricsWindow::FourteenDays),
+            } => {
+                assert_eq!(ids, vec!["agent_hours"]);
+                assert_eq!(scope, "demo");
+            }
+            _ => panic!("metrics flags"),
+        }
+        assert!(Cli::try_parse_from(["factory", "metrics", "--window", "7d"]).is_err());
     }
 
     #[test]

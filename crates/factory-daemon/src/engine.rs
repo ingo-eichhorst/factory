@@ -768,10 +768,10 @@ impl Engine {
                 let (filename, body) = self.policy_export_render(scope.as_deref(), &format).await?;
                 Ok(Payload::PolicyExport { format, filename, body })
             }
-            Request::Metrics { ids } => {
+            Request::Metrics { ids, scope, window } => {
                 let now = Utc::now();
                 let ids = if ids.is_empty() { self.default_metric_ids().await } else { ids };
-                let metrics = self.metrics(&ids, now).await?;
+                let metrics = self.metrics_for(&ids, now, scope.as_deref(), window).await?;
                 Ok(Payload::Metrics {
                     values: metrics.values,
                     series: metrics.series,
