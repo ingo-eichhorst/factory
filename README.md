@@ -2174,40 +2174,57 @@ nearest `dashboard:` block wins **whole**, never merged tile-by-tile with
 what an ancestor declared -- a layout is always one list a person can read
 top to bottom. With no `dashboard:` block anywhere in the chain, the
 dashboard renders its built-in default (today's page, unchanged; the list
-itself lives in `ui/js/dashboard-model.js`, not in this config). An empty
-`tiles: []` is a valid, deliberate layout too -- a scope that wants to show
-nothing, distinct from naming no block at all, which inherits instead.
+itself lives in `ui/js/dashboard-model.js`, not in this config).
 **Removing the block reveals whatever it was overriding** -- there is no
 separate reset action, because the config file already is the reset.
 
-**Validation, at load**, in the same style an unknown role is refused: an
-unknown metric id (or a family named unbound, like bare `compliance` with
-no framework) is a config error naming the block and the tile (`invalid
-request: scope "demo" dashboard.tiles[2].metric "compliance" is not a
-known metric`); a tile naming both `metric` and `view`, or neither, the
-same way.
-A metric the registry knows but cannot compute yet is **not** an error --
-the tile is valid and shows its own reason, exactly as an unavailable
-metric already does elsewhere. `view` and `size` are closed enums, so an
-unrecognised value is refused by the parser itself, the file and the bad
-value both named, the same as an unrecognised `lifetime:` or
-`sandbox:` elsewhere in this file. The instance root writes its dashboard
-only in its top-level `dashboard:`; a `scope.dashboard` block in the root's
-own config is refused at startup, and a `dashboard:` block written beside a
-nested scope's `scope:` block (where that file never reads it) is refused
-with the file named, the same two mistakes `roles:` already guards against.
+**Validation, at load**, in the same style an unknown role is refused: a
+`dashboard:` block with no tiles is refused outright
+(`` dashboard needs at least one tile; remove the `dashboard:` block to inherit ``)
+-- a layout
+that draws nothing is not a smaller valid layout, the same rule an empty
+workflow or an empty quality attribute list already follows, and the fix
+is named in the message. An unknown metric id (or a family named unbound,
+like bare `compliance` with no framework) is a config error naming the
+block and the tile (`invalid request: scope "demo"
+dashboard.tiles[2].metric "compliance" is not a known metric`); a tile
+naming both `metric` and `view`, or neither, the same way. A metric the
+registry knows but cannot compute yet is **not** an error -- the tile is
+valid and shows its own reason, exactly as an unavailable metric already
+does elsewhere. `view` and `size` are closed enums, so an unrecognised
+value is refused by the parser itself, the file and the bad value both
+named, the same as an unrecognised `lifetime:` or `sandbox:` elsewhere in
+this file. The instance root writes its dashboard only in its top-level
+`dashboard:`; a `scope.dashboard` block in the root's own config is
+refused at startup, and a `dashboard:` block written beside a nested
+scope's `scope:` block (where that file never reads it) is refused with
+the file named, the same two mistakes `roles:` already guards against.
 
 **Reading it**: `Request::Dashboard { scope }` (wire op `"dashboard"`) answers
-`{ tiles: [...] | null, source: "default" | "root" | "<scope name>" }` --
-`tiles: null` means "use the built-in default", and `source` says which
-layer answered. `scope` left out resolves the instance root's own; an
-unknown scope name is refused (404 over HTTP), unlike `roles_for`'s
-tolerant fallback to the built-in roles for a scope that has since gone --
-a dashboard request names a place to show, and a place that resolves to
-nothing has none to show. `GET /api/dashboard?scope=demo`
-or `factory dashboard --scope demo` read the same thing. No write or reset
-request exists yet -- editing the block by hand is the only way in, until
-the tile catalogue editor (phase 5) lands.
+`{ tiles: [...] | null, source: "<scope name>" | null }` -- `tiles: null`
+means "use the built-in default", paired always with `source: null`;
+otherwise `source` names the scope whose block answered (the root's own
+configured scope name, for its top-level block, or the instance name when
+the root never opted itself into being a scope at all). Never a magic
+string like `"root"` or `"default"`: a scope can be named either of those,
+so `source` is always either `null` or a real name a caller could look up.
+`scope` left out resolves the instance root's own; an unknown scope name
+is refused (404 over HTTP), unlike `roles_for`'s tolerant fallback to the
+built-in roles for a scope that has since gone -- a dashboard request
+names a place to show, and a place that resolves to nothing has none to
+show. `GET /api/dashboard?scope=demo` or `factory dashboard --scope demo`
+read the same thing. No write or reset request exists yet -- editing the
+block by hand is the only way in, until the tile catalogue editor (phase
+5) lands.
+
+The dashboard page itself (`ui/js/dashboard.js`) fetches this alongside
+`/api/production` on load and on a scope change, never on a window change
+-- a layout does not depend on how far back the history cards look -- and
+falls back to its own built-in default on a failed fetch, so a slow or
+unreachable daemon never draws a blank page. A tile it does not yet have a
+renderer for (any `metric` tile, or a `view` id later phases of the epic
+add before this page catches up) draws as a small, named placeholder
+instead of nothing or a crash.
 
 ### The AI accounts behind the agents
 

@@ -174,12 +174,15 @@ impl Tile {
 /// `config.rs`'s `Config::dashboard`/`Scope::dashboard` doc comments for
 /// where each may be written, which mirrors `roles:`/`scope.roles` exactly.
 ///
-/// `tiles: []` is a valid, deliberate layout -- a scope that wants to show
-/// nothing, distinct from a scope that names no `dashboard:` block at all
-/// (which inherits instead). That distinction is exactly why every holder
-/// of this type is `Option<DashboardConfig>` rather than a bare
-/// `DashboardConfig` defaulting to empty: `None` inherits, `Some` (however
-/// short) replaces whatever was inherited, whole.
+/// Every holder of this type is `Option<DashboardConfig>` rather than a
+/// bare `DashboardConfig` defaulting to empty, so "no `dashboard:` block at
+/// all" (inherit) and "a `dashboard:` block is here" (replace whatever was
+/// inherited, whole) are distinguishable at every layer: `None` inherits,
+/// `Some` replaces. A `Some` with zero tiles is refused at
+/// [`DashboardConfig::validate`], though, the same way an empty workflow
+/// or an empty quality attribute list is -- a dashboard that draws nothing
+/// is not a smaller valid layout, and the block to remove to fall back to
+/// the inherited one is right there in the error.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DashboardConfig {
@@ -192,6 +195,11 @@ impl DashboardConfig {
     /// root or `scope "demo-app" dashboard` for a nested one -- passed
     /// through to each tile with its own index appended.
     pub fn validate(&self, path: &str) -> Result<(), String> {
+        if self.tiles.is_empty() {
+            return Err(format!(
+                "{path} needs at least one tile; remove the `dashboard:` block to inherit"
+            ));
+        }
         for (i, tile) in self.tiles.iter().enumerate() {
             tile.validate(&format!("{path}.tiles[{i}]"))?;
         }
@@ -245,8 +253,16 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_tile_list_is_a_valid_layout() {
-        DashboardConfig::default().validate("dashboard").unwrap();
+    fn an_empty_tile_list_is_refused_naming_the_block_and_the_fix() {
+        let e = DashboardConfig::default().validate("dashboard").unwrap_err();
+        assert!(e.contains("dashboard"), "{e}");
+        assert!(e.contains("at least one tile"), "{e}");
+        assert!(e.contains("remove the `dashboard:` block to inherit"), "{e}");
+
+        let e = DashboardConfig::default()
+            .validate(r#"scope "demo" dashboard"#)
+            .unwrap_err();
+        assert!(e.contains(r#"scope "demo" dashboard needs at least one tile"#), "{e}");
     }
 
     #[test]

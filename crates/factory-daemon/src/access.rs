@@ -2069,23 +2069,26 @@ mod tests {
     async fn dashboard_for_resolves_down_the_path_tree_and_never_up_or_sideways() {
         let e = engine_dashboard_tree();
         let (tiles, source) = e.dashboard_for(Some("demo-app")).unwrap();
-        assert_eq!(source, "engineering", "projects/demo is below projects on disk");
+        assert_eq!(source, Some("engineering".to_string()), "projects/demo is below projects on disk");
         assert_eq!(tiles.unwrap().tiles[0].metric.as_ref().unwrap().as_str(), "throughput_week");
 
         // `sibling` (path `projects/sibling`) is below `projects` too, so it
         // inherits the same override.
         let (tiles, source) = e.dashboard_for(Some("sibling")).unwrap();
-        assert_eq!(source, "engineering");
+        assert_eq!(source, Some("engineering".to_string()));
         assert!(tiles.is_some());
 
         // `engineering/outsider` reads like a child of `engineering` by name,
-        // but its path (`elsewhere`) is not below `projects` at all.
+        // but its path (`elsewhere`) is not below `projects` at all. This
+        // fixture names no root `dashboard:` either, so it falls all the way
+        // through to the built-in default: `None` on both sides, never the
+        // magic string `"default"`.
         let (tiles, source) = e.dashboard_for(Some("engineering/outsider")).unwrap();
         assert!(
             tiles.is_none(),
             "engineering/outsider is not below projects by path, whatever its name says"
         );
-        assert_eq!(source, "default", "never up or sideways");
+        assert_eq!(source, None, "never up or sideways");
     }
 
     #[tokio::test]

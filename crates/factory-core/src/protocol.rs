@@ -994,11 +994,13 @@ pub enum Payload {
     /// The answer to `Request::Dashboard`: the resolved tile list, or `null`
     /// on the wire for "no block anywhere in the chain names one -- use the
     /// built-in default" (the default list itself lives in `dashboard-model.js`,
-    /// not here), and `source` naming which layer answered: `"default"`,
-    /// `"root"`, or the resolving scope's own name.
+    /// not here), and `source` naming the scope whose `dashboard:` block
+    /// answered -- `null` for the same built-in-default case, never a magic
+    /// string like `"root"` or `"default"`: a scope can be named either of
+    /// those, and `source` must never be mistaken for one.
     Dashboard {
         tiles: Option<Vec<crate::dashboard::Tile>>,
-        source: String,
+        source: Option<String>,
     },
     /// The L6 Goals tab -- see `GoalsReport`.
     Goals { report: GoalsReport },
@@ -2149,20 +2151,20 @@ mod tests {
 
     #[test]
     fn a_dashboard_payload_carries_null_tiles_and_the_source_on_the_wire() {
-        let payload = Payload::Dashboard { tiles: None, source: "default".into() };
+        let payload = Payload::Dashboard { tiles: None, source: None };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["kind"], "dashboard");
         assert_eq!(json["tiles"], serde_json::Value::Null);
-        assert_eq!(json["source"], "default");
+        assert_eq!(json["source"], serde_json::Value::Null, "never a magic string like \"default\"");
 
         let tile = crate::dashboard::Tile {
             metric: Some(crate::metrics::MetricId::new("throughput_week").unwrap()),
             view: None,
             size: crate::dashboard::TileSize::S,
         };
-        let payload = Payload::Dashboard { tiles: Some(vec![tile]), source: "root".into() };
+        let payload = Payload::Dashboard { tiles: Some(vec![tile]), source: Some("demo".into()) };
         let json = serde_json::to_value(&payload).unwrap();
-        assert_eq!(json["source"], "root");
+        assert_eq!(json["source"], "demo");
         assert_eq!(json["tiles"][0]["metric"], "throughput_week");
         assert_eq!(json["tiles"][0]["size"], "s");
         assert!(json["tiles"][0].get("view").is_none(), "view is omitted, not null, when absent");

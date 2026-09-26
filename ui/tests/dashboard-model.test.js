@@ -16,6 +16,8 @@ import {
   validateTile,
   validateDashboard,
   packRows,
+  resolveDashboard,
+  isTileRenderable,
 } from "../js/dashboard-model.js";
 
 // --------------------------------------------------------- the vocabulary
@@ -170,6 +172,28 @@ test("DEFAULT_DASHBOARD is frozen two levels deep", () => {
   for (const tile of DEFAULT_DASHBOARD) assert.ok(Object.isFrozen(tile));
 });
 
+// --------------------------------------------------- phase 4 (#159) reads
+
+test("resolveDashboard uses the fetched tiles when they are a non-empty array, else the default", () => {
+  const fetched = [{ view: "kpis", size: "s" }];
+  assert.equal(resolveDashboard(fetched), fetched);
+  assert.equal(resolveDashboard(null), DEFAULT_DASHBOARD, "the server's own built-in-default answer");
+  assert.equal(resolveDashboard(undefined), DEFAULT_DASHBOARD, "not fetched yet");
+  assert.equal(resolveDashboard([]), DEFAULT_DASHBOARD, "the server never sends this -- an empty list is a config error");
+  assert.equal(resolveDashboard("nope"), DEFAULT_DASHBOARD, "anything that is not an array reads as no override");
+});
+
+test("isTileRenderable is true only for a view id this page already draws a card for", () => {
+  for (const id of RENDERABLE_VIEW_IDS) {
+    assert.equal(isTileRenderable({ view: id, size: "s" }), true, id);
+  }
+  assert.equal(isTileRenderable({ view: "agent_hours_by_scope", size: "m" }), false, "phase 3's own view, not built yet");
+  assert.equal(isTileRenderable({ view: "nonsense", size: "s" }), false, "not even in the vocabulary");
+  assert.equal(isTileRenderable({ metric: "throughput_week", size: "s" }), false, "no metric tile renders yet");
+  assert.equal(isTileRenderable(null), false);
+  assert.equal(isTileRenderable({ view: "kpis", metric: "throughput_week", size: "s" }), false, "both is not a tile");
+});
+
 // ------------------------------------------------ dashboard.js renders it
 
 // `modal.js`, which `tasks.js` (imported by `dashboard.js`) opens its
@@ -178,7 +202,7 @@ test("DEFAULT_DASHBOARD is frozen two levels deep", () => {
 // requirement `operations.test.js`/`scenarios.test.js` document.
 const bare = { addEventListener() {}, getElementById: () => null };
 globalThis.document = bare;
-const { renderDashboard } = await import("../js/dashboard.js");
+const { renderDashboard, loadDashboard } = await import("../js/dashboard.js");
 
 const served = readFileSync(new URL("../../crates/factory-daemon/src/ui.rs", import.meta.url), "utf8");
 
@@ -215,4 +239,104 @@ test("renderDashboard renders the default tile list's sections, in order, from #
     assert.ok(at > last, `${label} rendered out of order`);
     last = at;
   }
+});
+
+// -------------------------------------------------- loadDashboard (#159)
+
+const PRODUCTION_ANSWER = {
+  status: "ok",
+  data: { production: { bin: "day", buckets: [], daily: [], earliest_run: null } },
+};
+
+function fakeDashEls() {
+  return { dash: { innerHTML: "", querySelector: () => null, querySelectorAll: () => [] }, "dash-source": { textContent: "" } };
+}
+
+test("loadDashboard fetches /api/dashboard for the selected scope, draws its tiles, and shows the source", async () => {
+  const elements = fakeDashEls();
+  document.getElementById = (id) => (id in elements ? elements[id] : null);
+
+  const requested = [];
+  globalThis.fetch = async (path) => {
+    requested.push(path);
+    if (path.startsWith("/api/production")) {
+      return { status: 200, statusText: "OK", json: async () => PRODUCTION_ANSWER };
+    }
+    return {
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        status: "ok",
+        data: {
+          kind: "dashboard",
+          tiles: [{ view: "kpis", size: "xl" }, { view: "agent_hours_by_scope", size: "m" }],
+          source: "demo",
+        },
+      }),
+    };
+  };
+  state.scope = "demo";
+  state.scopes = [{ name: "demo", path: "demo", agents: [] }];
+  state.tasks = new Map();
+
+  await loadDashboard();
+
+  assert.ok(requested.includes("/api/dashboard?scope=demo"), requested.join(", "));
+  assert.equal(elements["dash-source"].textContent, "layout from demo");
+  assert.match(elements.dash.innerHTML, /class="kpis"/, "the renderable tile draws its own card");
+  assert.match(
+    elements.dash.innerHTML,
+    /agent_hours_by_scope — not drawn yet/,
+    "a view id phase 3 has not built yet gets a placeholder, not nothing"
+  );
+
+  delete globalThis.fetch;
+});
+
+test("no `dashboard:` anywhere (tiles: null, source: null) draws exactly DEFAULT_DASHBOARD and shows no source", async () => {
+  const elements = fakeDashEls();
+  document.getElementById = (id) => (id in elements ? elements[id] : null);
+
+  globalThis.fetch = async (path) => {
+    if (path.startsWith("/api/production")) {
+      return { status: 200, statusText: "OK", json: async () => PRODUCTION_ANSWER };
+    }
+    return { status: 200, statusText: "OK", json: async () => ({ status: "ok", data: { kind: "dashboard", tiles: null, source: null } }) };
+  };
+  state.scope = null;
+  state.scopes = [{ name: "root", path: "root", agents: [] }];
+  state.tasks = new Map();
+
+  await loadDashboard();
+
+  assert.equal(elements["dash-source"].textContent, "", "null source shows nothing, not the word null");
+  assert.match(elements.dash.innerHTML, /<h3>By scope/, "the last DEFAULT_DASHBOARD card is there");
+
+  delete globalThis.fetch;
+});
+
+test("a failed /api/dashboard fetch falls back to DEFAULT_DASHBOARD, never a blank page", async () => {
+  const elements = fakeDashEls();
+  document.getElementById = (id) => (id in elements ? elements[id] : null);
+
+  globalThis.fetch = async (path) => {
+    if (path.startsWith("/api/production")) {
+      return { status: 200, statusText: "OK", json: async () => PRODUCTION_ANSWER };
+    }
+    throw new Error("offline");
+  };
+  state.scope = null;
+  state.scopes = [{ name: "root", path: "root", agents: [] }];
+  state.tasks = new Map();
+
+  await loadDashboard();
+
+  assert.equal(elements["dash-source"].textContent, "");
+  assert.match(elements.dash.innerHTML, /class="kpis"/);
+  assert.match(elements.dash.innerHTML, /<h3>Throughput/);
+  assert.match(elements.dash.innerHTML, /<h3>By scope/);
+
+  delete globalThis.fetch;
+  document.getElementById = () => null;
+  state.scope = null;
 });

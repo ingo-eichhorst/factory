@@ -411,7 +411,7 @@ impl Engine {
     pub fn dashboard_for(
         &self,
         scope: Option<&str>,
-    ) -> Result<(Option<factory_core::dashboard::DashboardConfig>, String)> {
+    ) -> Result<(Option<factory_core::dashboard::DashboardConfig>, Option<String>)> {
         self.factory_snapshot().dashboard_for(scope)
     }
 

@@ -2622,15 +2622,19 @@ fn metrics_text(values: &[factory_core::metrics::MetricValue], series: &[factory
     out.trim_end().to_string()
 }
 
-fn dashboard_text(tiles: &Option<Vec<factory_core::dashboard::Tile>>, source: &str) -> String {
+fn dashboard_text(tiles: &Option<Vec<factory_core::dashboard::Tile>>, source: &Option<String>) -> String {
+    // The server pairs `tiles: null` with `source: null` always -- see
+    // `Config::dashboard`'s doc comment -- so `tiles == None` is the whole
+    // answer for "built-in default"; a name in `source` otherwise, never a
+    // magic string like `"root"` or `"default"`.
     let tiles = match tiles {
         Some(tiles) => tiles,
-        None => return format!("(built-in default -- source: {source})"),
+        None => return "(built-in default)".to_string(),
     };
-    if tiles.is_empty() {
-        return format!("(no tiles -- source: {source})");
-    }
-    let mut out = format!("source: {source}\n");
+    let mut out = match source {
+        Some(name) => format!("source: {name}\n"),
+        None => String::new(),
+    };
     for tile in tiles {
         let what = match (&tile.metric, &tile.view) {
             (Some(metric), _) => format!("metric {}", metric.as_str()),

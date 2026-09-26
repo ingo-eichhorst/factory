@@ -2076,14 +2076,16 @@ mod tests {
         let (status, json) = request(engine.clone(), "GET", "/api/dashboard", None).await;
         assert_eq!(status, 200, "{json}");
         assert_eq!(json["data"]["kind"], "dashboard");
-        assert_eq!(json["data"]["source"], "root", "no scope given resolves the instance root's own");
+        // The root's own configured scope is named "company", so that is
+        // what `source` says answered -- never the magic string "root".
+        assert_eq!(json["data"]["source"], "company", "no scope given resolves the instance root's own");
         assert_eq!(json["data"]["tiles"][0]["metric"], "throughput_week");
 
         // The root's own scope carries no override of its own, so naming it
         // explicitly falls through to the same root block.
         let (status, json) = request(engine.clone(), "GET", "/api/dashboard?scope=company", None).await;
         assert_eq!(status, 200, "{json}");
-        assert_eq!(json["data"]["source"], "root");
+        assert_eq!(json["data"]["source"], "company");
 
         let (status, json) = request(engine.clone(), "GET", "/api/dashboard?scope=demo", None).await;
         assert_eq!(status, 200, "{json}");
@@ -2093,6 +2095,16 @@ mod tests {
 
         let (status, _) = request(engine, "GET", "/api/dashboard?scope=nope", None).await;
         assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn get_api_dashboard_with_no_block_anywhere_answers_null_tiles_and_null_source() {
+        // `engine_with_quality` declares no `dashboard:` at all, root or scope.
+        let engine = engine_with_quality();
+        let (status, json) = request(engine, "GET", "/api/dashboard", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["tiles"], serde_json::Value::Null, "use the UI's built-in default");
+        assert_eq!(json["data"]["source"], serde_json::Value::Null, "never the word \"default\"");
     }
 
     async fn serve() -> std::net::SocketAddr {
