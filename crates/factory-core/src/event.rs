@@ -119,6 +119,17 @@ pub enum Event {
     BackupVerified {
         verification: crate::backup::VerifySummary,
     },
+    /// A deployment began or ended (`#185`).
+    DeploymentUpdated {
+        deployment: Box<crate::environments::Deployment>,
+    },
+    /// An environment's status changed: its checks' latest answers add up
+    /// to something else now. Only a change is published, never a sample.
+    EnvironmentStatusChanged {
+        environment: String,
+        status: crate::environments::EnvStatus,
+        at: DateTime<Utc>,
+    },
     /// A push from a runtime, mapped onto whichever standing agent or run's
     /// session it was about. This never moves a task or a run -- only the
     /// agent's own `factory task report` may do that -- so `task_id()` is
@@ -166,7 +177,9 @@ impl Event {
             | Event::QualityChanged { .. }
             | Event::BackupCompleted { .. }
             | Event::BackupFailed { .. }
-            | Event::BackupVerified { .. } => None,
+            | Event::BackupVerified { .. }
+            | Event::DeploymentUpdated { .. }
+            | Event::EnvironmentStatusChanged { .. } => None,
             Event::WorkflowCreated { .. }
             | Event::WorkflowUpdated { .. }
             | Event::WorkflowDeleted { .. }

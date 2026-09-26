@@ -420,6 +420,88 @@ fn quality_def(characteristic: &str) -> MetricDef {
     )
 }
 
+/// The environment metrics' shared source (`#185`).
+const ENVIRONMENT_SOURCE: &str =
+    "environments::report over the health samples and deployments the daemon records (/api/environments)";
+
+/// One `<name>.<env>` metric of a running environment -- an SLA figure or
+/// one of DORA's four keys for the promotion path ending there.
+fn environment_def(name: &str, env: &str) -> Option<MetricDef> {
+    let (title, description, unit, better) = match name {
+        "availability" => (
+            "Availability",
+            "The share of healthy samples of every declared check over the environment's SLO window              (28 days without one). No samples is no value, never 100%.",
+            Unit::Ratio,
+            Better::Higher,
+        ),
+        "error_budget" => (
+            "Error budget remaining",
+            "What is left of the SLO's error budget over its window: 1 untouched, 0 spent, below 0              overspent. Needs an SLO.",
+            Unit::Ratio,
+            Better::Higher,
+        ),
+        "incidents" => (
+            "Incidents",
+            "Incidents -- two or more consecutive failures of a check, until it answers again --              open in the SLO window.",
+            Unit::Count,
+            Better::Lower,
+        ),
+        "mttr" => (
+            "Mean time to restore",
+            "The mean duration of the incidents that ended in the SLO window.",
+            Unit::Seconds,
+            Better::Lower,
+        ),
+        "deploy_frequency" => (
+            "Deployment frequency (DORA)",
+            "Successful deployments per week over the SLO window.",
+            Unit::PerWeek,
+            Better::Higher,
+        ),
+        "lead_time_p50" => (
+            "Lead time for changes p50 (DORA)",
+            "The median time from a released commit's committer time to its deployment finishing,              over successful deployments in the SLO window that recorded when their commit was made.",
+            Unit::Seconds,
+            Better::Lower,
+        ),
+        "change_failure_rate" => (
+            "Change failure rate (DORA)",
+            "The share of finished deployments in the SLO window that failed (a failed post-deploy \
+             verification included), were rolled back, or were followed by an incident within an \
+             hour, before the next deployment.",
+            Unit::Ratio,
+            Better::Lower,
+        ),
+        "time_to_restore_p50" => (
+            "Time to restore p50 (DORA)",
+            "The median duration of the incidents that ended in the SLO window.",
+            Unit::Seconds,
+            Better::Lower,
+        ),
+        _ => return None,
+    };
+    Some(fixed(
+        &format!("{name}.{env}"),
+        &format!("{title} ({env})"),
+        description,
+        unit,
+        better,
+        ENVIRONMENT_SOURCE,
+    ))
+}
+
+/// The metric names every environment has, `availability.<env>` and so on.
+pub const ENVIRONMENT_METRICS: [&str; 8] = [
+    "availability",
+    "error_budget",
+    "incidents",
+    "mttr",
+    "deploy_frequency",
+    "lead_time_p50",
+    "change_failure_rate",
+    "time_to_restore_p50",
+];
+
 /// The v1 metric registry, sorted by `id` (a family's own pattern for a
 /// parameterised metric, e.g. `compliance.<framework>`).
 pub fn registry() -> Vec<MetricDef> {
@@ -441,6 +523,7 @@ pub fn registry() -> Vec<MetricDef> {
         unit_cost_def(),
         tokens_per_run_def(),
     ];
+    defs.extend(ENVIRONMENT_METRICS.iter().filter_map(|m| environment_def(m, "<env>")));
     defs.sort_by(|a, b| a.id.cmp(&b.id));
     defs
 }
@@ -494,6 +577,9 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         // characteristic ISO 25010 does not name still resolves here, and
         // `factory-daemon` answers it with `value: None` and the reason.
         ["quality", characteristic] => quality_def(characteristic),
+        [name, env] if ENVIRONMENT_METRICS.contains(name) => {
+            environment_def(name, env).expect("every ENVIRONMENT_METRICS name has a definition")
+        }
         _ => return Err(MetricError::Unknown(id.clone())),
     };
     Ok(def)

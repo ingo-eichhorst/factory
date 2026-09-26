@@ -13,6 +13,7 @@ pub mod control_plan;
 pub mod dashboard;
 pub mod dataset;
 pub mod dependencies;
+pub mod environments;
 pub mod error;
 pub mod event;
 pub mod goals;

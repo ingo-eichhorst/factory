@@ -1,5 +1,5 @@
 //! Where the Operations report is served, and the few actions it offers
-//! (`#106`, the L4 Operations tab and `factory stats`). Like `goals/mod.rs`
+//! (`#106`, the L4 Line tab and `factory stats`). Like `goals/mod.rs`
 //! and `scenarios/mod.rs`: `factory_core::operations` is the pure model,
 //! tested on its own, and decides what every number and exception means;
 //! this module gathers what it reads from the store, the journal and the

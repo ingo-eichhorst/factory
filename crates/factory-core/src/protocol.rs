@@ -112,7 +112,7 @@ pub enum Request {
         id: String,
     },
     /// `#106`: answer a blocked run -- `run.input` narrowed to the one case
-    /// the Operations tab offers it for. Only into the run's own session,
+    /// the Line tab offers it for. Only into the run's own session,
     /// only while the run is `Blocked`, and never without a reason, which
     /// is journaled as an intervention together with who gave it. The text
     /// itself is typed, not journaled: a record is no place for whatever a
@@ -377,6 +377,30 @@ pub enum Request {
     /// project's. Refused while another backup operation is running.
     #[serde(rename = "backup.run")]
     BackupRun,
+    /// The Operations tab (`#185`): every environment the systems Factory
+    /// builds are deployed to -- declared ones and any a deployment names --
+    /// with its status, current release, SLA figures and DORA keys, the
+    /// release catalogue and the deployment history. Read-only, computed on
+    /// read from recorded samples and deployments. `scope` narrows it to
+    /// that scope's subtree.
+    #[serde(rename = "environments")]
+    Environments {
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    /// A deployment has begun (`#185`). `deploy.record`, checked against
+    /// the environment's scope. Answers the recorded `Deployment`, whose
+    /// `id` the matching `deploy.finish` names.
+    #[serde(rename = "deploy.start")]
+    DeployStart(crate::environments::DeployStart),
+    /// A deployment has ended. A success is only recorded as one once the
+    /// environment's own checks pass, unless `verify: false` says to skip
+    /// them. The same grant as `DeployStart`.
+    #[serde(rename = "deploy.finish")]
+    DeployFinish(crate::environments::DeployFinish),
+    /// Put a release in the catalogue without deploying it. The same grant.
+    #[serde(rename = "release.add")]
+    ReleaseAdd(crate::environments::ReleaseAdd),
     /// Unpack a snapshot into a temporary directory and prove it would
     /// restore: every checksum in its manifest, `integrity_check` on the
     /// database copy, and every authored-content loader. `snapshot: None`
@@ -734,7 +758,7 @@ pub enum Request {
         #[serde(default)]
         agent: Option<String>,
     },
-    /// `#106`: the L4 Operations tab and `factory stats` -- what needs a
+    /// `#106`: the L4 Line tab and `factory stats` -- what needs a
     /// human now, where work is stuck, and how the line has been running
     /// over `window`. A read projection over tasks, runs, standing agents
     /// and the journal, computed fresh on every call like
@@ -749,7 +773,7 @@ pub enum Request {
         #[serde(default)]
         window: crate::operations::HealthWindow,
         /// Include the charts' per-step and per-run detail
-        /// (`Health::days`, `Health::finished_runs`). The Operations tab
+        /// (`Health::days`, `Health::finished_runs`). The Line tab
         /// asks for it; the Inbox and `factory stats` do not.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         detail: bool,
@@ -915,6 +939,14 @@ pub enum Payload {
     BackupRun { snapshot: crate::backup::Snapshot },
     /// The answer to `Request::BackupVerify`: every step and its outcome.
     BackupVerify { verification: crate::backup::Verification },
+    /// The Operations tab -- see `environments::EnvironmentsReport`. Boxed
+    /// for the same reason `Operations` is.
+    Environments { report: Box<crate::environments::EnvironmentsReport> },
+    /// A deployment as recorded: the answer to `deploy.start` and
+    /// `deploy.finish`.
+    Deployment { deployment: Box<crate::environments::Deployment> },
+    /// The answer to `release.add`.
+    ReleaseAdded { scope: String, release: crate::environments::ReleaseFacts },
     /// The answer to `Request::BackupRestore`: the newly materialized root.
     BackupRestore { restoration: crate::backup::Restoration },
     /// The L5 Knowledge tab. `present: false` when the vault
@@ -1029,7 +1061,7 @@ pub enum Payload {
     Quality { report: QualityReport },
     /// The answer to `Request::QualityRemediate` -- see `QualityRemediation`.
     QualityRemediate { result: QualityRemediation },
-    /// The L4 Operations tab -- see `factory_core::operations::OperationsReport`.
+    /// The L4 Line tab -- see `factory_core::operations::OperationsReport`.
     /// Boxed: the report is several times the size of every other payload,
     /// and would otherwise set the size of every `Response` (serde writes a
     /// box as what it holds).

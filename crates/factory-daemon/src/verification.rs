@@ -483,6 +483,7 @@ mod tests {
                 policies: Default::default(),
                 quality: Default::default(),
                 dependencies: Default::default(),
+                environments: Vec::new(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,

@@ -499,7 +499,10 @@ impl AgentContext {
              which shows the host, the daemon and which AI account each \
              agent's model calls go to; {bin} backup status, backup list, \
              which show whether the instance's state is backed up, how \
-             recently and whether a backup has been verified.\n\n\
+             recently and whether a backup has been verified; {bin} env \
+             [<name>], which shows the environments this company deploys \
+             to, what runs on each, its health and SLA, and {bin} deploy \
+             list.\n\n\
              The company's knowledge base is part of that: {bin} knowledge \
              search <words> [--tag <tag>] lists the pages that match, best \
              first, as file paths with the reason each matched. It never \
@@ -667,6 +670,9 @@ impl AgentContext {
                 ),
                 Grant::BackupRun => format!(
                     "backup.run -> {bin} backup run; {bin} backup verify [<snapshot>]; a backup is of the whole instance, not scoped to {scope}"
+                ),
+                Grant::DeployRecord => format!(
+                    "deploy.record -> {bin} deploy start --env <env> --commit <sha> [--describe ..] [--committed-at <rfc3339>] prints the deployment id; {bin} deploy finish <id> --status succeeded|failed|rolled-back [--reason \"...\"]; {bin} release add --commit <sha>; only for environments of {scope}"
                 ),
             });
         }

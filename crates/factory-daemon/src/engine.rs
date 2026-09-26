@@ -166,6 +166,9 @@ pub struct Engine {
     /// person can never run two at once over one destination. Taken with
     /// `try_lock`: a second request is refused, never queued.
     pub(crate) backup_busy: tokio::sync::Mutex<()>,
+    /// Deployments, releases and health samples -- see
+    /// `environments::EnvironmentStore` (`#185`).
+    pub(crate) environments: crate::environments::EnvironmentStore,
     /// Serializes a bench run's own read-modify-write: choosing which
     /// pending attempts to start, and recomputing the run's own status once
     /// every attempt has settled. Coarse -- one lock for every run, the same
@@ -311,6 +314,8 @@ impl Engine {
             backups: crate::backup::BackupStore::in_memory()
                 .expect("an in-memory backup store should open"),
             backup_busy: tokio::sync::Mutex::new(()),
+            environments: crate::environments::EnvironmentStore::in_memory()
+                .expect("an in-memory environment store should open"),
             bench_edit: tokio::sync::Mutex::new(()),
             usage_edit: tokio::sync::Mutex::new(()),
             bench_judging: Default::default(),
@@ -361,6 +366,12 @@ impl Engine {
     /// The same, for goals check-ins.
     pub fn with_goals_store(mut self, goals: crate::goals::GoalsStore) -> Self {
         self.goals = goals;
+        self
+    }
+
+    /// The same, for deployments and health samples.
+    pub fn with_environment_store(mut self, environments: crate::environments::EnvironmentStore) -> Self {
+        self.environments = environments;
         self
     }
 
@@ -576,6 +587,20 @@ impl Engine {
                     )
                     .await?,
             }),
+            Request::Environments { scope } => Ok(Payload::Environments {
+                report: Box::new(self.environments_report(scope).await?),
+            }),
+            // `deployment_updated` is published inside.
+            Request::DeployStart(req) => Ok(Payload::Deployment {
+                deployment: Box::new(self.deploy_start(caller, req).await?),
+            }),
+            Request::DeployFinish(req) => Ok(Payload::Deployment {
+                deployment: Box::new(self.deploy_finish(req).await?),
+            }),
+            Request::ReleaseAdd(req) => {
+                let (scope, release) = self.release_add(req).await?;
+                Ok(Payload::ReleaseAdded { scope, release })
+            }
             Request::BackupVerify { snapshot } => Ok(Payload::BackupVerify {
                 verification: self
                     .backup_verify(snapshot, crate::policies::caller_name(caller))
@@ -3653,6 +3678,7 @@ mod tests {
                 policies: Default::default(),
                 quality: Default::default(),
                 dependencies: Default::default(),
+                environments: Vec::new(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,

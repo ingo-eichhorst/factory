@@ -122,6 +122,10 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/environment", get(environment))
         .route("/api/dependencies", get(dependencies))
         .route("/api/infrastructure", get(infrastructure))
+        .route("/api/environments", get(environments))
+        .route("/api/deployments", post(deploy_start))
+        .route("/api/deployments/{id}/finish", post(deploy_finish))
+        .route("/api/releases", post(release_add))
         .route("/api/backup", get(backup))
         .route("/api/backup/run", post(backup_run))
         .route("/api/backup/verify", post(backup_verify))
@@ -361,6 +365,57 @@ async fn dependencies(
 
 async fn infrastructure(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Infrastructure).await
+}
+
+#[derive(serde::Deserialize)]
+struct EnvironmentsQuery {
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// `GET /api/environments?scope=` -- the Operations tab (`#185`).
+async fn environments(State(engine): State<Arc<Engine>>, Query(q): Query<EnvironmentsQuery>) -> AxumResponse {
+    run(&engine, Request::Environments { scope: q.scope }).await
+}
+
+/// `POST /api/deployments` with a `deploy.start` body.
+async fn deploy_start(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<factory_core::environments::DeployStart>,
+) -> AxumResponse {
+    run(&engine, Request::DeployStart(body)).await
+}
+
+#[derive(serde::Deserialize)]
+struct DeployFinishBody {
+    status: factory_core::environments::DeployStatus,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    verify: Option<bool>,
+}
+
+/// `POST /api/deployments/{id}/finish` `{status, reason?, verify?}`.
+async fn deploy_finish(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<DeployFinishBody>,
+) -> AxumResponse {
+    let req = factory_core::environments::DeployFinish {
+        id,
+        status: body.status,
+        reason: body.reason,
+        verify: body.verify.unwrap_or(true),
+    };
+    run(&engine, Request::DeployFinish(req)).await
+}
+
+/// `POST /api/releases` with a `release.add` body.
+async fn release_add(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<factory_core::environments::ReleaseAdd>,
+) -> AxumResponse {
+    run(&engine, Request::ReleaseAdd(body)).await
 }
 
 async fn backup(State(engine): State<Arc<Engine>>) -> AxumResponse {
