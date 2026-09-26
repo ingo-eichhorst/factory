@@ -16,6 +16,7 @@ import { loadDashboard, renderDashboard, loadInbox, renderInbox, wireDashboard }
 import { loadOperations, showOperations, hideOperations, wireOperations } from "./operations.js";
 import { loadIntake, showIntake, hideIntake, refreshIntake, wireIntake } from "./intake.js";
 import { touchesIntake } from "./intake-model.js";
+import { taskUsageMoved } from "./usage-model.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 import { loadEnvironment, renderSandboxes } from "./sandboxes.js";
@@ -673,9 +674,11 @@ function onEvent(ev) {
     case "run_updated":
       if (state.open === ev.run.task_id) {
         const i = state.runs.findIndex(r => r.id === ev.run.id);
-        // A new usage reading moves the task's sum too (#117); re-read it
-        // only then, not on every status flicker.
-        const usageMoved = JSON.stringify(i >= 0 ? state.runs[i].usage : null) !== JSON.stringify(ev.run.usage || null);
+        // A new usage reading moves the task's sum too (#117), and so does
+        // a run turning terminal, or gaining its re-estimate, with its usage
+        // unchanged -- the comparisons read those. Re-read only then, not
+        // on every flicker of something else.
+        const usageMoved = taskUsageMoved(i >= 0 ? state.runs[i] : null, ev.run);
         if (i >= 0) state.runs[i] = ev.run; else state.runs.unshift(ev.run);
         if (usageMoved) loadTaskUsage().then(renderModal);
         // A new run is the one worth watching.

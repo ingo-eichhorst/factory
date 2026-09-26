@@ -1403,6 +1403,14 @@ impl Engine {
                 task_scopes.insert(run.task_id.clone(), scope);
             }
         }
+        let mut snapshots_by_run = std::collections::BTreeMap::new();
+        for run in recent_runs.iter().filter(|run| run.provider_account.is_some()) {
+            let snapshots = self.store.usage_snapshots(&run.id).await.unwrap_or_default();
+            snapshots_by_run.insert(run.id.clone(), snapshots);
+        }
+        let bound_runs: Vec<Run> =
+            recent_runs.iter().filter(|run| run.provider_account.is_some()).cloned().collect();
+        let allocation = factory_core::usage::allocate_plan_share(&bound_runs, &snapshots_by_run);
         for provider in &mut providers {
             let bound: Vec<&Run> = recent_runs
                 .iter()
@@ -1420,17 +1428,19 @@ impl Engine {
                 })
                 .collect();
 
-            let mut windows: std::collections::BTreeMap<(u32, String), ProviderWindow> =
+            // One timeline per window across every run bound to the account,
+            // ordered by when the runtime sampled each reading: a handoff from
+            // one run to the next is still one window moving.
+            let mut timelines: std::collections::BTreeMap<(u32, String), Vec<WindowReading>> =
                 std::collections::BTreeMap::new();
             for run in &bound {
-                let snapshots = self.store.usage_snapshots(&run.id).await.unwrap_or_default();
-                let mut readings = Vec::new();
-                for snapshot in snapshots {
-                    let Some(usage) = snapshot.usage else { continue };
-                    for session in usage.sessions {
-                        let Some(rate) = session.rate_limit else { continue };
-                        for window in rate.windows {
-                            let (Some(minutes), Some(reset)) = (window.window_minutes, window.resets_at) else {
+                for snapshot in snapshots_by_run.get(&run.id).into_iter().flatten() {
+                    let Some(usage) = &snapshot.usage else { continue };
+                    let sampled_at = factory_core::usage::observed_at(snapshot);
+                    for session in &usage.sessions {
+                        let Some(rate) = &session.rate_limit else { continue };
+                        for window in &rate.windows {
+                            let (Some(minutes), Some(reset)) = (window.window_minutes, window.resets_at.clone()) else {
                                 continue;
                             };
                             let Ok(reset_at) = chrono::DateTime::parse_from_rfc3339(&reset) else {
@@ -1439,55 +1449,68 @@ impl Engine {
                             if reset_at.with_timezone(&Utc) <= now {
                                 continue;
                             }
-                            readings.push((
-                                minutes,
-                                reset,
-                                snapshot.at,
-                                window.used_percent,
-                                rate.plan_type.clone(),
-                                rate.attribution_quality.clone(),
-                            ));
+                            timelines.entry((minutes, reset)).or_default().push(WindowReading {
+                                sampled_at,
+                                sample_time_estimated: usage.sampled_at.is_none(),
+                                used_percent: window.used_percent.filter(|used| used.is_finite()),
+                                plan_type: rate.plan_type.clone(),
+                                attribution_quality: rate.attribution_quality.clone(),
+                            });
                         }
                     }
                 }
-                readings.sort_by_key(|reading| reading.2);
-                for (index, reading) in readings.iter().enumerate() {
-                    let previous = readings[..index]
-                        .iter()
-                        .rev()
-                        .find(|prior| prior.0 == reading.0 && prior.1 == reading.1)
-                        .and_then(|prior| prior.3);
-                    let trend = reading.3.zip(previous).map(|(current, prior)| current - prior);
-                    let key = (reading.0, reading.1.clone());
-                    let replace = windows.get(&key).map_or(true, |existing| existing.sampled_at <= reading.2);
-                    if replace {
-                        windows.insert(
-                            key,
-                            ProviderWindow {
-                                window_minutes: reading.0,
-                                used_percent: reading.3,
-                                resets_at: reading.1.clone(),
-                                sampled_at: reading.2,
-                                plan_type: reading.4.clone(),
-                                attribution_quality: reading.5.clone(),
-                                attribution: None,
-                                stale: now - reading.2 > chrono::Duration::minutes(15),
-                                trend_percent: trend,
-                                unknown: reading.3.is_none().then(|| "provider did not report used percent".into()),
-                            },
-                        );
-                    }
-                }
             }
-            let attribution = match provider.active_runs.len() {
-                0 => None,
-                1 => Some(factory_core::usage::PlanShareAttribution::Direct),
-                _ => Some(factory_core::usage::PlanShareAttribution::Apportioned),
-            };
-            provider.windows = windows.into_values().collect();
-            for window in &mut provider.windows {
-                window.attribution = attribution;
-            }
+            provider.windows = timelines
+                .into_iter()
+                .filter_map(|((minutes, reset), mut readings)| {
+                    readings.sort_by_key(|reading| reading.sampled_at);
+                    let latest = readings.pop()?;
+                    let trend = latest.used_percent.zip(
+                        readings
+                            .iter()
+                            .rev()
+                            .find(|prior| prior.sampled_at < latest.sampled_at && prior.used_percent.is_some())
+                            .and_then(|prior| prior.used_percent),
+                    )
+                    .map(|(current, prior)| current - prior);
+                    // Who the reading is charged to is a fact about the
+                    // interval it closed, fixed when it was sampled -- not
+                    // about who happens to be running when the page is read.
+                    let interval = allocation.intervals.iter().find(|interval| {
+                        interval.provider_account == provider.name
+                            && interval.window_minutes == minutes
+                            && interval.resets_at == reset
+                            && interval.to == latest.sampled_at
+                    });
+                    let attribution_unknown = match interval {
+                        Some(interval) => interval.unknown.clone(),
+                        None if latest.used_percent.is_some() => Some(
+                            "no earlier sample of this window to attribute the reading's change from".into(),
+                        ),
+                        None => None,
+                    };
+                    Some(ProviderWindow {
+                        window_minutes: minutes,
+                        used_percent: latest.used_percent,
+                        resets_at: reset,
+                        sampled_at: latest.sampled_at,
+                        sample_time_estimated: latest.sample_time_estimated,
+                        plan_type: latest.plan_type,
+                        attribution_quality: latest.attribution_quality,
+                        attribution: interval.and_then(|interval| interval.attribution),
+                        attribution_unknown,
+                        // A reading that does not say when it was sampled
+                        // cannot be vouched for as fresh.
+                        stale: latest.sample_time_estimated
+                            || now - latest.sampled_at > chrono::Duration::minutes(15),
+                        trend_percent: trend,
+                        unknown: latest
+                            .used_percent
+                            .is_none()
+                            .then(|| "provider did not report used percent".into()),
+                    })
+                })
+                .collect();
             provider.windows.sort_by_key(|window| window.window_minutes);
             if provider.kind == factory_core::config::ProviderKind::Subscription && provider.windows.is_empty() {
                 provider.usage_unknown = Some("no current rate-limit observation from a bound run".into());
@@ -3643,6 +3666,17 @@ impl Engine {
     }
 }
 
+/// One provider rate-limit window as one run's snapshot saw it -- what the
+/// L1 provider card's timeline is built from (`Engine::infrastructure`).
+struct WindowReading {
+    sampled_at: chrono::DateTime<Utc>,
+    /// The runtime gave no `sampled_at`, so `sampled_at` is when Factory asked.
+    sample_time_estimated: bool,
+    used_percent: Option<f64>,
+    plan_type: Option<String>,
+    attribution_quality: Option<String>,
+}
+
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -3986,6 +4020,218 @@ mod tests {
         );
         assert!(daemon.started_at <= Utc::now());
         assert_eq!(host.arch.as_deref(), Some(std::env::consts::ARCH));
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// A subscription provider, a task, and `n` runs bound to it -- all
+    /// started now, so every sample below is placed relative to that start.
+    async fn provider_runs(engine: &Arc<Engine>, n: usize) -> (Vec<Run>, chrono::DateTime<Utc>) {
+        {
+            let mut factory = engine.factory.write().unwrap();
+            factory.config.infrastructure = serde_yaml_ng::from_str(
+                "providers:\n\
+                 \x20 - name: claude-max\n    vendor: anthropic\n    kind: subscription\n    harnesses: [claude-code]\n",
+            )
+            .unwrap();
+        }
+        let task = engine
+            .create(NewTask {
+                title: "plan share".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut runs = Vec::new();
+        for i in 0..n {
+            let run = engine
+                .store
+                .create_run(&factory_core::run::NewRun {
+                    task_id: task.id.clone(),
+                    trigger: factory_core::run::Trigger::Manual,
+                    agent: "builder".into(),
+                    adapter: "claude-code".into(),
+                    runtime: "herdr".into(),
+                    token: format!("token-{i}"),
+                    queued_at: None,
+                    scheduled_for: None,
+                })
+                .await
+                .unwrap();
+            let run = engine
+                .store
+                .update_run(&run.id, &RunPatch { provider_account: Some("claude-max".into()), ..Default::default() })
+                .await
+                .unwrap();
+            runs.push(run);
+        }
+        let start = runs.iter().map(|run| run.started_at).max().unwrap();
+        (runs, start)
+    }
+
+    /// One reading of `run`, sampled `seconds` after `start`, with the
+    /// harness's cumulative tokens and, if given, the 5-hour window's use.
+    fn provider_snapshot(
+        run: &Run,
+        start: chrono::DateTime<Utc>,
+        seconds: i64,
+        tokens: u64,
+        used_percent: Option<f64>,
+    ) -> factory_core::usage::UsageSnapshot {
+        use factory_core::usage::*;
+        let sampled = start + chrono::Duration::seconds(seconds);
+        let resets_at = (start + chrono::Duration::hours(5)).to_rfc3339();
+        UsageSnapshot {
+            run_id: run.id.clone(),
+            task_id: run.task_id.clone(),
+            point: if seconds <= 1 { SnapshotPoint::Dispatch } else { SnapshotPoint::TurnEnded },
+            at: sampled,
+            runtime: "herdr".into(),
+            usage: Some(SessionUsage {
+                schema: USAGE_SCHEMA,
+                handle: None,
+                sampled_at: Some(sampled),
+                sessions: vec![HarnessUsage {
+                    session_id: run.id.clone(),
+                    adapter: Some("claude-code".into()),
+                    model: None,
+                    tokens: TokenCounts { input: Some(tokens), output: Some(0), cache_read: Some(0), cache_write: Some(0) },
+                    cost: UsageCost::default(),
+                    elapsed_seconds: None,
+                    active_seconds: None,
+                    subagents: Vec::new(),
+                    rate_limit: used_percent.map(|used| RateLimit {
+                        provider: Some("anthropic".into()),
+                        plan_type: Some("max".into()),
+                        attribution_quality: Some("confirmed".into()),
+                        windows: vec![RateLimitWindow {
+                            window_minutes: Some(300),
+                            used_percent: Some(used),
+                            resets_at: Some(resets_at.clone()),
+                        }],
+                    }),
+                    unavailable: Default::default(),
+                }],
+            }),
+            unknown: None,
+        }
+    }
+
+    async fn five_hour_window(engine: &Arc<Engine>) -> ProviderWindow {
+        let Payload::Infrastructure { providers, .. } = engine.infrastructure().await else {
+            panic!("not an infrastructure payload");
+        };
+        let provider = providers.into_iter().find(|p| p.name == "claude-max").unwrap();
+        assert_eq!(provider.windows.len(), 1, "{:?}", provider.windows);
+        provider.windows.into_iter().next().unwrap()
+    }
+
+    /// A window read by one run and then by the next is one window moving:
+    /// the trend spans the handoff, and the badge is the interval's.
+    #[tokio::test]
+    async fn a_provider_window_trend_spans_a_handoff_between_runs() {
+        let scope_dir = temp_dir("provider-handoff");
+        let engine = test_engine(scope_dir.clone());
+        let (runs, start) = provider_runs(&engine, 2).await;
+        let (a, b) = (&runs[0], &runs[1]);
+        for snapshot in [
+            provider_snapshot(a, start, 1, 0, Some(40.0)),
+            provider_snapshot(b, start, 1, 0, None),
+            provider_snapshot(a, start, 3, 50, Some(42.0)),
+            provider_snapshot(b, start, 3, 0, None),
+            provider_snapshot(b, start, 5, 100, Some(45.0)),
+        ] {
+            engine.store.append_usage(&snapshot).await.unwrap();
+        }
+        engine
+            .store
+            .update_run(&a.id, &RunPatch {
+                status: Some(RunStatus::Done),
+                ended_at: Some(start + chrono::Duration::seconds(3)),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let window = five_hour_window(&engine).await;
+        assert_eq!(window.used_percent, Some(45.0), "the newest sample, whichever run took it");
+        assert_eq!(window.sampled_at, start + chrono::Duration::seconds(5));
+        assert!((window.trend_percent.unwrap() - 3.0).abs() < 1e-9, "42 -> 45 across the handoff: {window:?}");
+        assert_eq!(window.attribution, Some(factory_core::usage::PlanShareAttribution::Direct));
+        assert_eq!(window.attribution_unknown, None);
+        assert!(!window.sample_time_estimated);
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// An apportioned reading stays apportioned after one of its consumers
+    /// ends: the badge is what the sampled interval said, not who is live.
+    #[tokio::test]
+    async fn an_apportioned_reading_keeps_its_badge_after_a_consumer_ends() {
+        let scope_dir = temp_dir("provider-apportioned");
+        let engine = test_engine(scope_dir.clone());
+        let (runs, start) = provider_runs(&engine, 2).await;
+        let (a, b) = (&runs[0], &runs[1]);
+        for snapshot in [
+            provider_snapshot(a, start, 1, 0, Some(10.0)),
+            provider_snapshot(b, start, 1, 0, None),
+            provider_snapshot(a, start, 4, 100, Some(14.0)),
+            provider_snapshot(b, start, 4, 300, None),
+        ] {
+            engine.store.append_usage(&snapshot).await.unwrap();
+        }
+        let apportioned = Some(factory_core::usage::PlanShareAttribution::Apportioned);
+        assert_eq!(five_hour_window(&engine).await.attribution, apportioned);
+
+        for run in [b, a] {
+            engine
+                .store
+                .update_run(&run.id, &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(start + chrono::Duration::seconds(6)),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let window = five_hour_window(&engine).await;
+            assert_eq!(window.attribution, apportioned, "after {} ended: {window:?}", run.id);
+        }
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// A reading is as fresh as its sample, not its request: a cached answer
+    /// sampled forty minutes ago is stale however recently it was asked for,
+    /// and one that does not say when it was sampled is never called fresh.
+    #[tokio::test]
+    async fn a_provider_reading_is_dated_by_its_sample_time() {
+        let scope_dir = temp_dir("provider-stale");
+        let engine = test_engine(scope_dir.clone());
+        let (runs, start) = provider_runs(&engine, 1).await;
+        let run = &runs[0];
+        let mut cached = provider_snapshot(run, start, 1, 0, Some(20.0));
+        let sampled = Utc::now() - chrono::Duration::minutes(40);
+        cached.usage.as_mut().unwrap().sampled_at = Some(sampled);
+        cached.at = Utc::now();
+        engine.store.append_usage(&cached).await.unwrap();
+
+        let window = five_hour_window(&engine).await;
+        assert_eq!(window.sampled_at, sampled);
+        assert!(window.stale, "{window:?}");
+        assert!(!window.sample_time_estimated);
+
+        let mut undated = provider_snapshot(run, start, 2, 0, Some(21.0));
+        undated.usage.as_mut().unwrap().sampled_at = None;
+        undated.at = Utc::now();
+        engine.store.append_usage(&undated).await.unwrap();
+        let window = five_hour_window(&engine).await;
+        assert_eq!(window.used_percent, Some(21.0));
+        assert_eq!(window.sampled_at, undated.at, "the request time stands in");
+        assert!(window.sample_time_estimated);
+        assert!(window.stale, "an undated reading is never vouched for as fresh");
 
         std::fs::remove_dir_all(scope_dir).ok();
     }

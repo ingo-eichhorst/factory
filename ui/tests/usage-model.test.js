@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { estimateComparisonView, fmtDuration, fmtUsd, fmtTokens, totalTokens, runUsageView, taskUsageLine, costFigure } from "../js/usage-model.js";
+import { readFileSync } from "node:fs";
+import { estimateComparisonView, fmtDuration, fmtUsd, fmtTokens, totalTokens, runUsageView, taskUsageLine, costFigure, taskUsageMoved, newestRead } from "../js/usage-model.js";
+
+const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
+const tasks = readFileSync(new URL("../js/tasks.js", import.meta.url), "utf8");
 
 test("an unknown count is a question mark and a tiny cost is not free", () => {
   assert.equal(fmtTokens(null), "?");
@@ -68,6 +72,36 @@ test("run usage says when plan share was apportioned or unavailable", () => {
   };
   assert.match(runUsageView(base).lines.join(" "), /1\.25% of claude-max 5-hour · apportioned/);
   assert.match(runUsageView({ ...base, plan_share: [], plan_share_unknown: "no baseline" }).lines.join(" "), /unknown — no baseline/);
+});
+
+test("a run turning terminal with its usage unchanged re-reads the task's usage", () => {
+  // The run-end reading is published while the run is still running; the
+  // terminal update that follows carries the same usage. Its comparison
+  // only becomes final at the second event, so that one must re-read too.
+  const usage = { state: "known", cost_usd: 0.3, as_of_point: "run_end" };
+  const reading = { id: "r1", status: "running", usage };
+  const terminal = { ...reading, status: "done", ended_at: "2026-09-26T12:00:00Z" };
+  assert.equal(taskUsageMoved(reading, terminal), true);
+  assert.equal(taskUsageMoved(terminal, { ...terminal }), false, "an identical echo does not");
+});
+
+test("a newly journaled re-estimate re-reads the task's usage", () => {
+  const run = { id: "r1", status: "running", usage: { state: "known" } };
+  const reEstimated = { ...run, re_estimate: { sample_count: 2, time: { low: 1, expected: 2, high: 3 } } };
+  assert.equal(taskUsageMoved(run, reEstimated), true);
+  assert.equal(taskUsageMoved(run, { ...run, original_estimate: { time: { low: 1, expected: 1, high: 1 } } }), true);
+  assert.equal(taskUsageMoved(null, run), true, "a new run is in the task's answer");
+  assert.equal(taskUsageMoved(run, { ...run, session: { handle: "w1:p2" } }), false, "anything else does not");
+});
+
+test("only the newest task-usage read may land", () => {
+  const reads = newestRead();
+  const first = reads.next();
+  const second = reads.next();
+  assert.equal(first(), false, "the earlier read resolving last is dropped");
+  assert.equal(second(), true);
+  assert.match(app, /taskUsageMoved\(i >= 0 \? state\.runs\[i\] : null, ev\.run\)/);
+  assert.match(tasks, /state\.open === open && current\(\)/);
 });
 
 test("costFigure: a row whose runs are all usage-unknown reads 'unknown', with no bar to draw -- never a measured-looking $0.00", () => {

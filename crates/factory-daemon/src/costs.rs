@@ -276,7 +276,10 @@ impl Engine {
         let mut actual_wall = 0u64;
         let mut actual_active = Some(0.0);
         let mut actual_cost = Some(0.0);
-        let mut original_estimate = None;
+        // The task's estimate is the sum of what each run was estimated at
+        // when it started, over the same runs whose actuals are summed --
+        // never the newest run's estimate against every run's actuals.
+        let mut estimate_sum = EstimateSum::default();
         let mut all_terminal = true;
         let mut all_cost_measurements_final = true;
         for run in runs {
@@ -289,9 +292,7 @@ impl Engine {
             });
             all_terminal &= terminal;
             all_cost_measurements_final &= final_usage.is_some();
-            if original_estimate.is_none() {
-                original_estimate = run.original_estimate.clone();
-            }
+            estimate_sum.add(run.original_estimate.as_ref());
             actual_active = match (actual_active, run.usage.as_ref().and_then(|usage| usage.active_seconds)) {
                 (Some(sum), Some(value)) => Some(sum + value),
                 _ => None,
@@ -331,6 +332,7 @@ impl Engine {
                 status: run.status,
             });
         }
+        let original_estimate = estimate_sum.total();
         Ok(TaskUsage {
             task_id: task.id,
             total,
@@ -464,6 +466,53 @@ fn group_key(
             None,
         ),
         CostGroupBy::Provider => (run.provider_account.clone().unwrap_or_else(|| "(unknown provider)".into()), None),
+    }
+}
+
+/// The runs' snapshotted estimates, summed range by range. One run with no
+/// estimate makes the time sum unknown, and one with no cost range the cost
+/// sum: a total that leaves a run out would be compared with actuals that
+/// include it.
+#[derive(Default)]
+struct EstimateSum {
+    runs: u32,
+    time: Option<factory_core::task::TimeEstimateRange>,
+    cost: Option<factory_core::task::CostEstimateRange>,
+    time_missing: bool,
+    cost_missing: bool,
+}
+
+impl EstimateSum {
+    fn add(&mut self, estimate: Option<&factory_core::task::Estimate>) {
+        self.runs += 1;
+        let Some(estimate) = estimate else {
+            self.time_missing = true;
+            self.cost_missing = true;
+            return;
+        };
+        let time = self.time.get_or_insert(factory_core::task::TimeEstimateRange { low: 0, expected: 0, high: 0 });
+        time.low += estimate.time.low;
+        time.expected += estimate.time.expected;
+        time.high += estimate.time.high;
+        match &estimate.cost {
+            Some(range) => {
+                let cost = self.cost.get_or_insert(factory_core::task::CostEstimateRange { low: 0.0, expected: 0.0, high: 0.0 });
+                cost.low += range.low;
+                cost.expected += range.expected;
+                cost.high += range.high;
+            }
+            None => self.cost_missing = true,
+        }
+    }
+
+    fn total(self) -> Option<factory_core::task::Estimate> {
+        if self.runs == 0 || self.time_missing {
+            return None;
+        }
+        Some(factory_core::task::Estimate {
+            time: self.time?,
+            cost: if self.cost_missing { None } else { self.cost },
+        })
     }
 }
 
@@ -1015,6 +1064,100 @@ mod tests {
         assert_eq!(comparison.within_range, None);
         assert_eq!(usage.cost_comparison.as_ref().unwrap().actual, None);
         assert_eq!(usage.cost_comparison.as_ref().unwrap().within_range, None);
+    }
+
+    #[tokio::test]
+    async fn a_task_compares_every_runs_actuals_with_every_runs_own_estimate() {
+        let engine = engine(vec![
+            Ok(Some(usage(0, 0.0))),
+            Ok(Some(usage(1_000, 0.10))),
+            Ok(Some(usage(0, 0.0))),
+            Ok(Some(usage(1_000, 0.10))),
+        ]);
+        let task = engine
+            .create(NewTask {
+                title: "recurring".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                estimate_seconds: Some(600),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // Each attempt takes exactly ten minutes of wall time.
+        let ten_minutes = |run: &Run| RunPatch {
+            ended_at: Some(run.started_at + Duration::seconds(600)),
+            ..Default::default()
+        };
+
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let first = engine.store.active_run(&task.id).await.unwrap().expect("dispatched");
+        let first = done(&engine, &task, &first).await;
+        engine.store.update_run(&first.id, &ten_minutes(&first)).await.unwrap();
+
+        // The estimate is edited between attempts: the second run is held
+        // to the new range, the first keeps the one it started with.
+        engine
+            .update(
+                &task.id,
+                factory_core::task::TaskPatch {
+                    estimate: Some(factory_core::task::Estimate {
+                        time: factory_core::task::TimeEstimateRange { low: 300, expected: 600, high: 1200 },
+                        cost: Some(factory_core::task::CostEstimateRange { low: 0.05, expected: 0.1, high: 0.2 }),
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let second = engine.store.active_run(&task.id).await.unwrap().expect("dispatched again");
+        let second = done(&engine, &task, &second).await;
+        engine.store.update_run(&second.id, &ten_minutes(&second)).await.unwrap();
+
+        let usage = engine.task_usage(&task.id).await.unwrap();
+        assert_eq!(usage.runs.len(), 2);
+        for entry in &usage.runs {
+            let comparison = entry.time_comparison.as_ref().unwrap();
+            assert_eq!(comparison.actual, Some(600));
+            assert_eq!(comparison.actual_over_expected, Some(1.0), "each run met its own estimate");
+            assert_eq!(comparison.within_range, Some(true));
+        }
+        let time = usage.time_comparison.as_ref().expect("both runs carry an estimate");
+        assert_eq!((time.low, time.expected, time.high), (600 + 300, 600 + 600, 600 + 1200));
+        assert_eq!(time.actual, Some(1200));
+        assert_eq!(time.actual_over_expected, Some(1.0), "two on-estimate runs are on estimate together");
+        assert_eq!(time.within_range, Some(true));
+        let summed = usage.original_estimate.as_ref().unwrap();
+        assert_eq!(summed.time.expected, time.expected);
+        // The first run had no cost range, so there is no task-wide one.
+        assert_eq!(summed.cost, None);
+        assert_eq!(usage.cost_comparison, None);
+    }
+
+    #[test]
+    fn a_run_with_no_estimate_leaves_the_task_total_out() {
+        let ranged = factory_core::task::Estimate {
+            time: factory_core::task::TimeEstimateRange { low: 10, expected: 20, high: 40 },
+            cost: Some(factory_core::task::CostEstimateRange { low: 1.0, expected: 2.0, high: 3.0 }),
+        };
+        let mut sum = EstimateSum::default();
+        sum.add(Some(&ranged));
+        sum.add(Some(&ranged));
+        let total = sum.total().unwrap();
+        assert_eq!((total.time.low, total.time.expected, total.time.high), (20, 40, 80));
+        assert_eq!(total.cost.map(|c| (c.low, c.expected, c.high)), Some((2.0, 4.0, 6.0)));
+
+        // A run from before estimates were snapshotted carries none: a total
+        // that left it out would be compared with actuals that include it.
+        let mut sum = EstimateSum::default();
+        sum.add(Some(&ranged));
+        sum.add(None);
+        assert_eq!(sum.total(), None);
+        assert_eq!(EstimateSum::default().total(), None, "no runs, no estimate");
     }
 
     #[tokio::test]

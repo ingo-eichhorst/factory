@@ -681,6 +681,31 @@ pub fn run_usage(snapshots: &[UsageSnapshot]) -> RunUsage {
 pub struct PlanShareAllocation {
     pub shares: BTreeMap<String, Vec<PlanShare>>,
     pub unknown: BTreeMap<String, Vec<PlanShareUnknown>>,
+    /// Every provider-window interval that was looked at, whatever became
+    /// of it -- what the L1 provider card reads its attribution from, so the
+    /// badge describes the interval the reading closed rather than who is
+    /// running when the page is opened.
+    pub intervals: Vec<PlanShareInterval>,
+}
+
+/// One interval between two consecutive observations of one provider
+/// window, across every run bound to the account.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanShareInterval {
+    pub provider_account: String,
+    pub window_minutes: u32,
+    pub resets_at: String,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    /// Percentage points the window moved over the interval.
+    pub delta: f64,
+    /// `Direct` or `Apportioned` when a positive delta was allocated;
+    /// `None` when there was nothing to allocate or it could not be.
+    pub attribution: Option<PlanShareAttribution>,
+    /// The runs the delta was allocated to.
+    pub consumers: Vec<String>,
+    /// Why the delta was not allocated, when it was not.
+    pub unknown: Option<String>,
 }
 
 impl PlanShareAllocation {
@@ -702,6 +727,16 @@ struct WindowObservation {
     at: DateTime<Utc>,
 }
 
+/// When the runtime says it took this reading -- the contract's
+/// `sampled_at` -- falling back to when Factory asked for it. A provider
+/// window and the token counts beside it are ordered and attributed by
+/// this, never by the request time alone: a cached or delayed answer
+/// describes the moment it was sampled. `UsageSnapshot::at` still orders
+/// a run's own snapshots (`run_usage`).
+pub fn observed_at(snapshot: &UsageSnapshot) -> DateTime<Utc> {
+    snapshot.usage.as_ref().and_then(|usage| usage.sampled_at).unwrap_or(snapshot.at)
+}
+
 fn cumulative_tokens(usage: &SessionUsage) -> Option<u64> {
     usage.sessions.iter().try_fold(0u64, |sum, session| {
         let parent = session.tokens.total()?;
@@ -719,7 +754,7 @@ fn token_increment(snapshots: &[UsageSnapshot], from: DateTime<Utc>, to: DateTim
         // A weight is honest only when its readings cover this provider
         // observation interval exactly. Reusing an older reading would also
         // charge tokens consumed before `from` to this interval.
-        .filter(|s| s.at == from)
+        .filter(|s| observed_at(s) == from)
         .max_by_key(|s| s.at)
         // A run that began inside an account observation interval has no
         // reading at `from`. Its dispatch snapshot is the aligned baseline
@@ -728,14 +763,14 @@ fn token_increment(snapshots: &[UsageSnapshot], from: DateTime<Utc>, to: DateTim
         .or_else(|| {
             snapshots
                 .iter()
-                .filter(|s| s.point == SnapshotPoint::Dispatch && s.at > from && s.at <= to)
-                .min_by_key(|s| s.at)
+                .filter(|s| s.point == SnapshotPoint::Dispatch && observed_at(s) > from && observed_at(s) <= to)
+                .min_by_key(|s| observed_at(s))
         })
         .and_then(|s| s.usage.as_ref())
         .and_then(cumulative_tokens)?;
     let after = snapshots
         .iter()
-        .filter(|s| s.at == to)
+        .filter(|s| observed_at(s) == to)
         .max_by_key(|s| s.at)
         .and_then(|s| s.usage.as_ref())
         .and_then(cumulative_tokens)?;
@@ -745,6 +780,7 @@ fn token_increment(snapshots: &[UsageSnapshot], from: DateTime<Utc>, to: DateTim
 /// Allocate each positive observed provider-window increment among runs that
 /// were active in the interval, weighted by their measured token increment.
 /// Missing identity, baselines, or weights remains explicitly unknown.
+/// Intervals are bounded by each reading's [`observed_at`].
 pub fn allocate_plan_share(
     runs: &[crate::run::Run],
     snapshots: &BTreeMap<String, Vec<UsageSnapshot>>,
@@ -764,6 +800,7 @@ pub fn allocate_plan_share(
         };
         for snapshot in snapshots.get(&run.id).into_iter().flatten() {
             let Some(usage) = &snapshot.usage else { continue };
+            let sampled = observed_at(snapshot);
             for session in &usage.sessions {
                 let Some(rate) = &session.rate_limit else { continue };
                 for window in &rate.windows {
@@ -772,7 +809,7 @@ pub fn allocate_plan_share(
                     else {
                         result.record_unknown(&run.id, PlanShareUnknown {
                             provider_account: Some(account.clone()), window_minutes: window.window_minutes,
-                            resets_at: window.resets_at.clone(), from: None, to: Some(snapshot.at),
+                            resets_at: window.resets_at.clone(), from: None, to: Some(sampled),
                             reason: "rate-limit window identity or usage is missing".into(),
                         });
                         continue;
@@ -780,7 +817,7 @@ pub fn allocate_plan_share(
                     if !used.is_finite() {
                         result.record_unknown(&run.id, PlanShareUnknown {
                             provider_account: Some(account.clone()), window_minutes: Some(minutes),
-                            resets_at: Some(reset), from: None, to: Some(snapshot.at),
+                            resets_at: Some(reset), from: None, to: Some(sampled),
                             reason: "rate-limit usage is not finite".into(),
                         });
                         continue;
@@ -797,7 +834,7 @@ pub fn allocate_plan_share(
                             minutes,
                             resets_at: reset,
                             used,
-                            at: snapshot.at,
+                            at: sampled,
                         });
                 }
             }
@@ -820,11 +857,24 @@ pub fn allocate_plan_share(
             let from = &pair[0];
             let to = &pair[1];
             let delta = to.used - from.used;
+            let interval = |attribution, consumers, unknown: Option<&str>| PlanShareInterval {
+                provider_account: to.account.clone(),
+                window_minutes: to.minutes,
+                resets_at: to.resets_at.clone(),
+                from: from.at,
+                to: to.at,
+                delta,
+                attribution,
+                consumers,
+                unknown: unknown.map(str::to_string),
+            };
             if delta < 0.0 {
+                let reason = "provider-window usage went backwards";
+                result.intervals.push(interval(None, Vec::new(), Some(reason)));
                 result.record_unknown(&to.run_id, PlanShareUnknown {
                     provider_account: Some(to.account.clone()), window_minutes: Some(to.minutes),
                     resets_at: Some(to.resets_at.clone()), from: Some(from.at), to: Some(to.at),
-                    reason: "provider-window usage went backwards".into(),
+                    reason: reason.into(),
                 });
                 continue;
             }
@@ -845,14 +895,17 @@ pub fn allocate_plan_share(
                 // positive share to emit, but this is measured evidence, not
                 // a missing baseline that should fall through to the generic
                 // unknown below.
+                result.intervals.push(interval(None, Vec::new(), None));
                 resolved.extend(candidates.into_iter().map(|candidate| candidate.id.clone()));
                 continue;
             }
             if candidates.is_empty() {
+                let reason = "no run was active during the provider-window increment";
+                result.intervals.push(interval(None, Vec::new(), Some(reason)));
                 result.record_unknown(&to.run_id, PlanShareUnknown {
                     provider_account: Some(to.account.clone()), window_minutes: Some(to.minutes),
                     resets_at: Some(to.resets_at.clone()), from: Some(from.at), to: Some(to.at),
-                    reason: "no run was active during the provider-window increment".into(),
+                    reason: reason.into(),
                 });
                 continue;
             }
@@ -874,6 +927,7 @@ pub fn allocate_plan_share(
                 } else {
                     "provider-window usage increased with no positive measured token increment"
                 };
+                result.intervals.push(interval(None, Vec::new(), Some(reason)));
                 for candidate in &candidates {
                     result.record_unknown(&candidate.id, PlanShareUnknown {
                         provider_account: Some(to.account.clone()), window_minutes: Some(to.minutes),
@@ -889,6 +943,11 @@ pub fn allocate_plan_share(
             } else {
                 PlanShareAttribution::Apportioned
             };
+            result.intervals.push(interval(
+                Some(attribution),
+                weighted.iter().map(|(candidate, _)| candidate.id.clone()).collect(),
+                None,
+            ));
             for (candidate, weight) in weighted {
                 let share = delta * weight as f64 / total as f64;
                 let list = result.shares.entry(candidate.id.clone()).or_default();
@@ -1095,6 +1154,10 @@ impl CostReport {
 pub struct TaskUsage {
     pub task_id: String,
     pub total: CostRow,
+    /// Every run's snapshotted original estimate, summed range by range --
+    /// what `time_comparison` and `cost_comparison` compare the summed
+    /// actuals with. `None` when a run has none; `cost` is `None` when a run
+    /// has no cost range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_estimate: Option<crate::task::Estimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1712,6 +1775,77 @@ mod tests {
         assert_eq!(gaps[0].from, Some(at(0)));
         assert_eq!(gaps[0].to, Some(at(10)));
         assert_eq!(gaps[0].window_minutes, Some(300));
+    }
+
+    /// `plan_snapshot`, asked for at `requested` but sampled by the
+    /// runtime at `sampled`.
+    fn sampled_snapshot(
+        run: &str,
+        requested: i64,
+        sampled: i64,
+        tokens: u64,
+        window: Option<(u32, &str, f64)>,
+    ) -> UsageSnapshot {
+        let mut snapshot = plan_snapshot(run, sampled, tokens, window);
+        snapshot.at = at(requested);
+        snapshot
+    }
+
+    #[test]
+    fn a_delayed_answer_is_attributed_over_its_sample_interval_not_its_request_interval() {
+        // The observer's runtime was asked at t5 and t10 but sampled at t2
+        // and t6. `late` started at t7 -- inside the request interval, after
+        // the sample interval -- so none of the t2..t6 growth is its.
+        let mut late = plan_run("late", None, Some("claude-max"));
+        late.started_at = at(7);
+        let mut late_baseline = plan_snapshot("late", 7, 0, None);
+        late_baseline.point = SnapshotPoint::Dispatch;
+        let runs = vec![plan_run("observer", None, Some("claude-max")), late];
+        let snapshots = BTreeMap::from([
+            ("observer".into(), vec![
+                sampled_snapshot("observer", 5, 2, 0, Some((300, "reset-a", 10.0))),
+                sampled_snapshot("observer", 10, 6, 100, Some((300, "reset-a", 14.0))),
+            ]),
+            ("late".into(), vec![late_baseline, plan_snapshot("late", 10, 50, None)]),
+        ]);
+
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        let share = &allocation.shares["observer"][0];
+        assert!((share.used_percent - 4.0).abs() < 1e-9, "{share:?}");
+        assert_eq!(share.attribution, PlanShareAttribution::Direct);
+        assert_eq!(share.as_of, at(6), "as of the sample, not the request");
+        assert!(!allocation.shares.contains_key("late"));
+        assert_eq!(allocation.intervals.len(), 1);
+        let interval = &allocation.intervals[0];
+        assert_eq!((interval.from, interval.to), (at(2), at(6)));
+        assert_eq!(interval.consumers, vec!["observer".to_string()]);
+        assert_eq!(interval.attribution, Some(PlanShareAttribution::Direct));
+    }
+
+    #[test]
+    fn a_cached_answer_served_twice_is_one_observation_not_an_interval() {
+        // Asked at t5 and t10, the runtime answered both times with the
+        // reading it sampled at t2: there is no second observation to take
+        // a difference from, so nothing is allocated and the gap is named.
+        let runs = vec![plan_run("cached", None, Some("claude-max"))];
+        let snapshots = BTreeMap::from([("cached".into(), vec![
+            sampled_snapshot("cached", 5, 2, 0, Some((300, "reset-a", 10.0))),
+            sampled_snapshot("cached", 10, 2, 0, Some((300, "reset-a", 10.0))),
+        ])]);
+
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        assert!(allocation.shares.is_empty());
+        assert!(allocation.intervals.is_empty());
+        assert!(allocation.unknown["cached"][0].reason.contains("could not be attributed"));
+    }
+
+    #[test]
+    fn with_no_sample_time_the_request_time_stands_in() {
+        let mut snapshot = plan_snapshot("r", 3, 0, None);
+        snapshot.usage.as_mut().unwrap().sampled_at = None;
+        assert_eq!(observed_at(&snapshot), at(3));
+        let delayed = sampled_snapshot("r", 9, 4, 0, None);
+        assert_eq!(observed_at(&delayed), at(4));
     }
 
     #[test]

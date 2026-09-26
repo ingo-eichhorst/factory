@@ -19,6 +19,41 @@ export function fmtTokens(n) {
   return String(n);
 }
 
+/// What of a run the open task's usage answer is derived from (#117): its
+/// usage, and the status, end, original estimate and re-estimate that
+/// decide whether a comparison is final and what it is compared with.
+export function usageProjectionKey(run) {
+  if (!run) return "null";
+  return JSON.stringify([
+    run.usage ?? null,
+    run.status ?? null,
+    run.ended_at ?? null,
+    run.original_estimate ?? null,
+    run.re_estimate ?? null,
+  ]);
+}
+
+/// Whether a run event changed anything the open task's usage answer is
+/// read from -- a run turning terminal with its usage unchanged included,
+/// since that is what makes its comparison final.
+export function taskUsageMoved(before, after) {
+  return usageProjectionKey(before) !== usageProjectionKey(after);
+}
+
+/// Numbered reads where only the newest call's answer may be kept: two
+/// run events close together start two reads, and the earlier one landing
+/// last would otherwise put the older answer back. `next()` hands out a
+/// check that stays true only while no later read has been started.
+export function newestRead() {
+  let latest = 0;
+  return {
+    next() {
+      const mine = ++latest;
+      return () => mine === latest;
+    },
+  };
+}
+
 export function fmtDuration(seconds) {
   if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return "?";
   if (seconds < 60) return `${Math.round(seconds)}s`;

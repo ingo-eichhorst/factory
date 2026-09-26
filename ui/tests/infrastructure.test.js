@@ -22,6 +22,7 @@ import {
   isEmptyProviders,
   kindBadge,
   providerWindowView,
+  resetsIn,
   sortHarnesses,
   visibleAgents,
 } from "../js/infra-model.js";
@@ -238,6 +239,30 @@ test("provider windows distinguish measured, stale, apportioned, and unknown", (
   assert.equal(unknown.percent, null);
   assert.equal(unknown.tone, "unknown");
   assert.match(unknown.detail, /no baseline/);
+});
+
+test("a provider window says when it resets, relative to now, and never guesses", () => {
+  const now = Date.parse("2026-09-26T12:00:00Z");
+  assert.equal(resetsIn("2026-09-26T14:10:00Z", now), "resets in 2h 10m");
+  assert.equal(resetsIn("2026-09-26T12:00:30Z", now), "resets in 1m");
+  assert.equal(resetsIn("2026-09-29T15:00:00Z", now), "resets in 3d 3h");
+  assert.equal(resetsIn("2026-09-26T11:00:00Z", now), "reset passed");
+  assert.equal(resetsIn("not a time", now), null);
+  assert.equal(resetsIn(undefined, now), null);
+  const view = providerWindowView({ window_minutes: 300, used_percent: 10, resets_at: "2026-09-26T14:10:00Z" }, now);
+  assert.match(view.detail, /resets in 2h 10m/);
+});
+
+test("a provider window's badge is the sampled interval's, and an unattributable change says why", () => {
+  const direct = providerWindowView({ window_minutes: 300, used_percent: 10, attribution: "direct" });
+  assert.match(direct.detail, /direct/);
+  const unknown = providerWindowView({
+    window_minutes: 300, used_percent: 10, attribution_unknown: "no earlier sample of this window",
+  });
+  assert.match(unknown.detail, /attribution unknown — no earlier sample of this window/);
+  const undated = providerWindowView({ window_minutes: 300, used_percent: 10, stale: true, sample_time_estimated: true });
+  assert.equal(undated.tone, "stale");
+  assert.match(undated.detail, /sample time not reported/);
 });
 
 // ------------------------------------------------------------------ fetch failures

@@ -1956,13 +1956,24 @@ pub struct ProviderWindow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used_percent: Option<f64>,
     pub resets_at: String,
+    /// When the runtime sampled the reading (`SessionUsage::sampled_at`).
     pub sampled_at: chrono::DateTime<chrono::Utc>,
+    /// The runtime did not say when it sampled, so `sampled_at` is when
+    /// Factory asked -- and the reading is never called fresh.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sample_time_estimated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution_quality: Option<String>,
+    /// How the change that ended at this reading was charged: to one run
+    /// (`direct`) or split across several (`apportioned`). Fixed by the
+    /// interval the reading closed, not by who is running now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution: Option<crate::usage::PlanShareAttribution>,
+    /// Why that change could not be attributed, when it could not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_unknown: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stale: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

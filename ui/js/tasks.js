@@ -9,7 +9,7 @@ import { openEdit, scheduleText } from "./task-form.js";
 import { scheduleLabel } from "./schedule.js";
 import { describeWorkflowOrigin } from "./workflows.js";
 import { entryKindLabel, entryTone } from "./operations-model.js";
-import { estimateComparisonView, runUsageView, taskUsageLine } from "./usage-model.js";
+import { estimateComparisonView, newestRead, runUsageView, taskUsageLine } from "./usage-model.js";
 import { columnFor, standing, taskActions, isSettled, CLOSE_REASONS, closeBody } from "./task-model.js";
 import { notStartedNote } from "./pending-model.js";
 
@@ -255,12 +255,15 @@ export async function loadRuns() {
 /// daemon rather than re-added here, so the modal and `factory task show`
 /// can never disagree about what counts. A daemon without the endpoint
 /// leaves it blank.
+const taskUsageReads = newestRead();
+
 export async function loadTaskUsage() {
   const open = state.open;
+  const current = taskUsageReads.next();
   try {
     const usage = (await api(`/api/tasks/${open}/usage`)).usage;
-    if (state.open === open) state.taskUsage = usage;
-  } catch { state.taskUsage = null; }
+    if (state.open === open && current()) state.taskUsage = usage;
+  } catch { if (current()) state.taskUsage = null; }
 }
 
 /// A run's usage block: tokens, cost and what they rest on, or why there
