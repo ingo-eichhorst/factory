@@ -432,7 +432,8 @@ fn ready_rate_def() -> MetricDef {
         "Ready rate",
         "Ready decisions over every intake decision event (ready, needs-info, wontfix, split) in \
          the trailing 28 days -- the same shared denominator needs_info_rate and duplicate_rate \
-         read, so the three shares add to one. An item sent back for information and later \
+         read, so the three shares never add to more than one: an invalid or out-of-scope wontfix \
+         and a split are in the denominator only. An item sent back for information and later \
          released counts as two events.",
         Unit::Ratio,
         Better::Higher,

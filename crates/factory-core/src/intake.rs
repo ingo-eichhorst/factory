@@ -1439,7 +1439,8 @@ fn rate(denom: usize, hits: usize, empty_reason: &str, caveat: &Option<String>, 
 /// `ready_rate` and `needs_info_rate` count two events for an item sent
 /// back once and later released; `duplicate_rate` counts only a wontfix
 /// closed as a duplicate -- an invalid or out-of-scope one, like a split,
-/// counts in the denominator only, so the three shares still add to one.
+/// counts in the denominator only, so the three shares add to one only when
+/// there are none of those.
 /// `intake_lead_time` is the nearest-rank median, in seconds, of a ready
 /// decision's own time minus the item's `received_at`, over items released
 /// ready in `window` -- [`crate::scenario::nearest_rank`], the same rule
