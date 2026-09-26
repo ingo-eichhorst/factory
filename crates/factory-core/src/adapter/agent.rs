@@ -678,7 +678,8 @@ impl AgentContext {
                     "intake.assess -> {bin} intake assess <id> --file <assessment.json> [--decide]"
                 ),
                 Grant::IntakeDecide => format!(
-                    "intake.decide -> {bin} intake decide <id> ready|needs-info|split|wontfix [--run]"
+                    "intake.decide -> {bin} intake decide <id> ready|needs-info|split|wontfix [--run] \
+                     (--run also needs task.run)"
                 ),
             });
         }
