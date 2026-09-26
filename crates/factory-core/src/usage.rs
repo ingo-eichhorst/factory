@@ -271,6 +271,11 @@ pub struct RunUsage {
     pub plan_share: Vec<PlanShare>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_share_unknown: Option<String>,
+    /// Provider-window intervals that could not be attributed. Kept beside
+    /// any known shares so a later successful interval cannot make an
+    /// earlier gap disappear.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan_share_unknowns: Vec<PlanShareUnknown>,
     /// Every price table behind `cost_usd`. More than one only when the
     /// sessions in the run were priced differently.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -306,6 +311,7 @@ impl RunUsage {
             active_seconds: None,
             plan_share: Vec::new(),
             plan_share_unknown: None,
+            plan_share_unknowns: Vec::new(),
             pricing_sources: Vec::new(),
             models: Vec::new(),
             sessions: 0,
@@ -343,6 +349,24 @@ pub struct PlanShare {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution_quality: Option<String>,
     pub as_of: DateTime<Utc>,
+}
+
+/// Evidence that one provider-window interval could not be allocated.
+/// Window identity and bounds are optional only for failures that prevented
+/// Factory from learning them (for example, a missing provider binding).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanShareUnknown {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<DateTime<Utc>>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -641,6 +665,7 @@ pub fn run_usage(snapshots: &[UsageSnapshot]) -> RunUsage {
         active_seconds: active,
         plan_share: Vec::new(),
         plan_share_unknown: None,
+        plan_share_unknowns: Vec::new(),
         pricing_sources: pricing.into_iter().collect(),
         models: models.into_iter().collect(),
         sessions: now.len() as u32,
@@ -655,7 +680,13 @@ pub fn run_usage(snapshots: &[UsageSnapshot]) -> RunUsage {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlanShareAllocation {
     pub shares: BTreeMap<String, Vec<PlanShare>>,
-    pub unknown: BTreeMap<String, String>,
+    pub unknown: BTreeMap<String, Vec<PlanShareUnknown>>,
+}
+
+impl PlanShareAllocation {
+    fn record_unknown(&mut self, run_id: &str, unknown: PlanShareUnknown) {
+        self.unknown.entry(run_id.to_string()).or_default().push(unknown);
+    }
 }
 
 #[derive(Clone)]
@@ -687,6 +718,15 @@ fn token_increment(snapshots: &[UsageSnapshot], from: DateTime<Utc>, to: DateTim
         .iter()
         .filter(|s| s.at <= from)
         .max_by_key(|s| s.at)
+        // A run that began inside an account observation interval has no
+        // earlier reading. Its dispatch snapshot is its valid zero-growth
+        // baseline for the part of the interval in which it existed.
+        .or_else(|| {
+            snapshots
+                .iter()
+                .filter(|s| s.point == SnapshotPoint::Dispatch && s.at > from && s.at <= to)
+                .min_by_key(|s| s.at)
+        })
         .and_then(|s| s.usage.as_ref())
         .and_then(cumulative_tokens)?;
     let after = snapshots
@@ -707,11 +747,15 @@ pub fn allocate_plan_share(
 ) -> PlanShareAllocation {
     let mut result = PlanShareAllocation::default();
     let by_id: BTreeMap<&str, &crate::run::Run> = runs.iter().map(|r| (r.id.as_str(), r)).collect();
+    let mut resolved = BTreeSet::new();
     let mut observations: BTreeMap<(String, u32, String), Vec<WindowObservation>> = BTreeMap::new();
 
     for run in runs {
         let Some(account) = run.provider_account.as_ref() else {
-            result.unknown.insert(run.id.clone(), "run has no provider-account binding".into());
+            result.record_unknown(&run.id, PlanShareUnknown {
+                provider_account: None, window_minutes: None, resets_at: None,
+                from: None, to: None, reason: "run has no provider-account binding".into(),
+            });
             continue;
         };
         for snapshot in snapshots.get(&run.id).into_iter().flatten() {
@@ -722,11 +766,19 @@ pub fn allocate_plan_share(
                     let (Some(minutes), Some(reset), Some(used)) =
                         (window.window_minutes, window.resets_at.clone(), window.used_percent)
                     else {
-                        result.unknown.insert(run.id.clone(), "rate-limit window identity or usage is missing".into());
+                        result.record_unknown(&run.id, PlanShareUnknown {
+                            provider_account: Some(account.clone()), window_minutes: window.window_minutes,
+                            resets_at: window.resets_at.clone(), from: None, to: Some(snapshot.at),
+                            reason: "rate-limit window identity or usage is missing".into(),
+                        });
                         continue;
                     };
                     if !used.is_finite() {
-                        result.unknown.insert(run.id.clone(), "rate-limit usage is not finite".into());
+                        result.record_unknown(&run.id, PlanShareUnknown {
+                            provider_account: Some(account.clone()), window_minutes: Some(minutes),
+                            resets_at: Some(reset), from: None, to: Some(snapshot.at),
+                            reason: "rate-limit usage is not finite".into(),
+                        });
                         continue;
                     }
                     observations
@@ -752,7 +804,11 @@ pub fn allocate_plan_share(
         points.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.run_id.cmp(&b.run_id)));
         if points.len() < 2 {
             for point in points {
-                result.unknown.entry(point.run_id).or_insert_with(|| "no earlier observation for this provider window".into());
+                result.record_unknown(&point.run_id, PlanShareUnknown {
+                    provider_account: Some(point.account), window_minutes: Some(point.minutes),
+                    resets_at: Some(point.resets_at), from: None, to: Some(point.at),
+                    reason: "no earlier observation for this provider window".into(),
+                });
             }
             continue;
         }
@@ -761,7 +817,11 @@ pub fn allocate_plan_share(
             let to = &pair[1];
             let delta = to.used - from.used;
             if delta < 0.0 {
-                result.unknown.insert(to.run_id.clone(), "provider-window usage went backwards".into());
+                result.record_unknown(&to.run_id, PlanShareUnknown {
+                    provider_account: Some(to.account.clone()), window_minutes: Some(to.minutes),
+                    resets_at: Some(to.resets_at.clone()), from: Some(from.at), to: Some(to.at),
+                    reason: "provider-window usage went backwards".into(),
+                });
                 continue;
             }
             if delta <= f64::EPSILON || to.at <= from.at {
@@ -776,7 +836,11 @@ pub fn allocate_plan_share(
                 })
                 .collect();
             if candidates.is_empty() {
-                result.unknown.insert(to.run_id.clone(), "no run was active during the provider-window increment".into());
+                result.record_unknown(&to.run_id, PlanShareUnknown {
+                    provider_account: Some(to.account.clone()), window_minutes: Some(to.minutes),
+                    resets_at: Some(to.resets_at.clone()), from: Some(from.at), to: Some(to.at),
+                    reason: "no run was active during the provider-window increment".into(),
+                });
                 continue;
             }
             let mut weighted = Vec::with_capacity(candidates.len());
@@ -785,18 +849,25 @@ pub fn allocate_plan_share(
                 let weight = snapshots
                     .get(&candidate.id)
                     .and_then(|s| token_increment(s, from.at, to.at));
-                match weight.filter(|weight| *weight > 0) {
+                match weight {
+                    Some(0) => {}
                     Some(weight) => weighted.push((*candidate, weight)),
-                    None => {
-                        result.unknown.insert(
-                            candidate.id.clone(),
-                            "no positive measured token increment for provider-window attribution".into(),
-                        );
-                        missing = true;
-                    }
+                    None => missing = true,
                 }
             }
-            if missing {
+            if missing || weighted.is_empty() {
+                let reason = if missing {
+                    "one or more active runs have no measured token increment for provider-window attribution"
+                } else {
+                    "provider-window usage increased with no positive measured token increment"
+                };
+                for candidate in &candidates {
+                    result.record_unknown(&candidate.id, PlanShareUnknown {
+                        provider_account: Some(to.account.clone()), window_minutes: Some(to.minutes),
+                        resets_at: Some(to.resets_at.clone()), from: Some(from.at), to: Some(to.at),
+                        reason: reason.into(),
+                    });
+                }
                 continue;
             }
             let total: u64 = weighted.iter().map(|(_, weight)| *weight).sum();
@@ -831,17 +902,21 @@ pub fn allocate_plan_share(
                         as_of: to.at,
                     });
                 }
-                result.unknown.remove(&candidate.id);
             }
+            resolved.extend(candidates.into_iter().map(|candidate| candidate.id.clone()));
         }
     }
 
     for run in by_id.values() {
-        if run.provider_account.is_some() && !result.shares.contains_key(&run.id) {
-            result
-                .unknown
-                .entry(run.id.clone())
-                .or_insert_with(|| "provider-window share could not be attributed".into());
+        if run.provider_account.is_some()
+            && !result.shares.contains_key(&run.id)
+            && !result.unknown.contains_key(&run.id)
+            && !resolved.contains(&run.id)
+        {
+            result.record_unknown(&run.id, PlanShareUnknown {
+                provider_account: run.provider_account.clone(), window_minutes: None, resets_at: None,
+                from: None, to: None, reason: "provider-window share could not be attributed".into(),
+            });
         }
     }
     result
@@ -1506,7 +1581,39 @@ mod tests {
     }
 
     #[test]
-    fn plan_share_keeps_missing_bindings_and_weights_unknown() {
+    fn measured_zero_consumers_do_not_discard_positive_allocation() {
+        let mut newly_started = plan_run("new", None, Some("claude-max"));
+        newly_started.started_at = at(5);
+        let mut new_baseline = plan_snapshot("new", 5, 0, None);
+        new_baseline.point = SnapshotPoint::Dispatch;
+        let runs = vec![
+            plan_run("consumer", None, Some("claude-max")),
+            plan_run("idle", None, Some("claude-max")),
+            newly_started,
+        ];
+        let snapshots = BTreeMap::from([
+            ("consumer".into(), vec![
+                plan_snapshot("consumer", 0, 0, Some((300, "reset-a", 10.0))),
+                plan_snapshot("consumer", 10, 100, Some((300, "reset-a", 14.0))),
+            ]),
+            ("idle".into(), vec![plan_snapshot("idle", 0, 0, None), plan_snapshot("idle", 10, 0, None)]),
+            ("new".into(), vec![new_baseline]),
+        ]);
+
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        let shares = &allocation.shares["consumer"];
+        assert_eq!(shares.len(), 1);
+        assert!((shares[0].used_percent - 4.0).abs() < 1e-9);
+        assert_eq!(shares[0].attribution, PlanShareAttribution::Direct);
+        assert!(!allocation.unknown.contains_key("consumer"));
+        assert!(!allocation.unknown.contains_key("idle"));
+        assert!(!allocation.unknown.contains_key("new"));
+        let allocated: f64 = allocation.shares.values().flatten().map(|share| share.used_percent).sum();
+        assert!((allocated - 4.0).abs() < 1e-9, "the observed provider delta is preserved");
+    }
+
+    #[test]
+    fn plan_share_keeps_missing_bindings_and_all_zero_weights_unknown() {
         let runs = vec![plan_run("unbound", None, None), plan_run("zero", None, Some("claude-max"))];
         let snapshots = BTreeMap::from([(
             "zero".into(),
@@ -1516,8 +1623,48 @@ mod tests {
             ],
         )]);
         let allocation = allocate_plan_share(&runs, &snapshots);
-        assert!(allocation.unknown["unbound"].contains("binding"));
-        assert!(allocation.unknown["zero"].contains("token increment"));
+        assert!(allocation.unknown["unbound"].iter().any(|gap| gap.reason.contains("binding")));
+        assert!(allocation.unknown["zero"].iter().any(|gap| gap.reason.contains("token increment")));
         assert!(allocation.shares.is_empty());
+    }
+
+    #[test]
+    fn a_later_successful_interval_does_not_erase_an_earlier_gap() {
+        let runs = vec![
+            plan_run("consumer", None, Some("claude-max")),
+            plan_run("missing", Some(10), Some("claude-max")),
+        ];
+        let snapshots = BTreeMap::from([("consumer".into(), vec![
+            plan_snapshot("consumer", 0, 0, Some((300, "reset-a", 10.0))),
+            plan_snapshot("consumer", 10, 100, Some((300, "reset-a", 12.0))),
+            plan_snapshot("consumer", 20, 200, Some((300, "reset-a", 14.0))),
+        ])]);
+
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        assert!((allocation.shares["consumer"][0].used_percent - 2.0).abs() < 1e-9);
+        let gaps = &allocation.unknown["consumer"];
+        assert_eq!(gaps.len(), 1, "the first interval remains unresolved");
+        assert_eq!(gaps[0].from, Some(at(0)));
+        assert_eq!(gaps[0].to, Some(at(10)));
+        assert_eq!(gaps[0].window_minutes, Some(300));
+    }
+
+    #[test]
+    fn a_known_window_is_kept_beside_an_unknown_window() {
+        let run = plan_run("consumer", None, Some("claude-max"));
+        let mut first = plan_snapshot("consumer", 0, 0, Some((10_080, "weekly", 20.0)));
+        first.usage.as_mut().unwrap().sessions[0].rate_limit.as_mut().unwrap().windows.push(RateLimitWindow {
+            window_minutes: Some(300), used_percent: Some(10.0), resets_at: Some("five-hour".into()),
+        });
+        let snapshots = BTreeMap::from([("consumer".into(), vec![
+            first,
+            plan_snapshot("consumer", 10, 100, Some((10_080, "weekly", 21.0))),
+        ])]);
+
+        let allocation = allocate_plan_share(&[run], &snapshots);
+        assert_eq!(allocation.shares["consumer"][0].window_minutes, 10_080);
+        assert!((allocation.shares["consumer"][0].used_percent - 1.0).abs() < 1e-9);
+        assert_eq!(allocation.unknown["consumer"][0].window_minutes, Some(300));
+        assert!(allocation.unknown["consumer"][0].reason.contains("no earlier observation"));
     }
 }

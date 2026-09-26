@@ -100,7 +100,15 @@ impl Engine {
             let Some(snapshots) = snapshots_by_run.get(&recent_run.id) else { continue };
             let mut usage = run_usage(snapshots);
             usage.plan_share = allocation.shares.get(&recent_run.id).cloned().unwrap_or_default();
-            usage.plan_share_unknown = allocation.unknown.get(&recent_run.id).cloned();
+            usage.plan_share_unknowns = allocation.unknown.get(&recent_run.id).cloned().unwrap_or_default();
+            if !usage.plan_share_unknowns.is_empty() {
+                let reasons: BTreeSet<&str> = usage.plan_share_unknowns.iter().map(|gap| gap.reason.as_str()).collect();
+                usage.plan_share_unknown = Some(if usage.plan_share_unknowns.len() == 1 {
+                    reasons.into_iter().next().unwrap_or("provider-window share could not be attributed").into()
+                } else {
+                    format!("{} provider-window gaps: {}", usage.plan_share_unknowns.len(), reasons.into_iter().collect::<Vec<_>>().join("; "))
+                });
+            }
             let patch = RunPatch { usage: Some(usage), ..Default::default() };
             match self.store.update_run(&recent_run.id, &patch).await {
                 Ok(updated) => self.bus.publish(Event::RunUpdated { run: updated.redacted() }),
@@ -157,14 +165,19 @@ impl Engine {
                 if first_wall > 0.0 && final_wall >= first_wall {
                     wall_ratios.push(final_wall / first_wall);
                 }
-                if let (Some(first), Some(final_value)) = (first_usage.active_seconds, final_usage.active_seconds) {
-                    if first > 0.0 && final_value >= first {
-                        active_ratios.push(final_value / first);
+                // Wall time comes from the completed run itself. Active time
+                // and cost come from the runtime, so only a successful,
+                // complete run-end reading is final enough for cohort ratios.
+                if final_usage.as_of_point == Some(SnapshotPoint::RunEnd) && !final_usage.partial {
+                    if let (Some(first), Some(final_value)) = (first_usage.active_seconds, final_usage.active_seconds) {
+                        if first > 0.0 && final_value >= first {
+                            active_ratios.push(final_value / first);
+                        }
                     }
-                }
-                if let (Some(first), Some(final_value)) = (first_usage.cost_usd, final_usage.cost_usd) {
-                    if first > 0.0 && final_value >= first {
-                        cost_ratios.push(final_value / first);
+                    if let (Some(first), Some(final_value)) = (first_usage.cost_usd, final_usage.cost_usd) {
+                        if first > 0.0 && final_value >= first {
+                            cost_ratios.push(final_value / first);
+                        }
                     }
                 }
                 sample_count += 1;
@@ -514,6 +527,12 @@ mod tests {
         }
     }
 
+    fn usage_with_active(input: u64, usd: f64, active_seconds: f64) -> SessionUsage {
+        let mut measured = usage(input, usd);
+        measured.sessions[0].active_seconds = Some(active_seconds);
+        measured
+    }
+
     fn engine(answers: Vec<Answer>) -> Arc<Engine> {
         let root = std::env::temp_dir().join(format!("factory-costs-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -742,6 +761,72 @@ mod tests {
         assert_eq!(engine.require_run(&run.id).await.unwrap().re_estimate, Some(first));
         let entries = engine.store.entries(&task.id, 100).await.unwrap();
         assert_eq!(entries.iter().filter(|entry| entry.kind == "re_estimate").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_end_snapshot_is_not_a_final_active_or_cost_cohort_measurement() {
+        let engine = engine(vec![
+            Ok(Some(usage_with_active(0, 0.0, 0.0))),
+            Ok(Some(usage_with_active(1_000, 1.0, 10.0))),
+            Err("run-end usage unavailable".into()),
+            Ok(Some(usage_with_active(0, 0.0, 0.0))),
+            Ok(Some(usage_with_active(500, 0.5, 5.0))),
+        ]);
+        let (reference_task, reference_run) = dispatched(&engine, None).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        engine
+            .turn_ended(
+                &reference_task.id,
+                factory_core::task::TurnEnded {
+                    event: factory_core::task::TurnEndEvent::Stop,
+                    pending_background: 0,
+                    error: None,
+                    error_details: None,
+                    last_message: None,
+                    token: reference_run.token.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if engine.require_run(&reference_run.id).await.unwrap().re_estimate.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let ended = done(&engine, &reference_task, &reference_run).await;
+        assert!(ended.usage.as_ref().unwrap().partial);
+        assert_eq!(ended.usage.as_ref().unwrap().as_of_point, Some(SnapshotPoint::TurnEnded));
+
+        let (task, run) = dispatched(&engine, None).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        engine
+            .turn_ended(
+                &task.id,
+                factory_core::task::TurnEnded {
+                    event: factory_core::task::TurnEndEvent::Stop,
+                    pending_background: 0,
+                    error: None,
+                    error_details: None,
+                    last_message: None,
+                    token: run.token.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut estimate = None;
+        for _ in 0..100 {
+            estimate = engine.require_run(&run.id).await.unwrap().re_estimate;
+            if estimate.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let estimate = estimate.expect("the first turn records a re-estimate");
+        assert_eq!(estimate.sample_count, 1);
+        assert!(estimate.time.is_some(), "completed wall time remains a valid cohort input");
+        assert_eq!(estimate.active_seconds, None, "partial active time is not final");
+        assert_eq!(estimate.cost, None, "partial cost is not final");
     }
 
     #[tokio::test]

@@ -1634,8 +1634,9 @@ pane reused from an earlier run is never billed twice. Rules:
 ```sh
 factory run show <run-id>        # the usage block
 factory task show <id>           # every run's usage and the sum
-factory cost --by issue --since 7d   # task | issue | scope | agent
+factory cost --by issue --since 7d   # task | issue | scope | agent | provider
 factory cost --by agent --scope projects/factory --since 2026-09-01
+factory cost --by provider --since 30d
 ```
 
 `GET /api/costs?group_by=&from=&to=&scope=`, `GET /api/tasks/{id}/usage` and
@@ -1645,9 +1646,28 @@ beside them is how many did not: an unmeasured run is counted, never dropped
 and never free. The registry metrics `unit_cost` and `tokens_per_run` read
 the same usage (see "Goals").
 
-Not yet (v2 and later): plan share of a subscription's rate-limit window
-(the snapshots already keep the windows), estimate vs actual, the provider
-and workflow groupings, and cost drivers in the Scenarios forecast.
+Tasks can carry low/expected/high time and cost estimates. The CLI accepts
+`--estimate-low`, `--estimate`, and `--estimate-high` (and the corresponding
+`--estimate-cost-*` flags); the old expected-only form remains a point range.
+The effective original estimate is copied onto each run, so later task edits
+do not rewrite history. At the first turn end Factory records one re-estimate
+from completed runs with the same canonical scope, agent, and task category,
+using low/median/high first-turn-to-final factors. With no usable cohort it
+records why the re-estimate is unavailable. Run and task usage compare actual
+wall time, active time, and cost with the original range, including the
+actual/expected ratio and whether the actual landed inside the range.
+
+For subscription accounts, positive changes in a provider's rate-limit window
+are attributed to the runs active during that observation interval in
+proportion to their measured token growth. One positive consumer is `direct`;
+several are `apportioned`. A measured zero-token run is excluded from the
+division, while a missing baseline or token measurement leaves that exact
+account/window/interval explicitly unknown. Known shares and unresolved gaps
+are both retained, so a later allocatable interval never hides an earlier one.
+
+Not yet (v3 and later): workflow cost grouping, budgets, Scenario cost
+drivers, policy/metric follow-through, and runtime-specific observation work
+tracked outside Factory.
 
 ## Workflows
 
@@ -2185,11 +2205,18 @@ providers claiming the same harness, the same provider name twice, `env:` on a
 claiming `shell` or a shell agent naming one, and an `infrastructure:` block in
 a nested scope's own file -- only the root's is read.
 
+The provider cards also show the latest 5-hour and weekly rate-limit windows,
+their reset times, freshness and attribution quality, a snapshot-derived
+trend, and the active agents and run instances bound to the account. Missing,
+stale, or apportioned readings say so rather than rendering as zero. The same
+snapshots supply per-run plan share and `factory cost --by provider`; Factory
+records token and API-equivalent cost measurements only when the configured
+agent runtime supplies them.
+
 The host half of the page is read live on every request, from `sysctl` and
 `libc` rather than a subprocess per field: model, chip, cores, memory, OS,
 uptime, load and the root filesystem. Any of those that cannot be read is
-`null`, never a failed request, and only macOS answers all of them. Usage and
-spend per provider are not shown: Factory does not record tokens yet.
+`null`, never a failed request, and only macOS answers all of them.
 
 ### Backup
 
