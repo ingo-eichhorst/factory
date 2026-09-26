@@ -265,11 +265,13 @@ export function checkTarget(scope, control, check) {
   return target ? { label: target.label, href: routeHref(scope, target.page) } : null;
 }
 
-/// A `dependencies` check's line: the SBOM's age limit, each severity's cap
-/// on open findings, and the cap on exploited ones -- whichever it sets.
+/// A `dependencies` check's line: the declared SBOM's age limit, whether a
+/// built SBOM is required, each severity's cap on open findings, and the cap
+/// on exploited ones -- whichever it sets.
 function describeDependencies(check) {
   const terms = [];
   if (check.sbom_max_age) terms.push(`SBOM max_age ${check.sbom_max_age}`);
+  if (check.built_sbom) terms.push("built SBOM required");
   for (const [severity, limit] of Object.entries(check.max_open || {})) {
     terms.push(`${severity} <= ${limit}`);
   }

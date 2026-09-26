@@ -387,6 +387,8 @@ pub struct DoctorReport {
 pub struct DependenciesFact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared_sbom_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_sbom_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub open: BTreeMap<Severity, u32>,
     #[serde(default)]

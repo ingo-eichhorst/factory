@@ -489,12 +489,14 @@ Policy catalogues may read the same evidence:
 ```yaml
 - check: dependencies
   sbom_max_age: 30d
+  built_sbom: true
   max_open: { critical: 0, high: 0 }
   exploited_open: 0
 ```
 
-`built_sbom`, installed-binary scanning, observed services, reachability and
-the CRA Article 14 clock are later phases; v1 makes no claim about them.
+The v2 scan workflow supplies the build and installed-binary evidence used by
+`built_sbom` and Doctor. Observed services, reachability, and the CRA Article
+14 clock remain future work.
 
 ## Knowledge
 
@@ -778,9 +780,11 @@ the live config snapshot rather than a store:
   and `power_assertion` (`daemon.power_assertion`). A `fact` outside this
   set is a finding at catalogue load time and stays `open`.
 - **`dependencies`** — satisfied when the newest declared SBOM is within
-  `sbom_max_age`, open findings do not exceed each `max_open` severity limit,
-  and KEV/EUVD findings do not exceed `exploited_open`. It reads the same
-  derived projection as L2 Dependencies; no policy-specific copy is stored.
+  `sbom_max_age`, a build SBOM exists for the newest release when
+  `built_sbom: true`, open findings do not exceed each `max_open` severity
+  limit, and KEV/EUVD findings do not exceed `exploited_open`. It reads the
+  same derived projection as L2 Dependencies; no policy-specific copy is
+  stored.
 
 Neither `roles`/`sandbox`/`secrets`/`daemon`/`dependencies` carries a `refs` entry: nothing
 behind them is an id a UI could link to yet (an agent name is not one of
