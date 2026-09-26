@@ -48,8 +48,8 @@ test("L5 Improvement is live, with a Benchmarks tab and a Knowledge tab after Se
   assert.ok(benchmarks < knowledge, "Knowledge tab must follow Benchmarks");
 });
 
-test("LEVEL_VIEWS.imp names exactly benchmarks and knowledge, invented spelling and all", () => {
-  assert.match(app, /imp: \["benchmarks", "knowledge"\]/);
+test("LEVEL_VIEWS.imp names exactly benchmarks, knowledge and quality, invented spelling and all", () => {
+  assert.match(app, /imp: \["benchmarks", "knowledge", "quality"\]/);
 });
 
 test("both new views have their own error element, hidden by default", () => {

@@ -1227,7 +1227,7 @@ scenarios, signposts. `GET /api/scenarios?scope=` answers the same
 
 ## Quality attributes
 
-L6 Direction's fourth tab (`#107`): which qualities matter for each scope,
+L5 Improvement's third tab (`#107`): which qualities matter for each scope,
 how much, what they trade off against, and whether they are being met —
 **measured, never claimed**. Goals say where the company is heading and
 Policy which external rules it follows; quality attributes say how *good*
@@ -2408,7 +2408,7 @@ goals and policy catalogues imply), the L6 Goals tab under
 `GET /api/scenarios?scope=`, turning one into real work under
 `POST /api/scenarios/promote`, and recomputing driver outcomes and the
 forecast under `POST /api/scenarios/whatif` (see "Scenarios" above), the
-L6 Quality attributes tab under `GET /api/quality?scope=` and a scenario's
+L5 Quality attributes tab under `GET /api/quality?scope=` and a scenario's
 remediation task under `POST /api/quality/remediate` (see "Quality
 attributes" above),
 L4 Operations tab under `GET /api/operations?scope=&window=`, skipping a

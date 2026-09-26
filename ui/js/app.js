@@ -211,17 +211,18 @@ function applyModal([taskId, runId]) {
 // fallback in `scopes.js`.
 const LEVEL_VIEWS = {
   dash: ["dashboard", "site", "activity", "inbox"],
-  // Goals first, then Quality, then Policy: Direction reads vision, then
-  // quality, then rules -- the long-term frame and this cycle's objectives,
-  // how good the work has to be on the way, and only then the control
+  // Goals first, then Policy: Direction reads vision, then rules -- the
+  // long-term frame and this cycle's objectives, and only then the control
   // catalogue that holds the company to what it already committed to.
-  dir: ["goals", "quality", "policy", "scenarios"],
+  dir: ["goals", "policy", "scenarios"],
   // The work first, then how it is running. Intake sits beside Tasks: it
   // is the queue in front of them (`#119`).
   proc: ["tasks", "intake", "workflows", "operations"],
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets", "dependencies"],
-  imp: ["benchmarks", "knowledge"],
+  // Quality closes the row: benchmarks and knowledge are how the work gets
+  // better, quality attributes whether it has got good enough.
+  imp: ["benchmarks", "knowledge", "quality"],
   infra: ["infrastructure", "doctor", "backup"],
 };
 
