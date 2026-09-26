@@ -1614,6 +1614,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hour_metrics_follow_every_window_preset_and_default_to_fourteen_days() {
+        let (engine, database) = scoped_engine();
+        let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 0);
+        let day = now - chrono::Duration::days(1);
+        let fourteen_days = now - chrono::Duration::days(14);
+        let ninety_days = now - chrono::Duration::days(90);
+
+        // Each cutoff has one run ending exactly at it and one starting
+        // exactly at it. The former contributes nothing to that window; the
+        // latter contributes its whole block and blocked segment.
+        for (title, start, end, blocked_from, blocked_to) in [
+            (
+                "inside day",
+                day,
+                day + chrono::Duration::hours(2),
+                day + chrono::Duration::minutes(30),
+                day + chrono::Duration::minutes(90),
+            ),
+            (
+                "before day",
+                day - chrono::Duration::hours(2),
+                day,
+                day - chrono::Duration::minutes(90),
+                day - chrono::Duration::minutes(30),
+            ),
+            (
+                "inside fourteen days",
+                fourteen_days,
+                fourteen_days + chrono::Duration::hours(4),
+                fourteen_days + chrono::Duration::hours(1),
+                fourteen_days + chrono::Duration::hours(3),
+            ),
+            (
+                "before fourteen days",
+                fourteen_days - chrono::Duration::hours(4),
+                fourteen_days,
+                fourteen_days - chrono::Duration::hours(3),
+                fourteen_days - chrono::Duration::hours(1),
+            ),
+            (
+                "inside ninety days",
+                ninety_days,
+                ninety_days + chrono::Duration::hours(6),
+                ninety_days + chrono::Duration::hours(1),
+                ninety_days + chrono::Duration::hours(4),
+            ),
+            (
+                "before ninety days",
+                ninety_days - chrono::Duration::hours(6),
+                ninety_days,
+                ninety_days - chrono::Duration::hours(5),
+                ninety_days - chrono::Duration::hours(2),
+            ),
+        ] {
+            let (task, run) = timed_run(
+                &engine,
+                &database,
+                title,
+                "work",
+                RunStatus::Done,
+                start,
+                Some(end),
+                None,
+            )
+            .await;
+            transition(&engine, &task.id, &run.id, "blocked", blocked_from).await;
+            transition(&engine, &task.id, &run.id, "unblocked", blocked_to).await;
+        }
+
+        let ids = [
+            MetricId::new("agent_hours").unwrap(),
+            MetricId::new("blocked_hours").unwrap(),
+        ];
+        for (window, days, expected_busy, expected_blocked) in [
+            (Some(MetricsWindow::Day), 1, 2.0, 1.0),
+            (Some(MetricsWindow::FourteenDays), 14, 8.0, 4.0),
+            (Some(MetricsWindow::NinetyDays), 90, 18.0, 9.0),
+            (None, 14, 8.0, 4.0),
+        ] {
+            let label = window.map_or_else(|| "omitted".to_string(), |value| value.to_string());
+            let computed = engine
+                .metrics_for(&ids, now, Some("work"), window)
+                .await
+                .unwrap();
+            assert_eq!(
+                metric(&computed, "agent_hours").value,
+                Some(expected_busy),
+                "{label} agent hours"
+            );
+            assert_eq!(
+                metric(&computed, "blocked_hours").value,
+                Some(expected_blocked),
+                "{label} blocked hours"
+            );
+
+            let occupancy = engine
+                .occupancy(None, Some(now - chrono::Duration::days(days)), Some(now))
+                .await
+                .unwrap();
+            let work = occupancy
+                .scopes
+                .iter()
+                .find(|scope| scope.name == "work")
+                .unwrap();
+            assert_eq!(
+                work.rows.iter().map(|row| row.busy_seconds).sum::<i64>() as f64 / 3600.0,
+                expected_busy,
+                "{label} occupancy busy hours"
+            );
+            assert_eq!(
+                work.rows.iter().map(|row| row.blocked_seconds).sum::<i64>() as f64 / 3600.0,
+                expected_blocked,
+                "{label} occupancy blocked hours"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn scoped_requests_validate_scope_but_keep_goal_and_bench_metrics_instance_wide() {
         let (engine, _database) = scoped_engine();
         let mut labelled = NewTask {
