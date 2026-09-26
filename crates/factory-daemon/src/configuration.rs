@@ -1000,7 +1000,7 @@ impl Engine {
                 "a role name is letters, digits, `-`, `_` and `.`, and cannot be empty",
             ));
         }
-        if name == Role::WORKER || name == Role::FOREMAN {
+        if name == Role::WORKER || name == Role::FOREMAN || name == Role::TRIAGER {
             return Err(bad(format!(
                 "{name:?} is a built-in role and cannot be redefined at any level"
             )));
@@ -1038,7 +1038,7 @@ impl Engine {
     /// name to this definition, and the refusal names every one of them.
     pub(crate) async fn delete_role(&self, scope_name: &str, name: &str) -> Result<(String, String)> {
         let name = name.trim().to_string();
-        if name == Role::WORKER || name == Role::FOREMAN {
+        if name == Role::WORKER || name == Role::FOREMAN || name == Role::TRIAGER {
             return Err(bad(format!("{name:?} is a built-in role and cannot be deleted")));
         }
         let given = self.given_roles().await?;
@@ -1879,10 +1879,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_two_that_ship_are_refused_at_every_level() {
+    async fn the_three_that_ship_are_refused_at_every_level() {
         let instance = Instance::new("presets", ROOT, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
         let engine = instance.engine();
-        for name in ["worker", "foreman"] {
+        for name in ["worker", "foreman", "triager"] {
             let defined = engine
                 .define_role("projects", name, spec("wider", &["task.create"], "scope"), false)
                 .await

@@ -768,8 +768,8 @@ pub enum Request {
     /// `#119`: hand work in through the intake gate instead of straight
     /// onto the line. Creates a task in `TaskStatus::Intake` with its
     /// `Intake` record -- no run, and none until it is released. Needs
-    /// `task.create` in the target scope, like `TaskCreate`. An agent's
-    /// request is recorded as source `agent`, whatever it says.
+    /// `intake.add` in the target scope (`#172`; `task.create` before it).
+    /// An agent's request is recorded as source `agent`, whatever it says.
     #[serde(rename = "intake.add")]
     IntakeAdd(crate::intake::NewIntake),
     /// The Intake view and `factory intake list`: every intake item in the
@@ -782,8 +782,11 @@ pub enum Request {
     },
     /// Start the triage node on an item: a task in the item's scope whose
     /// instructions are the generalised `ir:triage`, dispatched at once, that
-    /// answers with `IntakeAssess`. Needs `task.create` and reach over the
-    /// item.
+    /// answers with `IntakeAssess`. Needs `intake.triage` and reach over the
+    /// item (`#172`; `task.create` before it). Refused if the named `agent`
+    /// -- or the scope's default, when none is named -- holds a role that
+    /// may not `task.report`: a triage run that could never report its own
+    /// result would start and stay stuck.
     #[serde(rename = "intake.triage")]
     IntakeTriage {
         id: String,
@@ -791,9 +794,9 @@ pub enum Request {
         agent: Option<String>,
     },
     /// Record an assessment on an item. With `decide`, also apply what the
-    /// rules give -- ready or needs-info, never wontfix. Needs `task.edit`
+    /// rules give -- ready or needs-info, never wontfix. Needs `intake.assess`
     /// and reach over the item -- or to be the run of the item's own triage
-    /// task.
+    /// task (`#172`; `task.edit` before it).
     #[serde(rename = "intake.assess")]
     IntakeAssess {
         id: String,
@@ -801,16 +804,19 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         decide: bool,
     },
-    /// Decide an item: release it, send it back, or close it. The same grant
-    /// and reach as `IntakeAssess`.
+    /// Decide an item: release it, send it back, or close it. Needs
+    /// `intake.decide` and the same reach as `IntakeAssess` (`#172`;
+    /// `task.edit` before it). Releasing ready with `run: true` also needs
+    /// `task.run`, exactly as a workflow-routed release already does.
     #[serde(rename = "intake.decide")]
     IntakeDecide {
         id: String,
         decision: crate::intake::Decision,
     },
     /// Add information to an item that is still in intake -- the answer to a
-    /// needs-info, which puts it back in `received`. Needs `task.create`
-    /// with reach over the item, or to be the one who handed it in.
+    /// needs-info, which puts it back in `received`. Needs `intake.info` with
+    /// reach over the item, or to be the one who handed it in (`#172`;
+    /// `task.create` before it).
     #[serde(rename = "intake.info")]
     IntakeInfo { id: String, text: String },
     /// One task's usage and cost: every run's, and their sum (#117).

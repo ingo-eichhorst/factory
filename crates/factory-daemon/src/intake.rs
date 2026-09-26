@@ -23,6 +23,7 @@ use factory_core::intake::{
     self, AgentOption, Decision, DecisionRecord, Intake, IntakeBoard, IntakeSource, IntakeStage, NewIntake,
     RouteOptions, SourceKind, Verdict, WorkflowOption,
 };
+use factory_core::role::Grant;
 use factory_core::{Event, FactoryError, NewTask, Result, Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus, Trigger};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -190,6 +191,30 @@ impl Engine {
                     )));
                 }
             }
+        }
+        // Whoever the run lands on has to be able to report its own result
+        // -- otherwise it starts and can never close the loop (`#172`).
+        // Resolve exactly the agent `create` below would land it on, named
+        // or not, and check the role it would actually run under.
+        let factory = self.factory_snapshot();
+        let declared = factory.scope(&item.scope)?.clone();
+        let requested = agent
+            .clone()
+            .or_else(|| declared.agent_adapter().map(str::to_string))
+            .unwrap_or_else(|| factory.config.daemon.default_agent.clone());
+        let (resolved, _, _) = self.resolve_agent(&item.scope, &requested)?;
+        let role = self.effective_role(&item.scope, &resolved).await;
+        let may_report = self
+            .roles_for(&item.scope)
+            .get(&role)
+            .is_some_and(|def| def.allows(Grant::TaskReport));
+        if !may_report {
+            return Err(FactoryError::BadRequest(format!(
+                "{resolved} holds {role}, which may not {} ({} needed); a triage run must be able \
+                 to report its own result",
+                Grant::TaskReport.describe(),
+                Grant::TaskReport.as_str(),
+            )));
         }
         let routes = self.intake_routes().await?;
         let triage = self
@@ -760,6 +785,12 @@ mod tests {
     }
 
     fn engine() -> Arc<Engine> {
+        engine_with_scopes(vec![scope("demo"), scope("web")])
+    }
+
+    /// The same, with the caller's own scopes rather than the two plain ones
+    /// -- for a test that needs a declared agent of its own.
+    fn engine_with_scopes(scopes: Vec<Scope>) -> Arc<Engine> {
         let root = std::env::temp_dir().join(format!("factory-intake-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let config = Config {
@@ -772,7 +803,7 @@ mod tests {
             policies: Default::default(),
             quality: Default::default(),
             scope: None,
-            scopes: vec![scope("demo"), scope("web")],
+            scopes,
             infrastructure: Default::default(),
             plugins_dir: None,
         };
@@ -1064,6 +1095,24 @@ mod tests {
         let board = engine.intake_board(None).await.unwrap();
         assert_eq!(board.columns.triaging.len(), 1);
         assert_eq!(engine.intake_board(Some("web")).await.unwrap().columns.triaging.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_triage_run_must_be_able_to_report_its_own_result() {
+        // A declared agent holding a role with no `task.report` -- `triager`
+        // is exactly that role -- must be refused before any run starts.
+        let mut demo = scope("demo");
+        demo.agents = vec![serde_yaml_ng::from_str("name: gatekeeper\nharness: shell\nrole: triager\n").unwrap()];
+        let engine = engine_with_scopes(vec![demo, scope("web")]);
+        let item = add(&engine, "Broken link").await;
+
+        let why = engine.intake_triage(&Caller::Owner, &item.id, Some("gatekeeper".into())).await.unwrap_err();
+        assert!(why.to_string().contains("task.report"), "{why}");
+        assert!(engine.require(&item.id).await.unwrap().intake.unwrap().triage_task.is_none(), "nothing was started");
+
+        // A bare adapter name with no declared role defaults to worker, which
+        // may report -- unaffected by the scope's other declared agent.
+        assert!(engine.intake_triage(&Caller::Owner, &item.id, Some("shell".into())).await.is_ok());
     }
 
     #[tokio::test]

@@ -181,13 +181,18 @@ scope:
 - **foreman** runs a scope: it creates tasks there, edits any of them, and
   assigns them to the other agents in that scope. Its authority stops at the
   scope boundary — a foreman in `demo` cannot touch `root`.
+- **triager** coordinates the intake gate and runs nothing itself: it receives,
+  triages, assesses and decides intake items across its scope, but holds no
+  `task.*`, `agent.*` or `workflow.*` grant at all — starting a triage run
+  (`intake.triage`) is as far as it reaches, and that run executes as the
+  scope's own worker or whichever agent it names, never as the triager.
 
 An agent says which one it is by presenting the token Factory put in its
 session as `FACTORY_TOKEN`; the CLI sends it on every request. No token means
 the owner.
 
-Those two are not the whole list. A role is a **name**, a set of **grants**, and
-a **reach**, and an instance names as many as its way of working needs:
+Those three are not the whole list. A role is a **name**, a set of **grants**,
+and a **reach**, and an instance names as many as its way of working needs:
 
 ```yaml
 roles:
@@ -211,15 +216,29 @@ rather than ignored, and so is an agent given a role the instance never defined
     agent.start  agent.configure  agent.stop  agent.input  run.input
     workflow.create  workflow.edit  workflow.delete  workflow.run  workflow.cancel
     knowledge.write  dataset.edit  bench.run  policy.attest  goals.checkin
+    intake.add  intake.info  intake.triage  intake.assess  intake.decide
 
 Reading is not among them, because reading is open to every agent: one that
 cannot see the board cannot coordinate with anyone.
 
-`worker` and `foreman` ship written in that same vocabulary — a worker is
-`[task.edit, task.report, run.input]` at `reach: own`, a foreman is everything
-at `reach: scope` — and neither can be redefined. An instance that could
-rewrite `worker` from one line would widen every agent that never asked for a
-role.
+`worker`, `foreman` and `triager` ship written in that same vocabulary — a
+worker is `[task.edit, task.report, task.attach, run.input, intake.assess,
+intake.decide]` at `reach: own`, a foreman is everything at `reach: scope`, and
+a triager is exactly the five `intake.*` grants, named rather than written as
+`intake.*`, at `reach: scope` — and none of the three can be redefined. An
+instance that could rewrite `worker` from one line would widen every agent
+that never asked for a role. `task.*` does not expand to any `intake.*` grant,
+and `intake.*` (or `*`) is what does — the two vocabularies are separate on
+purpose, so a role written for tasks does not quietly pick up the intake gate.
+
+Before intake had its own grants (`#172`), it reused the task ones: handing
+something in was `task.create`, triaging, assessing or deciding one was
+`task.edit`. An instance role that named `task.create` or `task.edit` so it
+could work the intake gate keeps those task grants, but loses intake access
+until it also names the matching `intake.*` grants. And `triager` is now a
+name Factory itself defines: an instance or a scope that already names a role
+`triager` fails to load, exactly the refusal a `worker` or `foreman`
+redefinition already got.
 
 What a grant cannot say is written out in `access.rs`, in the arm it belongs
 to: handing a task to somebody else is not editing it, so a role that reaches
@@ -264,9 +283,9 @@ scope:
       role: reviewer
 ```
 
-A scope's roles are, in order: the two built in, the instance root's `roles:`,
-then each scope's `scope.roles` from the top of the tree down to the scope
-itself. The nearest definition wins. A scope's parent is the nearest configured
+A scope's roles are, in order: the three built in, the instance root's
+`roles:`, then each scope's `scope.roles` from the top of the tree down to the
+scope itself. The nearest definition wins. A scope's parent is the nearest configured
 scope above it **by path**, never by name: names may contain `/` and are
 matched loosely on purpose, so a scope named `projects/other` whose directory
 is somewhere else is not below `projects`.
@@ -274,8 +293,8 @@ is somewhere else is not below `projects`.
 - **An override replaces the whole definition** — description, grants and
   reach. Grants are never merged: a merge could only widen, and nobody reading
   either file could tell what the result was.
-- **`worker` and `foreman` cannot be redefined at any level**, for the same
-  reason they cannot be redefined at the root.
+- **`worker`, `foreman` and `triager` cannot be redefined at any level**, for
+  the same reason they cannot be redefined at the root.
 - **Roles never flow up or sideways.** A role defined in `projects/a` does not
   exist in `projects/b` or at the root. An agent given one there is refused,
   and the message lists the roles that scope does have.
