@@ -1097,6 +1097,7 @@ mod tests {
             quality: vec!["baseline".into()],
             infrastructure: Default::default(),
             plugins_dir: None,
+            dashboard: None,
         };
         let database = root.join(".factory/metrics.sqlite");
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
