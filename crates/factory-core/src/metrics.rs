@@ -58,6 +58,56 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
+// =========================================================== MetricsWindow
+
+/// The dashboard-wide interval a metrics request may select. Leaving it
+/// absent preserves each metric's established default; selecting one makes
+/// every run-backed metric read the same trailing interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MetricsWindow {
+    #[serde(rename = "day")]
+    Day,
+    #[serde(rename = "14d")]
+    FourteenDays,
+    #[serde(rename = "90d")]
+    NinetyDays,
+}
+
+impl MetricsWindow {
+    pub fn days(self) -> i64 {
+        match self {
+            Self::Day => 1,
+            Self::FourteenDays => 14,
+            Self::NinetyDays => 90,
+        }
+    }
+}
+
+impl std::fmt::Display for MetricsWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Day => "day",
+            Self::FourteenDays => "14d",
+            Self::NinetyDays => "90d",
+        })
+    }
+}
+
+impl std::str::FromStr for MetricsWindow {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "day" => Ok(Self::Day),
+            "14d" => Ok(Self::FourteenDays),
+            "90d" => Ok(Self::NinetyDays),
+            _ => Err(format!(
+                "{value:?} is not a metrics window; expected day, 14d, or 90d"
+            )),
+        }
+    }
+}
+
 // ================================================================ MetricId
 
 /// A metric's identity: `.`-separated segments, each starting with a
@@ -146,9 +196,20 @@ pub enum Unit {
     /// A count already expressed as a weekly rate (`throughput_week`).
     PerWeek,
     Seconds,
+    Hours,
     /// US dollars, API-equivalent (`unit_cost`) -- what the run's usage
     /// would have cost at the price table it was snapshotted with.
     Usd,
+}
+
+/// Whether a metric follows a requested scope subtree or deliberately stays
+/// instance-wide. Carried on every registry definition so a caller never
+/// mistakes an unscoped number for a scoped one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricCoverage {
+    ScopeAware,
+    InstanceWide,
 }
 
 /// Which direction is an improvement for this metric -- display and
@@ -178,6 +239,7 @@ pub struct MetricDef {
     pub description: String,
     pub unit: Unit,
     pub better: Better,
+    pub coverage: MetricCoverage,
     /// Which Factory data this metric projects -- documentation for a
     /// person or an agent reading the registry, not a pointer this module
     /// itself follows; computing the value is `factory-daemon`'s job.
@@ -204,10 +266,16 @@ fn fixed(
         description: description.to_string(),
         unit,
         better,
+        coverage: MetricCoverage::ScopeAware,
         source,
         available: true,
         unavailable_reason: None,
     }
+}
+
+fn instance_wide(mut def: MetricDef) -> MetricDef {
+    def.coverage = MetricCoverage::InstanceWide;
+    def
 }
 
 fn throughput_week_def() -> MetricDef {
@@ -352,17 +420,39 @@ fn tokens_per_run_def() -> MetricDef {
     )
 }
 
+fn agent_hours_def() -> MetricDef {
+    fixed(
+        "agent_hours",
+        "Agent hours",
+        "Hours covered by run blocks in the selected scope subtree and window. Overlapping runs for one agent count once; blocked time remains included.",
+        Unit::Hours,
+        Better::Lower,
+        "occupancy.rs's per-agent busy_seconds, summed and divided by 3600",
+    )
+}
+
+fn blocked_hours_def() -> MetricDef {
+    fixed(
+        "blocked_hours",
+        "Blocked hours",
+        "Hours covered by blocked segments inside run blocks in the selected scope subtree and window. Blocked time is part of agent_hours, never subtracted from it.",
+        Unit::Hours,
+        Better::Lower,
+        "occupancy.rs's per-agent blocked_seconds, summed and divided by 3600",
+    )
+}
+
 fn compliance_def(framework: &str) -> MetricDef {
     fixed(
         &format!("compliance.{framework}"),
         &format!("Compliance share ({framework})"),
         &format!(
             "Share of {framework}'s counted (regulation/standard) controls that are \
-             satisfied, attested, or not applicable, in the whole-instance subtree rollup."
+             satisfied, attested, or not applicable, in the selected scope subtree rollup."
         ),
         Unit::Ratio,
         Better::Higher,
-        "policy::rollup over policy::worst_across_scopes, evaluated at the instance root (PolicyReport)",
+        "policy::rollup over policy::worst_across_scopes for the selected subtree (PolicyReport)",
     )
 }
 
@@ -370,26 +460,26 @@ fn open_controls_def(framework: &str) -> MetricDef {
     fixed(
         &format!("open_controls.{framework}"),
         &format!("Open controls ({framework})"),
-        &format!("Count of {framework}'s counted controls that are still open or stale, in the whole-instance subtree rollup."),
+        &format!("Count of {framework}'s counted controls that are still open or stale, in the selected scope subtree rollup."),
         Unit::Count,
         Better::Lower,
-        "policy::rollup's open+stale counts, evaluated at the instance root (PolicyReport)",
+        "policy::rollup's open+stale counts for the selected subtree (PolicyReport)",
     )
 }
 
 fn bench_resolve_rate_def(dataset: &str) -> MetricDef {
-    fixed(
+    instance_wide(fixed(
         &format!("bench.resolve_rate.{dataset}"),
         &format!("Bench resolve rate ({dataset})"),
         &format!("The newest settled bench run's resolve rate for dataset {dataset}; an unverified run never counts."),
         Unit::Ratio,
         Better::Higher,
         "bench::aggregate's newest settled BenchResult.resolve_rate",
-    )
+    ))
 }
 
 fn goal_tasks_done_def(objective: &str, kr: &str) -> MetricDef {
-    fixed(
+    instance_wide(fixed(
         &format!("goal_tasks_done.{objective}.{kr}"),
         &format!("Goal tasks done ({objective}/{kr})"),
         &format!(
@@ -400,7 +490,7 @@ fn goal_tasks_done_def(objective: &str, kr: &str) -> MetricDef {
         Unit::Count,
         Better::Higher,
         "task labels (goal=<objective>/<kr>), the newest run per labelled task",
-    )
+    ))
 }
 
 fn quality_def(characteristic: &str) -> MetricDef {
@@ -409,14 +499,13 @@ fn quality_def(characteristic: &str) -> MetricDef {
         &format!("Quality scenarios met ({characteristic})"),
         &format!(
             "Share of every declared quality scenario under ISO 25010 characteristic \
-             {characteristic} that is met, counted once per scope it applies in, across the \
-             whole instance. A draft or no-data scenario counts against it: declared but not \
-             shown to be met is not met. Company-wide only -- a scope name can hold `/`, which a \
-             metric id segment cannot."
+             {characteristic} that is met, counted once per scope it applies in within the \
+             selected subtree. A draft or no-data scenario counts against it: declared but \
+             not shown to be met is not met."
         ),
         Unit::Ratio,
         Better::Higher,
-        "quality::evaluate over every scope's merged utility tree (/api/quality)",
+        "quality::evaluate over each selected scope's merged utility tree (/api/quality)",
     )
 }
 
@@ -427,6 +516,8 @@ pub fn registry() -> Vec<MetricDef> {
         throughput_week_def(),
         first_pass_yield_def(),
         scrap_rate_def(),
+        agent_hours_def(),
+        blocked_hours_def(),
         compliance_def("<framework>"),
         open_controls_def("<framework>"),
         bench_resolve_rate_def("<dataset>"),
@@ -485,6 +576,8 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         ["time_to_recover_p50"] => time_to_recover_p50_def(),
         ["unit_cost"] => unit_cost_def(),
         ["tokens_per_run"] => tokens_per_run_def(),
+        ["agent_hours"] => agent_hours_def(),
+        ["blocked_hours"] => blocked_hours_def(),
         ["compliance", framework] => compliance_def(framework),
         ["open_controls", framework] => open_controls_def(framework),
         ["bench", "resolve_rate", dataset] => bench_resolve_rate_def(dataset),
@@ -607,6 +700,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn metrics_windows_use_the_wire_and_cli_spellings() {
+        for (text, window, days) in [
+            ("day", MetricsWindow::Day, 1),
+            ("14d", MetricsWindow::FourteenDays, 14),
+            ("90d", MetricsWindow::NinetyDays, 90),
+        ] {
+            assert_eq!(text.parse::<MetricsWindow>().unwrap(), window);
+            assert_eq!(window.to_string(), text);
+            assert_eq!(window.days(), days);
+            assert_eq!(
+                serde_json::to_value(window).unwrap(),
+                serde_json::json!(text)
+            );
+        }
+        assert!("7d".parse::<MetricsWindow>().is_err());
+    }
+
+    #[test]
+    fn an_older_metrics_request_without_scope_or_window_still_deserializes() {
+        let request: crate::protocol::Request = serde_json::from_value(serde_json::json!({
+            "op": "metrics",
+            "params": { "ids": ["throughput_week"] }
+        }))
+        .unwrap();
+        assert!(matches!(
+            request,
+            crate::protocol::Request::Metrics {
+                scope: None,
+                window: None,
+                ..
+            }
+        ));
+    }
+
     // -- registry --------------------------------------------------------
 
     #[test]
@@ -617,6 +745,8 @@ mod tests {
         assert_eq!(ids, sorted);
         for expect in [
             "throughput_week",
+            "agent_hours",
+            "blocked_hours",
             "first_pass_yield",
             "scrap_rate",
             "compliance.<framework>",
@@ -635,6 +765,29 @@ mod tests {
         ] {
             assert!(ids.iter().any(|id| id == expect), "missing {expect} in {ids:?}");
         }
+    }
+
+    #[test]
+    fn hour_metrics_are_scope_aware_and_only_goal_and_bench_families_are_instance_wide() {
+        for id in ["agent_hours", "blocked_hours"] {
+            let def = resolve(&MetricId::new(id).unwrap()).unwrap();
+            assert_eq!(def.unit, Unit::Hours, "{id}");
+            assert_eq!(def.coverage, MetricCoverage::ScopeAware, "{id}");
+        }
+        for id in [
+            "bench.resolve_rate.eval-set-a",
+            "goal_tasks_done.ship-compliant.cra-open-zero",
+        ] {
+            assert_eq!(
+                resolve(&MetricId::new(id).unwrap()).unwrap().coverage,
+                MetricCoverage::InstanceWide,
+                "{id}"
+            );
+        }
+        assert!(registry()
+            .into_iter()
+            .filter(|d| d.coverage == MetricCoverage::InstanceWide)
+            .all(|d| d.id.starts_with("bench.") || d.id.starts_with("goal_tasks_done.")));
     }
 
     #[test]

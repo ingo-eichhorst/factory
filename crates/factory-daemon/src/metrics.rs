@@ -12,7 +12,7 @@
 //! "scrapped"/"reworked" a second time -- that module's own doc comment is
 //! the one place those words are defined, and this one only sums buckets it
 //! already produced. `compliance.<fw>`/`open_controls.<fw>` read
-//! `Engine::policy_report(None)`'s subtree rollup. `bench.resolve_rate.<dataset>`
+//! `Engine::policy_report(scope)`'s subtree rollup. `bench.resolve_rate.<dataset>`
 //! reads the newest settled bench run through `bench::aggregate`, the same
 //! function `bench show`'s own results table uses.
 //! `goal_tasks_done.<objective>.<kr>` is the one metric with no existing
@@ -62,14 +62,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
+use factory_core::config::Scope;
 use factory_core::error::{FactoryError, Result};
 use factory_core::goals::GoalsCatalogue;
-use factory_core::metrics::{self, MetricDef, MetricError, MetricId, MetricSeries, MetricValue};
-use factory_core::protocol::{MetricDefView, PolicyReport, ProductionBin};
+use factory_core::metrics::{
+    self, MetricDef, MetricError, MetricId, MetricSeries, MetricValue, MetricsWindow,
+};
+use factory_core::protocol::{
+    MetricDefView, PolicyReport, Production, ProductionBin, ProductionBucket,
+};
 use factory_core::quality::ScenarioStatus;
 use factory_core::task::{TaskFilter, TaskStatus};
 
 use crate::engine::Engine;
+use crate::policies::subtree_scopes;
 
 /// `Request::Metrics`'s answer, and the same shape `#100`'s Scenarios tab
 /// calls `Engine::metrics` for directly -- a plain struct rather than
@@ -101,6 +107,10 @@ fn is_usage_metric(id: &str) -> bool {
     matches!(id, "unit_cost" | "tokens_per_run")
 }
 
+fn is_hours_metric(id: &str) -> bool {
+    matches!(id, "agent_hours" | "blocked_hours")
+}
+
 fn is_policy_metric(id: &str) -> bool {
     id.starts_with("compliance.") || id.starts_with("open_controls.")
 }
@@ -111,10 +121,31 @@ fn is_quality_metric(id: &str) -> bool {
 
 impl Engine {
     /// Compute every id in `ids` (deduplicated), lazily: nothing not asked
-    /// for is ever touched, and `production`/`policy_report`/the bench store
-    /// are each read at most once per call regardless of how many ids ask
-    /// for something behind them.
+    /// for is ever touched, and each backing read is shared by every id that
+    /// needs it (production is read once per exact scope when a subtree must
+    /// be aggregated).
     pub(crate) async fn metrics(self: &Arc<Self>, ids: &[MetricId], now: DateTime<Utc>) -> Result<Metrics> {
+        self.metrics_for(ids, now, None, None).await
+    }
+
+    /// The request-facing form of [`Engine::metrics`]: optionally narrow
+    /// every scope-aware family to one scope's `Scope.path` subtree and
+    /// override each run-backed family's established default interval.
+    pub(crate) async fn metrics_for(
+        self: &Arc<Self>,
+        ids: &[MetricId],
+        now: DateTime<Utc>,
+        scope: Option<&str>,
+        window: Option<MetricsWindow>,
+    ) -> Result<Metrics> {
+        // Resolve once even when the caller asks only for an instance-wide
+        // family: an unknown scope is a bad request, never an empty-looking
+        // bench or goal value.
+        let snapshot = self.factory_snapshot();
+        let (asked_scope, target_scopes) = subtree_scopes(&snapshot, scope)?;
+        let canonical_scope = asked_scope.as_ref().map(|s| s.name.as_str());
+        let target_scope_names: BTreeSet<String> = target_scopes.iter().map(|s| s.name.clone()).collect();
+
         let mut wanted: Vec<MetricId> = Vec::new();
         for id in ids {
             if !wanted.contains(id) {
@@ -147,7 +178,7 @@ impl Engine {
         // or Goals read must not break over one bad profile.
         let needs_quality = resolved.iter().any(|(id, r)| r.is_ok() && is_quality_metric(id.as_str()));
         let quality_inputs = if needs_quality {
-            Some(self.quality_inputs(None, false).await.map_err(|e| e.to_string()))
+            Some(self.quality_inputs(canonical_scope, false).await.map_err(|e| e.to_string()))
         } else {
             None
         };
@@ -172,9 +203,10 @@ impl Engine {
         let needs_runs = computing
             .iter()
             .any(|(id, r)| r.is_ok() && (is_operations_metric(id.as_str()) || is_usage_metric(id.as_str())));
+        let needs_hours = computing.iter().any(|(id, r)| r.is_ok() && is_hours_metric(id.as_str()));
 
         let production = if needs_production {
-            Some(self.production(Some(5), Some(ProductionBin::Day), None).await?)
+            Some(self.metric_production(canonical_scope, &target_scopes, window, now).await?)
         } else {
             None
         };
@@ -182,16 +214,37 @@ impl Engine {
         // failing before it, and cutting the history at the window's edge
         // would shorten that streak rather than leave it out.
         let runs = if needs_runs {
-            Some(
-                self.store
-                    .runs_between(now - chrono::Duration::days(2 * OPERATIONS_WINDOW_DAYS), now)
-                    .await?,
-            )
+            let run_window_days = window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS);
+            let mut runs = self.store
+                .runs_between(now - chrono::Duration::days(2 * run_window_days), now)
+                .await?;
+            if canonical_scope.is_some() {
+                let tasks = self.store.list(&TaskFilter::default()).await?;
+                let task_ids: BTreeSet<&str> = tasks
+                    .iter()
+                    .filter(|task| target_scope_names.contains(&snapshot.canonical_scope_name(&task.scope)))
+                    .map(|task| task.id.as_str())
+                    .collect();
+                runs.retain(|run| task_ids.contains(run.task_id.as_str()));
+            }
+            Some(runs)
         } else {
             None
         };
         let policy_report = if needs_policy {
-            Some(self.policy_report(None).await?)
+            Some(self.policy_report(canonical_scope).await?)
+        } else {
+            None
+        };
+        let hours = if needs_hours {
+            let days = window.map(MetricsWindow::days).unwrap_or(14);
+            let occupancy = self
+                .occupancy(None, Some(now - chrono::Duration::days(days)), Some(now))
+                .await?;
+            Some(HoursTotals::from_occupancy(
+                &occupancy,
+                canonical_scope.map(|_| &target_scope_names),
+            ))
         } else {
             None
         };
@@ -202,8 +255,17 @@ impl Engine {
             if def_result.is_err() {
                 continue;
             }
-            let (value, series) =
-                self.compute_one(id, production.as_ref(), policy_report.as_ref(), runs.as_deref(), now).await?;
+            let (value, series) = self
+                .compute_one(
+                    id,
+                    production.as_ref(),
+                    policy_report.as_ref(),
+                    runs.as_deref(),
+                    hours.as_ref(),
+                    now,
+                    window,
+                )
+                .await?;
             computed.insert(id.clone(), value);
             if let Some(s) = series {
                 computed_series.insert(id.clone(), s);
@@ -271,6 +333,39 @@ impl Engine {
         Ok(Metrics { values, series, registry })
     }
 
+    /// Production's public scope parameter is intentionally exact. Metrics
+    /// select a subtree, so read each exact scope and add the aligned daily
+    /// grids; this keeps production's one containment rule authoritative.
+    async fn metric_production(
+        self: &Arc<Self>,
+        scope: Option<&str>,
+        target_scopes: &[Scope],
+        window: Option<MetricsWindow>,
+        now: DateTime<Utc>,
+    ) -> Result<Production> {
+        let minutes = window
+            .map(|window| (window.days() * 24 * 60) as u32)
+            .or(Some(5));
+        if scope.is_none() {
+            return self
+                .production_at(minutes, Some(ProductionBin::Day), None, now)
+                .await;
+        }
+        let mut aggregate: Option<Production> = None;
+        for target in target_scopes {
+            let next = self
+                .production_at(minutes, Some(ProductionBin::Day), Some(target.name.clone()), now)
+                .await?;
+            match &mut aggregate {
+                None => aggregate = Some(next),
+                Some(total) => merge_production(total, next),
+            }
+        }
+        aggregate.ok_or_else(|| {
+            FactoryError::BadRequest(format!("scope {scope:?} has no configured subtree"))
+        })
+    }
+
     /// One available, non-`quality.*` metric's value, and its series when
     /// it has one, off the `production`/`policy_report`/`runs` this call
     /// already read (each `Some` exactly when some id needs it).
@@ -280,22 +375,52 @@ impl Engine {
         production: Option<&factory_core::protocol::Production>,
         policy_report: Option<&PolicyReport>,
         runs: Option<&[factory_core::run::Run]>,
+        hours: Option<&HoursTotals>,
         now: DateTime<Utc>,
+        window: Option<MetricsWindow>,
     ) -> Result<(MetricValue, Option<MetricSeries>)> {
         let daily = || &production.expect("needs_production set").daily;
         Ok(if id.as_str() == "throughput_week" {
-            let s = throughput_week_series(daily());
-            (value_from_series(&s, now, "no finished runs recorded yet"), Some(s))
+            let days = window.map(MetricsWindow::days).unwrap_or(7) as usize;
+            let mut s = throughput_series(daily(), days);
+            let value = match window {
+                Some(_) => exact_production_value(id, &production.expect("needs_production set").buckets, days, now),
+                None => value_from_series(&s, now, "no finished runs recorded yet"),
+            };
+            align_series_end(&mut s, &value, now);
+            (value, Some(s))
         } else if id.as_str() == "first_pass_yield" {
-            let s = first_pass_yield_series(daily());
-            (ratio_value(value_from_series(&s, now, NO_RECENT_RUNS), daily(), 28, now), Some(s))
+            let days = window.map(MetricsWindow::days).unwrap_or(28) as usize;
+            let mut s = first_pass_yield_series(daily(), days);
+            let value = match window {
+                Some(_) => exact_production_value(id, &production.expect("needs_production set").buckets, days, now),
+                None => ratio_value(value_from_series(&s, now, &no_recent_runs(days)), daily(), days, now),
+            };
+            align_series_end(&mut s, &value, now);
+            (value, Some(s))
         } else if id.as_str() == "scrap_rate" {
-            let s = scrap_rate_series(daily());
-            (ratio_value(value_from_series(&s, now, NO_RECENT_RUNS), daily(), 28, now), Some(s))
+            let days = window.map(MetricsWindow::days).unwrap_or(28) as usize;
+            let mut s = scrap_rate_series(daily(), days);
+            let value = match window {
+                Some(_) => exact_production_value(id, &production.expect("needs_production set").buckets, days, now),
+                None => ratio_value(value_from_series(&s, now, &no_recent_runs(days)), daily(), days, now),
+            };
+            align_series_end(&mut s, &value, now);
+            (value, Some(s))
         } else if is_operations_metric(id.as_str()) {
-            (operations_value(id, runs.expect("needs_runs set"), now), None)
+            (
+                operations_value(id, runs.expect("needs_runs set"), now, window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS)),
+                None,
+            )
         } else if is_usage_metric(id.as_str()) {
-            (usage_value(id, runs.expect("needs_runs set"), now), None)
+            (
+                usage_value(id, runs.expect("needs_runs set"), now, window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS)),
+                None,
+            )
+        } else if is_hours_metric(id.as_str()) {
+            let totals = hours.expect("needs_hours set");
+            let seconds = if id.as_str() == "agent_hours" { totals.busy_seconds } else { totals.blocked_seconds };
+            (MetricValue { id: id.clone(), value: Some(seconds as f64 / 3600.0), as_of: now, reason: None }, None)
         } else if let Some(framework) = id.as_str().strip_prefix("compliance.") {
             (compliance_value(id, policy_report.expect("needs_policy set"), framework, now), None)
         } else if let Some(framework) = id.as_str().strip_prefix("open_controls.") {
@@ -474,6 +599,71 @@ pub(crate) fn push_if_known(ids: &mut Vec<MetricId>, id: &MetricId) {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct HoursTotals {
+    busy_seconds: i64,
+    blocked_seconds: i64,
+}
+
+impl HoursTotals {
+    fn from_occupancy(
+        occupancy: &factory_core::occupancy::Occupancy,
+        selected_scopes: Option<&BTreeSet<String>>,
+    ) -> Self {
+        let mut busy_seconds = 0;
+        let mut blocked_seconds = 0;
+        for scope in &occupancy.scopes {
+            if selected_scopes.is_some_and(|selected| !selected.contains(&scope.name)) {
+                continue;
+            }
+            for row in &scope.rows {
+                busy_seconds += row.busy_seconds;
+                blocked_seconds += row.blocked_seconds;
+            }
+        }
+        Self {
+            busy_seconds,
+            blocked_seconds,
+        }
+    }
+}
+
+fn merge_production(total: &mut Production, next: Production) {
+    total.from = total.from.min(next.from);
+    total.to = total.to.max(next.to);
+    total.earliest_run = match (total.earliest_run, next.earliest_run) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    merge_buckets(&mut total.buckets, next.buckets);
+    merge_buckets(&mut total.daily, next.daily);
+}
+
+fn merge_buckets(total: &mut Vec<ProductionBucket>, next: Vec<ProductionBucket>) {
+    let mut positions: BTreeMap<NaiveDate, usize> = total
+        .iter()
+        .enumerate()
+        .map(|(index, bucket)| (bucket.from.date_naive(), index))
+        .collect();
+    for bucket in next {
+        let day = bucket.from.date_naive();
+        if let Some(index) = positions.get(&day).copied() {
+            let target = &mut total[index];
+            target.from = target.from.min(bucket.from);
+            target.to = target.to.max(bucket.to);
+            target.finished += bucket.finished;
+            target.scrapped += bucket.scrapped;
+            target.reworked += bucket.reworked;
+            target.first_pass += bucket.first_pass;
+            target.partial |= bucket.partial;
+        } else {
+            positions.insert(day, total.len());
+            total.push(bucket);
+        }
+    }
+    total.sort_by_key(|bucket| bucket.from);
+}
+
 /// Sum `finished`/`scrapped`/`reworked`/`first_pass` over a `window`-day
 /// trailing window ending at each day in `daily` (clipped at the start of
 /// the grid, so the earliest few points are over a shorter window than
@@ -501,10 +691,13 @@ where
     points
 }
 
-fn throughput_week_series(daily: &[factory_core::protocol::ProductionBucket]) -> MetricSeries {
+fn throughput_series(
+    daily: &[factory_core::protocol::ProductionBucket],
+    window: usize,
+) -> MetricSeries {
     MetricSeries {
         id: MetricId::new("throughput_week").expect("fixed id"),
-        points: rolling_series(daily, 7, |finished, _, _, _| Some(f64::from(finished))),
+        points: rolling_series(daily, window, |finished, _, _, _| Some(f64::from(finished))),
     }
 }
 
@@ -513,10 +706,13 @@ fn throughput_week_series(daily: &[factory_core::protocol::ProductionBucket]) ->
 /// (`reworked: 0`, `first_pass: 0`) is a real `0.0`, not a manufactured
 /// `1.0`. See `production.rs`'s module doc comment for `first_pass`'s own
 /// definition.
-fn first_pass_yield_series(daily: &[factory_core::protocol::ProductionBucket]) -> MetricSeries {
+fn first_pass_yield_series(
+    daily: &[factory_core::protocol::ProductionBucket],
+    window: usize,
+) -> MetricSeries {
     MetricSeries {
         id: MetricId::new("first_pass_yield").expect("fixed id"),
-        points: rolling_series(daily, 28, |finished, _, _, first_pass| {
+        points: rolling_series(daily, window, |finished, _, _, first_pass| {
             if finished == 0 {
                 None
             } else {
@@ -526,10 +722,13 @@ fn first_pass_yield_series(daily: &[factory_core::protocol::ProductionBucket]) -
     }
 }
 
-fn scrap_rate_series(daily: &[factory_core::protocol::ProductionBucket]) -> MetricSeries {
+fn scrap_rate_series(
+    daily: &[factory_core::protocol::ProductionBucket],
+    window: usize,
+) -> MetricSeries {
     MetricSeries {
         id: MetricId::new("scrap_rate").expect("fixed id"),
-        points: rolling_series(daily, 28, |finished, scrapped, _, _| {
+        points: rolling_series(daily, window, |finished, scrapped, _, _| {
             if finished == 0 {
                 None
             } else {
@@ -553,7 +752,71 @@ fn value_from_series(series: &MetricSeries, now: DateTime<Utc>, empty_reason: &s
     }
 }
 
-const NO_RECENT_RUNS: &str = "no finished runs in the trailing 28 days";
+/// The explicit request window is an exact timestamp interval. Production's
+/// `buckets` cover that interval (including its partial first day), whereas
+/// `daily` is the calendar-aligned 53-week history used for sparklines.
+fn exact_production_value(
+    id: &MetricId,
+    buckets: &[ProductionBucket],
+    window_days: usize,
+    now: DateTime<Utc>,
+) -> MetricValue {
+    let (finished, scrapped, first_pass) =
+        buckets
+            .iter()
+            .fold((0u32, 0u32, 0u32), |(f, s, p), bucket| {
+                (
+                    f + bucket.finished,
+                    s + bucket.scrapped,
+                    p + bucket.first_pass,
+                )
+            });
+    if id.as_str() == "throughput_week" {
+        return MetricValue {
+            id: id.clone(),
+            value: Some(f64::from(finished)),
+            as_of: now,
+            reason: None,
+        };
+    }
+    if finished == 0 {
+        return MetricValue {
+            id: id.clone(),
+            value: None,
+            as_of: now,
+            reason: Some(no_recent_runs(window_days)),
+        };
+    }
+    let numerator = if id.as_str() == "first_pass_yield" {
+        first_pass
+    } else {
+        scrapped
+    };
+    let as_of = buckets
+        .iter()
+        .rev()
+        .find(|bucket| bucket.finished > 0)
+        .map(|bucket| bucket.to)
+        .unwrap_or(now);
+    MetricValue {
+        id: id.clone(),
+        value: Some(f64::from(numerator) / f64::from(finished)),
+        as_of,
+        reason: None,
+    }
+}
+
+fn align_series_end(series: &mut MetricSeries, value: &MetricValue, now: DateTime<Utc>) {
+    let Some(value) = value.value else { return };
+    match series.points.last_mut() {
+        Some((day, current)) if *day == now.date_naive() => *current = value,
+        _ => series.points.push((now.date_naive(), value)),
+    }
+}
+
+fn no_recent_runs(window: usize) -> String {
+    format!("no finished runs in the trailing {window} days")
+}
 
 /// A production ratio as its registry entry defines it -- over the trailing
 /// `window` days -- with an honest `as_of`.
@@ -579,7 +842,7 @@ fn ratio_value(mut value: MetricValue, daily: &[factory_core::protocol::Producti
         _ => {
             value.value = None;
             value.as_of = now;
-            value.reason = Some(NO_RECENT_RUNS.to_string());
+            value.reason = Some(no_recent_runs(window));
         }
     }
     value
@@ -593,8 +856,8 @@ fn ratio_value(mut value: MetricValue, daily: &[factory_core::protocol::Producti
 /// quality scenario's `max_age` reads a figure nothing has moved in weeks
 /// as stale. With no value, `now`, beside the reason -- the same as a
 /// production ratio with nothing finished.
-fn operations_value(id: &MetricId, runs: &[factory_core::run::Run], now: DateTime<Utc>) -> MetricValue {
-    let window = factory_core::operations::Window::trailing(now, OPERATIONS_WINDOW_DAYS);
+fn operations_value(id: &MetricId, runs: &[factory_core::run::Run], now: DateTime<Utc>, window_days: i64) -> MetricValue {
+    let window = factory_core::operations::Window::trailing(now, window_days);
     match factory_core::operations::registry_metric(id.as_str(), runs, &window) {
         Some(figure) => MetricValue {
             id: id.clone(),
@@ -617,8 +880,13 @@ fn operations_value(id: &MetricId, runs: &[factory_core::run::Run], now: DateTim
 /// `unit_cost`/`tokens_per_run`, `as_of` the newest run end behind the
 /// value, like the operations metrics -- `now` beside a reason when there
 /// is none.
-fn usage_value(id: &MetricId, runs: &[factory_core::run::Run], now: DateTime<Utc>) -> MetricValue {
-    match factory_core::usage::usage_metric(id.as_str(), runs, now, OPERATIONS_WINDOW_DAYS) {
+fn usage_value(
+    id: &MetricId,
+    runs: &[factory_core::run::Run],
+    now: DateTime<Utc>,
+    window_days: i64,
+) -> MetricValue {
+    match factory_core::usage::usage_metric(id.as_str(), runs, now, window_days) {
         Some(figure) => MetricValue {
             id: id.clone(),
             value: figure.value,
@@ -673,11 +941,11 @@ fn compliance_value(id: &MetricId, report: &PolicyReport, framework: &str, now: 
 }
 
 /// `quality.<characteristic>`: of every declared scenario under
-/// `characteristic`, counted once per scope it applies in across the whole
-/// instance, the share that is `met`. A draft or `no_data` scenario counts
-/// in the denominator -- declared but not shown to be met is not met, the
-/// same "never green without evidence" rule the tab itself keeps. `None`,
-/// with the reason, for a characteristic ISO 25010 does not name or one no
+/// `characteristic`, counted once per scope it applies in within the selected
+/// subtree, the share that is `met`. A draft or `no_data` scenario counts in
+/// the denominator -- declared but not shown to be met is not met, the same
+/// "never green without evidence" rule the tab itself keeps. `None`, with the
+/// reason, for a characteristic ISO 25010 does not name or one no selected
 /// scope declares anything under: nothing declared is not "all met".
 fn quality_value(id: &MetricId, rollup: &QualityRollup, characteristic: &str, now: DateTime<Utc>) -> MetricValue {
     let unknown = factory_core::quality::CATALOGUE.iter().all(|c| c.id != characteristic);
@@ -741,9 +1009,11 @@ mod tests {
     use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::TaskStore;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
-    use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
-    use factory_core::task::{NewTask, TaskPatch};
+    use factory_core::run::{NewRun, Run, RunPatch, RunStatus, Trigger};
+    use factory_core::task::{NewTask, TaskEntry, TaskPatch};
+    use factory_core::usage::{RunUsage, TokenCounts, UsageState};
     use factory_plugins::{Registry, SqliteStore};
+    use rusqlite::params;
     use std::path::PathBuf;
 
     fn scope_at(id: &str, name: &str, path: &str) -> Scope {
@@ -777,6 +1047,140 @@ mod tests {
         let registry = Registry::with_builtins();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    /// A path-shaped scope tree whose names deliberately do not share
+    /// prefixes: `work` owns `nested`; `side` is a sibling. Policy is n/a in
+    /// the work subtree but open at the sibling, and the quality profile's
+    /// sandbox scenario is met in work/nested but not at side.
+    fn scoped_engine() -> (Arc<Engine>, PathBuf) {
+        let root = std::env::temp_dir().join(format!("factory-scoped-metrics-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::create_dir_all(root.join(".factory/quality")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/cra.yaml"),
+            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: a\n    title: A\n    evidence:\n      - check: attestation\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".factory/quality/baseline.yaml"),
+            "attributes:\n  - id: reliability\n    importance: H\n    difficulty: M\n    scenarios:\n      - { id: sandboxed, measure: { check: sandbox } }\n",
+        )
+        .unwrap();
+
+        let mut root_scope: Scope = serde_yaml_ng::from_str("id: root-id\nname: company\n").unwrap();
+        root_scope.path = PathBuf::from(".");
+        let mut work: Scope = serde_yaml_ng::from_str(
+            "id: work-id\nname: work\nagents:\n  - { name: worker, harness: shell, sandbox: docker }\npolicies:\n  not_applicable:\n    - { control: cra/a, rationale: test }\n",
+        )
+        .unwrap();
+        work.path = PathBuf::from("projects/work");
+        let mut nested: Scope = serde_yaml_ng::from_str(
+            "id: nested-id\nname: nested\nagents:\n  - { name: worker, harness: shell, sandbox: docker }\n",
+        )
+        .unwrap();
+        nested.path = PathBuf::from("projects/work/nested");
+        let mut side: Scope = serde_yaml_ng::from_str(
+            "id: side-id\nname: side\nagents:\n  - { name: worker, harness: shell, sandbox: none }\n",
+        )
+        .unwrap();
+        side.path = PathBuf::from("projects/side");
+
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(root_scope.clone()),
+            scopes: vec![root_scope, work, nested, side],
+            roles: Default::default(),
+            policies: PolicyDeclaration { frameworks: vec!["cra".into()], ..Default::default() },
+            quality: vec!["baseline".into()],
+            infrastructure: Default::default(),
+            plugins_dir: None,
+            dashboard: None,
+        };
+        let database = root.join(".factory/metrics.sqlite");
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
+        let engine = Arc::new(Engine::new(
+            Factory { root, config },
+            Registry::with_builtins(),
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+        (engine, database)
+    }
+
+    fn measured(usd: f64, tokens: u64) -> RunUsage {
+        RunUsage {
+            state: UsageState::Known,
+            reason: None,
+            tokens: TokenCounts { input: Some(tokens), output: Some(0), cache_read: Some(0), cache_write: Some(0) },
+            cost_usd: Some(usd),
+            ..RunUsage::unknown("", 2)
+        }
+    }
+
+    /// The sqlite adapter owns run timestamps, so a fixture that needs exact
+    /// historical boundaries rewrites its just-created record as one atomic
+    /// row update, including the JSON source of truth.
+    fn store_run_at(database: &std::path::Path, run: &Run) {
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let data = serde_json::to_string(run).unwrap();
+        connection
+            .execute(
+                "UPDATE runs SET status = ?2, started_at = ?3, ended_at = ?4, data = ?5 WHERE id = ?1",
+                params![run.id, run.status.as_str(), run.started_at.to_rfc3339(), run.ended_at.map(|at| at.to_rfc3339()), data],
+            )
+            .unwrap();
+    }
+
+    async fn timed_run(
+        engine: &Arc<Engine>,
+        database: &std::path::Path,
+        title: &str,
+        scope: &str,
+        status: RunStatus,
+        started_at: DateTime<Utc>,
+        ended_at: Option<DateTime<Utc>>,
+        usage: Option<RunUsage>,
+    ) -> (factory_core::task::Task, Run) {
+        let task = engine
+            .store
+            .create(&task_from_new(
+                NewTask { title: title.into(), ..Default::default() },
+                scope.into(),
+                "worker".into(),
+                "shell".into(),
+            ))
+            .await
+            .unwrap();
+        let mut run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "worker".into(),
+                adapter: "shell".into(),
+                runtime: "shell".into(),
+                token: "tok".into(),
+                queued_at: Some(started_at),
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        run.status = status;
+        run.started_at = started_at;
+        run.ended_at = ended_at;
+        run.usage = usage;
+        store_run_at(database, &run);
+        (task, run)
+    }
+
+    async fn transition(engine: &Arc<Engine>, task_id: &str, run_id: &str, kind: &str, at: DateTime<Utc>) {
+        let mut entry = TaskEntry::new("agent", kind, kind).in_run(run_id);
+        entry.at = at;
+        engine.store.append_entry(task_id, &entry).await.unwrap();
     }
 
     /// A finished run for a fresh task in `root` (or the next attempt of an
@@ -840,6 +1244,639 @@ mod tests {
             .await
             .unwrap();
         task
+    }
+
+    // ------------------------------------------------------- scope/window
+
+    fn metric<'a>(computed: &'a Metrics, id: &str) -> &'a MetricValue {
+        computed
+            .values
+            .iter()
+            .find(|value| value.id.as_str() == id)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_scope_includes_descendants_and_excludes_siblings_across_metric_families() {
+        let (engine, database) = scoped_engine();
+        let now = Utc::now();
+        let (parent_task, parent_run) = timed_run(
+            &engine,
+            &database,
+            "parent done",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::hours(3),
+            Some(now - chrono::Duration::hours(2)),
+            Some(measured(2.0, 200)),
+        )
+        .await;
+        transition(
+            &engine,
+            &parent_task.id,
+            &parent_run.id,
+            "blocked",
+            now - chrono::Duration::minutes(165),
+        )
+        .await;
+        transition(
+            &engine,
+            &parent_task.id,
+            &parent_run.id,
+            "unblocked",
+            now - chrono::Duration::minutes(150),
+        )
+        .await;
+        let (child_task, child_run) = timed_run(
+            &engine,
+            &database,
+            "child done",
+            "nested",
+            RunStatus::Done,
+            now - chrono::Duration::hours(2),
+            Some(now - chrono::Duration::hours(1)),
+            Some(measured(4.0, 400)),
+        )
+        .await;
+        transition(
+            &engine,
+            &child_task.id,
+            &child_run.id,
+            "blocked",
+            now - chrono::Duration::minutes(105),
+        )
+        .await;
+        transition(
+            &engine,
+            &child_task.id,
+            &child_run.id,
+            "unblocked",
+            now - chrono::Duration::minutes(75),
+        )
+        .await;
+        let (sibling_task, sibling_run) = timed_run(
+            &engine,
+            &database,
+            "sibling failure",
+            "side",
+            RunStatus::Failed,
+            now - chrono::Duration::hours(2),
+            Some(now - chrono::Duration::minutes(30)),
+            Some(measured(90.0, 9_000)),
+        )
+        .await;
+        transition(
+            &engine,
+            &sibling_task.id,
+            &sibling_run.id,
+            "blocked",
+            now - chrono::Duration::minutes(90),
+        )
+        .await;
+        transition(
+            &engine,
+            &sibling_task.id,
+            &sibling_run.id,
+            "unblocked",
+            now - chrono::Duration::minutes(30),
+        )
+        .await;
+
+        let ids: Vec<MetricId> = [
+            "throughput_week",
+            "fail_rate",
+            "unit_cost",
+            "tokens_per_run",
+            "compliance.cra",
+            "open_controls.cra",
+            "quality.reliability",
+            "agent_hours",
+            "blocked_hours",
+        ]
+        .into_iter()
+        .map(|id| MetricId::new(id).unwrap())
+        .collect();
+        let scoped = engine
+            .metrics_for(&ids, now, Some("work"), Some(MetricsWindow::Day))
+            .await
+            .unwrap();
+
+        assert_eq!(metric(&scoped, "throughput_week").value, Some(2.0));
+        assert_eq!(metric(&scoped, "fail_rate").value, Some(0.0));
+        assert_eq!(metric(&scoped, "unit_cost").value, Some(3.0));
+        assert_eq!(metric(&scoped, "tokens_per_run").value, Some(300.0));
+        assert_eq!(metric(&scoped, "compliance.cra").value, Some(1.0));
+        assert_eq!(metric(&scoped, "open_controls.cra").value, Some(0.0));
+        assert_eq!(metric(&scoped, "quality.reliability").value, Some(1.0));
+        assert_eq!(metric(&scoped, "agent_hours").value, Some(2.0));
+        assert_eq!(metric(&scoped, "blocked_hours").value, Some(0.75));
+
+        let occupancy = engine
+            .occupancy(None, Some(now - chrono::Duration::days(1)), Some(now))
+            .await
+            .unwrap();
+        let subtree_rows = occupancy
+            .scopes
+            .iter()
+            .filter(|scope| matches!(scope.name.as_str(), "work" | "nested"))
+            .flat_map(|scope| &scope.rows);
+        let (subtree_busy, subtree_blocked) = subtree_rows
+            .fold((0, 0), |(busy, blocked), row| {
+                (busy + row.busy_seconds, blocked + row.blocked_seconds)
+            });
+        let side = occupancy
+            .scopes
+            .iter()
+            .find(|scope| scope.name == "side")
+            .unwrap();
+        assert_eq!(
+            metric(&scoped, "agent_hours").value,
+            Some(subtree_busy as f64 / 3600.0),
+            "scope hours match the work subtree's occupancy rows"
+        );
+        assert_eq!(
+            metric(&scoped, "blocked_hours").value,
+            Some(subtree_blocked as f64 / 3600.0),
+            "blocked hours match the work subtree's occupancy rows"
+        );
+        assert_eq!(
+            side.rows.iter().map(|row| row.busy_seconds).sum::<i64>() as f64 / 3600.0,
+            1.5,
+            "the excluded sibling has distinct busy time"
+        );
+        assert_eq!(
+            side.rows.iter().map(|row| row.blocked_seconds).sum::<i64>() as f64 / 3600.0,
+            1.0,
+            "the excluded sibling has distinct blocked time"
+        );
+
+        let all = engine
+            .metrics_for(&ids, now, None, Some(MetricsWindow::Day))
+            .await
+            .unwrap();
+        assert_eq!(metric(&all, "throughput_week").value, Some(3.0));
+        assert_eq!(metric(&all, "fail_rate").value, Some(1.0 / 3.0));
+        assert_eq!(
+            metric(&all, "unit_cost").value,
+            Some(48.0),
+            "all cost divided by the two done units"
+        );
+        assert!(metric(&all, "compliance.cra").value.unwrap() < 1.0);
+        assert_eq!(metric(&all, "open_controls.cra").value, Some(1.0));
+        assert!(metric(&all, "quality.reliability").value.unwrap() < 1.0);
+        assert_eq!(metric(&all, "agent_hours").value, Some(3.5));
+        assert_eq!(metric(&all, "blocked_hours").value, Some(1.75));
+    }
+
+    #[tokio::test]
+    async fn explicit_windows_override_run_backed_metrics_and_omission_keeps_legacy_windows() {
+        let (engine, database) = scoped_engine();
+        let now = Utc::now();
+        for (name, age, status, usd) in [
+            ("recent", chrono::Duration::hours(12), RunStatus::Done, 1.0),
+            (
+                "eight days",
+                chrono::Duration::days(8),
+                RunStatus::Failed,
+                2.0,
+            ),
+            (
+                "thirty days",
+                chrono::Duration::days(30),
+                RunStatus::Failed,
+                3.0,
+            ),
+            (
+                "hundred days",
+                chrono::Duration::days(100),
+                RunStatus::Done,
+                4.0,
+            ),
+        ] {
+            let end = now - age;
+            timed_run(
+                &engine,
+                &database,
+                name,
+                "work",
+                status,
+                end - chrono::Duration::hours(1),
+                Some(end),
+                Some(measured(usd, (usd * 100.0) as u64)),
+            )
+            .await;
+        }
+
+        let ids: Vec<MetricId> = [
+            "throughput_week",
+            "first_pass_yield",
+            "fail_rate",
+            "unit_cost",
+        ]
+        .into_iter()
+        .map(|id| MetricId::new(id).unwrap())
+        .collect();
+        for (window, finished, failures, cost) in [
+            (MetricsWindow::Day, 1.0, 0.0, 1.0),
+            (MetricsWindow::FourteenDays, 2.0, 0.5, 3.0),
+            (MetricsWindow::NinetyDays, 3.0, 2.0 / 3.0, 6.0),
+        ] {
+            let computed = engine
+                .metrics_for(&ids, now, Some("work"), Some(window))
+                .await
+                .unwrap();
+            assert_eq!(
+                metric(&computed, "throughput_week").value,
+                Some(finished),
+                "{window}"
+            );
+            assert_eq!(
+                metric(&computed, "fail_rate").value,
+                Some(failures),
+                "{window}"
+            );
+            assert_eq!(metric(&computed, "unit_cost").value, Some(cost), "{window}");
+        }
+
+        let legacy = engine
+            .metrics_for(&ids, now, Some("work"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            metric(&legacy, "throughput_week").value,
+            Some(1.0),
+            "legacy throughput is seven days"
+        );
+        assert_eq!(
+            metric(&legacy, "first_pass_yield").value,
+            Some(0.5),
+            "legacy production ratio is 28 days"
+        );
+        assert_eq!(
+            metric(&legacy, "fail_rate").value,
+            Some(0.5),
+            "legacy operations is 28 days"
+        );
+        assert_eq!(
+            metric(&legacy, "unit_cost").value,
+            Some(3.0),
+            "legacy usage is 28 days"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_window_uses_one_half_open_cutoff_across_run_backed_families() {
+        let (engine, database) = scoped_engine();
+        // Keep the request clock deliberately distinct from the wall clock:
+        // every family must use this one captured bound, not sample its own.
+        let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 0)
+            + chrono::Duration::hours(2);
+        let cutoff = now - chrono::Duration::days(1);
+        let (cutoff_task, cutoff_run) = timed_run(
+            &engine,
+            &database,
+            "exactly at cutoff",
+            "work",
+            RunStatus::Failed,
+            cutoff - chrono::Duration::hours(1),
+            Some(cutoff),
+            Some(measured(99.0, 9_900)),
+        )
+        .await;
+        transition(
+            &engine,
+            &cutoff_task.id,
+            &cutoff_run.id,
+            "blocked",
+            cutoff - chrono::Duration::hours(1),
+        )
+        .await;
+        transition(&engine, &cutoff_task.id, &cutoff_run.id, "unblocked", cutoff).await;
+
+        let (inside_task, inside_run) = timed_run(
+            &engine,
+            &database,
+            "inside cutoff",
+            "work",
+            RunStatus::Done,
+            cutoff,
+            Some(cutoff + chrono::Duration::hours(1)),
+            Some(measured(1.0, 100)),
+        )
+        .await;
+        transition(&engine, &inside_task.id, &inside_run.id, "blocked", cutoff).await;
+        transition(
+            &engine,
+            &inside_task.id,
+            &inside_run.id,
+            "unblocked",
+            cutoff + chrono::Duration::hours(1),
+        )
+        .await;
+
+        let ids: Vec<MetricId> = [
+            "throughput_week",
+            "fail_rate",
+            "unit_cost",
+            "agent_hours",
+            "blocked_hours",
+        ]
+            .into_iter()
+            .map(|id| MetricId::new(id).unwrap())
+            .collect();
+        let computed = engine
+            .metrics_for(&ids, now, Some("work"), Some(MetricsWindow::Day))
+            .await
+            .unwrap();
+        assert_eq!(metric(&computed, "throughput_week").value, Some(1.0));
+        assert_eq!(metric(&computed, "fail_rate").value, Some(0.0));
+        assert_eq!(metric(&computed, "unit_cost").value, Some(1.0));
+        assert_eq!(metric(&computed, "agent_hours").value, Some(1.0));
+        assert_eq!(metric(&computed, "blocked_hours").value, Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn hour_metrics_match_occupancy_unions_and_keep_blocked_time_inside_total_time() {
+        let (engine, database) = scoped_engine();
+        let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 0);
+        let (first_task, first) = timed_run(
+            &engine,
+            &database,
+            "overlap a",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::hours(4),
+            Some(now - chrono::Duration::hours(1)),
+            None,
+        )
+        .await;
+        let (second_task, second) = timed_run(
+            &engine,
+            &database,
+            "overlap b",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::hours(3),
+            Some(now - chrono::Duration::hours(2)),
+            None,
+        )
+        .await;
+        transition(
+            &engine,
+            &first_task.id,
+            &first.id,
+            "blocked",
+            now - chrono::Duration::minutes(210),
+        )
+        .await;
+        transition(
+            &engine,
+            &first_task.id,
+            &first.id,
+            "unblocked",
+            now - chrono::Duration::minutes(150),
+        )
+        .await;
+        transition(
+            &engine,
+            &second_task.id,
+            &second.id,
+            "blocked",
+            now - chrono::Duration::hours(3),
+        )
+        .await;
+        transition(
+            &engine,
+            &second_task.id,
+            &second.id,
+            "unblocked",
+            now - chrono::Duration::hours(2),
+        )
+        .await;
+        timed_run(
+            &engine,
+            &database,
+            "sibling work",
+            "side",
+            RunStatus::Done,
+            now - chrono::Duration::hours(10),
+            Some(now - chrono::Duration::hours(1)),
+            None,
+        )
+        .await;
+
+        let ids = [
+            MetricId::new("agent_hours").unwrap(),
+            MetricId::new("blocked_hours").unwrap(),
+        ];
+        let computed = engine
+            .metrics_for(&ids, now, Some("work"), Some(MetricsWindow::Day))
+            .await
+            .unwrap();
+        assert_eq!(
+            metric(&computed, "agent_hours").value,
+            Some(3.0),
+            "overlapping blocks are a three-hour union"
+        );
+        assert_eq!(
+            metric(&computed, "blocked_hours").value,
+            Some(1.5),
+            "overlapping blocked segments are a 90-minute union"
+        );
+        assert!(
+            metric(&computed, "agent_hours").value.unwrap()
+                > metric(&computed, "blocked_hours").value.unwrap(),
+            "blocked time remains part of total time"
+        );
+
+        let occupancy = engine
+            .occupancy(None, Some(now - chrono::Duration::days(1)), Some(now))
+            .await
+            .unwrap();
+        let work = occupancy
+            .scopes
+            .iter()
+            .find(|scope| scope.name == "work")
+            .unwrap();
+        assert_eq!(
+            work.rows.iter().map(|row| row.busy_seconds).sum::<i64>() as f64 / 3600.0,
+            3.0
+        );
+        assert_eq!(
+            work.rows.iter().map(|row| row.blocked_seconds).sum::<i64>() as f64 / 3600.0,
+            1.5
+        );
+    }
+
+    #[tokio::test]
+    async fn hour_metrics_follow_every_window_preset_and_default_to_fourteen_days() {
+        let (engine, database) = scoped_engine();
+        let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 0);
+        let day = now - chrono::Duration::days(1);
+        let fourteen_days = now - chrono::Duration::days(14);
+        let ninety_days = now - chrono::Duration::days(90);
+
+        // Each cutoff has one run ending exactly at it and one starting
+        // exactly at it. The former contributes nothing to that window; the
+        // latter contributes its whole block and blocked segment.
+        for (title, start, end, blocked_from, blocked_to) in [
+            (
+                "inside day",
+                day,
+                day + chrono::Duration::hours(2),
+                day + chrono::Duration::minutes(30),
+                day + chrono::Duration::minutes(90),
+            ),
+            (
+                "before day",
+                day - chrono::Duration::hours(2),
+                day,
+                day - chrono::Duration::minutes(90),
+                day - chrono::Duration::minutes(30),
+            ),
+            (
+                "inside fourteen days",
+                fourteen_days,
+                fourteen_days + chrono::Duration::hours(4),
+                fourteen_days + chrono::Duration::hours(1),
+                fourteen_days + chrono::Duration::hours(3),
+            ),
+            (
+                "before fourteen days",
+                fourteen_days - chrono::Duration::hours(4),
+                fourteen_days,
+                fourteen_days - chrono::Duration::hours(3),
+                fourteen_days - chrono::Duration::hours(1),
+            ),
+            (
+                "inside ninety days",
+                ninety_days,
+                ninety_days + chrono::Duration::hours(6),
+                ninety_days + chrono::Duration::hours(1),
+                ninety_days + chrono::Duration::hours(4),
+            ),
+            (
+                "before ninety days",
+                ninety_days - chrono::Duration::hours(6),
+                ninety_days,
+                ninety_days - chrono::Duration::hours(5),
+                ninety_days - chrono::Duration::hours(2),
+            ),
+        ] {
+            let (task, run) = timed_run(
+                &engine,
+                &database,
+                title,
+                "work",
+                RunStatus::Done,
+                start,
+                Some(end),
+                None,
+            )
+            .await;
+            transition(&engine, &task.id, &run.id, "blocked", blocked_from).await;
+            transition(&engine, &task.id, &run.id, "unblocked", blocked_to).await;
+        }
+
+        let ids = [
+            MetricId::new("agent_hours").unwrap(),
+            MetricId::new("blocked_hours").unwrap(),
+        ];
+        for (window, days, expected_busy, expected_blocked) in [
+            (Some(MetricsWindow::Day), 1, 2.0, 1.0),
+            (Some(MetricsWindow::FourteenDays), 14, 8.0, 4.0),
+            (Some(MetricsWindow::NinetyDays), 90, 18.0, 9.0),
+            (None, 14, 8.0, 4.0),
+        ] {
+            let label = window.map_or_else(|| "omitted".to_string(), |value| value.to_string());
+            let computed = engine
+                .metrics_for(&ids, now, Some("work"), window)
+                .await
+                .unwrap();
+            assert_eq!(
+                metric(&computed, "agent_hours").value,
+                Some(expected_busy),
+                "{label} agent hours"
+            );
+            assert_eq!(
+                metric(&computed, "blocked_hours").value,
+                Some(expected_blocked),
+                "{label} blocked hours"
+            );
+
+            let occupancy = engine
+                .occupancy(None, Some(now - chrono::Duration::days(days)), Some(now))
+                .await
+                .unwrap();
+            let work = occupancy
+                .scopes
+                .iter()
+                .find(|scope| scope.name == "work")
+                .unwrap();
+            assert_eq!(
+                work.rows.iter().map(|row| row.busy_seconds).sum::<i64>() as f64 / 3600.0,
+                expected_busy,
+                "{label} occupancy busy hours"
+            );
+            assert_eq!(
+                work.rows.iter().map(|row| row.blocked_seconds).sum::<i64>() as f64 / 3600.0,
+                expected_blocked,
+                "{label} occupancy blocked hours"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_requests_validate_scope_but_keep_goal_and_bench_metrics_instance_wide() {
+        let (engine, _database) = scoped_engine();
+        let mut labelled = NewTask {
+            title: "sibling goal".into(),
+            ..Default::default()
+        };
+        labelled.labels.insert("goal".into(), "ship/kr".into());
+        let task = engine
+            .store
+            .create(&task_from_new(
+                labelled,
+                "side".into(),
+                "worker".into(),
+                "shell".into(),
+            ))
+            .await
+            .unwrap();
+        engine
+            .store
+            .update(
+                &task.id,
+                &TaskPatch {
+                    status: Some(TaskStatus::Done),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let ids = [
+            MetricId::new("goal_tasks_done.ship.kr").unwrap(),
+            MetricId::new("bench.resolve_rate.missing").unwrap(),
+        ];
+        let computed = engine
+            .metrics_for(&ids, Utc::now(), Some("work"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            metric(&computed, "goal_tasks_done.ship.kr").value,
+            Some(1.0)
+        );
+        assert!(computed
+            .registry
+            .iter()
+            .all(|def| def.coverage == metrics::MetricCoverage::InstanceWide));
+
+        let error = engine
+            .metrics_for(&ids, Utc::now(), Some("unknown"), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown"), "{error}");
     }
 
     // ------------------------------------------------------- operations

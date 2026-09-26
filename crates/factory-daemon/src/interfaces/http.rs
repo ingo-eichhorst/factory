@@ -720,10 +720,15 @@ struct MetricsQuery {
     /// catalogues imply.
     #[serde(default)]
     ids: String,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    window: Option<factory_core::metrics::MetricsWindow>,
 }
 
-/// `GET /api/metrics?ids=a,b` -- every named metric's computed value, its
-/// history where it has one, and the definition behind it.
+/// `GET /api/metrics?ids=a,b&scope=&window=day|14d|90d` -- every named
+/// metric's computed value, its history where it has one, and the definition
+/// behind it.
 async fn metrics(State(engine): State<Arc<Engine>>, Query(q): Query<MetricsQuery>) -> AxumResponse {
     let mut ids = Vec::new();
     for raw in q.ids.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -732,7 +737,15 @@ async fn metrics(State(engine): State<Arc<Engine>>, Query(q): Query<MetricsQuery
             Err(e) => return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response(),
         }
     }
-    run(&engine, Request::Metrics { ids }).await
+    run(
+        &engine,
+        Request::Metrics {
+            ids,
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+            window: q.window,
+        },
+    )
+    .await
 }
 
 #[derive(serde::Deserialize)]
@@ -2030,6 +2043,30 @@ mod tests {
         assert_eq!(report["scopes"][0]["attributes"][0]["scenarios"][0]["status"], "met", "no agent is unsandboxed");
 
         let (status, _) = request(engine, "GET", "/api/quality?scope=nope", None).await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn get_api_metrics_accepts_scope_and_window_and_rejects_unknown_values() {
+        let engine = engine_with_quality();
+        let (status, json) = request(
+            engine.clone(),
+            "GET",
+            "/api/metrics?ids=agent_hours,bench.resolve_rate.missing&scope=company&window=14d",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["kind"], "metrics");
+        let registry = json["data"]["registry"].as_array().unwrap();
+        assert_eq!(registry[0]["id"], "agent_hours");
+        assert_eq!(registry[0]["unit"], "hours");
+        assert_eq!(registry[0]["coverage"], "scope_aware");
+        assert_eq!(registry[1]["coverage"], "instance_wide");
+
+        let (status, _) = request(engine.clone(), "GET", "/api/metrics?window=7d", None).await;
+        assert_eq!(status, 400);
+        let (status, _) = request(engine, "GET", "/api/metrics?scope=missing", None).await;
         assert_eq!(status, 404);
     }
 
