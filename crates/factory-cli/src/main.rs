@@ -2062,7 +2062,7 @@ fn kept_by_text(kept: &[factory_core::backup::KeptBy]) -> String {
 /// `factory backup status`, for a person: the hero line, the facts under
 /// it, then every warning.
 fn backup_status_text(payload: &Payload) -> Option<String> {
-    use factory_core::backup::{AgeLevel, WarningLevel};
+    use factory_core::backup::{AgeLevel, RepositoryState, TimeMachineFact, WarningLevel};
     let Payload::Backup { report } = payload else { return None };
     let mut out = String::new();
     let level = match report.age {
@@ -2118,6 +2118,36 @@ fn backup_status_text(payload: &Payload) -> Option<String> {
             out.push_str("  running      a backup operation is in progress\n");
         }
     }
+    // `#155`: scope source code is backed up by pushing it, not by the
+    // snapshot above, so this reads whether or not one is even configured.
+    if !report.code.is_empty() {
+        out.push_str("\nCODE\n");
+        for repo in &report.code {
+            let scopes = repo.scopes.join(", ");
+            let remote = repo.remote_url.as_deref().unwrap_or("--");
+            let state = match &repo.state {
+                RepositoryState::Tracked { upstream, ahead, .. } if *ahead > 0 => {
+                    format!("{upstream}, {ahead} unpushed (as of last fetch)")
+                }
+                RepositoryState::Tracked { upstream, .. } => format!("{upstream}, up to date (as of last fetch)"),
+                RepositoryState::NoDirectory => "no such directory".into(),
+                RepositoryState::NotARepository => "not a git repository".into(),
+                RepositoryState::NoCommits => "no commits yet".into(),
+                RepositoryState::DetachedHead => "detached HEAD".into(),
+                RepositoryState::NoRemote => "no remote configured".into(),
+                RepositoryState::NoUpstream => "no upstream branch".into(),
+                RepositoryState::InspectionFailed { reason } => format!("unknown -- {reason}"),
+            };
+            out.push_str(&format!("  {scopes:<24} {remote:<44} {state}\n"));
+        }
+    }
+    out.push_str("\nTIME MACHINE  ");
+    out.push_str(&match &report.time_machine {
+        Some(TimeMachineFact::Configured { destinations }) => format!("configured -- {}\n", destinations.join(", ")),
+        Some(TimeMachineFact::NotConfigured) => "not configured\n".to_string(),
+        Some(TimeMachineFact::Unavailable { reason }) => format!("unknown -- {reason}\n"),
+        Some(TimeMachineFact::Unsupported) | None => "not supported on this platform\n".to_string(),
+    });
     if !report.warnings.is_empty() {
         out.push_str("\nWARNINGS\n");
         for w in &report.warnings {

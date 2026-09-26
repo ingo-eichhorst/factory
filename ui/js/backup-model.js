@@ -191,3 +191,79 @@ export function backupFailure(error) {
 export function isBackupEvent(ev) {
   return !!ev && typeof ev.type === "string" && ev.type.startsWith("backup_");
 }
+
+// -------------------------------------------------------------------- #155
+//
+// Scope source code is backed up by pushing it, not by this snapshot, so
+// these read `report.code`/`report.time_machine` whether or not a backup is
+// even configured -- and never claim more than the daemon actually asked
+// `git`/`tmutil` for. A state this page does not recognise (an older or a
+// newer daemon) reads as unknown, the same as `inspection_failed`: never
+// drawn as a problem, never drawn as fine.
+
+/// One row per scope named in a `RepositoryFact` -- two scopes sharing a
+/// repository share the same state and remote, but the table reads by
+/// scope, the way `factory backup status` does.
+export function codeRows(report) {
+  const facts = (report && report.code) || [];
+  const rows = [];
+  for (const f of facts) {
+    const cell = codeCell(f);
+    const scopes = Array.isArray(f.scopes) && f.scopes.length ? f.scopes : [MISSING];
+    for (const scope of scopes) {
+      rows.push({ scope, remote: (f.remote_url) || MISSING, ...cell });
+    }
+  }
+  return rows;
+}
+
+/// The state cell for one repository fact: level (`ok`/`warn`/`none`) and
+/// the words a person reads it as. `ahead` is always "as of last fetch" --
+/// this never fetches, so it never claims to know what a fetch would find.
+function codeCell(fact) {
+  const state = (fact && fact.state) || {};
+  switch (state.state) {
+    case "tracked": {
+      const ahead = state.ahead || 0;
+      return ahead > 0
+        ? { level: "warn", text: `${ahead} unpushed (as of last fetch)` }
+        : { level: "ok", text: "up to date (as of last fetch)" };
+    }
+    case "no_remote":
+      return { level: "warn", text: "no remote configured" };
+    case "no_upstream":
+      return { level: "warn", text: "no upstream branch" };
+    case "detached_head":
+      return { level: "none", text: "detached HEAD" };
+    case "no_commits":
+      return { level: "none", text: "no commits yet" };
+    case "not_a_repository":
+      return { level: "none", text: "not a git repository" };
+    case "no_directory":
+      return { level: "none", text: "no such directory" };
+    case "inspection_failed":
+      return { level: "none", text: `unknown -- ${state.reason || "the probe failed"}` };
+    default:
+      return { level: "none", text: "unknown" };
+  }
+}
+
+/// The Time Machine line: level and words, distinguishing observed
+/// (`configured`/`not_configured`) from unknown (`unavailable`, or no
+/// answer at all) from `unsupported` (not this platform -- never a warning).
+export function timeMachineText(report) {
+  const tm = report && report.time_machine;
+  if (!tm) return { level: "none", text: "unknown" };
+  switch (tm.state) {
+    case "configured":
+      return { level: "ok", text: `configured -- ${(tm.destinations || []).join(", ") || MISSING}` };
+    case "not_configured":
+      return { level: "warn", text: "not configured" };
+    case "unavailable":
+      return { level: "none", text: `unknown -- ${tm.reason || "could not be read"}` };
+    case "unsupported":
+      return { level: "none", text: "not supported on this platform" };
+    default:
+      return { level: "none", text: "unknown" };
+  }
+}
