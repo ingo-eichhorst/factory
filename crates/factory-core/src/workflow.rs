@@ -795,11 +795,22 @@ impl WorkflowDefinition {
                 .copied()
                 .filter(|s| s.kind == StepKind::Approval)
                 .collect();
-            let after: Vec<_> = to_inject
+            let gates: Vec<_> = to_inject
                 .iter()
                 .copied()
-                .filter(|s| s.kind != StepKind::Approval)
+                .filter(|s| s.kind == StepKind::Gate)
                 .collect();
+            let reviews: Vec<_> = to_inject
+                .iter()
+                .copied()
+                .filter(|s| s.kind == StepKind::Review)
+                .collect();
+            // A resolved plan's unconstrained tie-break is lexical, which
+            // would put `review` before `tests`. Runtime verification and the
+            // documented workflow both spend deterministic gates first.
+            // Keep the resolved order within each phase, but make the phase
+            // boundary explicit in the immutable workflow snapshot.
+            let after: Vec<_> = gates.into_iter().chain(reviews).collect();
 
             // Approval is a prerequisite: every former parent reaches the
             // approval chain, whose last node reaches the work. A root task
@@ -1613,6 +1624,53 @@ mod tests {
             steps.iter().map(|s| s.kind).collect::<Vec<_>>(),
             vec![StepKind::Gate, StepKind::Review]
         );
+    }
+
+    #[test]
+    fn resolved_lexical_plan_still_injects_deterministic_gates_before_review() {
+        let requirement = |step: &str, gate: Option<&str>, by: Option<&str>| {
+            crate::control_plan::Requirement {
+                applies_to: vec!["feature".into()],
+                step: step.into(),
+                gate: gate.map(str::to_string),
+                by: by.map(str::to_string),
+                before: None,
+                after: None,
+                timeout_seconds: None,
+            }
+        };
+        let applied = crate::policy::Applied {
+            control: crate::policy::ControlRef::new("house", "tested"),
+            title: "Tested".into(),
+            kind: crate::policy::Kind::BestPractice,
+            maps_to: Vec::new(),
+            evidence: Vec::new(),
+            max_age: None,
+            not_applicable: None,
+            remediation: None,
+            requires: vec![
+                requirement("tests", Some("true"), None),
+                requirement("review", None, Some("independent")),
+            ],
+        };
+        let resolved = control_plan::resolve("demo", "feature", &[applied], &[]);
+        assert_eq!(
+            resolved.steps.iter().map(|s| s.step.as_str()).collect::<Vec<_>>(),
+            vec!["review", "tests"],
+            "the unconstrained plan demonstrates its lexical tie-break"
+        );
+
+        let mut def = definition(vec![node("a")], vec![]);
+        def.category = Some("feature".into());
+        let (out, _) = def.inject(&BTreeMap::from([("feature".into(), resolved)]));
+        assert_eq!(
+            out.required_steps_for("a")
+                .iter()
+                .map(|s| s.kind)
+                .collect::<Vec<_>>(),
+            vec![StepKind::Gate, StepKind::Review]
+        );
+        assert!(out.edges.iter().any(|edge| edge.from == "a.tests" && edge.to == "a.review"));
     }
 
     #[test]

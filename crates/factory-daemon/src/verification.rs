@@ -184,7 +184,7 @@ impl Engine {
             && run.session.is_none()
             && run.status == RunStatus::Blocked
         {
-            let resumed = self
+            let resumed = match self
                 .dispatch(
                     &task.id,
                     run.trigger,
@@ -193,7 +193,25 @@ impl Engine {
                         scheduled_for: run.scheduled_for,
                     },
                 )
-                .await?;
+                .await
+            {
+                Ok(run) => run,
+                Err(error) => {
+                    // This is the same dispatch path as `start_run_due`, but
+                    // a caller is waiting for its answer. Once approval has
+                    // been recorded, any failure must settle the held run so
+                    // it cannot remain dispatching (or blocked with a pass
+                    // that makes the approval action unusable). A retry then
+                    // starts a fresh, approvable attempt.
+                    self.fail_run(
+                        &run.id,
+                        factory_core::run::FailKind::DispatchFailed,
+                        &format!("dispatch failed after approval: {error}"),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
             self.sync_workflow_for_task(&task.id).await;
             return Ok(resumed);
         }
@@ -274,31 +292,10 @@ impl Engine {
                     .or_else(|| a.exit_code.map(|code| format!("{} exit {code}", a.step)))
             })
             .unwrap_or_else(|| "verification did not pass".into());
-        self.entry(
-            &task.id,
-            TaskEntry::new(
-                "owner",
-                "rework_accepted",
-                format!("accepted rework: {finding}"),
-            )
-            .in_run(&run.id),
-        )
-        .await;
-        self.close_session(&run).await;
-        let ended = self
-            .finish_run(
-                &run.id,
-                RunStatus::Failed,
-                RunPatch {
-                    status: Some(RunStatus::Failed),
-                    error: Some(format!("rework requested: {finding}")),
-                    ..Default::default()
-                },
-                "verification rework accepted",
-            )
-            .await?;
-
-        if let Some(origin) = task.workflow_origin {
+        // Validate and apply the bounded workflow transition to an in-memory
+        // snapshot before consuming the blocked subject. Exhausted and
+        // missing exits remain blocked and actionable for a person.
+        let workflow_rework = if let Some(origin) = task.workflow_origin.as_ref() {
             let mut workflow = self.workflow_run(&origin.workflow_run_id).await?;
             let from = failed
                 .and_then(|a| a.node_id.clone())
@@ -331,13 +328,7 @@ impl Engine {
                 }
             }
             match workflow.send_back(&from, &origin.node_id) {
-                factory_core::workflow::SendBack::Sent { .. } => {
-                    self.workflows.put_run(&workflow).await?;
-                    self.bus.publish(Event::WorkflowRunUpdated {
-                        run: workflow.clone(),
-                    });
-                    self.advance_workflow(&workflow.id).await?;
-                }
+                factory_core::workflow::SendBack::Sent { .. } => Some(workflow),
                 factory_core::workflow::SendBack::Exhausted { max_rounds } => {
                     return Err(FactoryError::BadRequest(format!(
                         "verification rework exhausted its {max_rounds} rounds; a person must resolve it"
@@ -349,6 +340,40 @@ impl Engine {
                     ));
                 }
             }
+        } else {
+            None
+        };
+
+        self.entry(
+            &task.id,
+            TaskEntry::new(
+                "owner",
+                "rework_accepted",
+                format!("accepted rework: {finding}"),
+            )
+            .in_run(&run.id),
+        )
+        .await;
+        self.close_session(&run).await;
+        let ended = self
+            .finish_run(
+                &run.id,
+                RunStatus::Failed,
+                RunPatch {
+                    status: Some(RunStatus::Failed),
+                    error: Some(format!("rework requested: {finding}")),
+                    ..Default::default()
+                },
+                "verification rework accepted",
+            )
+            .await?;
+
+        if let Some(workflow) = workflow_rework {
+            self.workflows.put_run(&workflow).await?;
+            self.bus.publish(Event::WorkflowRunUpdated {
+                run: workflow.clone(),
+            });
+            self.advance_workflow(&workflow.id).await?;
         } else {
             let instructions = format!(
                 "{}\n\nRework requested from run {}:\n{}",
@@ -513,17 +538,42 @@ impl Engine {
     }
 
     fn release_verification(&self, run_id: &str) {
-        self.verifying.lock().unwrap().remove(run_id);
+        let replay = {
+            let mut verifying = self.verifying.lock().unwrap();
+            match verifying.get_mut(run_id) {
+                Some(requested) if *requested => {
+                    *requested = false;
+                    true
+                }
+                Some(_) => {
+                    verifying.remove(run_id);
+                    false
+                }
+                None => false,
+            }
+        };
+        if replay {
+            let _ = self.verify_tx.send(run_id.to_string());
+        }
     }
 
     fn enqueue_verification(&self, run_id: &str) {
-        {
+        let enqueue = {
             let mut verifying = self.verifying.lock().unwrap();
-            if !verifying.insert(run_id.to_string()) {
-                return; // already queued or being verified
+            match verifying.get_mut(run_id) {
+                Some(requested) => {
+                    *requested = true;
+                    false
+                }
+                None => {
+                    verifying.insert(run_id.to_string(), false);
+                    true
+                }
             }
+        };
+        if enqueue {
+            let _ = self.verify_tx.send(run_id.to_string());
         }
-        let _ = self.verify_tx.send(run_id.to_string());
     }
 
     /// Start the verifier: every enqueued run is verified on a task of its
@@ -1056,7 +1106,7 @@ mod tests {
     use factory_core::run::Trigger;
     use factory_core::task::{NewTask, SessionRef, TaskReport};
     use factory_core::workflow::{CanvasPoint, WorkflowDraft, WorkflowEdge, WorkflowNode, WorkflowNodeKind, WorkflowNodeStatus};
-    use factory_plugins::{Registry, SqliteStore};
+    use factory_plugins::{HarnessAgent, Registry, SqliteStore};
     use std::path::PathBuf;
 
     struct QuietRuntime;
@@ -1088,10 +1138,39 @@ mod tests {
         }
     }
 
+    struct FailingRuntime;
+    #[async_trait::async_trait]
+    impl AgentRuntime for FailingRuntime {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        async fn start(&self, _: &StartRequest) -> Result<SessionRef> {
+            Err(FactoryError::BadRequest("runtime start failed for the test".into()))
+        }
+        async fn submit(&self, _: &SessionRef, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn status(&self, _: &SessionRef) -> Result<factory_core::adapter::RuntimeStatus> {
+            Ok(factory_core::adapter::RuntimeStatus::Working)
+        }
+        async fn send_text(&self, _: &SessionRef, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_keys(&self, _: &SessionRef, _: &[String]) -> Result<()> {
+            Ok(())
+        }
+        async fn read(&self, _: &SessionRef, _: u32) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn stop(&self, _: &SessionRef) -> Result<()> {
+            Ok(())
+        }
+    }
+
     /// An instance committed to one framework, `house`, whose single control
     /// requires `requires` -- YAML for one `requires:` list -- and whose
     /// only scope, `demo`, is a plain directory the gates run in.
-    fn engine(requires: &str) -> (Arc<Engine>, PathBuf) {
+    fn engine_with_verifier(requires: &str, spawn_verifier: bool) -> (Arc<Engine>, PathBuf) {
         let root = std::env::temp_dir().join(format!("factory-verify-test-{}", uuid::Uuid::new_v4()));
         let work = root.join("demo");
         std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
@@ -1103,10 +1182,26 @@ mod tests {
             ),
         )
         .unwrap();
+        let fake_harness = work.join("fake-harness");
+        std::fs::write(&fake_harness, "#!/bin/sh\necho fake 1.0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&fake_harness).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&fake_harness, permissions).unwrap();
+        }
         let config = Config {
             version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+            daemon: DaemonConfig {
+                power_assertion: false,
+                harness_health: factory_core::config::HarnessHealthConfig {
+                    cache_seconds: 0,
+                    ..Default::default()
+                },
+                ..DaemonConfig::default()
+            },
             roles: Default::default(),
             policies: PolicyDeclaration { frameworks: vec!["house".into()], ..Default::default() },
             quality: Default::default(),
@@ -1139,6 +1234,15 @@ mod tests {
         };
         let mut registry = Registry::with_builtins();
         registry.add_runtime(Arc::new(QuietRuntime), "test");
+        registry.add_runtime(Arc::new(FailingRuntime), "test");
+        registry.add_agent(
+            Arc::new(HarnessAgent::new(
+                "fake",
+                fake_harness.display().to_string(),
+                "test harness",
+            )),
+            "test",
+        );
         let engine = Arc::new(Engine::new(
             Factory { root, config },
             registry,
@@ -1146,8 +1250,14 @@ mod tests {
             PathBuf::from("factory"),
             Vec::new(),
         ));
-        engine.spawn_verifier();
+        if spawn_verifier {
+            engine.spawn_verifier();
+        }
         (engine, work)
+    }
+
+    fn engine(requires: &str) -> (Arc<Engine>, PathBuf) {
+        engine_with_verifier(requires, true)
     }
 
     const TESTS_FOR_FEATURES: &str = "      - { applies_to: [feature], step: tests, gate: \"test -f built.txt\" }";
@@ -1224,6 +1334,25 @@ mod tests {
         panic!("no review task for {subject_run}");
     }
 
+    #[test]
+    fn a_review_wakeup_arriving_before_verifier_release_is_replayed() {
+        let (engine, _) = engine_with_verifier("", false);
+        engine.enqueue_verification("subject");
+        // This is what `record_review_attestation` does when a very fast
+        // review finishes while `ensure_review_tasks` still owns the run.
+        engine.enqueue_verification("subject");
+        engine.release_verification("subject");
+
+        let mut receiver = engine.verify_rx.lock().unwrap().take().unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), "subject");
+        assert_eq!(receiver.try_recv().unwrap(), "subject");
+        assert!(receiver.try_recv().is_err());
+
+        // Completing the replay releases ownership normally.
+        engine.release_verification("subject");
+        assert!(!engine.verifying.lock().unwrap().contains_key("subject"));
+    }
+
     #[tokio::test]
     async fn approval_blocks_before_agent_launch_and_an_owner_decision_resumes_the_same_run() {
         let (engine, _) = engine("      - { applies_to: [feature], step: approval, by: person }");
@@ -1248,6 +1377,92 @@ mod tests {
         let attestations = engine.run_attestations(&held.id).await.unwrap();
         assert_eq!(attestations.len(), 1);
         assert_eq!(attestations[0].actor, "owner");
+    }
+
+    async fn assert_approval_resume_failed(engine: &Arc<Engine>, task: &Task, held: &Run) {
+        let error = engine
+            .decide_approval(
+                &Caller::Owner,
+                &held.id,
+                AttestationVerdict::Pass,
+                "release approved",
+            )
+            .await
+            .unwrap_err();
+        assert!(!error.to_string().is_empty());
+        let failed = engine.require_run(&held.id).await.unwrap();
+        assert_eq!(failed.status, RunStatus::Failed);
+        assert_eq!(failed.fail_kind, Some(factory_core::run::FailKind::DispatchFailed));
+        assert!(failed.session.is_none());
+        assert!(engine.store.active_run(&task.id).await.unwrap().is_none());
+        assert!(engine.require(&task.id).await.unwrap().blocked_by_failure());
+    }
+
+    #[tokio::test]
+    async fn a_harness_failure_after_approval_settles_the_held_run() {
+        let (engine, work) = engine("      - { applies_to: [feature], step: approval, by: person }");
+        let task = engine
+            .create(NewTask {
+                title: "use the probed harness".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("fake".into()),
+                runtime: Some("quiet".into()),
+                worktree: Some(false),
+                category: Some("feature".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        std::fs::remove_file(work.join("fake-harness")).unwrap();
+
+        assert_approval_resume_failed(&engine, &task, &held).await;
+    }
+
+    #[tokio::test]
+    async fn a_worktree_failure_after_approval_settles_the_held_run() {
+        let (engine, _) = engine("      - { applies_to: [feature], step: approval, by: person }");
+        let task = engine
+            .create(NewTask {
+                title: "needs a worktree".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                runtime: Some("quiet".into()),
+                worktree: Some(true),
+                category: Some("feature".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
+
+        assert_approval_resume_failed(&engine, &task, &held).await;
+    }
+
+    #[tokio::test]
+    async fn a_runtime_start_failure_after_approval_settles_the_held_run() {
+        let (engine, _) = engine("      - { applies_to: [feature], step: approval, by: person }");
+        let task = engine
+            .create(NewTask {
+                title: "uses a failing runtime".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                runtime: Some("failing".into()),
+                worktree: Some(false),
+                category: Some("feature".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
+
+        assert_approval_resume_failed(&engine, &task, &held).await;
     }
 
     #[tokio::test]
@@ -1596,5 +1811,60 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("failed gate did not start the bounded workflow rework round");
+    }
+
+    #[tokio::test]
+    async fn exhausted_workflow_rework_leaves_the_subject_blocked_for_a_person() {
+        let (engine, _) = engine(TESTS_FOR_FEATURES);
+        let definition = engine
+            .create_workflow(WorkflowDraft {
+                name: "exhausted-gate-rework".into(),
+                scope: "demo".into(),
+                category: Some("feature".into()),
+                nodes: vec![node("a")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let wf = engine
+            .start_workflow(&definition.id, Default::default(), &Caller::Owner)
+            .await
+            .unwrap();
+        let task_id = loop {
+            let run = engine.workflow_run(&wf.id).await.unwrap();
+            if let Some(id) = run
+                .nodes
+                .iter()
+                .find(|n| n.node_id == "a")
+                .and_then(|n| n.task_id.clone())
+            {
+                if engine.store.active_run(&id).await.unwrap().is_some() {
+                    break id;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        let failed = report_done(&engine, &task_id).await;
+        assert_eq!(settled(&engine, &failed.id).await.status, RunStatus::Blocked);
+
+        let mut exhausted = engine.workflow_run(&wf.id).await.unwrap();
+        let gate = exhausted
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == "a.tests")
+            .unwrap();
+        gate.round = 5;
+        engine.workflows.put_run(&exhausted).await.unwrap();
+
+        let error = engine.accept_rework(&failed.id).await.unwrap_err();
+        assert!(error.to_string().contains("exhausted"), "{error}");
+        let still_blocked = engine.require_run(&failed.id).await.unwrap();
+        assert_eq!(still_blocked.status, RunStatus::Blocked);
+        assert_eq!(still_blocked.blocked_source, Some(BlockSource::Verification));
+        assert!(still_blocked.error.is_none(), "the blocked subject was not consumed");
+        let unchanged = engine.workflow_run(&wf.id).await.unwrap();
+        let subject = unchanged.nodes.iter().find(|n| n.node_id == "a").unwrap();
+        assert_eq!(subject.task_id.as_deref(), Some(task_id.as_str()));
+        assert!(subject.superseded_task_ids.is_empty());
     }
 }

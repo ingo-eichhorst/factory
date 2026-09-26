@@ -200,10 +200,11 @@ pub struct Engine {
     /// to spawn it from.
     pub(crate) bench_judge_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
     pub(crate) dataset_locks: crate::datasets::DatasetLocks,
-    /// Run ids queued for, or in, verification (`#118`) -- the dedup that
-    /// keeps one run's gates from running twice at once. See
-    /// `verification.rs`.
-    pub(crate) verifying: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Run ids queued for, or in, verification (`#118`). The bool remembers
+    /// a wake-up that arrived while the verifier owned the run, so releasing
+    /// that ownership replays it instead of losing a fast review result.
+    /// See `verification.rs`.
+    pub(crate) verifying: std::sync::Mutex<std::collections::HashMap<String, bool>>,
     /// Where `report` hands a `done` that needs verifying. The verifier
     /// (`spawn_verifier`) holds the other end; like `bench_judge_tx`, this is
     /// how a gate that runs for minutes stays off the report's own path.
