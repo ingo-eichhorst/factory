@@ -31,6 +31,9 @@ const grants = [
   { name: "task.report", describe: "report on tasks", group: "Tasks" },
   { name: "agent.start", describe: "start agents", group: "Agents" },
   { name: "run.input", describe: "type into a run's session", group: "Runs" },
+  // `#172`: a role's grants can include a group the daemon has never sent
+  // before -- the view groups by whatever `group` says, not a fixed list.
+  { name: "intake.triage", describe: "start a triage run on an intake item", group: "Intake" },
 ];
 
 const here = { kind: "scope", scope: "projects/demo" };
@@ -93,12 +96,18 @@ test("reach is said in words, with the rule grants cannot express", () => {
 
 test("a card shows what a role may not do as well as what it may", () => {
   const groups = grantGroups(reviewer, grants);
-  assert.deepEqual(groups.map(g => g.group), ["Tasks", "Agents", "Runs"]);
+  assert.deepEqual(groups.map(g => g.group), ["Tasks", "Agents", "Runs", "Intake"]);
   assert.equal(groups[1].items[0].allowed, false);
+  // A group is rendered whenever the vocabulary carries it, whether or not
+  // this particular role holds anything in it (`#172`'s Intake group, for a
+  // reviewer that holds none of it).
+  assert.equal(groups[3].group, "Intake");
+  assert.equal(groups[3].items[0].allowed, false);
 
   const card = roleCard(reviewer, grants, { scope: "projects/demo", writes: here, actions: true });
   assert.match(card, /✓<\/span> create tasks/);
   assert.match(card, /✗<\/span> start agents/);
+  assert.match(card, /✗<\/span> start a triage run on an intake item/);
   assert.match(card, /critic/);
   assert.match(card, /helper <span class="tag"[^>]*>given<\/span>/);
   assert.match(card, /data-role-act="edit"/);
@@ -136,6 +145,7 @@ test("the define payload refuses what the daemon would refuse, with a sentence",
   assert.throws(() => roleDefinePayload(null, { name: "x" }), /Select one scope/);
   assert.throws(() => roleDefinePayload("demo", { name: "has space" }), /no spaces/);
   assert.throws(() => roleDefinePayload("demo", { name: "worker" }), /built in/);
+  assert.throws(() => roleDefinePayload("demo", { name: "triager" }), /built in/);
   assert.deepEqual(
     roleDefinePayload("demo", { name: " reviewer ", describe: "", grants: ["task.edit", "task.edit"], reach: "scope" }, true),
     { scope: "demo", name: "reviewer", role: { grants: ["task.edit"], reach: "scope" }, replace: true },

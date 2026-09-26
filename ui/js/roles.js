@@ -91,7 +91,7 @@ export function roleDefinePayload(scope, values, replace) {
   if (!/^[A-Za-z0-9_.-]+$/.test(name)) {
     throw new Error("A role name is letters, digits, -, _ and ., with no spaces.");
   }
-  if (name === "worker" || name === "foreman") {
+  if (name === "worker" || name === "foreman" || name === "triager") {
     throw new Error(`${name} is built in and cannot be redefined.`);
   }
   const reach = String(values.reach ?? "own");

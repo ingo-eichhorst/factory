@@ -593,17 +593,10 @@ impl AgentContext {
                 Grant::TaskCreate => format!(
                     "task.create -> {bin} task create \"<title>\" -i \"<instructions>\" --scope {scope} --agent <agent>; \
                      that creates it and nothing more -- it is not dispatched until `task run <id>` \
-                     (or `task create --run`, which does both) or its schedule fires; \
-                     or, for work that is not yet clear, tested or known to be ours, hand it in through the \
-                     intake gate instead: {bin} intake add \"<title>\" -i \"<what is asked>\" --scope {scope} \
-                     (it is triaged before it can run; {bin} intake info <id> \"...\" answers a needs-info)"
+                     (or `task create --run`, which does both) or its schedule fires"
                 ),
                 Grant::TaskEdit => {
-                    format!(
-                        "task.edit -> {bin} task edit <id> ... (see --help for every field); triaging an \
-                         intake item is an edit too: {bin} intake assess <id> --file <assessment.json> \
-                         [--decide], {bin} intake decide <id> ready|needs-info|wontfix"
-                    )
+                    format!("task.edit -> {bin} task edit <id> ... (see --help for every field)")
                 }
                 Grant::TaskDelete => format!("task.delete -> {bin} task delete <id>"),
                 Grant::TaskRun => format!("task.run -> {bin} task run <id>"),
@@ -667,6 +660,25 @@ impl AgentContext {
                 ),
                 Grant::BackupRun => format!(
                     "backup.run -> {bin} backup run; {bin} backup verify [<snapshot>]; a backup is of the whole instance, not scoped to {scope}"
+                ),
+                Grant::IntakeAdd => format!(
+                    "intake.add -> {bin} intake add \"<title>\" -i \"<what is asked>\" --scope {scope}; \
+                     for work that is not yet clear, tested or known to be ours -- it is triaged before \
+                     it can run"
+                ),
+                Grant::IntakeInfo => format!(
+                    "intake.info -> {bin} intake info <id> \"...\"; answers a needs-info and puts the \
+                     item back in the queue"
+                ),
+                Grant::IntakeTriage => format!(
+                    "intake.triage -> {bin} intake triage <id> [--agent <agent>]; starts a triage run \
+                     that assesses the item and submits it"
+                ),
+                Grant::IntakeAssess => format!(
+                    "intake.assess -> {bin} intake assess <id> --file <assessment.json> [--decide]"
+                ),
+                Grant::IntakeDecide => format!(
+                    "intake.decide -> {bin} intake decide <id> ready|needs-info|split|wontfix [--run]"
                 ),
             });
         }
@@ -950,6 +962,10 @@ mod tests {
         Roles::presets().get(&crate::role::Role::foreman()).unwrap().clone()
     }
 
+    fn triager() -> RoleDef {
+        Roles::presets().get(&crate::role::Role::triager()).unwrap().clone()
+    }
+
     fn custom(grants: &[Grant], reach: Reach) -> RoleDef {
         RoleDef {
             name: crate::role::Role::new("runner"),
@@ -969,11 +985,35 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_is_told_it_can_assess_and_decide_intake_items() {
+        // What `task.edit` used to say for it, before `#172` gave intake its
+        // own grants.
+        let guide = base(Some(worker())).factory_guide();
+        assert!(guide.contains("intake.assess"), "{guide}");
+        assert!(guide.contains("intake.decide"), "{guide}");
+        assert!(!guide.contains("intake.add"), "a worker never had task.create, so never intake.add: {guide}");
+        assert!(!guide.contains("intake.triage"), "{guide}");
+    }
+
+    #[test]
     fn a_foreman_is_told_it_can_create_edit_and_assign_tasks_in_its_scope() {
         let guide = base(Some(foreman())).factory_guide();
         for grant in ["task.create", "task.edit", "task.delete", "task.run", "task.cancel", "agent.start"] {
             assert!(guide.contains(grant), "a foreman has {grant}: {guide}");
         }
+        assert!(guide.contains("everything in your scope"));
+    }
+
+    #[test]
+    fn a_triager_is_told_the_intake_commands_and_never_to_create_or_edit_a_task() {
+        let guide = base(Some(triager())).factory_guide();
+        for grant in ["intake.add", "intake.info", "intake.triage", "intake.assess", "intake.decide"] {
+            assert!(guide.contains(grant), "a triager has {grant}: {guide}");
+        }
+        assert!(!guide.contains("task.create ->"), "{guide}");
+        assert!(!guide.contains("task.edit ->"), "{guide}");
+        assert!(!guide.contains("task.report ->"), "the triager coordinates; it never reports a run: {guide}");
+        assert!(!guide.contains("agent.start"), "{guide}");
         assert!(guide.contains("everything in your scope"));
     }
 
