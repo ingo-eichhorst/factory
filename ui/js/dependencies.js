@@ -1,14 +1,12 @@
 //! L2 Environment, Dependencies: one selected scope's newest SBOM per
 //! lifecycle, derived findings, and declared services.
 
-import { $, api, esc, state, statusBadge } from "./core.js";
+import { $, api, esc, state } from "./core.js";
 import { writeHash } from "./scopes.js";
+import { findingCard } from "./dependency-finding.js";
 import {
-  affectedLabel,
   credentialState,
-  exploitSignals,
   findingCounts,
-  pathLabel,
   scanLabel,
   serviceTarget,
   shapeFindings,
@@ -37,44 +35,6 @@ function documentCard(row) {
       ? `findings <code>${esc(vulnerability.attachment.filename)}</code>`
       : `<span class="sub">no vulnerability document attached by this scan</span>`}</div>
   </article>`;
-}
-
-function ratingLabel(rating) {
-  return [rating.source, rating.method, rating.score, rating.vector].filter((v) => v !== null && v !== undefined && v !== "").join(" · ");
-}
-
-/// A finding's authored VEX, escaped: state, justification and response, or
-/// `none` when nobody has assessed it.
-function vexLabel(finding) {
-  if (!finding.vex_state) return "none";
-  const response = (finding.vex_response || []).join(", ");
-  return [finding.vex_state, finding.vex_justification, response].filter(Boolean).map(esc).join(" · ");
-}
-
-function findingCard(finding) {
-  const signals = exploitSignals(finding);
-  const ratings = (finding.ratings || []).map((rating) =>
-    `<li>${[rating.severity, ratingLabel(rating)].filter(Boolean).map(esc).join(" · ")}</li>`
-  ).join("");
-  const vex = vexLabel(finding);
-  return `<details class="dep-finding">
-    <summary>
-      ${statusBadge(finding.status)}
-      <span class="dep-severity sev-${esc(finding.severity)}">${esc(finding.severity)}</span>
-      <strong>${esc(finding.id)}</strong>
-      <span>${esc(affectedLabel(finding.affected))}</span>
-      <span class="sub">${esc(finding.state)}</span>
-    </summary>
-    <dl>
-      <dt>Ratings</dt><dd>${ratings ? `<ul>${ratings}</ul>` : "—"}</dd>
-      <dt>Affected</dt><dd>${esc(affectedLabel(finding.affected))}<br><code>${esc(finding.affected.bom_ref)}</code></dd>
-      <dt>Dependency path</dt><dd>${esc(pathLabel(finding.affected))}</dd>
-      <dt>Scan</dt><dd>${esc(scanLabel(finding.scan))}<br>run <code>${esc(finding.scan.attachment.run_id)}</code></dd>
-      <dt>Fixed version</dt><dd>${esc(finding.fixed_version || "—")}</dd>
-      <dt>VEX</dt><dd>${vex}</dd>
-      <dt>Exploit signals</dt><dd>${signals.length ? signals.map((s) => `<span class="tag warn">${esc(s)}</span>`).join(" ") : "none"}</dd>
-    </dl>
-  </details>`;
 }
 
 function credentialCell(name, credential) {

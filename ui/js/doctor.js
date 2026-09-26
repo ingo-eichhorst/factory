@@ -1,8 +1,9 @@
 //! L1 Doctor: the installed Factory binaries against the newest scanned
 //! Factory build. The daemon owns the current/behind/missing verdict.
 
-import { $, api, esc, state, statusBadge } from "./core.js";
-import { affectedLabel, scanLabel, shapeFindings } from "./dependencies-model.js";
+import { $, api, esc, state } from "./core.js";
+import { scanLabel, shapeFindings } from "./dependencies-model.js";
+import { findingCard } from "./dependency-finding.js";
 import {
   doctorFailure,
   findingSummary,
@@ -41,16 +42,6 @@ function evidenceCard(title, document, now) {
   </article>`;
 }
 
-function findingRow(finding) {
-  return `<tr>
-    <td>${statusBadge(finding.status)}</td>
-    <td><span class="dep-severity sev-${esc(finding.severity)}">${esc(finding.severity)}</span></td>
-    <td><strong>${esc(finding.id)}</strong></td>
-    <td>${esc(affectedLabel(finding.affected))}</td>
-    <td class="sub">${esc(scanLabel(finding.scan))}</td>
-  </tr>`;
-}
-
 export function renderDoctor() {
   const unavailable = $("doctor-unavailable");
   if (unavailable) unavailable.hidden = !state.doctorUnavailable;
@@ -80,7 +71,7 @@ export function renderDoctor() {
     </section>
     <section class="doctor-findings">
       <h3>Running findings <span class="sub">${counts.open} open · ${counts.assessed} assessed · ${counts.total} total</span></h3>
-      ${findings.length ? `<div class="doctor-table"><table><thead><tr><th>Status</th><th>Severity</th><th>Finding</th><th>Component</th><th>Scan</th></tr></thead><tbody>${findings.map(findingRow).join("")}</tbody></table></div>`
+      ${findings.length ? `<div class="doctor-finding-list">${findings.map(findingCard).join("")}</div>`
         : `<div class="empty">No findings in the newest running scan.</div>`}
     </section>`;
 }

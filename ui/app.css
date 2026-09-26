@@ -477,8 +477,7 @@ a.role-origin:hover { color: var(--signal); border-color: var(--signal); }
 .doctor-evidence code { overflow-wrap: anywhere; }
 .doctor-findings h3 { margin: 0 0 8px; font: 600 12px/1.4 var(--cond); letter-spacing: .04em; }
 .doctor-findings h3 .sub { margin-left: 8px; font: 400 11px/1.4 var(--sans); }
-.doctor-table { overflow-x: auto; }
-.doctor-table td { vertical-align: top; }
+.doctor-finding-list { display: grid; gap: 7px; }
 .role-holders { display: flex; gap: 10px; flex-wrap: wrap; }
 .role-holder { font-weight: 500; }
 .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
