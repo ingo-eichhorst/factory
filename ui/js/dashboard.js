@@ -6,6 +6,14 @@
 //! answer, so the throughput chart and the sparklines under the KPIs can
 //! never disagree with each other.
 //!
+//! Which tiles to draw, and in what order, is a third, separately-scoped
+//! read: `GET /api/dashboard?scope=` (`#159`), fetched alongside
+//! `/api/production` on load and on a scope change, but never on a window
+//! change -- a layout does not depend on how far back the history cards
+//! look. `resolveDashboard` (`dashboard-model.js`) is where "nothing
+//! overrides anything, or the fetch failed" turns into `DEFAULT_DASHBOARD`,
+//! so this file never has to ask which case it is in.
+//!
 //! Two fixed calendar facts decided once in the endpoint and never re-decided
 //! here: a run is **finished** when `ended_at` is set, bucketed by
 //! `ended_at`; a finished run is **scrapped** if it ended `failed` or
@@ -48,7 +56,7 @@ import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 import { hasFailed } from "./task-model.js";
 import { notStarted } from "./pending-model.js";
-import { DEFAULT_DASHBOARD, packRows } from "./dashboard-model.js";
+import { packRows, resolveDashboard, isTileRenderable } from "./dashboard-model.js";
 
 /// The three presets the window selector offers. `bin` travels with every
 /// request rather than being guessed from `minutes` server-side, so a caller
@@ -67,8 +75,19 @@ let windowKey = "d14";
 /// three read as different cards rather than the same blank.
 let production;
 
+/// The last `/api/dashboard` answer (`#159`): `layoutTiles` is the
+/// resolved tile list, or `null` for "nothing overrides anything, use the
+/// built-in default" -- `resolveDashboard` (`dashboard-model.js`) is the
+/// one place that decision is made, so `undefined` (not fetched yet) and a
+/// failed fetch (set to `null` below) read exactly like the server's own
+/// "no override" answer. `layoutSource` names the scope whose `dashboard:`
+/// block won, or `null` for the same built-in-default case; shown, subtly,
+/// in the bar (`renderDashSource`).
+let layoutTiles;
+let layoutSource = null;
+
 export async function loadDashboard() {
-  await loadProduction();
+  await Promise.all([loadProduction(), loadLayout()]);
   renderDashboard();
 }
 
@@ -83,7 +102,36 @@ async function loadProduction() {
   }
 }
 
+/// The window selector's own reload: production is scoped by window, the
+/// layout is not, so switching windows re-fetches only the former --
+/// `wireDashboard`'s window buttons call this, never `loadDashboard`.
+async function reloadProduction() {
+  await loadProduction();
+  renderDashboard();
+}
+
+async function loadLayout() {
+  const params = new URLSearchParams();
+  if (state.scope) params.set("scope", state.scope);
+  const query = params.toString() ? `?${params}` : "";
+  try {
+    const answer = await api(`/api/dashboard${query}`);
+    layoutTiles = answer.tiles;
+    layoutSource = answer.source;
+  } catch {
+    layoutTiles = null;
+    layoutSource = null;
+  }
+}
+
+function renderDashSource() {
+  const el = $("dash-source");
+  if (!el) return;
+  el.textContent = layoutSource ? `layout from ${layoutSource}` : "";
+}
+
 export function renderDashboard() {
+  renderDashSource();
   const el = $("dash");
   if (!el) return;
   // The rail decides how much of the instance this reads as. Every figure
@@ -117,7 +165,7 @@ export function renderDashboard() {
   const calWasAtEdge = !oldCal || oldCal.scrollLeft >= oldCal.scrollWidth - oldCal.clientWidth - 2;
   const calScrollLeft = oldCal ? oldCal.scrollLeft : 0;
 
-  el.innerHTML = renderTiles(DEFAULT_DASHBOARD, { tasks, scopes, prod, everFinished });
+  el.innerHTML = renderTiles(resolveDashboard(layoutTiles), { tasks, scopes, prod, everFinished });
 
   wireCalToggle();
 
@@ -163,9 +211,19 @@ const VIEW_RENDERERS = {
       </section>`,
 };
 
+/// A tile `isTileRenderable` (`dashboard-model.js`) says this page cannot
+/// draw yet -- a `metric` tile (no renderer exists this phase) or a
+/// `view` id outside `VIEW_RENDERERS`' keys -- gets a small, neutral card
+/// naming it instead of nothing or a crash: the config or the catalogue
+/// may already be ahead of what `VIEW_RENDERERS` knows how to render.
+function placeholderTile(tile) {
+  const name = (tile && (tile.metric || tile.view)) || "tile";
+  return `<section class="dcard"><div class="empty">${esc(name)} — not drawn yet</div></section>`;
+}
+
 function renderTile(tile, ctx) {
-  const renderer = VIEW_RENDERERS[tile.view];
-  return renderer ? renderer(ctx) : "";
+  if (!isTileRenderable(tile)) return placeholderTile(tile);
+  return VIEW_RENDERERS[tile.view](ctx);
 }
 
 /// Assembles the page from a tile list: pack tiles into 12-column rows
@@ -628,7 +686,7 @@ export function wireDashboard() {
         if (b.dataset.w === windowKey) return;
         windowKey = b.dataset.w;
         for (const o of seg.querySelectorAll("button")) o.classList.toggle("on", o.dataset.w === windowKey);
-        loadDashboard();
+        reloadProduction();
       };
     }
   }

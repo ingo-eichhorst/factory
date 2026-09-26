@@ -158,6 +158,7 @@ mod tests {
                 ..DaemonConfig::default()
             },
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             scope: None,
@@ -171,6 +172,7 @@ mod tests {
                 git: None,
                 task_store: None,
                 roles: Default::default(),
+                dashboard: None,
                 policies: Default::default(),
                 quality: Default::default(),
                 dependencies: Default::default(),
@@ -241,6 +243,7 @@ mod tests {
                 ..DaemonConfig::default()
             },
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             scope: None,
@@ -254,6 +257,7 @@ mod tests {
                 git: None,
                 task_store: None,
                 roles: Default::default(),
+                dashboard: None,
                 policies: Default::default(),
                 quality: Default::default(),
                 dependencies: Default::default(),
@@ -1020,6 +1024,7 @@ mod tests {
                 // real `caffeinate` on whatever machine runs the tests.
                 daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
                 roles: Default::default(),
+                dashboard: None,
                 policies: Default::default(),
                 quality: Default::default(),
                 scope: None,
@@ -1033,6 +1038,7 @@ mod tests {
                     git: None,
                     task_store: None,
                     roles: Default::default(),
+                    dashboard: None,
                     policies: Default::default(),
                     quality: Default::default(),
                     dependencies: Default::default(),

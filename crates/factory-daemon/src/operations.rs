@@ -771,6 +771,7 @@ mod tests {
                 scope("other-id", "other", root.join("projects/other")),
             ],
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),

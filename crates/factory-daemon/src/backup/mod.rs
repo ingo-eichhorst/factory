@@ -585,6 +585,7 @@ mod tests {
             scope: Some(company.clone()),
             scopes: vec![company],
             roles: Default::default(),
+            dashboard: None,
             policies: PolicyDeclaration::default(),
             quality: Default::default(),
             infrastructure: serde_yaml_ng::from_str(&format!(

@@ -149,6 +149,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/policy/remediate", post(policy_remediate))
         .route("/api/policy/export", get(policy_export))
         .route("/api/metrics", get(metrics))
+        .route("/api/dashboard", get(dashboard))
         .route("/api/costs", get(costs))
         .route("/api/goals", get(goals))
         .route("/api/goals/checkins", post(create_goals_checkin))
@@ -732,6 +733,25 @@ async fn metrics(State(engine): State<Arc<Engine>>, Query(q): Query<MetricsQuery
         }
     }
     run(&engine, Request::Metrics { ids }).await
+}
+
+#[derive(serde::Deserialize)]
+struct DashboardQuery {
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// `GET /api/dashboard?scope=` -- the resolved dashboard layout for `scope`
+/// (the instance root's own when left out), and where it came from
+/// (`#159`). An unknown scope is a 404, like `/api/quality`'s own.
+async fn dashboard(State(engine): State<Arc<Engine>>, Query(q): Query<DashboardQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::Dashboard {
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+        },
+    )
+    .await
 }
 
 #[derive(serde::Deserialize)]
@@ -1941,6 +1961,7 @@ mod tests {
             scope: Some(company.clone()),
             scopes: vec![company],
             roles: Default::default(),
+            dashboard: None,
             policies: PolicyDeclaration::default(),
             quality: vec!["baseline".into()],
             infrastructure: Default::default(),
@@ -2021,6 +2042,71 @@ mod tests {
         assert!(json["message"].as_str().unwrap_or_default().contains("already met"), "{json}");
     }
 
+    fn engine_with_dashboard() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-http-test-{}", uuid::Uuid::new_v4()));
+        let mut company: Scope = serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let mut demo: Scope = serde_yaml_ng::from_str(
+            "id: demo-id\nname: demo\ndashboard:\n  tiles:\n    - { view: kpis, size: m }\n",
+        )
+        .unwrap();
+        demo.path = PathBuf::from("demo");
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company, demo],
+            roles: Default::default(),
+            dashboard: Some(
+                serde_yaml_ng::from_str("tiles:\n  - { metric: throughput_week, size: s }\n").unwrap(),
+            ),
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    #[tokio::test]
+    async fn get_api_dashboard_resolves_the_layout_and_an_unknown_scope_is_a_404() {
+        let engine = engine_with_dashboard();
+        let (status, json) = request(engine.clone(), "GET", "/api/dashboard", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["kind"], "dashboard");
+        // The root's own configured scope is named "company", so that is
+        // what `source` says answered -- never the magic string "root".
+        assert_eq!(json["data"]["source"], "company", "no scope given resolves the instance root's own");
+        assert_eq!(json["data"]["tiles"][0]["metric"], "throughput_week");
+
+        // The root's own scope carries no override of its own, so naming it
+        // explicitly falls through to the same root block.
+        let (status, json) = request(engine.clone(), "GET", "/api/dashboard?scope=company", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["source"], "company");
+
+        let (status, json) = request(engine.clone(), "GET", "/api/dashboard?scope=demo", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["source"], "demo", "demo's own override wins over the root's");
+        assert_eq!(json["data"]["tiles"][0]["view"], "kpis");
+        assert_eq!(json["data"]["tiles"][0]["size"], "m");
+
+        let (status, _) = request(engine, "GET", "/api/dashboard?scope=nope", None).await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn get_api_dashboard_with_no_block_anywhere_answers_null_tiles_and_null_source() {
+        // `engine_with_quality` declares no `dashboard:` at all, root or scope.
+        let engine = engine_with_quality();
+        let (status, json) = request(engine, "GET", "/api/dashboard", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["tiles"], serde_json::Value::Null, "use the UI's built-in default");
+        assert_eq!(json["data"]["source"], serde_json::Value::Null, "never the word \"default\"");
+    }
+
     async fn serve() -> std::net::SocketAddr {
         let root = std::env::temp_dir().join(format!("factory-http-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -2031,6 +2117,7 @@ mod tests {
             scope: None,
             scopes: vec![serde_yaml_ng::from_str("id: demo-id\nname: demo\npath: .\n").unwrap()],
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),
@@ -2099,6 +2186,7 @@ mod tests {
             )
             .unwrap()],
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),

@@ -574,6 +574,7 @@ mod tests {
             git: None,
             task_store: None,
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             dependencies: Default::default(),
@@ -589,6 +590,7 @@ mod tests {
             // No real `caffeinate` from a test that dispatches.
             daemon: DaemonConfig { power_assertion: false, default_agent: "shell".into(), ..DaemonConfig::default() },
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             scope: None,

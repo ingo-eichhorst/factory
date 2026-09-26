@@ -195,3 +195,30 @@ export const DEFAULT_DASHBOARD = Object.freeze(
     { view: "by_scope", size: "xl" },
   ].map((tile) => Object.freeze(tile))
 );
+
+// ------------------------------------------------------- phase 4 (#159) reads
+
+/// Which tile list `dashboard.js` should draw: `fetchedTiles` when
+/// `GET /api/dashboard` named one, else `DEFAULT_DASHBOARD`. The daemon
+/// already answers `tiles: null` for "nothing overrides anything, use the
+/// built-in default" (`#159`'s `Config::dashboard_for_scope`), and a fetch
+/// that has not resolved yet (`undefined`) or that failed (also read as
+/// `null` by the caller) fall back the same way -- so a slow or
+/// unreachable daemon still draws today's page, never a blank one. Never
+/// re-validates: a layout that reached the wire already passed
+/// `Config::validate` server-side, and `DEFAULT_DASHBOARD` is validated by
+/// the tests above.
+export function resolveDashboard(fetchedTiles) {
+  return Array.isArray(fetchedTiles) && fetchedTiles.length > 0 ? fetchedTiles : DEFAULT_DASHBOARD;
+}
+
+/// Whether `dashboard.js`'s `VIEW_RENDERERS` map can draw `tile` today: a
+/// `view` id in `RENDERABLE_VIEW_IDS`. A `metric` tile (no renderer exists
+/// yet, this phase or the next) and a `view` id from the wider epic
+/// vocabulary (`EPIC_VIEW_IDS`) that phase 3 has not built a card for yet
+/// both read `false` here, so `dashboard.js` can draw a neutral
+/// placeholder instead of nothing or a crash -- the config or the
+/// catalogue may already be ahead of what this page knows how to render.
+export function isTileRenderable(tile) {
+  return tileKind(tile) === "view" && RENDERABLE_VIEW_IDS.includes(tile.view);
+}
