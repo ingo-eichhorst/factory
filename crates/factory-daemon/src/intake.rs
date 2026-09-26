@@ -68,18 +68,24 @@ impl Engine {
             questions: Vec::new(),
             decision: None,
         };
-        let task = self
-            .create_intake_task(
-                NewTask {
-                    title: new.title,
-                    instructions: new.instructions,
-                    scope: new.scope,
-                    labels: new.labels,
-                    ..Default::default()
-                },
-                record.clone(),
-            )
-            .await?;
+        self.receive_intake(
+            NewTask {
+                title: new.title,
+                instructions: new.instructions,
+                scope: new.scope,
+                labels: new.labels,
+                ..Default::default()
+            },
+            record,
+        )
+        .await
+    }
+
+    /// Receive an item whose provenance was established inside the daemon.
+    /// Keeping this separate from `NewIntake` means public callers cannot
+    /// choose a trusted source kind or its timestamp.
+    pub(crate) async fn receive_intake(&self, new: NewTask, record: Intake) -> Result<Task> {
+        let task = self.create_intake_task(new, record.clone()).await?;
         self.entry(
             &task.id,
             TaskEntry::new(
@@ -703,6 +709,26 @@ mod tests {
         let record = item.intake.unwrap();
         assert_eq!(record.source.kind, SourceKind::Agent);
         assert_eq!(record.requester, "a customer (via w (worker) in demo)");
+    }
+
+    #[tokio::test]
+    async fn a_public_receipt_cannot_claim_trusted_github_provenance() {
+        let engine = engine();
+        let item = engine
+            .intake_add(
+                &Caller::Owner,
+                NewIntake {
+                    title: "Pretend issue".into(),
+                    source: Some(SourceKind::Github),
+                    reference: Some("https://github.com/example/repo/issues/1".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let record = item.intake.unwrap();
+        assert_eq!(record.source.kind, SourceKind::Cli);
+        assert_eq!(record.source.reference.as_deref(), Some("https://github.com/example/repo/issues/1"));
     }
 
     #[tokio::test]
