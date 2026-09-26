@@ -751,7 +751,15 @@ function byScopeTable(tasks, scopes) {
 /// window label sits in), and a body. Kept as one function so a tile never
 /// has to restate `<section class="dcard">`/`<h3>` by hand.
 function dcard(title, qualifier, body) {
-  return `<section class="dcard"><h3>${esc(title)}${qualifier ? `<span class="r">${esc(qualifier)}</span>` : ""}</h3>${body}</section>`;
+  const right = qualifier ? '<span class="r">' + esc(qualifier) + "</span>" : "";
+  return `<section class="dcard"><h3>${esc(title)}${right}</h3>${body}</section>`;
+}
+
+/// " · trailing N days" for a window the answer itself reported, or "" when
+/// it reported none -- the one place a tile qualifier spells a day count.
+function trailingDays(days) {
+  if (days === null) return "";
+  return ` · trailing ${days} ${days === 1 ? "day" : "days"}`;
 }
 
 /// One `.stn` bar row (`app.css`, the same markup `onTheLine`'s `stnRow`
@@ -799,13 +807,14 @@ function metricTile(tile) {
 /// `from` to `now`, never `to` (which overshoots a quarter-window ahead to
 /// leave room for a scheduled run's own preview, `occupancy.js`'s own
 /// `liveView`). Said plainly rather than assumed from the dashboard's own
-/// window key: `/api/occupancy` clamps at 30 days (`occupancy.rs`'s
-/// `MAX_MINUTES`), so a `d90` selection quietly answers less than asked,
-/// and a tile that named the window it asked for rather than the one it got
-/// would disagree with a future `agent_hours` metric tile sitting beside it.
+/// window key: `/api/occupancy` clamps the window it serves (`occupancy.rs`'s
+/// `MIN_MINUTES`/`MAX_MINUTES`), so a request outside that range answers
+/// something other than what was asked, and a tile that named the window it
+/// asked for rather than the one it got would disagree with an `agent_hours`
+/// metric tile sitting beside it.
 function occupancyWindowNote(occ) {
   const days = windowDays(occ.from, occ.now);
-  return days === null ? "from run blocks" : `from run blocks · trailing ${days} day${days === 1 ? "" : "s"}`;
+  return "from run blocks" + trailingDays(days);
 }
 
 /// `agent_hours_by_scope`/`agent_hours_by_agent`: one bar per row from
@@ -888,7 +897,7 @@ function costTile() {
     })
     .join("");
   const days = windowDays(tileCosts.from, tileCosts.to);
-  const qualifier = `API-equivalent USD · by scope${days === null ? "" : ` · trailing ${days} day${days === 1 ? "" : "s"}`}`;
+  const qualifier = "API-equivalent USD · by scope" + trailingDays(days);
   return dcard("Cost", qualifier, `<p class="dnote">${esc(line)}</p>${rows}`);
 }
 

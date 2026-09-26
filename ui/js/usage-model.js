@@ -93,7 +93,7 @@ export function taskUsageLine(total) {
 /// still partial reads the same figure `taskUsageLine` would sum, prefixed
 /// `≥` -- a lower bound, not the whole story.
 export function costFigure(row) {
-  if (!row || !row.runs) return { text: "—", hasCost: false };
+  if (!row?.runs) return { text: "—", hasCost: false };
   if (row.runs_unknown === row.runs) return { text: "unknown", hasCost: false };
   const costed = row.runs - (row.runs_unknown || 0) - (row.runs_cost_unknown || 0);
   if (costed === 0) return { text: "?", hasCost: false };
