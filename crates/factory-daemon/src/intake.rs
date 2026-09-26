@@ -10,13 +10,18 @@
 //! (`TRIAGE_VERDICT_KIND`) carrying the whole assessment in `data`, and the
 //! category, priority and estimate travel as labels. Nothing here reaches
 //! outside Factory: no comment, label or reply on any external system.
+//!
+//! A split is the other way out: the item is replaced by smaller intake
+//! items in the same scope, each carrying `intake-parent`, and closes as
+//! `Done` with their ids -- the precedent a workflow release set.
 
 use crate::access::Caller;
 use crate::engine::{Due, Engine};
 use crate::operations::Asked;
 use chrono::Utc;
 use factory_core::intake::{
-    self, Decision, DecisionRecord, Intake, IntakeBoard, IntakeSource, IntakeStage, NewIntake, SourceKind, Verdict,
+    self, AgentOption, Decision, DecisionRecord, Intake, IntakeBoard, IntakeSource, IntakeStage, NewIntake,
+    RouteOptions, SourceKind, Verdict, WorkflowOption,
 };
 use factory_core::{Event, FactoryError, NewTask, Result, Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus, Trigger};
 use std::collections::BTreeSet;
@@ -122,7 +127,43 @@ impl Engine {
                 t.intake.is_none() || members.as_ref().is_none_or(|m| m.contains(&t.scope))
             })
             .collect();
-        Ok(intake::board(&tasks, Utc::now()))
+        let mut board = intake::board(&tasks, Utc::now());
+        board.routes = self.intake_routes().await?;
+        Ok(board)
+    }
+
+    /// Every scope an item can be routed to, with the agents a task there
+    /// can run on (and the model each one's args choose) and the workflows
+    /// it has -- what a triager, a run or a person, chooses the route from.
+    /// Standing agents are left out: they are not given tasks.
+    pub(crate) async fn intake_routes(&self) -> Result<Vec<RouteOptions>> {
+        let factory = self.factory_snapshot();
+        let mut out = Vec::new();
+        for scope in &factory.config.scopes {
+            let default_agent = scope
+                .agent_adapter()
+                .map(str::to_string)
+                .unwrap_or_else(|| factory.config.daemon.default_agent.clone());
+            let mut agents: Vec<AgentOption> = scope
+                .agents_with(&factory.config.daemon.foreman)
+                .into_iter()
+                .filter(|a| !a.lifetime.is_standing())
+                .map(|a| AgentOption { name: a.name(), harness: a.harness.clone(), model: intake::model_of(&a.args) })
+                .collect();
+            if !agents.iter().any(|a| a.name == default_agent) {
+                agents.insert(0, AgentOption { name: default_agent.clone(), harness: default_agent.clone(), model: None });
+            }
+            let workflows = self
+                .workflows
+                .definitions(Some(&scope.name))
+                .await?
+                .iter()
+                .filter(|d| d.scope == scope.name)
+                .map(WorkflowOption::from_definition)
+                .collect();
+            out.push(RouteOptions { scope: scope.name.clone(), default_agent: Some(default_agent), agents, workflows });
+        }
+        Ok(out)
     }
 
     /// `Request::IntakeTriage`: the intake workflow's triage node. A task of
@@ -150,12 +191,11 @@ impl Engine {
                 }
             }
         }
-        let factory = self.factory_snapshot();
-        let scopes: Vec<String> = factory.config.scopes.iter().map(|s| s.name.clone()).collect();
+        let routes = self.intake_routes().await?;
         let triage = self
             .create(NewTask {
                 title: format!("Triage: {}", item.title),
-                instructions: intake::triage_instructions(&item, &scopes, &self.factory_bin.display().to_string()),
+                instructions: intake::triage_instructions(&item, &routes, &self.factory_bin.display().to_string()),
                 scope: Some(item.scope.clone()),
                 agent,
                 labels: [(TRIAGE_LABEL.to_string(), item.id.clone())].into_iter().collect(),
@@ -212,6 +252,35 @@ impl Engine {
         }
         if let Some(workflow) = &assessment.routing.workflow {
             let found = self.find_workflow(&scope, workflow).await?;
+            // Refused now rather than at release: an input the run needs,
+            // or a step that is not there, is the assessor's to fix.
+            found
+                .with_inputs(&assessment.routing.inputs)
+                .map_err(|e| FactoryError::BadRequest(format!("workflow {}: {e}", found.name)))?;
+            let mut agents = std::collections::BTreeMap::new();
+            for (step, agent) in &assessment.routing.agents {
+                let node = found
+                    .nodes
+                    .iter()
+                    .find(|n| &n.id == step && n.kind == factory_core::WorkflowNodeKind::Task)
+                    .ok_or_else(|| {
+                        let steps: Vec<&str> = found
+                            .nodes
+                            .iter()
+                            .filter(|n| n.kind == factory_core::WorkflowNodeKind::Task)
+                            .map(|n| n.id.as_str())
+                            .collect();
+                        FactoryError::BadRequest(format!(
+                            "workflow {} has no step {step:?}; its steps are {}",
+                            found.name,
+                            steps.join(", ")
+                        ))
+                    })?;
+                let node_scope = node.task.scope.clone().unwrap_or_else(|| found.scope.clone());
+                let (name, _, _) = self.resolve_agent(&node_scope, agent)?;
+                agents.insert(step.clone(), name);
+            }
+            assessment.routing.agents = agents;
             assessment.routing.workflow = Some(found.id);
         }
         let triage = intake::evaluate(&assessment, caller.describe(), Utc::now());
@@ -254,7 +323,13 @@ impl Engine {
         let asked = Asked::new(caller, None);
         let now = Utc::now();
         let mut next = record.clone();
-        let mut decided = DecisionRecord { decision: decision.clone(), by: caller.describe(), at: now, workflow_run: None };
+        let mut decided = DecisionRecord {
+            decision: decision.clone(),
+            by: caller.describe(),
+            at: now,
+            workflow_run: None,
+            parts: Vec::new(),
+        };
 
         match &decision {
             Decision::Ready { run } => {
@@ -292,7 +367,9 @@ impl Engine {
                     // left to do itself. `start_workflow` checks the caller
                     // could create and run every node by hand.
                     Some(workflow) => {
-                        let run = self.start_workflow(workflow, Default::default(), caller).await?;
+                        let run = self
+                            .start_workflow_with_agents(workflow, routing.inputs.clone(), &routing.agents, caller)
+                            .await?;
                         decided.workflow_run = Some(run.id.clone());
                         patch.status = Some(TaskStatus::Done);
                         patch.result = Some(format!(
@@ -351,6 +428,7 @@ impl Engine {
                 }
                 Ok(task)
             }
+            Decision::Split { parts } => self.intake_split(&item, &record, parts, next, decided, &asked, now).await,
             Decision::Wontfix { reason, evidence, duplicate_of } => {
                 let why = match duplicate_of {
                     Some(of) => format!("wontfix: duplicate of {of} -- {}", evidence.trim()),
@@ -377,6 +455,106 @@ impl Engine {
                 Ok(task)
             }
         }
+    }
+
+    /// A `split` decision: each part an intake item of its own in the item's
+    /// scope, made dependencies first, and the item closed as `Done` naming
+    /// them.
+    #[allow(clippy::too_many_arguments)]
+    async fn intake_split(
+        &self,
+        item: &Task,
+        record: &Intake,
+        parts: &[intake::SplitPart],
+        mut next: Intake,
+        mut decided: DecisionRecord,
+        asked: &Asked,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Task> {
+        let parts = intake::split_parts(record, parts).map_err(FactoryError::BadRequest)?;
+        let ordered = intake::split_order(&parts).expect("split_parts refuses a cycle");
+        let total = ordered.len();
+        let mut made: std::collections::BTreeMap<String, Task> = std::collections::BTreeMap::new();
+        for (k, part) in ordered.into_iter().enumerate() {
+            let mut text = part.instructions.clone();
+            if let Some(acceptance) = &part.acceptance {
+                text.push_str(&format!("\n\nDone when: {acceptance}"));
+            }
+            if !part.depends_on.is_empty() {
+                // Dependencies are made first, so each one is there.
+                let after: Vec<String> = part
+                    .depends_on
+                    .iter()
+                    .filter_map(|d| made.get(d))
+                    .map(|t| format!("{} (intake item {})", t.title, t.id))
+                    .collect();
+                text.push_str(&format!("\n\nComes after: {}.", after.join("; ")));
+            }
+            text.push_str(&format!(
+                "\n\n---\nPart {} of {total} split from intake item {} ({}). The original request, for context:\n\n{}",
+                k + 1,
+                item.id,
+                item.title,
+                item.instructions.trim(),
+            ));
+            let mut labels = item.labels.clone();
+            labels.insert(intake::PARENT_LABEL.into(), item.id.clone());
+            labels.insert(intake::PART_LABEL.into(), part.id.clone());
+            let child = self
+                .create_intake_task(
+                    NewTask {
+                        title: part.title.clone(),
+                        instructions: text,
+                        scope: Some(item.scope.clone()),
+                        labels,
+                        ..Default::default()
+                    },
+                    Intake {
+                        stage: IntakeStage::Received,
+                        source: record.source.clone(),
+                        requester: record.requester.clone(),
+                        received_at: now,
+                        triage: None,
+                        triage_task: None,
+                        questions: Vec::new(),
+                        decision: None,
+                    },
+                )
+                .await?;
+            self.entry(
+                &child.id,
+                asked.entry(
+                    "intake_received",
+                    format!("split from intake item {} as part {} of {total} {}", item.id, k + 1, asked.words()),
+                    serde_json::json!({ "parent": item.id, "part": part.id, "depends_on": part.depends_on }),
+                ),
+            )
+            .await;
+            made.insert(part.id.clone(), child);
+        }
+        let children: Vec<&Task> = parts.iter().filter_map(|p| made.get(&p.id)).collect();
+        decided.parts = children.iter().map(|t| t.id.clone()).collect();
+        let result = format!(
+            "split into {} intake items: {}",
+            children.len(),
+            children.iter().map(|t| format!("{} ({})", t.title, t.id)).collect::<Vec<_>>().join("; ")
+        );
+        next.stage = IntakeStage::Split;
+        next.questions.clear();
+        next.decision = Some(decided.clone());
+        let patch =
+            TaskPatch { status: Some(TaskStatus::Done), result: Some(result.clone()), ..Default::default() };
+        let task = self.write_intake(&item.id, next, patch).await?;
+        self.entry(
+            &task.id,
+            asked.entry(
+                "intake_split",
+                format!("{result} ({})", asked.words()),
+                serde_json::json!({ "decision": decided, "parts": parts }),
+            ),
+        )
+        .await;
+        Ok(task)
     }
 
     /// `Request::IntakeInfo`: more from the requester. It goes into the
@@ -624,9 +802,10 @@ mod tests {
             urgency: Level::Medium,
             complexity: 3,
             estimate: None,
-            routing: Routing { scope: scope.into(), agent: Some("shell".into()), workflow: None },
+            routing: Routing { scope: scope.into(), agent: Some("shell".into()), ..Default::default() },
             summary: "bounded".into(),
             questions: vec![],
+            split: vec![],
         }
     }
 
@@ -929,5 +1108,197 @@ mod tests {
         let Response::Ok { data: Payload::IntakeBoard { board } } = response else { panic!("{response:?}") };
         assert_eq!(board.columns.received.len(), 1);
         assert_eq!(board.axes.len(), 7);
+    }
+
+    fn too_big() -> Assessment {
+        let mut a = assessment("demo");
+        let scope = a.axes.iter_mut().find(|c| c.axis == Axis::Scope).unwrap();
+        scope.pass = false;
+        scope.evidence = "four subsystems in one item".into();
+        a.complexity = 10;
+        a.split = vec![
+            factory_core::intake::SplitPart {
+                id: "rework".into(),
+                title: "Rework as a run".into(),
+                instructions: "rounds on runs".into(),
+                depends_on: vec!["resume".into()],
+                acceptance: None,
+            },
+            factory_core::intake::SplitPart {
+                id: "resume".into(),
+                title: "Resume mechanism".into(),
+                instructions: "capture and resume sessions".into(),
+                depends_on: vec![],
+                acceptance: Some("cargo test resume_".into()),
+            },
+        ];
+        a
+    }
+
+    #[tokio::test]
+    async fn a_red_item_says_what_moves_it_and_splitting_hands_its_parts_back_into_intake() {
+        let engine = engine();
+        let item = engine
+            .intake_add(
+                &Caller::Owner,
+                NewIntake {
+                    title: "Everything at once".into(),
+                    instructions: "the whole issue".into(),
+                    scope: Some("demo".into()),
+                    reference: Some("https://example.test/issues/178".into()),
+                    labels: [("issue".to_string(), "178".to_string())].into_iter().collect(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let back = engine.intake_assess(&Caller::Owner, &item.id, too_big(), true).await.unwrap();
+        assert_eq!(back.intake.as_ref().unwrap().stage, IntakeStage::NeedsInfo, "a proposal does not split by itself");
+        let board = engine.intake_board(None).await.unwrap();
+        let card = &board.columns.needs_info[0];
+        assert_eq!(card.next_actions[0].action, factory_core::intake::NextActionKind::Split);
+        assert!(card.next_actions[0].hint.contains("Resume mechanism"), "{:?}", card.next_actions);
+
+        let split = engine.intake_decide(&Caller::Owner, &item.id, Decision::Split { parts: vec![] }).await.unwrap();
+        assert_eq!(split.status, TaskStatus::Done);
+        let record = split.intake.as_ref().unwrap();
+        assert_eq!(record.stage, IntakeStage::Split);
+        let parts = record.decision.as_ref().unwrap().parts.clone();
+        assert_eq!(parts.len(), 2);
+        assert!(split.result.as_deref().unwrap().starts_with("split into 2 intake items"));
+        assert!(kinds(&engine, &item.id).await.contains(&"intake_split".to_string()));
+
+        // Written order is kept in the record; dependencies are made first.
+        let rework = engine.require(&parts[0]).await.unwrap();
+        let resume = engine.require(&parts[1]).await.unwrap();
+        assert_eq!(rework.title, "Rework as a run");
+        for part in [&rework, &resume] {
+            assert_eq!(part.status, TaskStatus::Intake);
+            let r = part.intake.as_ref().unwrap();
+            assert_eq!(r.stage, IntakeStage::Received);
+            assert_eq!(r.source.reference.as_deref(), Some("https://example.test/issues/178"));
+            assert_eq!(part.labels[factory_core::intake::PARENT_LABEL], item.id);
+            assert_eq!(part.labels["issue"], "178", "the parent's labels travel");
+            assert!(part.instructions.contains("the whole issue"), "the original request, for context");
+        }
+        assert_eq!(rework.labels[factory_core::intake::PART_LABEL], "rework");
+        assert!(rework.instructions.contains(&format!("Comes after: Resume mechanism (intake item {})", resume.id)));
+        assert!(resume.instructions.contains("Done when: cargo test resume_"));
+        assert!(resume.instructions.contains("Part 1 of 2"), "dependencies first");
+
+        let board = engine.intake_board(None).await.unwrap();
+        assert_eq!(board.split, 1);
+        assert_eq!(board.columns.received.len(), 2);
+        assert!(board.columns.received.iter().all(|c| c.parent.as_deref() == Some(item.id.as_str())));
+        let again = engine.intake_decide(&Caller::Owner, &item.id, Decision::Split { parts: vec![] }).await;
+        assert!(again.unwrap_err().to_string().contains("already left intake"));
+    }
+
+    #[tokio::test]
+    async fn the_triage_run_may_propose_a_split_but_not_make_one() {
+        let engine = engine();
+        let item = add(&engine, "Everything at once").await;
+        let triage = engine.intake_triage(&Caller::Owner, &item.id, Some("shell".into())).await.unwrap();
+        let run = loop {
+            if let Some(run) = engine.store.active_run(&triage.id).await.unwrap() {
+                break run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        let triager = worker(Some(run.id.clone()));
+        let assess = Request::IntakeAssess { id: item.id.clone(), assessment: too_big(), decide: true };
+        engine.authorize(&triager, &assess).await.unwrap();
+        let split = Request::IntakeDecide { id: item.id.clone(), decision: Decision::Split { parts: vec![] } };
+        let why = engine.authorize(&triager, &split).await.unwrap_err();
+        assert!(why.to_string().contains("propose the split"), "{why}");
+        engine.authorize(&Caller::Owner, &split).await.unwrap();
+    }
+
+    async fn issue_flow(engine: &Arc<Engine>) {
+        engine
+            .create_workflow(WorkflowDraft {
+                name: "issue-flow".into(),
+                scope: "demo".into(),
+                inputs: vec![factory_core::workflow::WorkflowInput { name: "issue".into(), description: "number".into() }],
+                nodes: vec![WorkflowNode {
+                    id: "fix".into(),
+                    position: CanvasPoint::default(),
+                    kind: WorkflowNodeKind::Task,
+                    task: NewTask {
+                        title: "Fix #{{issue}}".into(),
+                        instructions: "true".into(),
+                        scope: Some("demo".into()),
+                        agent: Some("shell".into()),
+                        worktree: Some(false),
+                        ..Default::default()
+                    },
+                    gate: None,
+                    exits: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_workflow_route_carries_its_inputs_and_each_steps_agent_into_the_run() {
+        let engine = engine();
+        issue_flow(&engine).await;
+        let item = add(&engine, "Issue 178").await;
+        let routed = |inputs: &[(&str, &str)], agents: &[(&str, &str)]| {
+            let mut a = assessment("demo");
+            a.routing.agent = None;
+            a.routing.workflow = Some("issue-flow".into());
+            a.routing.inputs = inputs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            a.routing.agents = agents.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            a
+        };
+        // Refused at assessment, before anything is written.
+        let why = engine.intake_assess(&Caller::Owner, &item.id, routed(&[], &[]), false).await.unwrap_err();
+        assert!(why.to_string().contains("needs issue"), "{why}");
+        let why = engine
+            .intake_assess(&Caller::Owner, &item.id, routed(&[("issue", "178")], &[("review", "shell")]), false)
+            .await
+            .unwrap_err();
+        assert!(why.to_string().contains("no step \"review\"; its steps are fix"), "{why}");
+        let why = engine
+            .intake_assess(&Caller::Owner, &item.id, routed(&[("issue", "178")], &[("fix", "no-such-agent")]), false)
+            .await
+            .unwrap_err();
+        assert!(why.to_string().contains("no-such-agent"), "{why}");
+        assert!(engine.require(&item.id).await.unwrap().intake.unwrap().triage.is_none());
+
+        let released = engine
+            .intake_assess(&Caller::Owner, &item.id, routed(&[("issue", "178")], &[("fix", "codex")]), true)
+            .await
+            .unwrap();
+        assert_eq!(released.status, TaskStatus::Done, "released by starting the workflow");
+        let run_id = released.intake.as_ref().unwrap().decision.as_ref().unwrap().workflow_run.clone().unwrap();
+        let run = engine.workflow_run(&run_id).await.unwrap();
+        assert_eq!(run.inputs["issue"], "178");
+        let fix = run.definition.nodes.iter().find(|n| n.id == "fix").unwrap();
+        assert_eq!(fix.task.title, "Fix #178");
+        assert_eq!(fix.task.agent.as_deref(), Some("codex"), "the route's agent, not the definition's");
+        let stored = engine.find_workflow("demo", "issue-flow").await.unwrap();
+        assert_eq!(stored.nodes[0].task.agent.as_deref(), Some("shell"), "the definition is untouched");
+    }
+
+    #[tokio::test]
+    async fn the_board_lists_every_route_with_agents_and_workflows() {
+        let engine = engine();
+        issue_flow(&engine).await;
+        let board = engine.intake_board(None).await.unwrap();
+        let names: Vec<&str> = board.routes.iter().map(|r| r.scope.as_str()).collect();
+        assert_eq!(names, vec!["demo", "web"]);
+        let demo = &board.routes[0];
+        assert_eq!(demo.default_agent.as_deref(), Some("shell"));
+        assert!(demo.agents.iter().any(|a| a.name == "shell"));
+        assert_eq!(demo.workflows.len(), 1);
+        let flow = &demo.workflows[0];
+        assert_eq!(flow.inputs[0].name, "issue");
+        assert_eq!(flow.steps[0].id, "fix");
+        assert_eq!(flow.steps[0].agent.as_deref(), Some("shell"));
+        assert!(board.routes[1].workflows.is_empty());
     }
 }

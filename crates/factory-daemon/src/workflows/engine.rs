@@ -1794,12 +1794,37 @@ impl Engine {
         inputs: BTreeMap<String, String>,
         caller: &Caller,
     ) -> Result<WorkflowRun> {
+        self.start_workflow_with_agents(id, inputs, &BTreeMap::new(), caller).await
+    }
+
+    /// `start_workflow`, with some steps given to other agents than the
+    /// definition names -- the route an intake item was released on. Only
+    /// this run's snapshot changes; the definition stays as written.
+    pub(crate) async fn start_workflow_with_agents(
+        self: &Arc<Self>,
+        id: &str,
+        inputs: BTreeMap<String, String>,
+        agents: &BTreeMap<String, String>,
+        caller: &Caller,
+    ) -> Result<WorkflowRun> {
         let definition = self.workflow_definition(id).await?;
         definition.validate().map_err(FactoryError::BadRequest)?;
         // `#140`: the run's inputs are written into its snapshot before
         // anything else looks at it, so what is authorized, injected and
         // spawned below is exactly what will run.
-        let definition = definition.with_inputs(&inputs).map_err(FactoryError::BadRequest)?;
+        let mut definition = definition.with_inputs(&inputs).map_err(FactoryError::BadRequest)?;
+        // Likewise each step's agent: set before the spawn check, so the
+        // agent that is authorized is the one that will run.
+        for (step, agent) in agents {
+            let node = definition
+                .nodes
+                .iter_mut()
+                .find(|n| &n.id == step && n.kind == WorkflowNodeKind::Task)
+                .ok_or_else(|| {
+                    FactoryError::BadRequest(format!("workflow {} has no task step {step:?}", definition.name))
+                })?;
+            node.task.agent = Some(agent.clone());
+        }
         // Every node must be something this caller could `task.create` and
         // `task.run` by hand, checked before anything is persisted -- a
         // `workflow.run` grant is not a way to launder a caller into
