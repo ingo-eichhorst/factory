@@ -1,4 +1,4 @@
-//! The L6 Direction, Quality attributes tab (GitHub issue `#107`, slice 3):
+//! The L5 Improvement, Quality attributes tab (GitHub issue `#107`, slice 3):
 //! which qualities matter for each scope, how much, what they trade off
 //! against, and whether they are met -- measured, never claimed. A picture,
 //! not an enforcer (design §8): nothing here starts, stops or gates any

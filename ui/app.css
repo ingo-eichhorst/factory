@@ -1955,8 +1955,8 @@ a.goal-kr-source:hover { color: var(--signal); text-decoration: underline; }
   .scn-driver-row output { text-align: left; }
 }
 
-/* ================================================================== L6
-   direction: quality attributes (#107). A scenario's five statuses reuse
+/* ================================================================== L5
+   improvement: quality attributes (#107). A scenario's five statuses reuse
    the shared `.badge s-*` convention -- `.s-stale` is already Policy's (the
    same word, the same meaning: evidence older than it may be), the other
    four are new. Never green without a measure: `draft` and `no_data` are
