@@ -9,6 +9,7 @@ mod configuration;
 mod costs;
 mod datasets;
 mod dependencies;
+mod doctor;
 mod discovery;
 mod engine;
 mod goals;
@@ -51,8 +52,15 @@ use std::sync::Arc;
 use engine::Engine;
 use interfaces::{HttpInterface, SocketInterface};
 
+const BUILD_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("FACTORY_GIT_SHA"),
+    ")"
+);
+
 #[derive(Parser)]
-#[command(name = "factory-daemon", about = "The Factory daemon", version)]
+#[command(name = "factory-daemon", about = "The Factory daemon", version = BUILD_VERSION)]
 struct Cli {
     /// Instance root. Defaults to the nearest ancestor holding a .factory/.
     #[arg(long, global = true, env = "FACTORY_ROOT")]

@@ -332,10 +332,13 @@ pub enum Check {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         absent: Vec<String>,
     },
-    /// The newest declared dependency inventory and its derived open findings.
+    /// The newest declared and built dependency inventories and their derived
+    /// open findings.
     Dependencies {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sbom_max_age: Option<Duration>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        built_sbom: bool,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         max_open: BTreeMap<Severity, u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -434,9 +437,10 @@ impl Check {
                 }
             }
             Check::Daemon { fact } => format!("daemon: {fact}"),
-            Check::Dependencies { sbom_max_age, max_open, exploited_open } => {
+            Check::Dependencies { sbom_max_age, built_sbom, max_open, exploited_open } => {
                 let mut terms = Vec::new();
                 if let Some(age) = sbom_max_age { terms.push(format!("SBOM max_age {age}")); }
+                if *built_sbom { terms.push("built SBOM required".to_string()); }
                 for (severity, limit) in max_open { terms.push(format!("{} <= {limit}", severity.as_str())); }
                 if let Some(limit) = exploited_open { terms.push(format!("exploited <= {limit}")); }
                 format!("dependencies: {}", terms.join(", "))
@@ -1802,7 +1806,7 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                     }
                 }
             }
-            Check::Dependencies { sbom_max_age: _, max_open, exploited_open } => {
+            Check::Dependencies { sbom_max_age: _, built_sbom, max_open, exploited_open } => {
                 let Some(fact) = &evidence.dependencies else {
                     open.push("dependencies: not resolved for this scope".to_string());
                     continue;
@@ -1816,6 +1820,9 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                         )),
                         Some(_) => {}
                     }
+                }
+                if *built_sbom && fact.built_sbom_at.is_none() {
+                    breaches.push("no built SBOM for the newest release".to_string());
                 }
                 for (severity, limit) in max_open {
                     let actual = fact.open.get(severity).copied().unwrap_or_default();
@@ -2482,6 +2489,37 @@ mod tests {
         assert_eq!(check, Check::Secrets { absent: Vec::new() });
         let json = serde_json::to_string(&check).unwrap();
         assert_eq!(json, "{\"check\":\"secrets\"}", "an empty `absent` is not written out");
+    }
+
+    #[test]
+    fn dependencies_built_sbom_requirement_parses_and_defaults_off() {
+        let required: Check =
+            serde_yaml_ng::from_str("check: dependencies\nbuilt_sbom: true\n").unwrap();
+        assert_eq!(
+            required,
+            Check::Dependencies {
+                sbom_max_age: None,
+                built_sbom: true,
+                max_open: BTreeMap::new(),
+                exploited_open: None,
+            }
+        );
+        assert_eq!(required.describe(), "dependencies: built SBOM required");
+
+        let optional: Check = serde_yaml_ng::from_str("check: dependencies\n").unwrap();
+        assert_eq!(
+            optional,
+            Check::Dependencies {
+                sbom_max_age: None,
+                built_sbom: false,
+                max_open: BTreeMap::new(),
+                exploited_open: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&optional).unwrap(),
+            "{\"check\":\"dependencies\"}"
+        );
     }
 
     // -- applicable ----------------------------------------------------------
@@ -4062,6 +4100,7 @@ mod tests {
     fn dependencies_check_enforces_freshness_severity_and_exploitation_limits() {
         let check = Check::Dependencies {
             sbom_max_age: Some("30d".parse().unwrap()),
+            built_sbom: false,
             max_open: BTreeMap::from([(Severity::Critical, 0)]),
             exploited_open: Some(0),
         };
@@ -4070,6 +4109,7 @@ mod tests {
         let mut evidence = Evidence::default();
         evidence.dependencies = Some(DependenciesFact {
             declared_sbom_at: Some(now - chrono::Duration::days(1)),
+            built_sbom_at: None,
             open: BTreeMap::new(),
             exploited_open: 0,
         });
@@ -4078,5 +4118,35 @@ mod tests {
         evidence.dependencies.as_mut().unwrap().open.insert(Severity::Critical, 1);
         evidence.dependencies.as_mut().unwrap().exploited_open = 1;
         assert_eq!(evaluate(&applied, &evidence, now)[0].status.kind(), StatusKind::Open);
+    }
+
+    #[test]
+    fn dependencies_check_requires_build_evidence_when_requested() {
+        let check = Check::Dependencies {
+            sbom_max_age: None,
+            built_sbom: true,
+            max_open: BTreeMap::new(),
+            exploited_open: None,
+        };
+        let applied = vec![applied_control("built-dependencies", vec![check], Vec::new())];
+        let now = "2026-09-25T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut evidence = Evidence::default();
+        evidence.dependencies = Some(DependenciesFact::default());
+
+        let missing = evaluate(&applied, &evidence, now);
+        assert_eq!(missing[0].status.kind(), StatusKind::Open);
+        assert!(
+            missing[0]
+                .status
+                .reasons()
+                .iter()
+                .any(|reason| reason == "dependencies: no built SBOM for the newest release")
+        );
+
+        evidence.dependencies.as_mut().unwrap().built_sbom_at = Some(now);
+        assert_eq!(
+            evaluate(&applied, &evidence, now)[0].status.kind(),
+            StatusKind::Satisfied
+        );
     }
 }

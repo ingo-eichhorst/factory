@@ -245,6 +245,7 @@ impl Engine {
             | Request::Environment
             | Request::Dependencies { .. }
             | Request::DependenciesVex { .. }
+            | Request::Doctor
             | Request::Infrastructure
             // Lists the destination and reads the history; writes nothing.
             | Request::Backup
@@ -1009,6 +1010,7 @@ mod tests {
         );
         assert!(!allowed(&e, &worker("w"), verify).await, "a worker holds no backup.run");
         assert!(allowed(&e, &worker("w"), Request::Backup).await, "reading the status is open to every agent");
+        assert!(allowed(&e, &worker("w"), Request::Doctor).await, "Doctor is a read open to every agent");
         assert!(allowed(&e, &Caller::Owner, Request::BackupRun).await);
     }
 

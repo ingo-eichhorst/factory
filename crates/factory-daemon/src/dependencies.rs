@@ -5,9 +5,9 @@
 
 use chrono::{DateTime, Utc};
 use factory_core::dependencies::{
-    validate_document, AffectedComponent, Attachment, AttachmentKind, DependenciesFact,
-    DependenciesReport, DependencyFinding, DependencyServiceView, DocumentSummary, FindingStatus,
-    LifecycleDocuments, LifecycleState, Rating, Severity,
+    product_identity, validate_document, AffectedComponent, Attachment, AttachmentKind,
+    DependenciesFact, DependenciesReport, DependencyFinding, DependencyServiceView,
+    DocumentSummary, FindingStatus, LifecycleDocuments, LifecycleState, Rating, Severity,
 };
 use factory_core::error::{FactoryError, Result};
 use factory_core::protocol::CredentialRow;
@@ -172,6 +172,7 @@ fn summary(document: &StoredDocument) -> DocumentSummary {
         tool,
         tool_version,
         scan_time,
+        identity: product_identity(&document.json),
     }
 }
 
@@ -618,8 +619,14 @@ pub(crate) fn fact(report: &DependenciesReport) -> DependenciesFact {
         .iter()
         .find(|d| d.state == LifecycleState::Declared)
         .map(|d| d.sbom.attachment.attached_at);
+    let built_sbom_at = report
+        .documents
+        .iter()
+        .find(|d| d.state == LifecycleState::Built)
+        .map(|d| d.sbom.attachment.attached_at);
     let mut fact = DependenciesFact {
         declared_sbom_at,
+        built_sbom_at,
         ..Default::default()
     };
     for finding in report
@@ -905,6 +912,38 @@ mod tests {
         );
         assert_eq!(report.findings[0].status, FindingStatus::Open);
         assert_eq!(report.findings[0].scan.attachment.run_id, "r1");
+    }
+
+    #[test]
+    fn policy_fact_projects_the_newest_build_sbom() {
+        let built = include_bytes!(
+            "../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json"
+        );
+        let docs = vec![stored(
+            AttachmentKind::Sbom,
+            built,
+            "2026-09-25T10:00:00Z",
+            "built",
+            "r1",
+        )];
+        let report = build_report(
+            &scope(None),
+            &docs,
+            &[],
+            DateTime::parse_from_rfc3339("2026-09-25T11:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+
+        assert_eq!(
+            fact(&report).built_sbom_at,
+            Some(
+                DateTime::parse_from_rfc3339("2026-09-25T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            )
+        );
+        assert_eq!(fact(&build_report(&scope(None), &[], &[], Utc::now())).built_sbom_at, None);
     }
 
     #[test]

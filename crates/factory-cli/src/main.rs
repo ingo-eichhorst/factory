@@ -27,8 +27,15 @@ use std::path::{Path, PathBuf};
 
 use client::Client;
 
+const BUILD_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("FACTORY_GIT_SHA"),
+    ")"
+);
+
 #[derive(Parser)]
-#[command(name = "factory", about = "Talk to a Factory daemon", version)]
+#[command(name = "factory", about = "Talk to a Factory daemon", version = BUILD_VERSION)]
 struct Cli {
     /// Instance root. Defaults to the nearest ancestor holding a .factory/.
     #[arg(long, global = true, env = "FACTORY_ROOT")]
@@ -4348,8 +4355,14 @@ fn dependencies_text(report: &DependenciesReport) -> String {
     let mut out = format!("{} dependencies\n", report.scope);
     if report.documents.is_empty() { out.push_str("  no scans\n"); }
     for document in &report.documents {
+        let identity = document
+            .sbom
+            .identity
+            .as_ref()
+            .map(|identity| format!(" v{} {}", identity.version, identity.git_sha))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "  {:<8} {}{}\n", document.state, document.sbom.attachment.attached_at,
+            "  {:<8} {}{}{}\n", document.state, document.sbom.attachment.attached_at, identity,
             if document.vulnerabilities.is_some() { " + vulnerabilities" } else { "" }
         ));
     }
@@ -5859,6 +5872,30 @@ mod tests {
         assert!(matches!(read.command, Command::Dependencies { ref args } if args == &["demo"]));
         let vex = Cli::try_parse_from(["factory", "dependencies", "vex", "demo"]).unwrap();
         assert!(matches!(vex.command, Command::Dependencies { ref args } if args == &["vex", "demo"]));
+    }
+
+    #[test]
+    fn dependency_rows_show_the_product_version_and_commit_when_present() {
+        let report: DependenciesReport = serde_json::from_value(serde_json::json!({
+            "scope": "factory",
+            "documents": [{
+                "state": "built",
+                "sbom": {
+                    "attachment": {
+                        "id": "s1", "kind": "sbom", "scope": "factory", "run_id": "r1",
+                        "task_id": "t1", "attempt": 1, "attached_at": "2026-09-25T12:00:00Z",
+                        "filename": "build.cdx.json", "spec_version": "1.6", "states": ["built"]
+                    },
+                    "identity": { "version": "0.1.0", "git_sha": "0123456789abcdef" }
+                }
+            }],
+            "findings": [],
+            "services": []
+        }))
+        .unwrap();
+        let text = dependencies_text(&report);
+        assert!(text.contains("built"));
+        assert!(text.contains("v0.1.0 0123456789abcdef"));
     }
 
     // -- --timezone ----------------------------------------------------------

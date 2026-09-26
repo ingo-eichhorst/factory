@@ -573,6 +573,9 @@ impl Engine {
             Request::DependenciesVex { scope } => Ok(Payload::Text {
                 text: self.dependencies_vex(&scope).await?,
             }),
+            Request::Doctor => Ok(Payload::Doctor {
+                report: self.doctor_report().await?,
+            }),
             // Keep the provider/snapshot projection out of this already-large
             // request future's stack frame. Every request variant shares that
             // frame even when Infrastructure was not the one selected.

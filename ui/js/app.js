@@ -27,6 +27,7 @@ import { loadDatasets, renderDatasetsSegment, wireDatasets } from "./datasets.js
 import { acceptBenchRunEvent, loadBenchRuns, renderBenchRunsSegment, wireBenchRuns } from "./bench-runs.js";
 import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from "./knowledge.js";
 import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
+import { refreshDoctor, renderDoctor, wireDoctor } from "./doctor.js";
 import { refreshBackup, renderBackup, wireBackup } from "./backup.js";
 import { isBackupEvent } from "./backup-model.js";
 import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
@@ -131,6 +132,7 @@ const VIEWS = {
     tail: { write: knowledgeTail, read: readKnowledgeTail },
   },
   infrastructure: { onShow: startInfrastructure, onHide: stopAgentPoll },
+  doctor: { onShow: startDoctor, onHide: stopAgentPoll },
   // Polled like Infrastructure -- the destination is a disk that can be
   // unplugged, which fires no event -- and refetched on every `backup_*`
   // event (`onEvent` below), which the daemon's own job publishes too.
@@ -222,7 +224,7 @@ const LEVEL_VIEWS = {
   // Quality closes the row: benchmarks and knowledge are how the work gets
   // better, quality attributes whether it has got good enough.
   imp: ["benchmarks", "knowledge", "quality"],
-  infra: ["infrastructure", "backup"],
+  infra: ["infrastructure", "doctor", "backup"],
 };
 
 /// The live level that claims `tab`, for backfilling `state.level` before any
@@ -355,6 +357,7 @@ function rerender(route) {
   // the rail says; what narrows is the agents listed under each account and
   // under Unassigned -- the same split Secrets keeps for the home directory.
   else if (state.tab === "infrastructure") renderInfrastructure();
+  else if (state.tab === "doctor") renderDoctor();
   // A backup is of the whole instance: no rail selection narrows it.
   else if (state.tab === "backup") renderBackup();
 }
@@ -512,6 +515,12 @@ function startInfrastructure() {
   state.agentPoll = setInterval(refreshInfrastructure, 30000);
 }
 
+function startDoctor() {
+  stopAgentPoll();
+  refreshDoctor();
+  state.agentPoll = setInterval(refreshDoctor, 30000);
+}
+
 function startBackup() {
   stopAgentPoll();
   refreshBackup();
@@ -590,6 +599,7 @@ async function boot() {
   wireBenchRuns();
   $("knowledge-refresh").onclick = () => loadKnowledge();
   $("infrastructure-refresh").onclick = () => refreshInfrastructure();
+  wireDoctor();
   wireBackup();
   wireOccupancy();
   $("newTask").onclick = () => openCreate();
@@ -742,6 +752,7 @@ function onEvent(ev) {
   if (ev.type === "goals_changed" && state.tab === "goals") reloadGoals();
   // A backup taken (by a person or the schedule), failed or verified.
   if (isBackupEvent(ev) && state.tab === "backup") refreshBackup();
+  if (state.tab === "doctor" && (ev.type === "task_entry" || ev.type === "run_updated")) refreshDoctor();
   // A scenario's own policy delta and goal-scenario probabilities are read
   // off the same live evidence and check-ins those two events already name;
   // `reloadScenarios` is a full reload (the forecast itself is a Monte Carlo
