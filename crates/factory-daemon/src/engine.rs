@@ -400,6 +400,21 @@ impl Engine {
         })
     }
 
+    /// The resolved dashboard for `scope` (or the instance root's own when
+    /// `scope` is `None`): its tiles (`None` for "use the built-in
+    /// default") and where the layout came from -- `Factory::dashboard_for`,
+    /// resolved from the live snapshot on every call for the same reason
+    /// `roles_for` is: a scope-config write holds from the next request with
+    /// nothing to invalidate. Unlike `roles_for`, an unknown scope is
+    /// propagated as an error rather than defaulted -- see
+    /// `Factory::dashboard_for`'s own doc comment for why.
+    pub fn dashboard_for(
+        &self,
+        scope: Option<&str>,
+    ) -> Result<(Option<factory_core::dashboard::DashboardConfig>, String)> {
+        self.factory_snapshot().dashboard_for(scope)
+    }
+
     /// Every policy layer in effect for `scope` right now, root first --
     /// resolved from the live snapshot on every call for the same reason
     /// `roles_for` is: a scope-config write holds from the next request with
@@ -776,6 +791,13 @@ impl Engine {
                     values: metrics.values,
                     series: metrics.series,
                     registry: metrics.registry,
+                })
+            }
+            Request::Dashboard { scope } => {
+                let (dashboard, source) = self.dashboard_for(scope.as_deref())?;
+                Ok(Payload::Dashboard {
+                    tiles: dashboard.map(|d| d.tiles),
+                    source,
                 })
             }
             Request::Goals { scope, cycle } => Ok(Payload::Goals {
@@ -3607,6 +3629,7 @@ mod tests {
                 ..DaemonConfig::default()
             },
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             scope: None,
@@ -3620,6 +3643,7 @@ mod tests {
                 git: None,
                 task_store: None,
                 roles: Default::default(),
+                dashboard: None,
                 policies: Default::default(),
                 quality: Default::default(),
                 dependencies: Default::default(),

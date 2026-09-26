@@ -2132,6 +2132,81 @@ a store that is asked something it should not be says so instead of guessing.
 The engine a scope uses is shown in the Roster, and is not editable there
 -- see the last section of this file for why.
 
+### Dashboard configuration (#159)
+
+The dashboard's layout is a `dashboard:` block, inherited down the scope
+tree exactly the way `roles:` is -- the root's own top-level `dashboard:`,
+then each nested scope's `scope.dashboard`, from the top of the tree down to
+the scope being asked about:
+
+```yaml
+# root .factory/config.yaml, top level (like `roles:`)
+dashboard:
+  tiles:
+    - { metric: throughput_week, size: s }
+    - { metric: compliance.cra, size: s }
+    - { view: throughput, size: l }
+
+# a nested scope: projects/demo/.factory/config.yaml
+scope:
+  id: 8fc86b67-aeba-4935-a623-d75f59d77acd
+  name: demo
+  dashboard:                    # replaces the inherited layout whole, here and below
+    tiles:
+      - { view: kpis, size: s }
+      - { metric: agent_hours, size: m }
+```
+
+A tile is exactly one of `metric` (any registry `MetricId` -- see "Goals"
+above for the registry, including a bound family like `compliance.cra`) or
+`view` (one of a fixed catalogue: `kpis`, `throughput`, `on_the_line`,
+`production_year`, `by_scope`, `agent_hours_by_scope`,
+`agent_hours_by_agent`, `occupancy_strip`, `inbox`, `compliance`, `cost`),
+plus a `size` of `s`, `m`, `l` or `xl`. `kpis` is today's KPI row. No tile
+takes a query, a filter or a `group_by` -- design §8's rule against a query
+language holds here exactly as it does for metrics and policy checks; a
+metric family's own bound segment (`compliance.cra`) is the only
+parameter a tile ever carries.
+
+**Resolution**, in one place (`Config::dashboard_for_scope`, the same chain
+`roles_for_scope` walks by `Scope.path`, never by name or up the tree): the
+nearest `dashboard:` block wins **whole**, never merged tile-by-tile with
+what an ancestor declared -- a layout is always one list a person can read
+top to bottom. With no `dashboard:` block anywhere in the chain, the
+dashboard renders its built-in default (today's page, unchanged; the list
+itself lives in `ui/js/dashboard-model.js`, not in this config). An empty
+`tiles: []` is a valid, deliberate layout too -- a scope that wants to show
+nothing, distinct from naming no block at all, which inherits instead.
+**Removing the block reveals whatever it was overriding** -- there is no
+separate reset action, because the config file already is the reset.
+
+**Validation, at load**, in the same style an unknown role is refused: an
+unknown metric id (or a family named unbound, like bare `compliance` with
+no framework) is a config error naming the block and the tile
+(`scope "demo"'s dashboard.tiles[2].metric: "compliance" is not a known
+metric`); a tile naming both `metric` and `view`, or neither, the same way.
+A metric the registry knows but cannot compute yet is **not** an error --
+the tile is valid and shows its own reason, exactly as an unavailable
+metric already does elsewhere. `view` and `size` are closed enums, so an
+unrecognised value is refused by the parser itself, the file and the bad
+value both named, the same as an unrecognised `lifetime:` or
+`sandbox:` elsewhere in this file. The instance root writes its dashboard
+only in its top-level `dashboard:`; a `scope.dashboard` block in the root's
+own config is refused at startup, and a `dashboard:` block written beside a
+nested scope's `scope:` block (where that file never reads it) is refused
+with the file named, the same two mistakes `roles:` already guards against.
+
+**Reading it**: `Request::Dashboard { scope }` (wire op `"dashboard"`) answers
+`{ tiles: [...] | null, source: "default" | "root" | "<scope name>" }` --
+`tiles: null` means "use the built-in default", and `source` says which
+layer answered. `scope` left out resolves the instance root's own; an
+unknown scope name is refused (404 over HTTP), unlike a metric's own scope
+resolution, because a dashboard request names a place to show and a place
+that resolves to nothing has none to show. `GET /api/dashboard?scope=demo`
+or `factory dashboard --scope demo` read the same thing. No write or reset
+request exists yet -- editing the block by hand is the only way in, until
+the tile catalogue editor (phase 5) lands.
+
 ### The AI accounts behind the agents
 
 An agent declaration says which harness it runs, not which account pays for

@@ -259,6 +259,10 @@ impl Engine {
             | Request::PolicyControl { .. }
             | Request::PolicyExport { .. }
             | Request::Metrics { .. }
+            // The dashboard's resolved layout (`#159`): a projection over
+            // config already readable through the roster/config views, the
+            // same reasoning `Metrics` gets read access with no grant.
+            | Request::Dashboard { .. }
             | Request::Goals { .. }
             // Read like `Goals`: authored profiles and evidence folded
             // fresh, nothing written (`#107`).
@@ -679,6 +683,7 @@ mod tests {
                 serde_yaml_ng::from_str("name: other\npath: .\n").unwrap(),
             ],
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),
@@ -2017,6 +2022,84 @@ mod tests {
         assert!(e.roles_for("demo-app/inner").contains(&Role::new("lead")));
         assert!(!e.roles_for("engineering/outsider").contains(&Role::new("lead")));
         assert!(!e.roles_for("company").contains(&Role::new("lead")), "never up");
+    }
+
+    // -- dashboard_for --------------------------------------------------------
+
+    /// The same topology `engine_tree` uses for roles (`#159`): `engineering`
+    /// (path `projects`) overrides the dashboard, `demo-app` (path
+    /// `projects/demo`, below it) inherits, and `sibling`/`engineering/outsider`
+    /// (named like a child of `engineering` but not below `projects` on
+    /// disk) do not.
+    fn engine_dashboard_tree() -> Arc<Engine> {
+        let at = |name: &str, path: &str, dashboard: &str| {
+            let mut yaml = format!("id: {name}-id\nname: {name}\n");
+            if !dashboard.is_empty() {
+                yaml.push_str(&format!("dashboard:\n{dashboard}"));
+            }
+            let mut scope: factory_core::config::Scope = serde_yaml_ng::from_str(&yaml).unwrap();
+            scope.path = PathBuf::from(path);
+            scope
+        };
+        let mut config: Config = serde_yaml_ng::from_str("instance:\n  id: i\n  name: test\n").unwrap();
+        config.scopes = vec![
+            at("company", ".", ""),
+            at(
+                "engineering",
+                "projects",
+                "  tiles:\n    - { metric: throughput_week, size: s }\n",
+            ),
+            at("demo-app", "projects/demo", ""),
+            at("sibling", "projects/sibling", ""),
+            at("engineering/outsider", "elsewhere", ""),
+        ];
+        Arc::new(Engine::new(
+            Factory {
+                root: PathBuf::from("/tmp/factory-access-dashboard-tree-test"),
+                config,
+            },
+            Registry::with_builtins(),
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            vec![],
+        ))
+    }
+
+    #[tokio::test]
+    async fn dashboard_for_resolves_down_the_path_tree_and_never_up_or_sideways() {
+        let e = engine_dashboard_tree();
+        let (tiles, source) = e.dashboard_for(Some("demo-app")).unwrap();
+        assert_eq!(source, "engineering", "projects/demo is below projects on disk");
+        assert_eq!(tiles.unwrap().tiles[0].metric.as_ref().unwrap().as_str(), "throughput_week");
+
+        // `sibling` (path `projects/sibling`) is below `projects` too, so it
+        // inherits the same override.
+        let (tiles, source) = e.dashboard_for(Some("sibling")).unwrap();
+        assert_eq!(source, "engineering");
+        assert!(tiles.is_some());
+
+        // `engineering/outsider` reads like a child of `engineering` by name,
+        // but its path (`elsewhere`) is not below `projects` at all.
+        let (tiles, source) = e.dashboard_for(Some("engineering/outsider")).unwrap();
+        assert!(
+            tiles.is_none(),
+            "engineering/outsider is not below projects by path, whatever its name says"
+        );
+        assert_eq!(source, "default", "never up or sideways");
+    }
+
+    #[tokio::test]
+    async fn dashboard_for_an_unknown_scope_is_refused() {
+        let e = engine_dashboard_tree();
+        let err = e.dashboard_for(Some("nope")).unwrap_err().to_string();
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn reading_the_dashboard_needs_no_grant() {
+        let e = engine();
+        assert!(allowed(&e, &worker("w"), Request::Dashboard { scope: None }).await);
+        assert!(allowed(&e, &Caller::Owner, Request::Dashboard { scope: None }).await);
     }
 
     // -- giving an agent a role --------------------------------------------

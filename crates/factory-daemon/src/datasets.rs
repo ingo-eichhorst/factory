@@ -322,6 +322,7 @@ mod tests {
             instance: Instance { id: "test".into(), name: "test".into() },
             daemon: DaemonConfig::default(),
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             scope: None,

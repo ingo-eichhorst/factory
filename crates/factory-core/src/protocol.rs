@@ -606,6 +606,20 @@ pub enum Request {
         #[serde(default)]
         ids: Vec<crate::metrics::MetricId>,
     },
+    /// The dashboard's resolved layout for `scope` (`#159`, phase 4 of
+    /// `#150`): the nearest `dashboard:` block down `Scope.path`, the
+    /// instance root's own top-level `dashboard:`, or `None` for "use the
+    /// built-in default" -- see `Config::dashboard_for_scope`. `scope`
+    /// absent means the instance root itself. An unknown scope is refused
+    /// (`FactoryError::NoSuchScope`), unlike `Metrics`'s own scope
+    /// resolution elsewhere: a dashboard request names a place to show, and
+    /// a place that resolves to nothing has no dashboard to show, rather
+    /// than silently substituting the root's. Read-only.
+    #[serde(rename = "dashboard")]
+    Dashboard {
+        #[serde(default)]
+        scope: Option<String>,
+    },
     /// The L6 Goals tab: vision, mission, the north star and its inputs,
     /// every cycle's own summary, the asked-for (or current) cycle's full
     /// graded report, and the roadmap -- narrowed to `scope` (and its
@@ -975,6 +989,15 @@ pub enum Payload {
         values: Vec<crate::metrics::MetricValue>,
         series: Vec<crate::metrics::MetricSeries>,
         registry: Vec<MetricDefView>,
+    },
+    /// The answer to `Request::Dashboard`: the resolved tile list, or `null`
+    /// on the wire for "no block anywhere in the chain names one -- use the
+    /// built-in default" (the default list itself lives in `dashboard-model.js`,
+    /// not here), and `source` naming which layer answered: `"default"`,
+    /// `"root"`, or the resolving scope's own name.
+    Dashboard {
+        tiles: Option<Vec<crate::dashboard::Tile>>,
+        source: String,
     },
     /// The L6 Goals tab -- see `GoalsReport`.
     Goals { report: GoalsReport },
@@ -2110,6 +2133,38 @@ mod tests {
     fn a_datasets_request_is_a_read_without_parameters() {
         let env: Envelope = serde_json::from_str(r#"{"op":"datasets"}"#).expect("request parses");
         assert!(matches!(env.request, Request::Datasets));
+    }
+
+    #[test]
+    fn a_dashboard_request_defaults_scope_to_none_and_reads_it_when_given() {
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"dashboard","params":{}}"#).expect("no scope is fine");
+        assert!(matches!(env.request, Request::Dashboard { scope: None }));
+
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"dashboard","params":{"scope":"demo"}}"#).expect("request parses");
+        assert!(matches!(env.request, Request::Dashboard { scope: Some(s) } if s == "demo"));
+    }
+
+    #[test]
+    fn a_dashboard_payload_carries_null_tiles_and_the_source_on_the_wire() {
+        let payload = Payload::Dashboard { tiles: None, source: "default".into() };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["kind"], "dashboard");
+        assert_eq!(json["tiles"], serde_json::Value::Null);
+        assert_eq!(json["source"], "default");
+
+        let tile = crate::dashboard::Tile {
+            metric: Some(crate::metrics::MetricId::new("throughput_week").unwrap()),
+            view: None,
+            size: crate::dashboard::TileSize::S,
+        };
+        let payload = Payload::Dashboard { tiles: Some(vec![tile]), source: "root".into() };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["source"], "root");
+        assert_eq!(json["tiles"][0]["metric"], "throughput_week");
+        assert_eq!(json["tiles"][0]["size"], "s");
+        assert!(json["tiles"][0].get("view").is_none(), "view is omitted, not null, when absent");
     }
 
     #[test]

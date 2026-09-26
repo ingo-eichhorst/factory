@@ -138,6 +138,14 @@ enum Command {
         /// e.g. `throughput_week`, `compliance.cra`, `bench.resolve_rate.eval-set-a`.
         ids: Vec<String>,
     },
+    /// The dashboard's resolved layout for a scope (`#159`): the nearest
+    /// `dashboard:` block down its path, the instance root's own, or the
+    /// built-in default when nothing overrides it.
+    Dashboard {
+        /// The scope to resolve for (default: the instance root itself).
+        #[arg(long)]
+        scope: Option<String>,
+    },
     /// What runs used and cost, summed per task, GitHub issue (`issue=<n>`
     /// label), scope or agent (#117). Usage comes from the agent runtime;
     /// a run it could not measure is counted as unknown, never as free.
@@ -1443,6 +1451,14 @@ async fn main() -> Result<()> {
             })
         }
 
+        Command::Dashboard { scope } => {
+            let payload = client.send(Request::Dashboard { scope }).await?;
+            print(&payload, cli.json, |p| match p {
+                Payload::Dashboard { tiles, source } => Some(dashboard_text(tiles, source)),
+                _ => None,
+            })
+        }
+
         Command::Cost { by, since, until, scope } => {
             let group_by: factory_core::usage::CostGroupBy = by.parse().map_err(|e: String| anyhow!(e))?;
             let now = chrono::Utc::now();
@@ -2602,6 +2618,26 @@ fn metrics_text(values: &[factory_core::metrics::MetricValue], series: &[factory
             .unwrap_or_default();
         let reason = v.reason.as_deref().map(|r| format!("  ({r})")).unwrap_or_default();
         out.push_str(&format!("{:<40} {:<12} {value:>10}{trend}{reason}\n", v.id.as_str(), title));
+    }
+    out.trim_end().to_string()
+}
+
+fn dashboard_text(tiles: &Option<Vec<factory_core::dashboard::Tile>>, source: &str) -> String {
+    let tiles = match tiles {
+        Some(tiles) => tiles,
+        None => return format!("(built-in default -- source: {source})"),
+    };
+    if tiles.is_empty() {
+        return format!("(no tiles -- source: {source})");
+    }
+    let mut out = format!("source: {source}\n");
+    for tile in tiles {
+        let what = match (&tile.metric, &tile.view) {
+            (Some(metric), _) => format!("metric {}", metric.as_str()),
+            (None, Some(view)) => format!("view {}", view.as_str()),
+            (None, None) => "?".to_string(),
+        };
+        out.push_str(&format!("{:<8} {what}\n", format!("[{}]", tile.size.as_str())));
     }
     out.trim_end().to_string()
 }
