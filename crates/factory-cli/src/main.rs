@@ -2146,7 +2146,8 @@ fn backup_status_text(payload: &Payload) -> Option<String> {
         Some(TimeMachineFact::Configured { destinations }) => format!("configured -- {}\n", destinations.join(", ")),
         Some(TimeMachineFact::NotConfigured) => "not configured\n".to_string(),
         Some(TimeMachineFact::Unavailable { reason }) => format!("unknown -- {reason}\n"),
-        Some(TimeMachineFact::Unsupported) | None => "not supported on this platform\n".to_string(),
+        Some(TimeMachineFact::Unsupported) => "not supported on this platform\n".to_string(),
+        None => "unknown -- this daemon did not report it\n".to_string(),
     });
     if !report.warnings.is_empty() {
         out.push_str("\nWARNINGS\n");
