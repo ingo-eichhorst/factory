@@ -770,6 +770,9 @@ mod tests {
         assert_eq!((knowledge.files, knowledge.bytes), (Some(3), Some(30)));
         let goals = after.iter().find(|r| r.path == ".factory/goals/").unwrap();
         assert_eq!(goals.files, Some(0));
+        let vex = after.iter().find(|r| r.path == ".factory/vex/").unwrap();
+        assert!(vex.included);
+        assert_eq!(vex.files, Some(0));
         assert!(exclude_rows(false).iter().any(|r| r.path == ".factory/logs/"));
         assert!(!exclude_rows(true).iter().any(|r| r.path == ".factory/logs/"));
     }

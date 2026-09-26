@@ -2194,9 +2194,9 @@ spend per provider are not shown: Factory does not record tokens yet.
 ### Backup
 
 `.factory/` holds the only copy of the company's operating history -- the
-database, the knowledge vault, the policies, goals, scenarios and quality
-profiles -- and git tracks none of it. The root config names where a copy
-goes, and the daemon takes one on a schedule:
+database, the knowledge vault, the policies, goals, scenarios, quality
+profiles and VEX judgments -- and git tracks none of it. The root config
+names where a copy goes, and the daemon takes one on a schedule:
 
 ```yaml
 # root .factory/config.yaml
@@ -2215,7 +2215,7 @@ A snapshot is one `factory-backup-<instance>-<utc>.tar.zst` holding:
   writes, and never a file copy, which WAL would make torn -- then checked with
   `PRAGMA integrity_check` before anything is archived;
 - the root `.factory/config.yaml` and every registered scope's own;
-- `.factory/{knowledge,datasets,policies,goals,scenarios,quality}/`, whole;
+- `.factory/{knowledge,datasets,policies,goals,scenarios,quality,vex}/`, whole;
 - a `manifest.json`, written last: instance, daemon version (there is no
   build commit compiled in, so none is claimed), the database's
   `user_version`, tables and integrity result, and the path, size and sha256
@@ -2262,11 +2262,11 @@ sha256 against the manifest (a file missing, changed or unlisted fails it),
 runs `integrity_check` on the database copy and compares its schema version,
 loads the root config, and loads every authored-content directory with the
 loader the daemon uses: policies and drafts, goals, scenarios, quality
-profiles, datasets and the knowledge index. A file one of those loaders
-cannot parse is a warning, not a failure: the checksums have already proved
-it is byte for byte what was backed up, so it is broken in the live
-instance too. Every verification is recorded; the page's "last verified"
-only counts snapshots still in the destination.
+profiles, CycloneDX VEX judgments, datasets and the knowledge index. A file
+one of those loaders cannot parse is a warning, not a failure: the checksums
+have already proved it is byte for byte what was backed up, so it is broken
+in the live instance too. Every verification is recorded; the page's "last
+verified" only counts snapshots still in the destination.
 
 **The job.** Once a minute the daemon looks whether the schedule's next slot
 after the later of the last attempt and the newest archive has passed, so a

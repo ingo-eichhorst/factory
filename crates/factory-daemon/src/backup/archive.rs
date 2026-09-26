@@ -766,6 +766,7 @@ fn loaded(name: &str, what: String, unparsed: Vec<String>) -> VerifyCheck {
 }
 
 fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
+    use factory_core::dependencies::{validate_document, AttachmentKind};
     use factory_core::{goals, knowledge, policy, quality, scenario};
     let mut out = Vec::new();
 
@@ -817,6 +818,37 @@ fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
         .map(|f| f.subject.clone())
         .collect();
     out.push(loaded("quality", count(profiles.profiles.len(), "profile"), unparsed));
+
+    let vex_dir = root.join(FACTORY_DIR).join("vex");
+    let mut vex_paths = Vec::new();
+    let mut dirs = vec![vex_dir.clone()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(read) = fs::read_dir(&dir) else { continue };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".cdx.json"))
+            {
+                vex_paths.push(path);
+            }
+        }
+    }
+    vex_paths.sort();
+    let mut unparsed = Vec::new();
+    for path in &vex_paths {
+        let result = fs::read(path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| validate_document(&bytes, AttachmentKind::Vulnerabilities));
+        if let Err(error) = result {
+            let relative = path.strip_prefix(&vex_dir).unwrap_or(path);
+            unparsed.push(format!("{} ({error})", relative.display()));
+        }
+    }
+    out.push(loaded("vex", count(vex_paths.len(), "document"), unparsed));
 
     let dir = root.join(FACTORY_DIR).join("datasets");
     let mut names: Vec<String> = fs::read_dir(&dir)
@@ -885,6 +917,7 @@ mod tests {
             fs::create_dir_all(f.join("knowledge/data/secrets")).unwrap();
             fs::create_dir_all(f.join("policies")).unwrap();
             fs::create_dir_all(f.join("goals")).unwrap();
+            fs::create_dir_all(f.join("vex/demo")).unwrap();
             fs::create_dir_all(f.join("logs")).unwrap();
             fs::create_dir_all(root.join("projects/demo/.factory")).unwrap();
             fs::write(f.join("config.yaml"), "version: 1\ninstance:\n  id: inst-1\n  name: Test Instance\n").unwrap();
@@ -899,6 +932,11 @@ mod tests {
             fs::write(f.join("secrets.yaml"), "api: hunter2").unwrap();
             fs::write(f.join("logs/daemon.log"), "a log line").unwrap();
             fs::write(f.join("policies/broken.yaml"), "framework: [unclosed").unwrap();
+            fs::write(
+                f.join("vex/demo/review.cdx.json"),
+                include_bytes!("../../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json"),
+            )
+            .unwrap();
             std::os::unix::fs::symlink(f.join("secrets.yaml"), f.join("knowledge/link.md")).unwrap();
             let conn = Connection::open(f.join("factory.sqlite")).unwrap();
             conn.execute_batch(
@@ -962,12 +1000,21 @@ mod tests {
                 ".factory/factory.sqlite",
                 ".factory/knowledge/company/README.md",
                 ".factory/policies/broken.yaml",
+                ".factory/vex/demo/review.cdx.json",
                 "projects/demo/.factory/config.yaml",
             ]
         );
         assert_eq!(manifest.database.integrity, "ok");
         assert_eq!(manifest.database.user_version, 4);
         assert_eq!(manifest.database.tables, ["tasks"]);
+        assert_eq!(
+            manifest
+                .files
+                .iter()
+                .find(|file| file.path == ".factory/vex/demo/review.cdx.json")
+                .map(|file| file.group),
+            Some(Group::Vex)
+        );
         let excluded: Vec<&str> = manifest.excluded.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(
             excluded,
@@ -980,7 +1027,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(left.len(), 1, "{left:?}");
-        assert_eq!(taken.files, 5);
+        assert_eq!(taken.files, 6);
     }
 
     #[test]
@@ -996,12 +1043,28 @@ mod tests {
         let taken = instance.take(false);
         let checks = verify(&taken.path, "inst-1");
         let by_name: BTreeMap<&str, &VerifyCheck> = checks.iter().map(|c| (c.name.as_str(), c)).collect();
-        for name in ["archive", "manifest", "checksums", "database", "config", "goals", "scenarios", "quality", "datasets", "knowledge"] {
+        for name in ["archive", "manifest", "checksums", "database", "config", "goals", "scenarios", "quality", "vex", "datasets", "knowledge"] {
             assert_eq!(by_name[name].status, CheckStatus::Ok, "{name}: {}", by_name[name].detail);
         }
         assert_eq!(by_name["policies"].status, CheckStatus::Warn);
         assert!(by_name["policies"].detail.contains("broken.yaml"), "{}", by_name["policies"].detail);
         assert!(by_name["database"].detail.contains("1 tasks"), "{}", by_name["database"].detail);
+    }
+
+    #[test]
+    fn a_malformed_vex_document_is_named_by_verification() {
+        let instance = Instance::new("broken-vex");
+        fs::write(
+            instance.root.join(".factory/vex/demo/broken.cdx.json"),
+            br#"{"bomFormat":"not CycloneDX"}"#,
+        )
+        .unwrap();
+        let taken = instance.take(false);
+        let checks = verify(&taken.path, "inst-1");
+        let vex = checks.iter().find(|check| check.name == "vex").unwrap();
+        assert_eq!(vex.status, CheckStatus::Warn);
+        assert!(vex.detail.contains("demo/broken.cdx.json"), "{}", vex.detail);
+        assert!(vex.detail.contains("bomFormat"), "{}", vex.detail);
     }
 
     #[test]
@@ -1025,10 +1088,14 @@ mod tests {
         let into = base.join("restored");
         let restored = restore(&taken.path, "inst-1", &instance.root, &into).unwrap();
         assert_eq!(restored.into, into.canonicalize().unwrap());
-        assert_eq!(restored.files, 5);
+        assert_eq!(restored.files, 6);
         assert!(!restored.checks.iter().any(|c| c.status == CheckStatus::Fail));
         assert!(factory_core::config::Factory::load(&into).is_ok());
         assert_eq!(fs::read_to_string(into.join(".factory/knowledge/company/README.md")).unwrap(), "---\ntitle: readme\n---\n# Company\n");
+        assert_eq!(
+            fs::read(into.join(".factory/vex/demo/review.cdx.json")).unwrap(),
+            include_bytes!("../../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json")
+        );
         assert!(into.join("projects/demo/.factory/config.yaml").is_file());
         assert!(!into.join(".factory/secrets.yaml").exists());
         assert!(!into.join(".factory/knowledge/data/secrets/token.txt").exists());
