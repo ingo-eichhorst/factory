@@ -1,7 +1,8 @@
 //! What a run used, and what a task's runs used together (#117) -- pure
-//! shaping for the task modal's usage block. A count the runtime could not
-//! observe is `?`, and a run it could not measure says why; nothing here
-//! ever turns an unknown into a zero.
+//! shaping for the task modal's usage block, and (`costFigure`, #162) the
+//! dashboard's `cost` tile, one bar row per `/api/costs` group. A count the
+//! runtime could not observe is `?`, and a run it could not measure says
+//! why; nothing here ever turns an unknown into a zero.
 
 /// Dollars to the cent; a non-zero amount under a cent says so rather than
 /// reading as free.
@@ -109,4 +110,26 @@ export function taskUsageLine(total) {
   // A sum over no costed run is not $0.00.
   const costed = total.runs - (total.runs_unknown || 0) - (total.runs_cost_unknown || 0);
   return `All ${runs}: ${fmtTokens(sum)} tokens · ${costed ? fmtUsd(total.cost_usd) : "?"}${missing.length ? ` (not in the sum: ${missing.join(", ")})` : ""}`;
+}
+
+/// A row's (or a report's own `total`'s) cost figure alone -- the same
+/// distinction `taskUsageLine`'s sentence draws, honest about how much of
+/// it is actually measured, but just the number: for a compact display
+/// (the dashboard's `cost` tile, one bar row per `/api/costs` group) where
+/// the missing-runs breakdown `taskUsageLine` lists would not fit.
+/// `hasCost` is `false` whenever `text` is not a real measured figure --
+/// `cost_usd` in that case is `0` only because nothing costed contributed
+/// to the sum, never because the group truly cost nothing, and a caller
+/// must not draw a bar proportional to it (`dashboard.js`'s `costTile`).
+/// A row where every run's usage is unknown reads `"unknown"`, never a
+/// manufactured `$0.00`; one where some runs are unmeasured, uncosted, or
+/// still partial reads the same figure `taskUsageLine` would sum, prefixed
+/// `≥` -- a lower bound, not the whole story.
+export function costFigure(row) {
+  if (!row || !row.runs) return { text: "—", hasCost: false };
+  if (row.runs_unknown === row.runs) return { text: "unknown", hasCost: false };
+  const costed = row.runs - (row.runs_unknown || 0) - (row.runs_cost_unknown || 0);
+  if (costed === 0) return { text: "?", hasCost: false };
+  const bounded = (row.runs_unknown || 0) > 0 || (row.runs_cost_unknown || 0) > 0 || (row.runs_partial || 0) > 0;
+  return { text: `${bounded ? "≥ " : ""}${fmtUsd(row.cost_usd)}`, hasCost: true };
 }

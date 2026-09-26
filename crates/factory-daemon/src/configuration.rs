@@ -1272,6 +1272,7 @@ mod tests {
                 scope: None,
                 scopes: vec![scope],
                 roles: Default::default(),
+                dashboard: None,
                 policies: Default::default(),
                 quality: Default::default(),
                 infrastructure,

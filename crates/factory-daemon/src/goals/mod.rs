@@ -311,6 +311,7 @@ mod tests {
             scope: Some(company.clone()),
             scopes: vec![company, projects, demo, sibling],
             roles: Default::default(),
+            dashboard: None,
             policies: PolicyDeclaration::default(),
             quality: Default::default(),
             infrastructure: Default::default(),

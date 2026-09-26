@@ -7,7 +7,8 @@
 //! ([`retain`]), how old is too old ([`age_level`]) and which honest warnings
 //! a set of facts adds up to ([`warnings`]). Taking a snapshot, verifying one
 //! and the daemon job that runs them live in `factory-daemon`'s `backup`
-//! module, which is the only place that touches a file.
+//! module, which is the only place that touches a file and also stages a
+//! verified archive into a new root for owner-only restore.
 //!
 //! **What a backup is.** A consistent copy of the database (taken with
 //! `VACUUM INTO`, never a file copy -- the stores use WAL), the
@@ -189,6 +190,7 @@ pub enum Group {
     Goals,
     Scenarios,
     Quality,
+    Vex,
     Guides,
     Logs,
 }
@@ -204,6 +206,7 @@ impl Group {
             Self::Goals => "goals",
             Self::Scenarios => "scenarios",
             Self::Quality => "quality",
+            Self::Vex => "vex",
             Self::Guides => "guides",
             Self::Logs => "logs",
         }
@@ -212,15 +215,17 @@ impl Group {
 
 /// The authored-content directories under `.factory/`, each copied whole:
 /// the exception AGENTS.md makes to "everything under `.factory/` is the
-/// daemon's", because nothing regenerates them. `quality/` is here although
-/// the issue's table predates it -- AGENTS.md names it with the others.
-pub const AUTHORED: [(Group, &str, &str); 6] = [
+/// daemon's", because nothing regenerates them. `quality/` and `vex/` are
+/// here although the issue's table predates them -- AGENTS.md names them
+/// with the others.
+pub const AUTHORED: [(Group, &str, &str); 7] = [
     (Group::Knowledge, ".factory/knowledge/", "the knowledge vault: pages and documents"),
     (Group::Datasets, ".factory/datasets/", "benchmark datasets"),
     (Group::Policies, ".factory/policies/", "policy catalogues, drafts included"),
     (Group::Goals, ".factory/goals/", "direction and cycle files"),
     (Group::Scenarios, ".factory/scenarios/", "scenario files"),
     (Group::Quality, ".factory/quality/", "quality profiles"),
+    (Group::Vex, ".factory/vex/", "authored CycloneDX VEX judgments"),
 ];
 
 /// The two optional directories `include_logs: true` adds.
@@ -365,6 +370,20 @@ pub struct ManifestFile {
 pub struct ExcludedFile {
     pub path: String,
     pub reason: String,
+}
+
+/// A snapshot restored into a new instance root. Restore is deliberately a
+/// CLI-only, owner-only operation; this is its socket response and `--json`
+/// shape, not state kept by the running instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restoration {
+    pub snapshot: String,
+    pub into: String,
+    pub files: u64,
+    /// The same checks `backup verify` ran before the staged root was made
+    /// visible. A restoration is returned only when none failed.
+    pub checks: Vec<VerifyCheck>,
+    pub duration_ms: u64,
 }
 
 impl Manifest {
@@ -599,7 +618,7 @@ pub struct BackupReport {
     pub due_by: Option<DateTime<Utc>>,
     /// When the schedule next takes one.
     pub next_run: Option<DateTime<Utc>>,
-    /// A backup or verification is in progress right now.
+    /// A backup, verification or restore is in progress right now.
     pub running: bool,
     pub last_verified: Option<VerifySummary>,
     pub last_failure: Option<BackupFailure>,

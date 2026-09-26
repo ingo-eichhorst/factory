@@ -162,7 +162,7 @@ pub struct Engine {
     /// What happened to backups -- see `backup::BackupStore`. The archives
     /// themselves are the destination's, listed fresh on every request.
     pub(crate) backups: crate::backup::BackupStore,
-    /// Held for the whole of a backup or a verification, so the job and a
+    /// Held for the whole of a backup, verification or restore, so the job and a
     /// person can never run two at once over one destination. Taken with
     /// `try_lock`: a second request is refused, never queued.
     pub(crate) backup_busy: tokio::sync::Mutex<()>,
@@ -408,6 +408,21 @@ impl Engine {
         })
     }
 
+    /// The resolved dashboard for `scope` (or the instance root's own when
+    /// `scope` is `None`): its tiles (`None` for "use the built-in
+    /// default") and where the layout came from -- `Factory::dashboard_for`,
+    /// resolved from the live snapshot on every call for the same reason
+    /// `roles_for` is: a scope-config write holds from the next request with
+    /// nothing to invalidate. Unlike `roles_for`, an unknown scope is
+    /// propagated as an error rather than defaulted -- see
+    /// `Factory::dashboard_for`'s own doc comment for why.
+    pub fn dashboard_for(
+        &self,
+        scope: Option<&str>,
+    ) -> Result<(Option<factory_core::dashboard::DashboardConfig>, Option<String>)> {
+        self.factory_snapshot().dashboard_for(scope)
+    }
+
     /// Every policy layer in effect for `scope` right now, root first --
     /// resolved from the live snapshot on every call for the same reason
     /// `roles_for` is: a scope-config write holds from the next request with
@@ -579,6 +594,9 @@ impl Engine {
                 verification: self
                     .backup_verify(snapshot, crate::policies::caller_name(caller))
                     .await?,
+            }),
+            Request::BackupRestore { snapshot, into } => Ok(Payload::BackupRestore {
+                restoration: self.backup_restore(snapshot, into).await?,
             }),
             Request::Knowledge => {
                 let root = self.factory_snapshot().root;
@@ -782,14 +800,21 @@ impl Engine {
                 let (filename, body) = self.policy_export_render(scope.as_deref(), &format).await?;
                 Ok(Payload::PolicyExport { format, filename, body })
             }
-            Request::Metrics { ids } => {
+            Request::Metrics { ids, scope, window } => {
                 let now = Utc::now();
                 let ids = if ids.is_empty() { self.default_metric_ids().await } else { ids };
-                let metrics = self.metrics(&ids, now).await?;
+                let metrics = self.metrics_for(&ids, now, scope.as_deref(), window).await?;
                 Ok(Payload::Metrics {
                     values: metrics.values,
                     series: metrics.series,
                     registry: metrics.registry,
+                })
+            }
+            Request::Dashboard { scope } => {
+                let (dashboard, source) = self.dashboard_for(scope.as_deref())?;
+                Ok(Payload::Dashboard {
+                    tiles: dashboard.map(|d| d.tiles),
+                    source,
                 })
             }
             Request::Goals { scope, cycle } => Ok(Payload::Goals {
@@ -1044,19 +1069,22 @@ impl Engine {
             }
 
             // Intake (`#119`). Every write publishes `TaskCreated` or
-            // `TaskUpdated` itself; the board is a read over tasks.
+            // `TaskUpdated` itself; the board is a read over tasks. The
+            // big ones are boxed: releasing starts a workflow and splitting
+            // makes tasks, and inline they would size every request's
+            // future -- enough to overflow a test thread's stack.
             Request::IntakeAdd(new) => Ok(Payload::Task { task: self.intake_add(caller, new).await? }),
             Request::IntakeBoard { scope } => Ok(Payload::IntakeBoard {
-                board: self.intake_board(scope.as_deref()).await?,
+                board: Box::pin(self.intake_board(scope.as_deref())).await?,
             }),
             Request::IntakeTriage { id, agent } => Ok(Payload::Task {
-                task: self.intake_triage(caller, &id, agent).await?,
+                task: Box::pin(self.intake_triage(caller, &id, agent)).await?,
             }),
             Request::IntakeAssess { id, assessment, decide } => Ok(Payload::Task {
-                task: self.intake_assess(caller, &id, assessment, decide).await?,
+                task: Box::pin(self.intake_assess(caller, &id, assessment, decide)).await?,
             }),
             Request::IntakeDecide { id, decision } => Ok(Payload::Task {
-                task: self.intake_decide(caller, &id, decision).await?,
+                task: Box::pin(self.intake_decide(caller, &id, decision)).await?,
             }),
             Request::IntakeInfo { id, text } => Ok(Payload::Task {
                 task: self.intake_info(caller, &id, &text).await?,
@@ -3778,6 +3806,7 @@ mod tests {
                 ..DaemonConfig::default()
             },
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             scope: None,
@@ -3791,6 +3820,7 @@ mod tests {
                 git: None,
                 task_store: None,
                 roles: Default::default(),
+                dashboard: None,
                 policies: Default::default(),
                 quality: Default::default(),
                 dependencies: Default::default(),

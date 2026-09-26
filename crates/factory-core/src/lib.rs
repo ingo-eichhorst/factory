@@ -10,6 +10,7 @@ pub mod benchmark;
 pub mod building;
 pub mod config;
 pub mod control_plan;
+pub mod dashboard;
 pub mod dataset;
 pub mod dependencies;
 pub mod error;

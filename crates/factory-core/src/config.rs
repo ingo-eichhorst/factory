@@ -1,4 +1,5 @@
 use crate::agent::Lifetime;
+use crate::dashboard::DashboardConfig;
 use crate::policy::{ControlRef, Duration, NotApplicable, PolicyLayer, Tighten};
 use crate::quality::QualityLayer;
 use crate::role::{Role, RoleOrigin, RoleSpec, Roles};
@@ -135,6 +136,16 @@ pub struct Config {
     /// scope; a nested scope adds its own under `scope.roles`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub roles: BTreeMap<String, RoleSpec>,
+    /// This instance's own dashboard layout (`#159`), the top of every chain
+    /// `dashboard_for_scope` walks -- written here exactly where `roles`
+    /// above is, and refused on `self.scope` the same way
+    /// (`refuse_root_scope_dashboard`). `None` means the instance names no
+    /// layout of its own, which resolves to the built-in default unless a
+    /// scope below overrides it; `Some` replaces that default with at least
+    /// one tile -- an empty `tiles` is refused at validation, not a
+    /// deliberate "show nothing" -- see `DashboardConfig`'s own doc comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<DashboardConfig>,
     /// Which frameworks this instance commits to, plus any tightening or
     /// `n/a` declared at the root -- the top of every chain
     /// `policy_chain_for_scope` builds, mirroring `roles` above except
@@ -218,6 +229,79 @@ impl Config {
             )?;
         }
         Ok(roles)
+    }
+
+    /// This instance's own resolved dashboard, with nothing below the root
+    /// to ask about: the top-level `dashboard:`, if it named one, else the
+    /// built-in default. The second element says where it came from: `None`
+    /// for the built-in default, or `Some` naming the scope whose block
+    /// answered -- the root's own configured scope name, or the instance
+    /// name when the root never opted itself into being a scope at all
+    /// (`root_policy_layer`'s own naming rule, mirrored here). Never a
+    /// magic string like `"root"`: a scope can be named anything, including
+    /// `root` or `default`, and the source is always either `None` or an
+    /// actual name, never a word that could collide with one.
+    pub fn dashboard(&self) -> (Option<&DashboardConfig>, Option<String>) {
+        match &self.dashboard {
+            Some(dashboard) => {
+                let root_name = self
+                    .scope
+                    .as_ref()
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| self.instance.name.clone());
+                (Some(dashboard), Some(root_name))
+            }
+            None => (None, None),
+        }
+    }
+
+    /// The dashboard in effect in `scope`: the nearest `dashboard:` block
+    /// walking from `scope` itself back up to the root -- `ancestors_of`,
+    /// by `Scope.path`, the same chain `roles_for_scope` walks. Unlike
+    /// roles, a dashboard layer is never merged with what came before it:
+    /// the whole point of "nearest wins" here is that a layout stays one
+    /// readable list, so the first `Some` found walking upward is the
+    /// answer outright, with no folding step at all. The second element of
+    /// the pair names the scope whose block won, or `None` when nothing
+    /// anywhere in the chain names one (see `dashboard`'s own doc comment
+    /// for why this is never a magic string).
+    ///
+    /// A scope with no `dashboard:` of its own is skipped exactly like an
+    /// ancestor with no `roles:` is in `roles_for_scope` -- including the
+    /// root's own `Scope` entry that discovery may place in `self.scopes`
+    /// for path `.`, whose `dashboard` is always `None`
+    /// (`refuse_root_scope_dashboard` keeps the top-level block the only
+    /// way in for the root), so it is never mistaken for an override.
+    pub fn dashboard_for_scope<'a>(&'a self, scope: &'a Scope) -> (Option<&'a DashboardConfig>, Option<String>) {
+        for layer in self.ancestors_of(scope).into_iter().chain(std::iter::once(scope)).rev() {
+            if let Some(dashboard) = &layer.dashboard {
+                return (Some(dashboard), Some(layer.name.clone()));
+            }
+        }
+        self.dashboard()
+    }
+
+    /// Every dashboard block this config declares, checked against the
+    /// metric registry with the offending block and tile named -- the root's
+    /// own `dashboard:` (path `"dashboard"`), then each scope's
+    /// `scope.dashboard` (path `scope "{name}" dashboard`). Called from both
+    /// `validate` (every scope) and `validate_instance` (the root only, the
+    /// one layer that instance-only file can see) -- the same split those
+    /// two already draw for roles.
+    fn validate_dashboards<'a>(&self, scopes: impl Iterator<Item = &'a Scope>) -> Result<()> {
+        if let Some(dashboard) = &self.dashboard {
+            dashboard
+                .validate("dashboard")
+                .map_err(FactoryError::BadRequest)?;
+        }
+        for scope in scopes {
+            if let Some(dashboard) = &scope.dashboard {
+                dashboard
+                    .validate(&format!("scope {:?} dashboard", scope.name))
+                    .map_err(FactoryError::BadRequest)?;
+            }
+        }
+        Ok(())
     }
 
     /// The instance root's own policy layer, if it declared any -- the top
@@ -316,6 +400,8 @@ impl Config {
         self.refuse_root_scope_roles()?;
         self.refuse_root_scope_policies()?;
         self.refuse_root_scope_quality()?;
+        self.refuse_root_scope_dashboard()?;
+        self.validate_dashboards(self.scopes.iter())?;
         self.infrastructure.validate()?;
         for scope in self.scope.iter().chain(&self.scopes) {
             scope.validate_dependencies()?;
@@ -351,6 +437,8 @@ impl Config {
         self.refuse_root_scope_roles()?;
         self.refuse_root_scope_policies()?;
         self.refuse_root_scope_quality()?;
+        self.refuse_root_scope_dashboard()?;
+        self.validate_dashboards(std::iter::empty())?;
         self.infrastructure.validate()?;
         if let Some(scope) = &self.scope {
             scope.validate_dependencies()?;
@@ -411,6 +499,20 @@ impl Config {
                  The root's quality profiles belong in its top-level `quality:`; move {} there",
                 scope.name,
                 scope.quality.join(", ")
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// The instance root already has a dashboard layer, its top-level
+    /// `dashboard:` -- `refuse_root_scope_policies`'s reasoning, for the
+    /// dashboard layout instead (`#159`).
+    fn refuse_root_scope_dashboard(&self) -> Result<()> {
+        match &self.scope {
+            Some(scope) if scope.dashboard.is_some() => Err(FactoryError::BadRequest(format!(
+                "the instance root's config gives its scope {:?} a `scope.dashboard` block. \
+                 The root's dashboard belongs in its top-level `dashboard:`; move it there",
+                scope.name,
             ))),
             _ => Ok(()),
         }
@@ -487,6 +589,28 @@ pub fn refuse_misplaced_scope_quality(document: &serde_yaml_ng::Value, path: &Pa
         return Err(FactoryError::BadRequest(format!(
             "scope config {} has a top-level `quality:` block, which a scope's own file does not read. \
              Move it under `scope.quality`",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse a `dashboard:` block written at the top of a nested scope's own
+/// config -- `refuse_misplaced_scope_quality`'s mistake, for the dashboard
+/// layout instead (`#159`): serde would drop it without a word, and a scope
+/// would keep inheriting whatever it stood to override while its author
+/// believes otherwise. Called only from `discovery.rs`'s `read_scope`, the
+/// same as `refuse_misplaced_scope_quality` -- `configuration.rs`'s
+/// `read_document` also reads the instance root's own file, where a
+/// top-level `dashboard:` is exactly right.
+pub fn refuse_misplaced_scope_dashboard(document: &serde_yaml_ng::Value, path: &Path) -> Result<()> {
+    let misplaced = document
+        .as_mapping()
+        .is_some_and(|root| root.contains_key(serde_yaml_ng::Value::String("dashboard".into())));
+    if misplaced {
+        return Err(FactoryError::BadRequest(format!(
+            "scope config {} has a top-level `dashboard:` block, which a scope's own file does not read. \
+             Move it under `scope.dashboard`",
             path.display()
         )));
     }
@@ -1208,6 +1332,14 @@ pub struct Scope {
     /// `roles:` instead, and refuses this block.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub roles: BTreeMap<String, RoleSpec>,
+    /// This scope's own dashboard layout, replacing whatever it inherited
+    /// whole -- see `Config::dashboard_for_scope`. Only a nested scope
+    /// writes this: the instance root uses its top-level `dashboard:`
+    /// instead, and refuses this block, exactly like `roles` above. `None`
+    /// inherits; `Some` replaces, with at least one tile -- an empty
+    /// `tiles: []` is refused at validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<DashboardConfig>,
     /// This scope's own policy declarations, layered under the root's
     /// `policies:` and every ancestor's own `scope.policies` -- see
     /// `Config::policy_chain_for_scope`. Only a nested scope writes these:
@@ -1584,6 +1716,35 @@ impl Factory {
         }
     }
 
+    /// The resolved dashboard for `scope` -- its tiles (`None` for "use the
+    /// built-in default") and the name of the scope whose block answered
+    /// (`None` for the same built-in-default case, never a magic string --
+    /// see `Config::dashboard`'s own doc comment) -- or for the instance
+    /// root itself when `scope` is `None`.
+    ///
+    /// Deliberately **not** `roles_for`'s fallback: a caller asking for a
+    /// role is asking "what may I do", and a scope that has since vanished
+    /// still needs an answer (the built-in roles) rather than a hard
+    /// failure. A caller asking for a dashboard is asking "show me this
+    /// named place", and a name that resolves to nothing is refused outright
+    /// -- `Factory::scope`'s own `NoSuchScope`, propagated by `?` -- the same
+    /// way any other scope-addressed read (`Request::PolicyControl`,
+    /// `Request::TaskCreate`'s scope check) refuses a scope nothing
+    /// configures, rather than silently substituting the root's own.
+    pub fn dashboard_for(&self, scope: Option<&str>) -> Result<(Option<DashboardConfig>, Option<String>)> {
+        match scope {
+            None => {
+                let (dashboard, source) = self.config.dashboard();
+                Ok((dashboard.cloned(), source))
+            }
+            Some(name) => {
+                let found = self.scope(name)?;
+                let (dashboard, source) = self.config.dashboard_for_scope(found);
+                Ok((dashboard.cloned(), source))
+            }
+        }
+    }
+
     /// Every policy layer that applies to the scope a name resolves to, root
     /// first. A name that resolves to no scope -- a caller whose scope has
     /// since gone -- gets only the root layer, the same fallback `roles_for`
@@ -1676,6 +1837,7 @@ mod tests {
                 scope: None,
                 scopes: vec![],
                 roles: BTreeMap::new(),
+                dashboard: None,
                 policies: PolicyDeclaration::default(),
                 quality: Vec::new(),
                 infrastructure: Infrastructure::default(),
@@ -1948,6 +2110,236 @@ mod tests {
         let fine: serde_yaml_ng::Value =
             serde_yaml_ng::from_str("scope:\n  id: s\n  name: demo\n  roles: {}\n").unwrap();
         refuse_misplaced_scope_roles(&fine, Path::new("x")).unwrap();
+    }
+
+    // -- dashboard_for_scope --------------------------------------------------
+
+    /// A scope at `path` named `name`, declaring a `dashboard:` block inline
+    /// -- mirrors `scope_with_roles` exactly, same reason: inheritance must
+    /// follow the path, never the name.
+    fn scope_with_dashboard(name: &str, path: &str, dashboard: &str) -> Scope {
+        let mut yaml = format!("id: {name}-id\nname: {name}\n");
+        if !dashboard.is_empty() {
+            yaml.push_str(&format!("dashboard:\n{dashboard}"));
+        }
+        let mut scope: Scope = serde_yaml_ng::from_str(&yaml).unwrap();
+        scope.path = PathBuf::from(path);
+        scope
+    }
+
+    /// The same topology `tree()` uses for roles, with dashboards instead:
+    /// `company` at the root, `engineering` (path `projects`) overriding,
+    /// `demo-app` (path `projects/demo`, below `engineering`) overriding
+    /// again, `engineering/tools` (path `projects/tools`, below
+    /// `engineering`, inheriting), `engineering/other` (path `elsewhere`,
+    /// named like a child of `engineering` but not below it on disk) and
+    /// `lookalike` (path `projects-x`, a path that shares a string prefix
+    /// with `projects` but is not the same or a child segment) both outside
+    /// every override.
+    fn dashboard_tree() -> Config {
+        let mut c = config_with("dashboard:\n  tiles:\n    - { metric: throughput_week, size: s }\n");
+        c.scopes = vec![
+            scope_with_dashboard("company", ".", ""),
+            scope_with_dashboard(
+                "engineering",
+                "projects",
+                "  tiles:\n    - { metric: first_pass_yield, size: m }\n",
+            ),
+            scope_with_dashboard(
+                "demo-app",
+                "projects/demo",
+                "  tiles:\n    - { view: throughput, size: l }\n    - { view: kpis, size: s }\n",
+            ),
+            scope_with_dashboard("engineering/tools", "projects/tools", ""),
+            scope_with_dashboard("engineering/other", "elsewhere", ""),
+            scope_with_dashboard("lookalike", "projects-x", ""),
+        ];
+        c
+    }
+
+    #[test]
+    fn dashboard_parses_at_root_and_scope_level() {
+        let c = dashboard_tree();
+        let root_tiles = &c.dashboard.as_ref().expect("root declared a dashboard").tiles;
+        assert_eq!(root_tiles.len(), 1);
+        assert_eq!(root_tiles[0].metric.as_ref().unwrap().as_str(), "throughput_week");
+
+        let engineering = scope_named(&c, "engineering");
+        let tiles = &engineering.dashboard.as_ref().expect("engineering overrides").tiles;
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].metric.as_ref().unwrap().as_str(), "first_pass_yield");
+    }
+
+    #[test]
+    fn a_dashboard_override_reaches_descendants_but_not_siblings_or_ancestors() {
+        let c = dashboard_tree();
+
+        let (tiles, source) = c.dashboard_for_scope(scope_named(&c, "engineering/tools"));
+        assert_eq!(source, Some("engineering".to_string()), "projects/tools is below projects on disk");
+        assert_eq!(
+            tiles.unwrap().tiles[0].metric.as_ref().unwrap().as_str(),
+            "first_pass_yield"
+        );
+
+        for elsewhere in ["company", "engineering/other", "lookalike"] {
+            let (tiles, source) = c.dashboard_for_scope(scope_named(&c, elsewhere));
+            assert_eq!(
+                source, Some("n".to_string()),
+                "{elsewhere} is not below projects by path, whatever its name says -- falls \
+                 through to the instance root's own block instead of engineering's; \"n\" is \
+                 config_with's own instance name, the root's fallback when it names no scope"
+            );
+            assert_eq!(tiles.unwrap().tiles[0].metric.as_ref().unwrap().as_str(), "throughput_week");
+        }
+    }
+
+    #[test]
+    fn the_nearest_dashboard_wins_whole_never_merged_with_an_ancestors() {
+        let c = dashboard_tree();
+        let (tiles, source) = c.dashboard_for_scope(scope_named(&c, "demo-app"));
+        assert_eq!(source, Some("demo-app".to_string()));
+        let tiles = &tiles.unwrap().tiles;
+        assert_eq!(tiles.len(), 2, "demo-app's own two tiles, not folded with engineering's one");
+        assert!(tiles.iter().all(|t| t.metric.is_none()), "demo-app names only view tiles");
+    }
+
+    #[test]
+    fn an_empty_tile_list_override_fails_to_load_naming_the_scope() {
+        let mut c = tree();
+        c.scopes.push(scope_with_dashboard("empty-override", "projects/empty", "  tiles: []\n"));
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("empty-override"), "{e}");
+        assert!(e.contains("at least one tile"), "{e}");
+        assert!(e.contains("remove the `dashboard:` block to inherit"), "{e}");
+    }
+
+    #[test]
+    fn absent_dashboard_everywhere_resolves_to_the_built_in_default() {
+        let c = tree(); // the roles fixture: no `dashboard:` block anywhere
+        let (tiles, source) = c.dashboard_for_scope(scope_named(&c, "demo-app"));
+        assert!(tiles.is_none());
+        assert_eq!(source, None);
+
+        let (tiles, source) = c.dashboard();
+        assert!(tiles.is_none());
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn an_unknown_metric_fails_load_naming_the_root_dashboard_path_and_reason() {
+        let c = config_with("dashboard:\n  tiles:\n    - { metric: not_a_real_metric, size: s }\n");
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("dashboard.tiles[0].metric"), "{e}");
+        assert!(e.contains("not_a_real_metric"), "{e}");
+    }
+
+    #[test]
+    fn a_tile_naming_both_metric_and_view_fails_load() {
+        let c = config_with("dashboard:\n  tiles:\n    - { metric: throughput_week, view: kpis, size: s }\n");
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("dashboard.tiles[0]"), "{e}");
+        assert!(e.contains("exactly one"), "{e}");
+    }
+
+    #[test]
+    fn a_tile_naming_neither_metric_nor_view_fails_load() {
+        let c = config_with("dashboard:\n  tiles:\n    - { size: s }\n");
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("dashboard.tiles[0]"), "{e}");
+        assert!(e.contains("exactly one"), "{e}");
+    }
+
+    #[test]
+    fn a_bound_metric_family_loads_cleanly_but_an_empty_tile_list_does_not() {
+        config_with("dashboard:\n  tiles:\n    - { metric: compliance.cra, size: s }\n")
+            .validate()
+            .unwrap();
+        let e = config_with("dashboard:\n  tiles: []\n").validate().unwrap_err().to_string();
+        assert!(e.contains("dashboard needs at least one tile"), "{e}");
+    }
+
+    #[test]
+    fn an_invalid_tile_in_a_nested_scope_names_that_scope_and_fails_load() {
+        let mut c = tree();
+        c.scopes.push(scope_with_dashboard(
+            "bad-scope",
+            "projects/bad",
+            "  tiles:\n    - { metric: nope, size: s }\n",
+        ));
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("bad-scope"), "{e}");
+        assert!(e.contains("dashboard.tiles[0].metric"), "{e}");
+        assert!(e.contains("nope"), "{e}");
+    }
+
+    #[test]
+    fn an_unknown_size_or_view_is_refused_at_parse_time_as_a_closed_enum() {
+        let e = serde_yaml_ng::from_str::<Config>(
+            "instance:\n  id: i\n  name: n\ndashboard:\n  tiles:\n    - { metric: throughput_week, size: xxl }\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("xxl"), "{e}");
+
+        let e = serde_yaml_ng::from_str::<Config>(
+            "instance:\n  id: i\n  name: n\ndashboard:\n  tiles:\n    - { view: nonexistent_view, size: s }\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("nonexistent_view"), "{e}");
+    }
+
+    #[test]
+    fn the_root_config_refuses_scope_dashboard_and_points_at_its_own_dashboard() {
+        let c = config_with(
+            "scope:\n  name: company\n  dashboard:\n    tiles:\n      - { view: kpis, size: s }\n",
+        );
+        let e = c.validate_instance().unwrap_err().to_string();
+        assert!(e.contains("scope.dashboard"), "{e}");
+        assert!(e.contains("top-level `dashboard:`"), "{e}");
+    }
+
+    #[test]
+    fn a_top_level_dashboard_block_in_a_nested_scope_file_is_refused() {
+        let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            "scope:\n  id: s\n  name: demo\ndashboard:\n  tiles:\n    - { view: kpis, size: s }\n",
+        )
+        .unwrap();
+        let e = refuse_misplaced_scope_dashboard(&document, Path::new("/x/projects/demo/.factory/config.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("scope.dashboard"), "{e}");
+        assert!(e.contains("projects/demo"), "{e}");
+
+        let fine: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            "scope:\n  id: s\n  name: demo\n  dashboard:\n    tiles:\n      - { view: kpis, size: s }\n",
+        )
+        .unwrap();
+        refuse_misplaced_scope_dashboard(&fine, Path::new("x")).unwrap();
+    }
+
+    #[test]
+    fn factory_dashboard_for_an_unknown_scope_is_refused_unlike_roles_for() {
+        let f = factory_with(vec![scope_at("demo", ".")]);
+        let e = f.dashboard_for(Some("nope")).unwrap_err().to_string();
+        assert!(e.contains("nope"), "{e}");
+        assert!(
+            f.roles_for("nope").is_ok(),
+            "roles_for falls back to the built-in roles for a scope that has since gone; dashboard_for does not"
+        );
+    }
+
+    #[test]
+    fn factory_dashboard_for_none_resolves_the_instance_roots_own() {
+        let mut f = factory("/inst");
+        f.config.dashboard = Some(
+            serde_yaml_ng::from_str("tiles:\n  - { view: kpis, size: s }\n").unwrap(),
+        );
+        let (tiles, source) = f.dashboard_for(None).unwrap();
+        // "n" is `factory`'s own instance name -- the root's fallback name
+        // when it declares no `scope:` of its own (`Config::dashboard`).
+        assert_eq!(source, Some("n".to_string()));
+        assert_eq!(tiles.unwrap().tiles.len(), 1);
     }
 
     // -- policy_chain_for_scope ---------------------------------------------

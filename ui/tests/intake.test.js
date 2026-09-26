@@ -85,7 +85,7 @@ test("the board draws four columns from one read, each card with its axes and ve
   assert.match(html, /\? Who at the partner issues the new key\?/);
   assert.equal((html.match(/class="ik-axis /g) || []).length, 4 * 7, "seven marks on every card");
   assert.match(html, /ik-tolerated/);
-  assert.match(el["intake-summary"].textContent, /^3 open · 1 released and 1 closed in the last 14 days$/);
+  assert.match(el["intake-summary"].textContent, /^3 open · 1 released, 1 split and 1 closed in the last 14 days$/);
   assert.equal(el["intake-error"].hidden, true);
   hideIntake();
 });

@@ -16,6 +16,7 @@ use crate::run::Run;
 use crate::task::{CloseReason, NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TurnEnded};
 use crate::workflow::{WorkflowDefinition, WorkflowDraft, WorkflowLint, WorkflowRun};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", content = "params", rename_all = "snake_case")]
@@ -373,7 +374,7 @@ pub enum Request {
     /// Take a snapshot now -- the same one the schedule takes -- then apply
     /// retention. `backup.run`, checked against the root scope like
     /// `policy.attest`: the instance's state is company-wide, not one
-    /// project's. Refused while another backup or verification is running.
+    /// project's. Refused while another backup operation is running.
     #[serde(rename = "backup.run")]
     BackupRun,
     /// Unpack a snapshot into a temporary directory and prove it would
@@ -385,6 +386,16 @@ pub enum Request {
     BackupVerify {
         #[serde(default)]
         snapshot: Option<String>,
+    },
+    /// Verify and materialize a plaintext snapshot as a new instance root.
+    /// The destination must not exist or must be empty; the daemon stages it
+    /// beside that destination and renames only after every required check
+    /// passes. CLI-only and owner-only: there is intentionally no grant or
+    /// HTTP endpoint for restore.
+    #[serde(rename = "backup.restore")]
+    BackupRestore {
+        snapshot: String,
+        into: PathBuf,
     },
     /// The L5 Knowledge tab: an index of `<root>/.factory/knowledge/`,
     /// rebuilt from the files on every request. Read-only, like
@@ -605,6 +616,28 @@ pub enum Request {
     Metrics {
         #[serde(default)]
         ids: Vec<crate::metrics::MetricId>,
+        /// Only this scope and its descendants. Absent means the whole
+        /// instance; definitions marked `instance_wide` ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// Override the run-backed metrics' established default intervals.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<crate::metrics::MetricsWindow>,
+    },
+    /// The dashboard's resolved layout for `scope` (`#159`, phase 4 of
+    /// `#150`): the nearest `dashboard:` block down `Scope.path`, the
+    /// instance root's own top-level `dashboard:`, or `None` for "use the
+    /// built-in default" -- see `Config::dashboard_for_scope`. `scope`
+    /// absent means the instance root itself. An unknown scope is refused
+    /// (`FactoryError::NoSuchScope`), unlike `roles_for`'s tolerant fallback
+    /// to the built-in roles for a scope that has since gone: a dashboard
+    /// request names a place to show, and a place that resolves to nothing
+    /// has no dashboard to show, rather than silently substituting the
+    /// root's. Read-only.
+    #[serde(rename = "dashboard")]
+    Dashboard {
+        #[serde(default)]
+        scope: Option<String>,
     },
     /// The L6 Goals tab: vision, mission, the north star and its inputs,
     /// every cycle's own summary, the asked-for (or current) cycle's full
@@ -889,6 +922,8 @@ pub enum Payload {
     BackupRun { snapshot: crate::backup::Snapshot },
     /// The answer to `Request::BackupVerify`: every step and its outcome.
     BackupVerify { verification: crate::backup::Verification },
+    /// The answer to `Request::BackupRestore`: the newly materialized root.
+    BackupRestore { restoration: crate::backup::Restoration },
     /// The L5 Knowledge tab. `present: false` when the vault
     /// (`<root>/.factory/knowledge/`) does not exist -- an empty state, not
     /// an error -- with `root` still naming the path that was looked in, and
@@ -975,6 +1010,17 @@ pub enum Payload {
         values: Vec<crate::metrics::MetricValue>,
         series: Vec<crate::metrics::MetricSeries>,
         registry: Vec<MetricDefView>,
+    },
+    /// The answer to `Request::Dashboard`: the resolved tile list, or `null`
+    /// on the wire for "no block anywhere in the chain names one -- use the
+    /// built-in default" (the default list itself lives in `dashboard-model.js`,
+    /// not here), and `source` naming the scope whose `dashboard:` block
+    /// answered -- `null` for the same built-in-default case, never a magic
+    /// string like `"root"` or `"default"`: a scope can be named either of
+    /// those, and `source` must never be mistaken for one.
+    Dashboard {
+        tiles: Option<Vec<crate::dashboard::Tile>>,
+        source: Option<String>,
     },
     /// The L6 Goals tab -- see `GoalsReport`.
     Goals { report: GoalsReport },
@@ -1367,6 +1413,7 @@ pub struct MetricDefView {
     pub description: String,
     pub unit: crate::metrics::Unit,
     pub better: crate::metrics::Better,
+    pub coverage: crate::metrics::MetricCoverage,
     pub source: String,
     pub available: bool,
     pub unavailable_reason: Option<String>,
@@ -1380,6 +1427,7 @@ impl From<crate::metrics::MetricDef> for MetricDefView {
             description: d.description,
             unit: d.unit,
             better: d.better,
+            coverage: d.coverage,
             source: d.source.to_string(),
             available: d.available,
             unavailable_reason: d.unavailable_reason.map(str::to_string),
@@ -2130,6 +2178,20 @@ mod tests {
     }
 
     #[test]
+    fn a_backup_restore_request_carries_the_snapshot_and_new_root() {
+        let json = r#"{"op":"backup.restore","params":{"snapshot":"factory-backup-demo-20260925T030000Z.tar.zst","into":"/tmp/restored"}}"#;
+        let env: Envelope = serde_json::from_str(json).expect("request parses");
+        assert!(matches!(
+            &env.request,
+            Request::BackupRestore { snapshot, into }
+                if snapshot.ends_with(".tar.zst") && into == &PathBuf::from("/tmp/restored")
+        ));
+        let back = serde_json::to_string(&env).unwrap();
+        let again: Envelope = serde_json::from_str(&back).unwrap();
+        assert!(matches!(again.request, Request::BackupRestore { .. }));
+    }
+
+    #[test]
     fn a_knowledge_request_is_a_read_without_parameters() {
         let env: Envelope =
             serde_json::from_str(r#"{"op":"knowledge"}"#).expect("request parses");
@@ -2147,6 +2209,38 @@ mod tests {
     fn a_datasets_request_is_a_read_without_parameters() {
         let env: Envelope = serde_json::from_str(r#"{"op":"datasets"}"#).expect("request parses");
         assert!(matches!(env.request, Request::Datasets));
+    }
+
+    #[test]
+    fn a_dashboard_request_defaults_scope_to_none_and_reads_it_when_given() {
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"dashboard","params":{}}"#).expect("no scope is fine");
+        assert!(matches!(env.request, Request::Dashboard { scope: None }));
+
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"dashboard","params":{"scope":"demo"}}"#).expect("request parses");
+        assert!(matches!(env.request, Request::Dashboard { scope: Some(s) } if s == "demo"));
+    }
+
+    #[test]
+    fn a_dashboard_payload_carries_null_tiles_and_the_source_on_the_wire() {
+        let payload = Payload::Dashboard { tiles: None, source: None };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["kind"], "dashboard");
+        assert_eq!(json["tiles"], serde_json::Value::Null);
+        assert_eq!(json["source"], serde_json::Value::Null, "never a magic string like \"default\"");
+
+        let tile = crate::dashboard::Tile {
+            metric: Some(crate::metrics::MetricId::new("throughput_week").unwrap()),
+            view: None,
+            size: crate::dashboard::TileSize::S,
+        };
+        let payload = Payload::Dashboard { tiles: Some(vec![tile]), source: Some("demo".into()) };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["source"], "demo");
+        assert_eq!(json["tiles"][0]["metric"], "throughput_week");
+        assert_eq!(json["tiles"][0]["size"], "s");
+        assert!(json["tiles"][0].get("view").is_none(), "view is omitted, not null, when absent");
     }
 
     #[test]

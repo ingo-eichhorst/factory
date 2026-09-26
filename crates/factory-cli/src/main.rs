@@ -11,7 +11,7 @@ use factory_core::dependencies::{AttachmentKind, DependenciesReport};
 use factory_core::event::Event;
 use factory_core::goals::{self as goals_core, Band, CycleStatus, KrRef};
 use factory_core::knowledge::FindingKind;
-use factory_core::metrics::MetricId;
+use factory_core::metrics::{MetricId, MetricsWindow};
 use factory_core::operations::{self as ops, HealthWindow, OperationsReport};
 use factory_core::policy::{self, ControlRef};
 use factory_core::protocol::{
@@ -137,6 +137,21 @@ enum Command {
     Metrics {
         /// e.g. `throughput_week`, `compliance.cra`, `bench.resolve_rate.eval-set-a`.
         ids: Vec<String>,
+        /// Only this scope and its descendants (instance-wide metrics say so
+        /// in their registry definition and ignore this selection).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Override run-backed metric intervals: day, 14d, or 90d.
+        #[arg(long)]
+        window: Option<MetricsWindow>,
+    },
+    /// The dashboard's resolved layout for a scope (`#159`): the nearest
+    /// `dashboard:` block down its path, the instance root's own, or the
+    /// built-in default when nothing overrides it.
+    Dashboard {
+        /// The scope to resolve for (default: the instance root itself).
+        #[arg(long)]
+        scope: Option<String>,
     },
     /// What runs used and cost, summed per task, GitHub issue (`issue=<n>`
     /// label), scope, agent or provider (#117). Usage comes from the agent runtime;
@@ -276,11 +291,17 @@ enum IntakeCmd {
         decide: bool,
     },
     /// Decide: `ready` releases, `needs-info` sends it back with questions,
-    /// `wontfix` closes it -- only with a verified reason and evidence.
+    /// `split` replaces it with smaller intake items, `wontfix` closes it --
+    /// only with a verified reason and evidence.
     Decide {
         id: String,
-        #[arg(value_parser = ["ready", "needs-info", "wontfix"])]
+        #[arg(value_parser = ["ready", "needs-info", "split", "wontfix"])]
         decision: String,
+        /// split: the parts as a JSON array of `{id, title, instructions,
+        /// depends_on, acceptance}` (`-` for stdin). Absent takes the
+        /// assessment's proposal.
+        #[arg(long)]
+        file: Option<PathBuf>,
         /// ready: dispatch the released task at once.
         #[arg(long)]
         run: bool,
@@ -300,7 +321,16 @@ enum IntakeCmd {
     },
     /// Add information to an item -- the answer to a needs-info, which puts
     /// it back in the queue.
-    Info { id: String, text: String },
+    Info {
+        id: String,
+        text: String,
+        /// Then start a triage run on it straight away.
+        #[arg(long)]
+        triage: bool,
+        /// With `--triage`: the agent to triage with.
+        #[arg(long, requires = "triage")]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -443,6 +473,17 @@ enum BackupCmd {
         /// The snapshot's file name, as `list` shows it. The newest when
         /// left out.
         snapshot: Option<String>,
+    },
+    /// Verify a plaintext snapshot, then materialize it into a new instance
+    /// root. Owner-only. The destination must not exist or must be empty;
+    /// this never stops the current daemon or switches roots for you.
+    Restore {
+        /// The snapshot's file name, as `list` shows it.
+        snapshot: String,
+        /// A new or empty instance root. Relative paths are resolved by this
+        /// CLI before the request reaches the daemon.
+        #[arg(long)]
+        into: PathBuf,
     },
 }
 
@@ -1154,6 +1195,15 @@ async fn main() -> Result<()> {
                     _ => Ok(()),
                 }
             }
+            BackupCmd::Restore { snapshot, into } => {
+                let into = if into.is_absolute() {
+                    into
+                } else {
+                    std::env::current_dir()?.join(into)
+                };
+                let payload = client.send(Request::BackupRestore { snapshot, into }).await?;
+                print(&payload, cli.json, backup_restore_text)
+            }
         },
 
         Command::Adapters => {
@@ -1455,12 +1505,20 @@ async fn main() -> Result<()> {
             policy_cmd(cli.json, &client, cmd).await
         }
 
-        Command::Metrics { ids } => {
+        Command::Metrics { ids, scope, window } => {
             let ids: std::result::Result<Vec<MetricId>, String> = ids.into_iter().map(|s| s.parse()).collect();
             let ids = ids.map_err(|e| anyhow!(e))?;
-            let payload = client.send(Request::Metrics { ids }).await?;
+            let payload = client.send(Request::Metrics { ids, scope, window }).await?;
             print(&payload, cli.json, |p| match p {
                 Payload::Metrics { values, series, registry } => Some(metrics_text(values, series, registry)),
+                _ => None,
+            })
+        }
+
+        Command::Dashboard { scope } => {
+            let payload = client.send(Request::Dashboard { scope }).await?;
+            print(&payload, cli.json, |p| match p {
+                Payload::Dashboard { tiles, source } => Some(dashboard_text(tiles, source)),
                 _ => None,
             })
         }
@@ -1585,20 +1643,24 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
         IntakeCmd::Show { id } => client.send(Request::TaskGet { id }).await?,
         IntakeCmd::Triage { id, agent } => client.send(Request::IntakeTriage { id, agent }).await?,
         IntakeCmd::Assess { id, file, decide } => {
-            let text = if file.as_os_str() == "-" {
-                let mut text = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
-                text
-            } else {
-                std::fs::read_to_string(&file).map_err(|e| anyhow!("cannot read {}: {e}", file.display()))?
-            };
+            let text = read_file_or_stdin(&file)?;
             let assessment = serde_json::from_str(&text).map_err(|e| anyhow!("not an assessment: {e}"))?;
             client.send(Request::IntakeAssess { id, assessment, decide }).await?
         }
-        IntakeCmd::Decide { id, decision, run, questions, reason, evidence, duplicate_of } => {
+        IntakeCmd::Decide { id, decision, file, run, questions, reason, evidence, duplicate_of } => {
+            if file.is_some() && decision != "split" {
+                return Err(anyhow!("--file only goes with split"));
+            }
             let decision = match decision.as_str() {
                 "ready" => Decision::Ready { run },
                 "needs-info" => Decision::NeedsInfo { questions },
+                "split" => Decision::Split {
+                    parts: match file {
+                        Some(file) => serde_json::from_str(&read_file_or_stdin(&file)?)
+                            .map_err(|e| anyhow!("not a list of parts: {e}"))?,
+                        None => Vec::new(),
+                    },
+                },
                 _ => Decision::Wontfix {
                     reason: match reason.as_deref() {
                         Some("duplicate") => WontfixReason::Duplicate,
@@ -1612,7 +1674,14 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
             };
             client.send(Request::IntakeDecide { id, decision }).await?
         }
-        IntakeCmd::Info { id, text } => client.send(Request::IntakeInfo { id, text }).await?,
+        IntakeCmd::Info { id, text, triage, agent } => {
+            let answered = client.send(Request::IntakeInfo { id: id.clone(), text }).await?;
+            if triage {
+                client.send(Request::IntakeTriage { id, agent }).await?
+            } else {
+                answered
+            }
+        }
     };
     print(&payload, json, |p| match p {
         Payload::IntakeBoard { board } => Some(intake_board_text(board)),
@@ -1624,6 +1693,34 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
 /// A card's line: full id (it is what every other `intake` command takes),
 /// age, priority/category/estimate once assessed, the seven axes as a row
 /// of marks, the title.
+fn read_file_or_stdin(file: &std::path::Path) -> Result<String> {
+    if file.as_os_str() == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+        Ok(text)
+    } else {
+        std::fs::read_to_string(file).map_err(|e| anyhow!("cannot read {}: {e}", file.display()))
+    }
+}
+
+/// What would move a held-back item, one line per action with its reasons
+/// under it -- and the command that does it.
+fn next_actions_text(id: &str, actions: &[factory_core::intake::NextAction], indent: &str) -> String {
+    use factory_core::intake::NextActionKind;
+    let mut out = String::new();
+    for a in actions {
+        let command = match a.action {
+            NextActionKind::Split => format!("factory intake decide {id} split [--file parts.json]"),
+            NextActionKind::AddInfo => format!("factory intake info {id} \"...\" --triage"),
+        };
+        out.push_str(&format!("{indent}-> {}: {}\n{indent}   {command}\n", a.action.as_str().replace('_', "-"), a.hint));
+        for r in &a.reasons {
+            out.push_str(&format!("{indent}   because {r}\n"));
+        }
+    }
+    out
+}
+
 fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
     let (verdict, marks) = match &c.triage {
         Some(t) => (
@@ -1658,8 +1755,16 @@ fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
     {
         line.push_str("\n      the triage run ended without an assessment");
     }
+    if let Some(parent) = &c.parent {
+        line.push_str(&format!("\n      part of {parent}"));
+    }
     for q in &c.questions {
         line.push_str(&format!("\n      ? {q}"));
+    }
+    let next = next_actions_text(&c.id, &c.next_actions, "      ");
+    if !next.is_empty() {
+        line.push('\n');
+        line.push_str(next.trim_end());
     }
     line
 }
@@ -1680,8 +1785,9 @@ fn intake_board_text(board: &factory_core::intake::IntakeBoard) -> String {
         }
     }
     out.push_str(&format!(
-        "closed as wontfix in the last {} days: {}\naxes: {}",
+        "split in the last {} days: {}\nclosed as wontfix in the last {0} days: {}\naxes: {}",
         board.ready_window_days,
+        board.split,
         board.wontfix,
         board.axes.iter().map(|a| a.label.as_str()).collect::<Vec<_>>().join(", ")
     ));
@@ -1707,7 +1813,7 @@ fn intake_item_text(task: &Task) -> String {
     }
     if let Some(t) = &i.triage {
         out.push_str(&format!(
-            "  assessed   by {} at {}: {}\n  category   {}\n  priority   {} (impact {}, urgency {})\n  estimate   {} (complexity {})\n  route      {}{}{}\n",
+            "  assessed   by {} at {}: {}\n  category   {}\n  priority   {} (impact {}, urgency {})\n  estimate   {} (complexity {})\n  route      {}{}{}{}{}\n",
             t.by,
             t.at.to_rfc3339(),
             t.verdict.as_str().replace('_', "-"),
@@ -1720,6 +1826,19 @@ fn intake_item_text(task: &Task) -> String {
             t.assessment.routing.scope,
             t.assessment.routing.agent.as_ref().map(|a| format!(" as {a}")).unwrap_or_default(),
             t.assessment.routing.workflow.as_ref().map(|w| format!(", workflow {w}")).unwrap_or_default(),
+            if t.assessment.routing.inputs.is_empty() {
+                String::new()
+            } else {
+                let inputs: Vec<String> = t.assessment.routing.inputs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                format!(" with {}", inputs.join(", "))
+            },
+            if t.assessment.routing.agents.is_empty() {
+                String::new()
+            } else {
+                let agents: Vec<String> =
+                    t.assessment.routing.agents.iter().map(|(k, v)| format!("{k} by {v}")).collect();
+                format!("; {}", agents.join(", "))
+            },
         ));
         for a in &t.assessment.axes {
             out.push_str(&format!(
@@ -1733,14 +1852,33 @@ fn intake_item_text(task: &Task) -> String {
         if !t.assessment.summary.is_empty() {
             out.push_str(&format!("  summary    {}\n", t.assessment.summary));
         }
+        if !t.assessment.split.is_empty() {
+            out.push_str(&format!("  proposed split into {} parts:\n", t.assessment.split.len()));
+            for p in &t.assessment.split {
+                let after = if p.depends_on.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (after {})", p.depends_on.join(", "))
+                };
+                out.push_str(&format!("    {:<14} {}{after}\n", p.id, p.title));
+            }
+        }
     }
     for q in &i.questions {
         out.push_str(&format!("  ? {q}\n"));
+    }
+    let next = next_actions_text(&task.id, &factory_core::intake::next_actions(i), "  ");
+    if !next.is_empty() {
+        out.push_str("  what moves it:\n");
+        out.push_str(&next);
     }
     if let Some(d) = &i.decision {
         out.push_str(&format!("  decided    {} by {} at {}", d.decision.as_str().replace('_', "-"), d.by, d.at.to_rfc3339()));
         if let Some(run) = &d.workflow_run {
             out.push_str(&format!(" (workflow run {run})"));
+        }
+        if !d.parts.is_empty() {
+            out.push_str(&format!(" into {}", d.parts.join(", ")));
         }
         out.push('\n');
     }
@@ -1970,7 +2108,7 @@ fn backup_status_text(payload: &Payload) -> Option<String> {
         ));
         out.push_str("  encrypted    no (v1 writes plaintext archives)\n");
         if report.running {
-            out.push_str("  running      a backup or verification is in progress\n");
+            out.push_str("  running      a backup operation is in progress\n");
         }
     }
     if !report.warnings.is_empty() {
@@ -2049,6 +2187,31 @@ fn backup_verify_text(payload: &Payload) -> Option<String> {
         out.push_str(&format!("  {status}  {:<10} {}\n", c.name, c.detail));
     }
     Some(out.trim_end().to_string())
+}
+
+fn backup_restore_text(payload: &Payload) -> Option<String> {
+    let Payload::BackupRestore { restoration } = payload else { return None };
+    let root = shell_word(&restoration.into);
+    Some(format!(
+        "RESTORED  {}\n  {} files -> {}  in {:.1}s\n\
+         Nothing was switched or started. To switch over:\n\
+         1. Stop the current factory-daemon.\n\
+         2. Start the restored instance: factory-daemon --root {root} run\n\
+         3. Point the CLI at it: factory --root {root} status",
+        restoration.snapshot,
+        restoration.files,
+        restoration.into,
+        restoration.duration_ms as f64 / 1000.0,
+    ))
+}
+
+/// One shell word for the concrete commands printed after restore.
+fn shell_word(value: &str) -> String {
+    if !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+:@%=,".contains(c)) {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 /// Binary units, one decimal: `64.0 GiB`.
@@ -2624,6 +2787,30 @@ fn metrics_text(values: &[factory_core::metrics::MetricValue], series: &[factory
             .unwrap_or_default();
         let reason = v.reason.as_deref().map(|r| format!("  ({r})")).unwrap_or_default();
         out.push_str(&format!("{:<40} {:<12} {value:>10}{trend}{reason}\n", v.id.as_str(), title));
+    }
+    out.trim_end().to_string()
+}
+
+fn dashboard_text(tiles: &Option<Vec<factory_core::dashboard::Tile>>, source: &Option<String>) -> String {
+    // The server pairs `tiles: null` with `source: null` always -- see
+    // `Config::dashboard`'s doc comment -- so `tiles == None` is the whole
+    // answer for "built-in default"; a name in `source` otherwise, never a
+    // magic string like `"root"` or `"default"`.
+    let tiles = match tiles {
+        Some(tiles) => tiles,
+        None => return "(built-in default)".to_string(),
+    };
+    let mut out = match source {
+        Some(name) => format!("source: {name}\n"),
+        None => String::new(),
+    };
+    for tile in tiles {
+        let what = match (&tile.metric, &tile.view) {
+            (Some(metric), _) => format!("metric {}", metric.as_str()),
+            (None, Some(view)) => format!("view {}", view.as_str()),
+            (None, None) => "?".to_string(),
+        };
+        out.push_str(&format!("{:<8} {what}\n", format!("[{}]", tile.size.as_str())));
     }
     out.trim_end().to_string()
 }
@@ -5393,6 +5580,41 @@ mod tests {
     }
 
     #[test]
+    fn backup_restore_requires_a_snapshot_and_destination_and_prints_cutover_steps() {
+        let cli = Cli::try_parse_from([
+            "factory",
+            "backup",
+            "restore",
+            "factory-backup-demo-20260925T030000Z.tar.zst",
+            "--into",
+            "/tmp/restored factory",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Backup {
+                command: Some(BackupCmd::Restore { snapshot, into })
+            } if snapshot.ends_with(".tar.zst") && into == PathBuf::from("/tmp/restored factory")
+        ));
+        assert!(Cli::try_parse_from(["factory", "backup", "restore", "snapshot"]).is_err());
+
+        let payload = Payload::BackupRestore {
+            restoration: factory_core::backup::Restoration {
+                snapshot: "snapshot.tar.zst".into(),
+                into: "/tmp/restored factory".into(),
+                files: 12,
+                checks: vec![],
+                duration_ms: 1500,
+            },
+        };
+        let text = backup_restore_text(&payload).unwrap();
+        assert!(text.contains("12 files -> /tmp/restored factory"), "{text}");
+        assert!(text.contains("Nothing was switched or started"), "{text}");
+        assert!(text.contains("factory-daemon --root '/tmp/restored factory' run"), "{text}");
+        assert!(text.contains("factory --root '/tmp/restored factory' status"), "{text}");
+    }
+
+    #[test]
     fn creating_an_unscheduled_task_says_it_is_not_dispatched_and_how_to_run_it() {
         let note = created_note(&created(None), false);
         assert!(note.starts_with("created, not dispatched"), "{note}");
@@ -5801,7 +6023,18 @@ mod tests {
             Command::Intake { command: Some(IntakeCmd::Assess { decide: true, .. }), .. }
         ));
         let bad = Cli::try_parse_from(["factory", "intake", "decide", "abc", "maybe"]);
-        assert!(bad.is_err(), "only ready, needs-info or wontfix");
+        assert!(bad.is_err(), "only ready, needs-info, split or wontfix");
+        match parse(&["intake", "decide", "abc", "split", "--file", "parts.json"]).command {
+            Command::Intake { command: Some(IntakeCmd::Decide { decision, file: Some(f), .. }), .. } => {
+                assert_eq!((decision.as_str(), f.to_str().unwrap()), ("split", "parts.json"));
+            }
+            _ => panic!("not a split"),
+        }
+        assert!(matches!(
+            parse(&["intake", "info", "abc", "the answer", "--triage", "--agent", "codex"]).command,
+            Command::Intake { command: Some(IntakeCmd::Info { triage: true, agent: Some(_), .. }), .. }
+        ));
+        assert!(Cli::try_parse_from(["factory", "intake", "info", "abc", "x", "--agent", "codex"]).is_err());
     }
 
     #[test]
@@ -5823,6 +6056,31 @@ mod tests {
             _ => panic!("summary"),
         }
         assert!(Cli::try_parse_from(["factory", "stats", "--window", "9d"]).is_err());
+    }
+
+    #[test]
+    fn metrics_takes_scope_and_dashboard_window_presets() {
+        match parse(&[
+            "metrics",
+            "agent_hours",
+            "--scope",
+            "demo",
+            "--window",
+            "14d",
+        ])
+        .command
+        {
+            Command::Metrics {
+                ids,
+                scope: Some(scope),
+                window: Some(MetricsWindow::FourteenDays),
+            } => {
+                assert_eq!(ids, vec!["agent_hours"]);
+                assert_eq!(scope, "demo");
+            }
+            _ => panic!("metrics flags"),
+        }
+        assert!(Cli::try_parse_from(["factory", "metrics", "--window", "7d"]).is_err());
     }
 
     #[test]
