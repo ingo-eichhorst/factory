@@ -46,6 +46,16 @@
 //! sides of the figure; with none left the value is `None` and the reason
 //! says how many finished runs there were.
 //!
+//! The four intake metrics (`ready_rate`, `needs_info_rate`,
+//! `duplicate_rate`, `intake_lead_time`, #165) are
+//! `factory_core::intake::registry_metric` over decision events read off the
+//! task journal (`TaskStore::entries_of_kinds` over `triage_verdict`,
+//! `intake_needs_info`, `intake_closed`, `intake_split`), the same trailing
+//! 28 days by default -- `Intake.decision` is never read here, since it
+//! keeps only the latest decision and this needs every one. Scope narrows
+//! by the task's own current scope, canonicalised, the same rule the
+//! run-backed families follow.
+//!
 //! ## Unknown vs. unavailable
 //!
 //! An id `metrics::resolve` has never heard of refuses the whole call --
@@ -65,6 +75,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use factory_core::config::Scope;
 use factory_core::error::{FactoryError, Result};
 use factory_core::goals::GoalsCatalogue;
+use factory_core::intake::IntakeDecisionFact;
 use factory_core::metrics::{
     self, MetricDef, MetricError, MetricId, MetricSeries, MetricValue, MetricsWindow,
 };
@@ -110,6 +121,19 @@ fn is_usage_metric(id: &str) -> bool {
 fn is_hours_metric(id: &str) -> bool {
     matches!(id, "agent_hours" | "blocked_hours")
 }
+
+fn is_intake_metric(id: &str) -> bool {
+    matches!(id, "ready_rate" | "needs_info_rate" | "duplicate_rate" | "intake_lead_time")
+}
+
+/// The four journal kinds an intake decision is ever recorded under --
+/// `factory_daemon::intake`'s own `TRIAGE_VERDICT_KIND` plus the three
+/// literals `intake_decide` journals directly. Kept here rather than
+/// imported, the same way `factory_core::intake::decision_event` treats
+/// them: a rename of any one is caught by the daemon metrics test driving
+/// the real `intake_decide`, not by the type system.
+const INTAKE_DECISION_KINDS: [&str; 4] =
+    [crate::intake::TRIAGE_VERDICT_KIND, "intake_needs_info", "intake_closed", "intake_split"];
 
 fn is_policy_metric(id: &str) -> bool {
     id.starts_with("compliance.") || id.starts_with("open_controls.")
@@ -204,6 +228,7 @@ impl Engine {
             .iter()
             .any(|(id, r)| r.is_ok() && (is_operations_metric(id.as_str()) || is_usage_metric(id.as_str())));
         let needs_hours = computing.iter().any(|(id, r)| r.is_ok() && is_hours_metric(id.as_str()));
+        let needs_intake = computing.iter().any(|(id, r)| r.is_ok() && is_intake_metric(id.as_str()));
 
         let production = if needs_production {
             Some(self.metric_production(canonical_scope, &target_scopes, window, now).await?)
@@ -248,24 +273,27 @@ impl Engine {
         } else {
             None
         };
+        let intake_input = if needs_intake {
+            let days = window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS);
+            Some(self.intake_facts(days, now, canonical_scope, &target_scope_names, &snapshot).await?)
+        } else {
+            None
+        };
 
+        let sources = ComputeSources {
+            production: production.as_ref(),
+            policy_report: policy_report.as_ref(),
+            runs: runs.as_deref(),
+            hours: hours.as_ref(),
+            intake: intake_input.as_ref(),
+        };
         let mut computed: BTreeMap<MetricId, MetricValue> = BTreeMap::new();
         let mut computed_series: BTreeMap<MetricId, MetricSeries> = BTreeMap::new();
         for (id, def_result) in &computing {
             if def_result.is_err() {
                 continue;
             }
-            let (value, series) = self
-                .compute_one(
-                    id,
-                    production.as_ref(),
-                    policy_report.as_ref(),
-                    runs.as_deref(),
-                    hours.as_ref(),
-                    now,
-                    window,
-                )
-                .await?;
+            let (value, series) = self.compute_one(id, &sources, now, window).await?;
             computed.insert(id.clone(), value);
             if let Some(s) = series {
                 computed_series.insert(id.clone(), s);
@@ -366,19 +394,63 @@ impl Engine {
         })
     }
 
+    /// The decision facts the four intake metrics read (#165): every
+    /// journal entry of one of the four decision kinds since `window_days`
+    /// ago (`TaskStore::entries_of_kinds`), turned into an
+    /// `IntakeDecisionFact` by `intake::decision_event`, narrowed to the
+    /// requested scope subtree by each entry's own task -- read once here
+    /// with `TaskStore::list`, the same "one list, one pass" shape
+    /// `occupancy.rs` and `operations.rs` use `entries_of_kinds` with. A
+    /// task `entries_of_kinds` names that this read no longer finds (or
+    /// that never carried an `intake` record) is simply left out, never
+    /// specially checked for: a deleted task's own journal is gone with it
+    /// (`store_sqlite.rs`'s cascading delete on `task.delete`).
+    async fn intake_facts(
+        &self,
+        window_days: i64,
+        now: DateTime<Utc>,
+        canonical_scope: Option<&str>,
+        target_scope_names: &BTreeSet<String>,
+        snapshot: &factory_core::config::Factory,
+    ) -> Result<IntakeInput> {
+        let since = now - chrono::Duration::days(window_days);
+        let entries = self.store.entries_of_kinds(&INTAKE_DECISION_KINDS, since).await?;
+        let tasks = self.store.list(&TaskFilter::default()).await?;
+        let tasks_by_id: BTreeMap<&str, &factory_core::task::Task> =
+            tasks.iter().map(|t| (t.id.as_str(), t)).collect();
+        let mut facts = Vec::new();
+        let mut skipped = 0usize;
+        for (task_id, entry) in &entries {
+            let Some(task) = tasks_by_id.get(task_id.as_str()) else { continue };
+            let Some(record) = &task.intake else { continue };
+            if canonical_scope.is_some()
+                && !target_scope_names.contains(&snapshot.canonical_scope_name(&task.scope))
+            {
+                continue;
+            }
+            match factory_core::intake::decision_event(&entry.kind, entry.data.as_ref(), entry.at, record.received_at)
+            {
+                Some(Ok(fact)) => facts.push(fact),
+                Some(Err(())) => skipped += 1,
+                None => {}
+            }
+        }
+        Ok(IntakeInput { facts, skipped, window_days })
+    }
+
     /// One available, non-`quality.*` metric's value, and its series when
-    /// it has one, off the `production`/`policy_report`/`runs` this call
-    /// already read (each `Some` exactly when some id needs it).
+    /// it has one, off the backing reads `sources` already gathered (each
+    /// field `Some` exactly when some id needs it).
     async fn compute_one(
         &self,
         id: &MetricId,
-        production: Option<&factory_core::protocol::Production>,
-        policy_report: Option<&PolicyReport>,
-        runs: Option<&[factory_core::run::Run]>,
-        hours: Option<&HoursTotals>,
+        sources: &ComputeSources<'_>,
         now: DateTime<Utc>,
         window: Option<MetricsWindow>,
     ) -> Result<(MetricValue, Option<MetricSeries>)> {
+        let production = sources.production;
+        let policy_report = sources.policy_report;
+        let runs = sources.runs;
         let daily = || &production.expect("needs_production set").daily;
         Ok(if id.as_str() == "throughput_week" {
             let days = window.map(MetricsWindow::days).unwrap_or(7) as usize;
@@ -418,9 +490,11 @@ impl Engine {
                 None,
             )
         } else if is_hours_metric(id.as_str()) {
-            let totals = hours.expect("needs_hours set");
+            let totals = sources.hours.expect("needs_hours set");
             let seconds = if id.as_str() == "agent_hours" { totals.busy_seconds } else { totals.blocked_seconds };
             (MetricValue { id: id.clone(), value: Some(seconds as f64 / 3600.0), as_of: now, reason: None }, None)
+        } else if is_intake_metric(id.as_str()) {
+            (intake_value(id, sources.intake.expect("needs_intake set"), now), None)
         } else if let Some(framework) = id.as_str().strip_prefix("compliance.") {
             (compliance_value(id, policy_report.expect("needs_policy set"), framework, now), None)
         } else if let Some(framework) = id.as_str().strip_prefix("open_controls.") {
@@ -902,6 +976,50 @@ fn usage_value(
     }
 }
 
+/// Every backing read a `metrics_for` call may have gathered, bundled so
+/// `compute_one` takes one reference instead of one parameter per family --
+/// each field `Some` exactly when some asked id needed it.
+struct ComputeSources<'a> {
+    production: Option<&'a factory_core::protocol::Production>,
+    policy_report: Option<&'a PolicyReport>,
+    runs: Option<&'a [factory_core::run::Run]>,
+    hours: Option<&'a HoursTotals>,
+    intake: Option<&'a IntakeInput>,
+}
+
+/// What `Engine::intake_facts` read for one call: the decision facts
+/// already narrowed to the requested scope subtree, how many decision-kind
+/// entries in that same read did not parse, and the window (in days) they
+/// were both read over -- shared by every intake id a single `metrics_for`
+/// call asks for, so the journal and task list are each read once however
+/// many of the four ids are wanted.
+struct IntakeInput {
+    facts: Vec<IntakeDecisionFact>,
+    skipped: usize,
+    window_days: i64,
+}
+
+/// `ready_rate`/`needs_info_rate`/`duplicate_rate`/`intake_lead_time`,
+/// `as_of` the newest decision behind the value, like the operations
+/// metrics -- `now` beside a reason when there is none.
+fn intake_value(id: &MetricId, intake: &IntakeInput, now: DateTime<Utc>) -> MetricValue {
+    let window = factory_core::operations::Window::trailing(now, intake.window_days);
+    match factory_core::intake::registry_metric(id.as_str(), &intake.facts, &window, intake.skipped, intake.window_days) {
+        Some(figure) => MetricValue {
+            id: id.clone(),
+            value: figure.value,
+            as_of: figure.as_of.unwrap_or(now),
+            reason: figure.reason,
+        },
+        None => MetricValue {
+            id: id.clone(),
+            value: None,
+            as_of: now,
+            reason: Some("no computation wired for this metric yet".to_string()),
+        },
+    }
+}
+
 fn unavailable_value(id: &MetricId, reason: &str, now: DateTime<Utc>) -> MetricValue {
     MetricValue {
         id: id.clone(),
@@ -1006,6 +1124,8 @@ mod tests {
     //! tasks in the store, and a real policy catalogue on disk.
 
     use super::*;
+    use crate::access::Caller;
+    use crate::intake::TRIAGE_VERDICT_KIND;
     use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::TaskStore;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
@@ -2345,5 +2465,203 @@ mod tests {
         assert!(has("compliance.cra"), "implied by the loaded policy catalogue");
         assert!(has("open_controls.cra"));
         assert!(has("compliance.cra"), "also implied by the goals catalogue's own key result");
+        assert!(has("ready_rate"), "a fixed metric, so in the default set (#165)");
+        assert!(has("needs_info_rate"));
+        assert!(has("duplicate_rate"));
+        assert!(has("intake_lead_time"));
+    }
+
+    // ----------------------------------------------------- intake (#165)
+
+    fn intake_assessment(scope: &str) -> factory_core::intake::Assessment {
+        factory_core::intake::Assessment {
+            axes: factory_core::intake::Axis::ALL
+                .into_iter()
+                .map(|axis| factory_core::intake::AxisCheck {
+                    axis,
+                    pass: axis != factory_core::intake::Axis::Verifiability,
+                    evidence: format!("{} checked", axis.as_str()),
+                    cost: None,
+                })
+                .collect(),
+            category: "bugfix".into(),
+            impact: factory_core::intake::Level::High,
+            urgency: factory_core::intake::Level::Medium,
+            complexity: 3,
+            estimate: None,
+            routing: factory_core::intake::Routing { scope: scope.into(), agent: Some("worker".into()), ..Default::default() },
+            summary: "bounded".into(),
+            questions: vec![],
+            split: vec![],
+        }
+    }
+
+    fn ready_assessment(scope: &str) -> factory_core::intake::Assessment {
+        let mut a = intake_assessment(scope);
+        for check in &mut a.axes {
+            check.pass = true;
+        }
+        a
+    }
+
+    async fn add_intake_item(engine: &Arc<Engine>, scope: &str, title: &str) -> factory_core::task::Task {
+        engine
+            .intake_add(
+                &Caller::Owner,
+                factory_core::intake::NewIntake {
+                    title: title.into(),
+                    instructions: "fix it".into(),
+                    scope: Some(scope.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Rewrites a decision-kind journal entry's own `at` (and, when it
+    /// carries one, its `data.decision.at`) after the fact -- the same
+    /// technique `store_run_at` uses for a run's timestamps, needed because
+    /// `intake_decide` always journals at the real `Utc::now()` and a
+    /// window/rollup test needs decisions spread across specific days
+    /// relative to one `now` captured once at the top of the test.
+    fn backdate_decision(database: &std::path::Path, task_id: &str, kind: &str, at: DateTime<Utc>) {
+        let at_str = at.to_rfc3339();
+        let conn = rusqlite::Connection::open(database).unwrap();
+        conn.execute(
+            "UPDATE task_entries SET at = ?1, data = json_set(data, '$.at', ?1) \
+             WHERE task_id = ?2 AND json_extract(data, '$.kind') = ?3",
+            params![at_str, task_id, kind],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE task_entries SET data = json_set(data, '$.data.decision.at', ?1) \
+             WHERE task_id = ?2 AND json_extract(data, '$.kind') = ?3 AND json_extract(data, '$.data.decision') IS NOT NULL",
+            params![at_str, task_id, kind],
+        )
+        .unwrap();
+    }
+
+    /// Backdates an item's own `Intake.received_at` -- direct store
+    /// manipulation, like `backdate_decision`, since `intake_decide` always
+    /// carries forward whatever `received_at` a task already had.
+    async fn backdate_received_at(engine: &Arc<Engine>, task_id: &str, at: DateTime<Utc>) {
+        let task = engine.store.get(task_id).await.unwrap().unwrap();
+        let mut record = task.intake.unwrap();
+        record.received_at = at;
+        engine.store.update(task_id, &TaskPatch { intake: Some(record), ..Default::default() }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn intake_metrics_roll_up_the_subtree_and_read_the_window_override_with_as_of() {
+        use factory_core::intake::{Decision, WontfixReason};
+
+        let (engine, database) = scoped_engine();
+        let now = Utc::now();
+
+        // A: released ready in "work", decided 2 days ago, received 10 days
+        // before that -- an 8-day lead time.
+        let a = add_intake_item(&engine, "work", "A").await;
+        backdate_received_at(&engine, &a.id, now - chrono::Duration::days(10)).await;
+        engine.intake_assess(&Caller::Owner, &a.id, ready_assessment("work"), true).await.unwrap();
+        backdate_decision(&database, &a.id, TRIAGE_VERDICT_KIND, now - chrono::Duration::days(2));
+
+        // B: sent back for information in "nested" (a child of "work"),
+        // decided 47 hours ago -- the newest decision in the work subtree.
+        let b = add_intake_item(&engine, "nested", "B").await;
+        engine.intake_assess(&Caller::Owner, &b.id, intake_assessment("nested"), true).await.unwrap();
+        backdate_decision(&database, &b.id, TRIAGE_VERDICT_KIND, now - chrono::Duration::hours(47));
+
+        // C: closed as a duplicate in "side" (a sibling of "work"), decided
+        // 2 days ago -- excluded from the "work" subtree.
+        let c = add_intake_item(&engine, "side", "C").await;
+        engine
+            .intake_decide(
+                &Caller::Owner,
+                &c.id,
+                Decision::Wontfix { reason: WontfixReason::Duplicate, evidence: "same as A".into(), duplicate_of: Some(a.id.clone()) },
+            )
+            .await
+            .unwrap();
+        backdate_decision(&database, &c.id, "intake_closed", now - chrono::Duration::days(2));
+
+        // D: closed as invalid in "work", decided 20 days ago -- inside the
+        // default (28-day) and 90-day windows, outside a 14-day one.
+        let d = add_intake_item(&engine, "work", "D").await;
+        engine
+            .intake_decide(
+                &Caller::Owner,
+                &d.id,
+                Decision::Wontfix { reason: WontfixReason::Invalid, evidence: "not reproducible".into(), duplicate_of: None },
+            )
+            .await
+            .unwrap();
+        backdate_decision(&database, &d.id, "intake_closed", now - chrono::Duration::days(20));
+
+        let ids: Vec<MetricId> = ["ready_rate", "needs_info_rate", "duplicate_rate", "intake_lead_time"]
+            .into_iter()
+            .map(|id| MetricId::new(id).unwrap())
+            .collect();
+
+        // Default window (28 days), scope "work": A, B and D all count;
+        // C (in "side") does not. Newest of the three is B.
+        let work_default = engine.metrics_for(&ids, now, Some("work"), None).await.unwrap();
+        assert_eq!(metric(&work_default, "ready_rate").value, Some(1.0 / 3.0));
+        assert_eq!(metric(&work_default, "needs_info_rate").value, Some(1.0 / 3.0));
+        assert_eq!(metric(&work_default, "duplicate_rate").value, Some(0.0));
+        assert_eq!(metric(&work_default, "ready_rate").as_of, now - chrono::Duration::hours(47));
+        assert_eq!(
+            metric(&work_default, "intake_lead_time").value,
+            Some(chrono::Duration::days(8).num_seconds() as f64)
+        );
+        assert_eq!(metric(&work_default, "intake_lead_time").as_of, now - chrono::Duration::days(2));
+
+        // A 14-day window excludes D (20 days ago): only A and B remain.
+        let work_14d = engine.metrics_for(&ids, now, Some("work"), Some(MetricsWindow::FourteenDays)).await.unwrap();
+        assert_eq!(metric(&work_14d, "ready_rate").value, Some(0.5));
+        assert_eq!(metric(&work_14d, "needs_info_rate").value, Some(0.5));
+
+        // The excluded sibling scope has its own, independent rollup.
+        let side = engine.metrics_for(&ids, now, Some("side"), None).await.unwrap();
+        assert_eq!(metric(&side, "ready_rate").value, Some(0.0));
+        assert_eq!(metric(&side, "duplicate_rate").value, Some(1.0));
+        assert_eq!(metric(&side, "duplicate_rate").as_of, now - chrono::Duration::days(2));
+
+        // Unscoped rolls up all four decisions.
+        let all = engine.metrics_for(&ids, now, None, None).await.unwrap();
+        assert_eq!(metric(&all, "ready_rate").value, Some(0.25));
+        assert_eq!(metric(&all, "needs_info_rate").value, Some(0.25));
+        assert_eq!(metric(&all, "duplicate_rate").value, Some(0.25));
+        assert_eq!(metric(&all, "ready_rate").as_of, now - chrono::Duration::hours(47));
+    }
+
+    #[tokio::test]
+    async fn a_deleted_intake_item_drops_out_of_the_intake_metrics() {
+        use factory_core::intake::{Decision, WontfixReason};
+
+        let (engine, database) = scoped_engine();
+        let now = Utc::now();
+        let e = add_intake_item(&engine, "work", "E").await;
+        engine
+            .intake_decide(
+                &Caller::Owner,
+                &e.id,
+                Decision::Wontfix { reason: WontfixReason::Duplicate, evidence: "dup".into(), duplicate_of: Some("x".into()) },
+            )
+            .await
+            .unwrap();
+        backdate_decision(&database, &e.id, "intake_closed", now - chrono::Duration::hours(1));
+
+        let ids: Vec<MetricId> = ["duplicate_rate"].into_iter().map(|id| MetricId::new(id).unwrap()).collect();
+        let before = engine.metrics_for(&ids, now, Some("work"), None).await.unwrap();
+        assert_eq!(metric(&before, "duplicate_rate").value, Some(1.0));
+
+        assert!(engine.store.delete(&e.id).await.unwrap());
+        let after = engine.metrics_for(&ids, now, Some("work"), None).await.unwrap();
+        assert_eq!(metric(&after, "duplicate_rate").value, None);
+        assert_eq!(
+            metric(&after, "duplicate_rate").reason.as_deref(),
+            Some("no triage decisions in the trailing 28 days")
+        );
     }
 }

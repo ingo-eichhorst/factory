@@ -420,6 +420,65 @@ fn tokens_per_run_def() -> MetricDef {
     )
 }
 
+/// The intake metrics' shared source (#165): decision events read off the
+/// task journal, over the trailing 28 days -- `intake::registry_metric`
+/// mirrors `operations::registry_metric` for the run-backed families.
+const INTAKE_SOURCE: &str = "the task journal's intake decision events (triage_verdict, intake_needs_info, \
+     intake_closed, intake_split) over the trailing 28 days (TaskStore::entries_of_kinds)";
+
+fn ready_rate_def() -> MetricDef {
+    fixed(
+        "ready_rate",
+        "Ready rate",
+        "Ready decisions over every intake decision event (ready, needs-info, wontfix, split) in \
+         the trailing 28 days -- the same shared denominator needs_info_rate and duplicate_rate \
+         read, so the three shares never add to more than one: an invalid or out-of-scope wontfix \
+         and a split are in the denominator only. An item sent back for information and later \
+         released counts as two events.",
+        Unit::Ratio,
+        Better::Higher,
+        INTAKE_SOURCE,
+    )
+}
+
+fn needs_info_rate_def() -> MetricDef {
+    fixed(
+        "needs_info_rate",
+        "Needs-info rate",
+        "Needs-info decisions over every intake decision event in the trailing 28 days -- the \
+         same shared denominator as ready_rate and duplicate_rate.",
+        Unit::Ratio,
+        Better::Lower,
+        INTAKE_SOURCE,
+    )
+}
+
+fn duplicate_rate_def() -> MetricDef {
+    fixed(
+        "duplicate_rate",
+        "Duplicate rate",
+        "Wontfix decisions closed as a duplicate over every intake decision event in the trailing \
+         28 days -- the same shared denominator as ready_rate and needs_info_rate. An invalid or \
+         out-of-scope wontfix, and a split, count in the denominator only.",
+        Unit::Ratio,
+        Better::Lower,
+        INTAKE_SOURCE,
+    )
+}
+
+fn intake_lead_time_def() -> MetricDef {
+    fixed(
+        "intake_lead_time",
+        "Intake lead time",
+        "The median (nearest rank) of a ready decision's own time minus the item's \
+         Intake.received_at, over items released ready in the trailing 28 days. A GitHub item's \
+         received_at is the issue's own createdAt, from before it was ever labelled for triage.",
+        Unit::Seconds,
+        Better::Lower,
+        INTAKE_SOURCE,
+    )
+}
+
 fn agent_hours_def() -> MetricDef {
     fixed(
         "agent_hours",
@@ -531,6 +590,10 @@ pub fn registry() -> Vec<MetricDef> {
         time_to_recover_p50_def(),
         unit_cost_def(),
         tokens_per_run_def(),
+        ready_rate_def(),
+        needs_info_rate_def(),
+        duplicate_rate_def(),
+        intake_lead_time_def(),
     ];
     defs.sort_by(|a, b| a.id.cmp(&b.id));
     defs
@@ -576,6 +639,10 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         ["time_to_recover_p50"] => time_to_recover_p50_def(),
         ["unit_cost"] => unit_cost_def(),
         ["tokens_per_run"] => tokens_per_run_def(),
+        ["ready_rate"] => ready_rate_def(),
+        ["needs_info_rate"] => needs_info_rate_def(),
+        ["duplicate_rate"] => duplicate_rate_def(),
+        ["intake_lead_time"] => intake_lead_time_def(),
         ["agent_hours"] => agent_hours_def(),
         ["blocked_hours"] => blocked_hours_def(),
         ["compliance", framework] => compliance_def(framework),
@@ -762,8 +829,28 @@ mod tests {
             "time_to_recover_p50",
             "unit_cost",
             "tokens_per_run",
+            "ready_rate",
+            "needs_info_rate",
+            "duplicate_rate",
+            "intake_lead_time",
         ] {
             assert!(ids.iter().any(|id| id == expect), "missing {expect} in {ids:?}");
+        }
+    }
+
+    #[test]
+    fn the_intake_metrics_are_ratios_or_seconds_with_the_right_direction() {
+        for (id, unit, better) in [
+            ("ready_rate", Unit::Ratio, Better::Higher),
+            ("needs_info_rate", Unit::Ratio, Better::Lower),
+            ("duplicate_rate", Unit::Ratio, Better::Lower),
+            ("intake_lead_time", Unit::Seconds, Better::Lower),
+        ] {
+            let def = resolve(&MetricId::new(id).unwrap()).unwrap();
+            assert_eq!(def.unit, unit, "{id}");
+            assert_eq!(def.better, better, "{id}");
+            assert!(def.available, "{id}");
+            assert_eq!(def.coverage, MetricCoverage::ScopeAware, "{id}");
         }
     }
 

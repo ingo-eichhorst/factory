@@ -924,15 +924,20 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met | the selected scope's quality subtree — see "Quality attributes" |
 | `unit_cost` | API-equivalent USD spent per run ended `done` (failed and cancelled runs' cost included), trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 | `tokens_per_run` | mean tokens of every type per finished run, trailing 28 days | each run's measured usage (`Run.usage`, #117) |
+| `ready_rate` | ready decisions over every intake decision event (ready, needs-info, wontfix, split), trailing 28 days | the task journal's intake decision events (#165) |
+| `needs_info_rate` | needs-info decisions over every intake decision event, trailing 28 days -- the same shared denominator as `ready_rate` | the task journal's intake decision events (#165) |
+| `duplicate_rate` | wontfix decisions closed as a duplicate over every intake decision event, trailing 28 days -- an invalid or out-of-scope wontfix, and a split, count in the denominator only | the task journal's intake decision events (#165) |
+| `intake_lead_time` | median (nearest rank) of a ready decision's own time minus the item's `Intake.received_at`, seconds, over items released ready, trailing 28 days | the task journal's intake decision events (#165) |
 
 `factory metrics --scope <name> --window day|14d|90d [ids…]` and `GET
 /api/metrics?ids=a,b&scope=<name>&window=day|14d|90d` select one scope plus
 its descendants and one trailing interval. Both parameters are optional.
 Without `scope`, scope-aware metrics cover the whole instance. Without
 `window`, established defaults stay unchanged: seven days for throughput,
-28 days for production ratios, operations, and usage, and 14 days for the
-new hour metrics. An explicit window overrides all run-backed families.
-Unknown scopes and unsupported windows are errors, not empty reports.
+28 days for production ratios, operations, usage, and the intake metrics,
+and 14 days for the hour metrics. An explicit window overrides all
+run-backed families, the intake metrics included. Unknown scopes and
+unsupported windows are errors, not empty reports.
 
 Every definition in the response registry carries `coverage`:
 `scope_aware` means it follows that subtree; `instance_wide` means it does
@@ -965,7 +970,9 @@ their window that finished anything (and have no value at all, with the
 reason, when nothing in their trailing 28 days finished — never an older
 day's ratio), `bench.resolve_rate.<dataset>` as of
 the run it came from settling. `throughput_week` stays as of now — a count
-over a window ending now is a current fact even when it is zero. This is
+over a window ending now is a current fact even when it is zero. The intake
+metrics (above) follow the same rule: as of the newest decision event
+counted, never the moment asked for. This is
 what lets a freshness window (a quality scenario's `max_age`) read a value
 as stale at all.
 

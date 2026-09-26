@@ -17,10 +17,14 @@
 //! daemon (`factory-daemon/src/intake.rs`) owns the transitions.
 //!
 //! What this slice leaves out, on purpose: duplicate candidate detection,
-//! the security fast lane with its CRA clock, the `triager` role, metrics and
-//! every outbound effect. An assessment is never posted anywhere; it is only
-//! journaled.
+//! the security fast lane with its CRA clock, the `triager` role, and every
+//! outbound effect. An assessment is never posted anywhere; it is only
+//! journaled. The four intake registry metrics (`#165`, [`registry_metric`])
+//! are the one exception: they read the decision events this module already
+//! defines, but still no store -- `factory-daemon` builds the facts from the
+//! task journal and hands them over.
 
+use crate::operations::Window;
 use crate::task::{Task, TaskStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -1311,6 +1315,186 @@ pub fn routes_text(routes: &[RouteOptions]) -> String {
     out
 }
 
+// ==================================================================== metrics (#165)
+//
+// Four registry metrics over the gate's own history: `ready_rate`,
+// `needs_info_rate`, `duplicate_rate` and `intake_lead_time`. Read from the
+// task journal, not [`Intake::decision`] -- that field keeps only the
+// latest decision, so an item sent back for information and later released
+// would otherwise lose the needs-info half of its history the moment it
+// left intake.
+
+/// One decision a triager made about an item, as the journal recorded it --
+/// the unit every intake metric below is built from. `factory-daemon` turns
+/// each qualifying journal entry into one with [`decision_event`], already
+/// narrowed to a scope subtree; this module never reads a store itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntakeDecisionKind {
+    Ready,
+    NeedsInfo,
+    /// A `wontfix` closed as [`WontfixReason::Duplicate`].
+    Duplicate,
+    /// A `wontfix` closed as [`WontfixReason::Invalid`] or
+    /// [`WontfixReason::OutOfScope`] -- counts in the shared denominator
+    /// only, the same as [`Self::Split`].
+    OtherWontfix,
+    Split,
+}
+
+/// One decision event: what it was, when, and the item's own receipt time
+/// -- carried on every fact, ready or not, since this module has no task to
+/// look back at later; only [`registry_metric`]'s `intake_lead_time` arm
+/// ever reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntakeDecisionFact {
+    pub kind: IntakeDecisionKind,
+    /// `data.decision.at` off the journal entry, falling back to the
+    /// entry's own time for `intake_needs_info`, the one decision kind
+    /// `intake_decide` journals with no [`DecisionRecord`] to attach --
+    /// sent back before an assessment exists for [`Self::at`] to travel
+    /// with (see `factory-daemon/src/intake.rs`'s `intake_decide`).
+    pub at: DateTime<Utc>,
+    pub received_at: DateTime<Utc>,
+}
+
+/// What one journal entry means for the intake metrics, or why it does
+/// not -- `factory-daemon`'s `TaskStore::entries_of_kinds` hands over
+/// `kind` and `data` verbatim for every entry of one of the four decision
+/// kinds (`"triage_verdict"`, `"intake_needs_info"`, `"intake_closed"`,
+/// `"intake_split"` -- literals here, the same as the daemon's own
+/// `intake_closed`/`intake_split`, and kept in step with it by the daemon
+/// metrics test that drives the real `intake_decide` rather than by the
+/// type system); this is the one place both it and a pure fixture below
+/// turn that pair into a fact.
+///
+/// `None` for a `kind` this module does not treat as a decision event --
+/// defensive only, since the daemon asks the store for exactly these four
+/// kinds and nothing routes another one through here. `Some(Err(()))` for
+/// one of the four whose `data` does not have the shape `intake_decide`
+/// writes; the caller counts these into whatever reason a value that came
+/// out empty or partial already carries, so a bad row is never silently
+/// missing from a count it should have been in.
+pub fn decision_event(
+    kind: &str,
+    data: Option<&serde_json::Value>,
+    entry_at: DateTime<Utc>,
+    received_at: DateTime<Utc>,
+) -> Option<Result<IntakeDecisionFact, ()>> {
+    let fact = |kind, at| Some(Ok(IntakeDecisionFact { kind, at, received_at }));
+    match kind {
+        "intake_needs_info" => fact(IntakeDecisionKind::NeedsInfo, entry_at),
+        "triage_verdict" | "intake_closed" | "intake_split" => {
+            let Some(record) = data.and_then(|d| d.get("decision")) else { return Some(Err(())) };
+            let Ok(record) = serde_json::from_value::<DecisionRecord>(record.clone()) else {
+                return Some(Err(()));
+            };
+            let kind = match &record.decision {
+                Decision::Ready { .. } => IntakeDecisionKind::Ready,
+                Decision::NeedsInfo { .. } => IntakeDecisionKind::NeedsInfo,
+                Decision::Wontfix { reason: WontfixReason::Duplicate, .. } => IntakeDecisionKind::Duplicate,
+                Decision::Wontfix { .. } => IntakeDecisionKind::OtherWontfix,
+                Decision::Split { .. } => IntakeDecisionKind::Split,
+            };
+            fact(kind, record.at)
+        }
+        _ => None,
+    }
+}
+
+/// One intake metric's value over a window, and what it rests on -- the
+/// same shape `usage::UsageFigure` uses for `unit_cost`/`tokens_per_run`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntakeFigure {
+    pub value: Option<f64>,
+    pub reason: Option<String>,
+    /// The newest decision behind the value -- the whole denominator for a
+    /// rate, the ready decisions a lead time's median is drawn from --
+    /// `None` exactly when `value` is.
+    pub as_of: Option<DateTime<Utc>>,
+}
+
+fn with_caveat(reason: String, caveat: &Option<String>) -> String {
+    match caveat {
+        Some(c) => format!("{reason} ({c})"),
+        None => reason,
+    }
+}
+
+fn rate(denom: usize, hits: usize, empty_reason: &str, caveat: &Option<String>, as_of: Option<DateTime<Utc>>) -> IntakeFigure {
+    if denom == 0 {
+        return IntakeFigure { value: None, reason: Some(empty_reason.to_string()), as_of: None };
+    }
+    IntakeFigure { value: Some(hits as f64 / denom as f64), reason: caveat.clone(), as_of }
+}
+
+/// The four intake metrics (`ready_rate`, `needs_info_rate`,
+/// `duplicate_rate`, `intake_lead_time`), from `facts` already narrowed to a
+/// scope subtree and read straight off the task journal -- mirrors
+/// `operations::registry_metric` for the run-backed families, the one entry
+/// point `factory-daemon`'s metric wiring calls so a Goals or Scenarios
+/// read can never disagree with another reader of the same journal.
+/// `None` for an id that is not one of the four.
+///
+/// The three rates share one denominator: every decision event in `window`.
+/// `ready_rate` and `needs_info_rate` count two events for an item sent
+/// back once and later released; `duplicate_rate` counts only a wontfix
+/// closed as a duplicate -- an invalid or out-of-scope one, like a split,
+/// counts in the denominator only, so the three shares add to one only when
+/// there are none of those.
+/// `intake_lead_time` is the nearest-rank median, in seconds, of a ready
+/// decision's own time minus the item's `received_at`, over items released
+/// ready in `window` -- [`crate::scenario::nearest_rank`], the same rule
+/// `operations::registry_metric`'s `cycle_time_p50` uses.
+///
+/// `skipped` -- how many decision-kind entries [`decision_event`] could not
+/// parse in this same read -- is folded into whatever reason a value that
+/// came out `None` or partial already carries, never silently dropped from
+/// the count it should have been in.
+pub fn registry_metric(
+    id: &str,
+    facts: &[IntakeDecisionFact],
+    window: &Window,
+    skipped: usize,
+    window_days: i64,
+) -> Option<IntakeFigure> {
+    let in_window: Vec<&IntakeDecisionFact> = facts.iter().filter(|f| window.contains(f.at)).collect();
+    let denom = in_window.len();
+    let caveat = (skipped > 0).then(|| {
+        format!(
+            "{skipped} decision entr{} could not be read and {} left out of this count",
+            if skipped == 1 { "y" } else { "ies" },
+            if skipped == 1 { "was" } else { "were" },
+        )
+    });
+    let no_decisions = with_caveat(format!("no triage decisions in the trailing {window_days} days"), &caveat);
+    let count = |wanted: IntakeDecisionKind| in_window.iter().filter(|f| f.kind == wanted).count();
+    let newest = || in_window.iter().map(|f| f.at).max();
+    Some(match id {
+        "ready_rate" => rate(denom, count(IntakeDecisionKind::Ready), &no_decisions, &caveat, newest()),
+        "needs_info_rate" => rate(denom, count(IntakeDecisionKind::NeedsInfo), &no_decisions, &caveat, newest()),
+        "duplicate_rate" => rate(denom, count(IntakeDecisionKind::Duplicate), &no_decisions, &caveat, newest()),
+        "intake_lead_time" => {
+            let mut ready: Vec<&IntakeDecisionFact> =
+                in_window.iter().copied().filter(|f| f.kind == IntakeDecisionKind::Ready).collect();
+            if ready.is_empty() {
+                let reason = if denom == 0 {
+                    no_decisions
+                } else {
+                    with_caveat(format!("no items released ready in the trailing {window_days} days"), &caveat)
+                };
+                return Some(IntakeFigure { value: None, reason: Some(reason), as_of: None });
+            }
+            ready.sort_by_key(|f| f.at);
+            let mut lead_times: Vec<f64> =
+                ready.iter().map(|f| (f.at - f.received_at).num_seconds() as f64).collect();
+            lead_times.sort_by(|a, b| a.total_cmp(b));
+            let median = lead_times[crate::scenario::nearest_rank(lead_times.len(), 0.5)];
+            IntakeFigure { value: Some(median), reason: caveat, as_of: ready.last().map(|f| f.at) }
+        }
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1826,5 +2010,164 @@ mod tests {
         assert_eq!(b.split, 1);
         assert_eq!(b.columns.received.len(), 1);
         assert_eq!(b.columns.received[0].parent.as_deref(), Some("big"));
+    }
+
+    // -- intake metrics (#165) ------------------------------------------
+
+    fn dfact(kind: IntakeDecisionKind, at: DateTime<Utc>, received_at: DateTime<Utc>) -> IntakeDecisionFact {
+        IntakeDecisionFact { kind, at, received_at }
+    }
+
+    #[test]
+    fn ready_needs_info_and_duplicate_rate_share_one_denominator() {
+        let now = at();
+        let window = Window::trailing(now, 28);
+        // Six decision events: 2 ready, 1 needs-info, 1 duplicate, 1 other
+        // wontfix, 1 split -- the last two count in the shared denominator
+        // only, so the three shares below never add to more than 4/6.
+        let facts = vec![
+            dfact(IntakeDecisionKind::Ready, now - chrono::Duration::days(1), now - chrono::Duration::days(10)),
+            dfact(IntakeDecisionKind::Ready, now - chrono::Duration::days(2), now - chrono::Duration::days(9)),
+            dfact(IntakeDecisionKind::NeedsInfo, now - chrono::Duration::days(3), now - chrono::Duration::days(3)),
+            dfact(IntakeDecisionKind::Duplicate, now - chrono::Duration::days(4), now - chrono::Duration::days(4)),
+            dfact(IntakeDecisionKind::OtherWontfix, now - chrono::Duration::days(5), now - chrono::Duration::days(5)),
+            dfact(IntakeDecisionKind::Split, now - chrono::Duration::days(6), now - chrono::Duration::days(6)),
+        ];
+        let ready = registry_metric("ready_rate", &facts, &window, 0, 28).unwrap();
+        let needs_info = registry_metric("needs_info_rate", &facts, &window, 0, 28).unwrap();
+        let duplicate = registry_metric("duplicate_rate", &facts, &window, 0, 28).unwrap();
+        assert_eq!(ready.value, Some(2.0 / 6.0));
+        assert_eq!(needs_info.value, Some(1.0 / 6.0));
+        assert_eq!(duplicate.value, Some(1.0 / 6.0));
+        assert_eq!(ready.value.unwrap() + needs_info.value.unwrap() + duplicate.value.unwrap(), 4.0 / 6.0);
+        // `as_of` is the newest event behind the whole denominator, not
+        // just a metric's own numerator -- here the ready decision one day
+        // ago, even for `duplicate_rate`, whose own hit is four days old.
+        assert_eq!(ready.as_of, Some(now - chrono::Duration::days(1)));
+        assert_eq!(duplicate.as_of, Some(now - chrono::Duration::days(1)));
+    }
+
+    #[test]
+    fn a_needs_info_then_a_later_ready_decision_counts_as_two_events() {
+        let now = at();
+        let window = Window::trailing(now, 28);
+        let facts = vec![
+            dfact(IntakeDecisionKind::NeedsInfo, now - chrono::Duration::days(5), now - chrono::Duration::days(6)),
+            dfact(IntakeDecisionKind::Ready, now - chrono::Duration::days(1), now - chrono::Duration::days(6)),
+        ];
+        assert_eq!(registry_metric("ready_rate", &facts, &window, 0, 28).unwrap().value, Some(0.5));
+        assert_eq!(registry_metric("needs_info_rate", &facts, &window, 0, 28).unwrap().value, Some(0.5));
+    }
+
+    #[test]
+    fn a_duplicate_wontfix_counts_apart_from_an_invalid_or_out_of_scope_one() {
+        let now = at();
+        let window = Window::trailing(now, 28);
+        let facts = vec![
+            dfact(IntakeDecisionKind::Duplicate, now - chrono::Duration::days(1), now - chrono::Duration::days(1)),
+            dfact(IntakeDecisionKind::OtherWontfix, now - chrono::Duration::days(2), now - chrono::Duration::days(2)),
+            dfact(IntakeDecisionKind::OtherWontfix, now - chrono::Duration::days(3), now - chrono::Duration::days(3)),
+        ];
+        assert_eq!(registry_metric("duplicate_rate", &facts, &window, 0, 28).unwrap().value, Some(1.0 / 3.0));
+    }
+
+    #[test]
+    fn intake_lead_time_is_the_nearest_rank_median_in_seconds() {
+        let now = at();
+        let window = Window::trailing(now, 28);
+        // Four ready decisions with lead times of 1, 4, 2 and 3 days, in
+        // that creation order -- nearest_rank(4, 0.5) = round(0.5 * 3) = 2
+        // (0-based), so sorted ascending [1, 2, 3, 4] days picks the
+        // third-smallest: 3 days.
+        let facts: Vec<IntakeDecisionFact> = [1_i64, 4, 2, 3]
+            .into_iter()
+            .enumerate()
+            .map(|(i, lead_days)| {
+                let decided = now - chrono::Duration::hours(i as i64);
+                dfact(IntakeDecisionKind::Ready, decided, decided - chrono::Duration::days(lead_days))
+            })
+            .collect();
+        let figure = registry_metric("intake_lead_time", &facts, &window, 0, 28).unwrap();
+        assert_eq!(figure.value, Some(chrono::Duration::days(3).num_seconds() as f64));
+        // i = 0 (lead 1 day) decided exactly `now`, the newest of the four.
+        assert_eq!(figure.as_of, Some(now));
+    }
+
+    #[test]
+    fn an_empty_window_gives_none_never_zero() {
+        let now = at();
+        let window = Window::trailing(now, 28);
+        let ready = registry_metric("ready_rate", &[], &window, 0, 28).unwrap();
+        assert_eq!(ready.value, None);
+        assert_eq!(ready.as_of, None);
+        assert_eq!(ready.reason.as_deref(), Some("no triage decisions in the trailing 28 days"));
+
+        let lead_time = registry_metric("intake_lead_time", &[], &window, 0, 28).unwrap();
+        assert_eq!(lead_time.value, None);
+        assert_eq!(lead_time.reason.as_deref(), Some("no triage decisions in the trailing 28 days"));
+
+        // Decisions exist but none was released ready: a distinct reason
+        // from the shared "no decisions at all" one.
+        let only_needs_info =
+            [dfact(IntakeDecisionKind::NeedsInfo, now - chrono::Duration::days(1), now - chrono::Duration::days(2))];
+        let lead_time_no_ready = registry_metric("intake_lead_time", &only_needs_info, &window, 0, 28).unwrap();
+        assert_eq!(lead_time_no_ready.value, None);
+        assert_eq!(
+            lead_time_no_ready.reason.as_deref(),
+            Some("no items released ready in the trailing 28 days")
+        );
+
+        // A decision outside the window is simply not in `in_window` --
+        // same empty result, no special case needed.
+        let outside = [dfact(IntakeDecisionKind::Ready, now - chrono::Duration::days(40), now - chrono::Duration::days(50))];
+        assert_eq!(registry_metric("ready_rate", &outside, &window, 0, 28).unwrap().value, None);
+
+        assert_eq!(registry_metric("bogus_metric", &[], &window, 0, 28), None);
+    }
+
+    #[test]
+    fn decision_event_skips_unparseable_data_and_the_reason_counts_it() {
+        // `intake_needs_info` needs no `data` at all -- the kind alone is
+        // the whole signal.
+        assert!(matches!(
+            decision_event("intake_needs_info", None, at(), at()),
+            Some(Ok(IntakeDecisionFact { kind: IntakeDecisionKind::NeedsInfo, .. }))
+        ));
+        // The other three decision kinds need `data.decision` to parse as a
+        // `DecisionRecord`; missing or malformed, both refuse.
+        assert_eq!(decision_event("triage_verdict", None, at(), at()), Some(Err(())));
+        assert_eq!(
+            decision_event("intake_closed", Some(&serde_json::json!({"nope": true})), at(), at()),
+            Some(Err(()))
+        );
+        assert_eq!(
+            decision_event("intake_split", Some(&serde_json::json!({"decision": {"not": "a record"}})), at(), at()),
+            Some(Err(()))
+        );
+        // An unrelated kind is not a decision event at all.
+        assert_eq!(decision_event("task_updated", None, at(), at()), None);
+
+        // The registry folds a caller-supplied skip count into the reason,
+        // whatever the value -- a bad row is never invisible.
+        let now = at();
+        let window = Window::trailing(now, 28);
+        let empty = registry_metric("ready_rate", &[], &window, 2, 28).unwrap();
+        assert_eq!(
+            empty.reason.as_deref(),
+            Some("no triage decisions in the trailing 28 days (2 decision entries could not be read and were left out of this count)")
+        );
+        let one_skip = registry_metric(
+            "ready_rate",
+            &[dfact(IntakeDecisionKind::Ready, now - chrono::Duration::days(1), now - chrono::Duration::days(2))],
+            &window,
+            1,
+            28,
+        )
+        .unwrap();
+        assert_eq!(one_skip.value, Some(1.0));
+        assert_eq!(
+            one_skip.reason.as_deref(),
+            Some("1 decision entry could not be read and was left out of this count")
+        );
     }
 }
