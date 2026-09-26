@@ -48,6 +48,7 @@ import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 import { hasFailed } from "./task-model.js";
 import { notStarted } from "./pending-model.js";
+import { DEFAULT_DASHBOARD, packRows } from "./dashboard-model.js";
 
 /// The three presets the window selector offers. `bin` travels with every
 /// request rather than being guessed from `minutes` server-side, so a caller
@@ -116,22 +117,7 @@ export function renderDashboard() {
   const calWasAtEdge = !oldCal || oldCal.scrollLeft >= oldCal.scrollWidth - oldCal.clientWidth - 2;
   const calScrollLeft = oldCal ? oldCal.scrollLeft : 0;
 
-  el.innerHTML = `
-    <div class="kpis">${kpis(tasks, scopes, prod, everFinished).join("")}</div>
-    <div class="drow">
-      <section class="dcard">
-        <h3>Throughput<span class="r">${esc(WINDOWS[windowKey].label.toLowerCase())} · finished per ${esc(WINDOWS[windowKey].bin)} · reworked share at the base</span></h3>
-        ${throughput(prod, everFinished)}
-      </section>
-      ${onTheLine(tasks, prod, everFinished)}
-    </div>
-    ${productionYear(prod, everFinished)}
-    <div class="drow">
-      <section class="dcard wide">
-        <h3>By scope<span class="r">${scopes.length} scope${scopes.length === 1 ? "" : "s"}</span></h3>
-        ${byScopeTable(tasks, scopes)}
-      </section>
-    </div>`;
+  el.innerHTML = renderTiles(DEFAULT_DASHBOARD, { tasks, scopes, prod, everFinished });
 
   wireCalToggle();
 
@@ -143,6 +129,67 @@ export function renderDashboard() {
   if (newCal) {
     newCal.scrollLeft = calWasAtEdge ? newCal.scrollWidth - newCal.clientWidth : calScrollLeft;
   }
+}
+
+// ---------------------------------------------------------------- tiles (#163)
+
+/// One view tile's whole rendered card, keyed by `dashboard-model.js`'s
+/// view ids -- the map `renderTiles` dispatches through instead of the
+/// page being one hard-coded template. `ctx` is the one shared read every
+/// tile draws from (`tasks`, `scopes`, `prod`, `everFinished`): no tile
+/// fetches its own history, so the throughput chart and the sparklines
+/// under the KPIs can never disagree with each other, exactly as the
+/// module doc comment above promises.
+///
+/// Each function returns one whole, self-contained card -- its own
+/// `<section class="dcard">`/`<div class="kpis">`, heading included -- the
+/// same fragment `renderDashboard`'s old inline template produced at that
+/// spot; only `onTheLine` and `productionYear` already did, so `throughput`
+/// and `byScope` gained the wrapper `renderDashboard` used to add around
+/// them. Row grouping (which cards share a `.drow`) is decided once, by
+/// `renderTiles` below, from `dashboard-model.js`'s `packRows` -- a tile
+/// renderer never wraps itself in `.drow`.
+const VIEW_RENDERERS = {
+  kpis: (ctx) => `<div class="kpis">${kpis(ctx.tasks, ctx.scopes, ctx.prod, ctx.everFinished).join("")}</div>`,
+  throughput: (ctx) => `<section class="dcard">
+        <h3>Throughput<span class="r">${esc(WINDOWS[windowKey].label.toLowerCase())} · finished per ${esc(WINDOWS[windowKey].bin)} · reworked share at the base</span></h3>
+        ${throughput(ctx.prod, ctx.everFinished)}
+      </section>`,
+  on_the_line: (ctx) => onTheLine(ctx.tasks, ctx.prod, ctx.everFinished),
+  production_year: (ctx) => productionYear(ctx.prod, ctx.everFinished),
+  by_scope: (ctx) => `<section class="dcard wide">
+        <h3>By scope<span class="r">${ctx.scopes.length} scope${ctx.scopes.length === 1 ? "" : "s"}</span></h3>
+        ${byScopeTable(ctx.tasks, ctx.scopes)}
+      </section>`,
+};
+
+function renderTile(tile, ctx) {
+  const renderer = VIEW_RENDERERS[tile.view];
+  return renderer ? renderer(ctx) : "";
+}
+
+/// Assembles the page from a tile list: pack tiles into 12-column rows
+/// (`packRows`), then a row of two or more tiles shares one `.drow` (today
+/// only Throughput and On the line ever do, because `l + m === 12`) and a
+/// row of one tile renders bare -- no `.drow` around a lone card. `.drow`
+/// itself is a fixed `2fr / 1fr` CSS grid (`app.css`), not a general
+/// `span -> grid-column` mapping -- it realizes exactly an `[l, m]` row,
+/// in that order, because that is the one pair `DEFAULT_DASHBOARD` ever
+/// produces; a hypothetical `[m, l]` row would put the 4-col tile in the
+/// wider slot. A real span-aware grid is phase 3's, once more than one row
+/// shape exists to justify it.
+///
+/// That reproduces `.kpis`, the Throughput/On-the-line row and Production
+/// year byte-for-byte; By scope loses the `.drow` it used to sit alone in,
+/// which is a no-op here: `.dash` is a `flex-direction: column` container
+/// with `align-items: stretch` (`app.css`), so a bare flex child already
+/// spans the full width `.dcard.wide`'s `grid-column: 1 / -1` gave it
+/// inside that otherwise-empty grid -- the class stays, for what it
+/// documents, but nothing depends on it drawing anything anymore.
+function renderTiles(tiles, ctx) {
+  return packRows(tiles)
+    .map((row) => (row.length > 1 ? `<div class="drow">${row.map((t) => renderTile(t, ctx)).join("")}</div>` : renderTile(row[0], ctx)))
+    .join("");
 }
 
 // -------------------------------------------------------------------- KPIs
