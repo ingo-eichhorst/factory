@@ -15,15 +15,16 @@ const { askRemediate, confirmRemediate, loadQuality, noteToggle, renderQuality }
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const wiring = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
 
-test("L6 Direction's Quality tab sits between Goals and Policy, and the level's sub-label says so", () => {
+test("L5 Improvement's Quality tab follows Knowledge, and the level's sub-label says so", () => {
   assert.match(page, /id="tab-quality"[^>]*>Quality<\/button>/);
   assert.match(page, /id="view-quality"/);
-  const goals = page.indexOf('id="tab-goals"');
+  const knowledge = page.indexOf('id="tab-knowledge"');
   const quality = page.indexOf('id="tab-quality"');
-  const policy = page.indexOf('id="tab-policy"');
-  assert.ok(goals < quality && quality < policy, "Goals, then Quality, then Policy");
-  assert.match(page, /<span class="lv-sub">Goals, quality, policy, scenarios<\/span>/);
-  assert.match(wiring, /dir:\s*\["goals",\s*"quality",\s*"policy",\s*"scenarios"\]/);
+  assert.ok(knowledge < quality, "Knowledge, then Quality");
+  assert.match(page, /<span class="lv-sub">Benchmarks, knowledge and quality<\/span>/);
+  assert.match(page, /<span class="lv-sub">Goals, policy, scenarios<\/span>/);
+  assert.match(wiring, /imp:\s*\["benchmarks",\s*"knowledge",\s*"quality"\]/);
+  assert.doesNotMatch(wiring, /dir:\s*\[[^\]]*"quality"/, "Quality left Direction");
   assert.match(wiring, /quality:\s*\{\s*onShow:\s*loadQuality\s*\}/);
 });
 
@@ -53,8 +54,11 @@ test("no radar chart and no overall score anywhere in the tab", () => {
   }
 });
 
-test("a link with a level segment and an old bare link both land on the Quality page", () => {
+test("a link with a level segment, an old Direction link and an old bare link all land on the Quality page", () => {
   setRouter({ pages: ["dashboard", "goals", "quality", "policy"], redirects: {} });
+  globalThis.location = { hash: "#all/imp/quality" };
+  assert.equal(readHash().page, "quality");
+  // Quality lived under L6 Direction before; a bookmark from then still opens it.
   globalThis.location = { hash: "#all/dir/quality" };
   assert.equal(readHash().page, "quality");
   globalThis.location = { hash: "#all/quality" };
