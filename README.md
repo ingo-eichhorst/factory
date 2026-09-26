@@ -2239,10 +2239,29 @@ The dashboard page itself (`ui/js/dashboard.js`) fetches this alongside
 `/api/production` on load and on a scope change, never on a window change
 -- a layout does not depend on how far back the history cards look -- and
 falls back to its own built-in default on a failed fetch, so a slow or
-unreachable daemon never draws a blank page. A tile it does not yet have a
-renderer for (any `metric` tile, or a `view` id later phases of the epic
-add before this page catches up) draws as a small, named placeholder
-instead of nothing or a crash.
+unreachable daemon never draws a blank page. #162 (phase 3) gave every
+registry `metric` id and the rest of #150's view catalogue --
+`agent_hours_by_scope`/`agent_hours_by_agent`, `occupancy_strip`, `inbox`,
+`compliance`, `cost` -- their own renderer, so a placeholder now only draws
+for a `view` id outside the vocabulary, which the parser's own closed enum
+should already have refused before a layout reaches this page at all. Those
+tiles read four more shared answers -- `/api/metrics`, `/api/occupancy`,
+`/api/operations`, `/api/policy`, `/api/costs` -- each fetched at most once
+per render cycle and only when the resolved layout actually names a tile
+that needs it, so the built-in default (which names none of them) starts no
+new request. `/api/metrics` (`ids=` collected from every `metric` tile in one
+request, never one per tile) and `/api/costs` (a fixed `group_by=scope`,
+never an arbitrary parameter) follow the dashboard's own scope and window,
+the same as `/api/production`. `/api/occupancy` carries no `scope` on the
+wire at all (`Request::Occupancy`); its tiles follow the window (`minutes=`)
+and narrow the answer to the selected subtree client-side with `inScope`,
+the same as the occupancy chart itself -- and since the endpoint clamps a
+window past thirty days, an agent-hours tile's own qualifier says the span
+it actually got, not the one asked for. `/api/policy` follows the scope only,
+no window (a compliance rollup is a live snapshot, not a trailing sum). The
+`inbox` tile reuses the Inbox nav view's own unscoped fetch and model rather
+than a second copy, narrowing what it shows to the selected scope
+client-side the same way, so a scope change never needs a second request.
 
 ### The AI accounts behind the agents
 
@@ -2618,9 +2637,15 @@ request; a guide already in a running session is not rewritten. The page says
 in its own markup, not in anything it fetches, that roles are guard-rails and
 not a security boundary.
 
-**Dashboard** is five KPI tiles, a by-scope table and an inbox, all read from
-the same `state.tasks` and `state.scopes` every other view already holds —
-nothing here is fetched specially. The inbox lives inside the dashboard rather
+**Dashboard** is a resolved list of tiles (`GET /api/dashboard?scope=`, `#159`;
+the built-in default is five KPI tiles, a by-scope table and an inbox). The
+five default tiles still read the same `state.tasks`/`state.scopes` every
+other view already holds, nothing fetched specially for them; a registry
+`metric` tile or one of #150's newer view tiles (agent hours, occupancy
+strip, compliance, cost -- `#162`) reads `/api/metrics`, `/api/occupancy`,
+`/api/policy` or `/api/costs` instead, one shared request per endpoint per
+render cycle, fetched only when the resolved layout actually names a tile
+that needs it. The inbox lives inside the dashboard rather
 than beside it: every blocked, failed and cancelled task, and every schedule
 that missed its own next run, newest first. `blocked` is a real, first-class
 status — "the agent needs a human before it can go on" — so this is never a
