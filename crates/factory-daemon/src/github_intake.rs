@@ -277,6 +277,7 @@ mod tests {
             git: Some(remote.into()),
             task_store: None,
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             dependencies: Default::default(),
@@ -298,6 +299,7 @@ mod tests {
                     ..Default::default()
                 },
                 roles: Default::default(),
+                dashboard: None,
                 policies: Default::default(),
                 quality: Default::default(),
                 scope: None,
