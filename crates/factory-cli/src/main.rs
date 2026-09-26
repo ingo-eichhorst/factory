@@ -5168,9 +5168,12 @@ fn task_usage_text(u: &factory_core::usage::TaskUsage) -> String {
             unknown_suffix(&u.total)
         ));
     }
+    // The task's figures are sums over its runs, estimates included: say
+    // so, or a retry's second estimate reads as the task's own.
+    let over = if u.runs.len() == 1 { String::new() } else { format!(" over {} runs", u.runs.len()) };
     if let Some(comparison) = &u.time_comparison {
         s.push_str(&format!(
-            "  time       {} actual / {}s expected ({})\n",
+            "  time       {} actual / {}s expected{over} ({})\n",
             comparison
                 .actual
                 .map(|seconds| format!("{seconds}s"))
@@ -5184,7 +5187,7 @@ fn task_usage_text(u: &factory_core::usage::TaskUsage) -> String {
     }
     if let Some(comparison) = &u.cost_comparison {
         s.push_str(&format!(
-            "  cost       {} actual / {} expected\n",
+            "  cost       {} actual / {} expected{over}\n",
             comparison.actual.map(fmt_usd).unwrap_or_else(|| "unknown".into()),
             fmt_usd(comparison.expected)
         ));

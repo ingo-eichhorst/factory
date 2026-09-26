@@ -1463,7 +1463,16 @@ impl Engine {
             provider.windows = timelines
                 .into_iter()
                 .filter_map(|((minutes, reset), mut readings)| {
-                    readings.sort_by_key(|reading| reading.sampled_at);
+                    // Readings sampled in one instant are one observation,
+                    // the highest standing for it -- the rule plan share
+                    // uses (`factory_core::usage::PROVIDER_WINDOW_TIE`), so
+                    // the value shown and its badge come from the same one.
+                    readings.sort_by(|a, b| {
+                        a.sampled_at.cmp(&b.sampled_at).then_with(|| {
+                            let used = |r: &WindowReading| r.used_percent.unwrap_or(f64::NEG_INFINITY);
+                            used(a).total_cmp(&used(b))
+                        })
+                    });
                     let latest = readings.pop()?;
                     let trend = latest.used_percent.zip(
                         readings
@@ -4199,6 +4208,31 @@ mod tests {
             let window = five_hour_window(&engine).await;
             assert_eq!(window.attribution, apportioned, "after {} ended: {window:?}", run.id);
         }
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// Two runs reading the window in one instant are one observation: the
+    /// card shows the highest, as plan share does, whichever was stored last,
+    /// and its badge is that reading's interval.
+    #[tokio::test]
+    async fn simultaneous_provider_readings_show_the_one_plan_share_used() {
+        let scope_dir = temp_dir("provider-tie");
+        let engine = test_engine(scope_dir.clone());
+        let (runs, start) = provider_runs(&engine, 2).await;
+        let (a, b) = (&runs[0], &runs[1]);
+        for snapshot in [
+            provider_snapshot(a, start, 1, 0, Some(10.0)),
+            provider_snapshot(b, start, 1, 0, None),
+            provider_snapshot(a, start, 4, 100, Some(13.0)),
+            provider_snapshot(b, start, 4, 300, Some(12.0)),
+        ] {
+            engine.store.append_usage(&snapshot).await.unwrap();
+        }
+        let window = five_hour_window(&engine).await;
+        assert_eq!(window.used_percent, Some(13.0), "{window:?}");
+        assert!((window.trend_percent.unwrap() - 3.0).abs() < 1e-9);
+        assert_eq!(window.attribution, Some(factory_core::usage::PlanShareAttribution::Apportioned));
 
         std::fs::remove_dir_all(scope_dir).ok();
     }

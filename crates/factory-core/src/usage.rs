@@ -727,6 +727,46 @@ struct WindowObservation {
     at: DateTime<Utc>,
 }
 
+/// One point per sample time. Two runs reading the same account in the
+/// same instant -- `sampled_at` is often whole seconds -- are one
+/// observation, not an interval of zero length: pairing them would drop the
+/// growth up to the second or, if they disagree, charge it twice. Equal
+/// readings collapse silently. Readings that disagree say so on every run
+/// that took one, and the highest stands for the instant, since a window's
+/// use only grows until it resets. `PROVIDER_WINDOW_TIE` is the same rule
+/// for the L1 provider card.
+fn merge_simultaneous(mut points: Vec<WindowObservation>, result: &mut PlanShareAllocation) -> Vec<WindowObservation> {
+    points.sort_by(|a, b| {
+        a.at.cmp(&b.at)
+            .then_with(|| a.used.total_cmp(&b.used))
+            .then_with(|| a.run_id.cmp(&b.run_id))
+    });
+    let mut merged: Vec<WindowObservation> = Vec::with_capacity(points.len());
+    let mut start = 0;
+    while start < points.len() {
+        let end = start + points[start..].iter().take_while(|p| p.at == points[start].at).count();
+        let tied = &points[start..end];
+        let highest = tied.last().expect("a group holds its first point").clone();
+        if tied.iter().any(|p| (p.used - highest.used).abs() > f64::EPSILON) {
+            for point in tied {
+                result.record_unknown(&point.run_id, PlanShareUnknown {
+                    provider_account: Some(point.account.clone()), window_minutes: Some(point.minutes),
+                    resets_at: Some(point.resets_at.clone()), from: Some(point.at), to: Some(point.at),
+                    reason: PROVIDER_WINDOW_TIE.into(),
+                });
+            }
+        }
+        merged.push(highest);
+        start = end;
+    }
+    merged
+}
+
+/// Why a run's reading was set aside in favour of another run's taken at
+/// the same instant.
+pub const PROVIDER_WINDOW_TIE: &str =
+    "readings of this provider window sampled at the same instant disagree; the highest stands for it";
+
 /// When the runtime says it took this reading -- the contract's
 /// `sampled_at` -- falling back to when Factory asked for it. A provider
 /// window and the token counts beside it are ordered and attributed by
@@ -841,8 +881,8 @@ pub fn allocate_plan_share(
         }
     }
 
-    for ((_account, _minutes, _reset), mut points) in observations {
-        points.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.run_id.cmp(&b.run_id)));
+    for ((_account, _minutes, _reset), points) in observations {
+        let points = merge_simultaneous(points, &mut result);
         if points.len() < 2 {
             for point in points {
                 result.record_unknown(&point.run_id, PlanShareUnknown {
@@ -1836,7 +1876,62 @@ mod tests {
         let allocation = allocate_plan_share(&runs, &snapshots);
         assert!(allocation.shares.is_empty());
         assert!(allocation.intervals.is_empty());
-        assert!(allocation.unknown["cached"][0].reason.contains("could not be attributed"));
+        assert_eq!(allocation.unknown["cached"].len(), 1);
+        assert!(allocation.unknown["cached"][0].reason.contains("no earlier observation"));
+    }
+
+    fn allocated(allocation: &PlanShareAllocation) -> f64 {
+        allocation.shares.values().flatten().map(|share| share.used_percent).sum()
+    }
+
+    #[test]
+    fn two_runs_sampling_the_window_in_one_instant_are_one_observation() {
+        // a@0 10%, a@5 12%, b@5 12%: the two t5 readings agree, so the
+        // 2-point growth is allocated once and nothing is dropped.
+        let runs = vec![plan_run("a", None, Some("claude-max")), plan_run("b", None, Some("claude-max"))];
+        let snapshots = BTreeMap::from([
+            ("a".into(), vec![
+                plan_snapshot("a", 0, 0, Some((300, "reset-a", 10.0))),
+                plan_snapshot("a", 5, 100, Some((300, "reset-a", 12.0))),
+            ]),
+            ("b".into(), vec![
+                plan_snapshot("b", 0, 0, None),
+                plan_snapshot("b", 5, 100, Some((300, "reset-a", 12.0))),
+            ]),
+        ]);
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        assert!((allocated(&allocation) - 2.0).abs() < 1e-9, "{allocation:?}");
+        assert_eq!(allocation.intervals.len(), 1);
+        assert_eq!(allocation.intervals[0].attribution, Some(PlanShareAttribution::Apportioned));
+        assert!(allocation.unknown.is_empty(), "agreeing readings are no gap: {:?}", allocation.unknown);
+    }
+
+    #[test]
+    fn simultaneous_readings_that_disagree_are_named_and_never_drop_or_double_growth() {
+        // a@0 10, then a@5 13 and b@5 12 in the same instant, then a@10 15.
+        // Paired naively the t5 tie either drops growth or charges 1 point
+        // twice. The highest stands for t5: 3 then 2, 5 in all.
+        let runs = vec![plan_run("a", None, Some("claude-max")), plan_run("b", None, Some("claude-max"))];
+        let snapshots = BTreeMap::from([
+            ("a".into(), vec![
+                plan_snapshot("a", 0, 0, Some((300, "reset-a", 10.0))),
+                plan_snapshot("a", 5, 100, Some((300, "reset-a", 13.0))),
+                plan_snapshot("a", 10, 200, Some((300, "reset-a", 15.0))),
+            ]),
+            ("b".into(), vec![
+                plan_snapshot("b", 0, 0, None),
+                plan_snapshot("b", 5, 0, Some((300, "reset-a", 12.0))),
+                plan_snapshot("b", 10, 0, None),
+            ]),
+        ]);
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        assert!((allocated(&allocation) - 5.0).abs() < 1e-9, "the observed 10 -> 15, no more: {allocation:?}");
+        let deltas: Vec<f64> = allocation.intervals.iter().map(|interval| interval.delta).collect();
+        assert_eq!(deltas, vec![3.0, 2.0]);
+        for run in ["a", "b"] {
+            let gap = allocation.unknown[run].iter().find(|gap| gap.reason == PROVIDER_WINDOW_TIE).expect(run);
+            assert_eq!((gap.from, gap.to), (Some(at(5)), Some(at(5))));
+        }
     }
 
     #[test]

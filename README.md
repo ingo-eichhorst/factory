@@ -1677,6 +1677,10 @@ actual/expected ratio and whether the actual landed inside the range; active
 time is reported beside them, and has no estimate of its own to be compared
 with. A task compares the sum of its runs' actuals with the sum of those same
 runs' ranges, and leaves the comparison out when a run carries no estimate.
+Every attempt carries the estimate it started with, so a retry adds a second
+range beside the failed attempt's: the task's figure answers "these runs
+against their estimates", and each run's own comparison is the one to read
+for a single attempt.
 Neither claims a verdict before it is final: wall time waits for the run to
 end, and cost for a complete run-end reading.
 
