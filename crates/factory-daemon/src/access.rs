@@ -450,8 +450,15 @@ impl Engine {
             }
             Request::IntakeDecide { id, decision } => {
                 let Some(item) = self.store.get(id).await? else { return Ok(()) };
-                if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
-                    return Err(deny("decide an intake item that is neither in its reach nor its own triage run's"));
+                if task_in_reach(def, &item).is_err() {
+                    if !self.is_items_triage_run(caller, &item).await? {
+                        return Err(deny("decide an intake item that is neither in its reach nor its own triage run's"));
+                    }
+                    // Its triage run proposes a split; making the items is
+                    // for whoever answers for the item.
+                    if matches!(decision, factory_core::intake::Decision::Split { .. }) {
+                        return Err(deny("split an intake item it only triages -- propose the split in the assessment"));
+                    }
                 }
                 let routed = item.intake.as_ref().and_then(|i| i.triage.as_ref()).map(|t| &t.assessment.routing.scope);
                 match (decision, routed) {

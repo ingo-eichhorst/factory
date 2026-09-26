@@ -276,11 +276,17 @@ enum IntakeCmd {
         decide: bool,
     },
     /// Decide: `ready` releases, `needs-info` sends it back with questions,
-    /// `wontfix` closes it -- only with a verified reason and evidence.
+    /// `split` replaces it with smaller intake items, `wontfix` closes it --
+    /// only with a verified reason and evidence.
     Decide {
         id: String,
-        #[arg(value_parser = ["ready", "needs-info", "wontfix"])]
+        #[arg(value_parser = ["ready", "needs-info", "split", "wontfix"])]
         decision: String,
+        /// split: the parts as a JSON array of `{id, title, instructions,
+        /// depends_on, acceptance}` (`-` for stdin). Absent takes the
+        /// assessment's proposal.
+        #[arg(long)]
+        file: Option<PathBuf>,
         /// ready: dispatch the released task at once.
         #[arg(long)]
         run: bool,
@@ -300,7 +306,16 @@ enum IntakeCmd {
     },
     /// Add information to an item -- the answer to a needs-info, which puts
     /// it back in the queue.
-    Info { id: String, text: String },
+    Info {
+        id: String,
+        text: String,
+        /// Then start a triage run on it straight away.
+        #[arg(long)]
+        triage: bool,
+        /// With `--triage`: the agent to triage with.
+        #[arg(long, requires = "triage")]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1563,20 +1578,24 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
         IntakeCmd::Show { id } => client.send(Request::TaskGet { id }).await?,
         IntakeCmd::Triage { id, agent } => client.send(Request::IntakeTriage { id, agent }).await?,
         IntakeCmd::Assess { id, file, decide } => {
-            let text = if file.as_os_str() == "-" {
-                let mut text = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
-                text
-            } else {
-                std::fs::read_to_string(&file).map_err(|e| anyhow!("cannot read {}: {e}", file.display()))?
-            };
+            let text = read_file_or_stdin(&file)?;
             let assessment = serde_json::from_str(&text).map_err(|e| anyhow!("not an assessment: {e}"))?;
             client.send(Request::IntakeAssess { id, assessment, decide }).await?
         }
-        IntakeCmd::Decide { id, decision, run, questions, reason, evidence, duplicate_of } => {
+        IntakeCmd::Decide { id, decision, file, run, questions, reason, evidence, duplicate_of } => {
+            if file.is_some() && decision != "split" {
+                return Err(anyhow!("--file only goes with split"));
+            }
             let decision = match decision.as_str() {
                 "ready" => Decision::Ready { run },
                 "needs-info" => Decision::NeedsInfo { questions },
+                "split" => Decision::Split {
+                    parts: match file {
+                        Some(file) => serde_json::from_str(&read_file_or_stdin(&file)?)
+                            .map_err(|e| anyhow!("not a list of parts: {e}"))?,
+                        None => Vec::new(),
+                    },
+                },
                 _ => Decision::Wontfix {
                     reason: match reason.as_deref() {
                         Some("duplicate") => WontfixReason::Duplicate,
@@ -1590,7 +1609,14 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
             };
             client.send(Request::IntakeDecide { id, decision }).await?
         }
-        IntakeCmd::Info { id, text } => client.send(Request::IntakeInfo { id, text }).await?,
+        IntakeCmd::Info { id, text, triage, agent } => {
+            let answered = client.send(Request::IntakeInfo { id: id.clone(), text }).await?;
+            if triage {
+                client.send(Request::IntakeTriage { id, agent }).await?
+            } else {
+                answered
+            }
+        }
     };
     print(&payload, json, |p| match p {
         Payload::IntakeBoard { board } => Some(intake_board_text(board)),
@@ -1602,6 +1628,34 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
 /// A card's line: full id (it is what every other `intake` command takes),
 /// age, priority/category/estimate once assessed, the seven axes as a row
 /// of marks, the title.
+fn read_file_or_stdin(file: &std::path::Path) -> Result<String> {
+    if file.as_os_str() == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+        Ok(text)
+    } else {
+        std::fs::read_to_string(file).map_err(|e| anyhow!("cannot read {}: {e}", file.display()))
+    }
+}
+
+/// What would move a held-back item, one line per action with its reasons
+/// under it -- and the command that does it.
+fn next_actions_text(id: &str, actions: &[factory_core::intake::NextAction], indent: &str) -> String {
+    use factory_core::intake::NextActionKind;
+    let mut out = String::new();
+    for a in actions {
+        let command = match a.action {
+            NextActionKind::Split => format!("factory intake decide {id} split [--file parts.json]"),
+            NextActionKind::AddInfo => format!("factory intake info {id} \"...\" --triage"),
+        };
+        out.push_str(&format!("{indent}-> {}: {}\n{indent}   {command}\n", a.action.as_str().replace('_', "-"), a.hint));
+        for r in &a.reasons {
+            out.push_str(&format!("{indent}   because {r}\n"));
+        }
+    }
+    out
+}
+
 fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
     let (verdict, marks) = match &c.triage {
         Some(t) => (
@@ -1636,8 +1690,16 @@ fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
     {
         line.push_str("\n      the triage run ended without an assessment");
     }
+    if let Some(parent) = &c.parent {
+        line.push_str(&format!("\n      part of {parent}"));
+    }
     for q in &c.questions {
         line.push_str(&format!("\n      ? {q}"));
+    }
+    let next = next_actions_text(&c.id, &c.next_actions, "      ");
+    if !next.is_empty() {
+        line.push('\n');
+        line.push_str(next.trim_end());
     }
     line
 }
@@ -1658,8 +1720,9 @@ fn intake_board_text(board: &factory_core::intake::IntakeBoard) -> String {
         }
     }
     out.push_str(&format!(
-        "closed as wontfix in the last {} days: {}\naxes: {}",
+        "split in the last {} days: {}\nclosed as wontfix in the last {0} days: {}\naxes: {}",
         board.ready_window_days,
+        board.split,
         board.wontfix,
         board.axes.iter().map(|a| a.label.as_str()).collect::<Vec<_>>().join(", ")
     ));
@@ -1685,7 +1748,7 @@ fn intake_item_text(task: &Task) -> String {
     }
     if let Some(t) = &i.triage {
         out.push_str(&format!(
-            "  assessed   by {} at {}: {}\n  category   {}\n  priority   {} (impact {}, urgency {})\n  estimate   {} (complexity {})\n  route      {}{}{}\n",
+            "  assessed   by {} at {}: {}\n  category   {}\n  priority   {} (impact {}, urgency {})\n  estimate   {} (complexity {})\n  route      {}{}{}{}{}\n",
             t.by,
             t.at.to_rfc3339(),
             t.verdict.as_str().replace('_', "-"),
@@ -1698,6 +1761,19 @@ fn intake_item_text(task: &Task) -> String {
             t.assessment.routing.scope,
             t.assessment.routing.agent.as_ref().map(|a| format!(" as {a}")).unwrap_or_default(),
             t.assessment.routing.workflow.as_ref().map(|w| format!(", workflow {w}")).unwrap_or_default(),
+            if t.assessment.routing.inputs.is_empty() {
+                String::new()
+            } else {
+                let inputs: Vec<String> = t.assessment.routing.inputs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                format!(" with {}", inputs.join(", "))
+            },
+            if t.assessment.routing.agents.is_empty() {
+                String::new()
+            } else {
+                let agents: Vec<String> =
+                    t.assessment.routing.agents.iter().map(|(k, v)| format!("{k} by {v}")).collect();
+                format!("; {}", agents.join(", "))
+            },
         ));
         for a in &t.assessment.axes {
             out.push_str(&format!(
@@ -1711,14 +1787,33 @@ fn intake_item_text(task: &Task) -> String {
         if !t.assessment.summary.is_empty() {
             out.push_str(&format!("  summary    {}\n", t.assessment.summary));
         }
+        if !t.assessment.split.is_empty() {
+            out.push_str(&format!("  proposed split into {} parts:\n", t.assessment.split.len()));
+            for p in &t.assessment.split {
+                let after = if p.depends_on.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (after {})", p.depends_on.join(", "))
+                };
+                out.push_str(&format!("    {:<14} {}{after}\n", p.id, p.title));
+            }
+        }
     }
     for q in &i.questions {
         out.push_str(&format!("  ? {q}\n"));
+    }
+    let next = next_actions_text(&task.id, &factory_core::intake::next_actions(i), "  ");
+    if !next.is_empty() {
+        out.push_str("  what moves it:\n");
+        out.push_str(&next);
     }
     if let Some(d) = &i.decision {
         out.push_str(&format!("  decided    {} by {} at {}", d.decision.as_str().replace('_', "-"), d.by, d.at.to_rfc3339()));
         if let Some(run) = &d.workflow_run {
             out.push_str(&format!(" (workflow run {run})"));
+        }
+        if !d.parts.is_empty() {
+            out.push_str(&format!(" into {}", d.parts.join(", ")));
         }
         out.push('\n');
     }
@@ -5622,7 +5717,18 @@ mod tests {
             Command::Intake { command: Some(IntakeCmd::Assess { decide: true, .. }), .. }
         ));
         let bad = Cli::try_parse_from(["factory", "intake", "decide", "abc", "maybe"]);
-        assert!(bad.is_err(), "only ready, needs-info or wontfix");
+        assert!(bad.is_err(), "only ready, needs-info, split or wontfix");
+        match parse(&["intake", "decide", "abc", "split", "--file", "parts.json"]).command {
+            Command::Intake { command: Some(IntakeCmd::Decide { decision, file: Some(f), .. }), .. } => {
+                assert_eq!((decision.as_str(), f.to_str().unwrap()), ("split", "parts.json"));
+            }
+            _ => panic!("not a split"),
+        }
+        assert!(matches!(
+            parse(&["intake", "info", "abc", "the answer", "--triage", "--agent", "codex"]).command,
+            Command::Intake { command: Some(IntakeCmd::Info { triage: true, agent: Some(_), .. }), .. }
+        ));
+        assert!(Cli::try_parse_from(["factory", "intake", "info", "abc", "x", "--agent", "codex"]).is_err());
     }
 
     #[test]

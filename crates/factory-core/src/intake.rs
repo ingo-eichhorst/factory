@@ -8,8 +8,10 @@
 //! x urgency; a range estimate from a complexity level; and a route to a
 //! scope and, optionally, a workflow. [`evaluate`] turns an assessment into
 //! the verdict the rules give, and [`Decision`] is what a triager does with
-//! it: release it (`ready`), send it back (`needs-info`), or close it
-//! (`wontfix`, only with a verified reason).
+//! it: release it (`ready`), send it back (`needs-info`), split it into
+//! smaller items (`split`), or close it (`wontfix`, only with a verified
+//! reason). An item the rules hold back is never a dead end:
+//! [`next_actions`] says what would move each blocker.
 //!
 //! Everything here is pure: no store, no clock but the one passed in. The
 //! daemon (`factory-daemon/src/intake.rs`) owns the transitions.
@@ -26,8 +28,8 @@ use std::collections::BTreeMap;
 
 // ------------------------------------------------------------------ receipt
 
-/// How far an intake item has got. `Ready` and `Wontfix` are where it leaves
-/// intake; the rest keep the task in `TaskStatus::Intake`.
+/// How far an intake item has got. `Ready`, `Split` and `Wontfix` are where
+/// it leaves intake; the rest keep the task in `TaskStatus::Intake`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntakeStage {
@@ -41,6 +43,9 @@ pub enum IntakeStage {
     NeedsInfo,
     /// Released into the line.
     Ready,
+    /// Replaced by smaller items, each handed back into intake to be
+    /// triaged on its own.
+    Split,
     /// Closed with a verified reason.
     Wontfix,
 }
@@ -52,6 +57,7 @@ impl IntakeStage {
             Self::Triaging => "triaging",
             Self::NeedsInfo => "needs_info",
             Self::Ready => "ready",
+            Self::Split => "split",
             Self::Wontfix => "wontfix",
         }
     }
@@ -382,7 +388,13 @@ fn short_duration(seconds: u64) -> String {
 
 /// Where a ready item goes. `agent` absent means the scope's own agent, as
 /// for any task; `workflow` names a workflow definition in that scope to
-/// start instead of running the item as a task of its own.
+/// start instead of running the item as a task of its own, with `inputs`
+/// for the run and `agents` choosing who does each step.
+///
+/// A step's model is chosen by choosing its agent: a task carries no model
+/// of its own, and each harness spells the flag differently, so the model
+/// lives in an agent's declared `args` (`--model opus`) and a route picks
+/// between declared agents. [`RouteOptions`] lists them with their models.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Routing {
     pub scope: String,
@@ -390,6 +402,91 @@ pub struct Routing {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow: Option<String>,
+    /// The workflow run's inputs, by the names it declares. Only with a
+    /// workflow.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, String>,
+    /// Task node id -> the agent that runs that step, replacing the one the
+    /// definition names. Steps left out keep theirs. Only with a workflow.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agents: BTreeMap<String, String>,
+}
+
+/// One smaller item an assessment proposes, or a person writes, when an item
+/// is too big to be ready (`#180`'s plan, before its `expand` node exists).
+/// A split makes each part an intake item of its own, so each is triaged --
+/// and has to pass the seven axes -- on its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitPart {
+    /// Short and unique within the split: what `depends_on` names.
+    pub id: String,
+    pub title: String,
+    /// The part's own slice of the work, standalone.
+    #[serde(default)]
+    pub instructions: String,
+    /// The ids of parts that have to be done first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    /// How to tell the part is done -- a command, or a sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance: Option<String>,
+}
+
+/// At most this many parts: more is a plan, not a split, and each part is
+/// still triaged by hand.
+pub const MAX_SPLIT_PARTS: usize = 8;
+
+/// Refuse a split that is not one: two to eight parts, each with a unique
+/// slug id and a title, depending only on other parts, without a cycle.
+pub fn validate_split(parts: &[SplitPart]) -> Result<(), String> {
+    if parts.len() < 2 {
+        return Err("a split needs at least two parts".into());
+    }
+    if parts.len() > MAX_SPLIT_PARTS {
+        return Err(format!("a split has at most {MAX_SPLIT_PARTS} parts, not {}", parts.len()));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for p in parts {
+        let id = p.id.trim();
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            return Err(format!("part id {:?} is not a slug (lowercase letters, digits and dashes)", p.id));
+        }
+        if !ids.insert(id) {
+            return Err(format!("part id {id:?} is used twice"));
+        }
+        if p.title.trim().is_empty() {
+            return Err(format!("part {id} needs a title"));
+        }
+    }
+    for p in parts {
+        for d in &p.depends_on {
+            if d.trim() == p.id.trim() {
+                return Err(format!("part {} depends on itself", p.id));
+            }
+            if !ids.contains(d.trim()) {
+                return Err(format!("part {} depends on {d:?}, which is not a part", p.id));
+            }
+        }
+    }
+    if split_order(parts).is_none() {
+        return Err("the parts' dependencies go round in a circle".into());
+    }
+    Ok(())
+}
+
+/// The parts in an order where each comes after everything it depends on,
+/// otherwise as written; `None` for a cycle.
+pub fn split_order(parts: &[SplitPart]) -> Option<Vec<&SplitPart>> {
+    let mut out: Vec<&SplitPart> = Vec::with_capacity(parts.len());
+    let mut placed = std::collections::BTreeSet::new();
+    while out.len() < parts.len() {
+        let next = parts.iter().find(|p| {
+            !placed.contains(p.id.trim()) && p.depends_on.iter().all(|d| placed.contains(d.trim()))
+        })?;
+        placed.insert(next.id.trim());
+        out.push(next);
+    }
+    Some(out)
 }
 
 /// What a triager -- a person or a triage run -- submits.
@@ -415,6 +512,10 @@ pub struct Assessment {
     /// empty, the failed axes' evidence is what gets asked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<String>,
+    /// A proposed split, for an item too big or too loose to be ready as one.
+    /// Only proposed: the verdict is unchanged, and a person decides `split`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split: Vec<SplitPart>,
 }
 
 /// What the rules make of an assessment.
@@ -493,6 +594,12 @@ pub fn validate(a: &Assessment) -> Result<(), String> {
     }
     if a.routing.scope.trim().is_empty() {
         return Err("an assessment has to route the item to a scope".into());
+    }
+    if a.routing.workflow.is_none() && !(a.routing.inputs.is_empty() && a.routing.agents.is_empty()) {
+        return Err("workflow inputs and per-step agents need a workflow to route to".into());
+    }
+    if !a.split.is_empty() {
+        validate_split(&a.split).map_err(|e| format!("the proposed split: {e}"))?;
     }
     Ok(())
 }
@@ -578,6 +685,13 @@ pub enum Decision {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duplicate_of: Option<String>,
     },
+    /// Replace it with smaller items, each handed back into intake. Empty
+    /// parts take the assessment's proposal. Needs no verdict: an item
+    /// nobody could assess as one is exactly the one to split.
+    Split {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parts: Vec<SplitPart>,
+    },
 }
 
 impl Decision {
@@ -586,6 +700,7 @@ impl Decision {
             Self::Ready { .. } => "ready",
             Self::NeedsInfo { .. } => "needs_info",
             Self::Wontfix { .. } => "wontfix",
+            Self::Split { .. } => "split",
         }
     }
 }
@@ -600,6 +715,9 @@ pub struct DecisionRecord {
     /// to one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run: Option<String>,
+    /// The intake items a split made, in the parts' order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<String>,
 }
 
 /// Check a decision against the item before anything is written. Returns
@@ -651,7 +769,114 @@ pub fn check_decision(intake: &Intake, decision: &Decision) -> Result<Vec<String
             }
             Ok(Vec::new())
         }
+        Decision::Split { parts } => split_parts(intake, parts).map(|_| Vec::new()),
     }
+}
+
+/// The parts a `split` makes: the given ones, or else the assessment's
+/// proposal -- checked either way.
+pub fn split_parts(intake: &Intake, given: &[SplitPart]) -> Result<Vec<SplitPart>, String> {
+    let parts: Vec<SplitPart> = if given.is_empty() {
+        intake.triage.as_ref().map(|t| t.assessment.split.clone()).unwrap_or_default()
+    } else {
+        given.to_vec()
+    };
+    if parts.is_empty() {
+        return Err("say how to split it: no parts were given and the assessment proposes none".into());
+    }
+    validate_split(&parts)?;
+    Ok(parts
+        .into_iter()
+        .map(|p| SplitPart {
+            id: p.id.trim().to_string(),
+            title: p.title.trim().to_string(),
+            instructions: p.instructions.trim().to_string(),
+            depends_on: p.depends_on.iter().map(|d| d.trim().to_string()).collect(),
+            acceptance: p.acceptance.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()),
+        })
+        .collect())
+}
+
+// ------------------------------------------------------------ next actions
+
+/// What would move a held-back item forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextActionKind {
+    /// Too big or unbounded: split it into items that pass on their own.
+    Split,
+    /// Missing a fact or a decision only the requester has: answer the
+    /// questions, then triage it again.
+    AddInfo,
+}
+
+impl NextActionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Split => "split",
+            Self::AddInfo => "add_info",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextAction {
+    pub action: NextActionKind,
+    /// The blockers this answers, one line each.
+    pub reasons: Vec<String>,
+    /// What to do, in a sentence.
+    pub hint: String,
+}
+
+/// Every blocker of a needs-info verdict, turned into what would clear it:
+/// a failed Scope, a high-cost Observability gap and complexity 9-10 are
+/// cleared by splitting; the other axes by information. Split comes first
+/// -- a part is triaged again anyway, so questions asked of the whole may
+/// not apply to any part. Empty for an item the rules do not hold back.
+pub fn next_actions(intake: &Intake) -> Vec<NextAction> {
+    let Some(triage) = &intake.triage else { return Vec::new() };
+    if !intake.stage.is_open() || triage.verdict == Verdict::Ready {
+        return Vec::new();
+    }
+    let a = &triage.assessment;
+    let mut split = Vec::new();
+    let mut info = Vec::new();
+    for check in a.axes.iter().filter(|c| !c.pass) {
+        let line = format!("{}: {}", check.axis.label(), check.evidence.trim());
+        match (check.axis, check.cost) {
+            (Axis::Observability, Some(ObservabilityCost::Low | ObservabilityCost::Medium)) => {}
+            (Axis::Scope, _) | (Axis::Observability, _) => split.push(line),
+            _ => info.push(line),
+        }
+    }
+    if a.complexity >= 9 {
+        split.push(format!("Complexity {}: a subsystem or multi-phase change", a.complexity));
+    }
+    let mut out = Vec::new();
+    if !split.is_empty() {
+        let hint = if a.split.is_empty() {
+            "Split it into bounded items -- two to eight, each triaged on its own. Write the parts, \
+             or triage it again for a proposal."
+                .to_string()
+        } else {
+            format!(
+                "Split it as the assessment proposes, into {} parts: {}. Each goes back into intake and is triaged on its own.",
+                a.split.len(),
+                a.split.iter().map(|p| p.title.as_str()).collect::<Vec<_>>().join("; ")
+            )
+        };
+        out.push(NextAction { action: NextActionKind::Split, reasons: split, hint });
+    }
+    if !info.is_empty() {
+        out.push(NextAction {
+            action: NextActionKind::AddInfo,
+            reasons: info,
+            hint: "Answer the questions with what is missing; the item goes back into the queue to be \
+                   triaged again."
+                .into(),
+        });
+    }
+    out
 }
 
 /// The labels a released task carries -- the keys `#118`'s control plan and
@@ -703,7 +928,18 @@ pub struct IntakeCard {
     pub triage_task_ended: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<DecisionRecord>,
+    /// What would move it forward, when the rules hold it back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<NextAction>,
+    /// The item it was split from, when it is a part of one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
+
+/// The label a part carries: the id of the item it was split from.
+pub const PARENT_LABEL: &str = "intake-parent";
+/// The label a part carries: its id within the split.
+pub const PART_LABEL: &str = "intake-part";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IntakeColumns {
@@ -721,10 +957,95 @@ pub struct IntakeBoard {
     pub columns: IntakeColumns,
     /// Closed as wontfix in the same window -- counted, not drawn.
     pub wontfix: usize,
+    /// Split in the same window -- counted, not drawn; the parts are the
+    /// cards.
+    #[serde(default)]
+    pub split: usize,
     /// The seven axes with their pass conditions, so a form and a legend
     /// never keep a copy of their own.
     pub axes: Vec<AxisInfo>,
     pub categories: Vec<String>,
+    /// Where an item can be routed: every scope with its agents and
+    /// workflows. Filled in by the daemon, which has them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<RouteOptions>,
+}
+
+/// A scope an item can be routed to, and what can run it there -- what a
+/// triager chooses a workflow, its inputs and each step's agent from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteOptions {
+    pub scope: String,
+    /// The agent a task there runs on unless it says otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<String>,
+    #[serde(default)]
+    pub agents: Vec<AgentOption>,
+    #[serde(default)]
+    pub workflows: Vec<WorkflowOption>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentOption {
+    pub name: String,
+    pub harness: String,
+    /// Read off the agent's declared args; absent is the harness's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowOption {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub inputs: Vec<crate::workflow::WorkflowInput>,
+    /// Its task nodes, in the definition's order -- the steps an agent can
+    /// be chosen for.
+    #[serde(default)]
+    pub steps: Vec<WorkflowStep>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowStep {
+    pub id: String,
+    pub title: String,
+    /// The agent the definition names, if it names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+}
+
+/// The model an agent's args choose: `--model X`, `--model=X` or `-m X`.
+pub fn model_of(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if let Some(v) = a.strip_prefix("--model=") {
+            return Some(v.to_string());
+        }
+        if a == "--model" || a == "-m" {
+            return it.next().cloned();
+        }
+    }
+    None
+}
+
+impl WorkflowOption {
+    pub fn from_definition(d: &crate::workflow::WorkflowDefinition) -> Self {
+        Self {
+            id: d.id.clone(),
+            name: d.name.clone(),
+            description: d.description.clone(),
+            inputs: d.inputs.clone(),
+            steps: d
+                .nodes
+                .iter()
+                .filter(|n| n.kind == crate::workflow::WorkflowNodeKind::Task)
+                .map(|n| WorkflowStep { id: n.id.clone(), title: n.task.title.clone(), agent: n.task.agent.clone() })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -745,6 +1066,7 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
     let since = now - chrono::Duration::days(READY_WINDOW_DAYS);
     let mut columns = IntakeColumns::default();
     let mut wontfix = 0;
+    let mut split = 0;
     for task in tasks {
         let Some(intake) = &task.intake else { continue };
         let triage = intake.triage_task.as_deref().and_then(|id| by_id.get(id).copied());
@@ -769,6 +1091,8 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
             triage_task_status,
             triage_task_ended,
             decision: intake.decision.clone(),
+            next_actions: next_actions(intake),
+            parent: task.labels.get(PARENT_LABEL).cloned(),
         };
         match intake.stage {
             IntakeStage::Received => columns.received.push(card),
@@ -787,6 +1111,11 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
                     wontfix += 1;
                 }
             }
+            IntakeStage::Split => {
+                if decided_at.is_some_and(|at| at >= since) {
+                    split += 1;
+                }
+            }
         }
     }
     for column in [&mut columns.received, &mut columns.triaging, &mut columns.needs_info] {
@@ -801,6 +1130,7 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
         ready_window_days: READY_WINDOW_DAYS,
         columns,
         wontfix,
+        split,
         axes: Axis::ALL
             .into_iter()
             .map(|axis| AxisInfo {
@@ -810,6 +1140,7 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
             })
             .collect(),
         categories: CATEGORIES.iter().map(|c| c.to_string()).collect(),
+        routes: Vec::new(),
     }
 }
 
@@ -817,8 +1148,9 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
 
 /// The instructions of a triage run: `ir:triage` generalised from one
 /// GitHub repository to any item in any scope. The run reads, assesses and
-/// submits; it changes no file and posts nothing anywhere.
-pub fn triage_instructions(item: &Task, scopes: &[String], bin: &str) -> String {
+/// submits; it changes no file and posts nothing anywhere. `routes` is every
+/// scope with its agents and workflows, so the run chooses from what exists.
+pub fn triage_instructions(item: &Task, routes: &[RouteOptions], bin: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "Triage intake item {id} against the definition of ready. Do not do the work itself, \
@@ -860,18 +1192,28 @@ pub fn triage_instructions(item: &Task, scopes: &[String], bin: &str) -> String 
          four files, 7-8 cross-cutting, 9-10 a subsystem. It sets the estimate range (1-2: \
          15-45m, 3-4: 45m-2h, 5-6: 1.5-3h, 7-8: 2.5-5h). Give your own estimate only for a \
          named driver, and name it in the summary.\n\
-         8. Route it to the scope that owns it -- one of: ",
+         8. Route it: the scope that owns it, and the way of working that suits it best. \
+         Choose a workflow when one fits the kind of work -- give every input it declares \
+         in `routing.inputs`, and pick each step's agent in `routing.agents` (step id -> \
+         agent) where the default is a poor fit: a stronger model for design and review, a \
+         cheaper one for mechanical steps. A step's model is its agent's; there is no \
+         separate model setting. With no fitting workflow, route to the scope and, if one \
+         clearly fits, an agent there. Say why in the summary.\n\
+         9. If the scope axis fails or complexity is 9-10, propose a split in `split`: two to \
+         eight parts, each bounded enough to pass the seven axes on its own, with a short id, \
+         a title, its own instructions, `depends_on` naming the parts that come first, and \
+         an acceptance check. It is a proposal -- the verdict stays needs-info and a person \
+         decides to split -- so write each part to stand alone.\n\n\
+         ## Where it can go\n\n",
     );
-    out.push_str(&scopes.join(", "));
+    out.push_str(&routes_text(routes));
     out.push_str(
-        " -- and, if one clearly fits, an agent there. Name a workflow only if the scope \
-         already has one for exactly this.\n\n\
-         ## Submit\n\n\
+        "\n## Submit\n\n\
          Write the assessment as JSON to a file and submit it:\n\n",
     );
     out.push_str(&format!(
         "    {bin} intake assess {id} --file assessment.json --decide\n\n\
-         `--decide` applies what the rules give: ready releases the item into its scope, \
+         `--decide` applies what the rules give: ready releases the item into its route, \
          needs-info sends your questions back to the requester. The file's shape:\n\n",
         id = item.id,
     ));
@@ -890,17 +1232,78 @@ pub fn triage_instructions(item: &Task, scopes: &[String], bin: &str) -> String 
       "impact": "medium",
       "urgency": "high",
       "complexity": 4,
-      "routing": {"scope": "<scope>", "agent": "<optional>"},
-      "summary": "One or two sentences: what it is, and why this call.",
-      "questions": ["Only for needs-info: one concrete question per gap."]
+      "routing": {
+        "scope": "<scope>",
+        "agent": "<optional, without a workflow>",
+        "workflow": "<optional workflow name>",
+        "inputs": {"<input>": "<value>"},
+        "agents": {"<step id>": "<agent>"}
+      },
+      "summary": "One or two sentences: what it is, and why this call and this route.",
+      "questions": ["Only for needs-info: one concrete question per gap."],
+      "split": [
+        {"id": "first", "title": "...", "instructions": "...", "acceptance": "..."},
+        {"id": "second", "title": "...", "instructions": "...", "depends_on": ["first"], "acceptance": "..."}
+      ]
     }
 "#,
     );
     out.push_str(
-        "\nUse wontfix only for a verified duplicate, an invalid report or something out of \
-         scope -- and then do not decide it yourself: say so in your task report with the \
-         evidence, and a person closes it.\n",
+        "\nLeave out what does not apply: `split` unless it is too big, `inputs` and `agents` \
+         without a workflow. Use wontfix only for a verified duplicate, an invalid report or \
+         something out of scope -- and then do not decide it yourself: say so in your task \
+         report with the evidence, and a person closes it.\n",
     );
+    out
+}
+
+/// The routes as the triage instructions list them: one block per scope,
+/// its agents with their models, then its workflows with inputs and steps.
+pub fn routes_text(routes: &[RouteOptions]) -> String {
+    let mut out = String::new();
+    for r in routes {
+        out.push_str(&format!("- scope `{}`", r.scope));
+        if let Some(a) = &r.default_agent {
+            out.push_str(&format!(" (default agent {a})"));
+        }
+        out.push('\n');
+        if !r.agents.is_empty() {
+            let agents: Vec<String> = r
+                .agents
+                .iter()
+                .map(|a| {
+                    let model = a.model.as_deref().unwrap_or("default model");
+                    format!("{} ({}, {model})", a.name, a.harness)
+                })
+                .collect();
+            out.push_str(&format!("  agents: {}\n", agents.join(", ")));
+        }
+        for w in &r.workflows {
+            out.push_str(&format!("  workflow `{}`", w.name));
+            if !w.description.trim().is_empty() {
+                out.push_str(&format!(" -- {}", w.description.trim()));
+            }
+            out.push('\n');
+            for i in &w.inputs {
+                out.push_str(&format!("    input `{}`", i.name));
+                if !i.description.trim().is_empty() {
+                    out.push_str(&format!(": {}", i.description.trim()));
+                }
+                out.push('\n');
+            }
+            for s in &w.steps {
+                out.push_str(&format!(
+                    "    step `{}` {} [{}]\n",
+                    s.id,
+                    s.title,
+                    s.agent.as_deref().unwrap_or("the scope's agent")
+                ));
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push_str("(no scopes)\n");
+    }
     out
 }
 
@@ -926,6 +1329,7 @@ mod tests {
             routing: Routing { scope: "demo".into(), ..Default::default() },
             summary: "A bounded fix.".into(),
             questions: vec![],
+            split: vec![],
         }
     }
 
@@ -1160,6 +1564,7 @@ mod tests {
             by: "x".into(),
             at: now - chrono::Duration::hours(1),
             workflow_run: None,
+            parts: vec![],
         });
         let mut stale_ready = ready.clone();
         stale_ready.decision.as_mut().unwrap().at = now - chrono::Duration::days(30);
@@ -1170,6 +1575,7 @@ mod tests {
             by: "x".into(),
             at: now,
             workflow_run: None,
+            parts: vec![],
         });
         let tasks = vec![
             task("r1", TaskStatus::Intake, Some(received)),
@@ -1223,12 +1629,32 @@ mod tests {
     #[test]
     fn the_triage_instructions_carry_the_item_the_axes_the_rules_and_the_submit_command() {
         let item = task("item-1", TaskStatus::Intake, Some(open(None)));
-        let text = triage_instructions(&item, &["demo".into(), "web".into()], "/bin/factory");
+        let routes = vec![
+            RouteOptions { scope: "demo".into(), ..Default::default() },
+            RouteOptions {
+                scope: "web".into(),
+                default_agent: Some("claude-code".into()),
+                agents: vec![AgentOption { name: "reviewer".into(), harness: "codex".into(), model: Some("gpt-5".into()) }],
+                workflows: vec![WorkflowOption {
+                    id: "w1".into(),
+                    name: "github-issue".into(),
+                    description: "issue to PR".into(),
+                    inputs: vec![crate::workflow::WorkflowInput { name: "issue".into(), description: "the number".into() }],
+                    steps: vec![WorkflowStep { id: "review".into(), title: "Review #{{issue}}".into(), agent: Some("builder".into()) }],
+                }],
+            },
+        ];
+        let text = triage_instructions(&item, &routes, "/bin/factory");
         for axis in Axis::ALL {
             assert!(text.contains(axis.pass_condition()), "{axis:?}");
         }
         assert!(text.contains("/bin/factory intake assess item-1 --file assessment.json --decide"));
-        assert!(text.contains("demo, web"));
+        assert!(text.contains("- scope `demo`") && text.contains("- scope `web` (default agent claude-code)"));
+        assert!(text.contains("agents: reviewer (codex, gpt-5)"), "{text}");
+        assert!(text.contains("workflow `github-issue` -- issue to PR"));
+        assert!(text.contains("input `issue`: the number"));
+        assert!(text.contains("step `review` Review #{{issue}} [builder]"));
+        assert!(text.contains("\"split\""), "the shape shows a split");
         assert!(text.contains("post nothing outside Factory"));
     }
 
@@ -1252,5 +1678,142 @@ mod tests {
         assert_eq!(evaluate(&a, "x", at()).verdict, Verdict::Ready);
         let decision: Decision = serde_json::from_str(r#"{"decision":"needs_info","questions":["q"]}"#).unwrap();
         assert_eq!(decision, Decision::NeedsInfo { questions: vec!["q".into()] });
+    }
+
+    fn part(id: &str, deps: &[&str]) -> SplitPart {
+        SplitPart {
+            id: id.into(),
+            title: format!("Part {id}"),
+            instructions: format!("do {id}"),
+            depends_on: deps.iter().map(|d| d.to_string()).collect(),
+            acceptance: None,
+        }
+    }
+
+    #[test]
+    fn a_split_needs_two_to_eight_unique_parts_that_depend_only_on_each_other_without_a_cycle() {
+        assert!(validate_split(&[part("a", &[])]).unwrap_err().contains("two"));
+        let many: Vec<SplitPart> = (0..9).map(|i| part(&format!("p{i}"), &[])).collect();
+        assert!(validate_split(&many).unwrap_err().contains("at most 8"));
+        assert!(validate_split(&[part("a", &[]), part("a", &[])]).unwrap_err().contains("twice"));
+        assert!(validate_split(&[part("A b", &[]), part("c", &[])]).unwrap_err().contains("slug"));
+        assert!(validate_split(&[part("a", &["zz"]), part("b", &[])]).unwrap_err().contains("not a part"));
+        assert!(validate_split(&[part("a", &["a"]), part("b", &[])]).unwrap_err().contains("itself"));
+        assert!(validate_split(&[part("a", &["b"]), part("b", &["a"])]).unwrap_err().contains("circle"));
+        let mut untitled = part("b", &[]);
+        untitled.title = " ".into();
+        assert!(validate_split(&[part("a", &[]), untitled]).unwrap_err().contains("title"));
+
+        let parts = [part("rework", &["resume"]), part("resume", &[]), part("waiting", &[])];
+        assert!(validate_split(&parts).is_ok());
+        let order: Vec<&str> = split_order(&parts).unwrap().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(order, vec!["resume", "rework", "waiting"], "dependencies first, otherwise as written");
+    }
+
+    #[test]
+    fn an_assessment_may_propose_a_split_and_the_verdict_is_unchanged() {
+        let mut a = failing(Axis::Scope, None);
+        a.complexity = 10;
+        a.split = vec![part("a", &[])];
+        assert!(validate(&a).unwrap_err().contains("proposed split"));
+        a.split = vec![part("a", &[]), part("b", &["a"])];
+        assert!(validate(&a).is_ok());
+        assert!(matches!(evaluate(&a, "x", at()).verdict, Verdict::NeedsInfo { .. }));
+    }
+
+    #[test]
+    fn inputs_and_step_agents_need_a_workflow() {
+        let mut a = assessment();
+        a.routing.inputs.insert("issue".into(), "178".into());
+        assert!(validate(&a).unwrap_err().contains("need a workflow"));
+        a.routing.workflow = Some("github-issue".into());
+        a.routing.agents.insert("review".into(), "codex".into());
+        assert!(validate(&a).is_ok());
+        let json = serde_json::to_value(&a.routing).unwrap();
+        assert_eq!(json["inputs"]["issue"], "178");
+        assert_eq!(json["agents"]["review"], "codex");
+        let bare: Routing = serde_json::from_str(r#"{"scope":"demo"}"#).unwrap();
+        assert!(bare.inputs.is_empty() && bare.agents.is_empty(), "older routes still load");
+    }
+
+    #[test]
+    fn split_takes_the_given_parts_or_the_proposal_and_refuses_neither() {
+        let mut a = failing(Axis::Scope, None);
+        a.split = vec![part("a", &[]), part("b", &["a"])];
+        let item = open(Some(evaluate(&a, "x", at())));
+        let from_proposal = split_parts(&item, &[]).unwrap();
+        assert_eq!(from_proposal.len(), 2);
+        let given = split_parts(&item, &[part("x", &[]), part("y", &[])]).unwrap();
+        assert_eq!(given[0].id, "x");
+        assert!(check_decision(&item, &Decision::Split { parts: vec![] }).is_ok());
+
+        let bare = open(None);
+        assert!(check_decision(&bare, &Decision::Split { parts: vec![] }).unwrap_err().contains("no parts"));
+        assert!(
+            check_decision(&bare, &Decision::Split { parts: vec![part("a", &[]), part("b", &[])] }).is_ok(),
+            "a person splits an item nobody assessed"
+        );
+        let decision: Decision = serde_json::from_str(r#"{"decision":"split"}"#).unwrap();
+        assert_eq!(decision, Decision::Split { parts: vec![] });
+    }
+
+    #[test]
+    fn next_actions_turn_each_blocker_into_split_or_add_info() {
+        // Scope and complexity 10: split, with the proposal named.
+        let mut a = failing(Axis::Scope, None);
+        a.complexity = 10;
+        let v = a.axes.iter_mut().find(|c| c.axis == Axis::Verifiability).unwrap();
+        v.pass = false;
+        v.evidence = "no done signal".into();
+        let mut item = open(Some(evaluate(&a, "x", at())));
+        item.stage = IntakeStage::NeedsInfo;
+        let actions = next_actions(&item);
+        assert_eq!(actions.iter().map(|n| n.action).collect::<Vec<_>>(), vec![NextActionKind::Split, NextActionKind::AddInfo]);
+        assert_eq!(actions[0].reasons.len(), 2, "{:?}", actions[0].reasons);
+        assert!(actions[0].reasons[1].starts_with("Complexity 10"));
+        assert!(actions[0].hint.contains("triage it again for a proposal"));
+        assert_eq!(actions[1].reasons, vec!["Verifiability: no done signal"]);
+
+        a.split = vec![part("a", &[]), part("b", &[])];
+        item.triage = Some(evaluate(&a, "x", at()));
+        assert!(next_actions(&item)[0].hint.contains("2 parts: Part a; Part b"));
+
+        // A high-cost observability gap is split out; a tolerated one is nothing.
+        let high = open(Some(evaluate(&failing(Axis::Observability, Some(ObservabilityCost::High)), "x", at())));
+        assert_eq!(next_actions(&high)[0].action, NextActionKind::Split);
+        let low = open(Some(evaluate(&failing(Axis::Observability, Some(ObservabilityCost::Low)), "x", at())));
+        assert!(next_actions(&low).is_empty(), "ready: nothing to unblock");
+        assert!(next_actions(&open(None)).is_empty(), "not assessed: nothing to say yet");
+    }
+
+    #[test]
+    fn the_model_is_read_off_an_agents_args() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(model_of(&args(&["--model", "opus"])), Some("opus".into()));
+        assert_eq!(model_of(&args(&["--yolo", "--model=gpt-5"])), Some("gpt-5".into()));
+        assert_eq!(model_of(&args(&["-m", "o3"])), Some("o3".into()));
+        assert_eq!(model_of(&args(&["--yolo"])), None);
+    }
+
+    #[test]
+    fn the_board_counts_a_split_and_marks_its_parts() {
+        let now = at();
+        let mut split = open(None);
+        split.stage = IntakeStage::Split;
+        split.decision = Some(DecisionRecord {
+            decision: Decision::Split { parts: vec![] },
+            by: "x".into(),
+            at: now,
+            workflow_run: None,
+            parts: vec!["c1".into()],
+        });
+        let mut child = open(None);
+        child.stage = IntakeStage::Received;
+        let mut part_task = task("c1", TaskStatus::Intake, Some(child));
+        part_task.labels.insert(PARENT_LABEL.into(), "big".into());
+        let b = board(&[task("big", TaskStatus::Done, Some(split)), part_task], now);
+        assert_eq!(b.split, 1);
+        assert_eq!(b.columns.received.len(), 1);
+        assert_eq!(b.columns.received[0].parent.as_deref(), Some("big"));
     }
 }

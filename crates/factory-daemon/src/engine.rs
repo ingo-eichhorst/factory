@@ -1030,19 +1030,22 @@ impl Engine {
             }
 
             // Intake (`#119`). Every write publishes `TaskCreated` or
-            // `TaskUpdated` itself; the board is a read over tasks.
+            // `TaskUpdated` itself; the board is a read over tasks. The
+            // big ones are boxed: releasing starts a workflow and splitting
+            // makes tasks, and inline they would size every request's
+            // future -- enough to overflow a test thread's stack.
             Request::IntakeAdd(new) => Ok(Payload::Task { task: self.intake_add(caller, new).await? }),
             Request::IntakeBoard { scope } => Ok(Payload::IntakeBoard {
-                board: self.intake_board(scope.as_deref()).await?,
+                board: Box::pin(self.intake_board(scope.as_deref())).await?,
             }),
             Request::IntakeTriage { id, agent } => Ok(Payload::Task {
-                task: self.intake_triage(caller, &id, agent).await?,
+                task: Box::pin(self.intake_triage(caller, &id, agent)).await?,
             }),
             Request::IntakeAssess { id, assessment, decide } => Ok(Payload::Task {
-                task: self.intake_assess(caller, &id, assessment, decide).await?,
+                task: Box::pin(self.intake_assess(caller, &id, assessment, decide)).await?,
             }),
             Request::IntakeDecide { id, decision } => Ok(Payload::Task {
-                task: self.intake_decide(caller, &id, decision).await?,
+                task: Box::pin(self.intake_decide(caller, &id, decision)).await?,
             }),
             Request::IntakeInfo { id, text } => Ok(Payload::Task {
                 task: self.intake_info(caller, &id, &text).await?,
