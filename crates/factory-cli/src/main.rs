@@ -154,10 +154,10 @@ enum Command {
         scope: Option<String>,
     },
     /// What runs used and cost, summed per task, GitHub issue (`issue=<n>`
-    /// label), scope or agent (#117). Usage comes from the agent runtime;
+    /// label), scope, agent or provider (#117). Usage comes from the agent runtime;
     /// a run it could not measure is counted as unknown, never as free.
     Cost {
-        /// task, issue, scope or agent.
+        /// task, issue, scope, agent or provider.
         #[arg(long, default_value = "task")]
         by: String,
         /// Runs started since this: `7d`, `12h`, `2026-09-01` or RFC 3339.
@@ -883,6 +883,18 @@ enum TaskCmd {
         /// Expected seconds one run will occupy its agent (advisory only).
         #[arg(long)]
         estimate: Option<u64>,
+        /// Low and high seconds for a range; `--estimate` is the expected value.
+        #[arg(long)]
+        estimate_low: Option<u64>,
+        #[arg(long)]
+        estimate_high: Option<u64>,
+        /// Low, expected and high API-equivalent dollar estimate.
+        #[arg(long)]
+        estimate_cost_low: Option<f64>,
+        #[arg(long)]
+        estimate_cost: Option<f64>,
+        #[arg(long)]
+        estimate_cost_high: Option<f64>,
         /// Seconds this task's agent has to acknowledge a run.
         #[arg(long)]
         ack_timeout: Option<u64>,
@@ -948,6 +960,16 @@ enum TaskCmd {
         /// Expected seconds one run will occupy its agent (advisory only).
         #[arg(long)]
         estimate: Option<u64>,
+        #[arg(long)]
+        estimate_low: Option<u64>,
+        #[arg(long)]
+        estimate_high: Option<u64>,
+        #[arg(long)]
+        estimate_cost_low: Option<f64>,
+        #[arg(long)]
+        estimate_cost: Option<f64>,
+        #[arg(long)]
+        estimate_cost_high: Option<f64>,
         /// Remove the task's duration estimate.
         #[arg(long)]
         no_estimate: bool,
@@ -3953,6 +3975,11 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             schedule,
             timezone,
             estimate,
+            estimate_low,
+            estimate_high,
+            estimate_cost_low,
+            estimate_cost,
+            estimate_cost_high,
             ack_timeout,
             timeout,
             blocked_timeout,
@@ -3969,6 +3996,14 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 .map(|text| parse_schedule(text, timezone.as_deref()))
                 .transpose()?;
             let retry = retry.as_deref().map(parse_retry).transpose()?;
+            let estimate_range = estimate_from_args(
+                estimate_low,
+                estimate,
+                estimate_high,
+                estimate_cost_low,
+                estimate_cost,
+                estimate_cost_high,
+            )?;
             // Absent means on -- so passing neither flag says the same thing
             // as passing `--worktree` does. `--no-worktree` is the only way
             // to mean off, and it wins if both are somehow given.
@@ -3987,7 +4022,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     agent,
                     runtime,
                     schedule,
-                    estimate_seconds: estimate,
+                    estimate_seconds: estimate_range.as_ref().map(|value| value.time.expected),
+                    estimate: estimate_range,
                     ack_timeout_seconds: ack_timeout,
                     timeout_seconds: timeout,
                     blocked_timeout_seconds: blocked_timeout,
@@ -4032,6 +4068,11 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             timezone,
             no_schedule,
             estimate,
+            estimate_low,
+            estimate_high,
+            estimate_cost_low,
+            estimate_cost,
+            estimate_cost_high,
             no_estimate,
             ack_timeout,
             timeout,
@@ -4049,6 +4090,14 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             default_category,
         } => {
             let retry = retry.as_deref().map(parse_retry).transpose()?;
+            let estimate_range = estimate_from_args(
+                estimate_low,
+                estimate,
+                estimate_high,
+                estimate_cost_low,
+                estimate_cost,
+                estimate_cost_high,
+            )?;
             let patch = TaskPatch {
                 title,
                 instructions,
@@ -4060,7 +4109,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     .map(|text| parse_schedule(text, timezone.as_deref()))
                     .transpose()?,
                 clear_schedule: no_schedule,
-                estimate_seconds: estimate,
+                estimate_seconds: estimate_range.as_ref().map(|value| value.time.expected),
+                estimate: estimate_range,
                 clear_estimate: no_estimate,
                 ack_timeout_seconds: ack_timeout,
                 timeout_seconds: timeout,
@@ -4543,6 +4593,44 @@ fn parse_retry(text: &str) -> Result<RetryPolicy> {
     Ok(RetryPolicy::Backoff { max_attempts, backoff_seconds })
 }
 
+fn estimate_from_args(
+    low: Option<u64>,
+    expected: Option<u64>,
+    high: Option<u64>,
+    cost_low: Option<f64>,
+    cost_expected: Option<f64>,
+    cost_high: Option<f64>,
+) -> Result<Option<factory_core::task::Estimate>> {
+    let any_time = low.is_some() || expected.is_some() || high.is_some();
+    let any_cost = cost_low.is_some() || cost_expected.is_some() || cost_high.is_some();
+    if any_cost && !any_time {
+        return Err(anyhow!("a cost estimate needs a time estimate too"));
+    }
+    if !any_time {
+        return Ok(None);
+    }
+    let expected = expected.ok_or_else(|| anyhow!("--estimate is required as the expected duration"))?;
+    let time = match (low, high) {
+        (None, None) => factory_core::task::TimeEstimateRange::point(expected),
+        (Some(low), Some(high)) => factory_core::task::TimeEstimateRange { low, expected, high },
+        _ => return Err(anyhow!("--estimate-low and --estimate-high must be given together")),
+    };
+    let cost = match (cost_low, cost_expected, cost_high) {
+        (None, None, None) => None,
+        (Some(low), Some(expected), Some(high)) => {
+            Some(factory_core::task::CostEstimateRange { low, expected, high })
+        }
+        _ => {
+            return Err(anyhow!(
+                "--estimate-cost-low, --estimate-cost and --estimate-cost-high must all be given together"
+            ))
+        }
+    };
+    let estimate = factory_core::task::Estimate { time, cost };
+    estimate.validate().map_err(anyhow::Error::msg)?;
+    Ok(Some(estimate))
+}
+
 /// What `--status` takes on `task list`: a stored status, or one of the two
 /// a person asks for that are not one (`#122`) -- `failed`, a task blocked
 /// by a failed run, and `closed`, done or cancelled.
@@ -4931,6 +5019,29 @@ fn run_detail(r: &Run) -> String {
     if let Some(session) = &r.session {
         s.push_str(&format!("  session    {} {}\n", session.runtime, session.handle));
     }
+    if let Some(provider) = &r.provider_account {
+        s.push_str(&format!("  provider   {provider}\n"));
+    }
+    if let Some(estimate) = &r.original_estimate {
+        s.push_str(&format!(
+            "  estimated  {}s / {}s / {}s",
+            estimate.time.low, estimate.time.expected, estimate.time.high
+        ));
+        if let Some(cost) = &estimate.cost {
+            s.push_str(&format!("; {} / {} / {}", fmt_usd(cost.low), fmt_usd(cost.expected), fmt_usd(cost.high)));
+        }
+        s.push('\n');
+    }
+    if let Some(estimate) = &r.re_estimate {
+        if let Some(time) = &estimate.time {
+            s.push_str(&format!(
+                "  re-estimate {}s / {}s / {}s ({} samples)\n",
+                time.low, time.expected, time.high, estimate.sample_count
+            ));
+        } else if let Some(reason) = &estimate.reason {
+            s.push_str(&format!("  re-estimate unavailable -- {reason}\n"));
+        }
+    }
     if let Some(since) = r.blocked_since {
         let source = r.blocked_source.map(|s| s.as_str()).unwrap_or("?");
         s.push_str(&format!("  blocked    since {} ({source})\n", since.to_rfc3339()));
@@ -5016,6 +5127,21 @@ fn usage_block(u: &factory_core::usage::RunUsage) -> String {
     if !u.models.is_empty() {
         s.push_str(&format!("\n  model      {}", u.models.join(", ")));
     }
+    if let Some(seconds) = u.elapsed_seconds {
+        s.push_str(&format!("\n  elapsed    {seconds:.1}s"));
+    }
+    if let Some(seconds) = u.active_seconds {
+        s.push_str(&format!("\n  active     {seconds:.1}s"));
+    }
+    for share in &u.plan_share {
+        s.push_str(&format!(
+            "\n  plan share {:.2}% of {}m {} ({:?})",
+            share.used_percent, share.window_minutes, share.provider_account, share.attribution
+        ));
+    }
+    if let Some(reason) = &u.plan_share_unknown {
+        s.push_str(&format!("\n  plan share unknown -- {reason}"));
+    }
     s.push_str(&format!(
         "\n  sessions   {} harness session{}",
         u.sessions,
@@ -5040,6 +5166,30 @@ fn task_usage_text(u: &factory_core::usage::TaskUsage) -> String {
             fmt_tokens(u.total.tokens.total()),
             sum_usd(&u.total),
             unknown_suffix(&u.total)
+        ));
+    }
+    // The task's figures are sums over its runs, estimates included: say
+    // so, or a retry's second estimate reads as the task's own.
+    let over = if u.runs.len() == 1 { String::new() } else { format!(" over {} runs", u.runs.len()) };
+    if let Some(comparison) = &u.time_comparison {
+        s.push_str(&format!(
+            "  time       {} actual / {}s expected{over} ({})\n",
+            comparison
+                .actual
+                .map(|seconds| format!("{seconds}s"))
+                .unwrap_or_else(|| "unknown".into()),
+            comparison.expected,
+            comparison
+                .actual_over_expected
+                .map(|ratio| format!("{ratio:.2}x"))
+                .unwrap_or_else(|| "unknown".into())
+        ));
+    }
+    if let Some(comparison) = &u.cost_comparison {
+        s.push_str(&format!(
+            "  cost       {} actual / {} expected{over}\n",
+            comparison.actual.map(fmt_usd).unwrap_or_else(|| "unknown".into()),
+            fmt_usd(comparison.expected)
         ));
     }
     for r in &u.runs {
@@ -5262,8 +5412,15 @@ fn detail(t: &Task) -> String {
         s.push_str(&line);
         s.push('\n');
     }
-    if let Some(v) = t.estimate_seconds {
-        s.push_str(&format!("  estimate   {v}s\n"));
+    if let Some(estimate) = t.effective_estimate() {
+        s.push_str(&format!(
+            "  estimate   {}s / {}s / {}s",
+            estimate.time.low, estimate.time.expected, estimate.time.high
+        ));
+        if let Some(cost) = estimate.cost {
+            s.push_str(&format!("; {} / {} / {}", fmt_usd(cost.low), fmt_usd(cost.expected), fmt_usd(cost.high)));
+        }
+        s.push('\n');
     }
     if t.worktree {
         s.push_str("  worktree   yes, a fresh one before each run\n");
@@ -5741,6 +5898,28 @@ mod tests {
     }
 
     #[test]
+    fn task_estimate_shorthand_and_ranges_parse_without_ambiguity() {
+        let point = estimate_from_args(None, Some(900), None, None, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(point.time, factory_core::task::TimeEstimateRange::point(900));
+        let range = estimate_from_args(
+            Some(600),
+            Some(900),
+            Some(1800),
+            Some(1.0),
+            Some(2.0),
+            Some(4.0),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(range.time.low, 600);
+        assert_eq!(range.cost.unwrap().expected, 2.0);
+        assert!(estimate_from_args(Some(600), Some(900), None, None, None, None).is_err());
+        assert!(estimate_from_args(None, None, None, Some(1.0), Some(2.0), Some(3.0)).is_err());
+    }
+
+    #[test]
     fn infra_prints_unreadable_facts_as_dashes_and_lists_the_unassigned() {
         use factory_core::config::{ProviderKind, ProviderVia};
         use factory_core::protocol::*;
@@ -5772,6 +5951,9 @@ mod tests {
                     harness: "opencode".into(),
                     via: ProviderVia::Agent,
                 }],
+                windows: Vec::new(),
+                active_runs: Vec::new(),
+                usage_unknown: None,
             }],
             unassigned: vec![UnassignedAgent { scope: "demo".into(), agent: "helper".into(), harness: "codex".into() }],
             harnesses: vec![factory_core::harness::HarnessRow {

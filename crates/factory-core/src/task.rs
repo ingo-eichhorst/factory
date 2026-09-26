@@ -2,6 +2,59 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeEstimateRange {
+    pub low: u64,
+    pub expected: u64,
+    pub high: u64,
+}
+
+impl TimeEstimateRange {
+    pub fn point(seconds: u64) -> Self { Self { low: seconds, expected: seconds, high: seconds } }
+    pub fn validate(self) -> std::result::Result<(), String> {
+        if self.low == 0 { return Err("a task estimate must be at least one second".into()); }
+        if self.low > self.expected || self.expected > self.high {
+            return Err("estimate time must be ordered low <= expected <= high".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CostEstimateRange {
+    pub low: f64,
+    pub expected: f64,
+    pub high: f64,
+}
+
+impl CostEstimateRange {
+    pub fn validate(self) -> std::result::Result<(), String> {
+        if !self.low.is_finite() || !self.expected.is_finite() || !self.high.is_finite() {
+            return Err("estimate cost values must be finite".into());
+        }
+        if self.low < 0.0 || self.low > self.expected || self.expected > self.high {
+            return Err("estimate cost must be ordered 0 <= low <= expected <= high".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Estimate {
+    pub time: TimeEstimateRange,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CostEstimateRange>,
+}
+
+impl Estimate {
+    pub fn point(seconds: u64) -> Self { Self { time: TimeEstimateRange::point(seconds), cost: None } }
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        self.time.validate()?;
+        if let Some(cost) = self.cost { cost.validate()?; }
+        Ok(())
+    }
+}
+
 /// Where a task is in its life. The agent moves it through `Running` ->
 /// `Done`/`Failed`/`Blocked` by calling back; nothing infers completion from a
 /// terminal's appearance.
@@ -367,6 +420,8 @@ pub struct Task {
     /// never stops a run or changes its status (`timeout_seconds` does that).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<Estimate>,
     /// The most recent run's outcome, mirrored so a list does not have to read
     /// every run. `Run` is where it actually lives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -476,6 +531,10 @@ pub struct Task {
 }
 
 impl Task {
+    pub fn effective_estimate(&self) -> Option<Estimate> {
+        self.estimate.clone().or_else(|| self.estimate_seconds.map(Estimate::point))
+    }
+
     /// `Blocked` because its newest run failed, rather than because an
     /// agent is waiting on a question (`#122`). No run is active: there is
     /// nobody to answer, only a failure to look at, run again, or close.
@@ -544,6 +603,8 @@ pub struct NewTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<Estimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ack_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
@@ -585,6 +646,8 @@ pub struct TaskPatch {
     pub schedule: Option<Schedule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<Estimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -884,5 +947,22 @@ mod tests {
         let clear: TaskPatch = serde_json::from_str(r#"{"clear_estimate":true}"#).unwrap();
         assert_eq!(clear.estimate_seconds, None);
         assert!(clear.clear_estimate);
+    }
+
+    #[test]
+    fn estimate_ranges_validate_order_and_old_point_estimates_remain_effective() {
+        let estimate = Estimate {
+            time: TimeEstimateRange { low: 600, expected: 900, high: 1800 },
+            cost: Some(CostEstimateRange { low: 1.0, expected: 2.0, high: 4.0 }),
+        };
+        assert!(estimate.validate().is_ok());
+        assert!(Estimate { time: TimeEstimateRange { low: 901, expected: 900, high: 1800 }, cost: None }.validate().is_err());
+        assert!(Estimate { time: TimeEstimateRange::point(900), cost: Some(CostEstimateRange { low: 2.0, expected: 1.0, high: 3.0 }) }.validate().is_err());
+        let task: Task = serde_json::from_str(r#"{
+            "id":"t", "title":"old", "instructions":"", "scope":"demo",
+            "agent":"builder", "runtime":"herdr", "status":"pending", "estimate_seconds":900,
+            "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-01T00:00:00Z"
+        }"#).unwrap();
+        assert_eq!(task.effective_estimate(), Some(Estimate::point(900)));
     }
 }

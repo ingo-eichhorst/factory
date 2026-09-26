@@ -31,6 +31,7 @@ import {
   infraFailure,
   isEmptyProviders,
   kindBadge,
+  providerWindowView,
   sortHarnesses,
   visibleAgents,
 } from "./infra-model.js";
@@ -149,6 +150,17 @@ function providerCard(p) {
   const agents = shown.length
     ? agentGroups(shown)
     : `<div class="idle">${all.length ? "No agent in the selected scope uses it." : "No agent uses it yet."}</div>`;
+  const windows = (p.windows || []).map(window => {
+    const view = providerWindowView(window);
+    const meter = view.percent === null
+      ? `<div class="infra-window-empty">unknown</div>`
+      : `<div class="infra-meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${view.percent}" aria-label="${esc(view.name)} ${view.percent}% used"><div class="infra-meter-fill" data-level="${view.percent >= 90 ? "full" : (view.percent >= 75 ? "warn" : "ok")}" style="width:${view.percent}%"></div></div>`;
+    return `<div class="infra-window" data-tone="${view.tone}"><div><strong>${esc(view.name)}</strong><span class="sub">${esc(view.detail)}</span></div>${meter}</div>`;
+  }).join("");
+  const usage = windows || (p.usage_unknown ? `<div class="infra-window" data-tone="unknown"><span class="sub">Usage unknown — ${esc(p.usage_unknown)}</span></div>` : "");
+  const active = (p.active_runs || []).length
+    ? `<div class="infra-active"><span class="sub">Active now</span><ul>${p.active_runs.map(r => `<li>${esc(r.scope)}/${esc(r.agent)}${r.instance ? ` · <code>${esc(r.instance)}</code>` : ""}</li>`).join("")}</ul></div>`
+    : "";
   return `<article class="infra-card infra-provider" data-kind="${esc(p.kind)}">
     <header class="infra-card-head">
       <h3>${esc(p.name)}</h3>
@@ -163,6 +175,8 @@ function providerCard(p) {
         : ""}
       <div class="infra-fact"><dt>Agents</dt><dd class="sub">${all.length}</dd></div>
     </dl>
+    ${usage}
+    ${active}
     <div class="infra-agents">${agents}</div>
   </article>`;
 }

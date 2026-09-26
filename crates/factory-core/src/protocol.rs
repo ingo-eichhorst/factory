@@ -1942,6 +1942,54 @@ pub struct ProviderRow {
     pub plan: Option<String>,
     pub env: Option<String>,
     pub agents: Vec<ProviderAgent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<ProviderWindow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_runs: Vec<ProviderRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_unknown: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderWindow {
+    pub window_minutes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<f64>,
+    pub resets_at: String,
+    /// When the runtime sampled the reading (`SessionUsage::sampled_at`).
+    pub sampled_at: chrono::DateTime<chrono::Utc>,
+    /// The runtime did not say when it sampled, so `sampled_at` is when
+    /// Factory asked -- and the reading is never called fresh.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sample_time_estimated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_quality: Option<String>,
+    /// How the change that ended at this reading was charged: to one run
+    /// (`direct`) or split across several (`apportioned`). Fixed by the
+    /// interval the reading closed, not by who is running now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<crate::usage::PlanShareAttribution>,
+    /// Why that change could not be attributed, when it could not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_unknown: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trend_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderRun {
+    pub run_id: String,
+    pub task_id: String,
+    pub scope: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2649,6 +2697,9 @@ mod tests {
                     harness: "claude-code".into(),
                     via: ProviderVia::Harness,
                 }],
+                windows: Vec::new(),
+                active_runs: Vec::new(),
+                usage_unknown: None,
             }],
             unassigned: vec![UnassignedAgent {
                 scope: "model-lab".into(),
@@ -2693,6 +2744,9 @@ mod tests {
                 plan: None,
                 env: Some("OPENROUTER_API_KEY".into()),
                 agents: vec![],
+                windows: Vec::new(),
+                active_runs: Vec::new(),
+                usage_unknown: None,
             }],
             unassigned: vec![],
             harnesses: vec![],
