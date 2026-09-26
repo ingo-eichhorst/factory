@@ -28,6 +28,8 @@ import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from
 import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
 import { refreshBackup, renderBackup, wireBackup } from "./backup.js";
 import { isBackupEvent } from "./backup-model.js";
+import { refreshEnvironments, wireEnvironments } from "./environments.js";
+import { isEnvironmentsEvent } from "./environments-model.js";
 import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
 import { loadGoals, reloadGoals, wireGoals } from "./goals.js";
 import { loadQuality, reloadQuality, wireQuality } from "./quality.js";
@@ -50,7 +52,7 @@ let activityStarted = false;
 const VIEWS = {
   dashboard: { onShow: loadDashboard },
   // The daemon's attention list, every scope -- the same exceptions the
-  // Operations tab shows per scope (`#106`), so there is one list, filtered
+  // Line tab shows per scope (`#106`), so there is one list, filtered
   // two ways, and not two derivations that can disagree.
   inbox: { onShow: loadInbox },
   // No poll: a policy read is cheap (catalogues on disk, the knowledge index,
@@ -90,7 +92,10 @@ const VIEWS = {
   // No poll: every fact the report reads changes with a task, run, journal
   // or agent event, and `onEvent` refetches on those (`scheduleOpsRefresh`).
   // `onHide` is where "since you last looked" is written down.
-  operations: { onShow: showOperations, onHide: hideOperations },
+  // The L4 Line tab (`#106`): process operations, how Factory's own work is
+  // running. Its view key was `operations` until `#185` gave that word to
+  // the running systems (`environments` below); old links redirect.
+  line: { onShow: showOperations, onHide: hideOperations },
   // No poll either: an item changes only through a task event, and
   // `onEvent` refetches on the ones that touch intake (`touchesIntake`).
   intake: { onShow: showIntake, onHide: hideIntake },
@@ -130,6 +135,11 @@ const VIEWS = {
     tail: { write: knowledgeTail, read: readKnowledgeTail },
   },
   infrastructure: { onShow: startInfrastructure, onHide: stopAgentPoll },
+  // L1 Operations (`#185`): the environments the systems Factory builds run
+  // in. Polled -- a health check's answer arrives as a sample, not an event
+  // -- and refetched on `deployment_updated` and
+  // `environment_status_changed` (`onEvent` below).
+  environments: { onShow: startEnvironments, onHide: stopAgentPoll },
   // Polled like Infrastructure -- the destination is a disk that can be
   // unplugged, which fires no event -- and refetched on every `backup_*`
   // event (`onEvent` below), which the daemon's own job publishes too.
@@ -160,6 +170,10 @@ setRouter({
   // equivalent peer page back into the hash.
   redirects: {
     agents: legacyAgentRoute,
+    // `#185`: the L4 tab that was Operations is Line now, and "Operations"
+    // means the running systems. A link to the old tab lands where it
+    // always did.
+    operations: (tail) => ({ page: "line", tail }),
   },
   tailOf: () => {
     const tail = viewTail(state.tab);
@@ -215,13 +229,13 @@ const LEVEL_VIEWS = {
   dir: ["goals", "policy", "scenarios"],
   // The work first, then how it is running. Intake sits beside Tasks: it
   // is the queue in front of them (`#119`).
-  proc: ["tasks", "intake", "workflows", "operations"],
+  proc: ["tasks", "intake", "workflows", "line"],
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets", "dependencies"],
   // Quality closes the row: benchmarks and knowledge are how the work gets
   // better, quality attributes whether it has got good enough.
   imp: ["benchmarks", "knowledge", "quality"],
-  infra: ["infrastructure", "backup"],
+  infra: ["infrastructure", "environments", "backup"],
 };
 
 /// The live level that claims `tab`, for backfilling `state.level` before any
@@ -300,7 +314,9 @@ function rerender(route) {
   if (state.tab === "inbox") { renderInbox(); return; }
   // The daemon narrows the report to the selected subtree (`operations.js`'s
   // header), so a rail change refetches.
-  if (state.tab === "operations") { loadOperations(); return; }
+  if (state.tab === "line") { loadOperations(); return; }
+  // And the environments report (`#185`), narrowed the same way.
+  if (state.tab === "environments") { refreshEnvironments(); return; }
   // So does the intake board: the daemon narrows it to the subtree.
   if (state.tab === "intake") { loadIntake(); return; }
   // Everything already in the tail is still there; a scope change only
@@ -511,6 +527,12 @@ function startInfrastructure() {
   state.agentPoll = setInterval(refreshInfrastructure, 30000);
 }
 
+function startEnvironments() {
+  stopAgentPoll();
+  refreshEnvironments();
+  state.agentPoll = setInterval(refreshEnvironments, 30000);
+}
+
 function startBackup() {
   stopAgentPoll();
   refreshBackup();
@@ -590,6 +612,7 @@ async function boot() {
   $("knowledge-refresh").onclick = () => loadKnowledge();
   $("infrastructure-refresh").onclick = () => refreshInfrastructure();
   wireBackup();
+  wireEnvironments();
   wireOccupancy();
   $("newTask").onclick = () => openCreate();
   wireDashboard();
@@ -739,6 +762,8 @@ function onEvent(ev) {
   if (ev.type === "goals_changed" && state.tab === "goals") reloadGoals();
   // A backup taken (by a person or the schedule), failed or verified.
   if (isBackupEvent(ev) && state.tab === "backup") refreshBackup();
+  // A deployment began or ended, or an environment's status changed.
+  if (isEnvironmentsEvent(ev) && state.tab === "environments") refreshEnvironments();
   // A scenario's own policy delta and goal-scenario probabilities are read
   // off the same live evidence and check-ins those two events already name;
   // `reloadScenarios` is a full reload (the forecast itself is a Monte Carlo
@@ -779,7 +804,7 @@ function onEvent(ev) {
 }
 
 /// One refetch of `/api/operations` for a burst of events, at most one per
-/// `OPS_REFRESH_MS`, and none at all unless the Operations tab or the Inbox
+/// `OPS_REFRESH_MS`, and none at all unless the Line tab or the Inbox
 /// is what is on screen in a browser tab someone can see. The unscoped read
 /// walks sixty days of runs and the journal of every open one -- not free --
 /// and `task_entry` fires once per line an agent writes. The first event of
@@ -791,11 +816,11 @@ let opsTimer = null;
 
 function scheduleOpsRefresh() {
   if (opsTimer) return;
-  if (state.tab !== "operations" && state.tab !== "inbox") return;
+  if (state.tab !== "line" && state.tab !== "inbox") return;
   opsTimer = setTimeout(() => {
     opsTimer = null;
     if (document.hidden) return;
-    if (state.tab === "operations") loadOperations();
+    if (state.tab === "line") loadOperations();
     else if (state.tab === "inbox") loadInbox();
   }, OPS_REFRESH_MS);
 }

@@ -24,7 +24,7 @@ test("Intake is L4's second tab, beside Tasks, and is served", () => {
   assert.match(page, /id="tab-tasks"[^>]*>Tasks<\/button>\s*<button id="tab-intake"[^>]*>Intake<\/button>/);
   assert.match(page, /id="view-intake"/);
   assert.match(page, /id="intake-add"/);
-  assert.match(wiring, /proc: \["tasks", "intake", "workflows", "operations"\]/);
+  assert.match(wiring, /proc: \["tasks", "intake", "workflows", "line"\]/);
   assert.match(wiring, /intake: \{ onShow: showIntake, onHide: hideIntake \}/);
   assert.match(wiring, /if \(touchesIntake\(ev\)\) refreshIntake\(\);/);
   assert.match(served, /"js\/intake\.js"/);

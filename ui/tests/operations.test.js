@@ -22,12 +22,17 @@ const REPORT = JSON.parse(readFileSync(new URL("./fixtures/operations-report.jso
 
 // ------------------------------------------------------------- the frame
 
-test("Operations is L4's last tab, after Tasks, Intake and Workflows, and is served", () => {
-  assert.match(page, /id="tab-workflows"[^>]*>Workflows<\/button>\s*<button id="tab-operations"[^>]*>Operations<\/button>/);
-  assert.match(page, /id="view-operations"/);
-  assert.match(page, /<span class="lv-sub">Tasks, intake, workflows, operations<\/span>/);
-  assert.match(wiring, /proc: \["tasks", "intake", "workflows", "operations"\]/);
-  assert.match(wiring, /operations: \{ onShow: showOperations, onHide: hideOperations \}/);
+test("Line is L4's last tab, after Tasks, Intake and Workflows, and is served", () => {
+  // `#185` renamed it from Operations, which now means the running systems.
+  assert.match(page, /id="tab-workflows"[^>]*>Workflows<\/button>\s*<button id="tab-line"[^>]*>Line<\/button>/);
+  assert.match(page, /id="view-line"/);
+  assert.match(page, /<div id="view-line" hidden>\s*<div class="bar">\s*<h2>Line<\/h2>/);
+  assert.doesNotMatch(page, /id="tab-operations"/);
+  assert.match(page, /<span class="lv-sub">Tasks, intake, workflows, line<\/span>/);
+  assert.match(wiring, /proc: \["tasks", "intake", "workflows", "line"\]/);
+  assert.match(wiring, /line: \{ onShow: showOperations, onHide: hideOperations \}/);
+  // An old link to the tab lands on it under its new name.
+  assert.match(wiring, /operations: \(tail\) => \(\{ page: "line", tail \}\)/);
   assert.match(served, /"js\/operations\.js"/);
   assert.match(served, /"js\/operations-model\.js"/);
 });
@@ -40,7 +45,7 @@ test("no browser dialogs: every action is confirmed in the app's own modal", () 
 
 test("live updates are events, coalesced, and only for a tab someone is looking at", () => {
   assert.match(wiring, /const OPS_REFRESH_MS = 1500;/);
-  assert.match(wiring, /if \(state\.tab !== "operations" && state\.tab !== "inbox"\) return;/);
+  assert.match(wiring, /if \(state\.tab !== "line" && state\.tab !== "inbox"\) return;/);
   assert.match(wiring, /if \(document\.hidden\) return;/);
   assert.match(wiring, /ev\.type !== "agent_activity"/);
   assert.doesNotMatch(view, /setInterval/, "no poll");

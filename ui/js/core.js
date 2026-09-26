@@ -45,6 +45,9 @@ export const state = {
   backup: null,           // last /api/backup answer's report -- see backup::BackupReport
   backupError: null,
   backupUnavailable: false, // the daemon predates the endpoint (a bare 404), not a fault
+  environments: null,     // last /api/environments answer's report -- see environments::EnvironmentsReport
+  environmentsError: null,
+  environmentsUnavailable: false, // the daemon predates the endpoint (a bare 404), not a fault
   benchmarks: null,       // last /api/benchmarks answer: { configurations }
   benchmarksError: null,
   knowledge: null,        // last /api/knowledge answer: { root, present, notes, gaps, pages, findings }
