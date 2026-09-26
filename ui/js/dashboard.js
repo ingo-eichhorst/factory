@@ -68,7 +68,7 @@
 import { $, esc, api, state } from "./core.js";
 import { inScope, routeHref, scopeLabel } from "./scopes.js";
 import { fmtAge, inboxItems } from "./operations-model.js";
-import { fmtUsd, taskUsageLine } from "./usage-model.js";
+import { taskUsageLine, costFigure } from "./usage-model.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 import { hasFailed } from "./task-model.js";
@@ -355,8 +355,8 @@ const VIEW_RENDERERS = {
   // #162 (phase 3): the rest of #150's view catalogue, each off the one
   // shared read `loadTileData` fetched for it -- see that function's own
   // doc comment for which endpoint backs which id.
-  agent_hours_by_scope: () => agentHoursTile("Agent hours by scope", agentHoursByScope(tileOccupancy), "scope"),
-  agent_hours_by_agent: () => agentHoursTile("Agent hours by agent", agentHoursByAgent(tileOccupancy), "agent"),
+  agent_hours_by_scope: () => agentHoursTile("Agent hours by scope", agentHoursByScope(tileOccupancy)),
+  agent_hours_by_agent: () => agentHoursTile("Agent hours by agent", agentHoursByAgent(tileOccupancy)),
   occupancy_strip: () => occupancyStripTile(),
   inbox: () => inboxTile(),
   compliance: () => complianceTile(),
@@ -758,10 +758,16 @@ function dcard(title, qualifier, body) {
 /// draws) -- reused here rather than reimplemented, since a labelled bar
 /// with a trailing figure is exactly what every new view tile below needs.
 /// `note`, if given, is raw HTML appended after the figure -- the blocked-
-/// hours aside, or nothing.
+/// hours aside, or nothing. `pct` of `null` draws the empty groove with no
+/// fill at all, never a `0%`-wide one: a real zero and "there is nothing
+/// here to compare" are different facts, and a bar filled to nothing reads
+/// as the former (`costTile`'s own reason for passing `null`).
 function barRow(label, pct, figure, note) {
+  const track = pct === null
+    ? `<span class="track"></span>`
+    : `<span class="track"><i style="width:${Math.max(0, Math.min(100, pct)).toFixed(1)}%;background:var(--run)"></i></span>`;
   return `<div class="stn"><span class="nm">${esc(label)}</span>
-    <span class="track"><i style="width:${Math.max(0, Math.min(100, pct)).toFixed(1)}%;background:var(--run)"></i></span>
+    ${track}
     <span class="c">${esc(figure)}${note || ""}</span></div>`;
 }
 
@@ -807,20 +813,22 @@ function occupancyWindowNote(occ) {
 /// the one shared `/api/occupancy` read, `tileOccupancy`) -- busy hours as
 /// the bar, blocked hours named beside the figure, never subtracted from
 /// it, the same rule the occupancy chart itself keeps for the same numbers.
-/// `labelKind` picks `row.label` (the scope) or `row.agent`; sorted busiest
+/// `row.label` is already the right display name either way: a scope's own
+/// name from `agentHoursByScope`, or `agentHoursByAgent`'s own disambiguated
+/// `"<agent> · <scope>"` for a name that is not unique on this tile (`shell`
+/// turns up once per scope) -- this never has to know which. Sorted busiest
 /// first already, capped here at ten rows so the card stays a card.
-function agentHoursTile(title, rows, labelKind) {
+function agentHoursTile(title, rows) {
   if (tileOccupancy === undefined) return dcard(title, "from run blocks", `<div class="empty">loading…</div>`);
   if (tileOccupancy === null) return dcard(title, "", `<div class="err">Occupancy is not available right now.</div>`);
   const qualifier = occupancyWindowNote(tileOccupancy);
   if (!rows.length) return dcard(title, qualifier, `<div class="empty">No agents in this window.</div>`);
   const max = Math.max(1, ...rows.map((r) => r.busyHours));
   const body = rows.slice(0, 10).map((r) => {
-    const label = labelKind === "agent" ? r.agent : r.label;
     const note = r.blockedHours > 0.05
       ? ` <span class="occ-wait" title="blocked time is part of the hours worked, shown beside them, never taken off">· ${r.blockedHours.toFixed(1)}h blocked</span>`
       : "";
-    return barRow(label, (r.busyHours / max) * 100, `${r.busyHours.toFixed(1)}h`, note);
+    return barRow(r.label, (r.busyHours / max) * 100, `${r.busyHours.toFixed(1)}h`, note);
   }).join("");
   return dcard(title, qualifier, body);
 }
@@ -828,14 +836,16 @@ function agentHoursTile(title, rows, labelKind) {
 /// `occupancy_strip`: a compact per-agent utilisation strip -- one bar row
 /// per agent, `occupancyStripRows`' own `pct` of the window each covered,
 /// no blocks or spans underneath it the way the full occupancy chart draws.
-/// Capped at fourteen rows, busiest first.
+/// `r.label` is `occupancyStripRows`' own disambiguated name (`"<agent> ·
+/// <scope>"` when the bare name is not unique on this tile -- see
+/// `agentHoursTile`'s own note). Capped at fourteen rows, busiest first.
 function occupancyStripTile() {
   if (tileOccupancy === undefined) return dcard("Occupancy strip", "", `<div class="empty">loading…</div>`);
   if (tileOccupancy === null) return dcard("Occupancy strip", "", `<div class="err">Occupancy is not available right now.</div>`);
   const rows = occupancyStripRows(tileOccupancy, Date.now());
   const qualifier = `share busy · ${occupancyWindowNote(tileOccupancy)}`;
   if (!rows.length) return dcard("Occupancy strip", qualifier, `<div class="empty">No agents in this window.</div>`);
-  const body = rows.slice(0, 14).map((r) => barRow(r.agent, r.pct, `${r.pct}%`)).join("");
+  const body = rows.slice(0, 14).map((r) => barRow(r.label, r.pct, `${r.pct}%`)).join("");
   return dcard("Occupancy strip", qualifier, body);
 }
 
@@ -857,17 +867,25 @@ function complianceTile() {
 /// set from the dashboard's own window (`loadTileCosts`) -- the total line
 /// reuses `usage-model.js`'s own `taskUsageLine` (a `CostReport.total` is
 /// shaped exactly like the task-usage total it was written for), then the
-/// most-expensive rows (`topCostRows`), each with `fmtUsd`, the same
-/// formatting the task modal's usage block uses. The qualifier reads the
-/// answer's own `from`/`to`, not the dashboard's window key: an honest
-/// figure for whatever span the daemon actually answered, the same reason
-/// `occupancyWindowNote` reads `tileOccupancy`'s own bounds.
+/// most-expensive rows (`topCostRows`), each through `costFigure` (also
+/// `usage-model.js`): a row whose runs are all usage-unknown reads
+/// "unknown" with no bar at all, never a measured-looking `$0.00`; one with
+/// some unmeasured, uncosted or still-partial runs reads a `≥`-prefixed
+/// lower bound. The qualifier reads the answer's own `from`/`to`, not the
+/// dashboard's window key: an honest figure for whatever span the daemon
+/// actually answered, the same reason `occupancyWindowNote` reads
+/// `tileOccupancy`'s own bounds.
 function costTile() {
   if (tileCosts === undefined) return dcard("Cost", "", `<div class="empty">loading…</div>`);
   if (tileCosts === null) return dcard("Cost", "", `<div class="err">Costs are not available right now.</div>`);
   const line = taskUsageLine(tileCosts.total) || "No runs in this window.";
+  const total = tileCosts.total.cost_usd || 0;
   const rows = topCostRows(tileCosts, 5)
-    .map((r) => barRow(r.label || r.key, tileCosts.total.cost_usd ? (r.cost_usd / tileCosts.total.cost_usd) * 100 : 0, fmtUsd(r.cost_usd)))
+    .map((r) => {
+      const { text, hasCost } = costFigure(r);
+      const pct = hasCost && total ? (r.cost_usd / total) * 100 : null;
+      return barRow(r.label || r.key, pct, text);
+    })
     .join("");
   const days = windowDays(tileCosts.from, tileCosts.to);
   const qualifier = `API-equivalent USD · by scope${days === null ? "" : ` · trailing ${days} day${days === 1 ? "" : "s"}`}`;

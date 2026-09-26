@@ -196,6 +196,51 @@ test("agentHoursByAgent keys by scope/agent and never confuses same-named agents
   assert.deepEqual(rows.map((r) => r.key), ["child/carol", "root/alice", "root/bob"]);
   assert.equal(rows[0].busyHours, 9);
   assert.equal(rows.find((r) => r.key === "root/alice").blockedHours, 1);
+  // Every agent name in OCC is unique across scopes, so the display label is
+  // the bare name -- no scope tacked on for nothing to disambiguate.
+  assert.deepEqual(rows.map((r) => r.label).sort(), ["alice", "bob", "carol"]);
+});
+
+// The shape a live daemon actually sends: `shell` (the built-in agent) has
+// a row in every scope, so the same agent name turns up under several
+// `scopes[].rows[]` -- exactly what QA on #189 found (`shell` x3). Rows
+// under one name must stay distinct, never merged, and their display label
+// must say which scope, never leave the ambiguity on screen.
+const OCC_SHARED_AGENT_NAME = {
+  now: "2026-09-26T00:00:00Z",
+  from: "2026-09-12T00:00:00Z",
+  to: "2026-09-26T00:00:00Z",
+  scopes: [
+    { name: "root", path: "root", rows: [{ agent: "shell", busy_seconds: 3600, blocked_seconds: 0 }] },
+    { name: "child", path: "root/child", rows: [{ agent: "shell", busy_seconds: 1800, blocked_seconds: 0 }] },
+    { name: "other", path: "other", rows: [{ agent: "carol", busy_seconds: 900, blocked_seconds: 0 }] },
+  ],
+};
+
+test("agentHoursByAgent never merges two scopes' rows for the same agent name, and labels each with its own scope once the name is ambiguous", () => {
+  state.scope = null;
+  state.scopes = [{ name: "root", path: "root" }, { name: "child", path: "root/child" }, { name: "other", path: "other" }];
+  const rows = agentHoursByAgent(OCC_SHARED_AGENT_NAME);
+  // Two distinct rows, not one merged "shell" row.
+  assert.deepEqual(rows.map((r) => r.key).sort(), ["child/shell", "other/carol", "root/shell"]);
+  assert.equal(rows.find((r) => r.key === "root/shell").busyHours, 1, "each scope's own hours, not summed together");
+  assert.equal(rows.find((r) => r.key === "child/shell").busyHours, 0.5);
+  // The ambiguous name carries its scope; the unique one (carol) does not.
+  assert.equal(rows.find((r) => r.key === "root/shell").label, "shell · root");
+  assert.equal(rows.find((r) => r.key === "child/shell").label, "shell · child");
+  assert.equal(rows.find((r) => r.key === "other/carol").label, "carol");
+});
+
+test("agentHoursByAgent's disambiguation is computed over the rows actually shown: scoping down to where the name is unique drops the qualifier", () => {
+  // "child" is a leaf under "root" (no descendants of its own), so
+  // selecting it narrows to exactly that one scope -- the same rule
+  // `agentHoursByScope narrows to the selected scope's own subtree` above
+  // already exercises.
+  state.scope = "child";
+  state.scopes = [{ name: "root", path: "root" }, { name: "child", path: "root/child" }, { name: "other", path: "other" }];
+  const rows = agentHoursByAgent(OCC_SHARED_AGENT_NAME);
+  assert.deepEqual(rows.map((r) => r.key), ["child/shell"]);
+  assert.equal(rows[0].label, "shell", "only one shell row is visible now, nothing to disambiguate");
 });
 
 test("agentHoursByScope/agentHoursByAgent read a missing or malformed occupancy answer as no rows, not a throw", () => {
@@ -222,6 +267,17 @@ test("occupancyStripRows clips the window to now, so an answer whose `to` is in 
   const alice = rows.find((r) => r.agent === "alice");
   // 5h busy over 7 elapsed days (604800s) rather than the full 14.
   assert.equal(alice.pct, Math.round((3600 * 5 / (7 * 86400)) * 100));
+});
+
+test("occupancyStripRows never merges two scopes' rows for the same agent name, and labels each with its own scope once the name is ambiguous", () => {
+  state.scope = null;
+  state.scopes = [{ name: "root", path: "root" }, { name: "child", path: "root/child" }, { name: "other", path: "other" }];
+  const nowMs = Date.parse("2026-09-26T00:00:00Z");
+  const rows = occupancyStripRows(OCC_SHARED_AGENT_NAME, nowMs);
+  assert.deepEqual(rows.map((r) => r.key).sort(), ["child/shell", "other/carol", "root/shell"]);
+  assert.equal(rows.find((r) => r.key === "root/shell").label, "shell · root");
+  assert.equal(rows.find((r) => r.key === "child/shell").label, "shell · child");
+  assert.equal(rows.find((r) => r.key === "other/carol").label, "carol", "unique names stay bare");
 });
 
 // ------------------------------------------------------------- compliance

@@ -158,9 +158,30 @@ export function agentHoursByScope(occ) {
   return rows;
 }
 
+/// A per-agent row's own display label: the bare agent name when it is the
+/// only row in `rows` carrying that name, `"<agent> · <scope>"` when it is
+/// not -- an occupancy answer's rows live under `scopes[].rows[]`, so the
+/// same agent name (`shell`, the built-in agent every scope gets) turns up
+/// once per scope, and two distinct scopes' rows must never read as one
+/// agent. Computed over exactly the rows being shown (already narrowed by
+/// `inScope`), so a scope filter that leaves only one of them behind drops
+/// the qualifier along with the ambiguity that needed it.
+function withAgentLabels(rows) {
+  const scopesByAgent = new Map();
+  for (const r of rows) {
+    if (!scopesByAgent.has(r.agent)) scopesByAgent.set(r.agent, new Set());
+    scopesByAgent.get(r.agent).add(r.scope);
+  }
+  return rows.map((r) => ({
+    ...r,
+    label: scopesByAgent.get(r.agent).size > 1 ? `${r.agent} · ${r.scope}` : r.agent,
+  }));
+}
+
 /// The same figures, one row per agent instead of per scope -- `key` is
 /// `scope/agent` since an agent's own name is only unique inside its scope
-/// (`usage.rs`'s own `CostGroupBy::Agent` keeps the same rule).
+/// (`usage.rs`'s own `CostGroupBy::Agent` keeps the same rule); `label` is
+/// `withAgentLabels`' own disambiguated display name.
 export function agentHoursByAgent(occ) {
   if (!occ || !Array.isArray(occ.scopes)) return [];
   const rows = [];
@@ -173,13 +194,14 @@ export function agentHoursByAgent(occ) {
     }
   }
   rows.sort((a, b) => b.busyHours - a.busyHours || a.key.localeCompare(b.key));
-  return rows;
+  return withAgentLabels(rows);
 }
 
 /// A compact per-agent utilisation strip: `pct` of the answer's own window
 /// (`occ.from` to the earlier of `occ.to`/`nowMs`) each agent's `busy_seconds`
 /// covers -- the same fraction `occupancy.js`'s own util column reads off a
-/// row, without the timeline underneath it. Busiest first.
+/// row, without the timeline underneath it. Busiest first; `label` is the
+/// same disambiguated name `agentHoursByAgent` gives a repeated agent.
 export function occupancyStripRows(occ, nowMs) {
   if (!occ || !Array.isArray(occ.scopes)) return [];
   const from = Date.parse(occ.from);
@@ -196,7 +218,7 @@ export function occupancyStripRows(occ, nowMs) {
     }
   }
   rows.sort((a, b) => b.pct - a.pct || a.key.localeCompare(b.key));
-  return rows;
+  return withAgentLabels(rows);
 }
 
 // ----------------------------------------------------------- compliance (#150)
