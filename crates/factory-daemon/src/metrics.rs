@@ -1258,7 +1258,7 @@ mod tests {
     async fn a_scope_includes_descendants_and_excludes_siblings_across_metric_families() {
         let (engine, database) = scoped_engine();
         let now = Utc::now();
-        timed_run(
+        let (parent_task, parent_run) = timed_run(
             &engine,
             &database,
             "parent done",
@@ -1269,7 +1269,23 @@ mod tests {
             Some(measured(2.0, 200)),
         )
         .await;
-        timed_run(
+        transition(
+            &engine,
+            &parent_task.id,
+            &parent_run.id,
+            "blocked",
+            now - chrono::Duration::minutes(165),
+        )
+        .await;
+        transition(
+            &engine,
+            &parent_task.id,
+            &parent_run.id,
+            "unblocked",
+            now - chrono::Duration::minutes(150),
+        )
+        .await;
+        let (child_task, child_run) = timed_run(
             &engine,
             &database,
             "child done",
@@ -1280,7 +1296,23 @@ mod tests {
             Some(measured(4.0, 400)),
         )
         .await;
-        timed_run(
+        transition(
+            &engine,
+            &child_task.id,
+            &child_run.id,
+            "blocked",
+            now - chrono::Duration::minutes(105),
+        )
+        .await;
+        transition(
+            &engine,
+            &child_task.id,
+            &child_run.id,
+            "unblocked",
+            now - chrono::Duration::minutes(75),
+        )
+        .await;
+        let (sibling_task, sibling_run) = timed_run(
             &engine,
             &database,
             "sibling failure",
@@ -1289,6 +1321,22 @@ mod tests {
             now - chrono::Duration::hours(2),
             Some(now - chrono::Duration::minutes(30)),
             Some(measured(90.0, 9_000)),
+        )
+        .await;
+        transition(
+            &engine,
+            &sibling_task.id,
+            &sibling_run.id,
+            "blocked",
+            now - chrono::Duration::minutes(90),
+        )
+        .await;
+        transition(
+            &engine,
+            &sibling_task.id,
+            &sibling_run.id,
+            "unblocked",
+            now - chrono::Duration::minutes(30),
         )
         .await;
 
@@ -1300,6 +1348,8 @@ mod tests {
             "compliance.cra",
             "open_controls.cra",
             "quality.reliability",
+            "agent_hours",
+            "blocked_hours",
         ]
         .into_iter()
         .map(|id| MetricId::new(id).unwrap())
@@ -1316,6 +1366,47 @@ mod tests {
         assert_eq!(metric(&scoped, "compliance.cra").value, Some(1.0));
         assert_eq!(metric(&scoped, "open_controls.cra").value, Some(0.0));
         assert_eq!(metric(&scoped, "quality.reliability").value, Some(1.0));
+        assert_eq!(metric(&scoped, "agent_hours").value, Some(2.0));
+        assert_eq!(metric(&scoped, "blocked_hours").value, Some(0.75));
+
+        let occupancy = engine
+            .occupancy(None, Some(now - chrono::Duration::days(1)), Some(now))
+            .await
+            .unwrap();
+        let subtree_rows = occupancy
+            .scopes
+            .iter()
+            .filter(|scope| matches!(scope.name.as_str(), "work" | "nested"))
+            .flat_map(|scope| &scope.rows);
+        let (subtree_busy, subtree_blocked) = subtree_rows
+            .fold((0, 0), |(busy, blocked), row| {
+                (busy + row.busy_seconds, blocked + row.blocked_seconds)
+            });
+        let side = occupancy
+            .scopes
+            .iter()
+            .find(|scope| scope.name == "side")
+            .unwrap();
+        assert_eq!(
+            metric(&scoped, "agent_hours").value,
+            Some(subtree_busy as f64 / 3600.0),
+            "scope hours match the work subtree's occupancy rows"
+        );
+        assert_eq!(
+            metric(&scoped, "blocked_hours").value,
+            Some(subtree_blocked as f64 / 3600.0),
+            "blocked hours match the work subtree's occupancy rows"
+        );
+        assert_eq!(
+            side.rows.iter().map(|row| row.busy_seconds).sum::<i64>() as f64 / 3600.0,
+            1.5,
+            "the excluded sibling has distinct busy time"
+        );
+        assert_eq!(
+            side.rows.iter().map(|row| row.blocked_seconds).sum::<i64>() as f64 / 3600.0,
+            1.0,
+            "the excluded sibling has distinct blocked time"
+        );
 
         let all = engine
             .metrics_for(&ids, now, None, Some(MetricsWindow::Day))
@@ -1331,6 +1422,8 @@ mod tests {
         assert!(metric(&all, "compliance.cra").value.unwrap() < 1.0);
         assert_eq!(metric(&all, "open_controls.cra").value, Some(1.0));
         assert!(metric(&all, "quality.reliability").value.unwrap() < 1.0);
+        assert_eq!(metric(&all, "agent_hours").value, Some(3.5));
+        assert_eq!(metric(&all, "blocked_hours").value, Some(1.75));
     }
 
     #[tokio::test]
