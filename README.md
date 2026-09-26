@@ -2154,7 +2154,7 @@ scope:
   dashboard:                    # replaces the inherited layout whole, here and below
     tiles:
       - { view: kpis, size: s }
-      - { metric: agent_hours, size: m }
+      - { metric: unit_cost, size: m }
 ```
 
 A tile is exactly one of `metric` (any registry `MetricId` -- see "Goals"
@@ -2182,9 +2182,10 @@ separate reset action, because the config file already is the reset.
 
 **Validation, at load**, in the same style an unknown role is refused: an
 unknown metric id (or a family named unbound, like bare `compliance` with
-no framework) is a config error naming the block and the tile
-(`scope "demo"'s dashboard.tiles[2].metric: "compliance" is not a known
-metric`); a tile naming both `metric` and `view`, or neither, the same way.
+no framework) is a config error naming the block and the tile (`invalid
+request: scope "demo" dashboard.tiles[2].metric "compliance" is not a
+known metric`); a tile naming both `metric` and `view`, or neither, the
+same way.
 A metric the registry knows but cannot compute yet is **not** an error --
 the tile is valid and shows its own reason, exactly as an unavailable
 metric already does elsewhere. `view` and `size` are closed enums, so an
@@ -2200,9 +2201,10 @@ with the file named, the same two mistakes `roles:` already guards against.
 `{ tiles: [...] | null, source: "default" | "root" | "<scope name>" }` --
 `tiles: null` means "use the built-in default", and `source` says which
 layer answered. `scope` left out resolves the instance root's own; an
-unknown scope name is refused (404 over HTTP), unlike a metric's own scope
-resolution, because a dashboard request names a place to show and a place
-that resolves to nothing has none to show. `GET /api/dashboard?scope=demo`
+unknown scope name is refused (404 over HTTP), unlike `roles_for`'s
+tolerant fallback to the built-in roles for a scope that has since gone --
+a dashboard request names a place to show, and a place that resolves to
+nothing has none to show. `GET /api/dashboard?scope=demo`
 or `factory dashboard --scope demo` read the same thing. No write or reset
 request exists yet -- editing the block by hand is the only way in, until
 the tile catalogue editor (phase 5) lands.

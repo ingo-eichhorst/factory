@@ -611,10 +611,11 @@ pub enum Request {
     /// instance root's own top-level `dashboard:`, or `None` for "use the
     /// built-in default" -- see `Config::dashboard_for_scope`. `scope`
     /// absent means the instance root itself. An unknown scope is refused
-    /// (`FactoryError::NoSuchScope`), unlike `Metrics`'s own scope
-    /// resolution elsewhere: a dashboard request names a place to show, and
-    /// a place that resolves to nothing has no dashboard to show, rather
-    /// than silently substituting the root's. Read-only.
+    /// (`FactoryError::NoSuchScope`), unlike `roles_for`'s tolerant fallback
+    /// to the built-in roles for a scope that has since gone: a dashboard
+    /// request names a place to show, and a place that resolves to nothing
+    /// has no dashboard to show, rather than silently substituting the
+    /// root's. Read-only.
     #[serde(rename = "dashboard")]
     Dashboard {
         #[serde(default)]
