@@ -4983,8 +4983,11 @@ fn task_usage_text(u: &factory_core::usage::TaskUsage) -> String {
     }
     if let Some(comparison) = &u.time_comparison {
         s.push_str(&format!(
-            "  time       {}s actual / {}s expected ({})\n",
-            comparison.actual.unwrap_or_default(),
+            "  time       {} actual / {}s expected ({})\n",
+            comparison
+                .actual
+                .map(|seconds| format!("{seconds}s"))
+                .unwrap_or_else(|| "unknown".into()),
             comparison.expected,
             comparison
                 .actual_over_expected

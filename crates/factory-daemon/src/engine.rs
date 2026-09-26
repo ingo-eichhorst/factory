@@ -175,6 +175,13 @@ pub struct Engine {
     /// them all back, write the derived `usage` -- so two snapshots landing
     /// together never leave the older sum on the run (`costs.rs`).
     pub(crate) usage_edit: tokio::sync::Mutex<()>,
+    /// Turn-ended reads begin in chronological order but runtime calls may
+    /// finish out of order. Keep their observation times until each call has
+    /// settled so only the earliest outstanding turn can journal the one
+    /// first-turn re-estimate (`costs.rs`).
+    pub(crate) turn_usage_pending: std::sync::Mutex<
+        std::collections::HashMap<String, std::collections::BTreeSet<chrono::DateTime<Utc>>>,
+    >,
     /// Task ids already enqueued for judgement, or currently being judged by
     /// the worker: the guard that keeps a report and a cancel racing each
     /// other (or a live enqueue racing recovery's own sweep) from queuing
@@ -313,6 +320,7 @@ impl Engine {
             backup_busy: tokio::sync::Mutex::new(()),
             bench_edit: tokio::sync::Mutex::new(()),
             usage_edit: tokio::sync::Mutex::new(()),
+            turn_usage_pending: Default::default(),
             bench_judging: Default::default(),
             bench_judge_tx,
             bench_judge_rx: std::sync::Mutex::new(Some(bench_judge_rx)),

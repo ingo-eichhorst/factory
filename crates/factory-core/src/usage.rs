@@ -716,11 +716,15 @@ fn cumulative_tokens(usage: &SessionUsage) -> Option<u64> {
 fn token_increment(snapshots: &[UsageSnapshot], from: DateTime<Utc>, to: DateTime<Utc>) -> Option<u64> {
     let before = snapshots
         .iter()
-        .filter(|s| s.at <= from)
+        // A weight is honest only when its readings cover this provider
+        // observation interval exactly. Reusing an older reading would also
+        // charge tokens consumed before `from` to this interval.
+        .filter(|s| s.at == from)
         .max_by_key(|s| s.at)
         // A run that began inside an account observation interval has no
-        // earlier reading. Its dispatch snapshot is its valid zero-growth
-        // baseline for the part of the interval in which it existed.
+        // reading at `from`. Its dispatch snapshot is the aligned baseline
+        // for the part of the interval in which it existed, provided it also
+        // has a reading at the interval end.
         .or_else(|| {
             snapshots
                 .iter()
@@ -731,7 +735,7 @@ fn token_increment(snapshots: &[UsageSnapshot], from: DateTime<Utc>, to: DateTim
         .and_then(cumulative_tokens)?;
     let after = snapshots
         .iter()
-        .filter(|s| s.at <= to)
+        .filter(|s| s.at == to)
         .max_by_key(|s| s.at)
         .and_then(|s| s.usage.as_ref())
         .and_then(cumulative_tokens)?;
@@ -824,7 +828,7 @@ pub fn allocate_plan_share(
                 });
                 continue;
             }
-            if delta <= f64::EPSILON || to.at <= from.at {
+            if to.at <= from.at {
                 continue;
             }
             let candidates: Vec<&crate::run::Run> = runs
@@ -835,6 +839,15 @@ pub fn allocate_plan_share(
                         && run.ended_at.map_or(true, |ended| ended > from.at)
                 })
                 .collect();
+            if delta <= f64::EPSILON {
+                // Two valid provider observations prove that every active
+                // consumer's share of this interval is zero. There is no
+                // positive share to emit, but this is measured evidence, not
+                // a missing baseline that should fall through to the generic
+                // unknown below.
+                resolved.extend(candidates.into_iter().map(|candidate| candidate.id.clone()));
+                continue;
+            }
             if candidates.is_empty() {
                 result.record_unknown(&to.run_id, PlanShareUnknown {
                     provider_account: Some(to.account.clone()), window_minutes: Some(to.minutes),
@@ -1597,7 +1610,7 @@ mod tests {
                 plan_snapshot("consumer", 10, 100, Some((300, "reset-a", 14.0))),
             ]),
             ("idle".into(), vec![plan_snapshot("idle", 0, 0, None), plan_snapshot("idle", 10, 0, None)]),
-            ("new".into(), vec![new_baseline]),
+            ("new".into(), vec![new_baseline, plan_snapshot("new", 10, 0, None)]),
         ]);
 
         let allocation = allocate_plan_share(&runs, &snapshots);
@@ -1610,6 +1623,58 @@ mod tests {
         assert!(!allocation.unknown.contains_key("new"));
         let allocated: f64 = allocation.shares.values().flatten().map(|share| share.used_percent).sum();
         assert!((allocated - 4.0).abs() < 1e-9, "the observed provider delta is preserved");
+    }
+
+    #[test]
+    fn staggered_candidate_readings_never_weight_a_later_provider_interval() {
+        let runs = vec![
+            plan_run("observer", None, Some("claude-max")),
+            plan_run("staggered", None, Some("claude-max")),
+        ];
+        let snapshots = BTreeMap::from([
+            ("observer".into(), vec![
+                plan_snapshot("observer", 5, 0, Some((300, "reset-a", 10.0))),
+                plan_snapshot("observer", 10, 50, Some((300, "reset-a", 14.0))),
+            ]),
+            ("staggered".into(), vec![
+                plan_snapshot("staggered", 0, 0, None),
+                // These tokens were consumed before the provider interval
+                // began at t5. The t10 reading must not make them a weight
+                // for the t5--t10 provider delta.
+                plan_snapshot("staggered", 4, 100, None),
+                plan_snapshot("staggered", 10, 100, None),
+            ]),
+        ]);
+
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        assert!(allocation.shares.is_empty(), "unaligned token growth is never allocated");
+        for run in ["observer", "staggered"] {
+            let gap = &allocation.unknown[run][0];
+            assert_eq!(gap.from, Some(at(5)));
+            assert_eq!(gap.to, Some(at(10)));
+            assert!(gap.reason.contains("no measured token increment"));
+        }
+    }
+
+    #[test]
+    fn a_measured_zero_provider_delta_resolves_active_consumers() {
+        let run = plan_run("idle", None, Some("claude-max"));
+        let snapshots = BTreeMap::from([("idle".into(), vec![
+            plan_snapshot("idle", 0, 0, Some((300, "reset-a", 10.0))),
+            plan_snapshot("idle", 10, 100, Some((300, "reset-a", 10.0))),
+        ])]);
+
+        let allocation = allocate_plan_share(&[run], &snapshots);
+        assert!(allocation.shares.is_empty(), "zero provider growth invents no share");
+        assert!(allocation.unknown.is_empty(), "two equal readings are measured zero evidence");
+
+        let missing = allocate_plan_share(
+            &[plan_run("missing", None, Some("claude-max"))],
+            &BTreeMap::from([("missing".into(), vec![
+                plan_snapshot("missing", 10, 100, Some((300, "reset-a", 10.0))),
+            ])]),
+        );
+        assert!(missing.unknown["missing"][0].reason.contains("no earlier observation"));
     }
 
     #[test]

@@ -43,6 +43,43 @@ impl Engine {
     pub(crate) async fn snapshot_usage(&self, run: &Run, point: SnapshotPoint) {
         let Some(session) = &run.session else { return };
         let at = Utc::now();
+        if point == SnapshotPoint::TurnEnded {
+            self.turn_usage_pending
+                .lock()
+                .unwrap()
+                .entry(run.id.clone())
+                .or_default()
+                .insert(at);
+        }
+        self.capture_usage_snapshot(run, point, at, session).await;
+        if point == SnapshotPoint::TurnEnded {
+            let earliest_settled = {
+                let mut pending = self.turn_usage_pending.lock().unwrap();
+                let times = pending.entry(run.id.clone()).or_default();
+                times.remove(&at);
+                let ready = !times.iter().any(|pending_at| *pending_at < at);
+                if times.is_empty() {
+                    pending.remove(&run.id);
+                }
+                ready
+            };
+            if earliest_settled {
+                // Serialize this with snapshot writes. A later turn or run-end
+                // may already be stored, so record_re_estimate independently
+                // selects and caps itself at the first turn observation.
+                let _guard = self.usage_edit.lock().await;
+                self.record_re_estimate(run).await;
+            }
+        }
+    }
+
+    async fn capture_usage_snapshot(
+        &self,
+        run: &Run,
+        point: SnapshotPoint,
+        at: DateTime<Utc>,
+        session: &factory_core::task::SessionRef,
+    ) {
         let (usage, unknown) = match self.registry.runtime(&session.runtime) {
             Err(e) => (None, Some(e.to_string())),
             Ok(runtime) => match runtime.usage(session).await {
@@ -115,16 +152,20 @@ impl Engine {
                 Err(e) => tracing::warn!(run = %recent_run.id, error = %e, "could not record a run's usage"),
             }
         }
-        if point == SnapshotPoint::TurnEnded {
-            self.record_re_estimate(run, at).await;
-        }
     }
 
-    async fn record_re_estimate(&self, run: &Run, at: DateTime<Utc>) {
+    async fn record_re_estimate(&self, run: &Run) {
         let Ok(Some(current)) = self.store.get_run(&run.id).await else { return };
         if current.re_estimate.is_some() {
             return;
         }
+        let Ok(current_snapshots) = self.store.usage_snapshots(&run.id).await else { return };
+        let Some(first_at) = current_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.point == SnapshotPoint::TurnEnded)
+            .map(|snapshot| snapshot.at)
+            .min()
+        else { return };
         let Ok(Some(task)) = self.store.get(&run.task_id).await else { return };
         let snapshot = self.factory_snapshot();
         let scope = snapshot.canonical_scope_name(&task.scope);
@@ -183,9 +224,15 @@ impl Engine {
                 sample_count += 1;
             }
         }
-        let current_usage = current.usage.clone().unwrap_or_else(|| RunUsage::unknown("no usage was recorded", 0));
-        let observed_wall = ((at - current.started_at).num_milliseconds() >= 0)
-            .then(|| (at - current.started_at).num_milliseconds() as f64 / 1000.0);
+        let current_usage = run_usage(
+            &current_snapshots
+                .iter()
+                .filter(|snapshot| snapshot.at <= first_at)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let observed_wall = ((first_at - current.started_at).num_milliseconds() >= 0)
+            .then(|| (first_at - current.started_at).num_milliseconds() as f64 / 1000.0);
         let time = estimate_time(observed_wall, &wall_ratios);
         let active_seconds = estimate_time(current_usage.active_seconds, &active_ratios);
         let cost = estimate_cost(current_usage.cost_usd, &cost_ratios);
@@ -230,10 +277,18 @@ impl Engine {
         let mut actual_active = Some(0.0);
         let mut actual_cost = Some(0.0);
         let mut original_estimate = None;
+        let mut all_terminal = true;
+        let mut all_cost_measurements_final = true;
         for run in runs {
             total.add(run.usage.as_ref());
             let wall = (run.ended_at.unwrap_or(now) - run.started_at).num_seconds().max(0) as u64;
             actual_wall += wall;
+            let terminal = run.status.is_terminal();
+            let final_usage = run.usage.as_ref().filter(|usage| {
+                terminal && usage.as_of_point == Some(SnapshotPoint::RunEnd) && !usage.partial
+            });
+            all_terminal &= terminal;
+            all_cost_measurements_final &= final_usage.is_some();
             if original_estimate.is_none() {
                 original_estimate = run.original_estimate.clone();
             }
@@ -250,11 +305,16 @@ impl Engine {
                     estimate.time.low,
                     estimate.time.expected,
                     estimate.time.high,
-                    Some(wall),
+                    terminal.then_some(wall),
                 )
             });
             let cost_comparison = run.original_estimate.as_ref().and_then(|estimate| estimate.cost.as_ref()).map(|estimate| {
-                EstimateComparison::<f64>::new(estimate.low, estimate.expected, estimate.high, run.usage.as_ref().and_then(|u| u.cost_usd))
+                EstimateComparison::<f64>::new(
+                    estimate.low,
+                    estimate.expected,
+                    estimate.high,
+                    final_usage.and_then(|usage| usage.cost_usd),
+                )
             });
             entries.push(RunUsageEntry {
                 wall_seconds: wall as i64,
@@ -279,11 +339,16 @@ impl Engine {
                     estimate.time.low,
                     estimate.time.expected,
                     estimate.time.high,
-                    Some(actual_wall),
+                    all_terminal.then_some(actual_wall),
                 )
             }),
             cost_comparison: original_estimate.as_ref().and_then(|estimate| estimate.cost.as_ref()).map(|estimate| {
-                EstimateComparison::<f64>::new(estimate.low, estimate.expected, estimate.high, actual_cost)
+                EstimateComparison::<f64>::new(
+                    estimate.low,
+                    estimate.expected,
+                    estimate.high,
+                    all_cost_measurements_final.then_some(actual_cost).flatten(),
+                )
             }),
             original_estimate,
             actual_wall_seconds: Some(actual_wall),
@@ -458,6 +523,7 @@ mod tests {
     /// and `None` once the script runs out.
     struct MeteredRuntime {
         answers: Mutex<VecDeque<Answer>>,
+        delays: Mutex<VecDeque<std::time::Duration>>,
     }
 
     #[async_trait::async_trait]
@@ -491,7 +557,12 @@ mod tests {
             Ok(())
         }
         async fn usage(&self, _: &SessionRef) -> Result<Option<SessionUsage>> {
-            match self.answers.lock().unwrap().pop_front() {
+            let answer = self.answers.lock().unwrap().pop_front();
+            let delay = self.delays.lock().unwrap().pop_front().unwrap_or_default();
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            match answer {
                 Some(Ok(u)) => Ok(u),
                 Some(Err(e)) => Err(FactoryError::adapter("metered", e)),
                 None => Ok(None),
@@ -534,6 +605,13 @@ mod tests {
     }
 
     fn engine(answers: Vec<Answer>) -> Arc<Engine> {
+        engine_with_delays(answers, Vec::new())
+    }
+
+    fn engine_with_delays(
+        answers: Vec<Answer>,
+        delays: Vec<std::time::Duration>,
+    ) -> Arc<Engine> {
         let root = std::env::temp_dir().join(format!("factory-costs-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let config = Config {
@@ -573,6 +651,7 @@ mod tests {
         registry.add_runtime(
             Arc::new(MeteredRuntime {
                 answers: Mutex::new(answers.into()),
+                delays: Mutex::new(delays.into()),
             }),
             "test",
         );
@@ -764,6 +843,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn out_of_order_snapshot_completion_still_uses_the_first_turn_once() {
+        let engine = engine_with_delays(
+            vec![
+                Ok(Some(usage_with_active(0, 0.0, 0.0))),
+                Ok(Some(usage_with_active(1_000, 0.10, 10.0))),
+                Ok(Some(usage_with_active(2_000, 0.20, 20.0))),
+                Ok(Some(usage_with_active(3_000, 0.30, 30.0))),
+            ],
+            vec![
+                std::time::Duration::ZERO,
+                std::time::Duration::from_millis(100),
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+            ],
+        );
+        let (task, run) = dispatched(&engine, None).await;
+
+        let first_engine = engine.clone();
+        let first_run = run.clone();
+        let first = tokio::spawn(async move {
+            first_engine.snapshot_usage(&first_run, SnapshotPoint::TurnEnded).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let later_engine = engine.clone();
+        let later_run = run.clone();
+        let later = tokio::spawn(async move {
+            later_engine.snapshot_usage(&later_run, SnapshotPoint::TurnEnded).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let ended = done(&engine, &task, &run).await;
+        first.await.unwrap();
+        later.await.unwrap();
+
+        assert!((ended.usage.as_ref().unwrap().cost_usd.unwrap() - 0.30).abs() < 1e-9);
+        let updated = engine.require_run(&run.id).await.unwrap();
+        let estimate = updated.re_estimate.expect("the first turn records a re-estimate");
+        assert!((estimate.observed_cost_usd.unwrap() - 0.10).abs() < 1e-9, "{estimate:?}");
+        assert!((estimate.observed_active_seconds.unwrap() - 10.0).abs() < 1e-9, "{estimate:?}");
+        let entries = engine.store.entries(&task.id, 100).await.unwrap();
+        assert_eq!(entries.iter().filter(|entry| entry.kind == "re_estimate").count(), 1);
+    }
+
+    #[tokio::test]
     async fn a_failed_run_end_snapshot_is_not_a_final_active_or_cost_cohort_measurement() {
         let engine = engine(vec![
             Ok(Some(usage_with_active(0, 0.0, 0.0))),
@@ -827,6 +949,70 @@ mod tests {
         assert!(estimate.time.is_some(), "completed wall time remains a valid cohort input");
         assert_eq!(estimate.active_seconds, None, "partial active time is not final");
         assert_eq!(estimate.cost, None, "partial cost is not final");
+    }
+
+    fn ranged_estimate() -> factory_core::task::Estimate {
+        factory_core::task::Estimate {
+            time: factory_core::task::TimeEstimateRange { low: 1, expected: 900, high: 1800 },
+            cost: Some(factory_core::task::CostEstimateRange {
+                low: 1.0,
+                expected: 1.5,
+                high: 2.0,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn active_run_comparisons_do_not_claim_final_accuracy() {
+        let engine = engine(vec![Ok(Some(usage(0, 0.0)))]);
+        let (task, run) = dispatched(&engine, None).await;
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch { original_estimate: Some(ranged_estimate()), ..Default::default() },
+            )
+            .await
+            .unwrap();
+
+        let usage = engine.task_usage(&task.id).await.unwrap();
+        let entry = &usage.runs[0];
+        assert!(!entry.status.is_terminal());
+        assert_eq!(entry.time_comparison.as_ref().unwrap().actual, None);
+        assert_eq!(entry.time_comparison.as_ref().unwrap().actual_over_expected, None);
+        assert_eq!(entry.time_comparison.as_ref().unwrap().within_range, None);
+        assert_eq!(usage.time_comparison.as_ref().unwrap().actual, None);
+        assert_eq!(usage.time_comparison.as_ref().unwrap().within_range, None);
+    }
+
+    #[tokio::test]
+    async fn partial_run_end_cost_is_not_a_final_accuracy_verdict() {
+        let engine = engine(vec![
+            Ok(Some(usage(0, 0.0))),
+            Ok(Some(usage(1_500, 1.5))),
+            Err("run-end usage unavailable".into()),
+        ]);
+        let (task, run) = dispatched(&engine, None).await;
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch { original_estimate: Some(ranged_estimate()), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        engine.snapshot_usage(&run, SnapshotPoint::TurnEnded).await;
+        let ended = done(&engine, &task, &run).await;
+        assert!(ended.usage.as_ref().unwrap().partial);
+        assert!((ended.usage.as_ref().unwrap().cost_usd.unwrap() - 1.5).abs() < 1e-9);
+
+        let usage = engine.task_usage(&task.id).await.unwrap();
+        let comparison = usage.runs[0].cost_comparison.as_ref().unwrap();
+        assert_eq!(comparison.actual, None);
+        assert_eq!(comparison.actual_over_expected, None);
+        assert_eq!(comparison.within_range, None);
+        assert_eq!(usage.cost_comparison.as_ref().unwrap().actual, None);
+        assert_eq!(usage.cost_comparison.as_ref().unwrap().within_range, None);
     }
 
     #[tokio::test]
