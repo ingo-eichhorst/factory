@@ -24,8 +24,8 @@ use factory_core::event::Event;
 use factory_core::run::{Run, RunPatch};
 use factory_core::task::Task;
 use factory_core::usage::{
-    run_usage, CostGroupBy, CostReport, CostRow, RunUsage, RunUsageEntry, SnapshotPoint, TaskUsage,
-    UsageSnapshot,
+    allocate_plan_share, run_usage, CostGroupBy, CostReport, CostRow, EstimateComparison, ReEstimate,
+    RunUsage, RunUsageEntry, SnapshotPoint, TaskUsage, UsageSnapshot,
 };
 
 use crate::engine::Engine;
@@ -71,21 +71,139 @@ impl Engine {
             tracing::warn!(run = %run.id, point = point.as_str(), error = %e, "could not keep a usage snapshot");
             return;
         }
-        let snapshots = match self.store.usage_snapshots(&run.id).await {
-            Ok(s) => s,
+        let mut recent = match self
+            .store
+            .runs_between(at - Duration::days(8), at + Duration::seconds(1))
+            .await
+        {
+            Ok(runs) => runs,
             Err(e) => {
-                tracing::warn!(run = %run.id, error = %e, "could not read usage snapshots back");
+                tracing::warn!(run = %run.id, error = %e, "could not read runs for usage attribution");
                 return;
             }
         };
-        let patch = RunPatch {
-            usage: Some(run_usage(&snapshots)),
-            ..Default::default()
-        };
-        match self.store.update_run(&run.id, &patch).await {
-            Ok(updated) => self.bus.publish(Event::RunUpdated { run: updated.redacted() }),
-            Err(e) => tracing::warn!(run = %run.id, error = %e, "could not record a run's usage"),
+        if let Ok(active) = self.store.active_runs().await {
+            for active_run in active {
+                if !recent.iter().any(|candidate| candidate.id == active_run.id) {
+                    recent.push(active_run);
+                }
+            }
         }
+        let mut snapshots_by_run = BTreeMap::new();
+        for recent_run in &recent {
+            if let Ok(snapshots) = self.store.usage_snapshots(&recent_run.id).await {
+                snapshots_by_run.insert(recent_run.id.clone(), snapshots);
+            }
+        }
+        let allocation = allocate_plan_share(&recent, &snapshots_by_run);
+        for recent_run in &recent {
+            let Some(snapshots) = snapshots_by_run.get(&recent_run.id) else { continue };
+            let mut usage = run_usage(snapshots);
+            usage.plan_share = allocation.shares.get(&recent_run.id).cloned().unwrap_or_default();
+            usage.plan_share_unknown = allocation.unknown.get(&recent_run.id).cloned();
+            let patch = RunPatch { usage: Some(usage), ..Default::default() };
+            match self.store.update_run(&recent_run.id, &patch).await {
+                Ok(updated) => self.bus.publish(Event::RunUpdated { run: updated.redacted() }),
+                Err(e) => tracing::warn!(run = %recent_run.id, error = %e, "could not record a run's usage"),
+            }
+        }
+        if point == SnapshotPoint::TurnEnded {
+            self.record_re_estimate(run, at).await;
+        }
+    }
+
+    async fn record_re_estimate(&self, run: &Run, at: DateTime<Utc>) {
+        let Ok(Some(current)) = self.store.get_run(&run.id).await else { return };
+        if current.re_estimate.is_some() {
+            return;
+        }
+        let Ok(Some(task)) = self.store.get(&run.task_id).await else { return };
+        let snapshot = self.factory_snapshot();
+        let scope = snapshot.canonical_scope_name(&task.scope);
+        let category = factory_core::control_plan::effective_category(task.category.as_deref()).to_string();
+        let Ok(tasks) = self.store.list(&factory_core::task::TaskFilter::default()).await else { return };
+        let mut wall_ratios = Vec::new();
+        let mut active_ratios = Vec::new();
+        let mut cost_ratios = Vec::new();
+        let mut sample_count = 0u32;
+        for peer in tasks.iter().filter(|peer| {
+            snapshot.canonical_scope_name(&peer.scope) == scope
+                && factory_core::control_plan::effective_category(peer.category.as_deref()) == category
+        }) {
+            let Ok(runs) = self.store.runs(&peer.id, u32::MAX).await else { continue };
+            for completed in runs
+                .into_iter()
+                .filter(|candidate| {
+                    candidate.id != current.id
+                        && candidate.status.is_terminal()
+                        && candidate.agent == current.agent
+                })
+            {
+                let Ok(snapshots) = self.store.usage_snapshots(&completed.id).await else { continue };
+                let Some(first_at) = snapshots
+                    .iter()
+                    .filter(|s| s.point == SnapshotPoint::TurnEnded)
+                    .map(|s| s.at)
+                    .min()
+                else { continue };
+                let first_usage = run_usage(
+                    &snapshots.iter().filter(|s| s.at <= first_at).cloned().collect::<Vec<_>>(),
+                );
+                let final_usage = run_usage(&snapshots);
+                let first_wall = (first_at - completed.started_at).num_milliseconds() as f64 / 1000.0;
+                let final_wall = (completed.ended_at.unwrap_or(first_at) - completed.started_at)
+                    .num_milliseconds() as f64
+                    / 1000.0;
+                if first_wall > 0.0 && final_wall >= first_wall {
+                    wall_ratios.push(final_wall / first_wall);
+                }
+                if let (Some(first), Some(final_value)) = (first_usage.active_seconds, final_usage.active_seconds) {
+                    if first > 0.0 && final_value >= first {
+                        active_ratios.push(final_value / first);
+                    }
+                }
+                if let (Some(first), Some(final_value)) = (first_usage.cost_usd, final_usage.cost_usd) {
+                    if first > 0.0 && final_value >= first {
+                        cost_ratios.push(final_value / first);
+                    }
+                }
+                sample_count += 1;
+            }
+        }
+        let current_usage = current.usage.clone().unwrap_or_else(|| RunUsage::unknown("no usage was recorded", 0));
+        let observed_wall = ((at - current.started_at).num_milliseconds() >= 0)
+            .then(|| (at - current.started_at).num_milliseconds() as f64 / 1000.0);
+        let time = estimate_time(observed_wall, &wall_ratios);
+        let active_seconds = estimate_time(current_usage.active_seconds, &active_ratios);
+        let cost = estimate_cost(current_usage.cost_usd, &cost_ratios);
+        let reason = (time.is_none() && active_seconds.is_none() && cost.is_none())
+            .then(|| "no completed runs with a measurable first-turn-to-final ratio".into());
+        let estimate = ReEstimate {
+            time,
+            active_seconds,
+            cost,
+            sample_count,
+            scope,
+            agent: current.agent,
+            category,
+            observed_wall_seconds: observed_wall,
+            observed_active_seconds: current_usage.active_seconds,
+            observed_cost_usd: current_usage.cost_usd,
+            reason,
+        };
+        let Ok(updated) = self
+            .store
+            .update_run(&current.id, &RunPatch { re_estimate: Some(estimate.clone()), ..Default::default() })
+            .await
+        else { return };
+        self.bus.publish(Event::RunUpdated { run: updated.redacted() });
+        self.entry(
+            &current.task_id,
+            factory_core::task::TaskEntry::new("daemon", "re_estimate", "recorded the first-turn re-estimate")
+                .in_run(&current.id)
+                .with_data(serde_json::to_value(&estimate).unwrap_or_default()),
+        )
+        .await;
     }
 
     /// `Request::TaskUsage`: every run's usage and their sum.
@@ -95,10 +213,42 @@ impl Engine {
         let now = Utc::now();
         let mut total = CostRow::new(task.id.clone(), Some(task.title.clone()));
         let mut entries = Vec::with_capacity(runs.len());
+        let mut actual_wall = 0u64;
+        let mut actual_active = Some(0.0);
+        let mut actual_cost = Some(0.0);
+        let mut original_estimate = None;
         for run in runs {
             total.add(run.usage.as_ref());
+            let wall = (run.ended_at.unwrap_or(now) - run.started_at).num_seconds().max(0) as u64;
+            actual_wall += wall;
+            if original_estimate.is_none() {
+                original_estimate = run.original_estimate.clone();
+            }
+            actual_active = match (actual_active, run.usage.as_ref().and_then(|usage| usage.active_seconds)) {
+                (Some(sum), Some(value)) => Some(sum + value),
+                _ => None,
+            };
+            actual_cost = match (actual_cost, run.usage.as_ref().and_then(|usage| usage.cost_usd)) {
+                (Some(sum), Some(value)) => Some(sum + value),
+                _ => None,
+            };
+            let time_comparison = run.original_estimate.as_ref().map(|estimate| {
+                EstimateComparison::<u64>::new(
+                    estimate.time.low,
+                    estimate.time.expected,
+                    estimate.time.high,
+                    Some(wall),
+                )
+            });
+            let cost_comparison = run.original_estimate.as_ref().and_then(|estimate| estimate.cost.as_ref()).map(|estimate| {
+                EstimateComparison::<f64>::new(estimate.low, estimate.expected, estimate.high, run.usage.as_ref().and_then(|u| u.cost_usd))
+            });
             entries.push(RunUsageEntry {
-                wall_seconds: (run.ended_at.unwrap_or(now) - run.started_at).num_seconds(),
+                wall_seconds: wall as i64,
+                original_estimate: run.original_estimate,
+                re_estimate: run.re_estimate,
+                time_comparison,
+                cost_comparison,
                 usage: run
                     .usage
                     .clone()
@@ -111,6 +261,21 @@ impl Engine {
         Ok(TaskUsage {
             task_id: task.id,
             total,
+            time_comparison: original_estimate.as_ref().map(|estimate| {
+                EstimateComparison::<u64>::new(
+                    estimate.time.low,
+                    estimate.time.expected,
+                    estimate.time.high,
+                    Some(actual_wall),
+                )
+            }),
+            cost_comparison: original_estimate.as_ref().and_then(|estimate| estimate.cost.as_ref()).map(|estimate| {
+                EstimateComparison::<f64>::new(estimate.low, estimate.expected, estimate.high, actual_cost)
+            }),
+            original_estimate,
+            actual_wall_seconds: Some(actual_wall),
+            actual_active_seconds: actual_active,
+            actual_cost_usd: actual_cost,
             runs: entries,
         })
     }
@@ -220,7 +385,37 @@ fn group_key(
             ),
             None,
         ),
+        CostGroupBy::Provider => (run.provider_account.clone().unwrap_or_else(|| "(unknown provider)".into()), None),
     }
+}
+
+fn factors(values: &[f64]) -> Option<(f64, f64, f64)> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut values = values.to_vec();
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some((values[0], values[values.len() / 2], values[values.len() - 1]))
+}
+
+fn estimate_time(observed: Option<f64>, ratios: &[f64]) -> Option<factory_core::task::TimeEstimateRange> {
+    let observed = observed?;
+    let (low, expected, high) = factors(ratios)?;
+    Some(factory_core::task::TimeEstimateRange {
+        low: (observed * low).round().max(1.0) as u64,
+        expected: (observed * expected).round().max(1.0) as u64,
+        high: (observed * high).round().max(1.0) as u64,
+    })
+}
+
+fn estimate_cost(observed: Option<f64>, ratios: &[f64]) -> Option<factory_core::task::CostEstimateRange> {
+    let observed = observed?;
+    let (low, expected, high) = factors(ratios)?;
+    Some(factory_core::task::CostEstimateRange {
+        low: observed * low,
+        expected: observed * expected,
+        high: observed * high,
+    })
 }
 
 /// `Engine::snapshot_usage` needs `&self` only; the turn-ended path wants it
@@ -378,6 +573,7 @@ mod tests {
                 instructions: "true".into(),
                 scope: Some("demo".into()),
                 agent: Some("shell".into()),
+                estimate_seconds: Some(900),
                 worktree: Some(false),
                 labels: issue.map(|n| [("issue".to_string(), n.to_string())].into()).unwrap_or_default(),
                 ..Default::default()
@@ -414,6 +610,17 @@ mod tests {
         let baseline = engine.store.usage_snapshots(&run.id).await.unwrap();
         assert_eq!(baseline.len(), 1);
         assert_eq!(baseline[0].point, SnapshotPoint::Dispatch);
+        assert_eq!(run.original_estimate.as_ref().unwrap().time.expected, 900);
+
+        engine
+            .update(
+                &task.id,
+                factory_core::task::TaskPatch { estimate_seconds: Some(1800), ..Default::default() },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(engine.require_run(&run.id).await.unwrap().original_estimate.unwrap().time.expected, 900);
 
         let ended = done(&engine, &task, &run).await;
         let u = ended.usage.expect("the run carries its usage");
@@ -461,6 +668,80 @@ mod tests {
         assert_eq!(u.as_of_point, Some(SnapshotPoint::TurnEnded), "{u:?}");
         assert_eq!(engine.store.usage_snapshots(&run.id).await.unwrap().len(), 2);
         assert_eq!(u.tokens.input, Some(2_000));
+        let updated = engine.require_run(&run.id).await.unwrap();
+        assert!(updated.re_estimate.as_ref().unwrap().reason.as_deref().unwrap().contains("no completed runs"));
+        let entries = engine.store.entries(&task.id, 100).await.unwrap();
+        assert_eq!(entries.iter().filter(|entry| entry.kind == "re_estimate").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_first_turn_re_estimate_uses_matching_completed_runs_and_is_never_rewritten() {
+        let engine = engine(vec![
+            Ok(Some(usage(0, 0.0))),
+            Ok(Some(usage(1_000, 0.10))),
+            Ok(Some(usage(2_000, 0.20))),
+            Ok(Some(usage(0, 0.0))),
+            Ok(Some(usage(500, 0.05))),
+            Ok(Some(usage(1_500, 0.15))),
+        ]);
+        let (reference_task, reference_run) = dispatched(&engine, None).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        engine
+            .turn_ended(
+                &reference_task.id,
+                factory_core::task::TurnEnded {
+                    event: factory_core::task::TurnEndEvent::Stop,
+                    pending_background: 0,
+                    error: None,
+                    error_details: None,
+                    last_message: None,
+                    token: reference_run.token.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if engine.require_run(&reference_run.id).await.unwrap().re_estimate.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        done(&engine, &reference_task, &reference_run).await;
+
+        let (task, run) = dispatched(&engine, None).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        engine
+            .turn_ended(
+                &task.id,
+                factory_core::task::TurnEnded {
+                    event: factory_core::task::TurnEndEvent::Stop,
+                    pending_background: 0,
+                    error: None,
+                    error_details: None,
+                    last_message: None,
+                    token: run.token.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut first = None;
+        for _ in 0..100 {
+            first = engine.require_run(&run.id).await.unwrap().re_estimate;
+            if first.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let first = first.expect("the first turn records a re-estimate");
+        assert_eq!(first.sample_count, 1);
+        assert!(first.time.is_some());
+        assert!((first.cost.as_ref().unwrap().expected - 0.10).abs() < 1e-9, "{first:?}");
+
+        done(&engine, &task, &run).await;
+        assert_eq!(engine.require_run(&run.id).await.unwrap().re_estimate, Some(first));
+        let entries = engine.store.entries(&task.id, 100).await.unwrap();
+        assert_eq!(entries.iter().filter(|entry| entry.kind == "re_estimate").count(), 1);
     }
 
     #[tokio::test]
@@ -519,6 +800,14 @@ mod tests {
         let by_task = engine.costs_report(CostGroupBy::Task, None, None, None).await.unwrap();
         assert_eq!(by_task.rows[0].key, t1.id);
         assert_eq!(by_task.rows[0].label.as_deref(), Some("costly"));
+
+        engine
+            .store
+            .update_run(&r1.id, &RunPatch { provider_account: Some("claude-max".into()), ..Default::default() })
+            .await
+            .unwrap();
+        let by_provider = engine.costs_report(CostGroupBy::Provider, None, None, None).await.unwrap();
+        assert!(by_provider.rows.iter().any(|row| row.key == "claude-max"));
 
         // A window before any of it holds nothing; an empty one is refused.
         let past = Utc::now() - Duration::days(400);

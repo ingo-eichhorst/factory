@@ -18,6 +18,31 @@ export function fmtTokens(n) {
   return String(n);
 }
 
+export function fmtDuration(seconds) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return "?";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 360) / 10}h`;
+}
+
+export function estimateComparisonView(comparison, unit = "time") {
+  if (!comparison) return null;
+  const value = unit === "cost" ? fmtUsd : fmtDuration;
+  const actual = comparison.actual === null || comparison.actual === undefined ? "actual unknown" : value(comparison.actual);
+  const ratio = comparison.actual_over_expected === null || comparison.actual_over_expected === undefined
+    ? "ratio unknown"
+    : `${comparison.actual_over_expected.toFixed(2)}× expected`;
+  return {
+    tone: comparison.within_range === null || comparison.within_range === undefined
+      ? "unknown"
+      : (comparison.within_range ? "within" : "outside"),
+    label: `${value(comparison.low)}–${value(comparison.high)} · expected ${value(comparison.expected)} · actual ${actual} · ${ratio}`,
+    percent: comparison.actual === null || comparison.actual === undefined || comparison.high <= 0
+      ? null
+      : Math.min(100, Math.max(0, comparison.actual / comparison.high * 100)),
+  };
+}
+
 /// Every token type summed, or `null` if any one is unknown -- the same
 /// rule as `TokenCounts::total` on the server.
 export function totalTokens(tokens) {
@@ -49,6 +74,14 @@ export function runUsageView(usage) {
     `${fmtTokens(t.input)} in · ${fmtTokens(t.output)} out · ${fmtTokens(t.cache_read)} cache read · ${fmtTokens(t.cache_write)} cache write`,
   ];
   if (usage.pricing_sources && usage.pricing_sources.length) lines.push(`priced by ${usage.pricing_sources.join(", ")}`);
+  if (usage.elapsed_seconds !== null && usage.elapsed_seconds !== undefined) {
+    lines.push(`${fmtDuration(usage.elapsed_seconds)} runtime elapsed · ${fmtDuration(usage.active_seconds)} active`);
+  }
+  for (const share of usage.plan_share || []) {
+    const window = share.window_minutes === 300 ? "5-hour" : (share.window_minutes === 10080 ? "weekly" : `${share.window_minutes}-minute`);
+    lines.push(`${share.used_percent.toFixed(2)}% of ${share.provider_account} ${window} · ${share.attribution}`);
+  }
+  if (usage.plan_share_unknown) lines.push(`plan share unknown — ${usage.plan_share_unknown}`);
   if (usage.models && usage.models.length) {
     lines.push(`${usage.models.join(", ")} · ${usage.sessions} harness session${usage.sessions === 1 ? "" : "s"}`);
   }

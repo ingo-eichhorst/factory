@@ -21,6 +21,7 @@ import {
   infraFailure,
   isEmptyProviders,
   kindBadge,
+  providerWindowView,
   sortHarnesses,
   visibleAgents,
 } from "../js/infra-model.js";
@@ -219,6 +220,24 @@ test("unassigned agents group the same way and narrow to the rail", () => {
 
 test("an agent links to the roster with its scope selected", () => {
   assert.equal(agentHref("factory"), "#factory/roster");
+});
+
+test("provider windows distinguish measured, stale, apportioned, and unknown", () => {
+  const measured = providerWindowView({
+    window_minutes: 300, used_percent: 42.25, stale: false,
+    attribution: "apportioned", attribution_quality: "confirmed", trend_percent: 3.5,
+  });
+  assert.equal(measured.name, "5-hour");
+  assert.equal(measured.percent, 42.25);
+  assert.match(measured.detail, /apportioned/);
+  assert.match(measured.detail, /\+3\.5 points/);
+  const stale = providerWindowView({ window_minutes: 10080, used_percent: 80, stale: true });
+  assert.equal(stale.name, "weekly");
+  assert.equal(stale.tone, "stale");
+  const unknown = providerWindowView({ window_minutes: 300, used_percent: null, unknown: "no baseline" });
+  assert.equal(unknown.percent, null);
+  assert.equal(unknown.tone, "unknown");
+  assert.match(unknown.detail, /no baseline/);
 });
 
 // ------------------------------------------------------------------ fetch failures

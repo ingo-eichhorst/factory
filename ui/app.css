@@ -313,6 +313,7 @@ textarea { min-height: 84px; resize: vertical; font: 400 12px/1.6 var(--mono); }
 .btn.danger:hover:not(:disabled) { border-color: var(--fault); color: var(--fault); }
 .row-btns { display: flex; gap: 6px; flex-wrap: wrap; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 8px; }
 pre {
   background: var(--sunk); border: 1px solid var(--line-soft); padding: 10px 12px; border-radius: 4px;
   overflow-x: auto; font: 400 11.5px/1.7 var(--mono); color: var(--ink-2); margin: 0; white-space: pre-wrap;
@@ -1373,6 +1374,12 @@ button.linklike:hover { color: var(--signal); }
 .infra-meter-fill { height: 100%; background: var(--signal); }
 .infra-meter-fill[data-level="warn"] { background: var(--wait); }
 .infra-meter-fill[data-level="full"] { background: var(--fault); }
+.infra-window { display: grid; gap: 4px; margin-top: 8px; }
+.infra-window > div:first-child { display: flex; justify-content: space-between; gap: 8px; }
+.infra-window[data-tone="stale"] { opacity: .72; }
+.infra-window-empty { height: 7px; border-radius: 4px; background: repeating-linear-gradient(135deg, var(--line), var(--line) 4px, transparent 4px, transparent 8px); color: transparent; }
+.infra-active { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+.infra-active ul { margin: 4px 0 0; padding-left: 18px; }
 
 .infra-agents { margin-top: 10px; display: grid; gap: 8px; border-top: 1px solid var(--line-soft); padding-top: 9px; }
 .infra-scope-name {
@@ -2347,3 +2354,7 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
    text, never as a zero. */
 .usage { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
 .usage-known > div:first-child { font-weight: 600; }
+.estimate-actual { margin-top: 5px; }
+.estimate-meter { height: 5px; margin-top: 3px; overflow: hidden; border-radius: 3px; background: var(--line); }
+.estimate-meter span { display: block; height: 100%; background: var(--accent); }
+.estimate-actual[data-tone="outside"] .estimate-meter span { background: var(--bad); }

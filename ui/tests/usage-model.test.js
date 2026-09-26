@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { fmtUsd, fmtTokens, totalTokens, runUsageView, taskUsageLine } from "../js/usage-model.js";
+import { estimateComparisonView, fmtDuration, fmtUsd, fmtTokens, totalTokens, runUsageView, taskUsageLine } from "../js/usage-model.js";
 
 test("an unknown count is a question mark and a tiny cost is not free", () => {
   assert.equal(fmtTokens(null), "?");
@@ -47,4 +47,25 @@ test("a task's line says which runs are not in its sum", () => {
     "All 1 run: 10 tokens · ? (not in the sum: 1 without a cost)",
     "tokens but no measured cost is ?, not free"
   );
+});
+
+test("estimate comparisons keep ratio, range verdict, and unknown actual honest", () => {
+  assert.equal(fmtDuration(5400), "1.5h");
+  const outside = estimateComparisonView({ low: 60, expected: 120, high: 180, actual: 240, actual_over_expected: 2, within_range: false });
+  assert.equal(outside.tone, "outside");
+  assert.match(outside.label, /2\.00× expected/);
+  assert.equal(outside.percent, 100);
+  const unknown = estimateComparisonView({ low: 1, expected: 2, high: 3, actual: null, actual_over_expected: null, within_range: null }, "cost");
+  assert.equal(unknown.tone, "unknown");
+  assert.match(unknown.label, /actual unknown/);
+});
+
+test("run usage says when plan share was apportioned or unavailable", () => {
+  const base = {
+    state: "known", tokens: { input: 1, output: 1, cache_read: 0, cache_write: 0 }, cost_usd: 0.1,
+    elapsed_seconds: 80, active_seconds: 40, sessions: 1, notes: [],
+    plan_share: [{ provider_account: "claude-max", window_minutes: 300, used_percent: 1.25, attribution: "apportioned" }],
+  };
+  assert.match(runUsageView(base).lines.join(" "), /1\.25% of claude-max 5-hour · apportioned/);
+  assert.match(runUsageView({ ...base, plan_share: [], plan_share_unknown: "no baseline" }).lines.join(" "), /unknown — no baseline/);
 });

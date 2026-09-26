@@ -387,9 +387,15 @@ impl TaskStore for SqliteStore {
             }
             if patch.clear_estimate {
                 task.estimate_seconds = None;
+                task.estimate = None;
             }
             if let Some(v) = patch.estimate_seconds {
                 task.estimate_seconds = Some(v);
+                task.estimate = Some(factory_core::task::Estimate::point(v));
+            }
+            if let Some(v) = patch.estimate {
+                task.estimate_seconds = Some(v.time.expected);
+                task.estimate = Some(v);
             }
             if let Some(v) = patch.scope {
                 task.scope = v;
@@ -542,6 +548,9 @@ impl TaskStore for SqliteStore {
                 runtime: new.runtime.clone(),
                 session: None,
                 token: Some(new.token.clone()),
+                original_estimate: None,
+                provider_account: None,
+                re_estimate: None,
                 result: None,
                 routed_to: None,
                 error: None,
@@ -619,6 +628,15 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.session {
                 run.session = Some(v);
+            }
+            if let Some(v) = patch.original_estimate {
+                run.original_estimate = Some(v);
+            }
+            if let Some(v) = patch.provider_account {
+                run.provider_account = Some(v);
+            }
+            if let Some(v) = patch.re_estimate {
+                run.re_estimate = Some(v);
             }
             if let Some(v) = patch.result {
                 run.result = Some(v);
@@ -1047,6 +1065,7 @@ mod tests {
             status: TaskStatus::Pending,
             schedule: None,
             estimate_seconds: None,
+            estimate: None,
             result: None,
             routed_to: None,
             error: None,
@@ -1267,10 +1286,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(estimated.estimate_seconds, Some(900));
+        assert_eq!(estimated.estimate, Some(factory_core::task::Estimate::point(900)));
         assert_eq!(
             store.get("t1").await.unwrap().unwrap().estimate_seconds,
             Some(900)
         );
+
+        let range = factory_core::task::Estimate {
+            time: factory_core::task::TimeEstimateRange { low: 600, expected: 1200, high: 1800 },
+            cost: Some(factory_core::task::CostEstimateRange { low: 1.0, expected: 2.0, high: 4.0 }),
+        };
+        let estimated = store
+            .update("t1", &TaskPatch { estimate: Some(range.clone()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(estimated.estimate_seconds, Some(1200));
+        assert_eq!(estimated.estimate, Some(range));
 
         let cleared = store
             .update(
@@ -1283,6 +1314,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cleared.estimate_seconds, None);
+        assert_eq!(cleared.estimate, None);
         assert_eq!(
             store.get("t1").await.unwrap().unwrap().estimate_seconds,
             None

@@ -240,6 +240,15 @@ pub struct Run {
     /// The secret the agent presents when reporting on this run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The task estimate as it stood when this attempt was dispatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_estimate: Option<crate::task::Estimate>,
+    /// The configured provider account selected for this attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_account: Option<String>,
+    /// The first-turn re-estimate, recorded once and never rewritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re_estimate: Option<crate::usage::ReEstimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     /// The workflow route selected by this run's terminal `done` report.
@@ -368,6 +377,12 @@ pub struct RunPatch {
     pub status: Option<RunStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_estimate: Option<crate::task::Estimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re_estimate: Option<crate::usage::ReEstimate>,
     /// `None` means "leave alone" everywhere else here, so letting go of a
     /// session needs a field of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

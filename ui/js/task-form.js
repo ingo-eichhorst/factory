@@ -49,6 +49,7 @@ export function openEdit(task) {
         scheduleText: scheduleText(task.schedule),
         scheduleZone: scheduleZone(task.schedule),
         estimate_seconds: task.estimate_seconds,
+        estimate: task.estimate,
         ack_timeout_seconds: task.ack_timeout_seconds,
         timeout_seconds: task.timeout_seconds,
         labelText: Object.entries(task.labels || {}).map(([k, v]) => `${k}=${v}`).join("\n"),
@@ -182,8 +183,18 @@ export function taskFields(v) {
     <input id="c-schedule" placeholder="every 5m  ·  0 9 * * 1-5" value="${esc(v.scheduleText || "")}">
     <label for="c-timezone">Timezone <span class="sub" style="text-transform:none">cron only · blank = UTC</span></label>
     <input id="c-timezone" placeholder="Europe/Berlin" value="${esc(v.scheduleZone || "")}">
-    <label for="c-estimate">Estimated duration <span class="sub" style="text-transform:none">seconds · planning only</span></label>
-    <input id="c-estimate" type="number" min="1" placeholder="no estimate" value="${v.estimate_seconds ?? ""}">
+    <label>Estimated duration <span class="sub" style="text-transform:none">low · expected · high seconds · planning only</span></label>
+    <div class="grid3">
+      <input id="c-estimate-low" aria-label="Low duration estimate" type="number" min="1" placeholder="low" value="${v.estimate?.time?.low ?? v.estimate_seconds ?? ""}">
+      <input id="c-estimate" aria-label="Expected duration estimate" type="number" min="1" placeholder="expected" value="${v.estimate?.time?.expected ?? v.estimate_seconds ?? ""}">
+      <input id="c-estimate-high" aria-label="High duration estimate" type="number" min="1" placeholder="high" value="${v.estimate?.time?.high ?? v.estimate_seconds ?? ""}">
+    </div>
+    <label>Estimated API-equivalent cost <span class="sub" style="text-transform:none">low · expected · high USD · optional</span></label>
+    <div class="grid3">
+      <input id="c-estimate-cost-low" aria-label="Low cost estimate" type="number" min="0" step="0.01" placeholder="low" value="${v.estimate?.cost?.low ?? ""}">
+      <input id="c-estimate-cost" aria-label="Expected cost estimate" type="number" min="0" step="0.01" placeholder="expected" value="${v.estimate?.cost?.expected ?? ""}">
+      <input id="c-estimate-cost-high" aria-label="High cost estimate" type="number" min="0" step="0.01" placeholder="high" value="${v.estimate?.cost?.high ?? ""}">
+    </div>
     <div class="grid2">
       <div><label for="c-ack">Acknowledge within <span class="sub" style="text-transform:none">seconds</span></label>
         <input id="c-ack" type="number" min="1" placeholder="instance default" value="${v.ack_timeout_seconds ?? ""}"></div>
@@ -233,13 +244,37 @@ export function readTaskFields() {
     const v = $(id).value.trim();
     return v ? parseInt(v, 10) : null;
   };
+  const decimal = (id) => {
+    const v = $(id).value.trim();
+    return v ? Number(v) : null;
+  };
+  const time = [num("c-estimate-low"), num("c-estimate"), num("c-estimate-high")];
+  if (time.some(v => v !== null) && time.some(v => v === null)) {
+    throw new Error("duration estimate needs low, expected, and high values");
+  }
+  if (time[0] !== null && !(time[0] <= time[1] && time[1] <= time[2])) {
+    throw new Error("duration estimate must be ordered low <= expected <= high");
+  }
+  const costs = [decimal("c-estimate-cost-low"), decimal("c-estimate-cost"), decimal("c-estimate-cost-high")];
+  if (costs.some(v => v !== null) && costs.some(v => v === null)) {
+    throw new Error("cost estimate needs low, expected, and high values");
+  }
+  if (costs[0] !== null && !(0 <= costs[0] && costs[0] <= costs[1] && costs[1] <= costs[2])) {
+    throw new Error("cost estimate must be ordered 0 <= low <= expected <= high");
+  }
+  if (costs[0] !== null && time[0] === null) throw new Error("a cost estimate needs a duration estimate");
+  const estimate = time[0] === null ? null : {
+    time: { low: time[0], expected: time[1], high: time[2] },
+    ...(costs[0] === null ? {} : { cost: { low: costs[0], expected: costs[1], high: costs[2] } }),
+  };
   return {
     title: $("c-title").value.trim(),
     instructions: $("c-instructions").value,
     scope: $("c-scope").value || null,
     agent: $("c-agent").value || null,
     schedule: parseSchedule($("c-schedule").value, $("c-timezone").value),
-    estimate_seconds: num("c-estimate"),
+    estimate_seconds: estimate?.time.expected ?? null,
+    estimate,
     ack_timeout_seconds: num("c-ack"),
     timeout_seconds: num("c-timeout"),
     labels,

@@ -1180,6 +1180,7 @@ mod tests {
             status: TaskStatus::Pending,
             schedule: None,
             estimate_seconds: None,
+            estimate: None,
             result: None,
             routed_to: None,
             error: None,

@@ -9,7 +9,7 @@ import { openEdit, scheduleText } from "./task-form.js";
 import { scheduleLabel } from "./schedule.js";
 import { describeWorkflowOrigin } from "./workflows.js";
 import { entryKindLabel, entryTone } from "./operations-model.js";
-import { runUsageView, taskUsageLine } from "./usage-model.js";
+import { estimateComparisonView, runUsageView, taskUsageLine } from "./usage-model.js";
 import { columnFor, standing, taskActions, isSettled, CLOSE_REASONS, closeBody } from "./task-model.js";
 import { notStartedNote } from "./pending-model.js";
 
@@ -265,11 +265,29 @@ export async function loadTaskUsage() {
 
 /// A run's usage block: tokens, cost and what they rest on, or why there
 /// is none. See `usage-model.js`.
-function usageHtml(usage) {
+function comparisonHtml(label, comparison, unit) {
+  const view = estimateComparisonView(comparison, unit);
+  if (!view) return "";
+  const meter = view.percent === null ? "" : `<div class="estimate-meter"><span style="width:${view.percent}%"></span></div>`;
+  return `<div class="estimate-actual" data-tone="${view.tone}"><div class="sub">${esc(label)}: ${esc(view.label)}</div>${meter}</div>`;
+}
+
+function usageHtml(usage, entry) {
   const v = runUsageView(usage);
   let h = `<label>Usage</label><div class="usage usage-${v.tone}"><div${v.tone === "known" ? "" : ` class="sub"`}>${esc(v.headline)}</div>`;
   for (const line of v.lines) h += `<div class="sub">${esc(line)}</div>`;
   for (const note of v.notes) h += `<div class="sub warn">${esc(note)}</div>`;
+  h += comparisonHtml("Original time estimate", entry?.time_comparison, "time");
+  h += comparisonHtml("Original cost estimate", entry?.cost_comparison, "cost");
+  if (entry?.re_estimate) {
+    const re = entry.re_estimate;
+    const parts = [];
+    if (re.time) parts.push(`${re.time.low}s–${re.time.high}s (median ${re.time.expected}s)`);
+    if (re.active_seconds) parts.push(`${re.active_seconds.low}s–${re.active_seconds.high}s active`);
+    if (re.cost) parts.push(`$${re.cost.low.toFixed(2)}–$${re.cost.high.toFixed(2)} cost`);
+    const detail = re.reason || `${parts.join(" · ")} · ${re.sample_count} samples`;
+    h += `<div class="sub">First-turn re-estimate: ${esc(detail)}</div>`;
+  }
   return h + `</div>`;
 }
 
@@ -298,7 +316,8 @@ export function renderModal() {
 
   let meta = `<div class="sub">${esc(t.scope)} · ${esc(t.agent)} on ${esc(t.runtime)} · ${esc(scheduleLabel(t.schedule))}${pausedTag(t)}`;
   if (t.next_run_at && !t.schedule_paused) meta += ` · next ${new Date(t.next_run_at).toLocaleString()}`;
-  if (t.estimate_seconds) meta += ` · estimate ${shortSpan(t.estimate_seconds)}`;
+  if (t.estimate?.time) meta += ` · estimate ${shortSpan(t.estimate.time.low)}–${shortSpan(t.estimate.time.high)} (expected ${shortSpan(t.estimate.time.expected)})`;
+  else if (t.estimate_seconds) meta += ` · estimate ${shortSpan(t.estimate_seconds)}`;
   if (t.ack_timeout_seconds) meta += ` · ack ${t.ack_timeout_seconds}s`;
   if (t.timeout_seconds) meta += ` · timeout ${t.timeout_seconds}s`;
   if (t.worktree) meta += ` · own worktree`;
@@ -328,7 +347,8 @@ export function renderModal() {
     if (r.worktree_path) meta += ` at <code>${esc(r.worktree_path)}</code>`;
     meta += `</div>`;
   }
-  if (r) meta += usageHtml(r.usage);
+  const usageEntry = state.taskUsage?.runs?.find(entry => entry.run_id === r?.id);
+  if (r) meta += usageHtml(r.usage, usageEntry);
   const total = state.taskUsage && state.taskUsage.task_id === t.id ? taskUsageLine(state.taskUsage.total) : null;
   if (total) meta += `<div class="sub">${esc(total)}</div>`;
   if (r && r.result) meta += `<label>Result</label><pre>${esc(r.result)}</pre>`;

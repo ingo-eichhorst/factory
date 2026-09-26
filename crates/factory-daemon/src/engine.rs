@@ -16,8 +16,8 @@ use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
     AgentActivity, AgentView, CredentialRow, DaemonFacts, Envelope, InterfaceFacts, Payload,
-    ProviderAgent, ProviderRow, Request, Response, RuntimeConnectionView, SandboxRow, ScopeView,
-    StatusInfo, StoreFacts, UnassignedAgent,
+    ProviderAgent, ProviderRow, ProviderRun, ProviderWindow, Request, Response, RuntimeConnectionView,
+    SandboxRow, ScopeView, StatusInfo, StoreFacts, UnassignedAgent,
 };
 use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
@@ -444,7 +444,10 @@ impl Engine {
         if let Err(e) = self.authorize(&caller, &request).await {
             return Response::error(e.code(), e.to_string());
         }
-        match self.dispatch_request(&caller, request).await {
+        // The request dispatcher covers the whole protocol and is a large
+        // future in debug builds. Poll it from the heap so callers do not
+        // need a multi-megabyte stack merely to issue a small request.
+        match Box::pin(self.dispatch_request(&caller, request)).await {
             Ok(payload) => Response::ok(payload),
             Err(e) => Response::error(e.code(), e.to_string()),
         }
@@ -547,7 +550,10 @@ impl Engine {
             Request::DependenciesVex { scope } => Ok(Payload::Text {
                 text: self.dependencies_vex(&scope).await?,
             }),
-            Request::Infrastructure => Ok(self.infrastructure().await),
+            // Keep the provider/snapshot projection out of this already-large
+            // request future's stack frame. Every request variant shares that
+            // frame even when Infrastructure was not the one selected.
+            Request::Infrastructure => Ok(Box::pin(self.infrastructure()).await),
             Request::Backup => Ok(Payload::Backup {
                 report: Box::new(self.backup_report().await?),
             }),
@@ -1301,6 +1307,9 @@ impl Engine {
                 plan: p.plan.clone(),
                 env: p.env.clone(),
                 agents: Vec::new(),
+                windows: Vec::new(),
+                active_runs: Vec::new(),
+                usage_unknown: None,
             })
             .collect();
         let mut unassigned = Vec::new();
@@ -1326,6 +1335,126 @@ impl Engine {
                         harness: agent.harness.clone(),
                     }),
                 }
+            }
+        }
+
+        // Provider usage is derived from the same append-only run snapshots
+        // as cost. It is deliberately not persisted as a second aggregate.
+        let now = Utc::now();
+        let mut recent_runs = self
+            .store
+            .runs_between(now - chrono::Duration::days(8), now + chrono::Duration::seconds(1))
+            .await
+            .unwrap_or_default();
+        if let Ok(active) = self.store.active_runs().await {
+            for active_run in active {
+                if !recent_runs.iter().any(|candidate| candidate.id == active_run.id) {
+                    recent_runs.push(active_run);
+                }
+            }
+        }
+        let mut task_scopes = std::collections::BTreeMap::new();
+        for run in &recent_runs {
+            if !task_scopes.contains_key(&run.task_id) {
+                let scope = self
+                    .store
+                    .get(&run.task_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|task| factory.canonical_scope_name(&task.scope))
+                    .unwrap_or_else(|| "?".into());
+                task_scopes.insert(run.task_id.clone(), scope);
+            }
+        }
+        for provider in &mut providers {
+            let bound: Vec<&Run> = recent_runs
+                .iter()
+                .filter(|run| run.provider_account.as_deref() == Some(provider.name.as_str()))
+                .collect();
+            provider.active_runs = bound
+                .iter()
+                .filter(|run| !run.status.is_terminal())
+                .map(|run| ProviderRun {
+                    run_id: run.id.clone(),
+                    task_id: run.task_id.clone(),
+                    scope: task_scopes.get(&run.task_id).cloned().unwrap_or_else(|| "?".into()),
+                    agent: run.agent.clone(),
+                    instance: run.session.as_ref().map(|session| session.handle.clone()),
+                })
+                .collect();
+
+            let mut windows: std::collections::BTreeMap<(u32, String), ProviderWindow> =
+                std::collections::BTreeMap::new();
+            for run in &bound {
+                let snapshots = self.store.usage_snapshots(&run.id).await.unwrap_or_default();
+                let mut readings = Vec::new();
+                for snapshot in snapshots {
+                    let Some(usage) = snapshot.usage else { continue };
+                    for session in usage.sessions {
+                        let Some(rate) = session.rate_limit else { continue };
+                        for window in rate.windows {
+                            let (Some(minutes), Some(reset)) = (window.window_minutes, window.resets_at) else {
+                                continue;
+                            };
+                            let Ok(reset_at) = chrono::DateTime::parse_from_rfc3339(&reset) else {
+                                continue;
+                            };
+                            if reset_at.with_timezone(&Utc) <= now {
+                                continue;
+                            }
+                            readings.push((
+                                minutes,
+                                reset,
+                                snapshot.at,
+                                window.used_percent,
+                                rate.plan_type.clone(),
+                                rate.attribution_quality.clone(),
+                            ));
+                        }
+                    }
+                }
+                readings.sort_by_key(|reading| reading.2);
+                for (index, reading) in readings.iter().enumerate() {
+                    let previous = readings[..index]
+                        .iter()
+                        .rev()
+                        .find(|prior| prior.0 == reading.0 && prior.1 == reading.1)
+                        .and_then(|prior| prior.3);
+                    let trend = reading.3.zip(previous).map(|(current, prior)| current - prior);
+                    let key = (reading.0, reading.1.clone());
+                    let replace = windows.get(&key).map_or(true, |existing| existing.sampled_at <= reading.2);
+                    if replace {
+                        windows.insert(
+                            key,
+                            ProviderWindow {
+                                window_minutes: reading.0,
+                                used_percent: reading.3,
+                                resets_at: reading.1.clone(),
+                                sampled_at: reading.2,
+                                plan_type: reading.4.clone(),
+                                attribution_quality: reading.5.clone(),
+                                attribution: None,
+                                stale: now - reading.2 > chrono::Duration::minutes(15),
+                                trend_percent: trend,
+                                unknown: reading.3.is_none().then(|| "provider did not report used percent".into()),
+                            },
+                        );
+                    }
+                }
+            }
+            let attribution = match provider.active_runs.len() {
+                0 => None,
+                1 => Some(factory_core::usage::PlanShareAttribution::Direct),
+                _ => Some(factory_core::usage::PlanShareAttribution::Apportioned),
+            };
+            provider.windows = windows.into_values().collect();
+            for window in &mut provider.windows {
+                window.attribution = attribution;
+            }
+            provider.windows.sort_by_key(|window| window.window_minutes);
+            if provider.kind == factory_core::config::ProviderKind::Subscription && provider.windows.is_empty() {
+                provider.usage_unknown = Some("no current rate-limit observation from a bound run".into());
             }
         }
 
@@ -1781,6 +1910,12 @@ impl Engine {
                 "a task estimate must be at least one second".into(),
             ));
         }
+        if let Some(estimate) = &patch.estimate {
+            estimate.validate().map_err(FactoryError::BadRequest)?;
+            patch.estimate_seconds = Some(estimate.time.expected);
+        } else if let Some(seconds) = patch.estimate_seconds {
+            patch.estimate = Some(factory_core::task::Estimate::point(seconds));
+        }
         if let Some(category) = &patch.category {
             factory_core::control_plan::check_category(category).map_err(FactoryError::BadRequest)?;
         }
@@ -1965,7 +2100,7 @@ impl Engine {
 
     async fn create_task(
         &self,
-        new: NewTask,
+        mut new: NewTask,
         workflow_origin: Option<WorkflowOrigin>,
         bench_origin: Option<factory_core::bench::BenchOrigin>,
         id: Option<String>,
@@ -1979,6 +2114,12 @@ impl Engine {
             return Err(FactoryError::BadRequest(
                 "a task estimate must be at least one second".into(),
             ));
+        }
+        if let Some(estimate) = &new.estimate {
+            estimate.validate().map_err(FactoryError::BadRequest)?;
+            new.estimate_seconds = Some(estimate.time.expected);
+        } else if let Some(seconds) = new.estimate_seconds {
+            new.estimate = Some(factory_core::task::Estimate::point(seconds));
         }
         // A retry policy governs what happens after a *scheduled* run fails
         // (`Engine::settle_retry` never looks at it for a task with no
@@ -2147,6 +2288,19 @@ impl Engine {
         // `ack_timeout` three minutes later.
         self.harness_gate(&task, agent.as_ref(), trigger).await?;
         let factory = self.factory_snapshot();
+        let provider_account = declaration
+            .as_ref()
+            .and_then(|declared| factory.config.infrastructure.provider_for(declared))
+            .map(|(provider, _)| provider.name.clone())
+            .or_else(|| {
+                factory
+                    .config
+                    .infrastructure
+                    .providers
+                    .iter()
+                    .find(|provider| provider.harnesses.iter().any(|harness| harness == &adapter_name))
+                    .map(|provider| provider.name.clone())
+            });
         let scope_path = factory.scope_path(&task.scope)?;
         if !scope_path.is_dir() {
             return Err(FactoryError::BadRequest(format!(
@@ -2174,6 +2328,17 @@ impl Engine {
                 queued_at: Some(due.queued_at),
                 scheduled_for: due.scheduled_for,
             })
+            .await?;
+        let run = self
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    original_estimate: task.effective_estimate(),
+                    provider_account,
+                    ..Default::default()
+                },
+            )
             .await?;
 
         // The run exists from here on, so it holds its share of the power
@@ -2333,8 +2498,7 @@ impl Engine {
         // had already used -- a pane an earlier run left behind, a harness
         // that spent tokens coming up -- is not this run's (#117). Never a
         // `?`: a runtime with no usage to give must not fail the run.
-        self.snapshot_usage(&run, factory_core::usage::SnapshotPoint::Dispatch)
-            .await;
+        Box::pin(self.snapshot_usage(&run, factory_core::usage::SnapshotPoint::Dispatch)).await;
 
         let prompt = agent.prompt(&ctx).await?;
         runtime.submit(&session, &prompt).await?;
@@ -3122,8 +3286,7 @@ impl Engine {
                 }
             }
             // The last reading, while the session is still there to ask.
-            self.snapshot_usage(run, factory_core::usage::SnapshotPoint::RunEnd)
-                .await;
+            Box::pin(self.snapshot_usage(run, factory_core::usage::SnapshotPoint::RunEnd)).await;
             let _ = runtime.stop(session).await;
         }
     }
@@ -5364,6 +5527,9 @@ mod tests {
             runtime: "herdr".into(),
             session: None,
             token: None,
+            original_estimate: None,
+            provider_account: None,
+            re_estimate: None,
             result: None,
             routed_to: None,
             error: None,
@@ -5528,6 +5694,9 @@ mod tests {
             runtime: "herdr".into(),
             session: None,
             token: None,
+            original_estimate: None,
+            provider_account: None,
+            re_estimate: None,
             result: None,
             routed_to: None,
             error: None,

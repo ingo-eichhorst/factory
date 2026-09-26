@@ -677,10 +677,10 @@ struct CostsQuery {
     scope: Option<String>,
 }
 
-/// `GET /api/costs?group_by=task|issue|scope|agent&from=&to=&scope=` --
+/// `GET /api/costs?group_by=task|issue|scope|agent|provider&from=&to=&scope=` --
 /// usage and cost summed per group over the runs that started in the
 /// window (#117). `from`/`to` are RFC 3339; the window defaults to the last
-/// thirty days. A grouping v1 does not offer yet (`provider`, `workflow`)
+/// thirty days. A grouping this endpoint does not offer (`workflow`)
 /// is a 400 that says so, not an empty answer.
 async fn costs(State(engine): State<Arc<Engine>>, Query(q): Query<CostsQuery>) -> AxumResponse {
     let group_by = match q.group_by.as_deref().filter(|g| !g.trim().is_empty()) {
@@ -1990,8 +1990,12 @@ mod tests {
         assert_eq!(json["data"]["report"]["from"], "2026-01-01T00:00:00Z");
 
         let (status, json) = request(engine.clone(), "GET", "/api/costs?group_by=provider", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["report"]["group_by"], "provider");
+
+        let (status, json) = request(engine.clone(), "GET", "/api/costs?group_by=workflow", None).await;
         assert_eq!(status, 400, "{json}");
-        assert!(json["message"].as_str().unwrap().contains("provider"), "{json}");
+        assert!(json["message"].as_str().unwrap().contains("workflow"), "{json}");
 
         let (status, _) = request(engine, "GET", "/api/tasks/nope/usage", None).await;
         assert_eq!(status, 404);
