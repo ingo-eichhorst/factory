@@ -1,5 +1,6 @@
 //! L1 Backup (`#116`): the page's report, a backup taken on request or on
-//! the schedule, retention after it, and verification.
+//! the schedule, retention after it, verification, and owner-only restore
+//! into a new root.
 //!
 //! The file work is `archive.rs`'s and the record of what happened is
 //! `store.rs`'s; everything that decides -- retention, how old is too old,
@@ -23,7 +24,7 @@ use chrono::{DateTime, Duration, Utc};
 use factory_core::backup::{
     age_level, parse_archive_name, refuse_bad_snapshot_name, retain, warnings, AgeLevel, BackupConfig,
     BackupFailure, BackupReport, BackupTrigger, CheckStatus, DestinationFacts, ExcludeRow, Group, IncludeRow,
-    KeptBy, ManifestInstance, Snapshot, SnapshotRow, Verification, VerifySummary, WarningFacts, AUTHORED,
+    KeptBy, ManifestInstance, Restoration, Snapshot, SnapshotRow, Verification, VerifySummary, WarningFacts, AUTHORED,
     EXCLUDED, GRACE_HOURS, OPTIONAL, UNSCHEDULED_OVERDUE_HOURS, UNSCHEDULED_STALE_HOURS,
 };
 use factory_core::config::{Factory, CONFIG_FILE, FACTORY_DIR};
@@ -296,13 +297,13 @@ impl Engine {
     }
 
     /// Take a backup now and apply retention after it. Refused while another
-    /// backup or verification holds the lock; every failure past that point
+    /// backup operation holds the lock; every failure past that point
     /// is recorded and published as `backup_failed` before it is returned.
     pub(crate) async fn backup_run(self: &Arc<Self>, trigger: BackupTrigger, by: String) -> Result<Snapshot> {
         let (factory, config) = self.backup_config()?;
         let Ok(_busy) = self.backup_busy.try_lock() else {
             return Err(FactoryError::BadRequest(
-                "a backup or verification is already running; try again when it has finished".into(),
+                "another backup operation is already running; try again when it has finished".into(),
             ));
         };
         let at = Utc::now();
@@ -414,7 +415,7 @@ impl Engine {
         }
         let Ok(_busy) = self.backup_busy.try_lock() else {
             return Err(FactoryError::BadRequest(
-                "a backup or verification is already running; try again when it has finished".into(),
+                "another backup operation is already running; try again when it has finished".into(),
             ));
         };
         let destination = config.destination.clone();
@@ -462,6 +463,51 @@ impl Engine {
         tracing::info!(snapshot = %verification.snapshot, ok = verification.ok, "backup verified");
         self.bus.publish(Event::BackupVerified { verification: verification.summary() });
         Ok(verification)
+    }
+
+    /// Restore one named snapshot into a new root. Authorization makes this
+    /// owner-only before it reaches here; the daemon supplies its active root
+    /// so the archive layer can refuse aliases of the live instance. Unlike a
+    /// backup or verify, restore never changes this instance's history.
+    pub(crate) async fn backup_restore(self: &Arc<Self>, snapshot: String, into: PathBuf) -> Result<Restoration> {
+        let (factory, config) = self.backup_config()?;
+        refuse_bad_snapshot_name(&snapshot)?;
+        let Ok(_busy) = self.backup_busy.try_lock() else {
+            return Err(FactoryError::BadRequest(
+                "another backup operation is already running; try again when it has finished".into(),
+            ));
+        };
+        let destination = config.destination.clone();
+        let instance = factory.config.instance.name.clone();
+        let found = tokio::task::spawn_blocking({
+            let destination = destination.clone();
+            move || list_archives(&destination, &instance)
+        })
+        .await
+        .unwrap_or_default();
+        if !found.iter().any(|f| f.name == snapshot) {
+            return Err(FactoryError::BadRequest(format!(
+                "no snapshot {snapshot:?} in {}; `factory backup list` shows them",
+                destination.display()
+            )));
+        }
+
+        let started = std::time::Instant::now();
+        let archive_path = destination.join(&snapshot);
+        let instance_id = factory.config.instance.id.clone();
+        let active_root = factory.root.clone();
+        let restored = tokio::task::spawn_blocking(move || {
+            archive::restore(&archive_path, &instance_id, &active_root, &into)
+        })
+        .await
+        .map_err(|e| FactoryError::adapter("backup", format!("the restore task stopped: {e}")))??;
+        Ok(Restoration {
+            snapshot,
+            into: restored.into.display().to_string(),
+            files: restored.files,
+            checks: restored.checks,
+            duration_ms: started.elapsed().as_millis() as u64,
+        })
     }
 }
 
@@ -542,7 +588,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         if due > Utc::now() {
             continue;
         }
-        // Busy (a person's backup or verification) is not a failure: the
+        // Busy (a person's backup operation) is not a failure: the
         // next tick looks again.
         if engine.backup_busy.try_lock().is_err() {
             continue;
@@ -725,6 +771,9 @@ mod tests {
         assert_eq!((knowledge.files, knowledge.bytes), (Some(3), Some(30)));
         let goals = after.iter().find(|r| r.path == ".factory/goals/").unwrap();
         assert_eq!(goals.files, Some(0));
+        let vex = after.iter().find(|r| r.path == ".factory/vex/").unwrap();
+        assert!(vex.included);
+        assert_eq!(vex.files, Some(0));
         assert!(exclude_rows(false).iter().any(|r| r.path == ".factory/logs/"));
         assert!(!exclude_rows(true).iter().any(|r| r.path == ".factory/logs/"));
     }

@@ -16,6 +16,7 @@ use crate::run::Run;
 use crate::task::{CloseReason, NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskReport, TurnEnded};
 use crate::workflow::{WorkflowDefinition, WorkflowDraft, WorkflowLint, WorkflowRun};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", content = "params", rename_all = "snake_case")]
@@ -373,7 +374,7 @@ pub enum Request {
     /// Take a snapshot now -- the same one the schedule takes -- then apply
     /// retention. `backup.run`, checked against the root scope like
     /// `policy.attest`: the instance's state is company-wide, not one
-    /// project's. Refused while another backup or verification is running.
+    /// project's. Refused while another backup operation is running.
     #[serde(rename = "backup.run")]
     BackupRun,
     /// Unpack a snapshot into a temporary directory and prove it would
@@ -385,6 +386,16 @@ pub enum Request {
     BackupVerify {
         #[serde(default)]
         snapshot: Option<String>,
+    },
+    /// Verify and materialize a plaintext snapshot as a new instance root.
+    /// The destination must not exist or must be empty; the daemon stages it
+    /// beside that destination and renames only after every required check
+    /// passes. CLI-only and owner-only: there is intentionally no grant or
+    /// HTTP endpoint for restore.
+    #[serde(rename = "backup.restore")]
+    BackupRestore {
+        snapshot: String,
+        into: PathBuf,
     },
     /// The L5 Knowledge tab: an index of `<root>/.factory/knowledge/`,
     /// rebuilt from the files on every request. Read-only, like
@@ -904,6 +915,8 @@ pub enum Payload {
     BackupRun { snapshot: crate::backup::Snapshot },
     /// The answer to `Request::BackupVerify`: every step and its outcome.
     BackupVerify { verification: crate::backup::Verification },
+    /// The answer to `Request::BackupRestore`: the newly materialized root.
+    BackupRestore { restoration: crate::backup::Restoration },
     /// The L5 Knowledge tab. `present: false` when the vault
     /// (`<root>/.factory/knowledge/`) does not exist -- an empty state, not
     /// an error -- with `root` still naming the path that was looked in, and
@@ -2116,6 +2129,20 @@ mod tests {
         let env: Envelope =
             serde_json::from_str(r#"{"op":"environment"}"#).expect("request parses");
         assert!(matches!(env.request, Request::Environment));
+    }
+
+    #[test]
+    fn a_backup_restore_request_carries_the_snapshot_and_new_root() {
+        let json = r#"{"op":"backup.restore","params":{"snapshot":"factory-backup-demo-20260925T030000Z.tar.zst","into":"/tmp/restored"}}"#;
+        let env: Envelope = serde_json::from_str(json).expect("request parses");
+        assert!(matches!(
+            &env.request,
+            Request::BackupRestore { snapshot, into }
+                if snapshot.ends_with(".tar.zst") && into == &PathBuf::from("/tmp/restored")
+        ));
+        let back = serde_json::to_string(&env).unwrap();
+        let again: Envelope = serde_json::from_str(&back).unwrap();
+        assert!(matches!(again.request, Request::BackupRestore { .. }));
     }
 
     #[test]

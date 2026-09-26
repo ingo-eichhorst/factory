@@ -162,7 +162,7 @@ pub struct Engine {
     /// What happened to backups -- see `backup::BackupStore`. The archives
     /// themselves are the destination's, listed fresh on every request.
     pub(crate) backups: crate::backup::BackupStore,
-    /// Held for the whole of a backup or a verification, so the job and a
+    /// Held for the whole of a backup, verification or restore, so the job and a
     /// person can never run two at once over one destination. Taken with
     /// `try_lock`: a second request is refused, never queued.
     pub(crate) backup_busy: tokio::sync::Mutex<()>,
@@ -580,6 +580,9 @@ impl Engine {
                 verification: self
                     .backup_verify(snapshot, crate::policies::caller_name(caller))
                     .await?,
+            }),
+            Request::BackupRestore { snapshot, into } => Ok(Payload::BackupRestore {
+                restoration: self.backup_restore(snapshot, into).await?,
             }),
             Request::Knowledge => {
                 let root = self.factory_snapshot().root;

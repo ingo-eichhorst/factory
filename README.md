@@ -2288,9 +2288,9 @@ spend per provider are not shown: Factory does not record tokens yet.
 ### Backup
 
 `.factory/` holds the only copy of the company's operating history -- the
-database, the knowledge vault, the policies, goals, scenarios and quality
-profiles -- and git tracks none of it. The root config names where a copy
-goes, and the daemon takes one on a schedule:
+database, the knowledge vault, the policies, goals, scenarios, quality
+profiles and VEX judgments -- and git tracks none of it. The root config
+names where a copy goes, and the daemon takes one on a schedule:
 
 ```yaml
 # root .factory/config.yaml
@@ -2309,7 +2309,7 @@ A snapshot is one `factory-backup-<instance>-<utc>.tar.zst` holding:
   writes, and never a file copy, which WAL would make torn -- then checked with
   `PRAGMA integrity_check` before anything is archived;
 - the root `.factory/config.yaml` and every registered scope's own;
-- `.factory/{knowledge,datasets,policies,goals,scenarios,quality}/`, whole;
+- `.factory/{knowledge,datasets,policies,goals,scenarios,quality,vex}/`, whole;
 - a `manifest.json`, written last: instance, daemon version (there is no
   build commit compiled in, so none is claimed), the database's
   `user_version`, tables and integrity result, and the path, size and sha256
@@ -2328,6 +2328,8 @@ synced.
     factory backup list              every snapshot, verified or not, and the rule that keeps it
     factory backup run               take one now, then apply retention
     factory backup verify [<name>]   prove one would restore; exits non-zero on a failed check
+    factory backup restore <name> --into <new-root>
+                                      verify, then restore into a new root
 
 `GET /api/backup`, `POST /api/backup/run` and
 `POST /api/backup/verify?snapshot=` are the same three over HTTP, and the
@@ -2335,17 +2337,30 @@ synced.
 only an agent in the root scope may hold, like `policy.attest`; reading is
 open to every agent.
 
+**Restore** is CLI-only and owner-only; there is deliberately no HTTP or UI
+endpoint and no role grant for it. It runs the same archive-path, manifest,
+checksum, database-schema and authored-content checks as `verify`, staging the
+exact checked files in a temporary sibling of `<new-root>`. Only after every
+required check passes does one rename make the root visible. `<new-root>` must
+not exist or must be empty, and may never be the running instance. A corrupt,
+incomplete, unsafe or database-incompatible archive leaves neither a partial
+root nor a staging directory. The command prints the exact
+`factory-daemon --root <new-root> run` and `factory --root <new-root> status`
+commands for a switch-over, but never stops a daemon, switches roots or starts
+the restored instance itself. V1 plaintext archives are supported; encrypted
+input belongs to the separate encryption follow-up.
+
 **Verify** unpacks a snapshot into a temporary directory -- never over the
 instance -- refusing any entry that would land outside it, then checks every
 sha256 against the manifest (a file missing, changed or unlisted fails it),
 runs `integrity_check` on the database copy and compares its schema version,
 loads the root config, and loads every authored-content directory with the
 loader the daemon uses: policies and drafts, goals, scenarios, quality
-profiles, datasets and the knowledge index. A file one of those loaders
-cannot parse is a warning, not a failure: the checksums have already proved
-it is byte for byte what was backed up, so it is broken in the live
-instance too. Every verification is recorded; the page's "last verified"
-only counts snapshots still in the destination.
+profiles, CycloneDX VEX judgments, datasets and the knowledge index. A file
+one of those loaders cannot parse is a warning, not a failure: the checksums
+have already proved it is byte for byte what was backed up, so it is broken
+in the live instance too. Every verification is recorded; the page's "last
+verified" only counts snapshots still in the destination.
 
 **The job.** Once a minute the daemon looks whether the schedule's next slot
 after the later of the last attempt and the newest archive has passed, so a
@@ -2372,8 +2387,8 @@ Every backup and verification is an event -- `backup_completed`,
 unmounted volume is a `backup_failed` with the reason, a warning on the page
 and a line in the log. Not yet: `age` encryption (a config asking for
 `encrypt_to` is refused at load rather than given plaintext it thinks is
-encrypted), `restore --into`, the policy facts and metrics, the scope-repo
-remote report and the Time Machine fact are the issue's v2.
+encrypted), the policy facts and metrics, the scope-repo remote report and the
+Time Machine fact.
 
 ## Writing a plugin
 

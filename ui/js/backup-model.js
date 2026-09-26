@@ -162,7 +162,7 @@ export function actions(report) {
     return { run: false, verify: false, why: "configure infrastructure.backup first" };
   }
   if (report.running) {
-    return { run: false, verify: false, why: "a backup or verification is running" };
+    return { run: false, verify: false, why: "a backup operation is running" };
   }
   const any = Array.isArray(report.snapshots) && report.snapshots.length > 0;
   return { run: true, verify: any, why: any ? "" : "there is no snapshot to verify yet" };

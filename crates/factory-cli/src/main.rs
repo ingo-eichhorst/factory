@@ -467,6 +467,17 @@ enum BackupCmd {
         /// left out.
         snapshot: Option<String>,
     },
+    /// Verify a plaintext snapshot, then materialize it into a new instance
+    /// root. Owner-only. The destination must not exist or must be empty;
+    /// this never stops the current daemon or switches roots for you.
+    Restore {
+        /// The snapshot's file name, as `list` shows it.
+        snapshot: String,
+        /// A new or empty instance root. Relative paths are resolved by this
+        /// CLI before the request reaches the daemon.
+        #[arg(long)]
+        into: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1154,6 +1165,15 @@ async fn main() -> Result<()> {
                     }
                     _ => Ok(()),
                 }
+            }
+            BackupCmd::Restore { snapshot, into } => {
+                let into = if into.is_absolute() {
+                    into
+                } else {
+                    std::env::current_dir()?.join(into)
+                };
+                let payload = client.send(Request::BackupRestore { snapshot, into }).await?;
+                print(&payload, cli.json, backup_restore_text)
             }
         },
 
@@ -2059,7 +2079,7 @@ fn backup_status_text(payload: &Payload) -> Option<String> {
         ));
         out.push_str("  encrypted    no (v1 writes plaintext archives)\n");
         if report.running {
-            out.push_str("  running      a backup or verification is in progress\n");
+            out.push_str("  running      a backup operation is in progress\n");
         }
     }
     if !report.warnings.is_empty() {
@@ -2138,6 +2158,31 @@ fn backup_verify_text(payload: &Payload) -> Option<String> {
         out.push_str(&format!("  {status}  {:<10} {}\n", c.name, c.detail));
     }
     Some(out.trim_end().to_string())
+}
+
+fn backup_restore_text(payload: &Payload) -> Option<String> {
+    let Payload::BackupRestore { restoration } = payload else { return None };
+    let root = shell_word(&restoration.into);
+    Some(format!(
+        "RESTORED  {}\n  {} files -> {}  in {:.1}s\n\
+         Nothing was switched or started. To switch over:\n\
+         1. Stop the current factory-daemon.\n\
+         2. Start the restored instance: factory-daemon --root {root} run\n\
+         3. Point the CLI at it: factory --root {root} status",
+        restoration.snapshot,
+        restoration.files,
+        restoration.into,
+        restoration.duration_ms as f64 / 1000.0,
+    ))
+}
+
+/// One shell word for the concrete commands printed after restore.
+fn shell_word(value: &str) -> String {
+    if !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+:@%=,".contains(c)) {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 /// Binary units, one decimal: `64.0 GiB`.
@@ -5371,6 +5416,41 @@ mod tests {
         );
         t.id = "abc123".into();
         t
+    }
+
+    #[test]
+    fn backup_restore_requires_a_snapshot_and_destination_and_prints_cutover_steps() {
+        let cli = Cli::try_parse_from([
+            "factory",
+            "backup",
+            "restore",
+            "factory-backup-demo-20260925T030000Z.tar.zst",
+            "--into",
+            "/tmp/restored factory",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Backup {
+                command: Some(BackupCmd::Restore { snapshot, into })
+            } if snapshot.ends_with(".tar.zst") && into == PathBuf::from("/tmp/restored factory")
+        ));
+        assert!(Cli::try_parse_from(["factory", "backup", "restore", "snapshot"]).is_err());
+
+        let payload = Payload::BackupRestore {
+            restoration: factory_core::backup::Restoration {
+                snapshot: "snapshot.tar.zst".into(),
+                into: "/tmp/restored factory".into(),
+                files: 12,
+                checks: vec![],
+                duration_ms: 1500,
+            },
+        };
+        let text = backup_restore_text(&payload).unwrap();
+        assert!(text.contains("12 files -> /tmp/restored factory"), "{text}");
+        assert!(text.contains("Nothing was switched or started"), "{text}");
+        assert!(text.contains("factory-daemon --root '/tmp/restored factory' run"), "{text}");
+        assert!(text.contains("factory --root '/tmp/restored factory' status"), "{text}");
     }
 
     #[test]
