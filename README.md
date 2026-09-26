@@ -2513,8 +2513,37 @@ creating `/Volumes/Backup/factory` on the system disk would be the backup that
 looks fine and is not); the destination on the **same device** as the
 instance (same `st_dev`), which is a copy, not a backup; the newest backup
 stale (one slot missed, plus two hours' grace) or overdue (two); no schedule;
-and no snapshot in the destination verified, or the last verification
-failed. A destination inside the instance's own `.factory/` is refused.
+no snapshot in the destination verified, or the last verification failed; a
+scope's repository ahead of its upstream, with no remote, or with no upstream
+at all; and Time Machine not configured. A destination inside the instance's
+own `.factory/` is refused. The code and Time Machine warnings hold whether
+or not a backup is even configured -- source code is backed up by pushing
+it, not by this snapshot -- so they still follow the "no backup configured"
+warning rather than being skipped by it.
+
+**Code and Time Machine (`#155`).** Scope source code is backed up by
+pushing it to its git remote, never by the snapshot above, so the page says
+what `git` itself reports for each registered scope's repository: its
+current branch's remote and how many commits are not on it, **as of the
+last fetch** -- this never fetches, pushes or configures anything. Two
+scopes whose directories are the same repository (a nested scope sharing
+the root's checkout) are probed once and share one row's worth of fact.
+Every state is explicit rather than guessed: `no_directory`,
+`not_a_repository`, `no_commits`, `detached_head`, `no_remote`, `no_upstream`,
+`tracked` (with the remote, the upstream and the exact count ahead) or
+`inspection_failed` when a `git` probe itself failed or timed out. A remote
+URL is only ever shown redacted -- `user:password@`/`token@` userinfo is
+stripped from an `http(s)` URL before it reaches the wire; a
+scp-like `git@host:owner/repo.git` or an `ssh://` URL carries no such
+userinfo and is shown as is. On macOS, `tmutil destinationinfo` is read the
+same read-only way and reported `configured` (naming each destination),
+`not_configured`, or `unavailable` when `tmutil` could not be asked; every
+other platform reads `unsupported`. Unknown, failed or unsupported states are
+shown as unknown -- never claimed as a problem or as fine.
+`factory backup status` prints a `CODE` block and a `TIME MACHINE` line
+alongside the snapshot status; the L1 › Backup page draws the same as a
+"Code" table and a Time Machine fact, regardless of whether a backup is
+configured at all.
 
 Every backup and verification is an event -- `backup_completed`,
 `backup_failed`, `backup_verified` -- and a row in an append-only
@@ -2522,8 +2551,7 @@ Every backup and verification is an event -- `backup_completed`,
 unmounted volume is a `backup_failed` with the reason, a warning on the page
 and a line in the log. Not yet: `age` encryption (a config asking for
 `encrypt_to` is refused at load rather than given plaintext it thinks is
-encrypted), the policy facts and metrics, the scope-repo remote report and the
-Time Machine fact.
+encrypted) and the policy facts and metrics.
 
 ## Writing a plugin
 

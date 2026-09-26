@@ -22,6 +22,7 @@ import {
   ageBadge,
   backupFailure,
   checkRows,
+  codeRows,
   destinationLevel,
   destinationText,
   fmtAgo,
@@ -33,6 +34,7 @@ import {
   keptByText,
   lastVerifiedText,
   scheduleText,
+  timeMachineText,
   verifiedCell,
 } from "./backup-model.js";
 
@@ -117,6 +119,25 @@ function warningStrip(warnings) {
   </ul>`;
 }
 
+/// `#155`: source code is backed up by pushing it, not by a snapshot, so
+/// this reads `report.code`/`report.time_machine` regardless of whether
+/// `report.config` is set -- unlike every other section on the page.
+function codeSection(report) {
+  const rows = codeRows(report);
+  const tm = timeMachineText(report);
+  const body = rows.length
+    ? rows.map(r => `<tr>
+        <td>${esc(r.scope)}</td>
+        <td class="bk-path mono">${r.remote === MISSING ? `<span class="infra-missing">${MISSING}</span>` : esc(r.remote)}</td>
+        <td class="bk-${r.level}">${esc(r.text)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="3" class="bk-none">no registered scope resolves to a repository</td></tr>`;
+  return `<section class="bk-section"><h3>Code <span class="sub">pushed to a remote is the backup; this only reads what git already knows</span></h3>
+    <div class="bk-scroll"><table><thead><tr><th>Scope</th><th>Remote</th><th>State</th></tr></thead><tbody>${body}</tbody></table></div>
+    <dl class="infra-facts">${fact("Time Machine", tm.text, tm.level)}</dl>
+  </section>`;
+}
+
 function history(report) {
   const rows = report.snapshots || [];
   if (!report.config) return "";
@@ -181,7 +202,7 @@ export function renderBackup() {
     return;
   }
   page.hidden = false;
-  page.innerHTML = [hero(report), warningStrip(report.warnings), history(report), contents(report)].join("");
+  page.innerHTML = [hero(report), warningStrip(report.warnings), codeSection(report), history(report), contents(report)].join("");
   for (const b of page.querySelectorAll("[data-verify]")) {
     b.onclick = () => confirmVerify(b.dataset.verify);
   }

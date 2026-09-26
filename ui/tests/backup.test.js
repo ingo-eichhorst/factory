@@ -9,6 +9,7 @@ import {
   ageBadge,
   backupFailure,
   checkRows,
+  codeRows,
   destinationLevel,
   destinationText,
   fmtAgo,
@@ -21,6 +22,7 @@ import {
   keptByText,
   lastVerifiedText,
   scheduleText,
+  timeMachineText,
   verifiedCell,
 } from "../js/backup-model.js";
 
@@ -75,6 +77,35 @@ const REPORT = {
     { path: ".factory/logs/", why: "the daemon's logs", included: false, files: null, bytes: null },
   ],
   exclude: [{ path: ".factory/secrets.yaml", why: "a secret: never read, never copied" }],
+  // #155: the wire shape `RepositoryFact`/`TimeMachineFact` serialize to --
+  // pinned by a Rust test (`a_repository_fact_and_a_time_machine_fact_serialize_the_way_the_ui_expects`).
+  code: [
+    {
+      scopes: ["factory"],
+      path: "projects/factory",
+      state: { state: "tracked", remote: "origin", upstream: "origin/main", ahead: 2 },
+      remote_url: "https://github.com/o/factory.git",
+    },
+    {
+      scopes: ["root", "nested"],
+      path: ".",
+      state: { state: "tracked", remote: "origin", upstream: "origin/main", ahead: 0 },
+      remote_url: "https://github.com/o/root.git",
+    },
+    { scopes: ["no-remote"], path: "projects/no-remote", state: { state: "no_remote" }, remote_url: null },
+    { scopes: ["no-upstream"], path: "projects/no-upstream", state: { state: "no_upstream" }, remote_url: null },
+    { scopes: ["detached"], path: "projects/detached", state: { state: "detached_head" }, remote_url: null },
+    { scopes: ["fresh"], path: "projects/fresh", state: { state: "no_commits" }, remote_url: null },
+    { scopes: ["not-a-repo"], path: "projects/not-a-repo", state: { state: "not_a_repository" }, remote_url: null },
+    { scopes: ["gone"], path: "gone", state: { state: "no_directory" }, remote_url: null },
+    {
+      scopes: ["flaky"],
+      path: "projects/flaky",
+      state: { state: "inspection_failed", reason: "git timed out after 5s" },
+      remote_url: null,
+    },
+  ],
+  time_machine: { state: "not_configured" },
 };
 
 // ------------------------------------------------------------------ the tab
@@ -207,4 +238,63 @@ test("only backup_* events are the page's", () => {
   assert.equal(isBackupEvent({ type: "backup_verified" }), true);
   assert.equal(isBackupEvent({ type: "task_updated" }), false);
   assert.equal(isBackupEvent(null), false);
+});
+
+// -------------------------------------------------------------------- #155
+
+test("code is a row per scope, sharing one repository's state and remote", () => {
+  const rows = codeRows(REPORT);
+  // The 9 facts above cover 10 scope rows: one fact lists two scopes.
+  assert.equal(rows.length, 10);
+  const factory = rows.find(r => r.scope === "factory");
+  assert.deepEqual(factory, { scope: "factory", remote: "https://github.com/o/factory.git", level: "warn", text: "2 unpushed (as of last fetch)" });
+  const shared = rows.filter(r => r.scope === "root" || r.scope === "nested");
+  assert.equal(shared.length, 2);
+  for (const row of shared) {
+    assert.equal(row.level, "ok");
+    assert.equal(row.text, "up to date (as of last fetch)");
+    assert.equal(row.remote, "https://github.com/o/root.git");
+  }
+});
+
+test("an unpushed commit is a warning; up to date and unknown states are not", () => {
+  assert.equal(codeRows({ code: [{ scopes: ["a"], state: { state: "tracked", ahead: 1 } }] })[0].level, "warn");
+  assert.equal(codeRows({ code: [{ scopes: ["a"], state: { state: "tracked", ahead: 0 } }] })[0].level, "ok");
+  assert.equal(codeRows({ code: [{ scopes: ["a"], state: { state: "no_remote" } }] })[0].level, "warn");
+  assert.equal(codeRows({ code: [{ scopes: ["a"], state: { state: "no_upstream" } }] })[0].level, "warn");
+  // Never shown as a problem or as fine: unknown, exactly as the daemon warns.
+  for (const state of ["detached_head", "no_commits", "not_a_repository", "no_directory", "inspection_failed"]) {
+    assert.equal(codeRows({ code: [{ scopes: ["a"], state: { state } }] })[0].level, "none", state);
+  }
+  assert.deepEqual(codeRows({ code: [] }), []);
+  assert.deepEqual(codeRows({}), []);
+  assert.deepEqual(codeRows(null), []);
+});
+
+test("no scope name reads as the missing dash instead of an empty row", () => {
+  const rows = codeRows({ code: [{ scopes: [], state: { state: "no_remote" } }] });
+  assert.equal(rows[0].scope, MISSING);
+});
+
+test("time machine reads observed, unknown or unsupported -- never asserted from nothing", () => {
+  assert.deepEqual(timeMachineText({ time_machine: { state: "configured", destinations: ["Backup Disk"] } }), {
+    level: "ok",
+    text: "configured -- Backup Disk",
+  });
+  assert.equal(timeMachineText(REPORT).level, "warn");
+  assert.equal(timeMachineText(REPORT).text, "not configured");
+  const unavailable = timeMachineText({ time_machine: { state: "unavailable", reason: "tmutil is missing" } });
+  assert.equal(unavailable.level, "none");
+  assert.match(unavailable.text, /tmutil is missing/);
+  assert.deepEqual(timeMachineText({ time_machine: { state: "unsupported" } }), { level: "none", text: "not supported on this platform" });
+  assert.deepEqual(timeMachineText({}), { level: "none", text: "unknown" });
+  assert.deepEqual(timeMachineText(null), { level: "none", text: "unknown" });
+});
+
+test("the Code section renders for every report, not gated on report.config the way history and contents are", () => {
+  assert.match(view, /function codeSection\(report\)/);
+  assert.match(
+    view,
+    /\[hero\(report\), warningStrip\(report\.warnings\), codeSection\(report\), history\(report\), contents\(report\)\]/
+  );
 });

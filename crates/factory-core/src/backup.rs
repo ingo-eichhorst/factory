@@ -484,6 +484,131 @@ pub fn age_level(
     }
 }
 
+// ==================================================================== code
+//
+// `#155`: scope source code is backed up by pushing it to its git remote,
+// never by this snapshot -- so the only honest thing L1 Backup can say about
+// it is what `git` itself reports about the current branch, as of the last
+// fetch. Nothing here fetches, pushes or configures a remote.
+
+/// The current branch's state in a registered scope's repository, as
+/// `git` itself answers it -- never a guess, and never "backed up" claimed
+/// from anything but an upstream actually being ahead of nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RepositoryState {
+    /// The scope's directory does not exist.
+    NoDirectory,
+    /// The directory exists but `git` does not recognise it as a repository.
+    NotARepository,
+    /// A repository with no commits yet (an unborn `HEAD`).
+    NoCommits,
+    /// `HEAD` does not point at a branch.
+    DetachedHead,
+    /// A repository with commits, but no remote configured at all.
+    NoRemote,
+    /// The current branch has no upstream, though at least one remote
+    /// exists -- `git push -u` has never run for it.
+    NoUpstream,
+    /// The current branch tracks `upstream` on `remote`, `ahead` commits
+    /// not on it. Never re-derived after a fetch this probe never runs:
+    /// the count is against the local remote-tracking ref as it already
+    /// stood.
+    Tracked { remote: String, upstream: String, ahead: u64 },
+    /// A `git` probe failed or timed out; this row's state could not be
+    /// read. Never treated as a problem or as fine -- only as unknown.
+    InspectionFailed { reason: String },
+}
+
+/// One registered scope's repository, or the reason it has none. Two scopes
+/// whose directories are the same repository (a nested scope sharing the
+/// root's checkout, say) are probed once and share this same fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryFact {
+    /// Every registered scope name whose directory resolves to this
+    /// repository, in config order.
+    pub scopes: Vec<String>,
+    /// The repository's top level, relative to the instance root (or the
+    /// scope's own directory when there is no repository to give one).
+    pub path: String,
+    pub state: RepositoryState,
+    /// The tracked remote's URL with [`redact_remote`] applied. `None`
+    /// unless `state` is `Tracked`: an untracked or absent remote has
+    /// nothing this probe would know to ask `git` for.
+    pub remote_url: Option<String>,
+}
+
+/// One macOS Time Machine destination, from `tmutil destinationinfo`. See
+/// [`parse_destinationinfo`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TimeMachineFact {
+    /// At least one destination is configured, named as `tmutil` names it.
+    Configured { destinations: Vec<String> },
+    /// `tmutil` ran and plainly said none is configured.
+    NotConfigured,
+    /// `tmutil` could not be asked: missing, timed out, or an exit this
+    /// daemon does not otherwise recognise. Shown as unknown, never as a
+    /// problem or as fine.
+    Unavailable { reason: String },
+    /// Not macOS: Time Machine does not apply to this host.
+    Unsupported,
+}
+
+/// Strip `user:password@` / `token@` userinfo from an `http(s)` remote URL
+/// before it is ever put on the wire -- a personal-access-token remote must
+/// never reach `GET /api/backup`. `git@host:owner/repo.git` (the scp-like
+/// form) and `ssh://` URLs carry no userinfo worth redacting and are
+/// returned unchanged; so is anything that is not `http(s)` at all (a local
+/// path, for one).
+pub fn redact_remote(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else { return url.to_string() };
+    let scheme = &url[..scheme_end + 3];
+    if !scheme.eq_ignore_ascii_case("http://") && !scheme.eq_ignore_ascii_case("https://") {
+        return url.to_string();
+    }
+    let rest = &url[scheme_end + 3..];
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    match authority.rfind('@') {
+        Some(at) => format!("{scheme}{}{}", &authority[at + 1..], &rest[authority_end..]),
+        None => url.to_string(),
+    }
+}
+
+/// `tmutil destinationinfo`'s stdout (or, on a non-zero exit, whatever text
+/// there is to explain it) read into a fact. Pure: the daemon is the one
+/// that actually runs `tmutil`, under a timeout, and hands this whatever it
+/// got back.
+pub fn parse_destinationinfo(output: &str, success: bool) -> TimeMachineFact {
+    if !success {
+        let reason = output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("tmutil destinationinfo exited with an error")
+            .to_string();
+        return TimeMachineFact::Unavailable { reason };
+    }
+    if output.to_ascii_lowercase().contains("no destinations configured") {
+        return TimeMachineFact::NotConfigured;
+    }
+    let destinations: Vec<String> = output
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(key, _)| key.trim().eq_ignore_ascii_case("name"))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if destinations.is_empty() {
+        TimeMachineFact::Unavailable {
+            reason: format!("could not read tmutil destinationinfo's output: {output:?}"),
+        }
+    } else {
+        TimeMachineFact::Configured { destinations }
+    }
+}
+
 // ================================================================ warnings
 
 /// How loudly a warning is drawn.
@@ -520,6 +645,13 @@ pub struct WarningFacts {
     pub last_verified: Option<(DateTime<Utc>, bool)>,
     /// The newest failed attempt, when it is newer than the newest success.
     pub failure_since_newest: Option<(DateTime<Utc>, String)>,
+    /// `#155`: every registered scope's repository fact, gathered whether or
+    /// not a backup is configured at all -- source code is backed up by
+    /// pushing it, not by this report's `configured`.
+    pub code: Vec<RepositoryFact>,
+    /// `#155`: `None` when it was never asked (not yet wired up); distinct
+    /// from [`TimeMachineFact::Unavailable`], which is "asked and failed".
+    pub time_machine: Option<TimeMachineFact>,
 }
 
 pub fn warnings(f: &WarningFacts) -> Vec<BackupWarning> {
@@ -535,69 +667,109 @@ pub fn warnings(f: &WarningFacts) -> Vec<BackupWarning> {
              exist on this disk only. Add infrastructure.backup to the root .factory/config.yaml."
                 .into(),
         );
-        return out;
-    }
-    let destination = f.destination.clone().unwrap_or_default();
-    if let Some((at, reason)) = &f.failure_since_newest {
-        push(
-            "last_failed",
-            WarningLevel::Bad,
-            format!("The last backup attempt failed ({}): {reason}", at.format("%Y-%m-%d %H:%M UTC")),
-        );
-    }
-    if !f.destination_exists {
-        push(
-            "destination_missing",
-            WarningLevel::Bad,
-            format!("The destination {destination} does not exist or is not mounted."),
-        );
-    }
-    if f.same_device == Some(true) {
-        push(
-            "same_device",
-            WarningLevel::Bad,
-            format!(
-                "The destination {destination} is on the same device as the instance, so a disk failure \
-                 loses both: this is a copy, not a backup. Point it at an external disk, a NAS mount or a \
-                 synced folder."
+        // Source code is backed up by pushing it, not by this snapshot, so
+        // the code and Time Machine warnings below still apply -- and
+        // still follow `not_configured`, never before it.
+    } else {
+        let destination = f.destination.clone().unwrap_or_default();
+        if let Some((at, reason)) = &f.failure_since_newest {
+            push(
+                "last_failed",
+                WarningLevel::Bad,
+                format!("The last backup attempt failed ({}): {reason}", at.format("%Y-%m-%d %H:%M UTC")),
+            );
+        }
+        if !f.destination_exists {
+            push(
+                "destination_missing",
+                WarningLevel::Bad,
+                format!("The destination {destination} does not exist or is not mounted."),
+            );
+        }
+        if f.same_device == Some(true) {
+            push(
+                "same_device",
+                WarningLevel::Bad,
+                format!(
+                    "The destination {destination} is on the same device as the instance, so a disk failure \
+                     loses both: this is a copy, not a backup. Point it at an external disk, a NAS mount or a \
+                     synced folder."
+                ),
+            );
+        }
+        match (f.newest, f.age) {
+            (None, _) => push("no_backup", WarningLevel::Bad, "No backup has been taken yet.".into()),
+            (Some(_), Some(AgeLevel::Stale)) => push(
+                "stale",
+                WarningLevel::Warn,
+                "The newest backup is older than its schedule: at least one slot passed without a backup.".into(),
             ),
-        );
+            (Some(_), Some(AgeLevel::Overdue)) => push(
+                "overdue",
+                WarningLevel::Bad,
+                "The newest backup is overdue: more than one scheduled backup has been missed.".into(),
+            ),
+            _ => {}
+        }
+        if !f.scheduled {
+            push(
+                "unscheduled",
+                WarningLevel::Warn,
+                "No schedule is configured: a backup is taken only when somebody runs one. Add \
+                 infrastructure.backup.schedule."
+                    .into(),
+            );
+        }
+        match f.last_verified {
+            None if f.newest.is_some() => push(
+                "never_verified",
+                WarningLevel::Warn,
+                "No snapshot in the destination has been verified, so nobody knows whether one would restore. Run Verify.".into(),
+            ),
+            Some((at, false)) => push(
+                "verify_failed",
+                WarningLevel::Bad,
+                format!("The last verification ({}) failed.", at.format("%Y-%m-%d %H:%M UTC")),
+            ),
+            _ => {}
+        }
     }
-    match (f.newest, f.age) {
-        (None, _) => push("no_backup", WarningLevel::Bad, "No backup has been taken yet.".into()),
-        (Some(_), Some(AgeLevel::Stale)) => push(
-            "stale",
-            WarningLevel::Warn,
-            "The newest backup is older than its schedule: at least one slot passed without a backup.".into(),
-        ),
-        (Some(_), Some(AgeLevel::Overdue)) => push(
-            "overdue",
-            WarningLevel::Bad,
-            "The newest backup is overdue: more than one scheduled backup has been missed.".into(),
-        ),
-        _ => {}
+    // `#155`: honest, not exhaustive -- `inspection_failed` states are
+    // unknown, never asserted good or bad, so only `Tracked` (with commits
+    // to push), `NoRemote` and `NoUpstream` add a warning.
+    for repo in &f.code {
+        let label = if repo.scopes.is_empty() { "a scope".to_string() } else { repo.scopes.join(", ") };
+        match &repo.state {
+            RepositoryState::Tracked { ahead, .. } if *ahead > 0 => push(
+                "code_unpushed",
+                WarningLevel::Warn,
+                format!(
+                    "{label} has {ahead} commit{} not on its upstream, as of the last fetch ({}).",
+                    if *ahead == 1 { "" } else { "s" },
+                    repo.path
+                ),
+            ),
+            RepositoryState::NoRemote => push(
+                "code_no_remote",
+                WarningLevel::Warn,
+                format!("{label} has no git remote configured ({}): its commits exist only on this disk.", repo.path),
+            ),
+            RepositoryState::NoUpstream => push(
+                "code_no_upstream",
+                WarningLevel::Warn,
+                format!("{label}'s current branch has no upstream ({}): `git push -u` has never run.", repo.path),
+            ),
+            _ => {}
+        }
     }
-    if !f.scheduled {
+    if matches!(f.time_machine, Some(TimeMachineFact::NotConfigured)) {
         push(
-            "unscheduled",
+            "time_machine_off",
             WarningLevel::Warn,
-            "No schedule is configured: a backup is taken only when somebody runs one. Add \
-             infrastructure.backup.schedule."
+            "Time Machine is not configured on this Mac: nothing outside a pushed git remote or this backup \
+             has a second copy anywhere."
                 .into(),
         );
-    }
-    match f.last_verified {
-        None if f.newest.is_some() => push(
-            "never_verified",
-            WarningLevel::Warn,
-            "No snapshot in the destination has been verified, so nobody knows whether one would restore. Run Verify.".into(),
-        ),
-        Some((at, false)) => push(
-            "verify_failed",
-            WarningLevel::Bad,
-            format!("The last verification ({}) failed.", at.format("%Y-%m-%d %H:%M UTC")),
-        ),
-        _ => {}
     }
     out
 }
@@ -627,6 +799,16 @@ pub struct BackupReport {
     pub snapshots: Vec<SnapshotRow>,
     pub include: Vec<IncludeRow>,
     pub exclude: Vec<ExcludeRow>,
+    /// `#155`: every registered scope's repository fact, filled whether or
+    /// not a backup is configured. `#[serde(default)]` so a daemon built
+    /// before this exists still parses to a CLI built after.
+    #[serde(default)]
+    pub code: Vec<RepositoryFact>,
+    /// `#155`: `None` for a daemon built before this, or one that has not
+    /// asked yet -- distinct from `Some(Unavailable { .. })`, which asked
+    /// and failed.
+    #[serde(default)]
+    pub time_machine: Option<TimeMachineFact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -890,6 +1072,8 @@ mod tests {
             age: Some(AgeLevel::Fresh),
             last_verified: Some((Utc::now(), true)),
             failure_since_newest: None,
+            code: Vec::new(),
+            time_machine: None,
         };
         assert!(warnings(&fine).is_empty(), "{:?}", warnings(&fine));
 
@@ -910,5 +1094,191 @@ mod tests {
         let never = WarningFacts { newest: None, age: Some(AgeLevel::None), last_verified: None, ..fine };
         let kinds: Vec<String> = warnings(&never).into_iter().map(|w| w.kind).collect();
         assert_eq!(kinds, ["no_backup"], "never_verified says nothing new when there is nothing to verify");
+    }
+
+    fn tracked(scopes: &[&str], path: &str, remote: &str, upstream: &str, ahead: u64) -> RepositoryFact {
+        RepositoryFact {
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            path: path.into(),
+            state: RepositoryState::Tracked { remote: remote.into(), upstream: upstream.into(), ahead },
+            remote_url: Some(format!("https://github.com/o/{path}.git")),
+        }
+    }
+
+    #[test]
+    fn code_and_time_machine_warnings_follow_not_configured_and_add_nothing_for_the_unknown_states() {
+        // Even with no backup configured at all, the code and Time Machine
+        // facts are still gathered and still warn -- but `not_configured`
+        // stays first.
+        let unconfigured = WarningFacts {
+            code: vec![tracked(&["factory"], "projects/factory", "origin", "origin/main", 2)],
+            time_machine: Some(TimeMachineFact::NotConfigured),
+            ..WarningFacts::default()
+        };
+        let kinds: Vec<String> = warnings(&unconfigured).into_iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["not_configured", "code_unpushed", "time_machine_off"]);
+
+        let base = WarningFacts {
+            configured: true,
+            destination: Some("/Volumes/Backup".into()),
+            destination_exists: true,
+            same_device: Some(false),
+            scheduled: true,
+            newest: Some(Utc::now()),
+            age: Some(AgeLevel::Fresh),
+            last_verified: Some((Utc::now(), true)),
+            failure_since_newest: None,
+            code: Vec::new(),
+            time_machine: None,
+        };
+
+        let ahead = WarningFacts {
+            code: vec![tracked(&["factory"], "projects/factory", "origin", "origin/main", 1)],
+            ..base.clone()
+        };
+        let kinds: Vec<String> = warnings(&ahead).into_iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["code_unpushed"]);
+
+        let up_to_date = WarningFacts {
+            code: vec![tracked(&["factory"], "projects/factory", "origin", "origin/main", 0)],
+            ..base.clone()
+        };
+        assert!(warnings(&up_to_date).is_empty(), "ahead == 0 is nothing to warn about");
+
+        let no_remote = WarningFacts {
+            code: vec![RepositoryFact {
+                scopes: vec!["factory".into()],
+                path: "projects/factory".into(),
+                state: RepositoryState::NoRemote,
+                remote_url: None,
+            }],
+            ..base.clone()
+        };
+        assert_eq!(warnings(&no_remote).into_iter().map(|w| w.kind).collect::<Vec<_>>(), ["code_no_remote"]);
+
+        let no_upstream = WarningFacts {
+            code: vec![RepositoryFact {
+                scopes: vec!["factory".into()],
+                path: "projects/factory".into(),
+                state: RepositoryState::NoUpstream,
+                remote_url: None,
+            }],
+            ..base.clone()
+        };
+        assert_eq!(warnings(&no_upstream).into_iter().map(|w| w.kind).collect::<Vec<_>>(), ["code_no_upstream"]);
+
+        // Unknown, failed or unsupported states are never a problem or fine.
+        for state in [
+            RepositoryState::NoDirectory,
+            RepositoryState::NotARepository,
+            RepositoryState::NoCommits,
+            RepositoryState::DetachedHead,
+            RepositoryState::InspectionFailed { reason: "git timed out".into() },
+        ] {
+            let facts = WarningFacts {
+                code: vec![RepositoryFact { scopes: vec!["factory".into()], path: "projects/factory".into(), state, remote_url: None }],
+                ..base.clone()
+            };
+            assert!(warnings(&facts).is_empty(), "{:?}", warnings(&facts));
+        }
+        for tm in [TimeMachineFact::Unavailable { reason: "missing".into() }, TimeMachineFact::Unsupported] {
+            let facts = WarningFacts { time_machine: Some(tm), ..base.clone() };
+            assert!(warnings(&facts).is_empty(), "{:?}", warnings(&facts));
+        }
+        let configured_tm = WarningFacts {
+            time_machine: Some(TimeMachineFact::Configured { destinations: vec!["Backup Disk".into()] }),
+            ..base
+        };
+        assert!(warnings(&configured_tm).is_empty());
+    }
+
+    #[test]
+    fn redact_remote_strips_userinfo_from_http_urls_only() {
+        assert_eq!(
+            redact_remote("https://x-access-token:SECRET@github.com/o/r.git"),
+            "https://github.com/o/r.git"
+        );
+        assert_eq!(redact_remote("https://SECRET@host/r"), "https://host/r");
+        assert_eq!(redact_remote("http://user:pass@host:8080/path"), "http://host:8080/path");
+        // Never touched: no userinfo to strip in the first place.
+        assert_eq!(redact_remote("git@github.com:o/r.git"), "git@github.com:o/r.git", "scp-like: not http(s)");
+        assert_eq!(redact_remote("ssh://git@host/o/r.git"), "ssh://git@host/o/r.git", "ssh: not http(s)");
+        assert_eq!(redact_remote("https://github.com/o/r.git"), "https://github.com/o/r.git", "nothing to redact");
+        assert_eq!(redact_remote("/Volumes/Backup/bare.git"), "/Volumes/Backup/bare.git", "a local path");
+    }
+
+    #[test]
+    fn parse_destinationinfo_reads_one_or_two_destinations_and_the_plain_off_answer() {
+        // This Mac's own answer (#116): `tmutil: No destinations configured.`,
+        // exit 0.
+        assert_eq!(parse_destinationinfo("tmutil: No destinations configured.\n", true), TimeMachineFact::NotConfigured);
+
+        let one = "====================================================\n\
+                   Name              : Backup Disk\n\
+                   Kind              : Local\n\
+                   Mount Point       : /Volumes/Backup Disk\n\
+                   ID                : 11111111-1111-1111-1111-111111111111\n\
+                   ====================================================\n";
+        assert_eq!(
+            parse_destinationinfo(one, true),
+            TimeMachineFact::Configured { destinations: vec!["Backup Disk".into()] }
+        );
+
+        let two = format!(
+            "{one}====================================================\n\
+             Name              : Offsite Disk\n\
+             Kind              : Network\n\
+             ID                : 22222222-2222-2222-2222-222222222222\n\
+             ====================================================\n"
+        );
+        assert_eq!(
+            parse_destinationinfo(&two, true),
+            TimeMachineFact::Configured { destinations: vec!["Backup Disk".into(), "Offsite Disk".into()] }
+        );
+
+        let TimeMachineFact::Unavailable { reason } = parse_destinationinfo("tmutil: some error\n", false) else {
+            panic!("a non-zero exit is unavailable, not unsupported or configured");
+        };
+        assert!(reason.contains("some error"), "{reason}");
+    }
+
+    /// Pinned so a future edit cannot silently change the wire shape a
+    /// nested-enum fact serializes to -- the JS side matches this exactly.
+    #[test]
+    fn a_repository_fact_and_a_time_machine_fact_serialize_the_way_the_ui_expects() {
+        let fact = tracked(&["factory"], "projects/factory", "origin", "origin/main", 1);
+        let json = serde_json::to_value(&fact).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "scopes": ["factory"],
+                "path": "projects/factory",
+                "state": { "state": "tracked", "remote": "origin", "upstream": "origin/main", "ahead": 1 },
+                "remote_url": "https://github.com/o/projects/factory.git",
+            })
+        );
+
+        let no_remote = RepositoryFact {
+            scopes: vec!["factory".into()],
+            path: "projects/factory".into(),
+            state: RepositoryState::NoRemote,
+            remote_url: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&no_remote).unwrap(),
+            serde_json::json!({
+                "scopes": ["factory"],
+                "path": "projects/factory",
+                "state": { "state": "no_remote" },
+                "remote_url": null,
+            })
+        );
+
+        let tm = TimeMachineFact::Configured { destinations: vec!["Backup Disk".into()] };
+        assert_eq!(
+            serde_json::to_value(&tm).unwrap(),
+            serde_json::json!({ "state": "configured", "destinations": ["Backup Disk"] })
+        );
+        assert_eq!(serde_json::to_value(&TimeMachineFact::NotConfigured).unwrap(), serde_json::json!({ "state": "not_configured" }));
     }
 }

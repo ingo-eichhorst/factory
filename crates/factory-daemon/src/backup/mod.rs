@@ -16,6 +16,7 @@
 //! backup.
 
 pub mod archive;
+mod repos;
 pub mod store;
 
 pub use store::BackupStore;
@@ -181,6 +182,13 @@ impl Engine {
         let factory = self.factory_snapshot();
         let running = self.backup_busy.try_lock().is_err();
         let recorded = self.backups.all().await?;
+        // `#155`: gathered whether or not a backup is even configured --
+        // source code is backed up by pushing it, not by this snapshot --
+        // so both branches below carry them.
+        let (code, time_machine) = tokio::join!(
+            repos::repository_facts(&factory.root, &factory.config.scopes),
+            repos::time_machine_fact(),
+        );
         let Some(config) = factory.config.infrastructure.backup.clone() else {
             return Ok(BackupReport {
                 now,
@@ -192,10 +200,12 @@ impl Engine {
                 running,
                 last_verified: None,
                 last_failure: None,
-                warnings: warnings(&WarningFacts::default()),
+                warnings: warnings(&WarningFacts { code: code.clone(), time_machine: Some(time_machine.clone()), ..Default::default() }),
                 snapshots: Vec::new(),
                 include: include_rows(false, None),
                 exclude: exclude_rows(false),
+                code,
+                time_machine: Some(time_machine),
             });
         };
 
@@ -275,6 +285,8 @@ impl Engine {
                 .as_ref()
                 .filter(|f| newest.is_none_or(|n| f.at > n))
                 .map(|f| (f.at, f.reason.clone())),
+            code: code.clone(),
+            time_machine: Some(time_machine.clone()),
         };
         // The include table's numbers are the newest snapshot this daemon
         // took itself: the one it has a manifest summary for.
@@ -293,6 +305,8 @@ impl Engine {
             last_failure,
             warnings: warnings(&warning_facts),
             snapshots,
+            code,
+            time_machine: Some(time_machine),
         })
     }
 
@@ -645,6 +659,61 @@ mod tests {
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
             .with_backup_store(BackupStore::open(&database).unwrap());
         (Arc::new(engine), base)
+    }
+
+    /// `#155`, end to end through the engine: a scope's remote can carry a
+    /// token, and it must never survive onto the wire `GET /api/backup`
+    /// answers with -- only the redacted URL, and only for the tracked row.
+    #[tokio::test]
+    async fn a_secret_in_a_scopes_remote_never_reaches_the_serialized_report() {
+        async fn run(dir: &Path, args: &[&str]) {
+            assert!(
+                tokio::process::Command::new("git").args(args).current_dir(dir).status().await.unwrap().success(),
+                "git {args:?} in {}",
+                dir.display()
+            );
+        }
+        async fn output(dir: &Path, args: &[&str]) -> String {
+            let out = tokio::process::Command::new("git").args(args).current_dir(dir).output().await.unwrap();
+            assert!(out.status.success(), "git {args:?} in {}", dir.display());
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        let (engine, base) = engine_backing_up("{ daily: 7 }", "destination");
+        let root = engine.factory_snapshot().root;
+        run(&root, &["init", "-q"]).await;
+        run(&root, &["config", "user.email", "factory@example.com"]).await;
+        run(&root, &["config", "user.name", "factory"]).await;
+        run(&root, &["add", "-A"]).await;
+        run(&root, &["commit", "-q", "-m", "base"]).await;
+        run(&root, &["remote", "add", "origin", "https://x-access-token:SECRET-TOKEN@github.com/o/r.git"]).await;
+        // Plant the remote-tracking ref at the current commit and set the
+        // upstream directly -- never fetching -- then commit once more so
+        // `ahead == 1` without this probe ever contacting the remote.
+        let head_sha = output(&root, &["rev-parse", "HEAD"]).await;
+        let branch = output(&root, &["symbolic-ref", "--short", "HEAD"]).await;
+        let tracking_ref = format!("refs/remotes/origin/{branch}");
+        run(&root, &["update-ref", tracking_ref.as_str(), head_sha.as_str()]).await;
+        let upstream = format!("origin/{branch}");
+        run(&root, &["branch", "--set-upstream-to", upstream.as_str()]).await;
+        run(&root, &["commit", "-q", "--allow-empty", "-m", "second"]).await;
+
+        let report = engine.backup_report().await.unwrap();
+        let repo = report
+            .code
+            .iter()
+            .find(|f| f.scopes.iter().any(|s| s == "company"))
+            .expect("the company scope's repository fact");
+        match &repo.state {
+            factory_core::backup::RepositoryState::Tracked { ahead, .. } => assert_eq!(*ahead, 1, "{repo:?}"),
+            other => panic!("expected Tracked, got {other:?}"),
+        }
+        assert_eq!(repo.remote_url.as_deref(), Some("https://github.com/o/r.git"));
+
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("SECRET-TOKEN"), "a secret in a remote reached the wire: {json}");
+        assert!(json.contains("https://github.com/o/r.git"), "the redacted url should still be on the wire: {json}");
+        std::fs::remove_dir_all(base).ok();
     }
 
     /// The whole v1 path through the engine: run, list, verify, and the
