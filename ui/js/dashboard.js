@@ -26,17 +26,33 @@
 //! read separately and neither implies the other: a run started again is not
 //! evidence anyone rejected the one before, only that it was tried again.
 //!
-//! What this page will not draw, because the domain does not record it:
-//! cost, unit cost, or a euro figure of any kind (a `Run` carries no model,
-//! no tokens, no money -- see `run.rs`); a "verified" share (there is no
-//! verification step); workflows in flight (nothing links one task run to
-//! another); bays (a row is an agent, not a slot -- `occupancy.rs`); and a
-//! daemon-down calendar tile (the store has no event log, so a quiet day and
-//! a stopped daemon are the same shape of nothing and must not be drawn as
-//! different facts). The production-year grid labels a day before this
+//! What this page will not draw, because the domain does not record it: a
+//! "verified" share (there is no verification step); workflows in flight
+//! (nothing links one task run to another); bays (a row is an agent, not a
+//! slot -- `occupancy.rs`); and a daemon-down calendar tile (the store has
+//! no event log, so a quiet day and a stopped daemon are the same shape of
+//! nothing and must not be drawn as different facts). Cost stopped being one
+//! of these with #117: a run's measured usage (`Run.usage`) now backs the
+//! `cost` view tile and every registry metric's `usd`/`hours` figures
+//! (#162) -- this comment used to say otherwise and was wrong by the time
+//! #117 shipped. The production-year grid labels a day before this
 //! instance's first recorded run "no record", not "before this factory
 //! existed" -- the earliest run is a lower bound on how long the instance has
 //! existed, not its birthday.
+//!
+//! Registry metric tiles and #150's richer view tiles (#162, phase 3) read
+//! four more shared answers -- `/api/metrics`, `/api/occupancy`, `/api/
+//! operations`, `/api/policy`, `/api/costs` -- each fetched at most once per
+//! render cycle and only when the resolved layout actually names a tile
+//! that needs it (`neededEndpoints`/`neededMetricIds`,
+//! `dashboard-tiles-model.js`): the default layout names none of them, so it
+//! starts no new request. `/api/metrics`, `/api/occupancy` and `/api/costs`
+//! follow the dashboard's own window the same as `/api/production` does, so
+//! a window change refetches all four (`reloadTileData`); `/api/policy` and
+//! `/api/operations` do not, and only reload with the layout, on a scope
+//! change. `/api/occupancy` carries no `scope` on the wire at all
+//! (`Request::Occupancy`) -- every tile reading it narrows client-side with
+//! `inScope`, the same as the occupancy chart itself.
 //!
 //! Recent events: dropped, on purpose, rather than duplicated. Activity
 //! already is that view -- a tail of what this page has seen since it opened,
@@ -52,11 +68,23 @@
 import { $, esc, api, state } from "./core.js";
 import { inScope, routeHref, scopeLabel } from "./scopes.js";
 import { fmtAge, inboxItems } from "./operations-model.js";
+import { fmtUsd, taskUsageLine } from "./usage-model.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 import { hasFailed } from "./task-model.js";
 import { notStarted } from "./pending-model.js";
-import { packRows, resolveDashboard, isTileRenderable } from "./dashboard-model.js";
+import { packRows, resolveDashboard, isTileRenderable, tileKind, rowTemplate, rowIsAllSmall } from "./dashboard-model.js";
+import {
+  neededEndpoints,
+  neededMetricIds,
+  metricTileView,
+  agentHoursByScope,
+  agentHoursByAgent,
+  occupancyStripRows,
+  complianceSummaryRows,
+  topCostRows,
+  windowDays,
+} from "./dashboard-tiles-model.js";
 
 /// The three presets the window selector offers. `bin` travels with every
 /// request rather than being guessed from `minutes` server-side, so a caller
@@ -67,6 +95,12 @@ const WINDOWS = {
   d90: { label: "90 days", minutes: 90 * 24 * 60, bin: "week" },
 };
 let windowKey = "d14";
+
+/// `WINDOWS`' own keys, spelled the way `#182`'s `/api/metrics?window=`
+/// expects them (`factory_core::metrics::MetricsWindow`) -- the dashboard's
+/// three presets are exactly that enum's three values, just named
+/// differently on this side of the wire.
+const METRICS_WINDOW = { day: "day", d14: "14d", d90: "90d" };
 
 /// The last answer from `/api/production`. Module-local, the way
 /// `activity.js` keeps its own log: nothing outside this file draws history.
@@ -86,8 +120,24 @@ let production;
 let layoutTiles;
 let layoutSource = null;
 
+/// The four new shared reads #162's tiles draw from -- each `undefined`
+/// until its first fetch, `null` when that fetch failed, the same "three
+/// states, never a manufactured empty answer" rule `production`/
+/// `inboxReport` already keep. Only ever populated when `neededEndpoints`
+/// says the current layout has a tile that needs it (`loadTileData`/
+/// `reloadTileData` below) -- a layout without, say, a `cost` tile leaves
+/// `tileCosts` exactly as it was, which is harmless: nothing reads it.
+let tileMetrics; // last /api/metrics answer: { values, series, registry }
+let tileOccupancy; // last /api/occupancy answer's `.occupancy`
+let tilePolicy; // last /api/policy answer's `.report`
+let tileCosts; // last /api/costs answer's `.report`
+
 export async function loadDashboard() {
+  // Production and the layout are independent reads, same as before #162;
+  // only once the layout is resolved does anything know which of the new
+  // shared reads (if any) the tiles on it actually need.
   await Promise.all([loadProduction(), loadLayout()]);
+  await loadTileData(resolveDashboard(layoutTiles));
   renderDashboard();
 }
 
@@ -102,11 +152,99 @@ async function loadProduction() {
   }
 }
 
-/// The window selector's own reload: production is scoped by window, the
-/// layout is not, so switching windows re-fetches only the former --
-/// `wireDashboard`'s window buttons call this, never `loadDashboard`.
-async function reloadProduction() {
-  await loadProduction();
+/// Fetches exactly the shared reads `tiles` needs (`neededEndpoints`/
+/// `neededMetricIds`, `dashboard-tiles-model.js`) -- never more than one per
+/// endpoint, and none at all for a layout (the default included) that names
+/// no tile of that kind. Awaited alongside `loadProduction` from both
+/// `loadDashboard` (a fresh layout, so every kind is worth checking) and
+/// `reloadTileData` (the window changed; the layout did not).
+async function loadTileData(tiles) {
+  const needs = neededEndpoints(tiles);
+  await Promise.all([
+    needs.metrics ? loadTileMetrics(neededMetricIds(tiles)) : Promise.resolve(),
+    needs.occupancy ? loadTileOccupancy() : Promise.resolve(),
+    needs.operations ? loadInbox() : Promise.resolve(),
+    needs.policy ? loadTilePolicy() : Promise.resolve(),
+    needs.costs ? loadTileCosts() : Promise.resolve(),
+  ]);
+}
+
+/// One `/api/metrics?ids=…&scope=&window=` request for every metric tile on
+/// the page, scoped and windowed the same as `/api/production`. `ids` is
+/// never empty here -- `loadTileData` only calls this when `neededEndpoints`
+/// found a metric tile, and an empty `ids=` would ask the wire's own
+/// default (every metric in the registry) instead of the few this layout
+/// actually names.
+async function loadTileMetrics(ids) {
+  const params = new URLSearchParams({ ids: ids.join(",") });
+  if (state.scope) params.set("scope", state.scope);
+  params.set("window", METRICS_WINDOW[windowKey]);
+  try {
+    tileMetrics = await api(`/api/metrics?${params}`);
+  } catch {
+    tileMetrics = null;
+  }
+}
+
+/// `/api/occupancy`, over the dashboard's own window -- the one read
+/// `agent_hours_by_scope`/`_by_agent`/`occupancy_strip` all share. Unscoped
+/// on the wire (`Request::Occupancy` carries no `scope`, the same as
+/// `occupancy.js`'s own fetch): every tile that reads this filters rows
+/// with `inScope` itself, client-side, the way the chart already does.
+async function loadTileOccupancy() {
+  try {
+    tileOccupancy = (await api(`/api/occupancy?minutes=${WINDOWS[windowKey].minutes}`)).occupancy;
+  } catch {
+    tileOccupancy = null;
+  }
+}
+
+/// `/api/policy?scope=`, for the `compliance` tile -- the same request
+/// `policy.js`'s own board makes for the selected scope's subtree rollup.
+async function loadTilePolicy() {
+  const query = state.scope ? `?scope=${encodeURIComponent(state.scope)}` : "";
+  try {
+    tilePolicy = (await api(`/api/policy${query}`)).report;
+  } catch {
+    tilePolicy = null;
+  }
+}
+
+/// `/api/costs?group_by=scope&scope=&from=&to=`, for the `cost` tile -- a
+/// fixed grouping, no arbitrary parameter (#150 design §8), and `from`/`to`
+/// set from the dashboard's own window rather than the endpoint's own
+/// trailing-30-day default: #150 §4 asks for one scope and one window for
+/// the whole page, and a cost figure is no more exempt from that than a
+/// metric or an occupancy tile is.
+async function loadTileCosts() {
+  const now = Date.now();
+  const params = new URLSearchParams({
+    group_by: "scope",
+    from: new Date(now - WINDOWS[windowKey].minutes * 60000).toISOString(),
+    to: new Date(now).toISOString(),
+  });
+  if (state.scope) params.set("scope", state.scope);
+  try {
+    tileCosts = (await api(`/api/costs?${params}`)).report;
+  } catch {
+    tileCosts = null;
+  }
+}
+
+/// The window selector's own reload: production and every window-dependent
+/// tile read (`/api/metrics`, `/api/occupancy`, `/api/costs`) follow the
+/// window; the layout and `/api/policy` do not, so switching windows never
+/// re-fetches those -- `wireDashboard`'s window buttons call this, never
+/// `loadDashboard`.
+async function reloadTileData() {
+  const tiles = resolveDashboard(layoutTiles);
+  const needs = neededEndpoints(tiles);
+  await Promise.all([
+    loadProduction(),
+    needs.metrics ? loadTileMetrics(neededMetricIds(tiles)) : Promise.resolve(),
+    needs.occupancy ? loadTileOccupancy() : Promise.resolve(),
+    needs.costs ? loadTileCosts() : Promise.resolve(),
+  ]);
   renderDashboard();
 }
 
@@ -168,6 +306,11 @@ export function renderDashboard() {
   el.innerHTML = renderTiles(resolveDashboard(layoutTiles), { tasks, scopes, prod, everFinished });
 
   wireCalToggle();
+  // An `inbox` view tile (#162) draws its own `.inbox-item` rows inside
+  // `#dash`, the same markup `#inbox`'s own `renderInbox` draws -- rewired
+  // every redraw, same as the cal toggle, since `#dash`'s whole innerHTML
+  // was just replaced above.
+  wireInboxRows(el);
 
   // Restore scroll after the new `.calwrap` (if any -- a card with nothing
   // finished yet draws no grid at all) has real dimensions to measure. A
@@ -209,13 +352,22 @@ const VIEW_RENDERERS = {
         <h3>By scope<span class="r">${ctx.scopes.length} scope${ctx.scopes.length === 1 ? "" : "s"}</span></h3>
         ${byScopeTable(ctx.tasks, ctx.scopes)}
       </section>`,
+  // #162 (phase 3): the rest of #150's view catalogue, each off the one
+  // shared read `loadTileData` fetched for it -- see that function's own
+  // doc comment for which endpoint backs which id.
+  agent_hours_by_scope: () => agentHoursTile("Agent hours by scope", agentHoursByScope(tileOccupancy), "scope"),
+  agent_hours_by_agent: () => agentHoursTile("Agent hours by agent", agentHoursByAgent(tileOccupancy), "agent"),
+  occupancy_strip: () => occupancyStripTile(),
+  inbox: () => inboxTile(),
+  compliance: () => complianceTile(),
+  cost: () => costTile(),
 };
 
 /// A tile `isTileRenderable` (`dashboard-model.js`) says this page cannot
-/// draw yet -- a `metric` tile (no renderer exists this phase) or a
-/// `view` id outside `VIEW_RENDERERS`' keys -- gets a small, neutral card
-/// naming it instead of nothing or a crash: the config or the catalogue
-/// may already be ahead of what `VIEW_RENDERERS` knows how to render.
+/// draw -- a `view` id outside the vocabulary, which the closed enum on a
+/// config's own `dashboard:` block should already have refused before this
+/// page ever sees it -- gets a small, neutral card naming it instead of
+/// nothing or a crash.
 function placeholderTile(tile) {
   const name = (tile && (tile.metric || tile.view)) || "tile";
   return `<section class="dcard"><div class="empty">${esc(name)} — not drawn yet</div></section>`;
@@ -223,30 +375,31 @@ function placeholderTile(tile) {
 
 function renderTile(tile, ctx) {
   if (!isTileRenderable(tile)) return placeholderTile(tile);
-  return VIEW_RENDERERS[tile.view](ctx);
+  return tileKind(tile) === "metric" ? metricTile(tile) : VIEW_RENDERERS[tile.view](ctx);
 }
 
 /// Assembles the page from a tile list: pack tiles into 12-column rows
-/// (`packRows`), then a row of two or more tiles shares one `.drow` (today
-/// only Throughput and On the line ever do, because `l + m === 12`) and a
-/// row of one tile renders bare -- no `.drow` around a lone card. `.drow`
-/// itself is a fixed `2fr / 1fr` CSS grid (`app.css`), not a general
-/// `span -> grid-column` mapping -- it realizes exactly an `[l, m]` row,
-/// in that order, because that is the one pair `DEFAULT_DASHBOARD` ever
-/// produces; a hypothetical `[m, l]` row would put the 4-col tile in the
-/// wider slot. A real span-aware grid is phase 3's, once more than one row
-/// shape exists to justify it.
-///
-/// That reproduces `.kpis`, the Throughput/On-the-line row and Production
-/// year byte-for-byte; By scope loses the `.drow` it used to sit alone in,
-/// which is a no-op here: `.dash` is a `flex-direction: column` container
-/// with `align-items: stretch` (`app.css`), so a bare flex child already
-/// spans the full width `.dcard.wide`'s `grid-column: 1 / -1` gave it
-/// inside that otherwise-empty grid -- the class stays, for what it
-/// documents, but nothing depends on it drawing anything anymore.
+/// (`packRows`), then a row of two or more tiles shares one `.drow` and a
+/// row of one tile renders bare -- no `.drow` around a lone card, exactly as
+/// before #162. `.drow` is a span-aware grid now (`rowTemplate`,
+/// `dashboard-model.js`): fr-weighted per tile by its own size, set as the
+/// `--cols` custom property `app.css`'s `.drow` rule reads. For the one
+/// multi-tile row `DEFAULT_DASHBOARD` ever produces (`[l, m]`, 8 and 4 of
+/// 12), `rowTemplate` returns `null` -- nothing to override, so that row's
+/// markup is exactly what it always was and `app.css`'s own `2fr / 1fr`
+/// fallback draws it, pixel for pixel. `rowIsAllSmall` marks a row of only
+/// `s` tiles `drow-s`, so it goes two-up rather than one-per-line at the
+/// narrow breakpoint (`app.css`) -- `DEFAULT_DASHBOARD` has no `s` tile, so
+/// this never applies to it either.
 function renderTiles(tiles, ctx) {
   return packRows(tiles)
-    .map((row) => (row.length > 1 ? `<div class="drow">${row.map((t) => renderTile(t, ctx)).join("")}</div>` : renderTile(row[0], ctx)))
+    .map((row) => {
+      if (row.length <= 1) return renderTile(row[0], ctx);
+      const template = rowTemplate(row);
+      const cls = rowIsAllSmall(row) ? "drow drow-s" : "drow";
+      const style = template ? ` style="--cols:${esc(template)}"` : "";
+      return `<div class="${cls}"${style}>${row.map((t) => renderTile(t, ctx)).join("")}</div>`;
+    })
     .join("");
 }
 
@@ -591,6 +744,136 @@ function byScopeTable(tasks, scopes) {
   </table>`;
 }
 
+// --------------------------------------------------------- view tiles (#162)
+
+/// The small card every view tile below shares: a heading, an optional
+/// right-aligned qualifier (`.dcard h3 .r`, the same slot Throughput's own
+/// window label sits in), and a body. Kept as one function so a tile never
+/// has to restate `<section class="dcard">`/`<h3>` by hand.
+function dcard(title, qualifier, body) {
+  return `<section class="dcard"><h3>${esc(title)}${qualifier ? `<span class="r">${esc(qualifier)}</span>` : ""}</h3>${body}</section>`;
+}
+
+/// One `.stn` bar row (`app.css`, the same markup `onTheLine`'s `stnRow`
+/// draws) -- reused here rather than reimplemented, since a labelled bar
+/// with a trailing figure is exactly what every new view tile below needs.
+/// `note`, if given, is raw HTML appended after the figure -- the blocked-
+/// hours aside, or nothing.
+function barRow(label, pct, figure, note) {
+  return `<div class="stn"><span class="nm">${esc(label)}</span>
+    <span class="track"><i style="width:${Math.max(0, Math.min(100, pct)).toFixed(1)}%;background:var(--run)"></i></span>
+    <span class="c">${esc(figure)}${note || ""}</span></div>`;
+}
+
+/// A registry `metric` tile -- reuses `.kpi` (`app.css`), the same card
+/// `kpis()` already draws six of, so a metric split out on its own still
+/// looks like the figure it came from. `metricTileView`
+/// (`dashboard-tiles-model.js`) does every bit of the shaping (unit,
+/// unavailable reason, better-direction glyph, the instance-wide qualifier,
+/// its own series); this only turns that into markup, the same split every
+/// other tile below keeps.
+function metricTile(tile) {
+  if (tileMetrics === undefined) {
+    return `<div class="kpi"><span class="k">${esc(tile.metric)}</span><span class="d">loading…</span></div>`;
+  }
+  const view = metricTileView(tile.metric, tileMetrics);
+  const subParts = [];
+  if (!view.unavailable) {
+    if (view.better) subParts.push(`${view.better} better`);
+    if (view.coverage) subParts.push(view.coverage);
+  }
+  const sub = view.unavailable ? view.reason : subParts.join(" · ");
+  const spark = !view.unavailable && view.points && view.points.length >= 2 ? sparkline(view.points, "run") : "";
+  return `<div class="kpi"><span class="k">${esc(view.title)}</span>
+    <span class="v">${esc(view.unavailable ? "—" : view.valueText)}</span>
+    <span class="d">${esc(sub)}</span>${spark}</div>`;
+}
+
+/// The window a `tileOccupancy` answer actually covers, as a qualifier --
+/// `from` to `now`, never `to` (which overshoots a quarter-window ahead to
+/// leave room for a scheduled run's own preview, `occupancy.js`'s own
+/// `liveView`). Said plainly rather than assumed from the dashboard's own
+/// window key: `/api/occupancy` clamps at 30 days (`occupancy.rs`'s
+/// `MAX_MINUTES`), so a `d90` selection quietly answers less than asked,
+/// and a tile that named the window it asked for rather than the one it got
+/// would disagree with a future `agent_hours` metric tile sitting beside it.
+function occupancyWindowNote(occ) {
+  const days = windowDays(occ.from, occ.now);
+  return days === null ? "from run blocks" : `from run blocks · trailing ${days} day${days === 1 ? "" : "s"}`;
+}
+
+/// `agent_hours_by_scope`/`agent_hours_by_agent`: one bar per row from
+/// `agentHoursByScope`/`agentHoursByAgent` (`dashboard-tiles-model.js`, off
+/// the one shared `/api/occupancy` read, `tileOccupancy`) -- busy hours as
+/// the bar, blocked hours named beside the figure, never subtracted from
+/// it, the same rule the occupancy chart itself keeps for the same numbers.
+/// `labelKind` picks `row.label` (the scope) or `row.agent`; sorted busiest
+/// first already, capped here at ten rows so the card stays a card.
+function agentHoursTile(title, rows, labelKind) {
+  if (tileOccupancy === undefined) return dcard(title, "from run blocks", `<div class="empty">loading…</div>`);
+  if (tileOccupancy === null) return dcard(title, "", `<div class="err">Occupancy is not available right now.</div>`);
+  const qualifier = occupancyWindowNote(tileOccupancy);
+  if (!rows.length) return dcard(title, qualifier, `<div class="empty">No agents in this window.</div>`);
+  const max = Math.max(1, ...rows.map((r) => r.busyHours));
+  const body = rows.slice(0, 10).map((r) => {
+    const label = labelKind === "agent" ? r.agent : r.label;
+    const note = r.blockedHours > 0.05
+      ? ` <span class="occ-wait" title="blocked time is part of the hours worked, shown beside them, never taken off">· ${r.blockedHours.toFixed(1)}h blocked</span>`
+      : "";
+    return barRow(label, (r.busyHours / max) * 100, `${r.busyHours.toFixed(1)}h`, note);
+  }).join("");
+  return dcard(title, qualifier, body);
+}
+
+/// `occupancy_strip`: a compact per-agent utilisation strip -- one bar row
+/// per agent, `occupancyStripRows`' own `pct` of the window each covered,
+/// no blocks or spans underneath it the way the full occupancy chart draws.
+/// Capped at fourteen rows, busiest first.
+function occupancyStripTile() {
+  if (tileOccupancy === undefined) return dcard("Occupancy strip", "", `<div class="empty">loading…</div>`);
+  if (tileOccupancy === null) return dcard("Occupancy strip", "", `<div class="err">Occupancy is not available right now.</div>`);
+  const rows = occupancyStripRows(tileOccupancy, Date.now());
+  const qualifier = `share busy · ${occupancyWindowNote(tileOccupancy)}`;
+  if (!rows.length) return dcard("Occupancy strip", qualifier, `<div class="empty">No agents in this window.</div>`);
+  const body = rows.slice(0, 14).map((r) => barRow(r.agent, r.pct, `${r.pct}%`)).join("");
+  return dcard("Occupancy strip", qualifier, body);
+}
+
+/// `compliance`: per-framework met/open from `/api/policy` (`tilePolicy`),
+/// shaped by `complianceSummaryRows` (`dashboard-tiles-model.js`) the same
+/// way `compliance_value`/`open_controls_value` split it server-side. The
+/// qualifier names the same subtree `policy.js`'s own board note does.
+function complianceTile() {
+  if (tilePolicy === undefined) return dcard("Compliance", "", `<div class="empty">loading…</div>`);
+  if (tilePolicy === null) return dcard("Compliance", "", `<div class="err">Policy is not available right now.</div>`);
+  const rows = complianceSummaryRows(tilePolicy);
+  if (!rows.length) return dcard("Compliance", "", `<div class="empty">No framework catalogues loaded.</div>`);
+  const body = rows.map((r) => barRow(r.title, r.counted ? (r.met / r.counted) * 100 : 0, `${r.met}/${r.counted || 0}`)).join("");
+  const qualifier = state.scope ? `${state.scope} and below` : "whole instance's rollup";
+  return dcard("Compliance", qualifier, body);
+}
+
+/// `cost`: `/api/costs?group_by=scope&from=&to=` (`tileCosts`), `from`/`to`
+/// set from the dashboard's own window (`loadTileCosts`) -- the total line
+/// reuses `usage-model.js`'s own `taskUsageLine` (a `CostReport.total` is
+/// shaped exactly like the task-usage total it was written for), then the
+/// most-expensive rows (`topCostRows`), each with `fmtUsd`, the same
+/// formatting the task modal's usage block uses. The qualifier reads the
+/// answer's own `from`/`to`, not the dashboard's window key: an honest
+/// figure for whatever span the daemon actually answered, the same reason
+/// `occupancyWindowNote` reads `tileOccupancy`'s own bounds.
+function costTile() {
+  if (tileCosts === undefined) return dcard("Cost", "", `<div class="empty">loading…</div>`);
+  if (tileCosts === null) return dcard("Cost", "", `<div class="err">Costs are not available right now.</div>`);
+  const line = taskUsageLine(tileCosts.total) || "No runs in this window.";
+  const rows = topCostRows(tileCosts, 5)
+    .map((r) => barRow(r.label || r.key, tileCosts.total.cost_usd ? (r.cost_usd / tileCosts.total.cost_usd) * 100 : 0, fmtUsd(r.cost_usd)))
+    .join("");
+  const days = windowDays(tileCosts.from, tileCosts.to);
+  const qualifier = `API-equivalent USD · by scope${days === null ? "" : ` · trailing ${days} day${days === 1 ? "" : "s"}`}`;
+  return dcard("Cost", qualifier, `<p class="dnote">${esc(line)}</p>${rows}`);
+}
+
 // --------------------------------------------------------------------- inbox
 
 /// The last `/api/operations` answer the Inbox drew from. `undefined` until
@@ -622,6 +905,33 @@ export async function loadInbox() {
   renderInbox();
 }
 
+/// One attention item's row -- shared by the Inbox nav view (`renderInbox`,
+/// the whole list) and the dashboard's own `inbox` tile (`inboxTile`, top
+/// few), so there is one markup for it, not two that could drift apart.
+function inboxItemRow(it) {
+  const href = it.task_id ? "" : it.kind === "liveness_lost" ? routeHref(null, "roster") : "";
+  // The reason is the agent's own words when it gave any -- a blocked
+  // run's question, a failure's last error -- and the daemon's otherwise.
+  return `<div class="inbox-item"${it.task_id ? ` data-task="${esc(it.task_id)}"` : ""}${it.run_id ? ` data-run="${esc(it.run_id)}"` : ""}${href ? ` data-href="${esc(href)}"` : ""}>
+      <span class="it-dot" style="background:var(--${it.tone})"></span>
+      <span class="it-t"><b>${esc(it.title || it.agent || "")}</b> — ${esc(it.label)}${it.suspicion ? ` <span class="ops-suspect">suspicion</span>` : ""}
+        <span class="sub">${esc(it.reason)}${it.scope ? ` · ${esc(it.scope)}` : ""}</span>
+      </span>
+      <span class="it-age">${esc(fmtAge(it.age))}</span>
+    </div>`;
+}
+
+/// Wires every `.inbox-item` under `host` the same way, whichever of the two
+/// places drew them.
+function wireInboxRows(host) {
+  for (const row of host.querySelectorAll(".inbox-item")) {
+    row.onclick = () => {
+      if (row.dataset.task) openTask(row.dataset.task, row.dataset.run);
+      else if (row.dataset.href) location.hash = row.dataset.href;
+    };
+  }
+}
+
 export function renderInbox() {
   const host = $("inbox");
   if (!host) return;
@@ -635,25 +945,29 @@ export function renderInbox() {
     host.innerHTML = `<div class="empty">Nothing waiting on a person right now.</div>`;
     return;
   }
-  host.innerHTML = items.map((it) => {
-    const href = it.task_id ? "" : it.kind === "liveness_lost" ? routeHref(null, "roster") : "";
-    // The reason is the agent's own words when it gave any -- a blocked
-    // run's question, a failure's last error -- and the daemon's otherwise.
-    return `<div class="inbox-item"${it.task_id ? ` data-task="${esc(it.task_id)}"` : ""}${it.run_id ? ` data-run="${esc(it.run_id)}"` : ""}${href ? ` data-href="${esc(href)}"` : ""}>
-      <span class="it-dot" style="background:var(--${it.tone})"></span>
-      <span class="it-t"><b>${esc(it.title || it.agent || "")}</b> — ${esc(it.label)}${it.suspicion ? ` <span class="ops-suspect">suspicion</span>` : ""}
-        <span class="sub">${esc(it.reason)}${it.scope ? ` · ${esc(it.scope)}` : ""}</span>
-      </span>
-      <span class="it-age">${esc(fmtAge(it.age))}</span>
-    </div>`;
-  }).join("");
+  host.innerHTML = items.map(inboxItemRow).join("");
+  wireInboxRows(host);
+}
 
-  for (const row of host.querySelectorAll(".inbox-item")) {
-    row.onclick = () => {
-      if (row.dataset.task) openTask(row.dataset.task, row.dataset.run);
-      else if (row.dataset.href) location.hash = row.dataset.href;
-    };
-  }
+/// The dashboard's own `inbox` view tile: a count and the top few items off
+/// the same `inboxReport`/`inboxItems` the Inbox nav view reads -- reusing
+/// that fetch and model rather than a second, scoped copy of either, so the
+/// tile and the standalone Inbox can never disagree about what needs a
+/// person. Narrowed to the rail's own selection with `inScope`, client-side,
+/// the same way `renderDashboard` already narrows `tasks`/`scopes` and the
+/// occupancy tiles narrow their rows -- every other tile on a scoped
+/// dashboard reads the selection, and an item with no `scope` at all (a
+/// lost standing agent, say) is never hidden by one. Clicks are wired by
+/// `renderDashboard`, once, after `#dash`'s whole innerHTML (this tile
+/// included) is set -- the same `wireInboxRows` helper `renderInbox` uses
+/// for `#inbox`.
+function inboxTile() {
+  if (inboxReport === undefined) return dcard("Inbox", "", `<div class="inbox-list"><div class="empty">loading…</div></div>`);
+  if (inboxReport === null) return dcard("Inbox", "", `<div class="inbox-list"><div class="err">What needs a person is not available right now.</div></div>`);
+  const items = inboxItems(inboxReport, (Date.now() - inboxReceivedAt) / 1000).filter((it) => !it.scope || inScope(it.scope));
+  if (!items.length) return dcard("Inbox", "0 waiting", `<div class="inbox-list"><div class="empty">Nothing waiting on a person right now.</div></div>`);
+  const top = items.slice(0, 5).map(inboxItemRow).join("");
+  return dcard("Inbox", `${items.length} waiting`, `<div class="inbox-list">${top}</div>`);
 }
 
 // -------------------------------------------------------------------- wiring
@@ -686,7 +1000,7 @@ export function wireDashboard() {
         if (b.dataset.w === windowKey) return;
         windowKey = b.dataset.w;
         for (const o of seg.querySelectorAll("button")) o.classList.toggle("on", o.dataset.w === windowKey);
-        reloadProduction();
+        reloadTileData();
       };
     }
   }

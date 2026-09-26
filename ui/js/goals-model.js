@@ -241,11 +241,13 @@ export function seriesIndex(metricsAnswer) {
 }
 
 /// `{value, as_of, reason}` -> a plain number string per `Unit`
-/// (`ratio`/`count`/`per_week`/`seconds`/`usd`), or an em dash for `null` --
-/// display only, never used in a computation. `unit` is `null` for a manual
-/// key result (no registry entry backs it) or when the registry has not
-/// answered yet; either way this falls back to a trimmed plain number rather
-/// than guessing a unit.
+/// (`ratio`/`count`/`per_week`/`seconds`/`hours`/`usd`), or an em dash for
+/// `null` -- display only, never used in a computation. `unit` is `null` for
+/// a manual key result (no registry entry backs it) or when the registry has
+/// not answered yet; either way this falls back to a trimmed plain number
+/// rather than guessing a unit. `hours` is #150/#162's `agent_hours`/
+/// `blocked_hours`: one decimal, the same precision the dashboard's own
+/// agent-hours tiles show, never rounded to a whole hour.
 export function formatUnitValue(value, unit) {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
   switch (unit) {
@@ -257,6 +259,8 @@ export function formatUnitValue(value, unit) {
       return `${value.toFixed(1)}/wk`;
     case "seconds":
       return formatSeconds(value);
+    case "hours":
+      return `${value.toFixed(1)}h`;
     case "usd":
       return value > 0 && value < 0.005 ? "<$0.01" : `$${value.toFixed(2)}`;
     default:
