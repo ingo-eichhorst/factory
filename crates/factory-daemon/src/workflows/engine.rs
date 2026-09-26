@@ -1806,7 +1806,8 @@ impl Engine {
         // immutable snapshot as locked gate nodes. The stored definition is
         // untouched -- a later plan applies to later runs, never this one.
         let plans = self.control_plans(&definition).await?;
-        let (definition, _) = definition.inject(&plans);
+        let (mut definition, _) = definition.inject(&plans);
+        self.bind_functionaries(&mut definition)?;
         definition.validate().map_err(FactoryError::BadRequest)?;
         let mut run = WorkflowRun::new(definition, caller.as_workflow_actor());
         run.inputs = inputs;
@@ -2022,10 +2023,15 @@ impl Engine {
                         // is itself done -- a step that passed in a round
                         // that then blocked on another step is not a
                         // verified run to build on.
-                        finished(&edge.from)
-                            && match run.definition.nodes.iter().find(|n| n.id == edge.from) {
-                                Some(n) if n.kind == WorkflowNodeKind::Gate => {
-                                    run.nodes
+                        match run.definition.nodes.iter().find(|n| n.id == edge.from) {
+                            // Approval is enforced by the subject run's
+                            // pre-dispatch hold. Let the task/run exist so
+                            // the Inbox has a concrete run to decide.
+                            Some(n) if n.kind == WorkflowNodeKind::Approval => true,
+                            Some(n) if n.kind == WorkflowNodeKind::Gate => {
+                                finished(&edge.from)
+                                    && (run
+                                        .nodes
                                         .iter()
                                         .find(|node| node.node_id == edge.from)
                                         .is_some_and(|node| {
@@ -2034,10 +2040,10 @@ impl Engine {
                                         || run
                                             .definition
                                             .gate_subject(&n.id)
-                                            .is_some_and(|subject| done(&subject))
-                                }
-                                _ => true,
+                                            .is_some_and(|subject| done(&subject)))
                             }
+                            _ => finished(&edge.from),
+                        }
                     })
             })
             .filter(|node| {
@@ -2053,6 +2059,12 @@ impl Engine {
                             .iter()
                             .find(|n| n.node_id == edge.from)
                             .is_some_and(|n| n.status == WorkflowNodeStatus::Done)
+                            || run
+                                .definition
+                                .nodes
+                                .iter()
+                                .find(|n| n.id == edge.from)
+                                .is_some_and(|n| n.kind == WorkflowNodeKind::Approval)
                     })
             })
             .map(|node| node.node_id.clone())
@@ -2328,27 +2340,60 @@ impl Engine {
     /// * it failed or was cancelled -- the gate never will run: `skipped`;
     /// * anything else -- not reached yet.
     async fn mirror_gate_nodes(&self, run: &mut WorkflowRun) {
-        let gates: Vec<(String, String, String)> = run
+        let gates: Vec<(String, String, String, WorkflowNodeKind)> = run
             .definition
             .nodes
             .iter()
-            .filter(|n| n.kind == WorkflowNodeKind::Gate)
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    WorkflowNodeKind::Gate | WorkflowNodeKind::Review | WorkflowNodeKind::Approval
+                )
+            })
             .filter_map(|n| {
                 let subject = run.definition.gate_subject(&n.id)?;
-                Some((n.id.clone(), subject, n.gate.as_ref()?.step.clone()))
+                Some((n.id.clone(), subject, n.gate.as_ref()?.step.clone(), n.kind))
             })
             .collect();
-        for (gate_id, subject, step) in gates {
+        for (gate_id, subject, step, kind) in gates {
+            if kind == WorkflowNodeKind::Review
+                && run
+                    .nodes
+                    .iter()
+                    .find(|n| n.node_id == gate_id)
+                    .and_then(|n| n.task_id.as_ref())
+                    .is_some()
+            {
+                continue;
+            }
             let Some(task_id) = run.nodes.iter().find(|n| n.node_id == subject).and_then(|n| n.task_id.clone()) else {
                 continue;
             };
             let Ok(Some(subject_run)) = self.store.runs(&task_id, 1).await.map(|r| r.into_iter().next()) else {
                 continue;
             };
+            let evidence = self
+                .policies
+                .step_attestations(&subject_run.id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|a| a.step == step)
+                .max_by_key(|a| a.at);
             let (status, error) = match subject_run.status {
                 RunStatus::Done => (WorkflowNodeStatus::Done, None),
                 RunStatus::Verifying => (WorkflowNodeStatus::Verifying, None),
                 RunStatus::Failed | RunStatus::Cancelled => (WorkflowNodeStatus::Skipped, None),
+                RunStatus::Blocked if kind == WorkflowNodeKind::Approval => match evidence {
+                    Some(a) if a.verdict == AttestationVerdict::Pass => {
+                        (WorkflowNodeStatus::Done, None)
+                    }
+                    Some(a) => (WorkflowNodeStatus::Blocked, a.findings),
+                    None => (
+                        WorkflowNodeStatus::Blocked,
+                        Some("waiting for approval".into()),
+                    ),
+                },
                 RunStatus::Blocked
                     if subject_run.blocked_source == Some(factory_core::run::BlockSource::Verification) =>
                 {

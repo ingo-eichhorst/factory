@@ -311,13 +311,13 @@ function renderCanvas() {
       }).join("");
 
   $("workflow-nodes").innerHTML = graph.nodes.map(node => `
-    <div class="workflow-node" data-node="${esc(node.id)}" tabindex="0" role="group"
+    <div class="workflow-node wf-k-${esc(node.kind || "task")}" data-node="${esc(node.id)}" tabindex="0" role="group"
       aria-label="${esc(node.task.title || "Untitled task")}${roots.has(node.id) ? ", start node" : ""}${exitsOf(node).length ? `, ${esc(reworkSentence(graph.nodes, node))}` : ""}"
       style="left:${node.position.x}px;top:${node.position.y}px">
       ${roots.has(node.id) ? `<span class="wf-start">START</span>` : ""}
       <span class="wf-port-in" aria-hidden="true"></span>
-      <span class="workflow-node-kind">${node.kind === "gate"
-        ? `GATE${node.gate && node.gate.locked ? " 🔒" : ""}${node.gate && node.gate.required_by && node.gate.required_by.length ? ` · required by ${esc(node.gate.required_by.join(", "))}` : ""}`
+      <span class="workflow-node-kind">${["gate", "review", "approval"].includes(node.kind)
+        ? `${esc((node.kind || "gate").toUpperCase())}${node.gate && node.gate.locked ? " 🔒" : ""}${node.gate?.actor ? ` · ${esc(node.gate.actor)}` : node.kind === "review" ? " · no independent functionary" : ""}${node.gate && node.gate.required_by && node.gate.required_by.length ? ` · required by ${esc(node.gate.required_by.join(", "))}` : ""}`
         : "TASK"}</span>
       <strong>${esc(node.task.title || "Untitled task")}</strong>
       <span class="wf-line">${esc(node.task.scope || "")} · ${esc(node.task.agent || "default agent")}</span>
@@ -694,7 +694,7 @@ function renderNodeUses() {
 /// rather than silently reading as "none": the model still carries it, and
 /// `reworkProblems` says what is wrong with it.
 function renderReworkField(node, graph, readOnly) {
-  const gate = node.kind === "gate";
+  const gate = ["gate", "review", "approval"].includes(node.kind);
   const exits = exitsOf(node);
   const targets = graph.nodes.filter(item => item.id !== node.id);
   $("workflow-node-exits-list").innerHTML = exits.length ? exits.map((exit, index) => {
@@ -770,7 +770,7 @@ function editExitList(index, action) {
 function addExit() {
   if (mode === "run") return;
   const node = current.nodes.find(item => item.id === selectedNode);
-  if (!node || node.kind === "gate") return;
+  if (!node || ["gate", "review", "approval"].includes(node.kind)) return;
   node.exits = exitsOf(node).map(exit => ({ ...exit })); delete node.rework;
   const target = current.edges.find(edge => edge.from === node.id)?.to
     || reworkTargets(current.nodes, current.edges, node.id)[0]?.id

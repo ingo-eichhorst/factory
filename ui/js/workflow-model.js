@@ -89,7 +89,7 @@ export function inputProblems(workflow) {
   }
   if (!declared.size) return errors;
   for (const node of workflow.nodes) {
-    if (node.kind === "gate") continue;
+    if (["gate", "review", "approval"].includes(node.kind)) continue;
     const unknown = [...new Set(nodeTexts(node).flatMap(placeholders))].filter(name => !declared.has(name));
     for (const name of unknown) {
       errors.push({
@@ -125,7 +125,7 @@ export function reworkProblems(workflow) {
     const from = nodeLabel(node);
     for (const [index, exit] of exitsOf(node).entries()) {
       const label = `${from} exit ${index + 1}`;
-      if (node.kind === "gate") {
+      if (node.kind === "approval" || (["gate", "review"].includes(node.kind) && !node.gate?.locked)) {
         errors.push({ nodeId: node.id, message: `${from} is a gate and cannot declare exits; only a task node can` });
         continue;
       }
@@ -140,7 +140,7 @@ export function reworkProblems(workflow) {
       const backward = ancestors(workflow.edges, node.id).has(exit.to);
       if (!target) {
         errors.push({ nodeId: node.id, message: `${label} targets a node that no longer exists (${exit.to})` });
-      } else if (backward && target.kind === "gate") {
+      } else if (backward && ["gate", "review", "approval"].includes(target.kind)) {
         errors.push({ nodeId: node.id, message: `${label} points back to the gate ${nodeLabel(target)}; name a task node` });
       } else if (backward && !(Number.isInteger(exit.max_rounds) && exit.max_rounds >= 1)) {
         errors.push({ nodeId: node.id, message: `${label} points backward and needs at least one round` });

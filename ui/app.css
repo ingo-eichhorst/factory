@@ -1003,6 +1003,9 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
   box-shadow: 0 0 0 1px var(--run), 0 5px 16px rgba(0,0,0,.18);
 }
 .workflow-node.wf-s-blocked { border-left: 3px solid var(--wait); background: var(--wait-wash); }
+.workflow-node.wf-k-gate { box-shadow: inset 0 0 0 1px var(--line); }
+.workflow-node.wf-k-review { box-shadow: inset 0 0 0 1px var(--accent); }
+.workflow-node.wf-k-approval { box-shadow: inset 0 0 0 1px var(--signal); }
 /* `#118`: a task node whose done is being checked, or a gate running. Dotted,
    so it reads apart from running's solid accent without relying on hue. */
 .workflow-node.wf-s-verifying { border-left: 3px dotted var(--run); background: var(--run-wash); }
