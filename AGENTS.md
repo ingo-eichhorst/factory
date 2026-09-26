@@ -32,6 +32,8 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/{scenarios,scenarios-model}.js                         the L6 Scenarios tab and its pure shaping logic
     ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
     ui/js/{doctor,doctor-model}.js                               the L1 Doctor dependency view and its pure shaping logic
+    ui/js/dashboard-model.js                                     the dashboard's tile vocabulary, default layout and row packing (#163), pure
+    ui/js/dashboard-tiles-model.js                                metric-tile and view-tile shaping, and which endpoints a layout needs (#162), pure
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
 

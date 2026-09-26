@@ -633,6 +633,7 @@ mod tests {
                 scope_at("sibling-id", "sibling", "other", &[]),
             ],
             roles: Default::default(),
+            dashboard: None,
             policies: PolicyDeclaration::default(),
             quality: vec!["baseline".into()],
             infrastructure: Default::default(),

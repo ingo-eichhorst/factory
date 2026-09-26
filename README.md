@@ -915,21 +915,39 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `throughput_week` | finished runs, trailing 7 days | `production.rs`'s daily grid |
 | `first_pass_yield` | `first_pass/finished` (done and not rework, over finished), trailing 28 days | `production.rs`'s daily grid |
 | `scrap_rate` | `scrapped/finished`, trailing 28 days | `production.rs`'s daily grid |
-| `compliance.<framework>` | share of counted controls satisfied, attested, or n/a | `policy_report(None)`'s subtree rollup |
-| `open_controls.<framework>` | count of counted controls still open or stale | `policy_report(None)`'s subtree rollup |
+| `agent_hours` | hours covered by run blocks, with overlaps for one agent counted once | occupancy `busy_seconds` |
+| `blocked_hours` | blocked hours inside those run blocks, included in rather than subtracted from agent hours | occupancy `blocked_seconds` |
+| `compliance.<framework>` | share of counted controls satisfied, attested, or n/a | the selected scope's policy subtree rollup |
+| `open_controls.<framework>` | count of counted controls still open or stale | the selected scope's policy subtree rollup |
 | `bench.resolve_rate.<dataset>` | the newest settled bench run's resolve rate | `bench::aggregate` |
 | `goal_tasks_done.<objective>.<kr>` | count of tasks labelled `goal=<objective>/<kr>` whose status is `done` | task labels, through `TaskStore` |
-| `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met, across every scope | `quality_report(None)` — see "Quality attributes" |
+| `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met | the selected scope's quality subtree — see "Quality attributes" |
 | `unit_cost` | API-equivalent USD spent per run ended `done` (failed and cancelled runs' cost included), trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 | `tokens_per_run` | mean tokens of every type per finished run, trailing 28 days | each run's measured usage (`Run.usage`, #117) |
+
+`factory metrics --scope <name> --window day|14d|90d [ids…]` and `GET
+/api/metrics?ids=a,b&scope=<name>&window=day|14d|90d` select one scope plus
+its descendants and one trailing interval. Both parameters are optional.
+Without `scope`, scope-aware metrics cover the whole instance. Without
+`window`, established defaults stay unchanged: seven days for throughput,
+28 days for production ratios, operations, and usage, and 14 days for the
+new hour metrics. An explicit window overrides all run-backed families.
+Unknown scopes and unsupported windows are errors, not empty reports.
+
+Every definition in the response registry carries `coverage`:
+`scope_aware` means it follows that subtree; `instance_wide` means it does
+not. `bench.*` and `goal_tasks_done.*` are deliberately instance-wide
+because neither underlying record belongs to a scope. All other current
+families are scope-aware.
 
 `throughput_week`/`first_pass_yield`/`scrap_rate` read `production.rs`'s own
 daily grid directly rather than re-deriving "finished"/"scrapped"/
 "reworked" a second time — that module's own doc comment is the one place
 those words are defined. Every metric is computed **lazily**, like a policy
-fact: `Request::Metrics { ids }` only touches `production`/`policy_report`/
-the bench store when some asked id actually needs it, and each is read at
-most once per call no matter how many ids ask for something behind it. An
+fact: `Request::Metrics { ids, scope, window }` only touches `production`/`policy_report`/
+the bench store when some asked id actually needs it, and shares each
+backing read across all ids that need it (production reads each exact scope
+once when it aggregates a subtree). An
 id the registry has never heard of refuses the whole call (a typo should
 not come back as a quiet `None`); a metric named in the registry but not
 yet computable would come back as `value: None` with its reason, never an
@@ -1668,8 +1686,9 @@ pane reused from an earlier run is never billed twice. Rules:
 ```sh
 factory run show <run-id>        # the usage block
 factory task show <id>           # every run's usage and the sum
-factory cost --by issue --since 7d   # task | issue | scope | agent
+factory cost --by issue --since 7d   # task | issue | scope | agent | provider
 factory cost --by agent --scope projects/factory --since 2026-09-01
+factory cost --by provider --since 30d
 ```
 
 `GET /api/costs?group_by=&from=&to=&scope=`, `GET /api/tasks/{id}/usage` and
@@ -1679,9 +1698,41 @@ beside them is how many did not: an unmeasured run is counted, never dropped
 and never free. The registry metrics `unit_cost` and `tokens_per_run` read
 the same usage (see "Goals").
 
-Not yet (v2 and later): plan share of a subscription's rate-limit window
-(the snapshots already keep the windows), estimate vs actual, the provider
-and workflow groupings, and cost drivers in the Scenarios forecast.
+Tasks can carry low/expected/high time and cost estimates. The CLI accepts
+`--estimate-low`, `--estimate`, and `--estimate-high` (and the corresponding
+`--estimate-cost-*` flags); the old expected-only form remains a point range.
+The effective original estimate is copied onto each run, so later task edits
+do not rewrite history. At the first turn end Factory records one re-estimate
+from completed runs with the same canonical scope, agent, and task category,
+using low/median/high first-turn-to-final factors. With no usable cohort it
+records why the re-estimate is unavailable. Run usage compares each run's
+wall time and cost with the range it started with, including the
+actual/expected ratio and whether the actual landed inside the range; active
+time is reported beside them, and has no estimate of its own to be compared
+with. A task compares the sum of its runs' actuals with the sum of those same
+runs' ranges, and leaves the comparison out when a run carries no estimate.
+Every attempt carries the estimate it started with, so a retry adds a second
+range beside the failed attempt's: the task's figure answers "these runs
+against their estimates", and each run's own comparison is the one to read
+for a single attempt.
+Neither claims a verdict before it is final: wall time waits for the run to
+end, and cost for a complete run-end reading.
+
+For subscription accounts, positive changes in a provider's rate-limit window
+are attributed to the runs active during that observation interval in
+proportion to their measured token growth. One positive consumer is `direct`;
+several are `apportioned`. A measured zero-token run is excluded from the
+division, while a missing baseline or token measurement leaves that exact
+account/window/interval explicitly unknown. Known shares and unresolved gaps
+are both retained, so a later allocatable interval never hides an earlier one.
+Intervals are bounded by when the runtime sampled each reading (the contract's
+`sampled_at`), not when Factory asked, so a cached or delayed answer is charged
+to the runs active when it was sampled; a runtime that gives no sample time
+has the request time stand in.
+
+Not yet (v3 and later): workflow cost grouping, budgets, Scenario cost
+drivers, policy/metric follow-through, and runtime-specific observation work
+tracked outside Factory.
 
 ## Workflows
 
@@ -2003,6 +2054,17 @@ A harness binary can stop starting without anything changing in Factory: on
 and then failed as an `ack_timeout` that blamed the agent. So before a
 dispatch, the daemon checks the harness starts.
 
+Factory also disables each built-in harness's own launch-time update check for
+both task runs and standing agents: codex gets `-c` with
+`check_for_update_on_startup=false`, Claude Code gets `DISABLE_AUTOUPDATER=1`,
+pi gets `PI_SKIP_VERSION_CHECK=1`, and OpenCode gets
+`OPENCODE_DISABLE_AUTOUPDATE=true`. These are ephemeral adapter defaults;
+Factory does not rewrite a person's harness configuration, and scope-declared
+arguments still follow the codex default so an explicit declaration can
+override it. Scheduled host upgrades, including the active-run guard,
+serialization, post-upgrade checks, and alerting, are separate work tracked in
+[#173](https://github.com/ingo-eichhorst/factory/issues/173).
+
 - **The probe is declared, not run, by the adapter.** `Agent::health_probe()`
   (a default method on the Agent seam, `None` unless overridden) names a
   command; every built-in harness answers `<harness> --version`, `shell` and
@@ -2166,6 +2228,119 @@ a store that is asked something it should not be says so instead of guessing.
 The engine a scope uses is shown in the Roster, and is not editable there
 -- see the last section of this file for why.
 
+### Dashboard configuration (#159)
+
+The dashboard's layout is a `dashboard:` block, inherited down the scope
+tree exactly the way `roles:` is -- the root's own top-level `dashboard:`,
+then each nested scope's `scope.dashboard`, from the top of the tree down to
+the scope being asked about:
+
+```yaml
+# root .factory/config.yaml, top level (like `roles:`)
+dashboard:
+  tiles:
+    - { metric: throughput_week, size: s }
+    - { metric: compliance.cra, size: s }
+    - { view: throughput, size: l }
+
+# a nested scope: projects/demo/.factory/config.yaml
+scope:
+  id: 8fc86b67-aeba-4935-a623-d75f59d77acd
+  name: demo
+  dashboard:                    # replaces the inherited layout whole, here and below
+    tiles:
+      - { view: kpis, size: s }
+      - { metric: unit_cost, size: m }
+```
+
+A tile is exactly one of `metric` (any registry `MetricId` -- see "Goals"
+above for the registry, including a bound family like `compliance.cra`) or
+`view` (one of a fixed catalogue: `kpis`, `throughput`, `on_the_line`,
+`production_year`, `by_scope`, `agent_hours_by_scope`,
+`agent_hours_by_agent`, `occupancy_strip`, `inbox`, `compliance`, `cost`),
+plus a `size` of `s`, `m`, `l` or `xl`. `kpis` is today's KPI row. No tile
+takes a query, a filter or a `group_by` -- design §8's rule against a query
+language holds here exactly as it does for metrics and policy checks; a
+metric family's own bound segment (`compliance.cra`) is the only
+parameter a tile ever carries.
+
+**Resolution**, in one place (`Config::dashboard_for_scope`, the same chain
+`roles_for_scope` walks by `Scope.path`, never by name or up the tree): the
+nearest `dashboard:` block wins **whole**, never merged tile-by-tile with
+what an ancestor declared -- a layout is always one list a person can read
+top to bottom. With no `dashboard:` block anywhere in the chain, the
+dashboard renders its built-in default (today's page, unchanged; the list
+itself lives in `ui/js/dashboard-model.js`, not in this config).
+**Removing the block reveals whatever it was overriding** -- there is no
+separate reset action, because the config file already is the reset.
+
+**Validation, at load**, in the same style an unknown role is refused: a
+`dashboard:` block with no tiles is refused outright
+(`` dashboard needs at least one tile; remove the `dashboard:` block to inherit ``)
+-- a layout
+that draws nothing is not a smaller valid layout, the same rule an empty
+workflow or an empty quality attribute list already follows, and the fix
+is named in the message. An unknown metric id (or a family named unbound,
+like bare `compliance` with no framework) is a config error naming the
+block and the tile (`invalid request: scope "demo"
+dashboard.tiles[2].metric "compliance" is not a known metric`); a tile
+naming both `metric` and `view`, or neither, the same way. A metric the
+registry knows but cannot compute yet is **not** an error -- the tile is
+valid and shows its own reason, exactly as an unavailable metric already
+does elsewhere. `view` and `size` are closed enums, so an unrecognised
+value is refused by the parser itself, the file and the bad value both
+named, the same as an unrecognised `lifetime:` or `sandbox:` elsewhere in
+this file. The instance root writes its dashboard only in its top-level
+`dashboard:`; a `scope.dashboard` block in the root's own config is
+refused at startup, and a `dashboard:` block written beside a nested
+scope's `scope:` block (where that file never reads it) is refused with
+the file named, the same two mistakes `roles:` already guards against.
+
+**Reading it**: `Request::Dashboard { scope }` (wire op `"dashboard"`) answers
+`{ tiles: [...] | null, source: "<scope name>" | null }` -- `tiles: null`
+means "use the built-in default", paired always with `source: null`;
+otherwise `source` names the scope whose block answered (the root's own
+configured scope name, for its top-level block, or the instance name when
+the root never opted itself into being a scope at all). Never a magic
+string like `"root"` or `"default"`: a scope can be named either of those,
+so `source` is always either `null` or a real name a caller could look up.
+`scope` left out resolves the instance root's own; an unknown scope name
+is refused (404 over HTTP), unlike `roles_for`'s tolerant fallback to the
+built-in roles for a scope that has since gone -- a dashboard request
+names a place to show, and a place that resolves to nothing has none to
+show. `GET /api/dashboard?scope=demo` or `factory dashboard --scope demo`
+read the same thing. No write or reset request exists yet -- editing the
+block by hand is the only way in, until the tile catalogue editor (phase
+5) lands.
+
+The dashboard page itself (`ui/js/dashboard.js`) fetches this alongside
+`/api/production` on load and on a scope change, never on a window change
+-- a layout does not depend on how far back the history cards look -- and
+falls back to its own built-in default on a failed fetch, so a slow or
+unreachable daemon never draws a blank page. #162 (phase 3) gave every
+registry `metric` id and the rest of #150's view catalogue --
+`agent_hours_by_scope`/`agent_hours_by_agent`, `occupancy_strip`, `inbox`,
+`compliance`, `cost` -- their own renderer, so a placeholder now only draws
+for a `view` id outside the vocabulary, which the parser's own closed enum
+should already have refused before a layout reaches this page at all. Those
+tiles read four more shared answers -- `/api/metrics`, `/api/occupancy`,
+`/api/operations`, `/api/policy`, `/api/costs` -- each fetched at most once
+per render cycle and only when the resolved layout actually names a tile
+that needs it, so the built-in default (which names none of them) starts no
+new request. `/api/metrics` (`ids=` collected from every `metric` tile in one
+request, never one per tile) and `/api/costs` (a fixed `group_by=scope`,
+never an arbitrary parameter) follow the dashboard's own scope and window,
+the same as `/api/production`. `/api/occupancy` carries no `scope` on the
+wire at all (`Request::Occupancy`); its tiles follow the window (`minutes=`)
+and narrow the answer to the selected subtree client-side with `inScope`,
+the same as the occupancy chart itself -- and since the endpoint clamps a
+window past thirty days, an agent-hours tile's own qualifier says the span
+it actually got, not the one asked for. `/api/policy` follows the scope only,
+no window (a compliance rollup is a live snapshot, not a trailing sum). The
+`inbox` tile reuses the Inbox nav view's own unscoped fetch and model rather
+than a second copy, narrowing what it shows to the selected scope
+client-side the same way, so a scope change never needs a second request.
+
 ### The AI accounts behind the agents
 
 An agent declaration says which harness it runs, not which account pays for
@@ -2219,18 +2394,31 @@ providers claiming the same harness, the same provider name twice, `env:` on a
 claiming `shell` or a shell agent naming one, and an `infrastructure:` block in
 a nested scope's own file -- only the root's is read.
 
+The provider cards also show the latest 5-hour and weekly rate-limit windows,
+when each resets, freshness and attribution quality, a snapshot-derived
+trend, and the active agents and run instances bound to the account. The
+readings of every run bound to the account form one timeline, so the trend
+spans a handoff from one run to the next. A reading is dated by its sample
+time: one older than fifteen minutes, or one whose runtime did not say when
+it sampled, is marked stale. Its `direct` or `apportioned` badge is the
+attribution of the interval that reading closed, fixed when it was sampled
+rather than read off who is running now. Missing, stale, or unattributable
+readings say so rather than rendering as zero. The same
+snapshots supply per-run plan share and `factory cost --by provider`; Factory
+records token and API-equivalent cost measurements only when the configured
+agent runtime supplies them.
+
 The host half of the page is read live on every request, from `sysctl` and
 `libc` rather than a subprocess per field: model, chip, cores, memory, OS,
 uptime, load and the root filesystem. Any of those that cannot be read is
-`null`, never a failed request, and only macOS answers all of them. Usage and
-spend per provider are not shown: Factory does not record tokens yet.
+`null`, never a failed request, and only macOS answers all of them.
 
 ### Backup
 
 `.factory/` holds the only copy of the company's operating history -- the
-database, the knowledge vault, the policies, goals, scenarios and quality
-profiles -- and git tracks none of it. The root config names where a copy
-goes, and the daemon takes one on a schedule:
+database, the knowledge vault, the policies, goals, scenarios, quality
+profiles and VEX judgments -- and git tracks none of it. The root config
+names where a copy goes, and the daemon takes one on a schedule:
 
 ```yaml
 # root .factory/config.yaml
@@ -2249,7 +2437,7 @@ A snapshot is one `factory-backup-<instance>-<utc>.tar.zst` holding:
   writes, and never a file copy, which WAL would make torn -- then checked with
   `PRAGMA integrity_check` before anything is archived;
 - the root `.factory/config.yaml` and every registered scope's own;
-- `.factory/{knowledge,datasets,policies,goals,scenarios,quality}/`, whole;
+- `.factory/{knowledge,datasets,policies,goals,scenarios,quality,vex}/`, whole;
 - a `manifest.json`, written last: instance, daemon version (there is no
   build commit compiled in, so none is claimed), the database's
   `user_version`, tables and integrity result, and the path, size and sha256
@@ -2268,6 +2456,8 @@ synced.
     factory backup list              every snapshot, verified or not, and the rule that keeps it
     factory backup run               take one now, then apply retention
     factory backup verify [<name>]   prove one would restore; exits non-zero on a failed check
+    factory backup restore <name> --into <new-root>
+                                      verify, then restore into a new root
 
 `GET /api/backup`, `POST /api/backup/run` and
 `POST /api/backup/verify?snapshot=` are the same three over HTTP, and the
@@ -2275,17 +2465,30 @@ synced.
 only an agent in the root scope may hold, like `policy.attest`; reading is
 open to every agent.
 
+**Restore** is CLI-only and owner-only; there is deliberately no HTTP or UI
+endpoint and no role grant for it. It runs the same archive-path, manifest,
+checksum, database-schema and authored-content checks as `verify`, staging the
+exact checked files in a temporary sibling of `<new-root>`. Only after every
+required check passes does one rename make the root visible. `<new-root>` must
+not exist or must be empty, and may never be the running instance. A corrupt,
+incomplete, unsafe or database-incompatible archive leaves neither a partial
+root nor a staging directory. The command prints the exact
+`factory-daemon --root <new-root> run` and `factory --root <new-root> status`
+commands for a switch-over, but never stops a daemon, switches roots or starts
+the restored instance itself. V1 plaintext archives are supported; encrypted
+input belongs to the separate encryption follow-up.
+
 **Verify** unpacks a snapshot into a temporary directory -- never over the
 instance -- refusing any entry that would land outside it, then checks every
 sha256 against the manifest (a file missing, changed or unlisted fails it),
 runs `integrity_check` on the database copy and compares its schema version,
 loads the root config, and loads every authored-content directory with the
 loader the daemon uses: policies and drafts, goals, scenarios, quality
-profiles, datasets and the knowledge index. A file one of those loaders
-cannot parse is a warning, not a failure: the checksums have already proved
-it is byte for byte what was backed up, so it is broken in the live
-instance too. Every verification is recorded; the page's "last verified"
-only counts snapshots still in the destination.
+profiles, CycloneDX VEX judgments, datasets and the knowledge index. A file
+one of those loaders cannot parse is a warning, not a failure: the checksums
+have already proved it is byte for byte what was backed up, so it is broken
+in the live instance too. Every verification is recorded; the page's "last
+verified" only counts snapshots still in the destination.
 
 **The job.** Once a minute the daemon looks whether the schedule's next slot
 after the later of the last attempt and the newest archive has passed, so a
@@ -2312,8 +2515,8 @@ Every backup and verification is an event -- `backup_completed`,
 unmounted volume is a `backup_failed` with the reason, a warning on the page
 and a line in the log. Not yet: `age` encryption (a config asking for
 `encrypt_to` is refused at load rather than given plaintext it thinks is
-encrypted), `restore --into`, the policy facts and metrics, the scope-repo
-remote report and the Time Machine fact are the issue's v2.
+encrypted), the policy facts and metrics, the scope-repo remote report and the
+Time Machine fact.
 
 ## Writing a plugin
 
@@ -2525,9 +2728,15 @@ request; a guide already in a running session is not rewritten. The page says
 in its own markup, not in anything it fetches, that roles are guard-rails and
 not a security boundary.
 
-**Dashboard** is five KPI tiles, a by-scope table and an inbox, all read from
-the same `state.tasks` and `state.scopes` every other view already holds —
-nothing here is fetched specially. The inbox lives inside the dashboard rather
+**Dashboard** is a resolved list of tiles (`GET /api/dashboard?scope=`, `#159`;
+the built-in default is five KPI tiles, a by-scope table and an inbox). The
+five default tiles still read the same `state.tasks`/`state.scopes` every
+other view already holds, nothing fetched specially for them; a registry
+`metric` tile or one of #150's newer view tiles (agent hours, occupancy
+strip, compliance, cost -- `#162`) reads `/api/metrics`, `/api/occupancy`,
+`/api/policy` or `/api/costs` instead, one shared request per endpoint per
+render cycle, fetched only when the resolved layout actually names a tile
+that needs it. The inbox lives inside the dashboard rather
 than beside it: every blocked, failed and cancelled task, and every schedule
 that missed its own next run, newest first. `blocked` is a real, first-class
 status — "the agent needs a human before it can go on" — so this is never a

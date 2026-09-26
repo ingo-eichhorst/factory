@@ -15,8 +15,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use factory_core::config::{
-    refuse_misplaced_scope_infrastructure, refuse_misplaced_scope_policies, refuse_misplaced_scope_quality,
-    refuse_misplaced_scope_roles, Factory, Scope, CONFIG_FILE, FACTORY_DIR,
+    refuse_misplaced_scope_dashboard, refuse_misplaced_scope_infrastructure, refuse_misplaced_scope_policies,
+    refuse_misplaced_scope_quality, refuse_misplaced_scope_roles, Factory, Scope, CONFIG_FILE, FACTORY_DIR,
 };
 use factory_core::error::{FactoryError, Result};
 use serde::Deserialize;
@@ -124,6 +124,12 @@ fn read_scope(path: &Path) -> Result<Scope> {
     // `configuration.rs`'s `read_document`, which reads the instance root's
     // own file too -- where a top-level `quality:` is exactly right.
     refuse_misplaced_scope_quality(&document, path)?;
+    // And for a top-level `dashboard:` block (`#159`) -- the same mistake,
+    // for the dashboard layout instead. Deliberately not also in
+    // `configuration.rs`'s `read_document`, which mirrors quality's own
+    // reasoning there: that reader also reads the instance root's own file,
+    // where a top-level `dashboard:` is exactly right.
+    refuse_misplaced_scope_dashboard(&document, path)?;
     // And for `infrastructure:`, which only the instance root's file reads.
     // Only nested files come through here -- the root's own config is parsed
     // whole by `Factory::load` -- so this never refuses the one place the
@@ -250,6 +256,7 @@ mod tests {
                 scope: root_scope,
                 scopes: vec![legacy],
                 roles: Default::default(),
+                dashboard: Default::default(),
                 policies: Default::default(),
                 quality: Default::default(),
                 infrastructure: Default::default(),
@@ -431,6 +438,35 @@ mod tests {
         apply(&mut f).unwrap();
 
         assert_eq!(f.config.scopes[0].policies.frameworks, vec!["iso27001".to_string()]);
+    }
+
+    #[test]
+    fn a_dashboard_block_beside_the_scope_block_is_refused_with_the_file_named() {
+        let s = Scratch::new("misplaced-dashboard");
+        let path = s.write_scope(
+            "projects",
+            "scope: { id: p-id, name: projects }\ndashboard:\n  tiles: []\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        let error = apply(&mut f).unwrap_err().to_string();
+        assert!(error.contains("scope.dashboard"), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn scope_dashboard_is_read_from_a_nested_scope_file() {
+        let s = Scratch::new("scope-dashboard");
+        s.write_scope(
+            "projects",
+            "scope:\n  id: p-id\n  name: projects\n  dashboard:\n    tiles:\n      - { metric: throughput_week, size: s }\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        apply(&mut f).unwrap();
+
+        let dashboard = f.config.scopes[0].dashboard.as_ref().expect("scope.dashboard read");
+        assert_eq!(dashboard.tiles.len(), 1);
     }
 
     #[test]

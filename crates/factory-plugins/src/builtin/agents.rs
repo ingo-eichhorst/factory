@@ -79,6 +79,7 @@ impl Agent for HarnessAgent {
         // about surviving that intact.
         match self.harness.as_str() {
             "claude" => {
+                env.insert("DISABLE_AUTOUPDATER".to_string(), "1".to_string());
                 let path = ctx.write_guide_file()?;
                 args.push("--append-system-prompt-file".into());
                 args.push(path.display().to_string());
@@ -94,6 +95,7 @@ impl Agent for HarnessAgent {
                 }
             }
             "pi" => {
+                env.insert("PI_SKIP_VERSION_CHECK".to_string(), "1".to_string());
                 // pi's own flag reads a path's contents when given one.
                 let path = ctx.write_guide_file()?;
                 args.push("--append-system-prompt".into());
@@ -109,8 +111,15 @@ impl Agent for HarnessAgent {
             // puts the guide above the task for a task run, and a standing
             // codex agent -- which never gets a `prompt()` call -- gets
             // nothing, exactly as the table in the README says.
-            "codex" => {}
+            "codex" => {
+                args.push("-c".into());
+                args.push("check_for_update_on_startup=false".into());
+            }
             "opencode" => {
+                env.insert(
+                    "OPENCODE_DISABLE_AUTOUPDATE".to_string(),
+                    "true".to_string(),
+                );
                 // Merged as a local config layer alongside a person's own
                 // `opencode.json` -- its `instructions` array gains an entry
                 // rather than losing whatever was already there.
@@ -454,6 +463,7 @@ mod tests {
             status: TaskStatus::Dispatching,
             schedule: None,
             estimate_seconds: None,
+            estimate: None,
             result: None,
             routed_to: None,
             error: None,
@@ -641,6 +651,85 @@ mod tests {
         assert!(prompt.contains("truncated"), "the cut is marked: {prompt}");
     }
 
+    // -- launch-time update checks are disabled per harness (#131) ----------
+
+    #[tokio::test]
+    async fn codex_disables_its_startup_update_check_for_task_and_standing_launches() {
+        for standing in [false, true] {
+            let mut context = ctx(None);
+            if standing {
+                context.task = None;
+            }
+            let launch = HarnessAgent::codex().launch_spec(&context).await.unwrap();
+            assert_eq!(
+                launch.args,
+                ["-c", "check_for_update_on_startup=false"],
+                "the exact Codex config override must be present"
+            );
+            assert_eq!(launch.env, context.env());
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_disables_its_auto_updater_for_task_and_standing_launches() {
+        for standing in [false, true] {
+            let mut context = ctx(None);
+            if standing {
+                context.task = None;
+            }
+            let launch = HarnessAgent::claude_code()
+                .launch_spec(&context)
+                .await
+                .unwrap();
+            let mut expected_env = context.env();
+            expected_env.insert("DISABLE_AUTOUPDATER".to_string(), "1".to_string());
+            assert_eq!(launch.env, expected_env);
+            std::fs::remove_dir_all(&context.guides_dir).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn pi_skips_its_version_check_for_task_and_standing_launches() {
+        for standing in [false, true] {
+            let mut context = ctx(None);
+            if standing {
+                context.task = None;
+            }
+            let launch = HarnessAgent::pi().launch_spec(&context).await.unwrap();
+            let mut expected_env = context.env();
+            expected_env.insert("PI_SKIP_VERSION_CHECK".to_string(), "1".to_string());
+            assert_eq!(launch.env, expected_env);
+            std::fs::remove_dir_all(&context.guides_dir).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode_disables_auto_update_without_replacing_its_guide_config() {
+        for standing in [false, true] {
+            let mut context = ctx(None);
+            if standing {
+                context.task = None;
+            }
+            let launch = HarnessAgent::opencode()
+                .launch_spec(&context)
+                .await
+                .unwrap();
+            assert_eq!(
+                launch
+                    .env
+                    .get("OPENCODE_DISABLE_AUTOUPDATE")
+                    .map(String::as_str),
+                Some("true")
+            );
+            assert!(
+                launch.env.contains_key("OPENCODE_CONFIG_CONTENT"),
+                "the independent guide-bearing config remains present"
+            );
+            assert_eq!(launch.env.len(), context.env().len() + 2);
+            std::fs::remove_dir_all(&context.guides_dir).ok();
+        }
+    }
+
     // -- the guide, injected per harness in `launch_spec` -------------------
 
     #[tokio::test]
@@ -735,7 +824,7 @@ mod tests {
         // in `prompt()` instead of anything here.
         let context = ctx(None);
         let launch = HarnessAgent::codex().launch_spec(&context).await.unwrap();
-        assert!(launch.args.is_empty());
+        assert_eq!(launch.args, ["-c", "check_for_update_on_startup=false"]);
         assert!(!context.guides_dir.exists(), "nothing was written to a file");
     }
 
@@ -756,7 +845,7 @@ mod tests {
         let mut standing = ctx(None);
         standing.task = None;
         let launch = HarnessAgent::codex().launch_spec(&standing).await.unwrap();
-        assert!(launch.args.is_empty());
+        assert_eq!(launch.args, ["-c", "check_for_update_on_startup=false"]);
         assert!(launch.env.keys().all(|k| k.starts_with("FACTORY_")));
     }
 

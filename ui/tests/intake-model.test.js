@@ -5,10 +5,12 @@ import { readFileSync } from "node:fs";
 import {
   COLUMNS,
   addRequest,
+  agentText,
   assessRequest,
   assessmentProblem,
   axisMarks,
   buildAssessment,
+  buildParts,
   cardActions,
   cardNote,
   cards,
@@ -18,8 +20,13 @@ import {
   estimateText,
   fmtAge,
   infoRequest,
+  nextActions,
   previewVerdict,
   priorityOf,
+  routeFor,
+  routeProblem,
+  splitDraft,
+  splitProblem,
   totalOpen,
   touchesIntake,
   triageRequest,
@@ -27,7 +34,9 @@ import {
 } from "../js/intake-model.js";
 
 // Captured from a throwaway daemon's `GET /api/intake` after the `#119`
-// end-to-end run: one item in each column, one closed as wontfix.
+// end-to-end run: one item in each column, one closed as wontfix -- with
+// the next actions, a split count and the routes added by hand in the
+// daemon's shape.
 const { board } = JSON.parse(readFileSync(new URL("./fixtures/intake-board.json", import.meta.url), "utf8"));
 const card = (key) => cards(board, key)[0];
 
@@ -79,7 +88,8 @@ test("axis marks: pass, fail, a tolerated cheap observability gap, and unassesse
 
 test("actions follow the stage: a released item has none, a needs-info one takes information", () => {
   assert.deepEqual(cardActions(card("ready")), []);
-  assert.deepEqual(cardActions(card("needs_info")), ["info", "triage", "assess", "wontfix"]);
+  assert.deepEqual(cardActions(card("needs_info")), ["info", "triage", "assess", "split", "wontfix"]);
+  assert.deepEqual(cardActions({ ...card("ready"), stage: "split" }), [], "a split item is done with");
   assert.ok(cardActions(card("triaging")).includes("release"), "assessed ready waits for release");
   const running = { stage: "triaging", triage: null, triage_task: "t", triage_task_status: "running" };
   assert.ok(!cardActions(running).includes("triage"), "one triage run at a time");
@@ -165,4 +175,74 @@ test("ages read at a glance", () => {
   assert.equal(fmtAge(59 * 60), "59m");
   assert.equal(fmtAge(5 * 3600), "5h");
   assert.equal(fmtAge(3 * 86400 + 5), "3d");
+});
+
+test("a red item says what moves it, with the dialog for each action", () => {
+  const next = nextActions(card("needs_info"));
+  assert.deepEqual(next.map(n => [n.action, n.act]), [["split", "split"], ["add_info", "info"]]);
+  assert.equal(next[0].reasons.length, 2);
+  assert.match(next[0].hint, /triage it again for a proposal/);
+  assert.deepEqual(nextActions(card("received")), []);
+  assert.deepEqual(nextActions({ next_actions: [{ action: "unknown", reasons: [], hint: "" }] }), [], "only actions it can carry out");
+});
+
+test("a split opens on the proposal and is checked the daemon's way", () => {
+  assert.deepEqual(splitDraft(card("needs_info")).map(p => p.title), ["", ""], "two parts to write without a proposal");
+  const proposed = { triage: { assessment: { split: [
+    { id: "resume", title: "Resume", instructions: "r" },
+    { id: "rework", title: "Rework", depends_on: ["resume"], acceptance: "cargo test" },
+  ] } } };
+  const rows = splitDraft(proposed);
+  assert.equal(rows[1].depends_on, "resume");
+  const parts = buildParts(rows);
+  assert.deepEqual(parts[1], { id: "rework", title: "Rework", instructions: "", depends_on: ["resume"], acceptance: "cargo test" });
+  assert.equal(parts[0].depends_on, undefined);
+  assert.equal(splitProblem(parts), null);
+
+  assert.match(splitProblem(parts.slice(0, 1)), /two parts/);
+  assert.match(splitProblem([parts[0], { ...parts[1], id: "resume" }]), /used twice/);
+  assert.match(splitProblem([parts[0], { ...parts[1], id: "Re work" }]), /slug/);
+  assert.match(splitProblem([parts[0], { ...parts[1], title: "" }]), /title/);
+  assert.match(splitProblem([parts[0], { ...parts[1], depends_on: ["nope"] }]), /not a part/);
+  assert.match(splitProblem([{ ...parts[0], depends_on: ["rework"] }, parts[1]]), /circle/);
+  assert.match(splitProblem(Array.from({ length: 9 }, (_, i) => ({ id: `p${i}`, title: "t" }))), /at most 8/);
+
+  assert.deepEqual(decideRequest("i", "split", { parts }).body, { decision: "split", parts });
+});
+
+test("a workflow route carries its inputs and each step's agent, checked against the board", () => {
+  const values = {
+    axes: board.axes.map(({ axis }) => ({ axis, pass: true, evidence: "ok" })),
+    category: "feature", impact: "high", urgency: "medium", complexity: "5",
+    scope: "demo", agent: "codex", workflow: "wf-1",
+    inputs: { issue: " 178 " }, agents: { review: "codex", implement: "" },
+    summary: "", questions: "",
+  };
+  const a = buildAssessment(values);
+  assert.deepEqual(a.routing, { scope: "demo", workflow: "wf-1", inputs: { issue: "178" }, agents: { review: "codex" } },
+    "an agent for the whole goes only without a workflow, and blank steps keep theirs");
+  assert.equal(routeProblem(a, board), null);
+  assert.match(routeProblem(buildAssessment({ ...values, inputs: {} }), board), /needs issue/);
+  assert.match(routeProblem(buildAssessment({ ...values, agents: { deploy: "codex" } }), board), /no step deploy/);
+  assert.match(routeProblem(buildAssessment({ ...values, workflow: "gone" }), board), /no workflow gone/);
+  assert.equal(routeProblem(buildAssessment({ ...values, workflow: "" }), board), null);
+  assert.deepEqual(buildAssessment({ ...values, workflow: "" }).routing, { scope: "demo", agent: "codex" });
+
+  const proposal = buildAssessment({ ...values, split: [{ id: "a", title: "A" }] });
+  assert.match(assessmentProblem(proposal), /proposed split: a split needs at least two parts/);
+
+  const route = routeFor(board, "demo");
+  assert.deepEqual(route.agents.map(agentText), ["claude-code (default model)", "builder (claude-code, opus)", "codex (gpt-5)"]);
+  assert.deepEqual(routeFor(board, "elsewhere").workflows, []);
+});
+
+test("information can bring a triage run straight after it", () => {
+  const req = infoRequest("i", "the answer", true);
+  assert.deepEqual(req.body, { text: "the answer" });
+  assert.deepEqual(req.after, triageRequest("i", ""));
+  assert.equal(infoRequest("i", "x").after, undefined);
+});
+
+test("a part says which item it was split from", () => {
+  assert.equal(cardNote({ stage: "received", parent: "40dd199e-6953" }), "part of item 40dd199e");
 });

@@ -29,8 +29,9 @@ use crate::schedule;
 
 /// How far back the chart looks when nobody says.
 const DEFAULT_MINUTES: u32 = 12 * 60;
-/// A window wider than this is a different tool than a chart of today.
-const MAX_MINUTES: u32 = 30 * 24 * 60;
+/// The widest dashboard/metrics preset. The chart still defaults to today,
+/// but its authoritative interval unions also back the 90-day hour metrics.
+const MAX_MINUTES: u32 = 90 * 24 * 60;
 /// Nor is one narrower than this: a run is at least a pixel or two wide.
 const MIN_MINUTES: u32 = 5;
 /// How many firings of one schedule a window draws. An every-minute task
@@ -1247,6 +1248,9 @@ mod tests {
             runtime: "herdr".into(),
             session: None,
             token: None,
+            original_estimate: None,
+            provider_account: None,
+            re_estimate: None,
             result: None,
             routed_to: None,
             error: None,

@@ -995,6 +995,7 @@ mod tests {
             scope: None,
             scopes: Vec::new(),
             roles: Default::default(),
+            dashboard: None,
             policies: PolicyDeclaration { frameworks: vec!["cra".to_string()], ..Default::default() },
             quality: Default::default(),
             infrastructure: Default::default(),
