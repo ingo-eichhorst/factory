@@ -1106,7 +1106,7 @@ impl Engine {
                     .redacted(),
             }),
             Request::RunRework { id } => Ok(Payload::Run {
-                run: Box::pin(self.accept_rework(&id)).await?.redacted(),
+                run: Box::pin(self.accept_rework(caller, &id)).await?.redacted(),
             }),
 
             Request::RunList { task_id, limit } => Ok(Payload::Runs {
@@ -1811,6 +1811,15 @@ impl Engine {
         if let Some(category) = &patch.category {
             factory_core::control_plan::check_category(category).map_err(FactoryError::BadRequest)?;
         }
+        if patch.labels.as_ref().is_some_and(|labels| {
+            labels.contains_key(crate::verification::REVIEW_RUN_LABEL)
+                || labels.contains_key(crate::verification::REVIEW_STEP_LABEL)
+                || labels.contains_key(crate::verification::REVIEW_DIGEST_LABEL)
+        }) {
+            return Err(FactoryError::BadRequest(
+                "factory.review_* labels are reserved for daemon-created review tasks".into(),
+            ));
+        }
 
         let scope = patch.scope.clone().unwrap_or_else(|| current.scope.clone());
         if patch.scope.is_some() {
@@ -1954,7 +1963,7 @@ impl Engine {
     // -- creating ----------------------------------------------------------
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {
-        self.create_task(new, None, None, None, None).await
+        self.create_task(new, None, None, None, None, false).await
     }
 
     /// A task born inside the intake gate (`#119`): `TaskStatus::Intake`
@@ -1969,7 +1978,7 @@ impl Engine {
                 "an intake item has no schedule; release it first, then schedule the task".into(),
             ));
         }
-        self.create_task(new, None, None, None, Some(intake)).await
+        self.create_task(new, None, None, None, Some(intake), false).await
     }
 
     pub(crate) async fn create_workflow_task(
@@ -1978,7 +1987,7 @@ impl Engine {
         origin: WorkflowOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, Some(origin), None, Some(id), None).await
+        self.create_task(new, Some(origin), None, Some(id), None, false).await
     }
 
     pub(crate) async fn create_bench_task(
@@ -1987,7 +1996,16 @@ impl Engine {
         origin: factory_core::bench::BenchOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, None, Some(origin), Some(id), None).await
+        self.create_task(new, None, Some(origin), Some(id), None, false).await
+    }
+
+    pub(crate) async fn create_review_task(
+        &self,
+        new: NewTask,
+        origin: Option<WorkflowOrigin>,
+        id: String,
+    ) -> Result<Task> {
+        self.create_task(new, origin, None, Some(id), None, true).await
     }
 
     async fn create_task(
@@ -1997,6 +2015,7 @@ impl Engine {
         bench_origin: Option<factory_core::bench::BenchOrigin>,
         id: Option<String>,
         intake: Option<factory_core::intake::Intake>,
+        internal_review: bool,
     ) -> Result<Task> {
         let factory = self.factory_snapshot();
         if new.title.trim().is_empty() {
@@ -2005,6 +2024,15 @@ impl Engine {
         if new.estimate_seconds == Some(0) {
             return Err(FactoryError::BadRequest(
                 "a task estimate must be at least one second".into(),
+            ));
+        }
+        if !internal_review
+            && (new.labels.contains_key(crate::verification::REVIEW_RUN_LABEL)
+                || new.labels.contains_key(crate::verification::REVIEW_STEP_LABEL)
+                || new.labels.contains_key(crate::verification::REVIEW_DIGEST_LABEL))
+        {
+            return Err(FactoryError::BadRequest(
+                "factory.review_* labels are reserved for daemon-created review tasks".into(),
             ));
         }
         // A retry policy governs what happens after a *scheduled* run fails
@@ -2899,6 +2927,13 @@ impl Engine {
         }
         self.mirror_to_task(&run).await;
         self.settle_retry(&run).await;
+        if status != RunStatus::Done {
+            if let Ok(Some(task)) = self.store.get(&run.task_id).await {
+                if let Some(subject) = task.labels.get(crate::verification::REVIEW_RUN_LABEL) {
+                    self.enqueue_verification(subject);
+                }
+            }
+        }
         Ok(run)
     }
 

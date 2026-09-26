@@ -1250,6 +1250,16 @@ mod tests {
             "worker has no run.approve"
         );
         assert!(allowed(&e, &wearing("approver"), request(&mine)).await);
+        let executing_approver = Caller::Agent {
+            scope: "demo".into(),
+            name: "maker".into(),
+            role: Role::new("approver"),
+            run_id: Some(mine.clone()),
+        };
+        assert!(
+            allowed(&e, &executing_approver, Request::RunRework { id: mine.clone() }).await,
+            "reach/grant admits the request; the engine's identity check must reject self-rework"
+        );
         assert!(
             !allowed(&e, &wearing("approver"), request(&theirs)).await,
             "scope reach stops at demo"

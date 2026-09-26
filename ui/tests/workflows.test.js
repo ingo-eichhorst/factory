@@ -44,6 +44,11 @@ import {
   workflowRouteTail,
 } from "../js/workflow-model.js";
 
+const bareDocument = { addEventListener() {}, getElementById: () => null, querySelectorAll: () => [] };
+globalThis.document = bareDocument;
+globalThis.CSS = { escape: value => String(value) };
+const { paintStatuses } = await import("../js/workflows.js");
+
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
 const view = readFileSync(new URL("../js/workflows.js", import.meta.url), "utf8");
@@ -58,6 +63,24 @@ test("Workflows is a Process peer of Tasks with an accessible canvas and summary
   // Not anchored at the closing bracket: Operations follows (`#106`), and
   // `operations.test.js` pins the whole row.
   assert.match(app, /proc: \["tasks", "intake", "workflows"/);
+});
+
+test("status painting preserves every locked control card's kind class", () => {
+  for (const kind of ["gate", "review", "approval"]) {
+    const card = {
+      className: "",
+      classList: { add(name) { card.className += ` ${name}`; } },
+      querySelector: () => null,
+    };
+    paintStatuses({
+      graph: { nodes: [{ id: kind, kind }], edges: [] },
+      nodeRoot: { querySelector: () => card },
+      executionFor: () => ({ status: "running" }),
+      nodesOnly: true,
+    });
+    assert.match(card.className, new RegExp(`(?:^| )wf-k-${kind}(?: |$)`));
+    assert.match(card.className, /(?:^| )wf-s-running(?: |$)/);
+  }
 });
 
 // ------------------------------------------------------------------ R1: drag

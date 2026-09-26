@@ -1624,12 +1624,39 @@ mod tests {
             "the stored definition keeps its placeholders"
         );
     }
+
+    #[tokio::test]
+    async fn a_terminal_verifier_review_blocks_its_control_node_for_retry() {
+        let engine = engine();
+        let mut review = engine
+            .create(NewTask {
+                title: "review".into(),
+                scope: Some("demo".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        review
+            .labels
+            .insert(crate::verification::REVIEW_RUN_LABEL.into(), "subject".into());
+        review.status = TaskStatus::Cancelled;
+
+        assert_eq!(node_status(&review), WorkflowNodeStatus::Blocked);
+    }
 }
 
 /// A node's status, read off its task. A task blocked by a failure is a
 /// failed node (`#122`): the task waits for a person, but the workflow's
 /// step did fail, and its on-failure edges and retries must see that.
 fn node_status(task: &Task) -> WorkflowNodeStatus {
+    if task.labels.contains_key(crate::verification::REVIEW_RUN_LABEL)
+        && (task.has_failed() || task.status == TaskStatus::Cancelled)
+    {
+        // A verifier-owned review attempt may be retried. Its failure blocks
+        // the control node and subject for a person; it does not consume the
+        // whole workflow as a failed business step.
+        return WorkflowNodeStatus::Blocked;
+    }
     if task.has_failed() {
         return WorkflowNodeStatus::Failed;
     }
@@ -2380,45 +2407,58 @@ impl Engine {
                 .into_iter()
                 .filter(|a| a.step == step)
                 .max_by_key(|a| a.at);
-            let (status, error) = match subject_run.status {
-                RunStatus::Done => (WorkflowNodeStatus::Done, None),
-                RunStatus::Verifying => (WorkflowNodeStatus::Verifying, None),
-                RunStatus::Failed | RunStatus::Cancelled => (WorkflowNodeStatus::Skipped, None),
-                RunStatus::Blocked if kind == WorkflowNodeKind::Approval => match evidence {
-                    Some(a) if a.verdict == AttestationVerdict::Pass => {
-                        (WorkflowNodeStatus::Done, None)
+            let approval_status = if kind == WorkflowNodeKind::Approval {
+                match &evidence {
+                    Some(a) if a.verdict == AttestationVerdict::Pass => Some((WorkflowNodeStatus::Done, None)),
+                    Some(a) => Some((WorkflowNodeStatus::Blocked, a.findings.clone())),
+                    None if subject_run.status == RunStatus::Blocked => {
+                        Some((WorkflowNodeStatus::Blocked, Some("waiting for approval".into())))
                     }
-                    Some(a) => (WorkflowNodeStatus::Blocked, a.findings),
-                    None => (
-                        WorkflowNodeStatus::Blocked,
-                        Some("waiting for approval".into()),
-                    ),
-                },
-                RunStatus::Blocked
-                    if subject_run.blocked_source == Some(factory_core::run::BlockSource::Verification) =>
-                {
-                    let since = subject_run.blocked_since.unwrap_or(subject_run.started_at);
-                    let newest = self
-                        .policies
-                        .step_attestations(&subject_run.id)
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|a| a.step == step && a.at <= since)
-                        .max_by_key(|a| a.at);
-                    match newest {
-                        Some(a) if a.verdict == AttestationVerdict::Pass => (WorkflowNodeStatus::Done, None),
-                        Some(a) => (
-                            WorkflowNodeStatus::Blocked,
-                            Some(format!(
-                                "{step} failed ({})",
-                                a.exit_code.map(|c| format!("exit {c}")).unwrap_or_else(|| "did not finish".into())
-                            )),
-                        ),
-                        None => (WorkflowNodeStatus::Unstarted, None),
-                    }
+                    None => None,
                 }
-                _ => (WorkflowNodeStatus::Unstarted, None),
+            } else {
+                None
+            };
+            let (status, error) = if let Some(status) = approval_status {
+                status
+            } else {
+                match subject_run.status {
+                    RunStatus::Done => (WorkflowNodeStatus::Done, None),
+                    RunStatus::Verifying => (WorkflowNodeStatus::Verifying, None),
+                    RunStatus::Failed | RunStatus::Cancelled => {
+                        (WorkflowNodeStatus::Skipped, None)
+                    }
+                    RunStatus::Blocked
+                        if subject_run.blocked_source
+                            == Some(factory_core::run::BlockSource::Verification) =>
+                    {
+                        let since = subject_run.blocked_since.unwrap_or(subject_run.started_at);
+                        let newest = self
+                            .policies
+                            .step_attestations(&subject_run.id)
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|a| a.step == step && a.at <= since)
+                            .max_by_key(|a| a.at);
+                        match newest {
+                            Some(a) if a.verdict == AttestationVerdict::Pass => {
+                                (WorkflowNodeStatus::Done, None)
+                            }
+                            Some(a) => (
+                                WorkflowNodeStatus::Blocked,
+                                Some(format!(
+                                    "{step} failed ({})",
+                                    a.exit_code
+                                        .map(|c| format!("exit {c}"))
+                                        .unwrap_or_else(|| "did not finish".into())
+                                )),
+                            ),
+                            None => (WorkflowNodeStatus::Unstarted, None),
+                        }
+                    }
+                    _ => (WorkflowNodeStatus::Unstarted, None),
+                }
             };
             if let Some(node) = run.nodes.iter_mut().find(|n| n.node_id == gate_id) {
                 if !matches!(

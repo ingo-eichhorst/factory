@@ -494,6 +494,10 @@ pub struct StepAttestation {
     pub commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dirty: Option<bool>,
+    /// SHA-256 over the exact tracked diff and untracked file contents that
+    /// this evidence judged. Additive so older attestations remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     pub at: DateTime<Utc>,
@@ -764,6 +768,7 @@ mod tests {
             dir: "/tmp".into(),
             commit: None,
             dirty: None,
+            worktree_digest: None,
             node_id: None,
             at,
         }
@@ -787,9 +792,11 @@ mod tests {
         .unwrap();
         evidence.as_object_mut().unwrap().remove("findings");
         evidence.as_object_mut().unwrap().remove("round");
+        evidence.as_object_mut().unwrap().remove("worktree_digest");
         let evidence: StepAttestation = serde_json::from_value(evidence).unwrap();
         assert_eq!(evidence.findings, None);
         assert_eq!(evidence.round, 0);
+        assert_eq!(evidence.worktree_digest, None);
     }
 
     #[test]

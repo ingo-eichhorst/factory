@@ -341,17 +341,21 @@ function renderCanvas() {
 /// open-task button's visibility, the run-status chip and the run panel.
 /// Called after every structural render and on every `workflow_run_updated`
 /// -- it never rebuilds an element, so it never steals focus or a caret.
-function paintStatuses() {
-  if (!current) return;
-  const graph = activeGraph();
+export function paintStatuses(options = {}) {
+  if (!current && !options.graph) return;
+  const graph = options.graph || activeGraph();
+  const nodeRoot = options.nodeRoot || $("workflow-nodes");
+  const executionFor = options.executionFor || runNode;
+  const selected = Object.hasOwn(options, "selectedNode") ? options.selectedNode : selectedNode;
+  const connecting = Object.hasOwn(options, "connectFrom") ? options.connectFrom : connectFrom;
   for (const node of graph.nodes) {
-    const el = $("workflow-nodes")?.querySelector(`[data-node="${CSS.escape(node.id)}"]`);
+    const el = nodeRoot?.querySelector(`[data-node="${CSS.escape(node.id)}"]`);
     if (!el) continue;
-    const execution = runNode(node.id);
+    const execution = executionFor(node.id);
     const status = execution?.status || "unstarted";
-    el.className = `workflow-node ${nodeStatusClass(status)}`;
-    if (selectedNode === node.id) el.classList.add("selected");
-    if (connectFrom === node.id) el.classList.add("wf-connecting");
+    el.className = `workflow-node wf-k-${node.kind || "task"} ${nodeStatusClass(status)}`;
+    if (selected === node.id) el.classList.add("selected");
+    if (connecting === node.id) el.classList.add("wf-connecting");
     const badge = el.querySelector('[data-role="badge"]');
     if (badge) {
       badge.className = `wf-badge ${nodeStatusClass(status)}`;
@@ -366,6 +370,7 @@ function paintStatuses() {
     }
     paintRound(el, execution, graph.nodes);
   }
+  if (options.nodesOnly) return;
   for (const edge of graph.edges) {
     const from = graph.nodes.find(node => node.id === edge.from);
     const status = from ? (runNode(from.id)?.status || "unstarted") : "unstarted";

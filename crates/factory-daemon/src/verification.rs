@@ -28,10 +28,11 @@ use factory_core::event::Event;
 use factory_core::policy;
 use factory_core::quality;
 use factory_core::run::{BlockSource, Run, RunPatch, RunStatus};
-use factory_core::task::{NewTask, Task, TaskEntry, TaskFilter, TaskStatus, WorkflowOrigin};
+use factory_core::task::{NewTask, Task, TaskEntry, TaskFilter, WorkflowOrigin};
 use factory_core::workflow::{
     WorkflowDefinition, WorkflowLint, WorkflowNodeKind, WorkflowNodeStatus, IMPLICIT_NODE,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -41,6 +42,7 @@ use std::sync::Arc;
 pub(crate) const DEFAULT_GATE_TIMEOUT_SECS: u64 = 600;
 pub(crate) const REVIEW_RUN_LABEL: &str = "factory.review_run";
 pub(crate) const REVIEW_STEP_LABEL: &str = "factory.review_step";
+pub(crate) const REVIEW_DIGEST_LABEL: &str = "factory.review_digest";
 
 /// Run `sh -c command` in `dir`, combined stdout+stderr, bounded by
 /// `timeout_secs`. `(None, ...)` on a timeout or a failure to even start the
@@ -65,25 +67,110 @@ pub(crate) async fn run_shell_capture(dir: &Path, command: &str, timeout_secs: u
     }
 }
 
-/// The commit `dir` is at and whether its tree has uncommitted changes --
-/// what an attestation says it judged. `(None, None)` outside a git tree.
-async fn git_state(dir: &Path) -> (Option<String>, Option<bool>) {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct GitState {
+    commit: Option<String>,
+    dirty: Option<bool>,
+    digest: Option<String>,
+}
+
+fn directory_digest(root: &Path) -> std::io::Result<String> {
+    fn visit(root: &Path, dir: &Path, hasher: &mut Sha256) -> std::io::Result<()> {
+        let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            let metadata = std::fs::symlink_metadata(&path)?;
+            hasher.update(relative.to_string_lossy().as_bytes());
+            hasher.update(b"\0");
+            if metadata.file_type().is_symlink() {
+                hasher.update(b"link\0");
+                hasher.update(std::fs::read_link(&path)?.to_string_lossy().as_bytes());
+            } else if metadata.is_dir() {
+                hasher.update(b"dir\0");
+                visit(root, &path, hasher)?;
+            } else {
+                hasher.update(b"file\0");
+                hasher.update(std::fs::read(&path)?);
+            }
+            hasher.update(b"\0");
+        }
+        Ok(())
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"factory-directory-v1\0");
+    visit(root, root, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// HEAD plus the exact tracked diff and untracked bytes an attestation judges.
+async fn git_state(dir: &Path) -> GitState {
     let head = tokio::process::Command::new("git").arg("-C").arg(dir).args(["rev-parse", "HEAD"]).output().await;
     let commit = match head {
         Ok(out) if out.status.success() => Some(String::from_utf8_lossy(&out.stdout).trim().to_string()),
-        _ => return (None, None),
+        _ => return GitState {
+            digest: directory_digest(dir).ok(),
+            ..Default::default()
+        },
     };
     let status = tokio::process::Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         .output()
         .await;
-    let dirty = match status {
-        Ok(out) if out.status.success() => Some(!out.stdout.is_empty()),
-        _ => None,
+    let status = match status {
+        Ok(out) if out.status.success() => out.stdout,
+        _ => return GitState { commit, ..Default::default() },
     };
-    (commit, dirty)
+    let diff = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["diff", "--binary", "--no-ext-diff", "HEAD", "--"])
+        .output()
+        .await;
+    let untracked = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output()
+        .await;
+    let (diff, untracked) = match (diff, untracked) {
+        (Ok(diff), Ok(untracked)) if diff.status.success() && untracked.status.success() => {
+            (diff.stdout, untracked.stdout)
+        }
+        _ => {
+            return GitState {
+                commit,
+                dirty: Some(!status.is_empty()),
+                digest: None,
+            };
+        }
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"factory-worktree-v1\0");
+    hasher.update(commit.as_deref().unwrap_or_default().as_bytes());
+    hasher.update(b"\0status\0");
+    hasher.update(&status);
+    hasher.update(b"\0diff\0");
+    hasher.update(&diff);
+    hasher.update(b"\0untracked\0");
+    for raw in untracked.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+        hasher.update(raw);
+        hasher.update(b"\0");
+        let relative = String::from_utf8_lossy(raw);
+        match tokio::fs::read(dir.join(relative.as_ref())).await {
+            Ok(bytes) => hasher.update(bytes),
+            Err(error) => hasher.update(format!("<unreadable:{error}>").as_bytes()),
+        }
+        hasher.update(b"\0");
+    }
+    GitState {
+        commit,
+        dirty: Some(!status.is_empty()),
+        digest: Some(format!("{:x}", hasher.finalize())),
+    }
 }
 
 impl Engine {
@@ -141,7 +228,7 @@ impl Engine {
                 .display()
                 .to_string()
         });
-        let (commit, dirty) = git_state(Path::new(&dir)).await;
+        let state = git_state(Path::new(&dir)).await;
         let attestation = StepAttestation {
             id: uuid::Uuid::new_v4().to_string(),
             run_id: run.id.clone(),
@@ -159,8 +246,9 @@ impl Engine {
             exit_code: None,
             output: None,
             dir,
-            commit,
-            dirty,
+            commit: state.commit,
+            dirty: state.dirty,
+            worktree_digest: state.digest,
             node_id: step.node_id.clone(),
             at: Utc::now(),
         };
@@ -215,9 +303,10 @@ impl Engine {
             self.sync_workflow_for_task(&task.id).await;
             return Ok(resumed);
         }
-        if run.status == RunStatus::Verifying
-            || (run.status == RunStatus::Blocked
-                && run.blocked_source == Some(BlockSource::Verification))
+        if verdict == AttestationVerdict::Pass
+            && (run.status == RunStatus::Verifying
+                || (run.status == RunStatus::Blocked
+                    && run.blocked_source == Some(BlockSource::Verification)))
         {
             let updated = self
                 .store
@@ -244,7 +333,11 @@ impl Engine {
     /// Accept a verifier-created rework proposal. Workflow work uses its
     /// injected review node's bounded send-back; standalone work ends the
     /// rejected attempt and starts a same-task retry.
-    pub(crate) async fn accept_rework(self: &Arc<Self>, run_id: &str) -> Result<Run> {
+    pub(crate) async fn accept_rework(
+        self: &Arc<Self>,
+        caller: &crate::access::Caller,
+        run_id: &str,
+    ) -> Result<Run> {
         let run = self.require_run(run_id).await?;
         if run.status != RunStatus::Blocked || run.blocked_source != Some(BlockSource::Verification)
         {
@@ -253,6 +346,12 @@ impl Engine {
             ));
         }
         let task = self.require(&run.task_id).await?;
+        let actor = Self::decision_actor(caller);
+        if actor == run.agent {
+            return Err(FactoryError::Denied(
+                "the executing agent cannot accept rework for its own work".into(),
+            ));
+        }
         if task.workflow_origin.is_none() {
             let used = self
                 .store
@@ -347,7 +446,7 @@ impl Engine {
         self.entry(
             &task.id,
             TaskEntry::new(
-                "owner",
+                actor,
                 "rework_accepted",
                 format!("accepted rework: {finding}"),
             )
@@ -440,7 +539,60 @@ impl Engine {
         task: &Task,
         executor: &str,
     ) -> Result<Vec<RequiredStep>> {
-        if task.bench_origin.is_some() || task.labels.contains_key(REVIEW_RUN_LABEL) {
+        if task.bench_origin.is_some() {
+            return Ok(Vec::new());
+        }
+        let review_labels = [REVIEW_RUN_LABEL, REVIEW_STEP_LABEL, REVIEW_DIGEST_LABEL]
+            .iter()
+            .filter(|label| task.labels.contains_key(**label))
+            .count();
+        if review_labels != 0 {
+            if review_labels != 3 {
+                return Err(FactoryError::BadRequest(
+                    "an internal review task needs its complete daemon-owned provenance".into(),
+                ));
+            }
+            let subject_id = task.labels.get(REVIEW_RUN_LABEL).expect("counted above");
+            let step_name = task.labels.get(REVIEW_STEP_LABEL).expect("counted above");
+            if task
+                .labels
+                .get(REVIEW_DIGEST_LABEL)
+                .is_none_or(|digest| digest.trim().is_empty())
+            {
+                return Err(FactoryError::BadRequest(
+                    "an internal review task needs a worktree digest".into(),
+                ));
+            }
+            let subject = self.require_run(subject_id).await?;
+            if !matches!(subject.status, RunStatus::Verifying | RunStatus::Blocked)
+                || (subject.status == RunStatus::Blocked && subject.blocked_source != Some(BlockSource::Verification))
+            {
+                return Err(FactoryError::BadRequest("the referenced subject is not awaiting verification".into()));
+            }
+            let step = subject
+                .required_steps
+                .iter()
+                .find(|step| step.kind == StepKind::Review && step.step == *step_name)
+                .ok_or_else(|| {
+                    FactoryError::BadRequest(
+                        "the referenced subject does not require this review step".into(),
+                    )
+                })?;
+            if step.actor.as_deref() != Some(executor) || executor == subject.agent {
+                return Err(FactoryError::Denied(
+                    "the review task is not bound to this independent executor".into(),
+                ));
+            }
+            let subject_task = self.require(&subject.task_id).await?;
+            match (&subject_task.workflow_origin, &task.workflow_origin, &step.node_id) {
+                (None, None, _) => {}
+                (Some(subject_origin), Some(review_origin), Some(node_id))
+                    if subject_origin.workflow_run_id == review_origin.workflow_run_id
+                        && review_origin.node_id == *node_id => {}
+                _ => return Err(FactoryError::BadRequest(
+                    "the review task provenance does not match the subject workflow step".into(),
+                )),
+            }
             return Ok(Vec::new());
         }
         if let Some(origin) = &task.workflow_origin {
@@ -557,7 +709,7 @@ impl Engine {
         }
     }
 
-    fn enqueue_verification(&self, run_id: &str) {
+    pub(crate) fn enqueue_verification(&self, run_id: &str) {
         let enqueue = {
             let mut verifying = self.verifying.lock().unwrap();
             match verifying.get_mut(run_id) {
@@ -600,9 +752,9 @@ impl Engine {
         });
     }
 
-    /// Runs still `verifying` when the daemon last stopped are verified
-    /// again from the start -- their gates run anew; a half-finished round
-    /// is never judged.
+    /// Runs still `verifying` when the daemon last stopped resume against the
+    /// exact current digest. Complete gate evidence for that digest is reused;
+    /// a changed tree starts a fresh gate-then-review round.
     pub(crate) async fn recover_verifications(&self) {
         match self.store.active_runs().await {
             Ok(runs) => {
@@ -621,10 +773,15 @@ impl Engine {
         subject: &Run,
         task: &Task,
         dir: &Path,
+        state: &GitState,
     ) -> Result<bool> {
+        let digest = state.digest.as_deref().ok_or_else(|| {
+            FactoryError::Other(anyhow::anyhow!(
+                "could not compute the worktree digest for independent review"
+            ))
+        })?;
         let attestations = self.policies.step_attestations(&subject.id).await?;
         let all_tasks = self.store.list(&TaskFilter::default()).await?;
-        let (commit, dirty) = git_state(dir).await;
         let mut waiting = false;
         for step in subject
             .required_steps
@@ -633,7 +790,11 @@ impl Engine {
         {
             if attestations
                 .iter()
-                .any(|a| a.step == step.step && a.kind == StepKind::Review)
+                .any(|a| {
+                    a.step == step.step
+                        && a.kind == StepKind::Review
+                        && a.worktree_digest.as_deref() == Some(digest)
+                })
             {
                 continue;
             }
@@ -643,34 +804,60 @@ impl Engine {
             if actor == subject.agent {
                 continue; // never manufacture self-review
             }
-            if let Some(existing) = all_tasks.iter().find(|candidate| {
-                candidate.labels.get(REVIEW_RUN_LABEL) == Some(&subject.id)
-                    && candidate.labels.get(REVIEW_STEP_LABEL) == Some(&step.step)
-            }) {
-                if existing.status == TaskStatus::Done {
-                    if let Some(review_run) =
-                        self.store.runs(&existing.id, 1).await?.into_iter().next()
-                    {
-                        self.record_review_attestation(existing, &review_run, subject, step)
-                            .await?;
+            let existing = all_tasks
+                .iter()
+                .filter(|candidate| {
+                    candidate.labels.get(REVIEW_RUN_LABEL) == Some(&subject.id)
+                        && candidate.labels.get(REVIEW_STEP_LABEL) == Some(&step.step)
+                        && candidate
+                            .labels
+                            .get(REVIEW_DIGEST_LABEL)
+                            .map(String::as_str)
+                            == Some(digest)
+                })
+                .max_by_key(|candidate| candidate.created_at);
+            if let Some(existing) = existing {
+                if let Some(review_run) = self.store.runs(&existing.id, 1).await?.into_iter().next() {
+                    if review_run.status == RunStatus::Done {
+                        match self
+                            .record_review_attestation(existing, &review_run, subject, step)
+                            .await
+                        {
+                            Ok(()) => continue,
+                            Err(error) => {
+                                self.entry(&task.id, TaskEntry::new(
+                                    "daemon", "review_unusable",
+                                    format!("review task {} ended without usable evidence: {error}; fix or retry the subject to request another review", existing.id),
+                                ).in_run(&subject.id)).await;
+                                continue;
+                            }
+                        }
+                    }
+                    if review_run.status.is_terminal() {
+                        self.entry(&task.id, TaskEntry::new(
+                            "daemon", "review_unusable",
+                            format!("review task {} ended {} without a verdict; retry that review task, or resolve it as a person", existing.id, review_run.status.as_str()),
+                        ).in_run(&subject.id)).await;
+                        continue;
+                    } else {
+                        waiting = true;
                         continue;
                     }
                 }
-                waiting = true;
-                continue;
             }
 
             let mut labels = std::collections::BTreeMap::new();
             labels.insert(REVIEW_RUN_LABEL.into(), subject.id.clone());
             labels.insert(REVIEW_STEP_LABEL.into(), step.step.clone());
+            labels.insert(REVIEW_DIGEST_LABEL.into(), digest.to_string());
             let instructions = format!(
                 "Independently review task {} (run {}).\n\nSubject result:\n{}\n\nWorktree: {}\nCommit: {}\nDirty: {}\n\nReport plain done to pass. Report done --send-to {} with --result containing concrete findings to reject and propose rework.",
                 task.id,
                 subject.id,
                 subject.result.as_deref().unwrap_or("(no result supplied)"),
                 dir.display(),
-                commit.as_deref().unwrap_or("unknown"),
-                dirty.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()),
+                state.commit.as_deref().unwrap_or("unknown"),
+                state.dirty.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()),
                 task.workflow_origin.as_ref().map(|o| o.node_id.as_str()).unwrap_or("rework"),
             );
             let new = NewTask {
@@ -684,31 +871,25 @@ impl Engine {
                 ..Default::default()
             };
             let review_id = uuid::Uuid::new_v4().to_string();
-            let review =
-                if let (Some(origin), Some(node_id)) = (&task.workflow_origin, &step.node_id) {
-                    let review = self
-                        .create_workflow_task(
-                            new,
-                            WorkflowOrigin {
-                                workflow_id: origin.workflow_id.clone(),
-                                workflow_run_id: origin.workflow_run_id.clone(),
-                                node_id: node_id.clone(),
-                            },
-                            review_id,
-                        )
-                        .await?;
-                    let mut workflow = self.workflow_run(&origin.workflow_run_id).await?;
-                    if let Some(node) = workflow.nodes.iter_mut().find(|n| n.node_id == *node_id) {
-                        node.task_id = Some(review.id.clone());
-                        node.status = WorkflowNodeStatus::Pending;
-                    }
-                    self.workflows.put_run(&workflow).await?;
-                    self.bus
-                        .publish(Event::WorkflowRunUpdated { run: workflow });
-                    review
-                } else {
-                    self.create(new).await?
-                };
+            let review_origin = match (&task.workflow_origin, &step.node_id) {
+                (Some(origin), Some(node_id)) => Some(WorkflowOrigin {
+                    workflow_id: origin.workflow_id.clone(),
+                    workflow_run_id: origin.workflow_run_id.clone(),
+                    node_id: node_id.clone(),
+                }),
+                _ => None,
+            };
+            let review = self.create_review_task(new, review_origin, review_id).await?;
+            if let (Some(origin), Some(node_id)) = (&task.workflow_origin, &step.node_id) {
+                let mut workflow = self.workflow_run(&origin.workflow_run_id).await?;
+                if let Some(node) = workflow.nodes.iter_mut().find(|n| n.node_id == *node_id) {
+                    node.task_id = Some(review.id.clone());
+                    node.status = WorkflowNodeStatus::Pending;
+                }
+                self.workflows.put_run(&workflow).await?;
+                self.bus
+                    .publish(Event::WorkflowRunUpdated { run: workflow });
+            }
             self.entry(
                 &task.id,
                 TaskEntry::new(
@@ -776,7 +957,18 @@ impl Engine {
                 .display()
                 .to_string()
         });
-        let (commit, dirty) = git_state(Path::new(&dir)).await;
+        let state = git_state(Path::new(&dir)).await;
+        let expected_digest = review_task
+            .labels
+            .get(REVIEW_DIGEST_LABEL)
+            .ok_or_else(|| {
+                FactoryError::BadRequest("the review task has no worktree digest".into())
+            })?;
+        if state.digest.as_deref() != Some(expected_digest.as_str()) {
+            return Err(FactoryError::BadRequest(
+                "the subject worktree changed while review was outstanding; a fresh gate and review round is required".into(),
+            ));
+        }
         let attestation = StepAttestation {
             id: uuid::Uuid::new_v4().to_string(),
             run_id: subject.id.clone(),
@@ -798,8 +990,9 @@ impl Engine {
             exit_code: None,
             output: review_run.result.clone(),
             dir,
-            commit,
-            dirty,
+            commit: state.commit,
+            dirty: state.dirty,
+            worktree_digest: state.digest,
             node_id: step.node_id.clone(),
             at: review_run.ended_at.unwrap_or_else(Utc::now),
         };
@@ -831,7 +1024,24 @@ impl Engine {
         let Some(subject_id) = review_task.labels.get(REVIEW_RUN_LABEL) else {
             return Ok(());
         };
-        let subject = self.require_run(subject_id).await?;
+        let mut subject = self.require_run(subject_id).await?;
+        if subject.status == RunStatus::Blocked
+            && subject.blocked_source == Some(BlockSource::Verification)
+        {
+            subject = self
+                .store
+                .update_run(
+                    &subject.id,
+                    &RunPatch {
+                        status: Some(RunStatus::Verifying),
+                        clear_blocked: true,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            self.bus.publish(Event::RunUpdated { run: subject.clone() });
+            self.mirror_to_task(&subject).await;
+        }
         let step_name = review_task
             .labels
             .get(REVIEW_STEP_LABEL)
@@ -844,8 +1054,13 @@ impl Engine {
             .ok_or_else(|| {
                 FactoryError::BadRequest("the subject run no longer requires this review".into())
             })?;
-        self.record_review_attestation(review_task, review_run, &subject, step)
-            .await?;
+        if let Err(error) = self
+            .record_review_attestation(review_task, review_run, &subject, step)
+            .await
+        {
+            self.enqueue_verification(&subject.id);
+            return Err(error);
+        }
         // A rejected review proposes rework; it does not take the route by
         // itself. Clear the task mirror before workflow reconciliation so
         // only `run rework` performs the bounded send-back.
@@ -870,7 +1085,6 @@ impl Engine {
     /// work that already failed. Re-reads the run before settling, so a
     /// cancel that landed while a gate ran stands.
     pub(crate) async fn verify_run(self: &Arc<Self>, run_id: &str) -> Result<()> {
-        let started = Utc::now();
         let run = self.require_run(run_id).await?;
         if run.status != RunStatus::Verifying {
             self.release_verification(run_id);
@@ -882,9 +1096,36 @@ impl Engine {
             None => self.factory_snapshot().scope_path(&task.scope)?,
         };
         let category = control_plan::effective_category(task.category.as_deref()).to_string();
-        let (commit, dirty) = git_state(&dir).await;
+        let state = git_state(&dir).await;
+        let mut attestations = self.policies.step_attestations(&run.id).await?;
+        let round_evidence = |all: &[StepAttestation]| {
+            all.iter()
+                .filter(|evidence| {
+                    evidence.kind == StepKind::Approval
+                        || state.digest.as_deref().is_some_and(|digest| {
+                            evidence.worktree_digest.as_deref() == Some(digest)
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let gate_steps = run
+            .required_steps
+            .iter()
+            .filter(|step| step.kind == StepKind::Gate)
+            .cloned()
+            .collect::<Vec<_>>();
+        let existing_gates = control_plan::judge(
+            &gate_steps,
+            &round_evidence(&attestations),
+            &run.agent,
+            chrono::DateTime::<Utc>::MIN_UTC,
+        );
 
         for step in run.required_steps.iter().filter(|s| s.kind.enforced()) {
+            if existing_gates.passed {
+                break;
+            }
             if step.kind != StepKind::Gate {
                 continue;
             }
@@ -893,7 +1134,11 @@ impl Engine {
             };
             let timeout = step.timeout_seconds.unwrap_or(DEFAULT_GATE_TIMEOUT_SECS);
             let (exit_code, output) = run_shell_capture(&dir, command, timeout).await;
-            let verdict = if exit_code == Some(0) { AttestationVerdict::Pass } else { AttestationVerdict::Fail };
+            let verdict = if exit_code == Some(0) {
+                AttestationVerdict::Pass
+            } else {
+                AttestationVerdict::Fail
+            };
             let attestation = StepAttestation {
                 id: uuid::Uuid::new_v4().to_string(),
                 run_id: run.id.clone(),
@@ -912,13 +1157,16 @@ impl Engine {
                 exit_code,
                 output: Some(factory_core::bench::tail_4kib(&output)),
                 dir: dir.display().to_string(),
-                commit: commit.clone(),
-                dirty,
+                commit: state.commit.clone(),
+                dirty: state.dirty,
+                worktree_digest: state.digest.clone(),
                 node_id: step.node_id.clone(),
                 at: Utc::now(),
             };
             self.policies.append_step_attestation(&attestation).await?;
-            let code = exit_code.map(|c| format!("exit {c}")).unwrap_or_else(|| "did not finish".into());
+            let code = exit_code
+                .map(|c| format!("exit {c}"))
+                .unwrap_or_else(|| "did not finish".into());
             self.entry(
                 &task.id,
                 TaskEntry::new("daemon", "attested", format!("{}: {} ({code})", step.step, verdict.as_str()))
@@ -936,28 +1184,38 @@ impl Engine {
             }
         }
 
+        let after_gates = git_state(&dir).await;
+        if after_gates != state {
+            self.enqueue_verification(run_id);
+            self.release_verification(run_id);
+            self.sync_workflow_for_task(&task.id).await;
+            return Ok(());
+        }
+
         // Deterministic gates pass before a model review is ever spent. The
         // subject remains `verifying`; the review task's report wakes this
         // same coordinator, and labels make restart recovery idempotent.
-        let gate_attestations = self.policies.step_attestations(&run.id).await?;
+        attestations = self.policies.step_attestations(&run.id).await?;
+        let current_evidence = round_evidence(&attestations);
         let gates = control_plan::judge(
-            &run.required_steps
-                .iter()
-                .filter(|s| s.kind == StepKind::Gate)
-                .cloned()
-                .collect::<Vec<_>>(),
-            &gate_attestations,
+            &gate_steps,
+            &current_evidence,
             &run.agent,
-            started,
+            chrono::DateTime::<Utc>::MIN_UTC,
         );
-        if gates.passed && self.ensure_review_tasks(&run, &task, &dir).await? {
+        if gates.passed && self.ensure_review_tasks(&run, &task, &dir, &state).await? {
             self.release_verification(run_id);
             self.sync_workflow_for_task(&task.id).await;
             return Ok(());
         }
 
         let attestations = self.policies.step_attestations(&run.id).await?;
-        let verdict = control_plan::judge(&run.required_steps, &attestations, &run.agent, started);
+        let verdict = control_plan::judge(
+            &run.required_steps,
+            &round_evidence(&attestations),
+            &run.agent,
+            chrono::DateTime::<Utc>::MIN_UTC,
+        );
         // Free the run for its next `done` before settling it: once it reads
         // `blocked`, a report may re-enqueue it at any moment.
         self.release_verification(run_id);
@@ -1487,7 +1745,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_rejected_approval_stays_blocked_without_launching_the_agent() {
-        let (engine, _) = engine("      - { applies_to: [feature], step: approval, by: person }");
+        let requires = "      - { applies_to: [feature], step: approval, by: person }\n      - { applies_to: [feature], step: tests, gate: \"true\" }\n      - { applies_to: [feature], step: review, by: independent }";
+        let (engine, _) = engine(requires);
         let task = task(&engine, Some("feature")).await;
         engine.start_run(&task.id, Trigger::Manual).await;
         let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
@@ -1501,6 +1760,38 @@ mod tests {
         let evidence = engine.run_attestations(&held.id).await.unwrap();
         assert_eq!(evidence.last().unwrap().verdict, AttestationVerdict::Fail);
         assert_eq!(evidence.last().unwrap().findings.as_deref(), Some("release evidence is missing"));
+        assert_eq!(evidence.len(), 1, "rejection did not run the later gate");
+        assert!(engine.store.list(&TaskFilter::default()).await.unwrap().iter().all(|task| {
+            !task.labels.contains_key(REVIEW_RUN_LABEL)
+        }), "rejection did not spawn the later review");
+    }
+
+    #[tokio::test]
+    async fn reserved_review_labels_cannot_be_created_or_edited_by_a_caller() {
+        let (engine, _) = engine(TESTS_FOR_FEATURES);
+        let mut labelled = NewTask {
+            title: "ordinary work".into(),
+            scope: Some("demo".into()),
+            agent: Some("shell".into()),
+            runtime: Some("quiet".into()),
+            worktree: Some(false),
+            category: Some("feature".into()),
+            ..Default::default()
+        };
+        labelled.labels.insert(REVIEW_RUN_LABEL.into(), "forged".into());
+        let error = engine.create(labelled).await.unwrap_err();
+        assert!(error.to_string().contains("reserved"), "{error}");
+
+        let ordinary = task(&engine, Some("feature")).await;
+        let error = engine.update(
+            &ordinary.id,
+            factory_core::task::TaskPatch {
+                labels: Some(BTreeMap::from([(REVIEW_STEP_LABEL.into(), "review".into())])),
+                ..Default::default()
+            },
+            None,
+        ).await.unwrap_err();
+        assert!(error.to_string().contains("reserved"), "{error}");
     }
 
     #[tokio::test]
@@ -1531,7 +1822,7 @@ mod tests {
         let evidence = engine.run_attestations(&subject.id).await.unwrap();
         assert_eq!(
             evidence.iter().map(|a| a.kind).collect::<Vec<_>>(),
-            vec![StepKind::Gate, StepKind::Review, StepKind::Gate]
+            vec![StepKind::Gate, StepKind::Review]
         );
         assert_eq!(
             evidence
@@ -1578,7 +1869,7 @@ mod tests {
             rejection.findings.as_deref(),
             Some("the public API lacks a denial test")
         );
-        engine.accept_rework(&subject.id).await.unwrap();
+        engine.accept_rework(&Caller::Owner, &subject.id).await.unwrap();
         for _ in 0..200 {
             if engine.store.active_run(&task.id).await.unwrap().is_some() {
                 return;
@@ -1586,6 +1877,89 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("same-task rework did not start");
+    }
+
+    #[tokio::test]
+    async fn a_terminal_review_without_a_verdict_blocks_and_the_same_task_can_be_retried() {
+        let (engine, _) = engine("      - { applies_to: [feature], step: review, by: independent }");
+        let task = task(&engine, Some("feature")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let subject = report_done(&engine, &task.id).await;
+        let review = review_task(&engine, &subject.id).await;
+        let first = engine.store.active_run(&review.id).await.unwrap().unwrap();
+        engine.fail_run(&first.id, factory_core::run::FailKind::AgentFailed, "review crashed").await;
+
+        let blocked = settled(&engine, &subject.id).await;
+        assert_eq!(blocked.status, RunStatus::Blocked);
+        let entries = engine.store.run_entries(&subject.id, 100).await.unwrap();
+        assert!(entries.iter().any(|entry| entry.kind == "review_unusable"
+            && entry.message.contains(&review.id)), "{entries:#?}");
+
+        engine.start_run(&review.id, Trigger::Manual).await;
+        let retry = engine.store.active_run(&review.id).await.unwrap().unwrap();
+        engine.report(
+            &review.id,
+            TaskReport {
+                status: Some(RunStatus::Done),
+                message: None,
+                result: Some("retry reviewed the same digest".into()),
+                send_to: None,
+                error: None,
+                token: retry.token,
+            },
+        ).await.unwrap();
+        assert_eq!(settled(&engine, &subject.id).await.status, RunStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn changing_a_dirty_tree_while_review_waits_starts_a_new_digest_bound_round() {
+        let requires = "      - { applies_to: [feature], step: tests, gate: \"true\" }\n      - { applies_to: [feature], step: review, by: independent }";
+        let (engine, work) = engine(requires);
+        let task = task(&engine, Some("feature")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let subject = report_done(&engine, &task.id).await;
+        let first_review = review_task(&engine, &subject.id).await;
+        let first_run = engine.store.active_run(&first_review.id).await.unwrap().unwrap();
+
+        std::fs::write(work.join("changed-during-review.txt"), "new state").unwrap();
+        let error = engine.report(
+            &first_review.id,
+            TaskReport {
+                status: Some(RunStatus::Done),
+                message: None,
+                result: Some("reviewed the old state".into()),
+                send_to: None,
+                error: None,
+                token: first_run.token,
+            },
+        ).await.unwrap_err();
+        assert!(error.to_string().contains("worktree changed"), "{error}");
+
+        let second_review = review_task(&engine, &subject.id).await;
+        assert_ne!(second_review.id, first_review.id);
+        let second_run = engine.store.active_run(&second_review.id).await.unwrap().unwrap();
+        engine.report(
+            &second_review.id,
+            TaskReport {
+                status: Some(RunStatus::Done),
+                message: None,
+                result: Some("reviewed the new state".into()),
+                send_to: None,
+                error: None,
+                token: second_run.token,
+            },
+        ).await.unwrap();
+        assert_eq!(settled(&engine, &subject.id).await.status, RunStatus::Done);
+        let evidence = engine.run_attestations(&subject.id).await.unwrap();
+        assert_eq!(evidence.iter().filter(|item| item.kind == StepKind::Gate).count(), 2);
+        assert_eq!(evidence.iter().filter(|item| item.kind == StepKind::Review).count(), 1);
+        let final_digest = evidence.iter().find(|item| item.kind == StepKind::Review)
+            .and_then(|item| item.worktree_digest.as_deref()).unwrap();
+        assert_eq!(
+            evidence.iter().rev().find(|item| item.kind == StepKind::Gate)
+                .and_then(|item| item.worktree_digest.as_deref()),
+            Some(final_digest),
+        );
     }
 
     #[tokio::test]
@@ -1621,6 +1995,34 @@ mod tests {
         assert_eq!(verdicts, vec![AttestationVerdict::Fail, AttestationVerdict::Pass], "append-only: both rounds kept");
         assert!(attestations.iter().all(|a| a.actor == GATE_ACTOR && a.category == "feature"));
         assert_eq!(engine.require(&task.id).await.unwrap().status, factory_core::task::TaskStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn the_executor_cannot_accept_its_own_rework_but_an_authorized_other_actor_can() {
+        let (engine, _) = engine(TESTS_FOR_FEATURES);
+        let task = task(&engine, Some("feature")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let failed = report_done(&engine, &task.id).await;
+        assert_eq!(settled(&engine, &failed.id).await.status, RunStatus::Blocked);
+        let executor = Caller::Agent {
+            scope: "demo".into(),
+            name: failed.agent.clone(),
+            role: factory_core::role::Role::new("custom-approver"),
+            run_id: Some(failed.id.clone()),
+        };
+        let error = engine.accept_rework(&executor, &failed.id).await.unwrap_err();
+        assert!(error.to_string().contains("cannot accept rework"), "{error}");
+        assert_eq!(engine.require_run(&failed.id).await.unwrap().status, RunStatus::Blocked);
+        let checker = Caller::Agent {
+            scope: "demo".into(),
+            name: "checker".into(),
+            role: factory_core::role::Role::new("custom-approver"),
+            run_id: None,
+        };
+        engine.accept_rework(&checker, &failed.id).await.unwrap();
+        let entries = engine.store.run_entries(&failed.id, 100).await.unwrap();
+        assert!(entries.iter().any(|entry| entry.kind == "rework_accepted"
+            && entry.source == "checker"));
     }
 
     #[tokio::test]
@@ -1718,6 +2120,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_approval_keeps_its_verdict_while_the_subject_runs_or_stays_rejected() {
+        async fn started(engine: &Arc<Engine>) -> (factory_core::workflow::WorkflowRun, Task, Run) {
+            let definition = engine.create_workflow(WorkflowDraft {
+                name: "approval-state".into(),
+                scope: "demo".into(),
+                category: Some("feature".into()),
+                nodes: vec![node("a")],
+                ..Default::default()
+            }).await.unwrap();
+            let workflow = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+            loop {
+                let state = engine.workflow_run(&workflow.id).await.unwrap();
+                if let Some(task_id) = state.nodes.iter().find(|item| item.node_id == "a")
+                    .and_then(|item| item.task_id.as_ref())
+                {
+                    let task = engine.require(task_id).await.unwrap();
+                    if let Some(run) = engine.store.active_run(task_id).await.unwrap() {
+                        return (workflow, task, run);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
+        let requirement = "      - { applies_to: [feature], step: approval, by: person }";
+        let (approved_engine, _) = engine(requirement);
+        let (workflow, task, held) = started(&approved_engine).await;
+        approved_engine.decide_approval(&Caller::Owner, &held.id, AttestationVerdict::Pass, "approved").await.unwrap();
+        approved_engine.sync_workflow_for_task(&task.id).await;
+        let state = approved_engine.workflow_run(&workflow.id).await.unwrap();
+        let approval = state.definition.nodes.iter().find(|item| item.kind == WorkflowNodeKind::Approval).unwrap();
+        assert_eq!(state.nodes.iter().find(|item| item.node_id == approval.id).unwrap().status, WorkflowNodeStatus::Done);
+
+        let (rejected_engine, _) = engine(requirement);
+        let (workflow, task, held) = started(&rejected_engine).await;
+        rejected_engine.decide_approval(&Caller::Owner, &held.id, AttestationVerdict::Fail, "rejected").await.unwrap();
+        rejected_engine.sync_workflow_for_task(&task.id).await;
+        let state = rejected_engine.workflow_run(&workflow.id).await.unwrap();
+        let approval = state.definition.nodes.iter().find(|item| item.kind == WorkflowNodeKind::Approval).unwrap();
+        assert_eq!(state.nodes.iter().find(|item| item.node_id == approval.id).unwrap().status, WorkflowNodeStatus::Blocked);
+    }
+
+    #[tokio::test]
     async fn a_workflow_run_gets_locked_gates_and_a_node_downstream_waits_for_verified_work() {
         let (engine, work) = engine(TESTS_FOR_FEATURES);
         std::fs::write(work.join("built.txt"), "ok").unwrap();
@@ -1798,7 +2243,7 @@ mod tests {
         let failed = report_done(&engine, &first_task).await;
         assert_eq!(settled(&engine, &failed.id).await.status, RunStatus::Blocked);
 
-        engine.accept_rework(&failed.id).await.unwrap();
+        engine.accept_rework(&Caller::Owner, &failed.id).await.unwrap();
         for _ in 0..400 {
             let run = engine.workflow_run(&wf.id).await.unwrap();
             let node = run.nodes.iter().find(|n| n.node_id == "a").unwrap();
@@ -1856,7 +2301,7 @@ mod tests {
         gate.round = 5;
         engine.workflows.put_run(&exhausted).await.unwrap();
 
-        let error = engine.accept_rework(&failed.id).await.unwrap_err();
+        let error = engine.accept_rework(&Caller::Owner, &failed.id).await.unwrap_err();
         assert!(error.to_string().contains("exhausted"), "{error}");
         let still_blocked = engine.require_run(&failed.id).await.unwrap();
         assert_eq!(still_blocked.status, RunStatus::Blocked);

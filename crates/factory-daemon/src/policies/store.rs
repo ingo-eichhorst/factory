@@ -348,6 +348,7 @@ mod tests {
             dir: "/tmp".into(),
             commit: None,
             dirty: None,
+            worktree_digest: None,
             node_id: None,
             at: at + chrono::Duration::seconds(secs),
         };
