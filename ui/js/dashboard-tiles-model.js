@@ -41,7 +41,7 @@ export function neededMetricIds(tiles) {
       ids.add(tile.metric.trim());
     }
   }
-  return [...ids].sort();
+  return [...ids].sort((a, b) => a.localeCompare(b));
 }
 
 /// Which of the four new shared reads (`/api/metrics` beyond ids, `/api/
@@ -96,20 +96,20 @@ export function coverageQualifier(coverage) {
 /// now", the same honest fallback `metricUnavailableNote` already gives a
 /// metric the daemon itself could not compute.
 export function metricTileView(id, answer) {
-  const values = (answer && answer.values) || [];
-  const registry = (answer && answer.registry) || [];
-  const series = (answer && answer.series) || [];
+  const values = answer?.values || [];
+  const registry = answer?.registry || [];
+  const series = answer?.series || [];
   const def = registry.find((d) => d.id === id) || null;
   const mv = values.find((v) => v.id === id) || null;
   const s = series.find((sr) => sr.id === id) || null;
   const reason = mv ? metricUnavailableNote(mv) : "not available right now";
-  const points = s && Array.isArray(s.points) ? s.points.map(([, v]) => v) : null;
+  const points = Array.isArray(s?.points) ? s.points.map(([, v]) => v) : null;
   return {
     id,
     title: def ? def.title : id,
     unavailable: !!reason,
     reason,
-    valueText: reason ? null : formatUnitValue(mv.value, def && def.unit),
+    valueText: reason ? null : formatUnitValue(mv.value, def?.unit),
     better: def ? betterGlyph(def.better) : "",
     coverage: def ? coverageQualifier(def.coverage) : "",
     // A flat line at zero reads as "a stable trend of zero", which is not
@@ -249,5 +249,5 @@ export function complianceSummaryRows(report) {
 /// sorted most-expensive-first on the wire (`CostReport::sort_rows`), so
 /// this only ever truncates, never reorders.
 export function topCostRows(report, limit = 5) {
-  return ((report && report.rows) || []).slice(0, limit);
+  return (report?.rows || []).slice(0, limit);
 }

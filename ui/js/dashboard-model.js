@@ -273,5 +273,5 @@ export function rowTemplate(row) {
 /// than two-up does. Never true for a one-tile row (nothing to pair) or the
 /// default layout, which has no `s` tile at all.
 export function rowIsAllSmall(row) {
-  return Array.isArray(row) && row.length > 1 && row.every((tile) => tile && tile.size === "s");
+  return Array.isArray(row) && row.length > 1 && row.every((tile) => tile?.size === "s");
 }
