@@ -1,4 +1,4 @@
-//! Pure shaping logic for the L6 Direction, Quality attributes tab (GitHub
+//! Pure shaping logic for the L5 Improvement, Quality attributes tab (GitHub
 //! issue `#107`, slice 3): everything that turns a `QualityReport` (see
 //! `Payload::Quality` in `protocol.rs` and `factory_core::quality`) into the
 //! cells, trees, grids and geometry the heatmap, the utility tree, the

@@ -259,6 +259,10 @@ impl Engine {
             | Request::PolicyControl { .. }
             | Request::PolicyExport { .. }
             | Request::Metrics { .. }
+            // The dashboard's resolved layout (`#159`): a projection over
+            // config already readable through the roster/config views, the
+            // same reasoning `Metrics` gets read access with no grant.
+            | Request::Dashboard { .. }
             | Request::Goals { .. }
             // Read like `Goals`: authored profiles and evidence folded
             // fresh, nothing written (`#107`).
@@ -308,6 +312,10 @@ impl Engine {
             // Explicit, destructive, and rare: only the owner cleans a bench
             // run's worktrees and branches away.
             Request::BenchRunClean { .. } => return Needs::Owner,
+            // Restore materializes the whole company into a new root. Unlike
+            // run/verify, no role grant opens it: choosing a cutover candidate
+            // is the owner's decision alone (#153).
+            Request::BackupRestore { .. } => return Needs::Owner,
         })
     }
 
@@ -450,8 +458,15 @@ impl Engine {
             }
             Request::IntakeDecide { id, decision } => {
                 let Some(item) = self.store.get(id).await? else { return Ok(()) };
-                if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
-                    return Err(deny("decide an intake item that is neither in its reach nor its own triage run's"));
+                if task_in_reach(def, &item).is_err() {
+                    if !self.is_items_triage_run(caller, &item).await? {
+                        return Err(deny("decide an intake item that is neither in its reach nor its own triage run's"));
+                    }
+                    // Its triage run proposes a split; making the items is
+                    // for whoever answers for the item.
+                    if matches!(decision, factory_core::intake::Decision::Split { .. }) {
+                        return Err(deny("split an intake item it only triages -- propose the split in the assessment"));
+                    }
                 }
                 let routed = item.intake.as_ref().and_then(|i| i.triage.as_ref()).map(|t| &t.assessment.routing.scope);
                 match (decision, routed) {
@@ -679,6 +694,7 @@ mod tests {
                 serde_yaml_ng::from_str("name: other\npath: .\n").unwrap(),
             ],
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),
@@ -994,6 +1010,19 @@ mod tests {
         assert!(!allowed(&e, &worker("w"), verify).await, "a worker holds no backup.run");
         assert!(allowed(&e, &worker("w"), Request::Backup).await, "reading the status is open to every agent");
         assert!(allowed(&e, &Caller::Owner, Request::BackupRun).await);
+    }
+
+    #[tokio::test]
+    async fn backup_restore_is_the_owners_alone_even_when_a_role_has_every_grant() {
+        let e = engine_with_roles("roles:\n  everything:\n    grants: ['*']\n    reach: scope\n");
+        let request = Request::BackupRestore {
+            snapshot: "factory-backup-demo-20260925T030000Z.tar.zst".into(),
+            into: PathBuf::from("/tmp/restored-factory"),
+        };
+        assert!(allowed(&e, &Caller::Owner, request.clone()).await);
+        assert!(!allowed(&e, &wearing("everything"), request.clone()).await);
+        assert!(!allowed(&e, &foreman(), request.clone()).await);
+        assert!(!allowed(&e, &worker("w"), request).await);
     }
 
     /// `goals.checkin` is checked against the configured root scope exactly
@@ -2017,6 +2046,87 @@ mod tests {
         assert!(e.roles_for("demo-app/inner").contains(&Role::new("lead")));
         assert!(!e.roles_for("engineering/outsider").contains(&Role::new("lead")));
         assert!(!e.roles_for("company").contains(&Role::new("lead")), "never up");
+    }
+
+    // -- dashboard_for --------------------------------------------------------
+
+    /// The same topology `engine_tree` uses for roles (`#159`): `engineering`
+    /// (path `projects`) overrides the dashboard, `demo-app` (path
+    /// `projects/demo`, below it) inherits, and `sibling`/`engineering/outsider`
+    /// (named like a child of `engineering` but not below `projects` on
+    /// disk) do not.
+    fn engine_dashboard_tree() -> Arc<Engine> {
+        let at = |name: &str, path: &str, dashboard: &str| {
+            let mut yaml = format!("id: {name}-id\nname: {name}\n");
+            if !dashboard.is_empty() {
+                yaml.push_str(&format!("dashboard:\n{dashboard}"));
+            }
+            let mut scope: factory_core::config::Scope = serde_yaml_ng::from_str(&yaml).unwrap();
+            scope.path = PathBuf::from(path);
+            scope
+        };
+        let mut config: Config = serde_yaml_ng::from_str("instance:\n  id: i\n  name: test\n").unwrap();
+        config.scopes = vec![
+            at("company", ".", ""),
+            at(
+                "engineering",
+                "projects",
+                "  tiles:\n    - { metric: throughput_week, size: s }\n",
+            ),
+            at("demo-app", "projects/demo", ""),
+            at("sibling", "projects/sibling", ""),
+            at("engineering/outsider", "elsewhere", ""),
+        ];
+        Arc::new(Engine::new(
+            Factory {
+                root: PathBuf::from("/tmp/factory-access-dashboard-tree-test"),
+                config,
+            },
+            Registry::with_builtins(),
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            vec![],
+        ))
+    }
+
+    #[tokio::test]
+    async fn dashboard_for_resolves_down_the_path_tree_and_never_up_or_sideways() {
+        let e = engine_dashboard_tree();
+        let (tiles, source) = e.dashboard_for(Some("demo-app")).unwrap();
+        assert_eq!(source, Some("engineering".to_string()), "projects/demo is below projects on disk");
+        assert_eq!(tiles.unwrap().tiles[0].metric.as_ref().unwrap().as_str(), "throughput_week");
+
+        // `sibling` (path `projects/sibling`) is below `projects` too, so it
+        // inherits the same override.
+        let (tiles, source) = e.dashboard_for(Some("sibling")).unwrap();
+        assert_eq!(source, Some("engineering".to_string()));
+        assert!(tiles.is_some());
+
+        // `engineering/outsider` reads like a child of `engineering` by name,
+        // but its path (`elsewhere`) is not below `projects` at all. This
+        // fixture names no root `dashboard:` either, so it falls all the way
+        // through to the built-in default: `None` on both sides, never the
+        // magic string `"default"`.
+        let (tiles, source) = e.dashboard_for(Some("engineering/outsider")).unwrap();
+        assert!(
+            tiles.is_none(),
+            "engineering/outsider is not below projects by path, whatever its name says"
+        );
+        assert_eq!(source, None, "never up or sideways");
+    }
+
+    #[tokio::test]
+    async fn dashboard_for_an_unknown_scope_is_refused() {
+        let e = engine_dashboard_tree();
+        let err = e.dashboard_for(Some("nope")).unwrap_err().to_string();
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn reading_the_dashboard_needs_no_grant() {
+        let e = engine();
+        assert!(allowed(&e, &worker("w"), Request::Dashboard { scope: None }).await);
+        assert!(allowed(&e, &Caller::Owner, Request::Dashboard { scope: None }).await);
     }
 
     // -- giving an agent a role --------------------------------------------

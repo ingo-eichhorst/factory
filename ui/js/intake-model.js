@@ -133,20 +133,23 @@ export function cardNote(card) {
       ? `released into workflow run ${card.decision.workflow_run.slice(0, 8)}`
       : `released as ${card.status}`;
   }
+  if (card.parent) return `part of item ${card.parent.slice(0, 8)}`;
   return null;
 }
 
 /// Which actions an item allows, in the order the buttons are drawn. A
-/// released item has none: it is a task now, and the task modal is where it
-/// is worked.
+/// released or split item has none: it is a task now, and the task modal
+/// is where it is worked. Any open item can be split -- a person may cut
+/// one nobody could assess as a whole.
 export function cardActions(card) {
-  if (!card || card.stage === "ready" || card.stage === "wontfix") return [];
+  if (!card || !["received", "triaging", "needs_info"].includes(card.stage)) return [];
   const triageRunning = card.triage_task && !card.triage && !triageEnded(card);
   const out = [];
   if (card.stage === "needs_info") out.push("info");
   if (!triageRunning) out.push("triage");
   out.push("assess");
   if (card.triage && card.triage.verdict.verdict === "ready") out.push("release");
+  out.push("split");
   if (card.stage !== "needs_info") out.push("needs_info");
   out.push("wontfix");
   return out;
@@ -157,9 +160,104 @@ export const ACTION_LABELS = {
   triage: "Triage with an agent",
   assess: "Assess",
   release: "Release",
+  split: "Split into items",
   needs_info: "Needs info",
   wontfix: "Won't fix",
 };
+
+/// The daemon's next actions (`factory_core::intake::next_actions`), each
+/// with the dialog that carries it out.
+const NEXT_ACTION = {
+  split: { label: "Split into items", act: "split" },
+  add_info: { label: "Add information", act: "info" },
+};
+
+/// What would move a held-back item, as the item dialog draws it: the
+/// daemon's own list, with a button per action. Empty for any other item.
+export function nextActions(card) {
+  return ((card && card.next_actions) || [])
+    .filter(n => NEXT_ACTION[n.action])
+    .map(n => ({ ...NEXT_ACTION[n.action], action: n.action, hint: n.hint, reasons: n.reasons || [] }));
+}
+
+// ---------------------------------------------------------------- split
+
+/// The parts a split dialog opens with: the assessment's proposal, or two
+/// empty ones to write.
+export function splitDraft(card) {
+  const proposed = (card && card.triage && card.triage.assessment.split) || [];
+  if (proposed.length) {
+    return proposed.map(p => ({
+      id: p.id, title: p.title, instructions: p.instructions || "",
+      depends_on: (p.depends_on || []).join(", "), acceptance: p.acceptance || "",
+    }));
+  }
+  return [emptyPart(1), emptyPart(2)];
+}
+
+export function emptyPart(n) {
+  return { id: `part-${n}`, title: "", instructions: "", depends_on: "", acceptance: "" };
+}
+
+const commaList = (text) => String(text || "").split(",").map(s => s.trim()).filter(Boolean);
+
+/// The form's parts as the wire's `SplitPart`s.
+export function buildParts(rows) {
+  return (rows || []).map(r => {
+    const part = { id: (r.id || "").trim(), title: (r.title || "").trim(), instructions: (r.instructions || "").trim() };
+    const deps = commaList(r.depends_on);
+    if (deps.length) part.depends_on = deps;
+    if ((r.acceptance || "").trim()) part.acceptance = r.acceptance.trim();
+    return part;
+  });
+}
+
+/// Mirror of `factory_core::intake::validate_split`: the first thing that
+/// would be refused, or null.
+export function splitProblem(parts) {
+  if (parts.length < 2) return "a split needs at least two parts";
+  if (parts.length > MAX_SPLIT_PARTS) return `at most ${MAX_SPLIT_PARTS} parts`;
+  const ids = new Set();
+  for (const p of parts) {
+    if (!/^[a-z0-9-]+$/.test(p.id)) return `part id "${p.id}": a slug, as in resume-mechanism`;
+    if (ids.has(p.id)) return `part id "${p.id}" is used twice`;
+    ids.add(p.id);
+    if (!p.title) return `part ${p.id} needs a title`;
+  }
+  for (const p of parts) {
+    for (const d of p.depends_on || []) {
+      if (d === p.id) return `part ${p.id} depends on itself`;
+      if (!ids.has(d)) return `part ${p.id} depends on "${d}", which is not a part`;
+    }
+  }
+  const placed = new Set();
+  while (placed.size < parts.length) {
+    const next = parts.find(p => !placed.has(p.id) && (p.depends_on || []).every(d => placed.has(d)));
+    if (!next) return "the parts' dependencies go round in a circle";
+    placed.add(next.id);
+  }
+  return null;
+}
+
+export const MAX_SPLIT_PARTS = 8;
+
+// --------------------------------------------------------------- routes
+
+/// The board's route for one scope: its agents (with models) and workflows.
+export function routeFor(board, scope) {
+  return ((board && board.routes) || []).find(r => r.scope === scope) || { scope, agents: [], workflows: [] };
+}
+
+/// A workflow of a route, by id or by name -- an assessment names either.
+export function workflowIn(route, wanted) {
+  if (!wanted) return null;
+  return (route.workflows || []).find(w => w.id === wanted || w.name === wanted) || null;
+}
+
+/// `builder (claude-code, opus)`: an agent as a select option says it.
+export function agentText(agent) {
+  return `${agent.name} (${agent.harness === agent.name ? "" : `${agent.harness}, `}${agent.model || "default model"})`;
+}
 
 // ------------------------------------------------------------ requests
 
@@ -177,8 +275,12 @@ export function triageRequest(id, agent) {
   return { path: `/api/intake/${encodeURIComponent(id)}/triage`, method: "POST", body };
 }
 
-export function infoRequest(id, text) {
-  return { path: `/api/intake/${encodeURIComponent(id)}/info`, method: "POST", body: { text } };
+/// Information, and -- when asked -- a triage run straight after it, as
+/// the follow-up request `after`.
+export function infoRequest(id, text, retriage = false) {
+  const req = { path: `/api/intake/${encodeURIComponent(id)}/info`, method: "POST", body: { text } };
+  if (retriage) req.after = triageRequest(id, "");
+  return req;
 }
 
 const lines = (text) => String(text || "").split("\n").map(s => s.trim()).filter(Boolean);
@@ -188,6 +290,7 @@ const lines = (text) => String(text || "").split("\n").map(s => s.trim()).filter
 export function decideRequest(id, action, values = {}) {
   let body;
   if (action === "release") body = { decision: "ready", run: !!values.run };
+  else if (action === "split") body = { decision: "split", parts: values.parts || [] };
   else if (action === "needs_info") body = { decision: "needs_info", questions: lines(values.questions) };
   else if (action === "wontfix") {
     body = { decision: "wontfix", reason: values.reason, evidence: (values.evidence || "").trim() };
@@ -215,8 +318,17 @@ export function buildAssessment(values) {
     return check;
   });
   const routing = { scope: values.scope || "" };
-  if ((values.agent || "").trim()) routing.agent = values.agent.trim();
-  if ((values.workflow || "").trim()) routing.workflow = values.workflow.trim();
+  const workflow = (values.workflow || "").trim();
+  if (workflow) {
+    routing.workflow = workflow;
+    const inputs = clean(values.inputs);
+    if (Object.keys(inputs).length) routing.inputs = inputs;
+    const agents = clean(values.agents);
+    if (Object.keys(agents).length) routing.agents = agents;
+  } else if ((values.agent || "").trim()) {
+    routing.agent = values.agent.trim();
+  }
+  const split = buildParts(values.split);
   return {
     axes,
     category: (values.category || "").trim(),
@@ -226,7 +338,17 @@ export function buildAssessment(values) {
     routing,
     summary: (values.summary || "").trim(),
     questions: lines(values.questions),
+    ...(split.length ? { split } : {}),
   };
+}
+
+/// An object's non-blank values, trimmed.
+function clean(map) {
+  const out = {};
+  for (const [k, v] of Object.entries(map || {})) {
+    if (String(v || "").trim()) out[k] = String(v).trim();
+  }
+  return out;
 }
 
 /// Mirror of `factory_core::intake::validate`, for the form: the first
@@ -241,6 +363,25 @@ export function assessmentProblem(a) {
   if (!(a.complexity >= 1 && a.complexity <= 10)) return "complexity: 1 to 10";
   if (!LEVELS.includes(a.impact) || !LEVELS.includes(a.urgency)) return "impact and urgency: high, medium or low";
   if (!a.routing.scope) return "route it to a scope";
+  if (a.split && a.split.length) {
+    const why = splitProblem(a.split);
+    if (why) return `the proposed split: ${why}`;
+  }
+  return null;
+}
+
+/// The route checked against what the board says exists: a workflow the
+/// scope has, every input it declares, and steps it has. Null when fine.
+export function routeProblem(a, board) {
+  if (!a.routing.workflow) return null;
+  const w = workflowIn(routeFor(board, a.routing.scope), a.routing.workflow);
+  if (!w) return `${a.routing.scope} has no workflow ${a.routing.workflow}`;
+  const given = a.routing.inputs || {};
+  const missing = (w.inputs || []).filter(i => !given[i.name]).map(i => i.name);
+  if (missing.length) return `workflow ${w.name} needs ${missing.join(", ")}`;
+  const steps = new Set((w.steps || []).map(s => s.id));
+  const unknown = Object.keys(a.routing.agents || {}).find(s => !steps.has(s));
+  if (unknown) return `workflow ${w.name} has no step ${unknown}`;
   return null;
 }
 

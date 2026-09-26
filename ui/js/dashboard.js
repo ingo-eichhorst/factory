@@ -6,6 +6,14 @@
 //! answer, so the throughput chart and the sparklines under the KPIs can
 //! never disagree with each other.
 //!
+//! Which tiles to draw, and in what order, is a third, separately-scoped
+//! read: `GET /api/dashboard?scope=` (`#159`), fetched alongside
+//! `/api/production` on load and on a scope change, but never on a window
+//! change -- a layout does not depend on how far back the history cards
+//! look. `resolveDashboard` (`dashboard-model.js`) is where "nothing
+//! overrides anything, or the fetch failed" turns into `DEFAULT_DASHBOARD`,
+//! so this file never has to ask which case it is in.
+//!
 //! Two fixed calendar facts decided once in the endpoint and never re-decided
 //! here: a run is **finished** when `ended_at` is set, bucketed by
 //! `ended_at`; a finished run is **scrapped** if it ended `failed` or
@@ -48,6 +56,7 @@ import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 import { hasFailed } from "./task-model.js";
 import { notStarted } from "./pending-model.js";
+import { packRows, resolveDashboard, isTileRenderable } from "./dashboard-model.js";
 
 /// The three presets the window selector offers. `bin` travels with every
 /// request rather than being guessed from `minutes` server-side, so a caller
@@ -66,8 +75,19 @@ let windowKey = "d14";
 /// three read as different cards rather than the same blank.
 let production;
 
+/// The last `/api/dashboard` answer (`#159`): `layoutTiles` is the
+/// resolved tile list, or `null` for "nothing overrides anything, use the
+/// built-in default" -- `resolveDashboard` (`dashboard-model.js`) is the
+/// one place that decision is made, so `undefined` (not fetched yet) and a
+/// failed fetch (set to `null` below) read exactly like the server's own
+/// "no override" answer. `layoutSource` names the scope whose `dashboard:`
+/// block won, or `null` for the same built-in-default case; shown, subtly,
+/// in the bar (`renderDashSource`).
+let layoutTiles;
+let layoutSource = null;
+
 export async function loadDashboard() {
-  await loadProduction();
+  await Promise.all([loadProduction(), loadLayout()]);
   renderDashboard();
 }
 
@@ -82,7 +102,36 @@ async function loadProduction() {
   }
 }
 
+/// The window selector's own reload: production is scoped by window, the
+/// layout is not, so switching windows re-fetches only the former --
+/// `wireDashboard`'s window buttons call this, never `loadDashboard`.
+async function reloadProduction() {
+  await loadProduction();
+  renderDashboard();
+}
+
+async function loadLayout() {
+  const params = new URLSearchParams();
+  if (state.scope) params.set("scope", state.scope);
+  const query = params.toString() ? `?${params}` : "";
+  try {
+    const answer = await api(`/api/dashboard${query}`);
+    layoutTiles = answer.tiles;
+    layoutSource = answer.source;
+  } catch {
+    layoutTiles = null;
+    layoutSource = null;
+  }
+}
+
+function renderDashSource() {
+  const el = $("dash-source");
+  if (!el) return;
+  el.textContent = layoutSource ? `layout from ${layoutSource}` : "";
+}
+
 export function renderDashboard() {
+  renderDashSource();
   const el = $("dash");
   if (!el) return;
   // The rail decides how much of the instance this reads as. Every figure
@@ -116,22 +165,7 @@ export function renderDashboard() {
   const calWasAtEdge = !oldCal || oldCal.scrollLeft >= oldCal.scrollWidth - oldCal.clientWidth - 2;
   const calScrollLeft = oldCal ? oldCal.scrollLeft : 0;
 
-  el.innerHTML = `
-    <div class="kpis">${kpis(tasks, scopes, prod, everFinished).join("")}</div>
-    <div class="drow">
-      <section class="dcard">
-        <h3>Throughput<span class="r">${esc(WINDOWS[windowKey].label.toLowerCase())} · finished per ${esc(WINDOWS[windowKey].bin)} · reworked share at the base</span></h3>
-        ${throughput(prod, everFinished)}
-      </section>
-      ${onTheLine(tasks, prod, everFinished)}
-    </div>
-    ${productionYear(prod, everFinished)}
-    <div class="drow">
-      <section class="dcard wide">
-        <h3>By scope<span class="r">${scopes.length} scope${scopes.length === 1 ? "" : "s"}</span></h3>
-        ${byScopeTable(tasks, scopes)}
-      </section>
-    </div>`;
+  el.innerHTML = renderTiles(resolveDashboard(layoutTiles), { tasks, scopes, prod, everFinished });
 
   wireCalToggle();
 
@@ -143,6 +177,77 @@ export function renderDashboard() {
   if (newCal) {
     newCal.scrollLeft = calWasAtEdge ? newCal.scrollWidth - newCal.clientWidth : calScrollLeft;
   }
+}
+
+// ---------------------------------------------------------------- tiles (#163)
+
+/// One view tile's whole rendered card, keyed by `dashboard-model.js`'s
+/// view ids -- the map `renderTiles` dispatches through instead of the
+/// page being one hard-coded template. `ctx` is the one shared read every
+/// tile draws from (`tasks`, `scopes`, `prod`, `everFinished`): no tile
+/// fetches its own history, so the throughput chart and the sparklines
+/// under the KPIs can never disagree with each other, exactly as the
+/// module doc comment above promises.
+///
+/// Each function returns one whole, self-contained card -- its own
+/// `<section class="dcard">`/`<div class="kpis">`, heading included -- the
+/// same fragment `renderDashboard`'s old inline template produced at that
+/// spot; only `onTheLine` and `productionYear` already did, so `throughput`
+/// and `byScope` gained the wrapper `renderDashboard` used to add around
+/// them. Row grouping (which cards share a `.drow`) is decided once, by
+/// `renderTiles` below, from `dashboard-model.js`'s `packRows` -- a tile
+/// renderer never wraps itself in `.drow`.
+const VIEW_RENDERERS = {
+  kpis: (ctx) => `<div class="kpis">${kpis(ctx.tasks, ctx.scopes, ctx.prod, ctx.everFinished).join("")}</div>`,
+  throughput: (ctx) => `<section class="dcard">
+        <h3>Throughput<span class="r">${esc(WINDOWS[windowKey].label.toLowerCase())} · finished per ${esc(WINDOWS[windowKey].bin)} · reworked share at the base</span></h3>
+        ${throughput(ctx.prod, ctx.everFinished)}
+      </section>`,
+  on_the_line: (ctx) => onTheLine(ctx.tasks, ctx.prod, ctx.everFinished),
+  production_year: (ctx) => productionYear(ctx.prod, ctx.everFinished),
+  by_scope: (ctx) => `<section class="dcard wide">
+        <h3>By scope<span class="r">${ctx.scopes.length} scope${ctx.scopes.length === 1 ? "" : "s"}</span></h3>
+        ${byScopeTable(ctx.tasks, ctx.scopes)}
+      </section>`,
+};
+
+/// A tile `isTileRenderable` (`dashboard-model.js`) says this page cannot
+/// draw yet -- a `metric` tile (no renderer exists this phase) or a
+/// `view` id outside `VIEW_RENDERERS`' keys -- gets a small, neutral card
+/// naming it instead of nothing or a crash: the config or the catalogue
+/// may already be ahead of what `VIEW_RENDERERS` knows how to render.
+function placeholderTile(tile) {
+  const name = (tile && (tile.metric || tile.view)) || "tile";
+  return `<section class="dcard"><div class="empty">${esc(name)} — not drawn yet</div></section>`;
+}
+
+function renderTile(tile, ctx) {
+  if (!isTileRenderable(tile)) return placeholderTile(tile);
+  return VIEW_RENDERERS[tile.view](ctx);
+}
+
+/// Assembles the page from a tile list: pack tiles into 12-column rows
+/// (`packRows`), then a row of two or more tiles shares one `.drow` (today
+/// only Throughput and On the line ever do, because `l + m === 12`) and a
+/// row of one tile renders bare -- no `.drow` around a lone card. `.drow`
+/// itself is a fixed `2fr / 1fr` CSS grid (`app.css`), not a general
+/// `span -> grid-column` mapping -- it realizes exactly an `[l, m]` row,
+/// in that order, because that is the one pair `DEFAULT_DASHBOARD` ever
+/// produces; a hypothetical `[m, l]` row would put the 4-col tile in the
+/// wider slot. A real span-aware grid is phase 3's, once more than one row
+/// shape exists to justify it.
+///
+/// That reproduces `.kpis`, the Throughput/On-the-line row and Production
+/// year byte-for-byte; By scope loses the `.drow` it used to sit alone in,
+/// which is a no-op here: `.dash` is a `flex-direction: column` container
+/// with `align-items: stretch` (`app.css`), so a bare flex child already
+/// spans the full width `.dcard.wide`'s `grid-column: 1 / -1` gave it
+/// inside that otherwise-empty grid -- the class stays, for what it
+/// documents, but nothing depends on it drawing anything anymore.
+function renderTiles(tiles, ctx) {
+  return packRows(tiles)
+    .map((row) => (row.length > 1 ? `<div class="drow">${row.map((t) => renderTile(t, ctx)).join("")}</div>` : renderTile(row[0], ctx)))
+    .join("");
 }
 
 // -------------------------------------------------------------------- KPIs
@@ -581,7 +686,7 @@ export function wireDashboard() {
         if (b.dataset.w === windowKey) return;
         windowKey = b.dataset.w;
         for (const o of seg.querySelectorAll("button")) o.classList.toggle("on", o.dataset.w === windowKey);
-        loadDashboard();
+        reloadProduction();
       };
     }
   }

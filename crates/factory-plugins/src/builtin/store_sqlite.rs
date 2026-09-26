@@ -21,7 +21,11 @@ use std::sync::{Arc, Mutex};
 
 /// Bumped whenever the shape below changes. A database at any other version is
 /// discarded.
-const SCHEMA_VERSION: i64 = 4;
+/// The task-store schema this build can open without discarding its task
+/// tables. Backup restore checks this before it commits a restored root: a
+/// newer or older snapshot must never be installed only for startup to erase
+/// the operating history it was meant to recover.
+pub const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (

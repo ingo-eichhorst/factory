@@ -258,7 +258,24 @@
       },
       "by": "the owner",
       "at": "2026-09-25T16:20:26.132646Z"
-     }
+     },
+     "next_actions": [
+      {
+       "action": "split",
+       "reasons": [
+        "Scope: four subsystems in one item",
+        "Complexity 10: a subsystem or multi-phase change"
+       ],
+       "hint": "Split it into bounded items -- two to eight, each triaged on its own. Write the parts, or triage it again for a proposal."
+      },
+      {
+       "action": "add_info",
+       "reasons": [
+        "Verifiability: nothing says what done looks like"
+       ],
+       "hint": "Answer the questions with what is missing; the item goes back into the queue to be triaged again."
+      }
+     ]
     }
    ],
    "ready": [
@@ -396,6 +413,54 @@
    "chore",
    "security-report",
    "customer-request"
+  ],
+  "split": 1,
+  "routes": [
+   {
+    "scope": "demo",
+    "default_agent": "claude-code",
+    "agents": [
+     {
+      "name": "claude-code",
+      "harness": "claude-code"
+     },
+     {
+      "name": "builder",
+      "harness": "claude-code",
+      "model": "opus"
+     },
+     {
+      "name": "codex",
+      "harness": "codex",
+      "model": "gpt-5"
+     }
+    ],
+    "workflows": [
+     {
+      "id": "wf-1",
+      "name": "github-issue",
+      "description": "issue to PR",
+      "inputs": [
+       {
+        "name": "issue",
+        "description": "GitHub issue number"
+       }
+      ],
+      "steps": [
+       {
+        "id": "implement",
+        "title": "Implement #{{issue}}",
+        "agent": "builder"
+       },
+       {
+        "id": "review",
+        "title": "Review #{{issue}}",
+        "agent": "builder"
+       }
+      ]
+     }
+    ]
+   }
   ]
  }
 }

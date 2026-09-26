@@ -1037,6 +1037,7 @@ mod tests {
             scope: Some(root_scope.clone()),
             scopes: vec![root_scope],
             roles: Default::default(),
+            dashboard: None,
             policies: PolicyDeclaration { frameworks, ..Default::default() },
             quality: Default::default(),
             infrastructure: Default::default(),

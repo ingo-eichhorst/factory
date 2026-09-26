@@ -22,24 +22,33 @@ import {
   LEVELS,
   WONTFIX_REASONS,
   addRequest,
+  agentText,
   assessRequest,
   assessmentProblem,
   axisMarks,
   buildAssessment,
+  buildParts,
   cardActions,
   cardNote,
   cards,
   decideProblem,
   decideRequest,
+  emptyPart,
   estimateOf,
   estimateText,
   fmtAge,
   infoRequest,
+  nextActions,
   previewVerdict,
   priorityOf,
+  routeFor,
+  routeProblem,
+  splitDraft,
+  splitProblem,
   totalOpen,
   triageRequest,
   verdictChips,
+  workflowIn,
 } from "./intake-model.js";
 
 let board = null;
@@ -115,7 +124,7 @@ export function renderIntake() {
   if (!board) { host.innerHTML = boardError ? "" : "loading…"; return; }
   const sub = $("intake-summary");
   if (sub) {
-    sub.textContent = `${totalOpen(board)} open · ${cards(board, "ready").length} released and ${board.wontfix} closed in the last ${board.ready_window_days} days`;
+    sub.textContent = `${totalOpen(board)} open · ${cards(board, "ready").length} released, ${board.split || 0} split and ${board.wontfix} closed in the last ${board.ready_window_days} days`;
   }
   host.innerHTML = `<div class="kbcols">${COLUMNS.map(c => {
     const items = cards(board, c.key);
@@ -143,6 +152,40 @@ function findCard(id) {
 
 // ----------------------------------------------------------------- dialogs
 
+/// The route as a sentence: scope, agent or workflow, its inputs and the
+/// steps given to another agent.
+function routeText(routing) {
+  let out = routing.scope;
+  if (routing.agent) out += ` as ${routing.agent}`;
+  if (routing.workflow) {
+    const w = workflowIn(routeFor(board, routing.scope), routing.workflow);
+    out += `, workflow ${w ? w.name : routing.workflow}`;
+    const inputs = Object.entries(routing.inputs || {}).map(([k, v]) => `${k}=${v}`);
+    if (inputs.length) out += ` with ${inputs.join(", ")}`;
+    const agents = Object.entries(routing.agents || {}).map(([k, v]) => `${k} by ${v}`);
+    if (agents.length) out += `; ${agents.join(", ")}`;
+  }
+  return out;
+}
+
+/// What would move a held-back item: one block per action, its reasons,
+/// and the button that does it -- so a red item is never a dead end.
+function nextActionsBlock(card) {
+  const next = nextActions(card);
+  if (!next.length) return "";
+  return `<div class="ik-next"><label>What moves it forward</label>${next.map(n => `
+    <div class="ik-next-item"><p>${esc(n.hint)}</p>
+      <ul class="sub">${n.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>
+      <button class="btn primary" data-act="${n.act}">${esc(n.label)}</button></div>`).join("")}</div>`;
+}
+
+function proposedSplit(t) {
+  const parts = (t && t.assessment.split) || [];
+  if (!parts.length) return "";
+  return `<label>Proposed split</label><ol class="ik-parts">${parts.map(p => `
+    <li><b>${esc(p.title)}</b> <code>${esc(p.id)}</code>${(p.depends_on || []).length ? ` <span class="sub">after ${esc(p.depends_on.join(", "))}</span>` : ""}</li>`).join("")}</ol>`;
+}
+
 /// One item: its axes with evidence, what was asked, and what can be done.
 export function openItem(id) {
   const card = findCard(id);
@@ -150,7 +193,8 @@ export function openItem(id) {
   dropModal();
   const marks = axisMarks(card, board.axes);
   const t = card.triage;
-  const actions = cardActions(card);
+  const next = nextActions(card).map(n => n.act);
+  const actions = cardActions(card).filter(a => !next.includes(a));
   scrim(`
     <header><div><h2>${esc(card.title)}</h2><code class="id">${esc(card.id)}</code></div>
       <button class="x" id="ik-close" aria-label="Close">&times;</button></header>
@@ -158,7 +202,7 @@ export function openItem(id) {
       <p class="sub">${esc(card.stage.replace("_", " "))} · ${esc(card.scope)} · from ${esc(card.requester)} (${esc(card.source.kind)}${card.source.reference ? `: ${esc(card.source.reference)}` : ""}) · waiting ${esc(fmtAge(card.age_seconds))}</p>
       ${t ? `<p><span class="badge ik-p ik-${esc(t.priority)}">${esc(t.priority)}</span> <span class="tag">${esc(t.assessment.category)}</span>
         impact ${esc(t.assessment.impact)} × urgency ${esc(t.assessment.urgency)} · complexity ${esc(t.assessment.complexity)} · ${esc(estimateText(t.estimate))}
-        · route ${esc(t.assessment.routing.scope)}${t.assessment.routing.agent ? ` as ${esc(t.assessment.routing.agent)}` : ""}${t.assessment.routing.workflow ? `, workflow ${esc(t.assessment.routing.workflow)}` : ""}
+        · route ${esc(routeText(t.assessment.routing))}
         <br><span class="sub">assessed by ${esc(t.by)}: ${esc(t.verdict.verdict.replace("_", "-"))}</span></p>
         ${t.assessment.summary ? `<p>${esc(t.assessment.summary)}</p>` : ""}` : `<p class="sub">Not assessed yet.</p>`}
       <table class="ik-axes"><tbody>${marks.map(m => `
@@ -166,6 +210,8 @@ export function openItem(id) {
           <td>${m.evidence ? esc(m.evidence) : `<span class="sub">${esc(m.pass_condition)}</span>`}${m.cost ? ` <span class="sub">(cost ${esc(m.cost)})</span>` : ""}</td></tr>`).join("")}
       </tbody></table>
       ${card.questions && card.questions.length ? `<label>Asked of the requester</label><ul>${card.questions.map(q => `<li>${esc(q)}</li>`).join("")}</ul>` : ""}
+      ${proposedSplit(t)}
+      ${nextActionsBlock(card)}
       ${card.decision ? `<p class="sub">decided ${esc(card.decision.decision.decision.replace("_", "-"))} by ${esc(card.decision.by)}</p>` : ""}
       <div class="row-btns" style="margin-top:16px">
         ${actions.map(a => `<button class="btn ${a === "release" ? "primary" : a === "wontfix" ? "danger" : ""}" data-act="${a}">${esc(ACTION_LABELS[a])}</button>`).join("")}
@@ -183,6 +229,7 @@ function openAction(action, card) {
   if (action === "assess") return openAssessDialog(card);
   if (action === "triage") return openTriageDialog(card);
   if (action === "info") return openInfoDialog(card);
+  if (action === "split") return openSplitDialog(card);
   return openDecideDialog(action, card);
 }
 
@@ -222,6 +269,17 @@ function dialog(title, subtitle, body, button, build, problem = () => null, dang
     $("ik-err").textContent = "";
     try {
       await api(req.path, { method: req.method, body: JSON.stringify(req.body) });
+      // A follow-up, such as a triage run after information: the first
+      // request stands either way, so a refusal here is only reported.
+      if (req.after) {
+        try {
+          await api(req.after.path, { method: req.after.method, body: JSON.stringify(req.after.body) });
+        } catch (e) {
+          $("ik-err").textContent = `saved, but: ${e.message}`;
+          loadIntake();
+          return;
+        }
+      }
       closeModal();
       loadIntake();
     } catch (e) {
@@ -264,10 +322,58 @@ function openTriageDialog(card) {
 function openInfoDialog(card) {
   dialog("Add information", card.title, `
     ${card.questions && card.questions.length ? `<label>What was asked</label><ul>${card.questions.map(q => `<li>${esc(q)}</li>`).join("")}</ul>` : ""}
-    <label for="ik-info">The answer</label><textarea id="ik-info" rows="5"></textarea>`,
+    <label for="ik-info">The answer</label><textarea id="ik-info" rows="5"></textarea>
+    <label class="checkrow"><input type="checkbox" id="ik-retriage" checked><span>Triage it again straight away</span></label>`,
   "Add and requeue",
-  () => infoRequest(card.id, $("ik-info").value),
+  () => infoRequest(card.id, $("ik-info").value, $("ik-retriage").checked),
   () => ($("ik-info") && $("ik-info").value.trim() ? null : "write the information"));
+}
+
+/// Split an item into smaller ones, each handed back into intake. Opens on
+/// the assessment's proposal, or two empty parts to write.
+function openSplitDialog(card) {
+  let rows = splitDraft(card);
+  const read = () => [...document.querySelectorAll(".scrim [data-part]")].map(el => ({
+    id: el.querySelector("[data-f=id]").value,
+    title: el.querySelector("[data-f=title]").value,
+    instructions: el.querySelector("[data-f=instructions]").value,
+    depends_on: el.querySelector("[data-f=depends_on]").value,
+    acceptance: el.querySelector("[data-f=acceptance]").value,
+  }));
+  const partsHtml = () => rows.map((r, i) => `
+    <fieldset class="ik-part" data-part="${i}"><legend>Part ${i + 1}</legend>
+      <div class="ik-grid">
+        <label>Id <input data-f="id" value="${esc(r.id)}"></label>
+        <label>Comes after <input data-f="depends_on" value="${esc(r.depends_on)}" placeholder="ids, comma-separated"></label>
+      </div>
+      <label>Title <input data-f="title" value="${esc(r.title)}"></label>
+      <label>What it covers <textarea data-f="instructions" rows="3">${esc(r.instructions)}</textarea></label>
+      <label>Done when <input data-f="acceptance" value="${esc(r.acceptance)}" placeholder="a command or a sentence"></label>
+      ${rows.length > 2 ? `<button class="btn" data-remove="${i}">Remove part</button>` : ""}
+    </fieldset>`).join("");
+  const proposed = card.triage && (card.triage.assessment.split || []).length;
+  const sync = dialog("Split into items", card.title, `
+    <p class="env-note">${proposed ? "The assessment's proposal, to edit." : "No split was proposed: write the parts, or triage it again for a proposal."}
+      Each part becomes an intake item of its own in ${esc(card.scope)}, carrying this item's text for context,
+      and is triaged on its own. This item closes as split.</p>
+    <div id="ik-parts">${partsHtml()}</div>
+    <button class="btn" id="ik-add-part">Add part</button>`,
+  "Split",
+  () => decideRequest(card.id, "split", { parts: buildParts(read()) }),
+  () => splitProblem(buildParts(read())));
+  const redraw = () => {
+    $("ik-parts").innerHTML = partsHtml();
+    wireParts();
+    sync();
+  };
+  const wireParts = () => {
+    for (const el of document.querySelectorAll(".scrim #ik-parts input, .scrim #ik-parts textarea")) el.oninput = sync;
+    for (const b of document.querySelectorAll(".scrim [data-remove]")) {
+      b.onclick = () => { rows = read(); rows.splice(Number(b.dataset.remove), 1); redraw(); };
+    }
+  };
+  $("ik-add-part").onclick = () => { rows = read(); rows.push(emptyPart(rows.length + 1)); redraw(); };
+  wireParts();
 }
 
 function openDecideDialog(action, card) {
@@ -312,6 +418,11 @@ function openAssessDialog(card) {
       ${axis === "observability" ? `<select data-cost title="cost, when it fails"><option value="">cost…</option>${opts(COSTS, p.cost)}</select>` : ""}</td></tr>`;
   }).join("");
   const route = prior ? prior.routing : { scope: card.scope };
+  const fieldValues = (attr) => {
+    const out = {};
+    for (const el of document.querySelectorAll(`.scrim [${attr}]`)) out[el.getAttribute(attr)] = el.value;
+    return out;
+  };
   const values = () => ({
     axes: board.axes.map(({ axis }) => ({
       axis,
@@ -324,8 +435,12 @@ function openAssessDialog(card) {
     urgency: $("ik-urgency").value,
     complexity: $("ik-complexity").value,
     scope: $("ik-route").value,
-    agent: $("ik-route-agent").value,
-    workflow: $("ik-route-workflow").value,
+    agent: $("ik-route-agent") ? $("ik-route-agent").value : "",
+    workflow: $("ik-route-workflow") ? $("ik-route-workflow").value : "",
+    inputs: fieldValues("data-input"),
+    agents: fieldValues("data-step"),
+    // A proposal made earlier stays with a hand re-assessment.
+    split: prior && (prior.split || []).length ? splitDraft(card) : [],
     summary: $("ik-summary").value,
     questions: $("ik-ask").value,
   });
@@ -342,10 +457,7 @@ function openAssessDialog(card) {
       <label>Complexity <input id="ik-complexity" type="number" min="1" max="10" value="${esc(prior ? prior.complexity : 3)}"></label>
     </div>
     <label for="ik-route">Route to</label><select id="ik-route">${scopeOptions(route.scope)}</select>
-    <div class="ik-grid">
-      <label>Agent <input id="ik-route-agent" value="${esc(route.agent || "")}" placeholder="the scope's own"></label>
-      <label>Workflow <input id="ik-route-workflow" value="${esc(route.workflow || "")}" placeholder="none: run it as a task"></label>
-    </div>
+    <div id="ik-route-how"></div>
     <label for="ik-summary">Summary</label><textarea id="ik-summary" rows="2">${esc(prior ? prior.summary : "")}</textarea>
     <label for="ik-ask">Questions for a needs-info <span class="sub">one per line</span></label>
     <textarea id="ik-ask" rows="2">${esc(prior ? (prior.questions || []).join("\n") : "")}</textarea>
@@ -360,7 +472,43 @@ function openAssessDialog(card) {
     if (pv) {
       pv.textContent = `${v.verdict === "ready" ? "ready" : `needs-info (${v.blockers.join(", ")})`} · ${priorityOf(a.impact, a.urgency) || "-"} · ${estimateText(estimateOf(a.complexity))}`;
     }
-    return assessmentProblem(a);
+    return assessmentProblem(a) || routeProblem(a, board);
   });
+  // How it runs there: an agent, or a workflow with its inputs and an
+  // agent -- and so a model -- per step. Redrawn when the scope or the
+  // workflow changes, keeping what was chosen where it still applies.
+  const drawRoute = (keep) => {
+    const r = routeFor(board, $("ik-route").value);
+    const w = workflowIn(r, keep.workflow);
+    const agentOptions = (selected, none) => `<option value="">${esc(none)}</option>${(r.agents || []).map(a =>
+      `<option value="${esc(a.name)}"${a.name === selected ? " selected" : ""}>${esc(agentText(a))}</option>`).join("")}`;
+    $("ik-route-how").innerHTML = `
+      <label for="ik-route-workflow">Workflow <span class="sub">the way of working that suits it best</span></label>
+      <select id="ik-route-workflow"><option value="">none: run it as one task</option>${(r.workflows || []).map(x =>
+        `<option value="${esc(x.id)}"${w && w.id === x.id ? " selected" : ""}>${esc(x.name)}${x.description ? ` -- ${esc(x.description)}` : ""}</option>`).join("")}</select>
+      ${w ? `${(w.inputs || []).map(i => `
+        <label>Input ${esc(i.name)} <span class="sub">${esc(i.description || "")}</span>
+          <input data-input="${esc(i.name)}" value="${esc((keep.inputs || {})[i.name] || "")}"></label>`).join("")}
+        <table class="ik-axes ik-form"><tbody>${(w.steps || []).map(s => `
+          <tr><th scope="row">${esc(s.id)}</th><td class="sub">${esc(s.title)}</td>
+            <td><select data-step="${esc(s.id)}" title="agent, and so model, for this step">${agentOptions((keep.agents || {})[s.id], `as defined${s.agent ? `: ${s.agent}` : ""}`)}</select></td></tr>`).join("")}
+        </tbody></table>`
+      : `<label for="ik-route-agent">Agent</label><select id="ik-route-agent">${agentOptions(keep.agent, `the scope's own${r.default_agent ? `: ${r.default_agent}` : ""}`)}</select>`}`;
+    for (const el of document.querySelectorAll(".scrim #ik-route-how input, .scrim #ik-route-how select")) {
+      el.oninput = sync; el.onchange = sync;
+    }
+    $("ik-route-workflow").onchange = () => {
+      drawRoute({ ...currentRoute(), workflow: $("ik-route-workflow").value });
+      sync();
+    };
+  };
+  const currentRoute = () => ({
+    workflow: $("ik-route-workflow") ? $("ik-route-workflow").value : "",
+    agent: $("ik-route-agent") ? $("ik-route-agent").value : "",
+    inputs: fieldValues("data-input"),
+    agents: fieldValues("data-step"),
+  });
+  $("ik-route").onchange = () => { drawRoute({ ...currentRoute(), workflow: "" }); sync(); };
+  drawRoute(route);
   sync();
 }

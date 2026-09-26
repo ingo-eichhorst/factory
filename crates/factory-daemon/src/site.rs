@@ -668,6 +668,7 @@ mod tests {
             ))
             .unwrap()],
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),

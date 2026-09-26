@@ -812,6 +812,7 @@ mod tests {
             // see the same note on `engine::tests::test_engine`.
             daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             scope: None,
@@ -825,6 +826,7 @@ mod tests {
                 git: None,
                 task_store: None,
                 roles: Default::default(),
+                dashboard: None,
                 policies: Default::default(),
                 quality: Default::default(),
                 dependencies: Default::default(),
