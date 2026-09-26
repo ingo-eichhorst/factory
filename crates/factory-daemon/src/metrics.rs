@@ -206,7 +206,7 @@ impl Engine {
         let needs_hours = computing.iter().any(|(id, r)| r.is_ok() && is_hours_metric(id.as_str()));
 
         let production = if needs_production {
-            Some(self.metric_production(canonical_scope, &target_scopes, window).await?)
+            Some(self.metric_production(canonical_scope, &target_scopes, window, now).await?)
         } else {
             None
         };
@@ -341,19 +341,20 @@ impl Engine {
         scope: Option<&str>,
         target_scopes: &[Scope],
         window: Option<MetricsWindow>,
+        now: DateTime<Utc>,
     ) -> Result<Production> {
         let minutes = window
             .map(|window| (window.days() * 24 * 60) as u32)
             .or(Some(5));
         if scope.is_none() {
             return self
-                .production(minutes, Some(ProductionBin::Day), None)
+                .production_at(minutes, Some(ProductionBin::Day), None, now)
                 .await;
         }
         let mut aggregate: Option<Production> = None;
         for target in target_scopes {
             let next = self
-                .production(minutes, Some(ProductionBin::Day), Some(target.name.clone()))
+                .production_at(minutes, Some(ProductionBin::Day), Some(target.name.clone()), now)
                 .await?;
             match &mut aggregate {
                 None => aggregate = Some(next),
@@ -1429,54 +1430,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_explicit_window_uses_its_exact_timestamp_boundary() {
+    async fn explicit_window_uses_one_half_open_cutoff_across_run_backed_families() {
         let (engine, database) = scoped_engine();
-        let now = Utc::now();
-        for (label, days, side) in [
-            ("day", 1, -1),
-            ("day", 1, 1),
-            ("fortnight", 14, -1),
-            ("fortnight", 14, 1),
-            ("quarter", 90, -1),
-            ("quarter", 90, 1),
-        ] {
-            // `side = -1` is one minute inside the cutoff; `1` is one
-            // minute outside. The margin is wide enough for the endpoint's
-            // own clock read while still exercising the edge itself.
-            let end = now - chrono::Duration::days(days) + chrono::Duration::minutes(-side);
-            timed_run(
-                &engine,
-                &database,
-                &format!("{label}-{side}"),
-                "work",
-                RunStatus::Done,
-                end - chrono::Duration::minutes(30),
-                Some(end),
-                Some(measured(1.0, 100)),
-            )
-            .await;
-        }
-        let ids: Vec<MetricId> = ["throughput_week", "fail_rate", "unit_cost"]
+        // Keep the request clock deliberately distinct from the wall clock:
+        // every family must use this one captured bound, not sample its own.
+        let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 0)
+            + chrono::Duration::hours(2);
+        let cutoff = now - chrono::Duration::days(1);
+        let (cutoff_task, cutoff_run) = timed_run(
+            &engine,
+            &database,
+            "exactly at cutoff",
+            "work",
+            RunStatus::Failed,
+            cutoff - chrono::Duration::hours(1),
+            Some(cutoff),
+            Some(measured(99.0, 9_900)),
+        )
+        .await;
+        transition(
+            &engine,
+            &cutoff_task.id,
+            &cutoff_run.id,
+            "blocked",
+            cutoff - chrono::Duration::hours(1),
+        )
+        .await;
+        transition(&engine, &cutoff_task.id, &cutoff_run.id, "unblocked", cutoff).await;
+
+        let (inside_task, inside_run) = timed_run(
+            &engine,
+            &database,
+            "inside cutoff",
+            "work",
+            RunStatus::Done,
+            cutoff,
+            Some(cutoff + chrono::Duration::hours(1)),
+            Some(measured(1.0, 100)),
+        )
+        .await;
+        transition(&engine, &inside_task.id, &inside_run.id, "blocked", cutoff).await;
+        transition(
+            &engine,
+            &inside_task.id,
+            &inside_run.id,
+            "unblocked",
+            cutoff + chrono::Duration::hours(1),
+        )
+        .await;
+
+        let ids: Vec<MetricId> = [
+            "throughput_week",
+            "fail_rate",
+            "unit_cost",
+            "agent_hours",
+            "blocked_hours",
+        ]
             .into_iter()
             .map(|id| MetricId::new(id).unwrap())
             .collect();
-        for (window, expected) in [
-            (MetricsWindow::Day, 1.0),
-            (MetricsWindow::FourteenDays, 3.0),
-            (MetricsWindow::NinetyDays, 5.0),
-        ] {
-            let computed = engine
-                .metrics_for(&ids, now, Some("work"), Some(window))
-                .await
-                .unwrap();
-            assert_eq!(
-                metric(&computed, "throughput_week").value,
-                Some(expected),
-                "{window}"
-            );
-            assert_eq!(metric(&computed, "fail_rate").value, Some(0.0), "{window}");
-            assert_eq!(metric(&computed, "unit_cost").value, Some(1.0), "{window}");
-        }
+        let computed = engine
+            .metrics_for(&ids, now, Some("work"), Some(MetricsWindow::Day))
+            .await
+            .unwrap();
+        assert_eq!(metric(&computed, "throughput_week").value, Some(1.0));
+        assert_eq!(metric(&computed, "fail_rate").value, Some(0.0));
+        assert_eq!(metric(&computed, "unit_cost").value, Some(1.0));
+        assert_eq!(metric(&computed, "agent_hours").value, Some(1.0));
+        assert_eq!(metric(&computed, "blocked_hours").value, Some(1.0));
     }
 
     #[tokio::test]
