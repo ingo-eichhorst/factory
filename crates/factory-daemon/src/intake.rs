@@ -1587,6 +1587,23 @@ mod tests {
         assert_eq!(emails, 1, "exactly one task exists for the identity");
     }
 
+    /// `#171`'s outbound record is GitHub-only (`awaiting_approval_outbound`
+    /// gates on `source.kind == Github`) -- a relayed email or chat item
+    /// must never get one, whatever it is decided. `#167` never sends
+    /// anywhere but Factory itself, so this holds by construction; asserted
+    /// here so a later change to that gate cannot silently widen it.
+    #[tokio::test]
+    async fn a_relayed_item_is_decided_ready_but_never_gets_outbound_state() {
+        let engine = engine();
+        let at = Utc::now() - chrono::Duration::hours(1);
+        let item = engine.intake_add(&Caller::Owner, email_relay("Invoice question", "<outbound@x>", "a@b.c", at)).await.unwrap();
+        let released =
+            engine.intake_assess(&Caller::Owner, &item.id, assessment("demo"), true).await.unwrap();
+        let record = released.intake.unwrap();
+        assert_eq!(record.decision.as_ref().map(|d| &d.decision), Some(&Decision::Ready { run: false }));
+        assert!(record.outbound.is_none(), "an email item is never published to GitHub");
+    }
+
     /// The atomicity guarantee itself (`#167`, the same shape as
     /// `capacity_ten_concurrent_dispatches_against_a_limit_of_one_never_open_more_than_one_run`):
     /// two identical relays racing each other, however they interleave,
