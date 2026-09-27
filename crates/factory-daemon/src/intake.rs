@@ -1552,4 +1552,96 @@ mod tests {
         assert_eq!(flow.steps[0].agent.as_deref(), Some("shell"));
         assert!(board.routes[1].workflows.is_empty());
     }
+
+    // ------------------------------------------------------ definitions of ready (#169)
+
+    /// Write `<root>/.factory/intake/<name>.yaml`, creating the directory
+    /// the first time. The daemon re-reads this on every board, triage and
+    /// assess request -- no watcher, no cache -- so a test can rewrite it
+    /// between two calls and see the difference right away.
+    fn write_ready(engine: &Engine, name: &str, body: &str) {
+        let dir = engine.factory_snapshot().root.join(".factory/intake");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.yaml")), body).unwrap();
+    }
+
+    #[tokio::test]
+    async fn intake_assess_refuses_an_assessment_missing_a_required_check() {
+        let engine = engine();
+        write_ready(
+            &engine,
+            "ready",
+            "checks:\n  - id: threat-model\n    pass_condition: names a threat model\n",
+        );
+        let item = add(&engine, "Ship the new endpoint").await;
+        let why = engine.intake_assess(&Caller::Owner, &item.id, assessment("demo"), false).await.unwrap_err();
+        assert!(why.to_string().contains("threat-model"), "{why}");
+        assert!(why.to_string().contains("not assessed"), "{why}");
+
+        let mut a = assessment("demo");
+        a.checks = vec![factory_core::intake::CheckResult {
+            id: "threat-model".into(),
+            pass: true,
+            evidence: "documented in the PR".into(),
+        }];
+        let released = engine.intake_assess(&Caller::Owner, &item.id, a, true).await.unwrap();
+        assert_eq!(released.status, TaskStatus::Pending, "the extra check satisfied, released as usual");
+    }
+
+    #[tokio::test]
+    async fn the_triage_instructions_list_the_scopes_effective_checks() {
+        let engine = engine();
+        write_ready(
+            &engine,
+            "ready",
+            "checks:\n  - id: threat-model\n    pass_condition: names a threat model\n",
+        );
+        let item = add(&engine, "Ship the new endpoint").await;
+        let triage = engine.intake_triage(&Caller::Owner, &item.id, Some("shell".into())).await.unwrap();
+        assert!(triage.instructions.contains("threat-model"), "{}", triage.instructions);
+        assert!(triage.instructions.contains("names a threat model"), "{}", triage.instructions);
+    }
+
+    #[tokio::test]
+    async fn rewriting_the_definition_file_changes_the_next_evaluation_without_a_restart() {
+        let engine = engine();
+        let first = add(&engine, "First item").await;
+        let released = engine.intake_assess(&Caller::Owner, &first.id, assessment("demo"), true).await.unwrap();
+        assert_eq!(released.status, TaskStatus::Pending, "no definition file yet: today's seven axes only");
+
+        write_ready(&engine, "ready", "max_complexity: 2\n");
+        let second = add(&engine, "Second item").await;
+        // `--decide` only refuses releasing a needs-info verdict as ready;
+        // recording the assessment itself still succeeds, and the tighter
+        // cap shows up in the verdict it computed, no restart needed.
+        let recorded = engine.intake_assess(&Caller::Owner, &second.id, assessment("demo"), false).await.unwrap();
+        let Verdict::NeedsInfo { blockers } = recorded.intake.unwrap().triage.unwrap().verdict else {
+            panic!("complexity 3 over a cap of 2 should need info")
+        };
+        assert!(blockers.iter().any(|b| b.contains("over demo's own limit of 2")), "{blockers:?}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_definition_fails_closed_with_a_blocker_naming_the_scope() {
+        let engine = engine();
+        write_ready(&engine, "ready", "checks: [unclosed");
+        let item = add(&engine, "Anything at all").await;
+        let why = engine.intake_assess(&Caller::Owner, &item.id, assessment("demo"), false).await;
+        // `validate` refuses nothing extra here (no checks were declared,
+        // since the file never parsed), so the assessment itself validates;
+        // `evaluate` is where the fail-closed blocker actually shows, via
+        // `--decide`.
+        assert!(why.is_ok(), "{why:?}");
+        let decided =
+            engine.intake_assess(&Caller::Owner, &item.id, assessment("demo"), true).await.unwrap();
+        let record = decided.intake.unwrap();
+        let blockers = match record.triage.unwrap().verdict {
+            Verdict::NeedsInfo { blockers } => blockers,
+            Verdict::Ready => panic!("an unreadable definition must never be silently ready"),
+        };
+        assert!(
+            blockers.iter().any(|b| b.contains("definition of ready for demo could not be read")),
+            "{blockers:?}"
+        );
+    }
 }
