@@ -21,7 +21,7 @@ use crate::operations::Asked;
 use chrono::Utc;
 use factory_core::intake::{
     self, AgentOption, Decision, DecisionRecord, Intake, IntakeBoard, IntakeSource, IntakeStage, NewIntake,
-    RouteOptions, SourceKind, Verdict, WorkflowOption,
+    RouteOptions, SourceKind, Verdict, WorkflowOption, TRIAGE_LABEL,
 };
 use factory_core::role::Grant;
 use factory_core::{Event, FactoryError, NewTask, Result, Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus, Trigger};
@@ -31,8 +31,6 @@ use std::sync::Arc;
 /// The journal kind of a triage verdict -- the first attestation in a
 /// released task's evidence trail, until `#118` gives attestations a store.
 pub(crate) const TRIAGE_VERDICT_KIND: &str = "triage_verdict";
-/// The label a triage task carries: the id of the item it triages.
-pub(crate) const TRIAGE_LABEL: &str = "intake-triage";
 
 impl Engine {
     /// `Request::IntakeAdd`.
@@ -73,6 +71,7 @@ impl Engine {
             triage_task: None,
             questions: Vec::new(),
             decision: None,
+            candidates: Vec::new(),
         };
         self.receive_intake(
             NewTask {
@@ -89,9 +88,20 @@ impl Engine {
 
     /// Receive an item whose provenance was established inside the daemon.
     /// Keeping this separate from `NewIntake` means public callers cannot
-    /// choose a trusted source kind or its timestamp.
+    /// choose a trusted source kind or its timestamp. Searches for
+    /// duplicate candidates (`#166`) right away, for every source
+    /// including GitHub, and stores what it finds on the record.
     pub(crate) async fn receive_intake(&self, new: NewTask, record: Intake) -> Result<Task> {
         let task = self.create_intake_task(new, record.clone()).await?;
+        let all = self.store.list(&TaskFilter::default()).await?;
+        let candidates = intake::duplicate_candidates(&task, &all);
+        let task = if candidates.is_empty() {
+            task
+        } else {
+            let mut next = record.clone();
+            next.candidates = candidates.clone();
+            self.write_intake(&task.id, next, TaskPatch::default()).await?
+        };
         self.entry(
             &task.id,
             TaskEntry::new(
@@ -99,7 +109,11 @@ impl Engine {
                 "intake_received",
                 format!("received into intake from {} ({})", record.requester, record.source.kind.as_str()),
             )
-            .with_data(serde_json::json!({ "source": record.source, "requester": record.requester })),
+            .with_data(serde_json::json!({
+                "source": record.source,
+                "requester": record.requester,
+                "candidates": candidates,
+            })),
         )
         .await;
         Ok(task)
@@ -177,7 +191,7 @@ impl Engine {
         agent: Option<String>,
     ) -> Result<Task> {
         let item = self.require(id).await?;
-        let record = open_record(&item)?;
+        let record = open_record(&item)?.clone();
         if let Some(running) = &record.triage_task {
             if let Some(t) = self.store.get(running).await? {
                 // Settled rather than closed: a triage run that failed
@@ -216,11 +230,22 @@ impl Engine {
                 Grant::TaskReport.as_str(),
             )));
         }
+        // Search again: fresh candidates for the run's instructions and the
+        // record, in case something new has appeared since receipt.
+        let all = self.store.list(&TaskFilter::default()).await?;
+        let candidates = intake::duplicate_candidates(&item, &all);
+        let mut record_now = record.clone();
+        record_now.candidates = candidates;
         let routes = self.intake_routes().await?;
         let triage = self
             .create(NewTask {
                 title: format!("Triage: {}", item.title),
-                instructions: intake::triage_instructions(&item, &routes, &self.factory_bin.display().to_string()),
+                instructions: intake::triage_instructions(
+                    &item,
+                    &record_now,
+                    &routes,
+                    &self.factory_bin.display().to_string(),
+                ),
                 scope: Some(item.scope.clone()),
                 agent,
                 labels: [(TRIAGE_LABEL.to_string(), item.id.clone())].into_iter().collect(),
@@ -233,7 +258,7 @@ impl Engine {
                 ..Default::default()
             })
             .await?;
-        let mut next = record.clone();
+        let mut next = record_now;
         next.stage = IntakeStage::Triaging;
         next.triage_task = Some(triage.id.clone());
         let item = self.write_intake(&item.id, next, TaskPatch::default()).await?;
@@ -266,6 +291,7 @@ impl Engine {
         let item = self.require(id).await?;
         let record = open_record(&item)?;
         intake::validate(&assessment).map_err(FactoryError::BadRequest)?;
+        intake::validate_duplicates(&record.candidates, &assessment.duplicates).map_err(FactoryError::BadRequest)?;
         // The route has to be somewhere real now, not at release, when
         // whoever assessed it has stopped watching.
         let factory = self.factory_snapshot();
@@ -543,6 +569,7 @@ impl Engine {
                         triage_task: None,
                         questions: Vec::new(),
                         decision: None,
+                        candidates: Vec::new(),
                     },
                 )
                 .await?;
@@ -729,7 +756,10 @@ mod tests {
     use super::*;
     use factory_core::adapter::{AgentRuntime, StartRequest};
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
-    use factory_core::intake::{Assessment, Axis, AxisCheck, Level, Routing, WontfixReason};
+    use factory_core::intake::{
+        Assessment, Axis, AxisCheck, DuplicateCandidate, DuplicateKind, DuplicateMatch, DuplicateVerdict, Level,
+        NextActionKind, Routing, WontfixReason,
+    };
     use factory_core::protocol::{Payload, Request, Response};
     use factory_core::role::Role;
     use factory_core::task::SessionRef;
@@ -837,6 +867,7 @@ mod tests {
             summary: "bounded".into(),
             questions: vec![],
             split: vec![],
+            duplicates: vec![],
         }
     }
 
@@ -1143,6 +1174,101 @@ mod tests {
         let released = engine.intake_assess(&triager, &item.id, assessment("demo"), true).await.unwrap();
         assert_eq!(released.status, TaskStatus::Pending);
         assert_eq!(released.intake.unwrap().triage.unwrap().by, "w (worker) in demo");
+    }
+
+    async fn add_referencing(engine: &Arc<Engine>, title: &str, reference: &str) -> Task {
+        engine
+            .intake_add(
+                &Caller::Owner,
+                NewIntake {
+                    title: title.into(),
+                    instructions: "see the linked issue".into(),
+                    scope: Some("demo".into()),
+                    reference: Some(reference.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn receipt_and_triage_both_search_and_a_confirmed_candidate_blocks_release() {
+        let engine = engine();
+        let first = add_referencing(&engine, "Checkout crashes on coupon", "https://github.com/acme/shop/issues/42").await;
+        let second =
+            add_referencing(&engine, "Coupon code crash at checkout", "https://github.com/acme/shop/issues/42").await;
+
+        // Receipt already searched: the second item found the first by its
+        // shared GitHub reference.
+        let record = engine.require(&second.id).await.unwrap().intake.unwrap();
+        assert_eq!(record.candidates.len(), 1, "{:?}", record.candidates);
+        assert_eq!(record.candidates[0].reference, first.id);
+        assert_eq!(record.candidates[0].kind, DuplicateKind::IntakeItem);
+        assert_eq!(record.candidates[0].matched, DuplicateMatch::Source);
+
+        // Triage searches again and lists what it found in the run's own
+        // instructions.
+        let triage = engine.intake_triage(&Caller::Owner, &second.id, Some("shell".into())).await.unwrap();
+        assert!(triage.instructions.contains("Possible duplicates"));
+        assert!(triage.instructions.contains(&first.id), "{}", triage.instructions);
+        let record = engine.require(&second.id).await.unwrap().intake.unwrap();
+        assert_eq!(record.candidates.len(), 1);
+
+        // Confirming it blocks the verdict -- `--decide` never releases it.
+        let mut a = assessment("demo");
+        a.duplicates = vec![DuplicateCandidate {
+            kind: record.candidates[0].kind,
+            reference: first.id.clone(),
+            title: first.title.clone(),
+            evidence: "same GitHub issue, reported twice".into(),
+            matched: DuplicateMatch::Source,
+            score: None,
+            verdict: DuplicateVerdict::Confirmed,
+        }];
+        let assessed = engine.intake_assess(&Caller::Owner, &second.id, a, true).await.unwrap();
+        assert_eq!(assessed.status, TaskStatus::Intake, "a confirmed duplicate is never released");
+        let record = assessed.intake.clone().unwrap();
+        assert_eq!(record.stage, IntakeStage::NeedsInfo);
+        let factory_core::intake::Verdict::NeedsInfo { blockers } = &record.triage.as_ref().unwrap().verdict else {
+            panic!("expected needs-info")
+        };
+        assert!(blockers[0].contains("confirmed duplicate"), "{blockers:?}");
+
+        let board = engine.intake_board(None).await.unwrap();
+        let card = board.columns.needs_info.iter().find(|c| c.id == second.id).expect("still needs-info");
+        assert!(
+            card.next_actions.iter().any(|n| n.action == NextActionKind::CloseDuplicate
+                && n.reference.as_deref() == Some(first.id.as_str())),
+            "{:?}",
+            card.next_actions
+        );
+        assert_eq!(card.candidates[0].verdict, DuplicateVerdict::Confirmed, "the board shows the answer, not raw");
+    }
+
+    #[tokio::test]
+    async fn assess_refuses_to_leave_a_stored_candidate_unanswered() {
+        let engine = engine();
+        let first = add_referencing(&engine, "Checkout crashes on coupon", "https://github.com/acme/shop/issues/42").await;
+        let second =
+            add_referencing(&engine, "Coupon code crash at checkout", "https://github.com/acme/shop/issues/42").await;
+        assert!(!engine.require(&second.id).await.unwrap().intake.unwrap().candidates.is_empty());
+
+        let why = engine.intake_assess(&Caller::Owner, &second.id, assessment("demo"), false).await.unwrap_err();
+        assert!(why.to_string().contains("needs a verdict"), "{why}");
+
+        // Answering it, with evidence, goes through.
+        let mut a = assessment("demo");
+        a.duplicates = vec![DuplicateCandidate {
+            kind: DuplicateKind::IntakeItem,
+            reference: first.id.clone(),
+            title: first.title.clone(),
+            evidence: "not the same bug on closer reading".into(),
+            matched: DuplicateMatch::Source,
+            score: None,
+            verdict: DuplicateVerdict::Rejected,
+        }];
+        assert!(engine.intake_assess(&Caller::Owner, &second.id, a, false).await.is_ok());
     }
 
     #[tokio::test]

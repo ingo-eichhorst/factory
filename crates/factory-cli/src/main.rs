@@ -1717,6 +1717,10 @@ fn next_actions_text(id: &str, actions: &[factory_core::intake::NextAction], ind
     let mut out = String::new();
     for a in actions {
         let command = match a.action {
+            NextActionKind::CloseDuplicate => format!(
+                "factory intake decide {id} wontfix --reason duplicate --duplicate-of {} --evidence \"...\"",
+                a.reference.as_deref().unwrap_or("<ref>")
+            ),
             NextActionKind::Split => format!("factory intake decide {id} split [--file parts.json]"),
             NextActionKind::AddInfo => format!("factory intake info {id} \"...\" --triage"),
         };
@@ -1869,6 +1873,24 @@ fn intake_item_text(task: &Task) -> String {
                 };
                 out.push_str(&format!("    {:<14} {}{after}\n", p.id, p.title));
             }
+        }
+    }
+    let candidates = factory_core::intake::candidates_with_verdicts(i);
+    if !candidates.is_empty() {
+        out.push_str("  possible duplicates:\n");
+        for c in &candidates {
+            let matched = match c.matched {
+                factory_core::intake::DuplicateMatch::Source => "source".to_string(),
+                factory_core::intake::DuplicateMatch::Text => format!("text {}%", c.score.unwrap_or(0)),
+            };
+            out.push_str(&format!(
+                "    {:<10} {:<12} {} ({}) [{matched}] {}\n",
+                c.verdict.as_str(),
+                c.kind.as_str(),
+                c.reference,
+                c.title,
+                c.evidence,
+            ));
         }
     }
     for q in &i.questions {

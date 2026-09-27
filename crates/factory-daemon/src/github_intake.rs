@@ -122,6 +122,7 @@ async fn poll_once(engine: &Engine, gh: &Path) {
                 triage_task: None,
                 questions: Vec::new(),
                 decision: None,
+                candidates: Vec::new(),
             };
             let new = NewTask {
                 title: issue.title,

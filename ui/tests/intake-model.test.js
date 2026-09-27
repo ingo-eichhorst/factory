@@ -10,12 +10,15 @@ import {
   assessmentProblem,
   axisMarks,
   buildAssessment,
+  buildDuplicateAnswer,
   buildParts,
   cardActions,
   cardNote,
   cards,
+  confirmedDuplicate,
   decideProblem,
   decideRequest,
+  duplicateRows,
   estimateOf,
   estimateText,
   fmtAge,
@@ -31,6 +34,7 @@ import {
   touchesIntake,
   triageRequest,
   verdictChips,
+  wontfixDraft,
 } from "../js/intake-model.js";
 
 // Captured from a throwaway daemon's `GET /api/intake` after the `#119`
@@ -245,4 +249,88 @@ test("information can bring a triage run straight after it", () => {
 
 test("a part says which item it was split from", () => {
   assert.equal(cardNote({ stage: "received", parent: "40dd199e-6953" }), "part of item 40dd199e");
+});
+
+// ------------------------------------------------------------ duplicates (#166)
+
+const stored = { kind: "task", reference: "t-1", title: "Same bug", evidence: "same github reference", match: "source", verdict: "unverified" };
+
+test("previewVerdict mirrors the duplicate blocker, ahead of the axes", () => {
+  const values = {
+    axes: board.axes.map(({ axis }) => ({ axis, pass: true, evidence: "ok" })),
+    category: "bugfix", impact: "high", urgency: "medium", complexity: 4,
+    scope: "demo", summary: "", questions: "",
+    duplicates: [{ ...stored, verdict: "confirmed", evidence: "yes, same bug" }],
+  };
+  const a = buildAssessment(values);
+  assert.deepEqual(previewVerdict(a), { verdict: "needs_info", blockers: ["duplicate t-1"] });
+
+  const rejected = buildAssessment({ ...values, duplicates: [{ ...stored, verdict: "rejected", evidence: "no, different cause" }] });
+  assert.deepEqual(previewVerdict(rejected), { verdict: "ready", blockers: [] });
+});
+
+test("assessmentProblem refuses a stored candidate left unanswered or answered without evidence", () => {
+  const values = {
+    axes: board.axes.map(({ axis }) => ({ axis, pass: true, evidence: "ok" })),
+    category: "bugfix", impact: "high", urgency: "medium", complexity: 4,
+    scope: "demo", summary: "", questions: "",
+  };
+  const unanswered = buildAssessment(values);
+  assert.match(assessmentProblem(unanswered, [stored]), /confirm or reject it/);
+  assert.equal(assessmentProblem(unanswered, []), null, "nothing stored, nothing to answer");
+
+  const noEvidence = buildAssessment({ ...values, duplicates: [{ ...stored, verdict: "confirmed", evidence: " " }] });
+  assert.match(assessmentProblem(noEvidence, [stored]), /evidence for its verdict/);
+
+  const answered = buildAssessment({ ...values, duplicates: [{ ...stored, verdict: "rejected", evidence: "not the same" }] });
+  assert.equal(assessmentProblem(answered, [stored]), null);
+});
+
+test("buildDuplicateAnswer shapes a row to the wire, dropping a blank knowledge row", () => {
+  assert.deepEqual(buildDuplicateAnswer({ ...stored, verdict: "confirmed", evidence: " yes " }), {
+    kind: "task", reference: "t-1", title: "Same bug", match: "source", verdict: "confirmed", evidence: "yes",
+  });
+  const knowledge = buildDuplicateAnswer({
+    kind: "knowledge", reference: "specs/x.md", title: "X", match: "text", score: "80", verdict: "confirmed", evidence: "documents it",
+  });
+  assert.equal(knowledge.score, 80, "a text match's score is a number");
+  assert.deepEqual(buildAssessment({
+    axes: board.axes.map(({ axis }) => ({ axis, pass: true, evidence: "ok" })),
+    category: "bugfix", impact: "high", urgency: "medium", complexity: 4, scope: "demo", summary: "", questions: "",
+    duplicates: [{ kind: "", reference: "" }],
+  }).duplicates, undefined, "a row naming neither kind nor reference is dropped");
+});
+
+test("duplicateRows normalises a card's candidates for the modal", () => {
+  const card = { candidates: [
+    { kind: "task", reference: "t-1", title: "Same bug", evidence: "same reference", match: "source", verdict: "unverified" },
+    { kind: "knowledge", reference: "specs/x.md", title: "X", evidence: "documents it", match: "text", score: 82, verdict: "confirmed" },
+  ] };
+  const rows = duplicateRows(card);
+  assert.equal(rows[0].matchText, "source");
+  assert.equal(rows[1].matchText, "text 82%");
+  assert.deepEqual(duplicateRows({}), []);
+});
+
+test("a wontfix dialog prefills from the assessment's own confirmed duplicate", () => {
+  const confirmedCard = { triage: { assessment: { duplicates: [
+    { ...stored, verdict: "rejected", evidence: "not this one" },
+    { ...stored, reference: "t-2", verdict: "confirmed", evidence: "same bug, twice" },
+  ] } } };
+  assert.deepEqual(confirmedDuplicate(confirmedCard), { ...stored, reference: "t-2", verdict: "confirmed", evidence: "same bug, twice" });
+  assert.deepEqual(wontfixDraft(confirmedCard), { reason: "duplicate", duplicate_of: "t-2", evidence: "same bug, twice" });
+
+  const noneConfirmed = { triage: { assessment: { duplicates: [{ ...stored, verdict: "rejected", evidence: "not this one" }] } } };
+  assert.equal(confirmedDuplicate(noneConfirmed), null);
+  assert.deepEqual(wontfixDraft(noneConfirmed), { reason: "", duplicate_of: "", evidence: "" });
+  assert.deepEqual(wontfixDraft({}), { reason: "", duplicate_of: "", evidence: "" });
+});
+
+test("a confirmed candidate's close_duplicate next action opens the wontfix dialog", () => {
+  const card = { next_actions: [
+    { action: "close_duplicate", reasons: ["Duplicate: confirmed duplicate of t-2 -- same bug, twice"], hint: "Close it as the duplicate it was confirmed to be -- a person still decides, never the triage run.", reference: "t-2" },
+  ] };
+  assert.deepEqual(nextActions(card), [
+    { label: "Close as duplicate", act: "wontfix", action: "close_duplicate", hint: card.next_actions[0].hint, reasons: card.next_actions[0].reasons },
+  ]);
 });

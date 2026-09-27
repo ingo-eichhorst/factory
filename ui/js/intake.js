@@ -33,6 +33,7 @@ import {
   cards,
   decideProblem,
   decideRequest,
+  duplicateRows,
   emptyPart,
   estimateOf,
   estimateText,
@@ -48,6 +49,7 @@ import {
   totalOpen,
   triageRequest,
   verdictChips,
+  wontfixDraft,
   workflowIn,
 } from "./intake-model.js";
 
@@ -186,6 +188,19 @@ function proposedSplit(t) {
     <li><b>${esc(p.title)}</b> <code>${esc(p.id)}</code>${(p.depends_on || []).length ? ` <span class="sub">after ${esc(p.depends_on.join(", "))}</span>` : ""}</li>`).join("")}</ol>`;
 }
 
+/// The item modal's "Possible duplicates" block: what the daemon found,
+/// overlaid with the triager's own answer (`duplicateRows`) -- kind,
+/// reference, title, how it matched and its verdict. Empty when there is
+/// nothing to show.
+export function candidatesBlock(card) {
+  const rows = duplicateRows(card);
+  if (!rows.length) return "";
+  return `<label>Possible duplicates</label><ul class="ik-dupes">${rows.map(r => `
+    <li><span class="tag">${esc(r.kind)}</span> <code>${esc(r.reference)}</code> ${esc(r.title)}
+      <span class="badge ik-dup-${esc(r.verdict)}">${esc(r.verdict)}</span>
+      <br><span class="sub">${esc(r.matchText)} match -- ${esc(r.evidence)}</span></li>`).join("")}</ul>`;
+}
+
 /// One item: its axes with evidence, what was asked, and what can be done.
 export function openItem(id) {
   const card = findCard(id);
@@ -211,6 +226,7 @@ export function openItem(id) {
       </tbody></table>
       ${card.questions && card.questions.length ? `<label>Asked of the requester</label><ul>${card.questions.map(q => `<li>${esc(q)}</li>`).join("")}</ul>` : ""}
       ${proposedSplit(t)}
+      ${candidatesBlock(card)}
       ${nextActionsBlock(card)}
       ${card.decision ? `<p class="sub">decided ${esc(card.decision.decision.decision.replace("_", "-"))} by ${esc(card.decision.by)}</p>` : ""}
       <div class="row-btns" style="margin-top:16px">
@@ -396,15 +412,82 @@ function openDecideDialog(action, card) {
       <label for="ik-questions">Questions <span class="sub">one per line; empty asks the assessment's, or its failed axes</span></label>
       <textarea id="ik-questions" rows="4">${esc(suggested.join("\n"))}</textarea>`;
   } else {
+    // Prefilled from the assessment's own confirmed duplicate, when it has
+    // one -- what it named is what closes the item, not a fresh guess.
+    const draft = wontfixDraft(card);
     body = `<p class="env-note">Closes it. Only for a verified duplicate, an invalid report or something that is not ours to do.</p>
-      <label for="ik-reason">Reason</label><select id="ik-reason"><option value="">…</option>${WONTFIX_REASONS.map(r => `<option value="${r.key}">${esc(r.label)}</option>`).join("")}</select>
-      <label for="ik-evidence">Evidence <span class="sub">what verifies it</span></label><textarea id="ik-evidence" rows="3"></textarea>
-      <label for="ik-dup">Duplicate of <span class="sub">for a duplicate: a task id or an issue URL</span></label><input id="ik-dup">`;
+      <label for="ik-reason">Reason</label><select id="ik-reason"><option value="">…</option>${WONTFIX_REASONS.map(r => `<option value="${r.key}"${r.key === draft.reason ? " selected" : ""}>${esc(r.label)}</option>`).join("")}</select>
+      <label for="ik-evidence">Evidence <span class="sub">what verifies it</span></label><textarea id="ik-evidence" rows="3">${esc(draft.evidence)}</textarea>
+      <label for="ik-dup">Duplicate of <span class="sub">for a duplicate: a task id or an issue URL</span></label><input id="ik-dup" value="${esc(draft.duplicate_of)}">`;
   }
   dialog(ACTION_LABELS[action], card.title, body, ACTION_LABELS[action],
     () => decideRequest(card.id, action, values()),
     () => decideProblem(action, values()),
     action === "wontfix");
+}
+
+/// `duplicates` verdict rows for the assess dialog: the daemon's own list
+/// (`card.candidates`), each with its current verdict and evidence -- the
+/// last answer given, or the daemon's own found-reason to start from.
+function dupeVerdictOptions(selected) {
+  return ["unverified", "confirmed", "rejected"]
+    .map(v => `<option value="${v}"${v === selected ? " selected" : ""}>${v}</option>`)
+    .join("");
+}
+
+function dupesHtml(candidates) {
+  if (!candidates.length) return "";
+  return `<label>Possible duplicates <span class="sub">confirm or reject each, with your own evidence</span></label>
+    <div id="ik-dupes">${candidates.map((c, i) => `
+      <div class="ik-dupe-row" data-dupe="${i}">
+        <p><span class="tag">${esc(c.kind)}</span> <code>${esc(c.reference)}</code> ${esc(c.title)}
+          <span class="sub">(${esc(c.match)}${c.match === "text" && c.score != null ? ` ${esc(c.score)}%` : ""})</span></p>
+        <div class="ik-grid">
+          <label>Verdict <select data-dupe-verdict>${dupeVerdictOptions(c.verdict)}</select></label>
+          <label>Evidence <input data-dupe-evidence value="${esc(c.evidence)}"></label>
+        </div>
+      </div>`).join("")}</div>`;
+}
+
+/// A single row to name a duplicate the search never found -- a vault page
+/// from the triager's own `factory knowledge search`. Left blank, it is
+/// dropped (`buildDuplicateAnswer`/`buildAssessment`).
+function knowledgeRowHtml() {
+  return `<label>Add a knowledge candidate <span class="sub">a vault page \`factory knowledge search\` found; leave blank if none</span></label>
+    <div class="ik-grid">
+      <label>Vault path <input id="ik-know-ref" placeholder="specs/some-decision.md"></label>
+      <label>Title <input id="ik-know-title"></label>
+    </div>
+    <label>Evidence <input id="ik-know-evidence"></label>`;
+}
+
+function readDupeRows(candidates) {
+  return candidates.map((c, i) => ({
+    kind: c.kind,
+    reference: c.reference,
+    title: c.title,
+    match: c.match,
+    score: c.score,
+    verdict: document.querySelector(`.scrim [data-dupe="${i}"] [data-dupe-verdict]`).value,
+    evidence: document.querySelector(`.scrim [data-dupe="${i}"] [data-dupe-evidence]`).value,
+  }));
+}
+
+function readKnowledgeRow() {
+  const ref = $("ik-know-ref") ? $("ik-know-ref").value.trim() : "";
+  if (!ref) return null;
+  return {
+    kind: "knowledge",
+    reference: ref,
+    title: $("ik-know-title") ? $("ik-know-title").value : "",
+    match: "text",
+    // No score of its own: it was found by reading, not scored by overlap.
+    // Blank rather than 0 -- `buildDuplicateAnswer` then leaves it out
+    // rather than wire a false "0% match".
+    score: "",
+    verdict: "confirmed",
+    evidence: $("ik-know-evidence") ? $("ik-know-evidence").value : "",
+  };
 }
 
 function openAssessDialog(card) {
@@ -417,6 +500,7 @@ function openAssessDialog(card) {
       <td><input data-evidence="${axis}" placeholder="${esc(pass_condition)}" value="${esc(p.evidence)}">
       ${axis === "observability" ? `<select data-cost title="cost, when it fails"><option value="">cost…</option>${opts(COSTS, p.cost)}</select>` : ""}</td></tr>`;
   }).join("");
+  const candidates = card.candidates || [];
   const route = prior ? prior.routing : { scope: card.scope };
   const fieldValues = (attr) => {
     const out = {};
@@ -443,6 +527,10 @@ function openAssessDialog(card) {
     split: prior && (prior.split || []).length ? splitDraft(card) : [],
     summary: $("ik-summary").value,
     questions: $("ik-ask").value,
+    duplicates: (() => {
+      const knowledge = readKnowledgeRow();
+      return knowledge ? [...readDupeRows(candidates), knowledge] : readDupeRows(candidates);
+    })(),
   });
   const sync = dialog("Assess", card.title, `
     <p class="env-note">Each axis passes or fails with one sentence of evidence. Any failure but a low- or
@@ -461,6 +549,8 @@ function openAssessDialog(card) {
     <label for="ik-summary">Summary</label><textarea id="ik-summary" rows="2">${esc(prior ? prior.summary : "")}</textarea>
     <label for="ik-ask">Questions for a needs-info <span class="sub">one per line</span></label>
     <textarea id="ik-ask" rows="2">${esc(prior ? (prior.questions || []).join("\n") : "")}</textarea>
+    ${dupesHtml(candidates)}
+    ${knowledgeRowHtml()}
     <p class="ik-preview" id="ik-preview" aria-live="polite"></p>
     <label class="checkrow"><input type="checkbox" id="ik-decide" checked><span>Apply the verdict: release if ready, send back if needs-info</span></label>`,
   "Record assessment",
@@ -472,7 +562,7 @@ function openAssessDialog(card) {
     if (pv) {
       pv.textContent = `${v.verdict === "ready" ? "ready" : `needs-info (${v.blockers.join(", ")})`} · ${priorityOf(a.impact, a.urgency) || "-"} · ${estimateText(estimateOf(a.complexity))}`;
     }
-    return assessmentProblem(a) || routeProblem(a, board);
+    return assessmentProblem(a, candidates) || routeProblem(a, board);
   });
   // How it runs there: an agent, or a workflow with its inputs and an
   // agent -- and so a model -- per step. Redrawn when the scope or the

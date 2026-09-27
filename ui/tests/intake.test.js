@@ -8,7 +8,7 @@ import { state } from "../js/core.js";
 // to be one before the view is imported -- `operations.test.js`'s rule.
 const bare = { addEventListener() {}, getElementById: () => null };
 globalThis.document = bare;
-const { loadIntake, showIntake, hideIntake, refreshIntake, intakeCard } = await import("../js/intake.js");
+const { loadIntake, showIntake, hideIntake, refreshIntake, intakeCard, candidatesBlock } = await import("../js/intake.js");
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const wiring = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
@@ -124,4 +124,29 @@ test("a card escapes what a requester typed", () => {
   const html = intakeCard(evil, DATA.board.axes);
   assert.doesNotMatch(html, /<img/);
   assert.doesNotMatch(html, /<b>x/);
+});
+
+// ------------------------------------------------------------ duplicates (#166)
+
+test("the item modal lists each possible duplicate with its match and verdict", () => {
+  const card = { candidates: [
+    { kind: "task", reference: "t-1", title: "Order page shows stale totals", evidence: "same reference", match: "source", verdict: "unverified" },
+    { kind: "knowledge", reference: "specs/x.md", title: "X design", evidence: "documents the same flow", match: "text", score: 82, verdict: "confirmed" },
+  ] };
+  const html = candidatesBlock(card);
+  assert.match(html, /Possible duplicates/);
+  assert.match(html, /t-1/);
+  assert.match(html, /ik-dup-unverified/);
+  assert.match(html, /ik-dup-confirmed/);
+  assert.match(html, /text 82%/);
+  assert.equal(candidatesBlock({}), "", "nothing to show, nothing drawn");
+});
+
+test("the item modal escapes a candidate's own title and evidence", () => {
+  const evil = { candidates: [
+    { kind: "task", reference: "t-1", title: "<img src=x onerror=alert(1)>", evidence: "<b>evil</b>", match: "source", verdict: "unverified" },
+  ] };
+  const html = candidatesBlock(evil);
+  assert.doesNotMatch(html, /<img/);
+  assert.doesNotMatch(html, /<b>evil/);
 });

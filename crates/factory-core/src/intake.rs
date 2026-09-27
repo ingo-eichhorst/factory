@@ -16,13 +16,21 @@
 //! Everything here is pure: no store, no clock but the one passed in. The
 //! daemon (`factory-daemon/src/intake.rs`) owns the transitions.
 //!
-//! What this slice leaves out, on purpose: duplicate candidate detection,
-//! the security fast lane with its CRA clock, the `triager` role, and every
-//! outbound effect. An assessment is never posted anywhere; it is only
-//! journaled. The four intake registry metrics (`#165`, [`registry_metric`])
-//! are the one exception: they read the decision events this module already
-//! defines, but still no store -- `factory-daemon` builds the facts from the
-//! task journal and hands them over.
+//! Duplicates (`#166`) are found the same way: [`duplicate_candidates`] is a
+//! pure search over the open tasks the daemon hands it, run at receipt and
+//! again at triage; [`DuplicateCandidate`] is what it finds, what a triager
+//! answers, and what a triager adds itself from a vault search. A confirmed
+//! one blocks the verdict in [`evaluate`], same as a failed axis.
+//!
+//! What this slice leaves out, on purpose: auto-closing a duplicate, any
+//! embedding or LLM search, closed tasks or GitHub search, the per-child
+//! check (`#180`), the security fast lane with its CRA clock, the `triager`
+//! role, and every outbound effect. An assessment is never posted anywhere;
+//! it is only journaled. The four intake registry metrics (`#165`,
+//! [`registry_metric`]) are the one exception: they read the decision
+//! events this module already defines, but still no store --
+//! `factory-daemon` builds the facts from the task journal and hands them
+//! over.
 
 use crate::operations::Window;
 use crate::task::{Task, TaskStatus};
@@ -154,6 +162,292 @@ pub struct Intake {
     /// How it left intake, once it has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<DecisionRecord>,
+    /// Possible duplicates the daemon found -- at receipt, and again when
+    /// triage starts (`#166`). What a triager made of them travels with the
+    /// assessment instead, in `Triage::assessment::duplicates`; see
+    /// [`candidates_with_verdicts`] for the two put together.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<DuplicateCandidate>,
+}
+
+// --------------------------------------------------------------- duplicates
+
+/// Where a possible duplicate lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateKind {
+    /// An ordinary open task -- released, or never gated by intake at all.
+    Task,
+    /// Another item still held in intake (`TaskStatus::Intake`).
+    IntakeItem,
+    /// A page in the knowledge vault, named by a triager's own `factory
+    /// knowledge search` -- intake never reads the vault itself, so this is
+    /// always given, never found.
+    Knowledge,
+}
+
+impl DuplicateKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::IntakeItem => "intake_item",
+            Self::Knowledge => "knowledge",
+        }
+    }
+}
+
+/// How a candidate was found: the same source reference -- the strongest
+/// evidence, the same GitHub issue or mail id -- or a text match, a
+/// normalised token overlap of title and instructions above
+/// [`TEXT_MATCH_THRESHOLD`], carried as a percentage in `score`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateMatch {
+    Source,
+    Text,
+}
+
+/// Where a triager's answer to a candidate stands. A candidate the daemon
+/// just found, or a triager has not yet answered, is `unverified`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateVerdict {
+    #[default]
+    Unverified,
+    Confirmed,
+    Rejected,
+}
+
+impl DuplicateVerdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unverified => "unverified",
+            Self::Confirmed => "confirmed",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// One possible duplicate: what [`duplicate_candidates`] found (on
+/// [`Intake::candidates`]), or what a triager answered -- confirming or
+/// rejecting one of those, or adding a `knowledge` one of its own found
+/// with `factory knowledge search` (on `Assessment::duplicates`).
+/// `reference` is a task id for `task` and `intake_item`, a vault page path
+/// for `knowledge` -- free text, never followed by intake itself, same as
+/// [`IntakeSource::reference`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DuplicateCandidate {
+    pub kind: DuplicateKind,
+    pub reference: String,
+    pub title: String,
+    /// One sentence: why this is a candidate, or why a triager confirmed or
+    /// rejected it.
+    pub evidence: String,
+    #[serde(rename = "match")]
+    pub matched: DuplicateMatch,
+    /// A percentage, only for a `text` match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<u8>,
+    #[serde(default)]
+    pub verdict: DuplicateVerdict,
+}
+
+/// Above this normalised token overlap of title and the start of the
+/// instructions (as a percentage), two open items count as a text match.
+/// Picked from the fixtures below: high enough that sharing a boilerplate
+/// phrase never trips it alone, low enough that the same report in
+/// different words does.
+const TEXT_MATCH_THRESHOLD: u8 = 60;
+
+/// A text match also needs at least this many tokens in common. A single
+/// shared word can carry the whole percentage when both signatures are
+/// short (a bare title, a one-line instruction); two is the least an
+/// overlap can mean anything by.
+const MIN_SHARED_TOKENS: usize = 2;
+
+/// How many words of the instructions the signature looks at -- the
+/// opening, where an issue or a request says what it is, not whatever a
+/// template or a long paste adds after.
+const INSTRUCTION_PREFIX_WORDS: usize = 40;
+
+/// At most this many stored candidates. More is noise for a triager to wade
+/// through, and a false negative is cheaper to catch by hand than five red
+/// herrings are to dismiss one by one.
+pub const MAX_CANDIDATES: usize = 5;
+
+/// Function words common enough that sharing them alone proves nothing.
+/// Short, on purpose: everything else in a title or a request's opening is
+/// left to carry the signal.
+const STOPWORDS: &[&str] = &[
+    "the", "and", "for", "are", "but", "not", "you", "all", "can", "her", "was", "one", "our",
+    "out", "has", "him", "his", "how", "see", "two", "way", "did", "its", "let", "say", "she",
+    "too", "use", "with", "this", "that", "from", "have", "will", "your", "into", "also", "been",
+    "were", "when", "what", "then", "than", "only", "just",
+];
+
+/// A title's, or the start of a request's, words boiled down to what might
+/// carry signal: lowercase, split on anything that is not a letter or a
+/// digit, three characters or more, not a stopword.
+fn normalised_tokens(text: &str) -> Vec<String> {
+    text.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| w.len() >= 3 && !STOPWORDS.contains(w))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The set of tokens a title and the opening of its instructions boil down
+/// to, for the text-match rule.
+fn signature(title: &str, instructions: &str) -> std::collections::BTreeSet<String> {
+    let prefix = instructions.split_whitespace().take(INSTRUCTION_PREFIX_WORDS).collect::<Vec<_>>().join(" ");
+    let mut tokens = normalised_tokens(title);
+    tokens.extend(normalised_tokens(&prefix));
+    tokens.into_iter().collect()
+}
+
+/// Percentage overlap of two token sets, and how many they share. `(0, 0)`
+/// when either is empty -- a title-less, instruction-less item never
+/// "matches" everything by having nothing in common with it either.
+fn overlap(a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSet<String>) -> (u8, usize) {
+    if a.is_empty() || b.is_empty() {
+        return (0, 0);
+    }
+    let shared = a.intersection(b).count();
+    let union = a.union(b).count().max(1);
+    (((shared * 100) / union) as u8, shared)
+}
+
+/// Duplicate candidates for `item` among `tasks`: those still open
+/// (`!status.is_terminal()` -- not `Task::is_settled`, since a task blocked
+/// by a failure is still open work a duplicate would pile up behind),
+/// including other open intake items, excluding the item itself, triage
+/// bookkeeping tasks (`TRIAGE_LABEL`), the item's own split parent and
+/// parts (`PARENT_LABEL`), and its siblings -- a split's parts all carry
+/// the whole original request in their own instructions (`intake_split`),
+/// which would otherwise make every part look like a duplicate of every
+/// other for a reason that has nothing to do with the work.
+///
+/// The same source reference is the strongest evidence; otherwise, a text
+/// match at or above [`TEXT_MATCH_THRESHOLD`] with at least
+/// [`MIN_SHARED_TOKENS`] in common. At most [`MAX_CANDIDATES`], ordered by
+/// score then reference, so the same input always gives the same list.
+pub fn duplicate_candidates(item: &Task, tasks: &[Task]) -> Vec<DuplicateCandidate> {
+    let item_parent = item.labels.get(PARENT_LABEL).map(String::as_str);
+    let item_source = item.intake.as_ref().map(|i| &i.source);
+    let item_tokens = signature(&item.title, &item.instructions);
+
+    let mut scored: Vec<(u16, DuplicateCandidate)> = Vec::new();
+    for t in tasks {
+        if t.id == item.id || t.status.is_terminal() || t.labels.contains_key(TRIAGE_LABEL) {
+            continue;
+        }
+        if item_parent == Some(t.id.as_str()) {
+            continue; // t is the item it was split from
+        }
+        let t_parent = t.labels.get(PARENT_LABEL).map(String::as_str);
+        if t_parent == Some(item.id.as_str()) {
+            continue; // t is one of the item's own parts
+        }
+        if item_parent.is_some() && item_parent == t_parent {
+            continue; // t is a sibling part of the same split
+        }
+
+        let kind = if t.status == TaskStatus::Intake { DuplicateKind::IntakeItem } else { DuplicateKind::Task };
+
+        if let (Some(a), Some(b)) = (item_source, t.intake.as_ref().map(|i| &i.source)) {
+            let reference = a.reference.as_deref().map(str::trim).filter(|r| !r.is_empty());
+            if a.kind == b.kind && reference.is_some() && reference == b.reference.as_deref().map(str::trim) {
+                scored.push((
+                    u16::MAX,
+                    DuplicateCandidate {
+                        kind,
+                        reference: t.id.clone(),
+                        title: t.title.clone(),
+                        evidence: format!(
+                            "same {} reference as {} ({}): {}",
+                            a.kind.as_str(),
+                            t.id,
+                            t.title,
+                            reference.unwrap_or_default()
+                        ),
+                        matched: DuplicateMatch::Source,
+                        score: None,
+                        verdict: DuplicateVerdict::Unverified,
+                    },
+                ));
+                continue;
+            }
+        }
+
+        let t_tokens = signature(&t.title, &t.instructions);
+        let (score, shared) = overlap(&item_tokens, &t_tokens);
+        if score >= TEXT_MATCH_THRESHOLD && shared >= MIN_SHARED_TOKENS {
+            scored.push((
+                score as u16,
+                DuplicateCandidate {
+                    kind,
+                    reference: t.id.clone(),
+                    title: t.title.clone(),
+                    evidence: format!("{score}% overlap in title and instructions with {} ({})", t.id, t.title),
+                    matched: DuplicateMatch::Text,
+                    score: Some(score),
+                    verdict: DuplicateVerdict::Unverified,
+                },
+            ));
+        }
+    }
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.reference.cmp(&b.1.reference)));
+    scored.truncate(MAX_CANDIDATES);
+    scored.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Refuse an assessment that leaves a stored candidate unanswered, or
+/// answers one -- stored, or a triager's own `knowledge` find -- without
+/// evidence. A stored candidate is matched to its answer by `(kind,
+/// reference)`: a triager copies the daemon's own value back with its
+/// verdict and evidence changed, so an answer that names no stored
+/// candidate (a `knowledge` one, typically) is only checked for evidence
+/// here.
+pub fn validate_duplicates(stored: &[DuplicateCandidate], answered: &[DuplicateCandidate]) -> Result<(), String> {
+    for d in answered {
+        if d.evidence.trim().is_empty() {
+            return Err(format!("the {} candidate {} needs evidence for its verdict", d.kind.as_str(), d.reference));
+        }
+    }
+    for s in stored {
+        let answer = answered.iter().find(|d| d.kind == s.kind && d.reference == s.reference);
+        if !matches!(answer, Some(d) if d.verdict != DuplicateVerdict::Unverified) {
+            return Err(format!(
+                "possible duplicate {} ({}) needs a verdict: confirm or reject it",
+                s.reference, s.title
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What a card, `intake show` and the item modal display: the daemon's
+/// stored candidates overlaid with the triager's own answer by `(kind,
+/// reference)` where there is one, plus any candidate -- a `knowledge` one,
+/// typically -- the triager added that the search never found.
+/// [`Intake::candidates`] itself stays "what the daemon found", unanswered.
+pub fn candidates_with_verdicts(intake: &Intake) -> Vec<DuplicateCandidate> {
+    let answered: &[DuplicateCandidate] =
+        intake.triage.as_ref().map(|t| t.assessment.duplicates.as_slice()).unwrap_or(&[]);
+    let mut out: Vec<DuplicateCandidate> = intake
+        .candidates
+        .iter()
+        .map(|c| {
+            answered.iter().find(|d| d.kind == c.kind && d.reference == c.reference).cloned().unwrap_or_else(|| c.clone())
+        })
+        .collect();
+    for d in answered {
+        if !intake.candidates.iter().any(|c| c.kind == d.kind && c.reference == d.reference) {
+            out.push(d.clone());
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------------ triage
@@ -524,6 +818,12 @@ pub struct Assessment {
     /// Only proposed: the verdict is unchanged, and a person decides `split`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split: Vec<SplitPart>,
+    /// Every stored candidate (`Intake::candidates`) answered confirmed or
+    /// rejected, plus any `knowledge` one the triager found itself
+    /// (`#166`). [`validate_duplicates`] refuses one left unanswered, or
+    /// answered without evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplicates: Vec<DuplicateCandidate>,
 }
 
 /// What the rules make of an assessment.
@@ -532,7 +832,8 @@ pub struct Assessment {
 pub enum Verdict {
     Ready,
     NeedsInfo {
-        /// One line per reason, in axis order, the complexity rule last.
+        /// One line per reason: a confirmed duplicate first, then axis
+        /// order, the complexity rule last.
         blockers: Vec<String>,
     },
 }
@@ -612,13 +913,18 @@ pub fn validate(a: &Assessment) -> Result<(), String> {
     Ok(())
 }
 
-/// `ir:triage`'s rules. Any failed axis gives `needs-info`, except
-/// Observability at low or medium cost: that gap is closed by the task
-/// itself, instrument first. Complexity 9-10 is a subsystem and is split
-/// before it is taken on. Everything else is ready -- a bounded, reversible
-/// item does not wait on an implementation choice the work can make.
+/// `ir:triage`'s rules, plus one of its own (`#166`): a confirmed duplicate
+/// always gives `needs-info`, so `--decide` can never release one. Any
+/// failed axis gives `needs-info` too, except Observability at low or
+/// medium cost: that gap is closed by the task itself, instrument first.
+/// Complexity 9-10 is a subsystem and is split before it is taken on.
+/// Everything else is ready -- a bounded, reversible item does not wait on
+/// an implementation choice the work can make.
 pub fn evaluate(a: &Assessment, by: impl Into<String>, at: DateTime<Utc>) -> Triage {
     let mut blockers = Vec::new();
+    for d in a.duplicates.iter().filter(|d| d.verdict == DuplicateVerdict::Confirmed) {
+        blockers.push(format!("Duplicate: confirmed duplicate of {} -- {}", d.reference, d.evidence.trim()));
+    }
     for axis in Axis::ALL {
         let Some(check) = a.axes.iter().find(|c| c.axis == axis) else { continue };
         if check.pass {
@@ -811,6 +1117,8 @@ pub fn split_parts(intake: &Intake, given: &[SplitPart]) -> Result<Vec<SplitPart
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NextActionKind {
+    /// A candidate was confirmed: close it, naming what it duplicates.
+    CloseDuplicate,
     /// Too big or unbounded: split it into items that pass on their own.
     Split,
     /// Missing a fact or a decision only the requester has: answer the
@@ -821,6 +1129,7 @@ pub enum NextActionKind {
 impl NextActionKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::CloseDuplicate => "close_duplicate",
             Self::Split => "split",
             Self::AddInfo => "add_info",
         }
@@ -834,19 +1143,42 @@ pub struct NextAction {
     pub reasons: Vec<String>,
     /// What to do, in a sentence.
     pub hint: String,
+    /// `close_duplicate` only: the confirmed candidate's own reference, so
+    /// a caller can name it in `--duplicate-of` rather than print a
+    /// placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
 }
 
 /// Every blocker of a needs-info verdict, turned into what would clear it:
-/// a failed Scope, a high-cost Observability gap and complexity 9-10 are
-/// cleared by splitting; the other axes by information. Split comes first
-/// -- a part is triaged again anyway, so questions asked of the whole may
-/// not apply to any part. Empty for an item the rules do not hold back.
+/// a confirmed duplicate by closing it; a failed Scope, a high-cost
+/// Observability gap and complexity 9-10 by splitting; the other axes by
+/// information. A confirmed duplicate comes first -- closing makes
+/// splitting or asking questions moot -- then split, since a part is
+/// triaged again anyway and questions asked of the whole may not apply to
+/// any part. Empty for an item the rules do not hold back.
 pub fn next_actions(intake: &Intake) -> Vec<NextAction> {
     let Some(triage) = &intake.triage else { return Vec::new() };
     if !intake.stage.is_open() || triage.verdict == Verdict::Ready {
         return Vec::new();
     }
     let a = &triage.assessment;
+    let mut out = Vec::new();
+    let confirmed: Vec<&DuplicateCandidate> =
+        a.duplicates.iter().filter(|d| d.verdict == DuplicateVerdict::Confirmed).collect();
+    if !confirmed.is_empty() {
+        out.push(NextAction {
+            action: NextActionKind::CloseDuplicate,
+            reasons: confirmed
+                .iter()
+                .map(|d| format!("Duplicate: confirmed duplicate of {} -- {}", d.reference, d.evidence.trim()))
+                .collect(),
+            hint: "Close it as the duplicate it was confirmed to be -- a person still decides, never \
+                   the triage run."
+                .into(),
+            reference: Some(confirmed[0].reference.clone()),
+        });
+    }
     let mut split = Vec::new();
     let mut info = Vec::new();
     for check in a.axes.iter().filter(|c| !c.pass) {
@@ -860,7 +1192,6 @@ pub fn next_actions(intake: &Intake) -> Vec<NextAction> {
     if a.complexity >= 9 {
         split.push(format!("Complexity {}: a subsystem or multi-phase change", a.complexity));
     }
-    let mut out = Vec::new();
     if !split.is_empty() {
         let hint = if a.split.is_empty() {
             "Split it into bounded items -- two to eight, each triaged on its own. Write the parts, \
@@ -873,7 +1204,7 @@ pub fn next_actions(intake: &Intake) -> Vec<NextAction> {
                 a.split.iter().map(|p| p.title.as_str()).collect::<Vec<_>>().join("; ")
             )
         };
-        out.push(NextAction { action: NextActionKind::Split, reasons: split, hint });
+        out.push(NextAction { action: NextActionKind::Split, reasons: split, hint, reference: None });
     }
     if !info.is_empty() {
         out.push(NextAction {
@@ -882,6 +1213,7 @@ pub fn next_actions(intake: &Intake) -> Vec<NextAction> {
             hint: "Answer the questions with what is missing; the item goes back into the queue to be \
                    triaged again."
                 .into(),
+            reference: None,
         });
     }
     out
@@ -942,12 +1274,21 @@ pub struct IntakeCard {
     /// The item it was split from, when it is a part of one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// Possible duplicates, the daemon's own search overlaid with a
+    /// triager's answer (`#166`, [`candidates_with_verdicts`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<DuplicateCandidate>,
 }
 
 /// The label a part carries: the id of the item it was split from.
 pub const PARENT_LABEL: &str = "intake-parent";
 /// The label a part carries: its id within the split.
 pub const PART_LABEL: &str = "intake-part";
+/// The label a triage task carries: the id of the item it triages. Defined
+/// here, not only where it is set (`factory-daemon`'s `intake_triage`),
+/// because [`duplicate_candidates`] has to exclude these bookkeeping tasks
+/// from the search too.
+pub const TRIAGE_LABEL: &str = "intake-triage";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IntakeColumns {
@@ -1101,6 +1442,7 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
             decision: intake.decision.clone(),
             next_actions: next_actions(intake),
             parent: task.labels.get(PARENT_LABEL).cloned(),
+            candidates: candidates_with_verdicts(intake),
         };
         match intake.stage {
             IntakeStage::Received => columns.received.push(card),
@@ -1158,7 +1500,10 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
 /// GitHub repository to any item in any scope. The run reads, assesses and
 /// submits; it changes no file and posts nothing anywhere. `routes` is every
 /// scope with its agents and workflows, so the run chooses from what exists.
-pub fn triage_instructions(item: &Task, routes: &[RouteOptions], bin: &str) -> String {
+/// `record` is the item's own intake record, freshly searched for
+/// duplicates (`#166`) -- not necessarily `item.intake`, which may still be
+/// the record from before that search.
+pub fn triage_instructions(item: &Task, record: &Intake, routes: &[RouteOptions], bin: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "Triage intake item {id} against the definition of ready. Do not do the work itself, \
@@ -1170,10 +1515,31 @@ pub fn triage_instructions(item: &Task, routes: &[RouteOptions], bin: &str) -> S
         title = item.title,
         body = if item.instructions.trim().is_empty() { "(no description)" } else { item.instructions.trim() },
     ));
+    out.push_str("## Possible duplicates\n\n");
+    if record.candidates.is_empty() {
+        out.push_str("None found among the open tasks Factory searched.\n\n");
+    } else {
+        out.push_str(
+            "Factory found these among the open tasks -- confirm or reject each in your assessment's \
+             `duplicates`, copying it back with `verdict` set to `confirmed` or `rejected` and your \
+             own evidence sentence. Leaving one out, or leaving its verdict `unverified`, is refused, \
+             and so is an answer with no evidence:\n\n",
+        );
+        out.push_str(&serde_json::to_string_pretty(&record.candidates).unwrap_or_default());
+        out.push_str("\n\n");
+    }
+    out.push_str(
+        "Also run `factory knowledge search` for a documented duplicate in the vault. Add any you \
+         find as your own candidate in `duplicates` -- `kind: \"knowledge\"`, its vault path as \
+         `reference`, `match: \"text\"` with a `score` of your choosing, `verdict: \"confirmed\"`, \
+         and the evidence. Factory stores it exactly as given and never checks it against the vault \
+         itself.\n\n",
+    );
     out.push_str(
         "## How to triage\n\n\
          1. Read the item. Inspect the code, documents and prior work it touches, read-only; \
-         `factory knowledge search` and `factory task list` find related work.\n\
+         `factory knowledge search` and `factory task list` find related work. Answer every \
+         possible duplicate above.\n\
          2. Treat a dismissal (\"already fixed\", \"not relevant\") as an assumption until \
          something you can cite verifies it.\n\
          3. Score each readiness axis pass or fail with one evidence-based sentence:\n",
@@ -1185,9 +1551,10 @@ pub fn triage_instructions(item: &Task, routes: &[RouteOptions], bin: &str) -> S
         "   A failed observability axis carries its cost: low (run an existing tool), medium \
          (extend an existing event, metric or fixture) or high (build a new observation \
          system).\n\
-         4. Rules: any failed axis gives needs-info, except observability at low or medium \
-         cost. Complexity 9-10 gives needs-info (split it). Otherwise it is ready -- do not \
-         block on a reversible implementation choice.\n\
+         4. Rules: a confirmed duplicate always gives needs-info, and `--decide` can never \
+         release it. Any failed axis gives needs-info too, except observability at low or \
+         medium cost. Complexity 9-10 gives needs-info (split it). Otherwise it is ready -- do \
+         not block on a reversible implementation choice.\n\
          5. Category: one slug -- ",
     );
     out.push_str(&CATEGORIES.join(", "));
@@ -1252,15 +1619,20 @@ pub fn triage_instructions(item: &Task, routes: &[RouteOptions], bin: &str) -> S
       "split": [
         {"id": "first", "title": "...", "instructions": "...", "acceptance": "..."},
         {"id": "second", "title": "...", "instructions": "...", "depends_on": ["first"], "acceptance": "..."}
+      ],
+      "duplicates": [
+        {"kind": "task", "reference": "<id>", "title": "...", "evidence": "...", "match": "source", "verdict": "confirmed"},
+        {"kind": "knowledge", "reference": "<vault/path>", "title": "...", "evidence": "...", "match": "text", "score": 80, "verdict": "confirmed"}
       ]
     }
 "#,
     );
     out.push_str(
         "\nLeave out what does not apply: `split` unless it is too big, `inputs` and `agents` \
-         without a workflow. Use wontfix only for a verified duplicate, an invalid report or \
-         something out of scope -- and then do not decide it yourself: say so in your task \
-         report with the evidence, and a person closes it.\n",
+         without a workflow, `duplicates` only when nothing was found and your own search of \
+         the vault found nothing either. Use wontfix only for a verified duplicate, an invalid \
+         report or something out of scope -- and then do not decide it yourself: say so in \
+         your task report with the evidence, and a person closes it.\n",
     );
     out
 }
@@ -1518,6 +1890,7 @@ mod tests {
             summary: "A bounded fix.".into(),
             questions: vec![],
             split: vec![],
+            duplicates: vec![],
         }
     }
 
@@ -1662,6 +2035,7 @@ mod tests {
             triage_task: None,
             questions: vec![],
             decision: None,
+            candidates: vec![],
         }
     }
 
@@ -1738,6 +2112,298 @@ mod tests {
         t.status = status;
         t.intake = intake;
         t
+    }
+
+    /// A task with its own title and instructions -- what
+    /// `duplicate_candidates`'s text match reads -- and an optional intake
+    /// record for the source match and the "open intake item" kind.
+    fn item_task(id: &str, title: &str, instructions: &str, status: TaskStatus, intake: Option<Intake>) -> Task {
+        let mut t = task(id, status, intake);
+        t.title = title.into();
+        t.instructions = instructions.into();
+        t
+    }
+
+    fn received(reference: Option<&str>) -> Intake {
+        Intake {
+            stage: IntakeStage::Received,
+            source: IntakeSource { kind: SourceKind::Github, reference: reference.map(String::from) },
+            requester: "the owner".into(),
+            received_at: at(),
+            triage: None,
+            triage_task: None,
+            questions: vec![],
+            decision: None,
+            candidates: vec![],
+        }
+    }
+
+    #[test]
+    fn the_same_source_reference_is_the_strongest_evidence() {
+        let item = item_task(
+            "new",
+            "Different words entirely",
+            "nothing in common with the other one's text",
+            TaskStatus::Intake,
+            Some(received(Some("https://github.com/acme/widgets/issues/9"))),
+        );
+        let same_ref = item_task(
+            "old",
+            "Totally unrelated title too",
+            "and unrelated instructions as well",
+            TaskStatus::Intake,
+            Some(received(Some("https://github.com/acme/widgets/issues/9"))),
+        );
+        let other_ref = item_task(
+            "other",
+            "Also unrelated",
+            "also unrelated",
+            TaskStatus::Intake,
+            Some(received(Some("https://github.com/acme/widgets/issues/10"))),
+        );
+        let candidates = duplicate_candidates(&item, &[same_ref, other_ref]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].reference, "old");
+        assert_eq!(candidates[0].kind, DuplicateKind::IntakeItem);
+        assert_eq!(candidates[0].matched, DuplicateMatch::Source);
+        assert_eq!(candidates[0].verdict, DuplicateVerdict::Unverified);
+        assert_eq!(candidates[0].score, None);
+        assert!(candidates[0].evidence.contains("github"), "{:?}", candidates[0].evidence);
+    }
+
+    #[test]
+    fn a_near_identical_title_gives_a_text_match() {
+        // This pair's overlap lands at exactly 60%, `TEXT_MATCH_THRESHOLD`
+        // itself -- pinned there on purpose, to lock the boundary being
+        // inclusive (`>=`). A future change to the stopword list or the
+        // instruction-prefix length can move this score; if it drops the
+        // match, that is the signal to look at the rule, not this fixture.
+        let item = item_task(
+            "new",
+            "Checkout crashes when applying a coupon code",
+            "Customers report the checkout page crashes whenever a coupon code is applied at checkout.",
+            TaskStatus::Intake,
+            None,
+        );
+        let near_duplicate = item_task(
+            "old",
+            "Coupon code crashes the checkout page",
+            "The checkout page crashes when a coupon code is applied at checkout.",
+            TaskStatus::Pending,
+            None,
+        );
+        let candidates = duplicate_candidates(&item, &[near_duplicate]);
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(candidates[0].reference, "old");
+        assert_eq!(candidates[0].kind, DuplicateKind::Task, "released, not in intake");
+        assert_eq!(candidates[0].matched, DuplicateMatch::Text);
+        assert_eq!(candidates[0].score, Some(60), "pinned at the threshold itself, see above");
+    }
+
+    #[test]
+    fn unrelated_work_gives_no_candidate() {
+        let item = item_task(
+            "new",
+            "Checkout crashes when applying a coupon code",
+            "Customers report the checkout page crashes whenever a coupon code is applied at checkout.",
+            TaskStatus::Intake,
+            None,
+        );
+        let unrelated =
+            item_task("other", "Add dark mode to the dashboard", "Give the dashboard a dark theme option.", TaskStatus::Pending, None);
+        assert_eq!(duplicate_candidates(&item, &[unrelated]), Vec::new());
+    }
+
+    #[test]
+    fn a_pair_of_generic_items_with_shared_boilerplate_never_matches_on_that_alone() {
+        // Two items whose only common ground is a stock phrase used across
+        // many fixtures ("fix it") must not become duplicates of each other
+        // just because they share that one word -- `MIN_SHARED_TOKENS`.
+        let a = item_task("a", "Broken link", "fix it", TaskStatus::Intake, None);
+        let b = item_task("b", "Something else", "fix it", TaskStatus::Intake, None);
+        assert_eq!(duplicate_candidates(&a, &[b]), Vec::new());
+    }
+
+    #[test]
+    fn exclusions_the_item_itself_triage_tasks_its_parent_and_its_parts() {
+        let mut item = item_task("item", "Checkout crashes on coupon", "checkout page crashes on coupon code", TaskStatus::Intake, None);
+        item.labels.insert(PARENT_LABEL.into(), "parent".into());
+
+        let itself = item.clone();
+        let mut triage_run = item_task("triage-task", "Checkout crashes on coupon", "checkout page crashes on coupon code", TaskStatus::Pending, None);
+        triage_run.labels.insert(TRIAGE_LABEL.into(), "item".into());
+        let mut parent = item_task("parent", "Checkout crashes on coupon", "checkout page crashes on coupon code", TaskStatus::Intake, None);
+        parent.labels.insert(PARENT_LABEL.into(), "grandparent".into());
+        let mut part = item_task("part", "Checkout crashes on coupon", "checkout page crashes on coupon code", TaskStatus::Intake, None);
+        part.labels.insert(PARENT_LABEL.into(), "item".into());
+        let mut sibling = item_task("sibling", "Checkout crashes on coupon", "checkout page crashes on coupon code", TaskStatus::Intake, None);
+        sibling.labels.insert(PARENT_LABEL.into(), "parent".into());
+
+        let candidates = duplicate_candidates(&item, &[itself, triage_run, parent, part, sibling]);
+        assert_eq!(candidates, Vec::new(), "{candidates:?}");
+    }
+
+    #[test]
+    fn closed_tasks_are_never_candidates_even_when_identical() {
+        let item = item_task("item", "Checkout crashes on coupon", "checkout page crashes on coupon code", TaskStatus::Intake, None);
+        let done = item_task("done", "Checkout crashes on coupon", "checkout page crashes on coupon code", TaskStatus::Done, None);
+        let cancelled = item_task("cancelled", "Checkout crashes on coupon", "checkout page crashes on coupon code", TaskStatus::Cancelled, None);
+        assert_eq!(duplicate_candidates(&item, &[done, cancelled]), Vec::new());
+    }
+
+    #[test]
+    fn a_task_blocked_by_a_failure_is_still_open_work() {
+        let item = item_task("item", "Checkout crashes on coupon", "checkout page crashes on coupon code", TaskStatus::Intake, None);
+        let mut blocked =
+            item_task("blocked", "Checkout crashes on coupon", "checkout page crashes on coupon code", TaskStatus::Blocked, None);
+        blocked.failure = Some(crate::task::TaskFailure {
+            kind: Some(crate::run::FailKind::AgentFailed),
+            run_id: Some("r1".into()),
+            attempt: Some(1),
+            at: at(),
+        });
+        let candidates = duplicate_candidates(&item, &[blocked]);
+        assert_eq!(candidates.len(), 1, "Task::is_settled says closed; it is not -- #166 uses is_terminal");
+    }
+
+    #[test]
+    fn stable_order_and_a_cap_of_five() {
+        let item = item_task("item", "Widget", "widget", TaskStatus::Intake, Some(received(Some("dup"))));
+        let others: Vec<Task> = ["g", "f", "e", "d", "c", "b", "a"]
+            .into_iter()
+            .map(|id| item_task(id, "Unrelated title", "unrelated text", TaskStatus::Intake, Some(received(Some("dup")))))
+            .collect();
+        let candidates = duplicate_candidates(&item, &others);
+        assert_eq!(candidates.len(), 5, "capped");
+        let ids: Vec<&str> = candidates.iter().map(|c| c.reference.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c", "d", "e"], "same score, so ordered by id");
+        // Same input, same output.
+        assert_eq!(duplicate_candidates(&item, &others), candidates);
+    }
+
+    #[test]
+    fn an_intake_row_without_candidates_still_deserialises() {
+        let json = r#"{
+            "stage": "received",
+            "source": {"kind": "cli"},
+            "requester": "the owner",
+            "received_at": "2026-09-25T10:00:00Z"
+        }"#;
+        let intake: Intake = serde_json::from_str(json).unwrap();
+        assert!(intake.candidates.is_empty());
+        assert!(candidates_with_verdicts(&intake).is_empty());
+    }
+
+    #[test]
+    fn a_confirmed_duplicate_blocks_release_and_close_duplicate_leads_the_next_actions() {
+        let mut a = assessment();
+        a.duplicates = vec![DuplicateCandidate {
+            kind: DuplicateKind::Task,
+            reference: "t-1".into(),
+            title: "The original report".into(),
+            evidence: "same bug, reported twice".into(),
+            matched: DuplicateMatch::Source,
+            score: None,
+            verdict: DuplicateVerdict::Confirmed,
+        }];
+        let triage = evaluate(&a, "x", at());
+        let Verdict::NeedsInfo { blockers } = &triage.verdict else { panic!("expected needs-info") };
+        assert!(blockers[0].contains("confirmed duplicate of t-1"), "{blockers:?}");
+
+        let mut intake = received(None);
+        intake.triage = Some(triage);
+        let actions = next_actions(&intake);
+        assert_eq!(actions[0].action, NextActionKind::CloseDuplicate);
+        assert_eq!(actions[0].reference.as_deref(), Some("t-1"));
+        assert!(actions[0].hint.contains("never the triage run"));
+    }
+
+    #[test]
+    fn a_rejected_duplicate_leaves_the_verdict_ready() {
+        let mut a = assessment();
+        a.duplicates = vec![DuplicateCandidate {
+            kind: DuplicateKind::Task,
+            reference: "t-1".into(),
+            title: "Not actually the same".into(),
+            evidence: "different root cause".into(),
+            matched: DuplicateMatch::Source,
+            score: None,
+            verdict: DuplicateVerdict::Rejected,
+        }];
+        assert_eq!(evaluate(&a, "x", at()).verdict, Verdict::Ready);
+    }
+
+    #[test]
+    fn validation_refuses_a_stored_candidate_left_unanswered_or_answered_without_evidence() {
+        let stored = vec![DuplicateCandidate {
+            kind: DuplicateKind::Task,
+            reference: "t-1".into(),
+            title: "The original".into(),
+            evidence: "same github reference".into(),
+            matched: DuplicateMatch::Source,
+            score: None,
+            verdict: DuplicateVerdict::Unverified,
+        }];
+        assert!(validate_duplicates(&stored, &[]).unwrap_err().contains("needs a verdict"));
+
+        let unverified = vec![DuplicateCandidate { verdict: DuplicateVerdict::Unverified, ..stored[0].clone() }];
+        assert!(validate_duplicates(&stored, &unverified).unwrap_err().contains("needs a verdict"));
+
+        let no_evidence =
+            vec![DuplicateCandidate { verdict: DuplicateVerdict::Confirmed, evidence: "  ".into(), ..stored[0].clone() }];
+        assert!(validate_duplicates(&stored, &no_evidence).unwrap_err().contains("needs evidence"));
+
+        let answered = vec![DuplicateCandidate { verdict: DuplicateVerdict::Rejected, ..stored[0].clone() }];
+        assert!(validate_duplicates(&stored, &answered).is_ok());
+
+        // A brand-new knowledge candidate, naming no stored one, is fine as
+        // long as it has its own evidence.
+        let knowledge = vec![DuplicateCandidate {
+            kind: DuplicateKind::Knowledge,
+            reference: "specs/duplicate-detection.md".into(),
+            title: "Duplicate detection design".into(),
+            evidence: "documents the same decision".into(),
+            matched: DuplicateMatch::Text,
+            score: Some(75),
+            verdict: DuplicateVerdict::Confirmed,
+        }];
+        assert!(validate_duplicates(&[], &knowledge).is_ok());
+        assert!(validate_duplicates(&stored, &knowledge).is_err(), "the stored one is still unanswered");
+    }
+
+    #[test]
+    fn candidates_with_verdicts_overlays_the_answer_and_keeps_a_knowledge_addition() {
+        let mut intake = received(None);
+        intake.candidates = vec![DuplicateCandidate {
+            kind: DuplicateKind::Task,
+            reference: "t-1".into(),
+            title: "The original".into(),
+            evidence: "same github reference".into(),
+            matched: DuplicateMatch::Source,
+            score: None,
+            verdict: DuplicateVerdict::Unverified,
+        }];
+        assert_eq!(candidates_with_verdicts(&intake), intake.candidates);
+
+        let mut a = assessment();
+        a.duplicates = vec![
+            DuplicateCandidate { verdict: DuplicateVerdict::Confirmed, evidence: "yes, same one".into(), ..intake.candidates[0].clone() },
+            DuplicateCandidate {
+                kind: DuplicateKind::Knowledge,
+                reference: "specs/checkout.md".into(),
+                title: "Checkout design".into(),
+                evidence: "documents the same flow".into(),
+                matched: DuplicateMatch::Text,
+                score: Some(70),
+                verdict: DuplicateVerdict::Confirmed,
+            },
+        ];
+        intake.triage = Some(evaluate(&a, "x", at()));
+        let overlaid = candidates_with_verdicts(&intake);
+        assert_eq!(overlaid.len(), 2);
+        assert_eq!(overlaid[0].verdict, DuplicateVerdict::Confirmed);
+        assert_eq!(overlaid[0].evidence, "yes, same one");
+        assert_eq!(overlaid[1].kind, DuplicateKind::Knowledge);
     }
 
     #[test]
@@ -1823,7 +2489,8 @@ mod tests {
 
     #[test]
     fn the_triage_instructions_carry_the_item_the_axes_the_rules_and_the_submit_command() {
-        let item = task("item-1", TaskStatus::Intake, Some(open(None)));
+        let record = open(None);
+        let item = task("item-1", TaskStatus::Intake, Some(record.clone()));
         let routes = vec![
             RouteOptions { scope: "demo".into(), ..Default::default() },
             RouteOptions {
@@ -1839,7 +2506,7 @@ mod tests {
                 }],
             },
         ];
-        let text = triage_instructions(&item, &routes, "/bin/factory");
+        let text = triage_instructions(&item, &record, &routes, "/bin/factory");
         for axis in Axis::ALL {
             assert!(text.contains(axis.pass_condition()), "{axis:?}");
         }
@@ -1850,7 +2517,30 @@ mod tests {
         assert!(text.contains("input `issue`: the number"));
         assert!(text.contains("step `review` Review #{{issue}} [builder]"));
         assert!(text.contains("\"split\""), "the shape shows a split");
+        assert!(text.contains("\"duplicates\""), "the shape shows duplicates too");
         assert!(text.contains("post nothing outside Factory"));
+        assert!(text.contains("None found among the open tasks"), "no candidates were given");
+    }
+
+    #[test]
+    fn the_triage_instructions_list_stored_candidates_for_the_run_to_answer() {
+        let mut record = open(None);
+        record.candidates = vec![DuplicateCandidate {
+            kind: DuplicateKind::IntakeItem,
+            reference: "item-9".into(),
+            title: "Same bug, reported again".into(),
+            evidence: "same github reference as item-9".into(),
+            matched: DuplicateMatch::Source,
+            score: None,
+            verdict: DuplicateVerdict::Unverified,
+        }];
+        let item = task("item-1", TaskStatus::Intake, Some(record.clone()));
+        let text = triage_instructions(&item, &record, &[], "/bin/factory");
+        assert!(text.contains("item-9"));
+        assert!(text.contains("\"match\": \"source\""));
+        assert!(text.contains("confirm or reject each"));
+        assert!(text.contains("factory knowledge search"));
+        assert!(!text.contains("None found among the open tasks"));
     }
 
     #[test]

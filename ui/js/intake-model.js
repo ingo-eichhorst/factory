@@ -100,6 +100,37 @@ export function verdictChips(card) {
   };
 }
 
+// ------------------------------------------------------------ duplicates
+
+/// `card.candidates` (the daemon's search overlaid with the triager's own
+/// answer, `factory_core::intake::candidates_with_verdicts`), normalised
+/// for the item modal: `kind`, `reference`, `title`, `evidence`, `verdict`
+/// and `matchText` -- "source" or "text 82%".
+export function duplicateRows(card) {
+  return ((card && card.candidates) || []).map(c => ({
+    kind: c.kind,
+    reference: c.reference,
+    title: c.title,
+    evidence: c.evidence,
+    verdict: c.verdict,
+    matchText: c.match === "text" ? `text ${c.score != null ? c.score : "?"}%` : "source",
+  }));
+}
+
+/// The first candidate the assessment itself confirmed -- what a wontfix
+/// dialog prefills `duplicate_of` from. Null when there is none.
+export function confirmedDuplicate(card) {
+  const duplicates = (card && card.triage && card.triage.assessment && card.triage.assessment.duplicates) || [];
+  return duplicates.find(d => d.verdict === "confirmed") || null;
+}
+
+/// The wontfix dialog's starting values: a confirmed duplicate's own
+/// reference and evidence when there is one, otherwise blank.
+export function wontfixDraft(card) {
+  const d = confirmedDuplicate(card);
+  return d ? { reason: "duplicate", duplicate_of: d.reference, evidence: d.evidence || "" } : { reason: "", duplicate_of: "", evidence: "" };
+}
+
 /// The card's triage task has ended and nothing is running it. The daemon
 /// says so in `triage_task_ended` since #122 -- a failed triage run leaves
 /// its task `blocked`, which the status alone cannot tell from one waiting
@@ -166,8 +197,11 @@ export const ACTION_LABELS = {
 };
 
 /// The daemon's next actions (`factory_core::intake::next_actions`), each
-/// with the dialog that carries it out.
+/// with the dialog that carries it out. A confirmed duplicate opens the
+/// same wontfix dialog the board's own button does -- `wontfixDraft` is
+/// what prefills it.
 const NEXT_ACTION = {
+  close_duplicate: { label: "Close as duplicate", act: "wontfix" },
   split: { label: "Split into items", act: "split" },
   add_info: { label: "Add information", act: "info" },
 };
@@ -310,6 +344,25 @@ export function decideProblem(action, values = {}) {
   return null;
 }
 
+/// One duplicate row -- a stored candidate answered, or a knowledge one
+/// added by hand -- as the wire's `DuplicateCandidate`. Dropped by
+/// `buildAssessment` when it names neither a kind nor a reference: an
+/// "add a knowledge candidate" row nobody filled in.
+export function buildDuplicateAnswer(row) {
+  const out = {
+    kind: row.kind,
+    reference: (row.reference || "").trim(),
+    title: (row.title || "").trim(),
+    match: row.match || "text",
+    verdict: row.verdict || "unverified",
+    evidence: (row.evidence || "").trim(),
+  };
+  if (out.match === "text" && row.score !== "" && row.score != null && !Number.isNaN(Number(row.score))) {
+    out.score = Number(row.score);
+  }
+  return out;
+}
+
 /// The assessment form's values as the wire's `Assessment`.
 export function buildAssessment(values) {
   const axes = (values.axes || []).map(a => {
@@ -329,6 +382,7 @@ export function buildAssessment(values) {
     routing.agent = values.agent.trim();
   }
   const split = buildParts(values.split);
+  const duplicates = (values.duplicates || []).map(buildDuplicateAnswer).filter(d => d.kind && d.reference);
   return {
     axes,
     category: (values.category || "").trim(),
@@ -339,6 +393,7 @@ export function buildAssessment(values) {
     summary: (values.summary || "").trim(),
     questions: lines(values.questions),
     ...(split.length ? { split } : {}),
+    ...(duplicates.length ? { duplicates } : {}),
   };
 }
 
@@ -351,9 +406,11 @@ function clean(map) {
   return out;
 }
 
-/// Mirror of `factory_core::intake::validate`, for the form: the first
-/// thing that would be refused, or null.
-export function assessmentProblem(a) {
+/// Mirror of `factory_core::intake::validate` and `validate_duplicates`,
+/// for the form: the first thing that would be refused, or null. `stored`
+/// is the item's own found candidates (`card.candidates`) -- omitted where
+/// there are none to leave unanswered.
+export function assessmentProblem(a, stored = []) {
   for (const check of a.axes) {
     if (!check.evidence) return `${check.axis}: one sentence of evidence`;
     if (check.axis === "observability" && !check.pass && !check.cost) return "a failed observability axis needs its cost";
@@ -366,6 +423,13 @@ export function assessmentProblem(a) {
   if (a.split && a.split.length) {
     const why = splitProblem(a.split);
     if (why) return `the proposed split: ${why}`;
+  }
+  for (const d of a.duplicates || []) {
+    if (!(d.evidence || "").trim()) return `duplicate ${d.reference || "candidate"}: evidence for its verdict`;
+  }
+  for (const s of stored) {
+    const answer = (a.duplicates || []).find(d => d.kind === s.kind && d.reference === s.reference);
+    if (!answer || answer.verdict === "unverified") return `possible duplicate ${s.reference}: confirm or reject it`;
   }
   return null;
 }
@@ -386,9 +450,13 @@ export function routeProblem(a, board) {
 }
 
 /// What the rules will make of the form as it stands: `ready`, or
-/// `needs_info` with the reasons.
+/// `needs_info` with the reasons. Mirrors `evaluate`'s order -- a confirmed
+/// duplicate first, then the axes, then complexity.
 export function previewVerdict(a) {
   const blockers = [];
+  for (const d of a.duplicates || []) {
+    if (d.verdict === "confirmed") blockers.push(`duplicate ${d.reference}`);
+  }
   for (const check of a.axes) {
     if (check.pass) continue;
     if (check.axis === "observability" && (check.cost === "low" || check.cost === "medium")) continue;

@@ -257,6 +257,12 @@ table.ik-axes.ik-form .checkrow { margin: 4px 0; text-transform: none; letter-sp
 .ik-parts { margin: 4px 0 8px; padding-left: 20px; font-size: 12px; }
 fieldset.ik-part { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 0 0 10px; }
 fieldset.ik-part legend { font: 500 11px/1 var(--mono); color: var(--ink-2); padding: 0 4px; }
+.ik-dupes { list-style: none; margin: 4px 0 8px; padding: 0; font-size: 12px; }
+.ik-dupes li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.ik-dupe-row { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 0 0 8px; }
+.ik-dup-confirmed { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+.ik-dup-rejected { color: var(--ink-2); }
+.ik-dup-unverified { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
 
 /* ---------------------------------------------------------- tasks board
    Columns are statuses and nothing else: blocked sits leftmost because it is
