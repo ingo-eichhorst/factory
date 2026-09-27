@@ -251,6 +251,11 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../../ui/js/dashboard-tiles-model.js"),
     ),
     (
+        "js/dashboard-editor-model.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/dashboard-editor-model.js"),
+    ),
+    (
         "js/activity.js",
         "text/javascript; charset=utf-8",
         include_str!("../../../ui/js/activity.js"),
