@@ -1761,6 +1761,54 @@ person, or a role given the standing permission, has to ask for it.
   webhooks; the Inbox; a non-GitHub source; creating a label that does not
   exist.
 
+**Intake sources: email and chat (`#167`).** Two more source kinds,
+`email` and `chat`, alongside `cli`, `ui`, `agent` and `github` -- a way for
+a conversational request (a mail, an iMessage) to reach the same quality
+gate everything else does, instead of becoming a task directly.
+
+- **Relayed, not trusted.** The daemon runs no mail or chat client of its
+  own; something else -- today, the company assistant's `factory_task`
+  tool -- reads the message and hands it in. Any caller holding
+  `intake.add` may relay one, Owner or Agent alike: `factory intake add
+  --source email|chat --provider <name> --reference <message-id>
+  --requester <who> [--received-at <RFC3339>]`, or the same fields on `POST
+  /api/intake`. The daemon trusts nothing about *what* is claimed beyond
+  that it is relaying: `IntakeSource.relayed_by` is always the caller's own
+  `Caller::describe()`, recorded next to the claimed `provider` and
+  `reference`, never something a caller can spell as somebody else.
+- **What a relay must give.** `--reference` is the provider's own message
+  id and is required -- the free-text "an issue URL, a mail id" every other
+  kind's `reference` already was, made load-bearing here since it is also
+  the identity. `--requester` is the sender's own address or handle and is
+  required too; unlike an agent's ordinary delegated item (folded into
+  `"<on-behalf> (via <caller>)"`), a relay keeps `requester` and
+  `relayed_by` as two separate fields. `--received-at` is the provider's own
+  receipt time -- refused if it is in the future, defaulted to now when
+  absent. `--provider` (`apple-mail`, `imessage`, …) is free text and
+  optional. `github` is never accepted this way -- it stays the poller's
+  alone -- and `--provider`/`--received-at` without `--source email|chat`
+  is refused outright, the same as a missing message id or requester: a
+  malformed relay, not a fallback to an ordinary item.
+- **Identity and replay.** An email or chat item's identity is `(kind,
+  provider, reference)` -- the same shape GitHub's canonical issue URL
+  already gave `github`. `Engine::receive_intake` looks an item's identity
+  up and creates it under one lock (`#166`'s poller went through the exact
+  same path already; this generalises it), so a relay that retries --
+  hands in the same message twice, or two callers relay it at once --
+  finds the item it already made and returns it unchanged, with no second
+  `intake_received` journal entry. `cli`, `ui` and `agent` items are
+  unaffected: they still always create, exactly as before, and `#166`'s
+  duplicate-candidate search is their only signal that a repeat came in.
+- **Surfaces.** `intake show` and the board print the kind, the provider
+  when there is one, and who relayed it. `ui/js/intake-model.js` labels
+  the two new kinds.
+- **Left out on purpose:** an adapter that reads mail or chat itself --
+  the daemon is handed items, never fetching them; autonomous ingestion
+  by any assistant-side watcher (a human or its own policy decides what
+  gets relayed); a Gmail bridge; replies or any other outbound effect;
+  updating an item when its source message is later edited; duplicate
+  detection across sources.
+
 ## Operations
 
 L4 Process's third tab (`#106`), next to Tasks and Workflows: how the line
