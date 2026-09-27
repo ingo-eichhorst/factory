@@ -343,13 +343,23 @@ impl Engine {
         } else {
             BTreeSet::new()
         };
-        let (gates, daemon_fact, credential_rows) = self.dataset_level_facts(&per_scope_applied).await?;
+        let (gates, daemon_fact, credential_rows, backup_fact) = self.dataset_level_facts(&per_scope_applied).await?;
 
         let mut reports = Vec::new();
         let mut findings = Vec::new();
         for ((t, applied), (_, tree)) in per_scope_applied.iter().zip(&inputs.trees) {
             let evidence = self
-                .evidence_for_scope(&inputs.snapshot, t, applied, &tags, &[], &gates, daemon_fact, &credential_rows)
+                .evidence_for_scope(
+                    &inputs.snapshot,
+                    t,
+                    applied,
+                    &tags,
+                    &[],
+                    &gates,
+                    daemon_fact,
+                    &credential_rows,
+                    backup_fact.clone(),
+                )
                 .await?;
             findings.extend(policy::evidence_findings(&evidence, &t.name).into_iter().map(|f| quality::Finding {
                 kind: quality::FindingKind::AmbiguousCheckTarget,

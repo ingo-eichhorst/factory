@@ -297,11 +297,21 @@ async fn evaluate_baseline_over_scopes(
         per_scope_applied.push((t, applied));
     }
 
-    let (gates, daemon_fact, credential_rows) = engine.dataset_level_facts(&per_scope_applied).await?;
+    let (gates, daemon_fact, credential_rows, backup_fact) = engine.dataset_level_facts(&per_scope_applied).await?;
     let mut statuses_by_scope = BTreeMap::new();
     for (t, applied) in &per_scope_applied {
         let evidence = engine
-            .evidence_for_scope(snapshot, t, applied, tags, all_attestations, &gates, daemon_fact, &credential_rows)
+            .evidence_for_scope(
+                snapshot,
+                t,
+                applied,
+                tags,
+                all_attestations,
+                &gates,
+                daemon_fact,
+                &credential_rows,
+                backup_fact.clone(),
+            )
             .await?;
         findings.extend(policy::evidence_findings(&evidence, &t.name));
         let statuses = policy::evaluate(applied, &evidence, now);
@@ -341,11 +351,21 @@ async fn evaluate_scenario_over_scopes(
         per_scope_applied.push((t, applied));
     }
 
-    let (gates, daemon_fact, credential_rows) = engine.dataset_level_facts(&per_scope_applied).await?;
+    let (gates, daemon_fact, credential_rows, backup_fact) = engine.dataset_level_facts(&per_scope_applied).await?;
     let mut statuses_by_scope = BTreeMap::new();
     for (t, applied) in &per_scope_applied {
         let evidence = engine
-            .evidence_for_scope(snapshot, t, applied, tags, all_attestations, &gates, daemon_fact, &credential_rows)
+            .evidence_for_scope(
+                snapshot,
+                t,
+                applied,
+                tags,
+                all_attestations,
+                &gates,
+                daemon_fact,
+                &credential_rows,
+                backup_fact.clone(),
+            )
             .await?;
         policy_findings.extend(policy::evidence_findings(&evidence, &t.name));
         let statuses = policy::evaluate(applied, &evidence, now);
@@ -726,9 +746,19 @@ impl Engine {
 
         let all_attestations = self.policies.all().await?;
         let per_scope_applied = vec![(&scope_obj, scenario_applied.clone())];
-        let (gates, daemon_fact, credential_rows) = self.dataset_level_facts(&per_scope_applied).await?;
+        let (gates, daemon_fact, credential_rows, backup_fact) = self.dataset_level_facts(&per_scope_applied).await?;
         let evidence = self
-            .evidence_for_scope(&snapshot, &scope_obj, &scenario_applied, &tags, &all_attestations, &gates, daemon_fact, &credential_rows)
+            .evidence_for_scope(
+                &snapshot,
+                &scope_obj,
+                &scenario_applied,
+                &tags,
+                &all_attestations,
+                &gates,
+                daemon_fact,
+                &credential_rows,
+                backup_fact,
+            )
             .await?;
 
         let baseline_statuses = policy::evaluate(&baseline_applied, &evidence, now);

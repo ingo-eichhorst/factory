@@ -80,6 +80,21 @@ fn needs_daemon_facts(applied: &[policy::Applied]) -> bool {
         .any(|check| matches!(check, policy::Check::Daemon { .. }))
 }
 
+/// Whether any check among `applied` is `daemon` naming one of the three
+/// `backup_*` facts (`#154`) -- gates `Engine::backup_fact`, the one part of
+/// this module's evidence gathering that reads the destination and the
+/// backup store, behind an actual need for it. Distinct from
+/// `needs_daemon_facts`: a catalogue asking only `power_assertion` must
+/// never pay for it.
+fn needs_backup_facts(applied: &[policy::Applied]) -> bool {
+    applied.iter().flat_map(|a| &a.evidence).any(|check| {
+        matches!(
+            check,
+            policy::Check::Daemon { fact } if matches!(fact.as_str(), "backup_recent" | "backup_offsite" | "backup_verified")
+        )
+    })
+}
+
 fn needs_dependencies_facts(applied: &[policy::Applied]) -> bool {
     applied.iter().flat_map(|a| &a.evidence)
         .any(|check| matches!(check, policy::Check::Dependencies { .. }))
@@ -433,9 +448,12 @@ impl Engine {
     /// scope of their own, so a dataset named by two scopes' catalogues is
     /// still only walked once), the `daemon` fact (the same for every scope,
     /// resolved only when some scope's catalogue actually asks a `daemon`
-    /// question), and the credential inventory behind `secrets` (the one
-    /// part of this that touches the filesystem, gated the same way).
-    /// Shared by `policy_report` and `scenarios::Engine::scenarios_report`
+    /// question), the `backup_*` fact (`#154`, gated the same way but on its
+    /// own three names -- `needs_backup_facts` -- since it reads the
+    /// destination and the backup store, not just the config snapshot
+    /// `daemon_facts` does), and the credential inventory behind `secrets`
+    /// (the one part of this that touches the filesystem, gated the same
+    /// way). Shared by `policy_report` and `scenarios::Engine::scenarios_report`
     /// (`#100`), which calls this once for the baseline `Applied` sets and
     /// again for each scenario's own -- a scenario's overlay can name a
     /// `gate`/`daemon`/`secrets` check the baseline never did (an
@@ -444,7 +462,12 @@ impl Engine {
     pub(crate) async fn dataset_level_facts(
         &self,
         per_scope_applied: &[(&Scope, Vec<policy::Applied>)],
-    ) -> Result<(BTreeMap<String, policy::GateFact>, Option<policy::DaemonFact>, Vec<CredentialRow>)> {
+    ) -> Result<(
+        BTreeMap<String, policy::GateFact>,
+        Option<policy::DaemonFact>,
+        Vec<CredentialRow>,
+        Option<factory_core::backup::BackupFact>,
+    )> {
         let mut dataset_names: BTreeSet<String> = BTreeSet::new();
         for (_, applied) in per_scope_applied {
             dataset_names.extend(gate_dataset_names(applied));
@@ -459,7 +482,12 @@ impl Engine {
         } else {
             Vec::new()
         };
-        Ok((gates, daemon_fact, credential_rows))
+        let backup_fact = if per_scope_applied.iter().any(|(_, applied)| needs_backup_facts(applied)) {
+            Some(self.backup_fact(Utc::now()).await?)
+        } else {
+            None
+        };
+        Ok((gates, daemon_fact, credential_rows, backup_fact))
     }
 
     /// One scope's own `Evidence`, built from `applied` (its own applicable
@@ -481,6 +509,7 @@ impl Engine {
         gates: &BTreeMap<String, policy::GateFact>,
         daemon_fact: Option<policy::DaemonFact>,
         credential_rows: &[CredentialRow],
+        backup_fact: Option<factory_core::backup::BackupFact>,
     ) -> Result<policy::Evidence> {
         let ancestor_names: BTreeSet<&str> = snapshot
             .config
@@ -517,6 +546,7 @@ impl Engine {
             secrets,
             daemon: daemon_fact,
             dependencies,
+            backup: backup_fact,
         })
     }
 
@@ -566,10 +596,20 @@ impl Engine {
         // against its own, larger `applied` sets, so a policy fact is
         // gathered by exactly one function regardless of which report is
         // asking for it.
-        let (gates, daemon_fact, credential_rows) = self.dataset_level_facts(&per_scope_applied).await?;
+        let (gates, daemon_fact, credential_rows, backup_fact) = self.dataset_level_facts(&per_scope_applied).await?;
         for (t, applied) in &per_scope_applied {
             let evidence = self
-                .evidence_for_scope(&snapshot, t, applied, &tags, &all_attestations, &gates, daemon_fact, &credential_rows)
+                .evidence_for_scope(
+                    &snapshot,
+                    t,
+                    applied,
+                    &tags,
+                    &all_attestations,
+                    &gates,
+                    daemon_fact,
+                    &credential_rows,
+                    backup_fact.clone(),
+                )
                 .await?;
             findings.extend(policy::evidence_findings(&evidence, &t.name));
 
@@ -685,6 +725,11 @@ impl Engine {
             BTreeMap::new()
         };
         let daemon = needs_daemon_facts(&applied).then(|| self.daemon_facts());
+        let backup = if needs_backup_facts(&applied) {
+            Some(self.backup_fact(Utc::now()).await?)
+        } else {
+            None
+        };
         let dependencies = if needs_dependencies_facts(&applied) {
             Some(crate::dependencies::fact(&self.dependencies_report(&scope_obj.name).await?))
         } else {
@@ -700,6 +745,7 @@ impl Engine {
             secrets,
             daemon,
             dependencies,
+            backup,
         };
         let evaluated = policy::evaluate(&applied, &evidence, Utc::now())
             .into_iter()
@@ -1580,6 +1626,28 @@ mod tests {
         assert!(facts.foreman_enabled);
         assert_eq!(facts.http_loopback_only, Some(true), "the default bind, 127.0.0.1:8787, is loopback");
         assert!(facts.power_assertion);
+    }
+
+    /// `#154`: `dataset_level_facts` never gathers the backup fact when no
+    /// scope's applicable controls name a `backup_*` fact -- `house.yaml`'s
+    /// `j` names only `power_assertion`. The positive side (a catalogue that
+    /// does name one gathers it, and correctly) is `backup::tests`'
+    /// `backup_and_verify_satisfy_a_backup_verified_control_and_leave_backup_offsite_open`,
+    /// which would see `art-32-restore` stuck at "not resolved" rather than
+    /// `Satisfied` if the gather were ever skipped there.
+    #[tokio::test]
+    async fn dataset_level_facts_never_gathers_the_backup_fact_when_no_check_names_one() {
+        let engine = l123_test_engine();
+        let snapshot = engine.factory_snapshot();
+        let (catalogues, _findings, _tags) = engine.load_catalogues_and_tags().await.unwrap();
+        let chain = engine.policy_chain("root");
+        let (applied, _cf) = policy::applicable(&catalogues, &chain);
+        assert!(!needs_backup_facts(&applied), "house.yaml names no backup_* fact");
+
+        let root_scope = snapshot.config.scopes.iter().find(|s| s.name == "root").unwrap();
+        let per_scope_applied = vec![(root_scope, applied)];
+        let (_, _, _, backup_fact) = engine.dataset_level_facts(&per_scope_applied).await.unwrap();
+        assert!(backup_fact.is_none(), "no check here names a backup_* fact, so it must never be gathered");
     }
 
     // -- policy_remediate / policy_export (#83) ------------------------------
