@@ -87,10 +87,15 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         engine.recheck_harnesses();
 
         // -- tasks held on max_sessions (#179) --------------------------------
-        // The backstop for a restart, a raised limit, or a wakeup the
-        // capacity-release channel dropped; every ordinary release reaches
-        // its waiting task immediately through that channel instead.
-        engine.recheck_capacity().await;
+        // Queued onto the same capacity-release channel a run ending uses,
+        // not run inline: one slow dispatch here would otherwise delay every
+        // due task this tick still has to fire, the timeout checks below,
+        // and supervise_agents, exactly what tokio::spawn-ing each due
+        // dispatch above already avoids. The backstop for a restart, a
+        // raised limit, or a wakeup the channel dropped; every ordinary
+        // release reaches its waiting task immediately through that channel
+        // on its own.
+        engine.enqueue_capacity_sweep();
 
         // -- bench runs ----------------------------------------------------
         // A periodic sweep, not just a reaction to a settle: it is what

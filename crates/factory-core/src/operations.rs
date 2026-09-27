@@ -1262,6 +1262,11 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             };
             let reason = if active {
                 format!("{what} passed while the previous run was still going")
+            } else if task.slot_wait.is_some() {
+                // `#179`: dispatch was tried and held on `max_sessions`, not
+                // skipped outright -- the Queued item beside this exception
+                // already says so; this just avoids contradicting it.
+                format!("{what} passed while it was waiting for a capacity slot")
             } else {
                 format!("{what} passed and nothing was dispatched")
             };
@@ -2045,6 +2050,25 @@ mod tests {
         let queued = r.aging.items.iter().find(|i| i.stage == Stage::Queued).unwrap();
         assert_eq!(queued.age_s, 1800.0);
         assert_eq!(queued.basis, PaceBasis::NotPaced);
+    }
+
+    /// `#179`: a late slot held on capacity says so, rather than claiming
+    /// nothing was dispatched right beside the Queued item that says
+    /// otherwise.
+    #[test]
+    fn a_late_slot_held_on_capacity_says_so_not_that_nothing_was_dispatched() {
+        let mut t = scheduled(task("held", "demo"), ago(30));
+        t.slot_wait = Some(crate::task::SlotWait {
+            agent: "codex".into(),
+            scope: "demo".into(),
+            trigger: crate::run::Trigger::Schedule,
+            queued_at: ago(30),
+            scheduled_for: Some(ago(30)),
+            since: ago(30),
+        });
+        let r = report(&input(&[t], &[]));
+        let e = r.attention.iter().find(|e| e.kind == ExceptionKind::ScheduleLate).unwrap();
+        assert!(e.reason.ends_with("waiting for a capacity slot"), "{}", e.reason);
     }
 
     /// `#179`: a task waiting for a `max_sessions` slot counts in the queue

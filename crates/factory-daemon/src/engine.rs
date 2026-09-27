@@ -63,6 +63,20 @@ impl Due {
     }
 }
 
+/// What the capacity-release worker (`Engine::spawn_capacity_release_worker`)
+/// was sent (`#179`). One channel, one consumer, processed one event at a
+/// time: `Release` and `Sweep` both admit from `waiting_tasks()`, and
+/// `dispatch` has no guard against two overlapping admission attempts for
+/// the same waiting task -- keeping them off separate concurrent tasks is
+/// what closes that race, not anything inside `dispatch` itself.
+pub(crate) enum CapacityEvent {
+    /// A run ending: try to admit whatever is waiting on this (scope, agent).
+    Release(String, String),
+    /// The scheduler tick's own sweep: try every waiting task, for a
+    /// restart, a raised limit, or a `Release` this channel dropped.
+    Sweep,
+}
+
 /// Why a `schedule_skipped` entry's slots passed -- `data.reason` on the
 /// entry. Three causes produce the same state (a past `next_run_at` on a
 /// pending task), so the entry says which one it was.
@@ -307,16 +321,17 @@ pub struct Engine {
     /// fallible steps dispatch takes afterward (the worktree, the harness's
     /// own launch).
     pub(crate) admission_lock: tokio::sync::Mutex<()>,
-    /// A run ending sends its `(scope, agent)` here so a slot freeing wakes
-    /// whatever is waiting on it right away, without the `&self` sites that
-    /// notice a run end (`report`, `cancel_task_run`) needing an `Arc<Self>`
-    /// of their own -- the same shape `verify_tx`/`spawn_verifier` already
-    /// use for exactly this reason. The scheduler tick's own sweep
-    /// (`recheck_capacity`) is the backstop for a restart, a raised limit, or
-    /// a wakeup this channel drops.
-    pub(crate) capacity_release_tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
-    pub(crate) capacity_release_rx:
-        std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(String, String)>>>,
+    /// A run ending, or the scheduler tick, sends a [`CapacityEvent`] here so
+    /// one worker admits waiting tasks one event at a time -- without the
+    /// `&self` sites that notice a run end (`report`, `cancel_task_run`)
+    /// needing an `Arc<Self>` of their own, the same shape
+    /// `verify_tx`/`spawn_verifier` already use for exactly that reason, and
+    /// without a release and the tick's own sweep ever running at once: both
+    /// read `waiting_tasks()` and admit from it, and `dispatch` has no
+    /// existing-run guard of its own to fall back on if two admission
+    /// attempts for the same waiting task overlapped.
+    pub(crate) capacity_release_tx: tokio::sync::mpsc::UnboundedSender<CapacityEvent>,
+    pub(crate) capacity_release_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<CapacityEvent>>>,
 }
 
 impl Engine {
@@ -2408,9 +2423,28 @@ impl Engine {
                             scheduled_for: due.scheduled_for,
                             since: Utc::now(),
                         };
+                        // Forced to `Pending` even from `Blocked` (a
+                        // scheduled task that exhausted its retries, tried
+                        // again on its next regular slot, and hit capacity):
+                        // `waiting_tasks` only ever lists `Pending` rows, so
+                        // a wait left sitting on `Blocked` would never be
+                        // seen by a release or the tick sweep, and `fires()`
+                        // already keeps the schedule from retrying it in the
+                        // meantime. `failure` stays -- `TaskFailure`'s own
+                        // doc note is that `Pending` with a failure still
+                        // set is exactly what a queued retry already looks
+                        // like, and `create_run` clears it once this
+                        // actually dispatches.
                         let _ = self
                             .store
-                            .update(task_id, &TaskPatch { slot_wait: Some(wait), ..Default::default() })
+                            .update(
+                                task_id,
+                                &TaskPatch {
+                                    status: Some(TaskStatus::Pending),
+                                    slot_wait: Some(wait),
+                                    ..Default::default()
+                                },
+                            )
                             .await;
                         self.entry(task_id, TaskEntry::new("daemon", "capacity_held", reason)).await;
                         self.publish_task(task_id).await;
@@ -3152,21 +3186,41 @@ impl Engine {
     /// `Arc<Self>`, and a channel send needs no more than that, the same
     /// reason `enqueue_verification` gets away with it.
     pub(crate) fn enqueue_capacity_release(&self, scope: &str, agent: &str) {
-        let _ = self.capacity_release_tx.send((scope.to_string(), agent.to_string()));
+        let _ = self.capacity_release_tx.send(CapacityEvent::Release(scope.to_string(), agent.to_string()));
     }
 
-    /// Start the capacity-release worker: every `(scope, agent)`
-    /// `enqueue_capacity_release` sends is turned into an admission attempt
-    /// here, where an `Arc<Self>` is available. Called once, at startup,
-    /// like `spawn_verifier`; a second call is a no-op.
+    /// The scheduler tick's own sweep, queued rather than run inline: a tick
+    /// that blocked on one slow dispatch would delay every due task it fires
+    /// afterward, the ack/run-timeout checks, and `supervise_agents` behind
+    /// it -- exactly why the due-task loop already spawns each dispatch
+    /// instead of awaiting it in place, and `recheck_harnesses` backgrounds
+    /// itself. Going through the same channel `Release` does also means a
+    /// sweep and a release can never run at once.
+    pub(crate) fn enqueue_capacity_sweep(&self) {
+        let _ = self.capacity_release_tx.send(CapacityEvent::Sweep);
+    }
+
+    /// Start the capacity-release worker: every [`CapacityEvent`]
+    /// `enqueue_capacity_release`/`enqueue_capacity_sweep` sends is handled
+    /// here, one at a time, where an `Arc<Self>` is available. One consumer
+    /// is the point: `release_waiting` and `recheck_capacity` both read
+    /// `waiting_tasks()` and admit from it, and `dispatch` has no guard
+    /// against two overlapping admission attempts for the same waiting task,
+    /// so running them one after another here -- never on separate spawned
+    /// tasks -- is what keeps a release and a sweep from both admitting the
+    /// same task at once. Called once, at startup, like `spawn_verifier`; a
+    /// second call is a no-op.
     pub fn spawn_capacity_release_worker(self: &Arc<Self>) {
         let Some(mut rx) = self.capacity_release_rx.lock().unwrap().take() else {
             return;
         };
         let engine = self.clone();
         tokio::spawn(async move {
-            while let Some((scope, agent)) = rx.recv().await {
-                engine.release_waiting(&scope, &agent).await;
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CapacityEvent::Release(scope, agent) => engine.release_waiting(&scope, &agent).await,
+                    CapacityEvent::Sweep => engine.recheck_capacity().await,
+                }
             }
         });
     }
@@ -4351,6 +4405,50 @@ mod tests {
             assert!(engine.store.get(&second.id).await.unwrap().unwrap().slot_wait.is_none());
         }
 
+        /// A release and the tick's own sweep both read `waiting_tasks()`
+        /// and admit from it, and `dispatch` has no guard of its own against
+        /// two overlapping admission attempts for the same waiting task --
+        /// routing both through the one capacity-release worker, never onto
+        /// separate spawned tasks, is what keeps them from both admitting
+        /// the same waiter at once. A burst of releases and sweeps racing
+        /// for the one freed slot must still open exactly one run.
+        #[tokio::test]
+        async fn capacity_a_release_and_a_sweep_racing_for_the_same_slot_never_both_admit_it() {
+            let engine = capacity_engine(vec![agent("shell", "shell", Some(1))], None);
+            engine.spawn_capacity_release_worker();
+            let holder = task(&engine, "holder", "shell").await;
+            engine.start_run(&holder.id, Trigger::Manual).await;
+            let waiter = task(&engine, "waiter", "shell").await;
+            engine.start_run(&waiter.id, Trigger::Manual).await;
+            assert!(engine.store.active_run(&waiter.id).await.unwrap().is_none());
+
+            let mut bus = engine.bus.subscribe();
+            report_done(&engine, &holder.id).await;
+            // A burst: before the fix, `release_waiting` and
+            // `recheck_capacity` ran on separate spawned tasks and could
+            // both pass admission for `waiter` before either cleared its
+            // wait.
+            for _ in 0..20 {
+                engine.enqueue_capacity_release("demo", "shell");
+                engine.enqueue_capacity_sweep();
+            }
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if let Event::RunStarted { run } = bus.recv().await.unwrap() {
+                        if run.task_id == waiter.id {
+                            return;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the waiter should be admitted once");
+
+            let runs = engine.store.runs(&waiter.id, 10).await.unwrap();
+            assert_eq!(runs.len(), 1, "admitted exactly once, however many release/sweep events raced for it: {runs:?}");
+        }
+
         /// A scope-wide cap holds across every agent in it, with no agent
         /// cap of its own on either.
         #[tokio::test]
@@ -4391,6 +4489,40 @@ mod tests {
                 assert_eq!(wait.trigger, trigger);
                 assert_eq!(stored.status, TaskStatus::Pending);
             }
+        }
+
+        /// A scheduled task that exhausted its retries is `Blocked` (with a
+        /// `failure`), not `Pending` -- but its next regular slot still
+        /// tries it again (`fires()`'s `blocked_by_failure` branch). If that
+        /// attempt is held on capacity, the hold must force it out of
+        /// `Blocked`: `waiting_tasks` only ever lists `Pending` rows, so a
+        /// wait left sitting on `Blocked` would be invisible to every
+        /// release and the tick sweep alike, and stay stuck forever.
+        #[tokio::test]
+        async fn capacity_a_task_blocked_by_a_failure_is_forced_pending_when_held_and_still_gets_released() {
+            let engine = capacity_engine(vec![agent("shell", "shell", Some(1))], None);
+            let failing = task(&engine, "exhausted its retries", "shell").await;
+            let after_failure = engine.fail_task_for_test(&failing.id, FailKind::AgentFailed).await;
+            assert_eq!(after_failure.status, TaskStatus::Blocked, "sanity: blocked by the failure, not pending");
+
+            let holder = task(&engine, "holds the one slot", "shell").await;
+            engine.start_run(&holder.id, Trigger::Manual).await;
+            assert!(engine.store.active_run(&holder.id).await.unwrap().is_some());
+
+            // Its next regular slot tries again, and is held.
+            engine.start_run_due(&failing.id, Trigger::Schedule, Due::now()).await;
+            let stored = engine.store.get(&failing.id).await.unwrap().unwrap();
+            assert_eq!(stored.status, TaskStatus::Pending, "forced out of Blocked so it can be found and released");
+            assert!(stored.slot_wait.is_some());
+
+            // Free the slot; the tick sweep (not just a same-agent release)
+            // must still find and admit it.
+            report_done(&engine, &holder.id).await;
+            engine.recheck_capacity().await;
+            assert!(
+                engine.store.active_run(&failing.id).await.unwrap().is_some(),
+                "the previously-blocked task was admitted, not left waiting forever"
+            );
         }
 
         /// `factory status`'s own reading: one row per agent that declares
