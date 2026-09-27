@@ -96,18 +96,13 @@ use std::path::{Path, PathBuf};
 /// `min`. `Medium` is today's rule (`ObservabilityCost::Low` or `Medium`
 /// pass through, `High` never does), and every scope's default with no
 /// definition at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tolerance {
     None,
     Low,
+    #[default]
     Medium,
-}
-
-impl Default for Tolerance {
-    fn default() -> Self {
-        Tolerance::Medium
-    }
 }
 
 impl Tolerance {
