@@ -1915,6 +1915,7 @@ mod tests {
             summary: String::new(),
             questions: Vec::new(),
             split: Vec::new(),
+            duplicates: Vec::new(),
         }
     }
 

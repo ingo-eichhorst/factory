@@ -2493,6 +2493,7 @@ mod tests {
             summary: "bounded".into(),
             questions: vec![],
             split: vec![],
+            duplicates: vec![],
         }
     }
 
