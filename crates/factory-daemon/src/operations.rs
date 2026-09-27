@@ -291,13 +291,15 @@ impl Engine {
             Vec::new()
         };
 
-        // Every scope's own `max_sessions` (`#179`), root included; a scope
-        // that declares none is simply absent, not zero.
+        // Every scope's own `max_sessions` (`#179`), root included --
+        // discovery already folds the root's own `scope:` block into
+        // `config.scopes` (`discovery::apply`), so this alone is every
+        // scope, the same list `reconcile_agents` walks. A scope that
+        // declares none is simply absent, not zero.
         let capacity: BTreeMap<String, u32> = snapshot
             .config
-            .scope
+            .scopes
             .iter()
-            .chain(&snapshot.config.scopes)
             .filter_map(|s| s.max_sessions.map(|m| (s.name.clone(), m)))
             .collect();
 

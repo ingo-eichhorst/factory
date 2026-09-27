@@ -1220,7 +1220,12 @@ impl Engine {
         let factory = self.factory_snapshot();
         let tasks = self.store.list(&TaskFilter::default()).await?;
         let mut capacity = Vec::new();
-        for scope in factory.config.scope.iter().chain(&factory.config.scopes) {
+        // `config.scopes` alone is every scope, root included: discovery
+        // already folds the root's own `scope:` block into it
+        // (`discovery::apply`), the same list `reconcile_agents` walks.
+        // Chaining `config.scope` on top, as `Config::validate` does to
+        // cover its own pre-discovery call, would count the root twice.
+        for scope in &factory.config.scopes {
             for agent in scope.declared_agents() {
                 let Some(max) = agent.max_sessions else { continue };
                 let name = agent.name();
@@ -4402,6 +4407,29 @@ mod tests {
             let row = status.capacity.iter().find(|r| r.agent == "codex").expect("a row for the declared cap");
             assert_eq!(row.scope, "demo");
             assert_eq!((row.in_use, row.max, row.waiting), (2, 2, 2));
+        }
+
+        /// Regression: `discovery::apply` folds the instance root's own
+        /// `scope:` block into `config.scopes` and leaves `config.scope` set
+        /// too (`Config::validate`'s own `self.scope.iter().chain(&self.scopes)`
+        /// relies on exactly this to also cover its pre-discovery call). A
+        /// runtime reader that chains the same way, after discovery has
+        /// already run, counts the root scope's agents twice.
+        #[tokio::test]
+        async fn capacity_root_scope_is_not_counted_twice_after_discovery() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(2))], None);
+            {
+                let mut factory = engine.factory.write().unwrap();
+                let root = factory.config.scopes[0].clone();
+                factory.config.scope = Some(root);
+            }
+            let status = engine.status().await.unwrap();
+            assert_eq!(
+                status.capacity.iter().filter(|r| r.agent == "codex").count(),
+                1,
+                "one row, not one per place the root scope's data is reachable from: {:?}",
+                status.capacity
+            );
         }
 
         /// A run this daemon is holding open on someone's answer, with no
