@@ -4091,6 +4091,362 @@ mod tests {
         dir
     }
 
+    // ==================================================================
+    // #179: max_sessions enforced with a real admission queue
+    // ==================================================================
+    mod capacity_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use factory_core::adapter::runtime::{AgentRuntime, RuntimeEventStream};
+        use factory_core::config::HarnessHealthConfig;
+        use factory_core::task::SessionRef;
+
+        /// A runtime that opens a session without doing anything real: a
+        /// dispatch really succeeds and the run really stays open -- counted
+        /// as using a slot -- until something reports on it. No subprocess,
+        /// no herdr socket, nothing the machine running the test needs.
+        struct StubRuntime;
+
+        #[async_trait]
+        impl AgentRuntime for StubRuntime {
+            fn name(&self) -> &str {
+                "stub"
+            }
+            async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
+                Ok(SessionRef { runtime: "stub".into(), handle: format!("stub-{}", req.id), meta: Default::default() })
+            }
+            async fn submit(&self, _session: &SessionRef, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn status(&self, _session: &SessionRef) -> Result<RuntimeStatus> {
+                Ok(RuntimeStatus::Unknown)
+            }
+            async fn send_text(&self, _session: &SessionRef, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send_keys(&self, _session: &SessionRef, _keys: &[String]) -> Result<()> {
+                Ok(())
+            }
+            async fn read(&self, _session: &SessionRef, _lines: u32) -> Result<String> {
+                Ok(String::new())
+            }
+            async fn stop(&self, _session: &SessionRef) -> Result<()> {
+                Ok(())
+            }
+            async fn watch(&self) -> Result<Option<RuntimeEventStream>> {
+                Ok(None)
+            }
+        }
+
+        /// A scope declaring `agents` over a `stub` runtime with the harness
+        /// probe off, so a dispatch really succeeds and really keeps its
+        /// session open -- exactly what counting slots needs.
+        fn capacity_engine(agents: Vec<ScopeAgent>, scope_max_sessions: Option<u32>) -> Arc<Engine> {
+            let scope_path = temp_dir("capacity");
+            let config = Config {
+                version: 1,
+                instance: Instance { id: "test".into(), name: "test".into() },
+                daemon: DaemonConfig {
+                    power_assertion: false,
+                    harness_health: HarnessHealthConfig { enabled: false, ..Default::default() },
+                    ..DaemonConfig::default()
+                },
+                roles: Default::default(),
+                dashboard: None,
+                policies: Default::default(),
+                quality: Default::default(),
+                scope: None,
+                scopes: vec![Scope {
+                    id: "scope-id".into(),
+                    name: "demo".into(),
+                    path: scope_path,
+                    agent: None,
+                    agents,
+                    runtime: Some("stub".into()),
+                    git: None,
+                    task_store: None,
+                    max_sessions: scope_max_sessions,
+                    roles: Default::default(),
+                    dashboard: None,
+                    policies: Default::default(),
+                    quality: Default::default(),
+                    intake: Default::default(),
+                    dependencies: Default::default(),
+                }],
+                infrastructure: Default::default(),
+                plugins_dir: None,
+            };
+            let factory = Factory {
+                root: std::env::temp_dir().join(format!("factory-capacity-test-{}", uuid::Uuid::new_v4())),
+                config,
+            };
+            let mut registry = Registry::with_builtins();
+            registry.add_runtime(Arc::new(StubRuntime), "test");
+            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+            Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()))
+        }
+
+        fn agent(name: &str, harness: &str, max_sessions: Option<u32>) -> ScopeAgent {
+            ScopeAgent {
+                name: Some(name.into()),
+                harness: harness.into(),
+                lifetime: Lifetime::Task,
+                role: Role::default(),
+                autostart: None,
+                args: Vec::new(),
+                sandbox: Sandbox::None,
+                provider: None,
+                max_sessions,
+            }
+        }
+
+        async fn task(engine: &Arc<Engine>, title: &str, agent_name: &str) -> Task {
+            engine
+                .create(NewTask {
+                    title: title.into(),
+                    instructions: "true".into(),
+                    scope: Some("demo".into()),
+                    agent: Some(agent_name.into()),
+                    worktree: Some(false),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        }
+
+        async fn report_done(engine: &Arc<Engine>, task_id: &str) {
+            let run = engine.store.active_run(task_id).await.unwrap().unwrap();
+            engine
+                .report(
+                    task_id,
+                    TaskReport {
+                        status: Some(RunStatus::Done),
+                        message: None,
+                        result: Some("ok".into()),
+                        send_to: None,
+                        error: None,
+                        token: run.token.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        /// The triage's own scenario: `max_sessions: 2` on a shell agent,
+        /// four manual runs -- two run, two wait with their reason journaled.
+        #[tokio::test]
+        async fn capacity_holds_the_third_and_fourth_of_four_manual_runs_at_a_limit_of_two() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(2))], None);
+            let mut tasks = Vec::new();
+            for i in 0..4 {
+                let t = task(&engine, &format!("run {i}"), "codex").await;
+                engine.start_run(&t.id, Trigger::Manual).await;
+                tasks.push(t);
+            }
+
+            let mut running = 0;
+            let mut waiting = 0;
+            for t in &tasks {
+                let stored = engine.store.get(&t.id).await.unwrap().unwrap();
+                if engine.store.active_run(&t.id).await.unwrap().is_some() {
+                    running += 1;
+                    assert!(stored.slot_wait.is_none());
+                } else {
+                    waiting += 1;
+                    let wait = stored.slot_wait.expect("a held task carries its wait");
+                    assert_eq!(wait.agent, "codex");
+                    assert_eq!(wait.scope, "demo");
+                    assert_eq!(wait.trigger, Trigger::Manual);
+                    assert_eq!(stored.status, TaskStatus::Pending, "waiting for a slot, not blocked on a person");
+                    let entries = engine.store.entries(&t.id, 10).await.unwrap();
+                    assert!(
+                        entries.iter().any(|e| e.kind == "capacity_held"),
+                        "a held task journals why: {entries:?}"
+                    );
+                }
+            }
+            assert_eq!(running, 2, "the limit");
+            assert_eq!(waiting, 2);
+        }
+
+        /// Finishing one of the two running tasks should wake the oldest
+        /// waiting one, through the capacity-release channel, and carry its
+        /// original queue-wait forward onto the run it finally gets.
+        #[tokio::test]
+        async fn capacity_finishing_a_run_admits_the_oldest_waiting_task_with_its_original_queued_at() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(1))], None);
+            engine.spawn_capacity_release_worker();
+            let first = task(&engine, "first", "codex").await;
+            engine.start_run(&first.id, Trigger::Manual).await;
+            let second = task(&engine, "second", "codex").await;
+            engine.start_run(&second.id, Trigger::Manual).await;
+
+            let waiting = engine.store.get(&second.id).await.unwrap().unwrap();
+            let original_queued_at = waiting.slot_wait.expect("held").queued_at;
+            assert!(engine.store.active_run(&second.id).await.unwrap().is_none());
+
+            let mut bus = engine.bus.subscribe();
+            report_done(&engine, &first.id).await;
+
+            // The release goes through a channel to a spawned worker; wait
+            // for its effect instead of sleeping for it.
+            let started = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if let Event::RunStarted { run } = bus.recv().await.unwrap() {
+                        if run.task_id == second.id {
+                            return run;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the waiting task should be admitted once the slot frees");
+
+            assert_eq!(started.queued_at, Some(original_queued_at), "the whole wait counts as queue wait");
+            let settled = engine.store.get(&second.id).await.unwrap().unwrap();
+            assert!(settled.slot_wait.is_none(), "the wait is over");
+        }
+
+        /// The release channel is a convenience; the scheduler tick's own
+        /// sweep must reach the same waiting task on its own, for a restart
+        /// or a wakeup the channel dropped.
+        #[tokio::test]
+        async fn capacity_release_also_works_through_the_tick_sweep_alone() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(1))], None);
+            // Deliberately never spawned: `recheck_capacity` is the only
+            // thing that may admit the waiting task in this test.
+            let first = task(&engine, "first", "codex").await;
+            engine.start_run(&first.id, Trigger::Manual).await;
+            let second = task(&engine, "second", "codex").await;
+            engine.start_run(&second.id, Trigger::Manual).await;
+            assert!(engine.store.active_run(&second.id).await.unwrap().is_none());
+
+            report_done(&engine, &first.id).await;
+            assert!(
+                engine.store.active_run(&second.id).await.unwrap().is_none(),
+                "nothing has swept yet"
+            );
+
+            engine.recheck_capacity().await;
+            assert!(engine.store.active_run(&second.id).await.unwrap().is_some(), "the sweep admitted it");
+            assert!(engine.store.get(&second.id).await.unwrap().unwrap().slot_wait.is_none());
+        }
+
+        /// A scope-wide cap holds across every agent in it, with no agent
+        /// cap of its own on either.
+        #[tokio::test]
+        async fn capacity_a_scope_cap_holds_across_two_different_agents() {
+            let engine = capacity_engine(
+                vec![agent("codex", "shell", None), agent("claude", "shell", None)],
+                Some(2),
+            );
+            let a1 = task(&engine, "a1", "codex").await;
+            engine.start_run(&a1.id, Trigger::Manual).await;
+            let b1 = task(&engine, "b1", "claude").await;
+            engine.start_run(&b1.id, Trigger::Manual).await;
+            let a2 = task(&engine, "a2", "codex").await;
+            engine.start_run(&a2.id, Trigger::Manual).await;
+
+            assert!(engine.store.active_run(&a1.id).await.unwrap().is_some());
+            assert!(engine.store.active_run(&b1.id).await.unwrap().is_some());
+            assert!(engine.store.active_run(&a2.id).await.unwrap().is_none(), "the scope is already at 2/2");
+            let wait = engine.store.get(&a2.id).await.unwrap().unwrap().slot_wait.unwrap();
+            assert_eq!(wait.agent, "codex");
+        }
+
+        /// Every trigger dispatch can arrive on is held the same way, and
+        /// carries through to the wait it leaves behind.
+        #[tokio::test]
+        async fn capacity_holds_a_task_however_it_was_triggered() {
+            for trigger in [Trigger::Manual, Trigger::Schedule, Trigger::Retry, Trigger::Workflow, Trigger::Agent] {
+                let engine = capacity_engine(vec![agent("codex", "shell", Some(1))], None);
+                let holder = task(&engine, "holder", "codex").await;
+                engine.start_run(&holder.id, Trigger::Manual).await;
+                let waiter = task(&engine, "waiter", "codex").await;
+
+                let due = Due::now();
+                engine.start_run_due(&waiter.id, trigger, due).await;
+
+                let stored = engine.store.get(&waiter.id).await.unwrap().unwrap();
+                let wait = stored.slot_wait.unwrap_or_else(|| panic!("{trigger:?} should have been held"));
+                assert_eq!(wait.trigger, trigger);
+                assert_eq!(stored.status, TaskStatus::Pending);
+            }
+        }
+
+        /// A run this daemon is holding open on someone's answer, with no
+        /// session of its own (the `#184` approval-hold shape) -- built
+        /// directly, per the triage's own testing note, rather than
+        /// dispatched -- must not consume a slot.
+        #[tokio::test]
+        async fn capacity_a_session_less_blocked_run_does_not_consume_a_slot() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(1))], None);
+            let held = task(&engine, "approval held", "codex").await;
+            let run = engine
+                .store
+                .create_run(&NewRun {
+                    task_id: held.id.clone(),
+                    trigger: Trigger::Manual,
+                    agent: "codex".into(),
+                    adapter: "shell".into(),
+                    runtime: "stub".into(),
+                    token: "tok".into(),
+                    queued_at: None,
+                    scheduled_for: None,
+                })
+                .await
+                .unwrap();
+            // `Blocked`, no session: an approval hold, not a dispatch. It
+            // must stay non-terminal so it still shows up in `active_runs`.
+            engine
+                .store
+                .update_run(&run.id, &RunPatch { status: Some(RunStatus::Blocked), ..Default::default() })
+                .await
+                .unwrap();
+            assert!(engine.store.active_run(&held.id).await.unwrap().is_some(), "still open, just not counted");
+
+            let waiter = task(&engine, "waiter", "codex").await;
+            engine.start_run(&waiter.id, Trigger::Manual).await;
+            assert!(
+                engine.store.active_run(&waiter.id).await.unwrap().is_some(),
+                "the approval-held run left the one slot free"
+            );
+        }
+
+        /// The atomicity guarantee itself: with the admission lock doing its
+        /// job, ten dispatches racing for one slot never open more than one
+        /// run between them, however they interleave.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        async fn capacity_ten_concurrent_dispatches_against_a_limit_of_one_never_open_more_than_one_run() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(1))], None);
+            let mut tasks = Vec::new();
+            for i in 0..10 {
+                tasks.push(task(&engine, &format!("t{i}"), "codex").await);
+            }
+            let mut handles = Vec::new();
+            for t in &tasks {
+                let engine = engine.clone();
+                let id = t.id.clone();
+                handles.push(tokio::spawn(async move {
+                    engine.start_run(&id, Trigger::Manual).await;
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+
+            let open = engine.store.active_runs().await.unwrap();
+            assert_eq!(open.len(), 1, "never more than the declared limit, however the dispatches interleaved");
+            let mut waiting_count = 0;
+            for t in &tasks {
+                if engine.store.get(&t.id).await.unwrap().unwrap().slot_wait.is_some() {
+                    waiting_count += 1;
+                }
+            }
+            assert_eq!(waiting_count, 9);
+        }
+    }
+
     #[tokio::test]
     async fn runtime_diagnostics_group_scopes_and_isolate_a_missing_adapter_as_data() {
         let scope_dir = temp_dir("runtime-diagnostic");
@@ -6072,6 +6428,51 @@ mod tests {
         run.ended_at = None;
         assert_eq!(skip_reason_of(Some(&run), first), SkipReason::StillActive);
         assert_eq!(skip_reason_of(None, first), SkipReason::NotRunning);
+    }
+
+    /// `#179`: a slot that passed while its run was already queued but held
+    /// on `max_sessions`, not yet started, reads as `Queued` rather than
+    /// `NotRunning` -- detected from the run row alone, no extra state.
+    #[test]
+    fn a_skip_is_blamed_on_a_capacity_wait_when_the_run_was_queued_but_not_yet_started() {
+        let t0 = Utc::now();
+        let run = Run {
+            id: "r".into(),
+            task_id: "t".into(),
+            attempt: 1,
+            status: RunStatus::Running,
+            trigger: Trigger::Schedule,
+            agent: "codex".into(),
+            adapter: "codex".into(),
+            worktree_path: None,
+            worktree_branch: None,
+            runtime: "herdr".into(),
+            session: None,
+            token: None,
+            original_estimate: None,
+            provider_account: None,
+            re_estimate: None,
+            result: None,
+            routed_to: None,
+            error: None,
+            // Queued at the original slot, but not actually started (held on
+            // capacity) until well past the next one.
+            started_at: t0 + chrono::Duration::minutes(12),
+            ended_at: None,
+            queued_at: Some(t0),
+            scheduled_for: Some(t0),
+            fail_kind: None,
+            blocked_since: None,
+            blocked_source: None,
+            block_suspected_since: None,
+            turn_ended_at: None,
+            turn_end_reason: None,
+            required_steps: Vec::new(),
+            usage: None,
+        };
+        let first = t0 + chrono::Duration::minutes(5);
+        assert_eq!(skip_reason_of(Some(&run), first), SkipReason::Queued);
+        assert_eq!(SkipReason::Queued.describe(), "it was already queued, waiting for a capacity slot");
     }
 
     #[tokio::test]

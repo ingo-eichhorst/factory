@@ -975,6 +975,33 @@ mod tests {
         assert!(!task.schedule_paused, "an old row predates pausing, so its schedule is running");
     }
 
+    fn pending_task() -> Task {
+        let json = r#"{
+            "id": "t1", "title": "a task", "instructions": "", "scope": "demo",
+            "agent": "shell", "runtime": "herdr", "status": "pending",
+            "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z"
+        }"#;
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// `#179`: a task already waiting for a capacity slot fires no more,
+    /// however its status reads -- the wait, not the schedule, decides when
+    /// it dispatches next.
+    #[test]
+    fn a_task_waiting_for_a_slot_does_not_fire() {
+        let mut task = pending_task();
+        assert!(task.fires(), "an ordinary pending task fires");
+        task.slot_wait = Some(SlotWait {
+            agent: "codex".into(),
+            scope: "demo".into(),
+            trigger: crate::run::Trigger::Schedule,
+            queued_at: "2024-01-01T00:00:00Z".parse().unwrap(),
+            scheduled_for: None,
+            since: "2024-01-01T00:00:00Z".parse().unwrap(),
+        });
+        assert!(!task.fires(), "already claimed by the wait it is in");
+    }
+
     /// `RetryPolicy::None` has to round-trip as the bare string `retry: none`
     /// -- the exact spelling the issue this exists for asks for, and what
     /// `factory-cli`'s own `parse_retry` accepts.

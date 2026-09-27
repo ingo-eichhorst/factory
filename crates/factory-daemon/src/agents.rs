@@ -823,6 +823,63 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
 
+    // ================================================================ #179
+
+    #[test]
+    fn capacity_is_unlimited_when_neither_the_agent_nor_the_scope_declares_one() {
+        let cap = capacity("demo", "codex", None, None, [], false);
+        assert!(!cap.held());
+    }
+
+    #[test]
+    fn capacity_holds_once_the_agents_own_cap_is_spent() {
+        let counted = vec![("demo".to_string(), "codex".to_string()), ("demo".to_string(), "codex".to_string())];
+        let cap = capacity("demo", "codex", Some(2), None, counted, false);
+        assert_eq!(cap.in_use, 2);
+        assert!(cap.held());
+        assert_eq!(cap.holding_pair(), (2, 2));
+    }
+
+    #[test]
+    fn capacity_ignores_a_run_of_a_different_agent_or_scope() {
+        let counted = vec![
+            ("demo".to_string(), "other-agent".to_string()),
+            ("other-scope".to_string(), "codex".to_string()),
+        ];
+        let cap = capacity("demo", "codex", Some(1), None, counted, false);
+        assert_eq!(cap.in_use, 0, "neither run is this (scope, agent)");
+        assert!(!cap.held());
+    }
+
+    #[test]
+    fn capacity_counts_a_live_permanent_agent_of_the_same_name_as_one_slot() {
+        let cap = capacity("demo", "codex", Some(1), None, [], true);
+        assert_eq!(cap.in_use, 1);
+        assert!(cap.held(), "the standing agent itself already spends the only slot");
+    }
+
+    #[test]
+    fn capacity_the_scope_cap_holds_a_bare_adapter_with_no_declaration_of_its_own() {
+        // A task on an adapter the scope never declares has no agent cap to
+        // check -- only the scope's, counted the same way (#179).
+        let counted = vec![("demo".to_string(), "pi".to_string()), ("demo".to_string(), "codex".to_string())];
+        let cap = capacity("demo", "codex", None, Some(2), counted, false);
+        assert_eq!(cap.scope_in_use, 2);
+        assert!(cap.held());
+        assert_eq!(cap.holding_pair(), (2, 2), "the scope's own pair, since the agent has no cap of its own");
+    }
+
+    #[test]
+    fn capacity_run_uses_a_slot_excludes_a_session_less_blocked_run() {
+        // The #184 shape: `Blocked`, no session -- an approval hold, not a
+        // dispatch. `run_uses_a_slot` is what a caller filters runs through
+        // before ever building the counted list `capacity` sums, so this is
+        // the fixture built directly, per the triage's testing note.
+        assert!(!run_uses_a_slot(factory_core::run::RunStatus::Blocked, false));
+        assert!(run_uses_a_slot(factory_core::run::RunStatus::Blocked, true), "a session-holding block still counts");
+        assert!(run_uses_a_slot(factory_core::run::RunStatus::Dispatching, false));
+    }
+
     fn is_valid_herdr_name(name: &str) -> bool {
         (1..=32).contains(&name.len())
             && name.starts_with(|c: char| c.is_ascii_lowercase())
