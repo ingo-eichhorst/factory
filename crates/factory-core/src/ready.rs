@@ -763,12 +763,19 @@ mod tests {
 
     #[test]
     fn a_malformed_nearer_file_is_a_finding_and_a_fail_closed_blocker() {
-        let c = catalogue_from(&[("security.yaml", "checks: [unclosed")]);
+        let c = catalogue_from(&[
+            ("ready.yaml", "checks:\n  - id: changelog-note\n    pass_condition: x\n"),
+            ("security.yaml", "checks: [unclosed"),
+        ]);
         assert!(c.failed.contains("security"));
         let chain = [root_layer(), layer("security-team", &["security"], true)];
         let (def, findings) = effective(&c, "security-team", &chain);
         assert_eq!(kinds(&findings), vec![FindingKind::Unreadable]);
         assert_eq!(def.unreadable.len(), 1);
+        // The acceptance criterion in full: a broken nearer file is visible
+        // (the finding and the blocker above), but it never silently
+        // weakens what the root already required.
+        assert_eq!(def.checks.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["changelog-note"]);
     }
 
     #[test]

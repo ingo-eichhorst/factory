@@ -1842,7 +1842,11 @@ fn intake_definitions_text(routes: &[factory_core::intake::RouteOptions]) -> Str
         if d.observability_tolerance != factory_core::ready::Tolerance::default() {
             out.push_str(&format!("    observability_tolerance: {}\n", d.observability_tolerance.as_str()));
         }
-        for f in &r.findings {
+        // `Unreadable` findings are left out here: `d.unreadable` above
+        // already said the same thing as the blocker sentence that gates
+        // every assessment for this scope, and printing both reads as the
+        // same fact twice.
+        for f in r.findings.iter().filter(|f| f.kind != factory_core::ready::FindingKind::Unreadable) {
             out.push_str(&format!("    finding [{}] {:?}: {}\n", f.subject, f.kind, f.detail));
         }
     }
@@ -6395,5 +6399,27 @@ mod tests {
         };
         let text = intake_definitions_text(&[route]);
         assert!(text.contains("could not be read"), "{text}");
+    }
+
+    #[test]
+    fn intake_definitions_text_never_says_unreadable_twice() {
+        use factory_core::ready::{Finding, FindingKind, ReadyDefinition};
+        let route = factory_core::intake::RouteOptions {
+            scope: "demo".into(),
+            definition: ReadyDefinition {
+                scope: "demo".into(),
+                unreadable: vec!["definition of ready for demo could not be read: security binds \"security\", but no security.yaml file exists".into()],
+                ..Default::default()
+            },
+            findings: vec![Finding {
+                kind: FindingKind::Unreadable,
+                subject: "demo".into(),
+                detail: "binds \"security\", but no security.yaml file exists".into(),
+            }],
+            ..Default::default()
+        };
+        let text = intake_definitions_text(&[route]);
+        assert_eq!(text.matches("could not be read").count(), 1, "{text}");
+        assert!(!text.contains("finding ["), "an Unreadable finding restates the blocker sentence -- left out: {text}");
     }
 }
