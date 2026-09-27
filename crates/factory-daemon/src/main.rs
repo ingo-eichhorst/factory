@@ -369,6 +369,9 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // `#118`'s verifier, and the runs a restart caught mid-verification.
     engine.spawn_verifier();
     engine.recover_verifications().await;
+    // `#179`'s admission queue: a run ending wakes whatever is waiting on
+    // its (scope, agent) right away, rather than only on the next tick.
+    engine.spawn_capacity_release_worker();
     // The same, for bench runs still `running` when the daemon last stopped.
     engine.recover_bench_runs().await;
 

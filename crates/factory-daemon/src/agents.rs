@@ -20,6 +20,78 @@ use std::sync::Arc;
 
 use crate::engine::{append_declared_args, Engine};
 
+// ============================================================== capacity
+
+/// One (scope, agent)'s admission picture against its declared limits
+/// (`#179`): how many of its own non-terminal runs already use a slot,
+/// against its own cap, and the same for its scope as a whole. Pure -- the
+/// caller does the store reads and hands over just the counted (scope,
+/// agent) pairs of every run that uses a slot, plus whether a live
+/// permanent agent of this name is itself occupying one, so a test can
+/// build the numbers directly rather than dispatching real runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capacity {
+    pub in_use: u32,
+    pub max: Option<u32>,
+    pub scope_in_use: u32,
+    pub scope_max: Option<u32>,
+}
+
+impl Capacity {
+    /// Whether admission should wait: the agent's own cap is already spent,
+    /// or its scope's is. Checked in that order only for the message a
+    /// caller builds from it -- both are enforced regardless of which is
+    /// named.
+    pub fn held(&self) -> bool {
+        self.max.is_some_and(|m| self.in_use >= m) || self.scope_max.is_some_and(|m| self.scope_in_use >= m)
+    }
+
+    /// The `(in_use, max)` pair a held answer should report: the agent's own
+    /// cap when that is the one that is full, otherwise the scope's.
+    pub fn holding_pair(&self) -> (u32, u32) {
+        if self.max.is_some_and(|m| self.in_use >= m) {
+            (self.in_use, self.max.unwrap())
+        } else {
+            (self.scope_in_use, self.scope_max.unwrap_or(self.scope_in_use))
+        }
+    }
+}
+
+/// Whether a run counts as using a slot: still being dispatched, or already
+/// holding a session. A run this daemon is holding open on someone's answer
+/// with no session of its own (an approval hold, `Blocked` with nothing
+/// dispatched) does not count -- it is not spending anything the harness or
+/// the account is charged for.
+pub fn run_uses_a_slot(status: factory_core::run::RunStatus, has_session: bool) -> bool {
+    use factory_core::run::RunStatus;
+    status == RunStatus::Dispatching || has_session
+}
+
+/// Build `Capacity` from the runs already known to use a slot -- each as
+/// `(scope, agent)`, the same two strings admission is keyed on -- plus
+/// whether a live permanent agent named `agent` is itself one of them.
+pub fn capacity(
+    scope: &str,
+    agent: &str,
+    agent_max: Option<u32>,
+    scope_max: Option<u32>,
+    counted: impl IntoIterator<Item = (String, String)>,
+    permanent_agent_live: bool,
+) -> Capacity {
+    let mut in_use = u32::from(permanent_agent_live);
+    let mut scope_in_use = u32::from(permanent_agent_live);
+    for (s, a) in counted {
+        if s != scope {
+            continue;
+        }
+        scope_in_use += 1;
+        if a == agent {
+            in_use += 1;
+        }
+    }
+    Capacity { in_use, max: agent_max, scope_in_use, scope_max }
+}
+
 /// Herdr names are lowercase identifiers of at most 32 characters, starting
 /// with a lowercase letter. `factory-` stays the outer namespace: herdr agent
 /// names are global and `start()` adopts any existing agent carrying the name
@@ -122,6 +194,38 @@ fn runtime_name(scope: &str, name: &str) -> String {
 }
 
 impl Engine {
+    /// The live admission picture for `scope`'s `agent`, gathered fresh: an
+    /// `active_runs` scan plus one standing-agent lookup, so this is only
+    /// ever right for the instant it was called at -- exactly why `dispatch`
+    /// calls it under `admission_lock`, with `create_run` still inside the
+    /// same critical section, rather than trusting an answer from before.
+    pub(crate) async fn capacity_for(
+        &self,
+        scope: &str,
+        agent: &str,
+        agent_max: Option<u32>,
+    ) -> Result<Capacity> {
+        let scope_max = self.factory_snapshot().scope(scope).ok().and_then(|s| s.max_sessions);
+        let runs = self.store.active_runs().await?;
+        let mut counted = Vec::with_capacity(runs.len());
+        for run in &runs {
+            if !run_uses_a_slot(run.status, run.session.is_some()) {
+                continue;
+            }
+            if let Ok(Some(task)) = self.store.get(&run.task_id).await {
+                counted.push((task.scope, run.agent.clone()));
+            }
+        }
+        let permanent_agent_live = self
+            .store
+            .get_agent(&AgentSession::id_for(scope, agent))
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|a| a.state.is_live());
+        Ok(capacity(scope, agent, agent_max, scope_max, counted, permanent_agent_live))
+    }
+
     fn declared(&self, scope: &str, name: &str) -> Result<ScopeAgent> {
         let factory = self.factory_snapshot();
         factory

@@ -487,6 +487,11 @@ impl Engine {
                     status: Some(reason.status()),
                     closure: Some(closure),
                     clear_pending_retry: task.pending_retry.is_some(),
+                    // A closed task waits for nothing (`#179`) -- this is
+                    // also how a task only ever waiting for a slot, never
+                    // dispatched, is dropped from the line: there is no run
+                    // for `TaskCancel` to act on, but closing needs none.
+                    clear_slot_wait: task.slot_wait.is_some(),
                     ..Default::default()
                 },
             )

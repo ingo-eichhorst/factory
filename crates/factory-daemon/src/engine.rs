@@ -23,8 +23,8 @@ use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
 use factory_core::run::{BlockSource, FailKind, NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
-    NewTask, PendingRetry, RetryPolicy, Task, TaskEntry, TaskFailure, TaskFilter, TaskPatch, TaskReport,
-    TaskStatus, WorkflowOrigin,
+    NewTask, PendingRetry, RetryPolicy, SlotWait, Task, TaskEntry, TaskFailure, TaskFilter, TaskPatch,
+    TaskReport, TaskStatus, WorkflowOrigin,
 };
 use factory_plugins::registry::Registry;
 use std::path::{Path, PathBuf};
@@ -64,13 +64,18 @@ impl Due {
 }
 
 /// Why a `schedule_skipped` entry's slots passed -- `data.reason` on the
-/// entry. Two causes produce the same state (a past `next_run_at` on a
+/// entry. Three causes produce the same state (a past `next_run_at` on a
 /// pending task), so the entry says which one it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SkipReason {
     /// The task's previous run was still going when the first skipped slot
     /// came round -- `due()` only fires a `pending` task.
     StillActive,
+    /// Held on a declared `max_sessions` limit (`#179`): the run this streak
+    /// eventually got was already queued for it, just not started yet, when
+    /// the slot came round. A task with no capacity limit never sees this --
+    /// its run either starts at once or `StillActive` already explains it.
+    Queued,
     /// Nothing was running: the daemon was not there to fire it.
     NotRunning,
 }
@@ -97,11 +102,16 @@ fn dispatchable_from(
 }
 
 /// `Engine::skip_reason`'s rule, apart from the store: the newest run was
-/// open at `first` (started by then, not yet ended) or it was not.
+/// open at `first` (started by then, not yet ended), already queued for but
+/// not yet started at `first` (`#179`: it was waiting for a capacity slot),
+/// or neither.
 fn skip_reason_of(newest: Option<&Run>, first: chrono::DateTime<Utc>) -> SkipReason {
     match newest {
         Some(run) if run.started_at <= first && run.ended_at.is_none_or(|end| end >= first) => {
             SkipReason::StillActive
+        }
+        Some(run) if run.queued_at.is_some_and(|q| q <= first) && first < run.started_at => {
+            SkipReason::Queued
         }
         _ => SkipReason::NotRunning,
     }
@@ -111,6 +121,7 @@ impl SkipReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::StillActive => "still_active",
+            Self::Queued => "queued",
             Self::NotRunning => "not_running",
         }
     }
@@ -118,6 +129,7 @@ impl SkipReason {
     fn describe(self) -> &'static str {
         match self {
             Self::StillActive => "the previous run was still going",
+            Self::Queued => "it was already queued, waiting for a capacity slot",
             Self::NotRunning => "nothing was running it: the daemon was down, asleep or behind",
         }
     }
@@ -288,6 +300,23 @@ pub struct Engine {
     /// computing them runs the metrics they name. See
     /// `Engine::triggered_signposts_cached`.
     pub(crate) signpost_cache: std::sync::Mutex<Option<crate::operations::SignpostCache>>,
+    /// Serializes a `max_sessions` admission decision with the run it gates
+    /// (`#179`): read the live counts, decide, `create_run` -- all under this
+    /// one lock, so two dispatches racing for the last slot cannot both take
+    /// it. Held only across that read-decide-write; never across the slower,
+    /// fallible steps dispatch takes afterward (the worktree, the harness's
+    /// own launch).
+    pub(crate) admission_lock: tokio::sync::Mutex<()>,
+    /// A run ending sends its `(scope, agent)` here so a slot freeing wakes
+    /// whatever is waiting on it right away, without the `&self` sites that
+    /// notice a run end (`report`, `cancel_task_run`) needing an `Arc<Self>`
+    /// of their own -- the same shape `verify_tx`/`spawn_verifier` already
+    /// use for exactly this reason. The scheduler tick's own sweep
+    /// (`recheck_capacity`) is the backstop for a restart, a raised limit, or
+    /// a wakeup this channel drops.
+    pub(crate) capacity_release_tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    pub(crate) capacity_release_rx:
+        std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(String, String)>>>,
 }
 
 impl Engine {
@@ -300,6 +329,7 @@ impl Engine {
     ) -> Self {
         let (bench_judge_tx, bench_judge_rx) = tokio::sync::mpsc::unbounded_channel();
         let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (capacity_release_tx, capacity_release_rx) = tokio::sync::mpsc::unbounded_channel();
         let power = crate::power::PowerAssertions::new(factory.config.daemon.power_assertion);
         Self {
             factory: std::sync::RwLock::new(factory),
@@ -343,6 +373,9 @@ impl Engine {
             quality_guide_cache: Default::default(),
             schedule_lock: tokio::sync::Mutex::new(()),
             signpost_cache: std::sync::Mutex::new(None),
+            admission_lock: tokio::sync::Mutex::new(()),
+            capacity_release_tx,
+            capacity_release_rx: std::sync::Mutex::new(Some(capacity_release_rx)),
         }
     }
 
@@ -951,6 +984,12 @@ impl Engine {
             Request::TaskDelete { id } => {
                 if let Some(run) = self.store.active_run(&id).await? {
                     self.close_session(&run).await;
+                    // Deleting the task ends the run without ever reaching
+                    // `finish_run` (there is no row left to mirror), so the
+                    // slot it held is freed here instead (`#179`).
+                    if let Ok(Some(task)) = self.store.get(&id).await {
+                        self.enqueue_capacity_release(&task.scope, &run.agent);
+                    }
                 }
                 let deleted = self.store.delete(&id).await?;
                 if deleted {
@@ -974,6 +1013,16 @@ impl Engine {
                         "attempt {} of this task is still {}; cancel it before starting another",
                         run.attempt,
                         run.status.as_str()
+                    )));
+                }
+                // Already waiting for a slot (`#179`): a second request would
+                // only spawn a second hold attempt on the same wait, and the
+                // journal would say so twice for no reason.
+                if let Some(wait) = &task.slot_wait {
+                    return Err(FactoryError::BadRequest(format!(
+                        "this task is already waiting for a {} slot, since {}; cancel or close it, or wait for a slot to open",
+                        wait.agent,
+                        wait.since.to_rfc3339(),
                     )));
                 }
                 // Who asked, written down before the run exists: the record
@@ -2014,6 +2063,13 @@ impl Engine {
         if let Some(rt) = &patch.runtime {
             self.registry.runtime(rt)?;
         }
+        // A wait names the agent and scope it is waiting on (`#179`); moving
+        // either makes the wait meaningless -- it would go on counting
+        // against a slot this task no longer means to use.
+        let clears_wait = current.slot_wait.is_some() && (patch.agent.is_some() || patch.scope.is_some());
+        if clears_wait {
+            patch.clear_slot_wait = true;
+        }
         if let Some(s) = &patch.schedule {
             patch.next_run_at = Some(schedule::next_after(s, Utc::now())?);
         }
@@ -2125,6 +2181,17 @@ impl Engine {
                 None => TaskEntry::new("daemon", kind, message),
             };
             self.entry(&task.id, entry).await;
+        }
+        if clears_wait && task.slot_wait.is_none() {
+            self.entry(
+                &task.id,
+                TaskEntry::new(
+                    "daemon",
+                    "capacity_wait_cleared",
+                    "no longer waiting for a slot: its agent or scope changed",
+                ),
+            )
+            .await;
         }
         self.bus.publish(Event::TaskUpdated { task: task.clone() });
         Ok(task)
@@ -2299,6 +2366,41 @@ impl Engine {
                 self.record_bench_task_state(task_id).await;
                 return;
             }
+            // Held on `max_sessions` (`#179`), not failed either -- the task
+            // stays `Pending`, waiting for a slot, rather than `Blocked`
+            // waiting for a person. A repeat hold on the same wait (the tick
+            // sweep, another trigger arriving while it already waits) keeps
+            // the original `slot_wait` rather than restarting its clock or
+            // spamming the journal every time.
+            Err(FactoryError::CapacityHeld { agent, in_use, max }) => {
+                let reason = format!("waiting for a {agent} slot ({in_use}/{max} in use)");
+                tracing::info!(task = task_id, "{reason}");
+                if let Ok(Some(task)) = self.store.get(task_id).await {
+                    let already_this_wait = task
+                        .slot_wait
+                        .as_ref()
+                        .is_some_and(|w| w.agent == agent && w.scope == task.scope);
+                    if !already_this_wait {
+                        let wait = SlotWait {
+                            agent,
+                            scope: task.scope.clone(),
+                            trigger,
+                            queued_at: due.queued_at,
+                            scheduled_for: due.scheduled_for,
+                            since: Utc::now(),
+                        };
+                        let _ = self
+                            .store
+                            .update(task_id, &TaskPatch { slot_wait: Some(wait), ..Default::default() })
+                            .await;
+                        self.entry(task_id, TaskEntry::new("daemon", "capacity_held", reason)).await;
+                        self.publish_task(task_id).await;
+                    }
+                }
+                self.record_workflow_task_state(task_id).await;
+                self.record_bench_task_state(task_id).await;
+                return;
+            }
             Err(e) => {
                 // The run may or may not exist yet; if it does, close it.
                 if let Ok(Some(run)) = self.store.active_run(task_id).await {
@@ -2387,19 +2489,32 @@ impl Engine {
         let required_steps = self.required_steps_for_task(&task).await?;
 
         let token = factory_core::new_token();
-        let run = self
-            .store
-            .create_run(&NewRun {
-                task_id: task.id.clone(),
-                trigger,
-                agent: agent_name.clone(),
-                adapter: adapter_name.clone(),
-                runtime: task.runtime.clone(),
-                token: token.clone(),
-                queued_at: Some(due.queued_at),
-                scheduled_for: due.scheduled_for,
-            })
-            .await?;
+        // The capacity check and the run it admits happen under one lock, so
+        // two dispatches racing for the last slot cannot both read "one
+        // free" and both create a run (`#179`). Held only across this: the
+        // slower, fallible steps below (the power assertion, the worktree,
+        // the harness's own launch) never wait on it.
+        let run = {
+            let _admission = self.admission_lock.lock().await;
+            let agent_max = declaration.as_ref().and_then(|d| d.max_sessions);
+            let cap = self.capacity_for(&task.scope, &agent_name, agent_max).await?;
+            if cap.held() {
+                let (in_use, max) = cap.holding_pair();
+                return Err(FactoryError::CapacityHeld { agent: agent_name.clone(), in_use, max });
+            }
+            self.store
+                .create_run(&NewRun {
+                    task_id: task.id.clone(),
+                    trigger,
+                    agent: agent_name.clone(),
+                    adapter: adapter_name.clone(),
+                    runtime: task.runtime.clone(),
+                    token: token.clone(),
+                    queued_at: Some(due.queued_at),
+                    scheduled_for: due.scheduled_for,
+                })
+                .await?
+        };
         let run = self
             .store
             .update_run(
@@ -2998,10 +3113,89 @@ impl Engine {
         if let Ok(Some(task)) = self.store.get(&run.task_id).await {
             self.record_gone(&format!("run:{}", run.id), &task.scope, &run.agent)
                 .await;
+            // A slot just freed: wake whatever is waiting on this (scope,
+            // agent) -- `close_session`, called just before this by every
+            // caller, only closes the pane; the run is still non-terminal
+            // (and so still counted as using a slot) until this write lands,
+            // which is why the wakeup goes here and not there (`#179`).
+            self.enqueue_capacity_release(&task.scope, &run.agent);
         }
         self.mirror_to_task(&run).await;
         self.settle_retry(&run).await;
         Ok(run)
+    }
+
+    // -- max_sessions: releasing a slot (#179) ------------------------------
+
+    /// A run just stopped using a slot: send `(scope, agent)` to the capacity
+    /// worker so whatever is waiting on it wakes right away. `&self`
+    /// deliberately -- `finish_run`, `report` and `cancel_task_run` are not
+    /// `Arc<Self>`, and a channel send needs no more than that, the same
+    /// reason `enqueue_verification` gets away with it.
+    pub(crate) fn enqueue_capacity_release(&self, scope: &str, agent: &str) {
+        let _ = self.capacity_release_tx.send((scope.to_string(), agent.to_string()));
+    }
+
+    /// Start the capacity-release worker: every `(scope, agent)`
+    /// `enqueue_capacity_release` sends is turned into an admission attempt
+    /// here, where an `Arc<Self>` is available. Called once, at startup,
+    /// like `spawn_verifier`; a second call is a no-op.
+    pub fn spawn_capacity_release_worker(self: &Arc<Self>) {
+        let Some(mut rx) = self.capacity_release_rx.lock().unwrap().take() else {
+            return;
+        };
+        let engine = self.clone();
+        tokio::spawn(async move {
+            while let Some((scope, agent)) = rx.recv().await {
+                engine.release_waiting(&scope, &agent).await;
+            }
+        });
+    }
+
+    /// Every `Pending` task with a `slot_wait`, oldest wait first -- FIFO,
+    /// exactly the order `queued_at` gives it.
+    async fn waiting_tasks(&self) -> Vec<Task> {
+        let mut tasks: Vec<Task> = self
+            .store
+            .list(&TaskFilter { status: Some(TaskStatus::Pending), ..Default::default() })
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.slot_wait.is_some())
+            .collect();
+        tasks.sort_by_key(|t| t.slot_wait.as_ref().unwrap().queued_at);
+        tasks
+    }
+
+    /// Try to admit every waiting task whose own wait names `scope` or
+    /// `agent` -- oldest first. Each attempt is an ordinary `start_run_due`,
+    /// which re-checks live capacity under `admission_lock` on its own
+    /// terms: one run ending frees at most what it frees, so a task that
+    /// still does not fit is simply held again, at no cost beyond the check
+    /// itself. `dispatch` will see every earlier admission this loop already
+    /// made, so the order tried is the order admitted.
+    pub(crate) async fn release_waiting(self: &Arc<Self>, scope: &str, agent: &str) {
+        for task in self.waiting_tasks().await {
+            let Some(wait) = task.slot_wait.clone() else { continue };
+            if wait.scope != scope && wait.agent != agent {
+                continue;
+            }
+            let due = Due { queued_at: wait.queued_at, scheduled_for: wait.scheduled_for };
+            self.start_run_due(&task.id, wait.trigger, due).await;
+        }
+    }
+
+    /// The scheduler tick's sweep, next to `recheck_harnesses`: try every
+    /// waiting task, not just the ones a specific release names. Covers what
+    /// a single `(scope, agent)` wakeup cannot -- a restart (nothing sent
+    /// anything, but the wait is still on disk), a limit raised while tasks
+    /// were already waiting, and a wakeup this channel dropped.
+    pub(crate) async fn recheck_capacity(self: &Arc<Self>) {
+        for task in self.waiting_tasks().await {
+            let Some(wait) = task.slot_wait.clone() else { continue };
+            let due = Due { queued_at: wait.queued_at, scheduled_for: wait.scheduled_for };
+            self.start_run_due(&task.id, wait.trigger, due).await;
+        }
     }
 
     /// After the task's mirror is updated, decide what a scheduled task's

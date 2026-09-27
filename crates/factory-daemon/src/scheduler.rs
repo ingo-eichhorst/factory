@@ -86,6 +86,12 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         // Rate-limited and backgrounded inside; this only ever starts it.
         engine.recheck_harnesses();
 
+        // -- tasks held on max_sessions (#179) --------------------------------
+        // The backstop for a restart, a raised limit, or a wakeup the
+        // capacity-release channel dropped; every ordinary release reaches
+        // its waiting task immediately through that channel instead.
+        engine.recheck_capacity().await;
+
         // -- bench runs ----------------------------------------------------
         // A periodic sweep, not just a reaction to a settle: it is what
         // actually moves a run past the one dispatch failure
