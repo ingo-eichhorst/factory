@@ -1,0 +1,13 @@
+# Raises the default stack size for every process cargo spawns, `cargo
+# test`'s compiled test binaries included. `#[tokio::test]` runs its body on
+# libtest's own per-test thread, which defaults to 2MiB unless `RUST_MIN_STACK`
+# says otherwise; a debug build's async state machines are large enough that
+# at least two of `factory-daemon`'s own tests -- deep, sequential chains of
+# `Engine::handle_request` calls -- already sat within single-digit bytes of
+# that default before `#170` added a pointer-sized field to `Task`, `Request`
+# and `Payload` and tipped them over. 8MiB is the same headroom `cargo test`
+# gives the main thread on this platform; it costs nothing at runtime and
+# nothing in release builds (`RUST_MIN_STACK` only ever raises a spawned
+# thread's default, never a hard requirement).
+[env]
+RUST_MIN_STACK = "8388608"

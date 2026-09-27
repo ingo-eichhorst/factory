@@ -834,6 +834,33 @@ pub enum Request {
     /// `task.create` before it).
     #[serde(rename = "intake.info")]
     IntakeInfo { id: String, text: String },
+    /// Flag an item still in intake as a possible security report
+    /// (`#170`) -- from anyone who could assess it: flagging only adds
+    /// scrutiny. Needs `intake.assess` with the same reach `IntakeAssess`
+    /// checks. Refused once the item already carries a flag of any kind.
+    #[serde(rename = "intake.flag_security")]
+    IntakeFlagSecurity { id: String, reason: String },
+    /// A person confirms or dismisses a possible security report -- the one
+    /// decision an agent never makes, whatever role it holds (`Needs::Owner`).
+    /// Confirming needs no evidence; dismissing does, or it is refused.
+    /// Journaled as `intake_security_confirmed`/`intake_security_dismissed`.
+    #[serde(rename = "intake.security")]
+    IntakeSecurity {
+        id: String,
+        verdict: crate::intake::SecurityVerdict,
+        #[serde(default)]
+        evidence: String,
+    },
+    /// Every confirmed security report over `scope`'s subtree (every scope,
+    /// absent) -- `Engine::confirmed_security_reports`, read live off the
+    /// store, including an item that has since left intake. The L4 fact the
+    /// CRA reporting clock (`#157`, phase 2) will read; a plain read, needing
+    /// nothing, like `IntakeBoard`.
+    #[serde(rename = "intake.security_reports")]
+    IntakeSecurityReports {
+        #[serde(default)]
+        scope: Option<String>,
+    },
     /// One task's usage and cost: every run's, and their sum (#117).
     /// Read-only, derived from what the runs already carry.
     #[serde(rename = "task.usage")]
@@ -1069,6 +1096,8 @@ pub enum Payload {
     Operations { report: Box<crate::operations::OperationsReport> },
     /// The Intake view -- see `factory_core::intake::IntakeBoard`.
     IntakeBoard { board: crate::intake::IntakeBoard },
+    /// `Request::IntakeSecurityReports`' answer.
+    IntakeSecurityReports { reports: Vec<crate::intake::ConfirmedSecurityReport> },
     /// `Request::TaskUsage`'s answer.
     TaskUsage { usage: crate::usage::TaskUsage },
     /// `Request::RunUsage`'s answer.

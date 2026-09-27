@@ -276,6 +276,10 @@ enum IntakeCmd {
         /// Repeatable: `--label area=infra`.
         #[arg(long = "label")]
         labels: Vec<String>,
+        /// Flag it as a possible security report right away -- the same as
+        /// `flag-security` straight after (`#170`).
+        #[arg(long)]
+        security: bool,
     },
     /// One item: its text, where it stands, its assessment and decision.
     Show { id: String },
@@ -337,6 +341,30 @@ enum IntakeCmd {
         /// With `--triage`: the agent to triage with.
         #[arg(long, requires = "triage")]
         agent: Option<String>,
+    },
+    /// Flag an item still in the gate as a possible security report
+    /// (`#170`) -- anyone who could assess the item may; it only adds
+    /// scrutiny. Refused once the item already carries a flag of any kind.
+    FlagSecurity {
+        id: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// A person confirms or dismisses a possible security report. Owner
+    /// only -- an agent may flag (above), never decide.
+    Security {
+        id: String,
+        #[arg(value_parser = ["confirm", "dismiss"])]
+        verdict: String,
+        /// Required to dismiss; optional to confirm.
+        #[arg(long)]
+        evidence: Option<String>,
+    },
+    /// Every confirmed security report -- the L4 fact `#157`'s reporting
+    /// clock will read.
+    SecurityReports {
+        #[arg(long)]
+        scope: Option<String>,
     },
 }
 
@@ -1643,12 +1671,14 @@ async fn main() -> Result<()> {
             let cmd = match command {
                 None => IntakeCmd::List { scope },
                 Some(IntakeCmd::List { scope: s }) => IntakeCmd::List { scope: s.or(scope) },
-                Some(IntakeCmd::Add { scope: s, title, instructions, reference, requester, labels }) => {
-                    IntakeCmd::Add { scope: s.or(scope), title, instructions, reference, requester, labels }
+                Some(IntakeCmd::Add { scope: s, title, instructions, reference, requester, labels, security }) => {
+                    IntakeCmd::Add { scope: s.or(scope), title, instructions, reference, requester, labels, security }
                 }
+                Some(IntakeCmd::SecurityReports { scope: s }) => IntakeCmd::SecurityReports { scope: s.or(scope) },
                 Some(_) if scope.is_some() => {
                     return Err(anyhow!(
-                        "--scope before the subcommand only applies to `list` and `add`; the others name an item"
+                        "--scope before the subcommand only applies to `list`, `add` and `security-reports`; \
+                         the others name an item"
                     ));
                 }
                 Some(other) => other,
@@ -1659,10 +1689,10 @@ async fn main() -> Result<()> {
 }
 
 async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
-    use factory_core::intake::{Decision, NewIntake, SourceKind, WontfixReason};
+    use factory_core::intake::{Decision, NewIntake, SecurityVerdict, SourceKind, WontfixReason};
     let payload = match cmd {
         IntakeCmd::List { scope } => client.send(Request::IntakeBoard { scope }).await?,
-        IntakeCmd::Add { title, instructions, scope, reference, requester, labels } => {
+        IntakeCmd::Add { title, instructions, scope, reference, requester, labels, security } => {
             client
                 .send(Request::IntakeAdd(NewIntake {
                     title,
@@ -1672,6 +1702,7 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
                     reference,
                     requester,
                     labels: parse_labels(&labels)?,
+                    security,
                 }))
                 .await?
         }
@@ -1717,10 +1748,20 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
                 answered
             }
         }
+        IntakeCmd::FlagSecurity { id, reason } => client.send(Request::IntakeFlagSecurity { id, reason }).await?,
+        IntakeCmd::Security { id, verdict, evidence } => {
+            let verdict = match verdict.as_str() {
+                "confirm" => SecurityVerdict::Confirm,
+                _ => SecurityVerdict::Dismiss,
+            };
+            client.send(Request::IntakeSecurity { id, verdict, evidence: evidence.unwrap_or_default() }).await?
+        }
+        IntakeCmd::SecurityReports { scope } => client.send(Request::IntakeSecurityReports { scope }).await?,
     };
     print(&payload, json, |p| match p {
         Payload::IntakeBoard { board } => Some(intake_board_text(board)),
         Payload::Task { task } => Some(intake_item_text(task)),
+        Payload::IntakeSecurityReports { reports } => Some(intake_security_reports_text(reports)),
         _ => None,
     })
 }
@@ -1773,8 +1814,16 @@ fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
         ),
         None => ("-".into(), ".......".into()),
     };
+    // A possible or confirmed security report's own fast-lane mark
+    // (`#170`) -- `board()` already sorted it first; this is only the
+    // visible reason why.
+    let sec_mark = match c.security.as_ref().map(|f| f.state) {
+        Some(factory_core::intake::SecurityState::Possible) => "!P",
+        Some(factory_core::intake::SecurityState::Confirmed) => "!C",
+        _ => "  ",
+    };
     let mut line = format!(
-        "  {}  {:>7}  {}  {:<24} {} [{}] from {}",
+        "{sec_mark}{}  {:>7}  {}  {:<24} {} [{}] from {}",
         c.id,
         duration(c.age_seconds.max(0) as u64),
         marks,
@@ -1783,6 +1832,13 @@ fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
         c.scope,
         c.requester
     );
+    if let Some(f) = &c.security {
+        line.push_str(&format!(
+            "\n      security: {} ({})",
+            f.state.as_str(),
+            if f.reason.trim().is_empty() { "no reason given" } else { f.reason.trim() }
+        ));
+    }
     if c.stage == factory_core::intake::IntakeStage::Triaging && c.triage.is_none() {
         if let Some(t) = &c.triage_task {
             line.push_str(&format!("\n      triage run in task {t}"));
@@ -1881,6 +1937,29 @@ fn intake_definitions_text(routes: &[factory_core::intake::RouteOptions]) -> Str
     out
 }
 
+/// `factory intake security-reports` -- every confirmed security report,
+/// awareness time first (`#170`): the L4 fact `#157`'s reporting clock will
+/// read.
+fn intake_security_reports_text(reports: &[factory_core::intake::ConfirmedSecurityReport]) -> String {
+    if reports.is_empty() {
+        return "no confirmed security reports".into();
+    }
+    let mut out = String::new();
+    for r in reports {
+        out.push_str(&format!(
+            "  {}  {}  aware since {}  confirmed by {} at {}  from {}{}\n",
+            r.item,
+            r.scope,
+            r.awareness_at.to_rfc3339(),
+            r.confirmed_by,
+            r.confirmed_at.to_rfc3339(),
+            r.source.kind.as_str(),
+            r.source.reference.as_ref().map(|s| format!(" ({s})")).unwrap_or_default(),
+        ));
+    }
+    out
+}
+
 fn intake_item_text(task: &Task) -> String {
     let Some(i) = &task.intake else { return detail(task) };
     let mut out = format!(
@@ -1895,6 +1974,22 @@ fn intake_item_text(task: &Task) -> String {
         i.source.reference.as_ref().map(|r| format!(" ({r})")).unwrap_or_default(),
         i.received_at.to_rfc3339(),
     );
+    if let Some(f) = &i.security {
+        out.push_str(&format!(
+            "  security   {} -- flagged by {} at {}: {}\n",
+            f.state.as_str(),
+            f.flagged_by,
+            f.flagged_at.to_rfc3339(),
+            if f.reason.trim().is_empty() { "no reason given" } else { f.reason.trim() },
+        ));
+        if let (Some(by), Some(at)) = (&f.decided_by, f.decided_at) {
+            out.push_str(&format!(
+                "             decided by {by} at {}{}\n",
+                at.to_rfc3339(),
+                f.evidence.as_ref().map(|e| format!(": {e}")).unwrap_or_default(),
+            ));
+        }
+    }
     if let Some(t) = &i.triage_task {
         out.push_str(&format!("  triage run task {t}\n"));
     }
@@ -6329,6 +6424,59 @@ mod tests {
             Command::Intake { command: Some(IntakeCmd::Info { triage: true, agent: Some(_), .. }), .. }
         ));
         assert!(Cli::try_parse_from(["factory", "intake", "info", "abc", "x", "--agent", "codex"]).is_err());
+    }
+
+    #[test]
+    fn intake_parses_the_security_fast_lane_subcommands() {
+        match parse(&["intake", "add", "Possible RCE", "--scope", "web", "--security"]).command {
+            Command::Intake { command: Some(IntakeCmd::Add { security: true, .. }), .. } => {}
+            _ => panic!("expected --security to parse"),
+        }
+        match parse(&["intake", "add", "Ordinary bug", "--scope", "web"]).command {
+            Command::Intake { command: Some(IntakeCmd::Add { security: false, .. }), .. } => {}
+            _ => panic!("--security absent should default to false"),
+        }
+        match parse(&["intake", "flag-security", "abc", "--reason", "looks like an injection"]).command {
+            Command::Intake { command: Some(IntakeCmd::FlagSecurity { id, reason }), .. } => {
+                assert_eq!((id.as_str(), reason.as_str()), ("abc", "looks like an injection"));
+            }
+            _ => panic!("not a flag-security"),
+        }
+        match parse(&["intake", "security", "abc", "confirm"]).command {
+            Command::Intake { command: Some(IntakeCmd::Security { id, verdict, evidence: None }), .. } => {
+                assert_eq!((id.as_str(), verdict.as_str()), ("abc", "confirm"));
+            }
+            _ => panic!("not a confirm"),
+        }
+        match parse(&["intake", "security", "abc", "dismiss", "--evidence", "false positive"]).command {
+            Command::Intake { command: Some(IntakeCmd::Security { id, verdict, evidence: Some(e) }), .. } => {
+                assert_eq!((id.as_str(), verdict.as_str(), e.as_str()), ("abc", "dismiss", "false positive"));
+            }
+            _ => panic!("not a dismiss"),
+        }
+        assert!(
+            Cli::try_parse_from(["factory", "intake", "security", "abc", "maybe"]).is_err(),
+            "only confirm or dismiss"
+        );
+        match parse(&["intake", "security-reports"]).command {
+            Command::Intake { command: Some(IntakeCmd::SecurityReports { scope: None }), .. } => {}
+            _ => panic!("not a security-reports"),
+        }
+        match parse(&["intake", "security-reports", "--scope", "web"]).command {
+            Command::Intake { command: Some(IntakeCmd::SecurityReports { scope: Some(s) }), .. } => {
+                assert_eq!(s, "web");
+            }
+            _ => panic!("not a scoped security-reports"),
+        }
+        // `--scope` before the subcommand is left for the run loop's own
+        // merge to fold in (the same as `list` and `add`) -- parsing alone
+        // leaves it on the outer `Command::Intake`.
+        match parse(&["intake", "--scope", "web", "security-reports"]).command {
+            Command::Intake { scope: Some(outer), command: Some(IntakeCmd::SecurityReports { scope: None }) } => {
+                assert_eq!(outer, "web");
+            }
+            _ => panic!("not a pre-subcommand scope waiting to be merged"),
+        }
     }
 
     #[test]

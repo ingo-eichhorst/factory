@@ -190,21 +190,41 @@ export function cardNote(card) {
   return null;
 }
 
+/// A possible or confirmed security report (`#170`) -- the fast lane
+/// `board()` already sorted; here it is what gates release, split and
+/// wontfix. `dismissed` is an ordinary item again.
+export function securityFlag(card) {
+  return (card && card.security) || null;
+}
+
 /// Which actions an item allows, in the order the buttons are drawn. A
 /// released or split item has none: it is a task now, and the task modal
 /// is where it is worked. Any open item can be split -- a person may cut
-/// one nobody could assess as a whole.
+/// one nobody could assess as a whole -- except a possible security report,
+/// which nothing may release, split or close until a person looks (`#170`).
 export function cardActions(card) {
   if (!card || !["received", "triaging", "needs_info"].includes(card.stage)) return [];
   const triageRunning = card.triage_task && !card.triage && !triageEnded(card);
+  const flag = securityFlag(card);
+  const possible = !!flag && flag.state === "possible";
+  const confirmed = !!flag && flag.state === "confirmed";
   const out = [];
   if (card.stage === "needs_info") out.push("info");
   if (!triageRunning) out.push("triage");
   out.push("assess");
-  if (card.triage && card.triage.verdict.verdict === "ready") out.push("release");
-  out.push("split");
+  if (!possible && card.triage && card.triage.verdict.verdict === "ready") out.push("release");
+  if (!possible) out.push("split");
   if (card.stage !== "needs_info") out.push("needs_info");
-  out.push("wontfix");
+  // Wontfix is for a dismissal, never for a report nobody has looked at yet
+  // or one already confirmed real.
+  if (!possible && !confirmed) out.push("wontfix");
+  // Flagging only adds scrutiny, so it stays open to anyone who could assess
+  // the item -- but only once: an item already carrying a flag of any kind
+  // (possible, confirmed or dismissed) is never flagged a second time.
+  if (!flag) out.push("flag_security");
+  // Confirm or dismiss: the owner's alone (the daemon refuses anyone else),
+  // and only while the report is still `possible`.
+  if (possible) out.push("security_confirm", "security_dismiss");
   return out;
 }
 
@@ -216,6 +236,9 @@ export const ACTION_LABELS = {
   split: "Split into items",
   needs_info: "Needs info",
   wontfix: "Won't fix",
+  flag_security: "Flag as security report",
+  security_confirm: "Confirm security report",
+  security_dismiss: "Dismiss security report",
 };
 
 /// The daemon's next actions (`factory_core::intake::next_actions`), each
@@ -322,7 +345,32 @@ export function addRequest(values) {
   if (values.scope) body.scope = values.scope;
   if ((values.reference || "").trim()) body.reference = values.reference.trim();
   if ((values.requester || "").trim()) body.requester = values.requester.trim();
+  if (values.security) body.security = true;
   return { path: "/api/intake", method: "POST", body };
+}
+
+/// `#170`: flag an item still in the gate as a possible security report.
+export function flagSecurityRequest(id, reason) {
+  return { path: `/api/intake/${encodeURIComponent(id)}/flag-security`, method: "POST", body: { reason: reason || "" } };
+}
+
+/// `#170`: a person confirms or dismisses. `verdict` is `"confirm"` or
+/// `"dismiss"`; evidence is required for a dismissal, optional to confirm.
+export function securityDecisionRequest(id, verdict, evidence) {
+  return {
+    path: `/api/intake/${encodeURIComponent(id)}/security`,
+    method: "POST",
+    body: { verdict, evidence: (evidence || "").trim() },
+  };
+}
+
+/// What stops a security decision being sent -- the daemon's own rule said
+/// before the round trip.
+export function securityDecisionProblem(verdict, evidence) {
+  if (verdict === "dismiss" && !(evidence || "").trim()) {
+    return "dismissing needs the evidence that clears it";
+  }
+  return null;
 }
 
 export function triageRequest(id, agent) {

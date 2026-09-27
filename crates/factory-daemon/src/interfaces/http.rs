@@ -162,10 +162,13 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/quality/remediate", post(quality_remediate))
         .route("/api/operations", get(operations))
         .route("/api/intake", get(intake_board).post(intake_add))
+        .route("/api/intake/security-reports", get(intake_security_reports))
         .route("/api/intake/{id}/triage", post(intake_triage))
         .route("/api/intake/{id}/assess", post(intake_assess))
         .route("/api/intake/{id}/decide", post(intake_decide))
         .route("/api/intake/{id}/info", post(intake_info))
+        .route("/api/intake/{id}/flag-security", post(intake_flag_security))
+        .route("/api/intake/{id}/security", post(intake_security))
         .route("/api/benchmarks", get(benchmarks))
         .route("/api/datasets", get(list_datasets).post(create_dataset))
         .route("/api/datasets/{name}", get(get_dataset).delete(delete_dataset))
@@ -967,6 +970,47 @@ async fn intake_info(
     Json(body): Json<IntakeInfoBody>,
 ) -> AxumResponse {
     run(&engine, Request::IntakeInfo { id, text: body.text }).await
+}
+
+#[derive(serde::Deserialize)]
+struct IntakeFlagSecurityBody {
+    #[serde(default)]
+    reason: String,
+}
+
+/// `POST /api/intake/{id}/flag-security` -- `{reason}` (`#170`). Flagging
+/// only adds scrutiny, so it needs no more than `intake.assess` already does.
+async fn intake_flag_security(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<IntakeFlagSecurityBody>,
+) -> AxumResponse {
+    run(&engine, Request::IntakeFlagSecurity { id, reason: body.reason }).await
+}
+
+#[derive(serde::Deserialize)]
+struct IntakeSecurityBody {
+    verdict: factory_core::intake::SecurityVerdict,
+    #[serde(default)]
+    evidence: String,
+}
+
+/// `POST /api/intake/{id}/security` -- `{verdict, evidence?}` (`#170`).
+/// Confirming or dismissing is the owner's alone: the UI sends no token, so
+/// every browser caller already is the owner (`run`, below).
+async fn intake_security(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<IntakeSecurityBody>,
+) -> AxumResponse {
+    run(&engine, Request::IntakeSecurity { id, verdict: body.verdict, evidence: body.evidence }).await
+}
+
+/// `GET /api/intake/security-reports?scope=` -- every confirmed security
+/// report over the scope's subtree (`#170`), the L4 fact `#157`'s reporting
+/// clock will read.
+async fn intake_security_reports(State(engine): State<Arc<Engine>>, Query(q): Query<IntakeQuery>) -> AxumResponse {
+    run(&engine, Request::IntakeSecurityReports { scope: q.scope }).await
 }
 
 /// `POST /api/scenarios/promote` -- turn a scenario into real work. Answers

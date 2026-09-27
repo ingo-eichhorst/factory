@@ -123,6 +123,7 @@ async fn poll_once(engine: &Engine, gh: &Path) {
                 questions: Vec::new(),
                 decision: None,
                 candidates: Vec::new(),
+                security: None,
             };
             let new = NewTask {
                 title: issue.title,

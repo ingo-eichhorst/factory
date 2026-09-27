@@ -183,6 +183,11 @@ impl Engine {
             Request::IntakeTriage { .. } => Grant::IntakeTriage,
             Request::IntakeAssess { .. } => Grant::IntakeAssess,
             Request::IntakeDecide { .. } => Grant::IntakeDecide,
+            // Flagging only adds scrutiny -- the same door `intake.assess`
+            // already opens, not a sixth grant (`#170`). Confirming or
+            // dismissing is never an agent's, whatever it holds: see the
+            // `Needs::Owner` arm below.
+            Request::IntakeFlagSecurity { .. } => Grant::IntakeAssess,
             Request::TaskDelete { .. } => Grant::TaskDelete,
             Request::TaskRun { .. } => Grant::TaskRun,
             Request::TaskCancel { .. } => Grant::TaskCancel,
@@ -287,6 +292,10 @@ impl Engine {
             | Request::Operations { .. }
             // A projection over the task list, like `Operations` (`#119`).
             | Request::IntakeBoard { .. }
+            // The confirmed-report read (`#170`): a projection over the task
+            // list too, and the L4 fact `#157`'s clock will read -- open the
+            // same way `IntakeBoard` is.
+            | Request::IntakeSecurityReports { .. }
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
@@ -327,6 +336,12 @@ impl Engine {
             // run/verify, no role grant opens it: choosing a cutover candidate
             // is the owner's decision alone (#153).
             Request::BackupRestore { .. } => return Needs::Owner,
+            // Confirming or dismissing a possible security report is a
+            // person's call, never an agent's, whatever role it holds --
+            // AGENTS.md's "bounds what an agent does by accident, not what
+            // it could do" (`#170`). Flagging (above) stays `intake.assess`;
+            // this is the one door no grant opens.
+            Request::IntakeSecurity { .. } => return Needs::Owner,
         })
     }
 
@@ -466,6 +481,15 @@ impl Engine {
                     return Err(deny("assess an intake item that is neither in its reach nor its own triage run's"));
                 }
                 in_scope(&assessment.routing.scope)
+            }
+            // Flagging (`#170`): the same reach `IntakeAssess` checks, minus
+            // the route -- there is none to be in scope of.
+            Request::IntakeFlagSecurity { id, .. } => {
+                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
+                    return Err(deny("flag an intake item that is neither in its reach nor its own triage run's"));
+                }
+                Ok(())
             }
             Request::IntakeDecide { id, decision } => {
                 let Some(item) = self.store.get(id).await? else { return Ok(()) };
@@ -2125,6 +2149,50 @@ mod tests {
             !allowed(&e, &triager, Request::IntakeDecide { id: "elsewhere".into(), decision: ready(false) }).await
         );
         assert!(!allowed(&e, &triager, Request::IntakeAdd(NewIntake { title: "x".into(), scope: Some("other".into()), ..Default::default() })).await);
+    }
+
+    // -- intake security fast lane (`#170`) ---------------------------------
+
+    #[tokio::test]
+    async fn intake_flag_security_needs_intake_assess_and_reach_over_the_item() {
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        task_in(&e, "not_mine", "demo", "someone").await;
+        task_in(&e, "far", "other", "anyone").await;
+        let flag = |id: &str| Request::IntakeFlagSecurity { id: id.into(), reason: "looks exploitable".into() };
+
+        // Flagging rides `intake.assess` -- the same grant, not a sixth one.
+        assert!(allowed(&e, &worker("w"), flag("mine")).await);
+        assert!(!allowed(&e, &worker("w"), flag("not_mine")).await, "not assigned to it");
+        assert!(allowed(&e, &foreman(), flag("not_mine")).await, "scope reach covers everything in demo");
+        assert!(!allowed(&e, &foreman(), flag("far")).await, "out of the foreman's scope");
+        assert!(allowed(&e, &wearing("triager"), flag("not_mine")).await);
+        assert!(!allowed(&e, &wearing("triager"), flag("far")).await);
+    }
+
+    #[tokio::test]
+    async fn intake_security_confirm_or_dismiss_is_the_owners_alone() {
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        let confirm = || Request::IntakeSecurity {
+            id: "mine".into(),
+            verdict: factory_core::intake::SecurityVerdict::Confirm,
+            evidence: String::new(),
+        };
+        // Neither a worker in reach, a foreman with scope reach, nor the
+        // triager -- whatever grants a role holds -- may decide. Only the
+        // owner, no token at all, can.
+        assert!(!allowed(&e, &worker("w"), confirm()).await);
+        assert!(!allowed(&e, &foreman(), confirm()).await);
+        assert!(!allowed(&e, &wearing("triager"), confirm()).await);
+        assert!(allowed(&e, &Caller::Owner, confirm()).await);
+    }
+
+    #[tokio::test]
+    async fn intake_security_reports_needs_no_grant() {
+        let e = engine();
+        assert!(allowed(&e, &worker("w"), Request::IntakeSecurityReports { scope: None }).await);
+        assert!(allowed(&e, &Caller::Owner, Request::IntakeSecurityReports { scope: None }).await);
     }
 
     // -- roles inherited down the scope tree -------------------------------

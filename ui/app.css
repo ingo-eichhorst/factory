@@ -264,6 +264,14 @@ fieldset.ik-part legend { font: 500 11px/1 var(--mono); color: var(--ink-2); pad
 .ik-dup-rejected { color: var(--ink-2); }
 .ik-dup-unverified { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
 
+/* The security fast lane (#170): a possible report asks for attention (the
+   owner has to confirm or dismiss it), a confirmed one is a real fault, and
+   a dismissed one reads as ordinary again -- no wash, just a quiet note. */
+.ik-fast-lane { border-left: 3px solid var(--signal); }
+.ik-sec-possible { color: var(--signal-ink); border-color: transparent; background: var(--signal-wash); }
+.ik-sec-confirmed { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+.ik-sec-dismissed { color: var(--ink-2); }
+
 /* ---------------------------------------------------------- tasks board
    Columns are statuses and nothing else: blocked sits leftmost because it is
    the one column a person has to act on, the two pending flavours stay apart

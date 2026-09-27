@@ -997,6 +997,14 @@ impl Engine {
                 })
             }
             Request::TaskDelete { id } => {
+                // A confirmed security report is CRA evidence (`#170`):
+                // checked before anything else touches the run or the row,
+                // whatever the task's current status or stage.
+                if let Some(task) = self.store.get(&id).await? {
+                    if let Some(reason) = factory_core::intake::confirmed_security_delete_guard(&task) {
+                        return Err(FactoryError::BadRequest(reason));
+                    }
+                }
                 if let Some(run) = self.store.active_run(&id).await? {
                     self.close_session(&run).await;
                     // Deleting the task ends the run without ever reaching
@@ -1155,6 +1163,15 @@ impl Engine {
             }),
             Request::IntakeInfo { id, text } => Ok(Payload::Task {
                 task: self.intake_info(caller, &id, &text).await?,
+            }),
+            Request::IntakeFlagSecurity { id, reason } => Ok(Payload::Task {
+                task: self.intake_flag_security(caller, &id, &reason).await?,
+            }),
+            Request::IntakeSecurity { id, verdict, evidence } => Ok(Payload::Task {
+                task: self.intake_security_decision(caller, &id, verdict, &evidence).await?,
+            }),
+            Request::IntakeSecurityReports { scope } => Ok(Payload::IntakeSecurityReports {
+                reports: self.confirmed_security_reports(scope.as_deref()).await?,
             }),
 
             Request::WorkflowCreate(draft) => Ok(Payload::Workflow {

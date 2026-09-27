@@ -23,12 +23,16 @@ import {
   estimateOf,
   estimateText,
   fmtAge,
+  flagSecurityRequest,
   infoRequest,
   nextActions,
   previewVerdict,
   priorityOf,
   routeFor,
   routeProblem,
+  securityDecisionProblem,
+  securityDecisionRequest,
+  securityFlag,
   splitDraft,
   splitProblem,
   totalOpen,
@@ -114,13 +118,41 @@ test("axis marks: pass, fail, a tolerated cheap observability gap, and unassesse
 
 test("actions follow the stage: a released item has none, a needs-info one takes information", () => {
   assert.deepEqual(cardActions(card("ready")), []);
-  assert.deepEqual(cardActions(card("needs_info")), ["info", "triage", "assess", "split", "wontfix"]);
+  assert.deepEqual(cardActions(card("needs_info")), ["info", "triage", "assess", "split", "wontfix", "flag_security"]);
   assert.deepEqual(cardActions({ ...card("ready"), stage: "split" }), [], "a split item is done with");
   assert.ok(cardActions(card("triaging")).includes("release"), "assessed ready waits for release");
   const running = { stage: "triaging", triage: null, triage_task: "t", triage_task_status: "running" };
   assert.ok(!cardActions(running).includes("triage"), "one triage run at a time");
   assert.ok(!cardActions({ ...running, triage_task_status: "failed" }).includes("release"));
   assert.ok(cardActions({ ...running, triage_task_status: "failed" }).includes("triage"));
+});
+
+test("the security fast lane gates release, split and wontfix, and only the owner-facing actions show while possible (#170)", () => {
+  const base = card("needs_info");
+  assert.equal(securityFlag(base), null, "the fixture carries no flag");
+  assert.equal(securityFlag(null), null);
+
+  const possible = { ...base, security: { state: "possible", flagged_by: "agent triager", flagged_at: "t", reason: "looks bad" } };
+  const possibleActions = cardActions(possible);
+  assert.ok(!possibleActions.includes("release"), "never released while possible");
+  assert.ok(!possibleActions.includes("split"), "never split while possible");
+  assert.ok(!possibleActions.includes("wontfix"), "never closed while possible");
+  assert.ok(!possibleActions.includes("flag_security"), "already flagged");
+  assert.ok(possibleActions.includes("security_confirm") && possibleActions.includes("security_dismiss"));
+  assert.ok(possibleActions.includes("assess"), "assessing itself is still fine");
+
+  const confirmed = { ...card("triaging"), security: { state: "confirmed", flagged_by: "x", flagged_at: "t", reason: "r" } };
+  const confirmedActions = cardActions(confirmed);
+  assert.ok(confirmedActions.includes("release"), "a confirmed report may still release");
+  assert.ok(!confirmedActions.includes("wontfix"), "wontfix is for a dismissal, not a confirmed report");
+  assert.ok(!confirmedActions.includes("flag_security"));
+  assert.ok(!confirmedActions.includes("security_confirm") && !confirmedActions.includes("security_dismiss"), "already decided");
+
+  const dismissed = { ...base, security: { state: "dismissed", flagged_by: "x", flagged_at: "t", reason: "r" } };
+  const dismissedActions = cardActions(dismissed);
+  assert.ok(dismissedActions.includes("wontfix"), "an ordinary item again");
+  assert.ok(!dismissedActions.includes("flag_security"), "already carries a flag");
+  assert.ok(!dismissedActions.includes("security_confirm") && !dismissedActions.includes("security_dismiss"));
 });
 
 test("a card says what is happening to it", () => {
@@ -265,6 +297,28 @@ test("the requests are the daemon's routes and bodies", () => {
   assert.deepEqual(decideRequest("i", "wontfix", { reason: "duplicate", evidence: " e ", duplicate_of: " t-1 " }).body,
     { decision: "wontfix", reason: "duplicate", evidence: "e", duplicate_of: "t-1" });
   assert.equal(decideRequest("i", "invalid"), null);
+});
+
+test("addRequest carries --security only when asked, and the security routes are the daemon's (#170)", () => {
+  assert.equal(addRequest({ title: "x" }).body.security, undefined, "omitted when not asked");
+  assert.equal(addRequest({ title: "x", security: true }).body.security, true);
+  assert.equal(addRequest({ title: "x", security: false }).body.security, undefined);
+
+  assert.deepEqual(flagSecurityRequest("a/b", " looks bad "), {
+    path: "/api/intake/a%2Fb/flag-security", method: "POST", body: { reason: " looks bad " },
+  });
+  assert.deepEqual(flagSecurityRequest("i", undefined), { path: "/api/intake/i/flag-security", method: "POST", body: { reason: "" } });
+
+  assert.deepEqual(securityDecisionRequest("i", "confirm", ""), {
+    path: "/api/intake/i/security", method: "POST", body: { verdict: "confirm", evidence: "" },
+  });
+  assert.deepEqual(securityDecisionRequest("i", "dismiss", " false positive "), {
+    path: "/api/intake/i/security", method: "POST", body: { verdict: "dismiss", evidence: "false positive" },
+  });
+
+  assert.equal(securityDecisionProblem("confirm", ""), null, "confirming needs no evidence");
+  assert.equal(securityDecisionProblem("dismiss", "  "), "dismissing needs the evidence that clears it");
+  assert.equal(securityDecisionProblem("dismiss", "false positive"), null);
 });
 
 test("wontfix is refused before the round trip without a reason, evidence, or what it duplicates", () => {
