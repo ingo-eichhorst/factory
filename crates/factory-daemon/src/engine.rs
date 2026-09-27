@@ -15,7 +15,7 @@ use factory_core::config::{Factory, Sandbox, ScopeAgent, SHELL_HARNESS};
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
-    AgentActivity, AgentView, CredentialRow, DaemonFacts, Envelope, InterfaceFacts, Payload,
+    AgentActivity, AgentView, CapacityRow, CredentialRow, DaemonFacts, Envelope, InterfaceFacts, Payload,
     ProviderAgent, ProviderRow, ProviderRun, ProviderWindow, Request, Response, RuntimeConnectionView,
     SandboxRow, ScopeView, StatusInfo, StoreFacts, UnassignedAgent,
 };
@@ -1219,6 +1219,19 @@ impl Engine {
     async fn status(&self) -> Result<StatusInfo> {
         let factory = self.factory_snapshot();
         let tasks = self.store.list(&TaskFilter::default()).await?;
+        let mut capacity = Vec::new();
+        for scope in factory.config.scope.iter().chain(&factory.config.scopes) {
+            for agent in scope.declared_agents() {
+                let Some(max) = agent.max_sessions else { continue };
+                let name = agent.name();
+                let cap = self.capacity_for(&scope.name, &name, Some(max)).await?;
+                let waiting = tasks
+                    .iter()
+                    .filter(|t| t.slot_wait.as_ref().is_some_and(|w| w.scope == scope.name && w.agent == name))
+                    .count() as u32;
+                capacity.push(CapacityRow { scope: scope.name.clone(), agent: name, in_use: cap.in_use, max, waiting });
+            }
+        }
         Ok(StatusInfo {
             instance: factory.config.instance.name.clone(),
             instance_id: factory.config.instance.id.clone(),
@@ -1229,6 +1242,7 @@ impl Engine {
             tasks_active: self.store.active_runs().await?.len(),
             subscribers: self.bus.subscriber_count(),
             interfaces: self.interfaces.clone(),
+            capacity,
             scopes: factory.scope_names(),
         })
     }
@@ -4372,6 +4386,22 @@ mod tests {
                 assert_eq!(wait.trigger, trigger);
                 assert_eq!(stored.status, TaskStatus::Pending);
             }
+        }
+
+        /// `factory status`'s own reading: one row per agent that declares
+        /// its own `max_sessions`, with the same in-use count admission
+        /// uses and the waiting count alongside it.
+        #[tokio::test]
+        async fn capacity_shows_up_in_status_as_in_use_and_waiting_per_agent() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(2))], None);
+            for i in 0..4 {
+                let t = task(&engine, &format!("t{i}"), "codex").await;
+                engine.start_run(&t.id, Trigger::Manual).await;
+            }
+            let status = engine.status().await.unwrap();
+            let row = status.capacity.iter().find(|r| r.agent == "codex").expect("a row for the declared cap");
+            assert_eq!(row.scope, "demo");
+            assert_eq!((row.in_use, row.max, row.waiting), (2, 2, 2));
         }
 
         /// A run this daemon is holding open on someone's answer, with no
