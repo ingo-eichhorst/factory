@@ -41,9 +41,12 @@
 //! and the built-in limits (`ReadyDefinition::default()`) behaves exactly
 //! as intake always has.
 
+use crate::control_plan;
 use crate::operations::Window;
 use crate::ready::ReadyDefinition;
+use crate::run::Run;
 use crate::task::{Task, TaskStatus};
+use crate::usage::SnapshotPoint;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -651,16 +654,27 @@ pub fn priority(impact: Level, urgency: Level) -> Priority {
 }
 
 /// A time range, agent-active. The range is the estimate; `midpoint` is the
-/// single number a task's advisory `estimate_seconds` gets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// single number a task's advisory `estimate_seconds` gets when there is no
+/// better projection.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Estimate {
     pub min_seconds: u64,
     pub max_seconds: u64,
+    /// The explained projection inside the range -- a reference class's p50,
+    /// or an assessor's own -- as opposed to `midpoint()`'s bare average.
+    /// `#[serde(default)]`: absent on every row `#168` predates, which reads
+    /// as "no better number than the midpoint", exactly what those rows meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_seconds: Option<u64>,
+    /// A cost range alongside the time one, only when the source that set
+    /// `expected_seconds` had one -- the complexity table never does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<crate::task::CostEstimateRange>,
 }
 
 impl Estimate {
     pub fn new(min_seconds: u64, max_seconds: u64) -> Self {
-        Self { min_seconds, max_seconds }
+        Self { min_seconds, max_seconds, expected_seconds: None, cost: None }
     }
 
     /// `ir:triage`'s complexity table. Level 9 and 10 have no range: work
@@ -677,8 +691,32 @@ impl Estimate {
         })
     }
 
+    /// A reference class's own percentiles (`#168`): p10/p90 bound the
+    /// range, p50 is the explained `expected_seconds` -- never the bare
+    /// average `midpoint()` falls back to. `min_seconds` is floored at one:
+    /// a task that ran did something, however briefly, and a stored zero
+    /// fails `TimeEstimateRange::validate` the moment this becomes a task's
+    /// `Estimate`. Percentiles are already non-decreasing (nearest-rank over
+    /// a sorted sample), so flooring the low end alone cannot invert the
+    /// range.
+    pub fn from_reference(time: Percentiles<u64>, cost: Option<Percentiles<f64>>) -> Self {
+        let min_seconds = time.p10.max(1);
+        Self {
+            min_seconds,
+            max_seconds: time.p90.max(min_seconds),
+            expected_seconds: Some(time.p50.max(min_seconds)),
+            cost: cost.map(|c| crate::task::CostEstimateRange {
+                low: c.p10.max(0.0),
+                expected: c.p50.max(c.p10.max(0.0)),
+                high: c.p90.max(c.p10.max(0.0)),
+            }),
+        }
+    }
+
+    /// The explained projection when there is one, else the bare average of
+    /// the range -- what a task's advisory `estimate_seconds` gets.
     pub fn midpoint(self) -> u64 {
-        (self.min_seconds + self.max_seconds) / 2
+        self.expected_seconds.unwrap_or((self.min_seconds + self.max_seconds) / 2)
     }
 
     /// `45m-2h`, the spelling a label and a card use.
@@ -696,6 +734,353 @@ fn short_duration(seconds: u64) -> String {
     } else {
         format!("{}h{}m", minutes / 60, minutes % 60)
     }
+}
+
+// ------------------------------------------------------------ reference class
+
+/// `#168`: what an intake estimate rests on before any run of the item
+/// exists -- completed work in the same scope and category. This is a
+/// different computation from `#117`'s first-turn re-estimate
+/// (`factory-daemon`'s `record_re_estimate`, a *ratio* cohort applied to a
+/// run already dispatched): here the sample is whole tasks' *absolute* wall
+/// time and cost, read once at triage.
+///
+/// How far back the sample reaches.
+pub const REFERENCE_WINDOW_DAYS: i64 = 90;
+/// Below this many task samples, [`reference_estimate`] returns no
+/// percentiles for that dimension (time or cost, independently) and
+/// [`evaluate`] falls back to the complexity table.
+pub const REFERENCE_MIN_SAMPLES: u32 = 5;
+
+/// Nearest-rank p10/p50/p90, over one sample -- always non-decreasing
+/// (`scenario::nearest_rank`'s own guarantee), whatever the data looks like.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Percentiles<T> {
+    pub p10: T,
+    pub p50: T,
+    pub p90: T,
+}
+
+fn percentiles_u64(mut values: Vec<u64>) -> Percentiles<u64> {
+    values.sort_unstable();
+    let n = values.len();
+    Percentiles {
+        p10: values[crate::scenario::nearest_rank(n, 0.10)],
+        p50: values[crate::scenario::nearest_rank(n, 0.50)],
+        p90: values[crate::scenario::nearest_rank(n, 0.90)],
+    }
+}
+
+fn percentiles_f64(mut values: Vec<f64>) -> Percentiles<f64> {
+    values.sort_by(f64::total_cmp);
+    let n = values.len();
+    Percentiles {
+        p10: values[crate::scenario::nearest_rank(n, 0.10)],
+        p50: values[crate::scenario::nearest_rank(n, 0.50)],
+        p90: values[crate::scenario::nearest_rank(n, 0.90)],
+    }
+}
+
+/// [`reference_estimate`]'s answer: the class it looked at, the window, and
+/// -- independently, each with its own sample count -- the time and cost
+/// percentiles, present only where the sample cleared
+/// [`REFERENCE_MIN_SAMPLES`]. Never a store or a `Factory` snapshot: the
+/// daemon gathers the tasks and runs, this only reads them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferenceEstimate {
+    /// The exact canonical scope the sample was drawn from -- never a
+    /// subtree, so one project never trains another's estimate.
+    pub scope: String,
+    pub category: String,
+    /// Set only when the routed agent's own class alone had enough samples
+    /// to narrow to -- `None` means the sample is scope+category.
+    pub agent: Option<String>,
+    pub window: Window,
+    pub time_samples: u32,
+    pub time: Option<Percentiles<u64>>,
+    pub cost_samples: u32,
+    pub cost: Option<Percentiles<f64>>,
+}
+
+impl ReferenceEstimate {
+    /// A reference class with no data behind it at all -- what a caller
+    /// with nothing to gather (or a test not exercising this) passes.
+    pub fn empty(scope: impl Into<String>, category: impl Into<String>, window: Window) -> Self {
+        Self {
+            scope: scope.into(),
+            category: category.into(),
+            agent: None,
+            window,
+            time_samples: 0,
+            time: None,
+            cost_samples: 0,
+            cost: None,
+        }
+    }
+}
+
+/// One qualifying task's contribution to a reference class.
+struct ReferenceSample {
+    agent: String,
+    wall_seconds: u64,
+    /// `None` unless every run measured a final, non-partial cost -- an
+    /// unmeasured task is left out of the cost sample, never counted as $0.
+    cost_usd: Option<f64>,
+}
+
+/// The pure reference-class computation (`#168`): from every `Done` task
+/// and its runs, work out what completed work like this one actually cost
+/// in time and money.
+///
+/// **Sample.** A task counts when: its status is `Done`; every one of its
+/// runs is terminal; its last run ended inside the trailing
+/// [`REFERENCE_WINDOW_DAYS`] days of `to`; its scope, canonicalised by
+/// `canonical`, is exactly `scope` (also canonicalised) -- a subtree match
+/// would let one project's numbers train another's; its effective category
+/// (`control_plan::effective_category`) is exactly `category`; it is not
+/// itself a triage bookkeeping task (`TRIAGE_LABEL`); and it has at least
+/// one run at all -- a workflow-released item with none contributes
+/// nothing to a *time* sample.
+///
+/// **Time** is the sum of the task's runs' wall seconds
+/// (`ended_at - started_at`), floored at one -- the same total `#117`'s own
+/// task comparison (`TaskUsage::actual_wall_seconds`) measures.
+///
+/// **Cost** is the sum of the runs' final measured cost (`RunUsage` known,
+/// not partial, snapshotted at `SnapshotPoint::RunEnd`, with a `cost_usd`),
+/// and only when every run in the task has one -- one run with an
+/// unmeasured or partial reading makes the whole task's cost unknown,
+/// never zero.
+///
+/// **Harness narrowing.** `agent`, when given, is tried first: if the tasks
+/// that also match it alone number at least [`REFERENCE_MIN_SAMPLES`], the
+/// sample narrows to them and [`ReferenceEstimate::agent`] says so.
+/// Otherwise the sample stays scope+category and `agent` comes back `None`
+/// -- the caller's own agent request does not count as evidence by itself.
+///
+/// **Percentiles.** With at least [`REFERENCE_MIN_SAMPLES`] tasks in the
+/// (possibly narrowed) sample, time gets nearest-rank p10/p50/p90 in
+/// seconds. Cost is scored the same way but counted separately: whichever
+/// of the sample's tasks have a known cost, over the same minimum. Either
+/// dimension short of the minimum comes back `None` with its own count
+/// still reported, so a caller can say "insufficient evidence (n of 5)".
+pub fn reference_estimate(
+    scope: &str,
+    category: &str,
+    agent: Option<&str>,
+    to: DateTime<Utc>,
+    tasks: &[Task],
+    runs: &[Run],
+    canonical: impl Fn(&str) -> String,
+) -> ReferenceEstimate {
+    let window = Window::trailing(to, REFERENCE_WINDOW_DAYS);
+    let target_scope = canonical(scope);
+    let mut population: Vec<ReferenceSample> = Vec::new();
+    for task in tasks {
+        if task.status != TaskStatus::Done {
+            continue;
+        }
+        if task.labels.contains_key(TRIAGE_LABEL) {
+            continue;
+        }
+        if canonical(&task.scope) != target_scope {
+            continue;
+        }
+        if control_plan::effective_category(task.category.as_deref()) != category {
+            continue;
+        }
+        let task_runs: Vec<&Run> = runs.iter().filter(|r| r.task_id == task.id).collect();
+        if task_runs.is_empty() {
+            continue;
+        }
+        if !task_runs.iter().all(|r| r.status.is_terminal()) {
+            continue;
+        }
+        let Some(last_ended) = task_runs.iter().filter_map(|r| r.ended_at).max() else { continue };
+        if !window.contains(last_ended) {
+            continue;
+        }
+        let wall_seconds = task_runs
+            .iter()
+            .map(|r| (r.ended_at.unwrap_or(r.started_at) - r.started_at).num_seconds().max(0) as u64)
+            .sum::<u64>()
+            .max(1);
+        let cost_usd = task_runs
+            .iter()
+            .map(|r| {
+                r.usage
+                    .as_ref()
+                    .filter(|u| u.is_known() && !u.partial && u.as_of_point == Some(SnapshotPoint::RunEnd))
+                    .and_then(|u| u.cost_usd)
+            })
+            .collect::<Option<Vec<f64>>>()
+            .map(|costs| costs.into_iter().sum());
+        population.push(ReferenceSample { agent: task.agent.clone(), wall_seconds, cost_usd });
+    }
+
+    let (chosen, chosen_agent): (Vec<&ReferenceSample>, Option<String>) = match agent {
+        Some(wanted) => {
+            let narrowed: Vec<&ReferenceSample> = population.iter().filter(|s| s.agent == wanted).collect();
+            if narrowed.len() >= REFERENCE_MIN_SAMPLES as usize {
+                (narrowed, Some(wanted.to_string()))
+            } else {
+                (population.iter().collect(), None)
+            }
+        }
+        None => (population.iter().collect(), None),
+    };
+
+    let time_samples = chosen.len() as u32;
+    let time = (time_samples >= REFERENCE_MIN_SAMPLES)
+        .then(|| percentiles_u64(chosen.iter().map(|s| s.wall_seconds).collect()));
+
+    let costs: Vec<f64> = chosen.iter().filter_map(|s| s.cost_usd).collect();
+    let cost_samples = costs.len() as u32;
+    let cost = (cost_samples >= REFERENCE_MIN_SAMPLES).then(|| percentiles_f64(costs));
+
+    ReferenceEstimate {
+        scope: target_scope,
+        category: category.to_string(),
+        agent: chosen_agent,
+        window,
+        time_samples,
+        time,
+        cost_samples,
+        cost,
+    }
+}
+
+/// Where a `Triage`'s estimate came from -- precedence, high to low:
+/// the assessor's own range, then the reference class, then the complexity
+/// table. [`evaluate`] picks the first one available and records which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EstimateSource {
+    Assessor,
+    ReferenceClass,
+    ComplexityTable,
+}
+
+impl EstimateSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Assessor => "assessor",
+            Self::ReferenceClass => "reference_class",
+            Self::ComplexityTable => "complexity_table",
+        }
+    }
+}
+
+/// What a `Triage`'s estimate rests on -- stored beside it so a card or
+/// `factory intake show` can say why, and `#117`'s cost report can compare
+/// like with like. `#[serde(default)]`: absent on every `Triage` `#168`
+/// predates, which reads as "no basis recorded" -- an assessor range from
+/// before this shipped, read back with nothing to add.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EstimateBasis {
+    pub source: EstimateSource,
+    pub scope: String,
+    pub category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Absent only for `Assessor`: an assessor's own range was not read off
+    /// any window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<Window>,
+    #[serde(default)]
+    pub time_samples: u32,
+    #[serde(default)]
+    pub cost_samples: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<Percentiles<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Percentiles<f64>>,
+    /// Why a dimension short of the reference class's minimum has no
+    /// percentiles -- set on a `ComplexityTable` basis (time itself fell
+    /// back) and, still, on a `ReferenceClass` one whose cost alone did not
+    /// clear the minimum. `None` when nothing was short.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+
+impl EstimateBasis {
+    /// The sentence a card, `factory intake show` and the journal use --
+    /// mirrored in `ui/js/intake-model.js`'s `basisText`, which must read
+    /// exactly the same two shapes.
+    pub fn describe(&self) -> String {
+        match self.source {
+            EstimateSource::Assessor => "the assessor's own estimate".to_string(),
+            EstimateSource::ReferenceClass => format!(
+                "p10\u{2013}p90 of {n} completed {category} task{s} in {scope}, last {days} days",
+                n = self.time_samples,
+                category = self.category,
+                s = if self.time_samples == 1 { "" } else { "s" },
+                scope = self.scope,
+                days = REFERENCE_WINDOW_DAYS,
+            ),
+            EstimateSource::ComplexityTable => format!(
+                "complexity table: {n} of {min} samples",
+                n = self.time_samples,
+                min = REFERENCE_MIN_SAMPLES,
+            ),
+        }
+    }
+}
+
+/// [`evaluate`]'s estimate and its basis, by precedence: the assessor's own
+/// range first, then the reference class (whenever its time dimension
+/// cleared the minimum), then the complexity table. Complexity 9-10 with no
+/// assessor range and no complexity-table range of its own gets neither an
+/// estimate nor a basis -- there is no range to attribute.
+fn estimate_and_basis(a: &Assessment, reference: &ReferenceEstimate) -> (Option<Estimate>, Option<EstimateBasis>) {
+    if let Some(assessor) = a.estimate {
+        let basis = EstimateBasis {
+            source: EstimateSource::Assessor,
+            scope: reference.scope.clone(),
+            category: reference.category.clone(),
+            agent: None,
+            window: None,
+            time_samples: 0,
+            cost_samples: 0,
+            time: None,
+            cost: None,
+            fallback_reason: None,
+        };
+        return (Some(assessor), Some(basis));
+    }
+    if let Some(time) = reference.time {
+        let estimate = Estimate::from_reference(time, reference.cost);
+        let fallback_reason = reference.cost.is_none().then(|| {
+            format!("insufficient cost evidence ({} of {REFERENCE_MIN_SAMPLES})", reference.cost_samples)
+        });
+        let basis = EstimateBasis {
+            source: EstimateSource::ReferenceClass,
+            scope: reference.scope.clone(),
+            category: reference.category.clone(),
+            agent: reference.agent.clone(),
+            window: Some(reference.window),
+            time_samples: reference.time_samples,
+            cost_samples: reference.cost_samples,
+            time: reference.time,
+            cost: reference.cost,
+            fallback_reason,
+        };
+        return (Some(estimate), Some(basis));
+    }
+    let estimate = Estimate::from_complexity(a.complexity);
+    let basis = estimate.is_some().then(|| EstimateBasis {
+        source: EstimateSource::ComplexityTable,
+        scope: reference.scope.clone(),
+        category: reference.category.clone(),
+        agent: None,
+        window: Some(reference.window),
+        time_samples: reference.time_samples,
+        cost_samples: reference.cost_samples,
+        time: None,
+        cost: None,
+        fallback_reason: Some(format!("insufficient evidence ({} of {REFERENCE_MIN_SAMPLES})", reference.time_samples)),
+    });
+    (estimate, basis)
 }
 
 /// Where a ready item goes. `agent` absent means the scope's own agent, as
@@ -884,10 +1269,15 @@ impl Verdict {
 pub struct Triage {
     pub assessment: Assessment,
     pub priority: Priority,
-    /// The assessment's own range, or the complexity table's; absent for
-    /// complexity 9-10 without one.
+    /// The assessor's own range, the reference class's, or the complexity
+    /// table's; absent for complexity 9-10 without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate: Option<Estimate>,
+    /// Which of the three set `estimate`, and what it rests on (`#168`).
+    /// `#[serde(default)]`: absent on every `Triage` from before this
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_basis: Option<EstimateBasis>,
     pub verdict: Verdict,
     pub by: String,
     pub at: DateTime<Utc>,
@@ -985,7 +1375,19 @@ pub fn validate(a: &Assessment, definition: &ReadyDefinition) -> Result<(), Stri
 /// tightens it) gives `needs-info` too. Everything else is ready -- a
 /// bounded, reversible item does not wait on an implementation choice the
 /// work can make.
-pub fn evaluate(a: &Assessment, definition: &ReadyDefinition, by: impl Into<String>, at: DateTime<Utc>) -> Triage {
+///
+/// `reference` (`#168`) is the routed scope and category's reference class,
+/// already gathered by the caller (`factory-daemon` reads the store; a test
+/// passes [`ReferenceEstimate::empty`]) -- pure like `definition`, and used
+/// the same way: [`estimate_and_basis`] picks the assessor's own range over
+/// it, and it over the complexity table, purely from what it is handed.
+pub fn evaluate(
+    a: &Assessment,
+    definition: &ReadyDefinition,
+    reference: &ReferenceEstimate,
+    by: impl Into<String>,
+    at: DateTime<Utc>,
+) -> Triage {
     let mut blockers: Vec<String> = definition.unreadable.clone();
     for d in a.duplicates.iter().filter(|d| d.verdict == DuplicateVerdict::Confirmed) {
         blockers.push(format!("Duplicate: confirmed duplicate of {} -- {}", d.reference, d.evidence.trim()));
@@ -1019,10 +1421,12 @@ pub fn evaluate(a: &Assessment, definition: &ReadyDefinition, by: impl Into<Stri
         ));
     }
     let verdict = if blockers.is_empty() { Verdict::Ready } else { Verdict::NeedsInfo { blockers } };
+    let (estimate, estimate_basis) = estimate_and_basis(a, reference);
     Triage {
         assessment: a.clone(),
         priority: priority(a.impact, a.urgency),
-        estimate: a.estimate.or_else(|| Estimate::from_complexity(a.complexity)),
+        estimate,
+        estimate_basis,
         verdict,
         by: by.into(),
         at,
@@ -1701,8 +2105,10 @@ pub fn triage_instructions(item: &Task, record: &Intake, definition: &ReadyDefin
          7. Complexity 1-10 from the expected touch points, one level more per material \
          uncertainty: 1-2 one file, 3-4 one function or two files, 5-6 one slice across two to \
          four files, 7-8 cross-cutting, 9-10 a subsystem. It sets the estimate range (1-2: \
-         15-45m, 3-4: 45m-2h, 5-6: 1.5-3h, 7-8: 2.5-5h). Give your own estimate only for a \
-         named driver, and name it in the summary.\n\
+         15-45m, 3-4: 45m-2h, 5-6: 1.5-3h, 7-8: 2.5-5h) -- but when enough completed work in \
+         this scope and category exists, Factory replaces that table with the measured range \
+         itself (and shows its basis on release), so this is a fallback, not the last word. \
+         Give your own estimate only for a named driver, and name it in the summary.\n\
          8. Route it: the scope that owns it, and the way of working that suits it best. \
          Choose a workflow when one fits the kind of work -- give every input it declares \
          in `routing.inputs`, and pick each step's agent in `routing.agents` (step id -> \
@@ -2068,6 +2474,13 @@ mod tests {
         ReadyDefinition::default()
     }
 
+    /// A reference class with nothing in it -- every existing test asserted
+    /// against before `#168`, so `evaluate` falls through to the complexity
+    /// table exactly as it always did.
+    fn no_reference() -> ReferenceEstimate {
+        ReferenceEstimate::empty("demo", "bugfix", Window::trailing(at(), REFERENCE_WINDOW_DAYS))
+    }
+
     #[test]
     fn github_source_kind_has_a_stable_wire_name() {
         let json = serde_json::to_string(&SourceKind::Github).unwrap();
@@ -2106,7 +2519,7 @@ mod tests {
 
     #[test]
     fn all_seven_passing_is_ready_with_priority_and_estimate() {
-        let t = evaluate(&assessment(), &def(), "the owner", at());
+        let t = evaluate(&assessment(), &def(), &no_reference(), "the owner", at());
         assert_eq!(t.verdict, Verdict::Ready);
         assert_eq!(t.priority, Priority::P2);
         assert_eq!(t.estimate, Estimate::from_complexity(4));
@@ -2115,7 +2528,7 @@ mod tests {
     #[test]
     fn any_failed_axis_is_needs_info_naming_it() {
         for axis in Axis::ALL.into_iter().filter(|a| *a != Axis::Observability) {
-            let t = evaluate(&failing(axis, None), &def(), "x", at());
+            let t = evaluate(&failing(axis, None), &def(), &no_reference(), "x", at());
             let Verdict::NeedsInfo { blockers } = t.verdict else { panic!("{axis:?} should block") };
             assert_eq!(blockers, vec![format!("{}: {} is open", axis.label(), axis.as_str())]);
         }
@@ -2124,10 +2537,10 @@ mod tests {
     #[test]
     fn observability_at_low_or_medium_cost_is_tolerated_and_high_is_not() {
         for cost in [ObservabilityCost::Low, ObservabilityCost::Medium] {
-            let t = evaluate(&failing(Axis::Observability, Some(cost)), &def(), "x", at());
+            let t = evaluate(&failing(Axis::Observability, Some(cost)), &def(), &no_reference(), "x", at());
             assert_eq!(t.verdict, Verdict::Ready, "{cost:?}");
         }
-        let t = evaluate(&failing(Axis::Observability, Some(ObservabilityCost::High)), &def(), "x", at());
+        let t = evaluate(&failing(Axis::Observability, Some(ObservabilityCost::High)), &def(), &no_reference(), "x", at());
         assert!(matches!(t.verdict, Verdict::NeedsInfo { .. }));
     }
 
@@ -2135,7 +2548,7 @@ mod tests {
     fn complexity_nine_or_ten_is_needs_info_even_when_every_axis_passes() {
         let mut a = assessment();
         a.complexity = 9;
-        let t = evaluate(&a, &def(), "x", at());
+        let t = evaluate(&a, &def(), &no_reference(), "x", at());
         let Verdict::NeedsInfo { blockers } = t.verdict else { panic!("should block") };
         assert!(blockers[0].starts_with("Complexity 9"), "{blockers:?}");
         assert_eq!(t.estimate, None);
@@ -2145,7 +2558,7 @@ mod tests {
     fn an_own_estimate_replaces_the_tables() {
         let mut a = assessment();
         a.estimate = Some(Estimate::new(600, 1200));
-        assert_eq!(evaluate(&a, &def(), "x", at()).estimate, Some(Estimate::new(600, 1200)));
+        assert_eq!(evaluate(&a, &def(), &no_reference(), "x", at()).estimate, Some(Estimate::new(600, 1200)));
     }
 
     #[test]
@@ -2204,16 +2617,16 @@ mod tests {
     fn ready_is_refused_without_an_assessment_or_against_a_needs_info_verdict() {
         let ready = Decision::Ready { run: false };
         assert!(check_decision(&open(None), &ready).unwrap_err().contains("assess"));
-        let blocked = evaluate(&failing(Axis::Scope, None), &def(), "x", at());
+        let blocked = evaluate(&failing(Axis::Scope, None), &def(), &no_reference(), "x", at());
         let err = check_decision(&open(Some(blocked)), &ready).unwrap_err();
         assert!(err.contains("needs-info") && err.contains("Scope: scope is open"), "{err}");
-        let fine = evaluate(&assessment(), &def(), "x", at());
+        let fine = evaluate(&assessment(), &def(), &no_reference(), "x", at());
         assert!(check_decision(&open(Some(fine)), &ready).is_ok());
     }
 
     #[test]
     fn needs_info_asks_the_given_questions_then_the_assessments_then_the_blockers() {
-        let blocked = evaluate(&failing(Axis::Verifiability, None), &def(), "x", at());
+        let blocked = evaluate(&failing(Axis::Verifiability, None), &def(), &no_reference(), "x", at());
         let item = open(Some(blocked.clone()));
         let given = Decision::NeedsInfo { questions: vec!["What does done look like?".into()] };
         assert_eq!(check_decision(&item, &given).unwrap(), vec!["What does done look like?"]);
@@ -2245,7 +2658,7 @@ mod tests {
 
     #[test]
     fn a_decided_item_takes_no_second_decision() {
-        let mut item = open(Some(evaluate(&assessment(), &def(), "x", at())));
+        let mut item = open(Some(evaluate(&assessment(), &def(), &no_reference(), "x", at())));
         item.stage = IntakeStage::Ready;
         assert!(check_decision(&item, &Decision::Ready { run: false }).unwrap_err().contains("already left"));
     }
@@ -2254,7 +2667,7 @@ mod tests {
     fn release_labels_carry_category_priority_estimate_and_the_triage_mark() {
         let mut a = assessment();
         a.routing.workflow = Some("release-train".into());
-        let labels = release_labels(&evaluate(&a, &def(), "x", at()));
+        let labels = release_labels(&evaluate(&a, &def(), &no_reference(), "x", at()));
         assert_eq!(labels["triage"], "ready");
         assert_eq!(labels["category"], "bugfix");
         assert_eq!(labels["priority"], "P2");
@@ -2467,7 +2880,7 @@ mod tests {
             score: None,
             verdict: DuplicateVerdict::Confirmed,
         }];
-        let triage = evaluate(&a, &def(), "x", at());
+        let triage = evaluate(&a, &def(), &no_reference(), "x", at());
         let Verdict::NeedsInfo { blockers } = &triage.verdict else { panic!("expected needs-info") };
         assert!(blockers[0].contains("confirmed duplicate of t-1"), "{blockers:?}");
 
@@ -2491,7 +2904,7 @@ mod tests {
             score: None,
             verdict: DuplicateVerdict::Rejected,
         }];
-        assert_eq!(evaluate(&a, &def(), "x", at()).verdict, Verdict::Ready);
+        assert_eq!(evaluate(&a, &def(), &no_reference(), "x", at()).verdict, Verdict::Ready);
     }
 
     #[test]
@@ -2559,7 +2972,7 @@ mod tests {
                 verdict: DuplicateVerdict::Confirmed,
             },
         ];
-        intake.triage = Some(evaluate(&a, &def(), "x", at()));
+        intake.triage = Some(evaluate(&a, &def(), &no_reference(), "x", at()));
         let overlaid = candidates_with_verdicts(&intake);
         assert_eq!(overlaid.len(), 2);
         assert_eq!(overlaid[0].verdict, DuplicateVerdict::Confirmed);
@@ -2578,7 +2991,7 @@ mod tests {
         let mut needs = open(None);
         needs.stage = IntakeStage::NeedsInfo;
         needs.questions = vec!["which?".into()];
-        let mut ready = open(Some(evaluate(&assessment(), &def(), "x", now)));
+        let mut ready = open(Some(evaluate(&assessment(), &def(), &no_reference(), "x", now)));
         ready.stage = IntakeStage::Ready;
         ready.received_at = now - chrono::Duration::hours(10);
         ready.decision = Some(DecisionRecord {
@@ -2722,7 +3135,7 @@ mod tests {
         }"#;
         let a: Assessment = serde_json::from_str(json).unwrap();
         assert!(validate(&a, &def()).is_ok());
-        assert_eq!(evaluate(&a, &def(), "x", at()).verdict, Verdict::Ready);
+        assert_eq!(evaluate(&a, &def(), &no_reference(), "x", at()).verdict, Verdict::Ready);
         let decision: Decision = serde_json::from_str(r#"{"decision":"needs_info","questions":["q"]}"#).unwrap();
         assert_eq!(decision, Decision::NeedsInfo { questions: vec!["q".into()] });
     }
@@ -2765,7 +3178,7 @@ mod tests {
         assert!(validate(&a, &def()).unwrap_err().contains("proposed split"));
         a.split = vec![part("a", &[]), part("b", &["a"])];
         assert!(validate(&a, &def()).is_ok());
-        assert!(matches!(evaluate(&a, &def(), "x", at()).verdict, Verdict::NeedsInfo { .. }));
+        assert!(matches!(evaluate(&a, &def(), &no_reference(), "x", at()).verdict, Verdict::NeedsInfo { .. }));
     }
 
     #[test]
@@ -2787,7 +3200,7 @@ mod tests {
     fn split_takes_the_given_parts_or_the_proposal_and_refuses_neither() {
         let mut a = failing(Axis::Scope, None);
         a.split = vec![part("a", &[]), part("b", &["a"])];
-        let item = open(Some(evaluate(&a, &def(), "x", at())));
+        let item = open(Some(evaluate(&a, &def(), &no_reference(), "x", at())));
         let from_proposal = split_parts(&item, &[]).unwrap();
         assert_eq!(from_proposal.len(), 2);
         let given = split_parts(&item, &[part("x", &[]), part("y", &[])]).unwrap();
@@ -2812,7 +3225,7 @@ mod tests {
         let v = a.axes.iter_mut().find(|c| c.axis == Axis::Verifiability).unwrap();
         v.pass = false;
         v.evidence = "no done signal".into();
-        let mut item = open(Some(evaluate(&a, &def(), "x", at())));
+        let mut item = open(Some(evaluate(&a, &def(), &no_reference(), "x", at())));
         item.stage = IntakeStage::NeedsInfo;
         let actions = next_actions(&item, &def());
         assert_eq!(actions.iter().map(|n| n.action).collect::<Vec<_>>(), vec![NextActionKind::Split, NextActionKind::AddInfo]);
@@ -2822,13 +3235,13 @@ mod tests {
         assert_eq!(actions[1].reasons, vec!["Verifiability: no done signal"]);
 
         a.split = vec![part("a", &[]), part("b", &[])];
-        item.triage = Some(evaluate(&a, &def(), "x", at()));
+        item.triage = Some(evaluate(&a, &def(), &no_reference(), "x", at()));
         assert!(next_actions(&item, &def())[0].hint.contains("2 parts: Part a; Part b"));
 
         // A high-cost observability gap is split out; a tolerated one is nothing.
-        let high = open(Some(evaluate(&failing(Axis::Observability, Some(ObservabilityCost::High)), &def(), "x", at())));
+        let high = open(Some(evaluate(&failing(Axis::Observability, Some(ObservabilityCost::High)), &def(), &no_reference(), "x", at())));
         assert_eq!(next_actions(&high, &def())[0].action, NextActionKind::Split);
-        let low = open(Some(evaluate(&failing(Axis::Observability, Some(ObservabilityCost::Low)), &def(), "x", at())));
+        let low = open(Some(evaluate(&failing(Axis::Observability, Some(ObservabilityCost::Low)), &def(), &no_reference(), "x", at())));
         assert!(next_actions(&low, &def()).is_empty(), "ready: nothing to unblock");
         assert!(next_actions(&open(None), &def()).is_empty(), "not assessed: nothing to say yet");
     }
@@ -3094,7 +3507,7 @@ mod tests {
             let definition = definition_with(vec![check("threat-model", &[])]);
             let mut a = assessment();
             a.checks = vec![CheckResult { id: "threat-model".into(), pass: false, evidence: "no threat model yet".into() }];
-            let t = evaluate(&a, &definition, "x", at());
+            let t = evaluate(&a, &definition, &no_reference(), "x", at());
             let Verdict::NeedsInfo { blockers } = t.verdict else { panic!("should block") };
             assert!(blockers.iter().any(|b| b == "threat-model: no threat model yet"), "{blockers:?}");
         }
@@ -3103,7 +3516,7 @@ mod tests {
         fn a_check_inapplicable_to_the_category_is_never_evaluated() {
             let definition = definition_with(vec![check("threat-model", &["security-report"])]);
             let a = assessment(); // category "bugfix", no checks answered
-            assert_eq!(evaluate(&a, &definition, "x", at()).verdict, Verdict::Ready);
+            assert_eq!(evaluate(&a, &definition, &no_reference(), "x", at()).verdict, Verdict::Ready);
         }
 
         #[test]
@@ -3111,17 +3524,17 @@ mod tests {
             let definition = ReadyDefinition { scope: "demo".into(), max_complexity: 6, ..Default::default() };
             let mut a = assessment();
             a.complexity = 7;
-            let Verdict::NeedsInfo { blockers } = evaluate(&a, &definition, "x", at()).verdict else {
+            let Verdict::NeedsInfo { blockers } = evaluate(&a, &definition, &no_reference(), "x", at()).verdict else {
                 panic!("7 over a cap of 6 should block")
             };
             assert_eq!(blockers.len(), 1, "{blockers:?}");
             assert!(blockers[0].contains("over demo's own limit of 6"), "{}", blockers[0]);
 
             a.complexity = 6;
-            assert_eq!(evaluate(&a, &definition, "x", at()).verdict, Verdict::Ready);
+            assert_eq!(evaluate(&a, &definition, &no_reference(), "x", at()).verdict, Verdict::Ready);
 
             a.complexity = 9;
-            let Verdict::NeedsInfo { blockers } = evaluate(&a, &definition, "x", at()).verdict else {
+            let Verdict::NeedsInfo { blockers } = evaluate(&a, &definition, &no_reference(), "x", at()).verdict else {
                 panic!("9 always blocks")
             };
             assert_eq!(blockers.len(), 1, "the fixed 9-10 rule alone fires, not also the tighter cap: {blockers:?}");
@@ -3132,16 +3545,16 @@ mod tests {
         fn observability_tolerance_low_blocks_medium_cost_but_not_low_cost() {
             let definition = ReadyDefinition { scope: "demo".into(), observability_tolerance: Tolerance::Low, ..Default::default() };
             let medium = failing(Axis::Observability, Some(ObservabilityCost::Medium));
-            assert!(matches!(evaluate(&medium, &definition, "x", at()).verdict, Verdict::NeedsInfo { .. }));
+            assert!(matches!(evaluate(&medium, &definition, &no_reference(), "x", at()).verdict, Verdict::NeedsInfo { .. }));
             let low = failing(Axis::Observability, Some(ObservabilityCost::Low));
-            assert_eq!(evaluate(&low, &definition, "x", at()).verdict, Verdict::Ready);
+            assert_eq!(evaluate(&low, &definition, &no_reference(), "x", at()).verdict, Verdict::Ready);
         }
 
         #[test]
         fn observability_tolerance_none_blocks_even_low_cost() {
             let definition = ReadyDefinition { scope: "demo".into(), observability_tolerance: Tolerance::None, ..Default::default() };
             let low = failing(Axis::Observability, Some(ObservabilityCost::Low));
-            assert!(matches!(evaluate(&low, &definition, "x", at()).verdict, Verdict::NeedsInfo { .. }));
+            assert!(matches!(evaluate(&low, &definition, &no_reference(), "x", at()).verdict, Verdict::NeedsInfo { .. }));
         }
 
         #[test]
@@ -3152,7 +3565,7 @@ mod tests {
                 ..Default::default()
             };
             let a = assessment();
-            let Verdict::NeedsInfo { blockers } = evaluate(&a, &definition, "x", at()).verdict else {
+            let Verdict::NeedsInfo { blockers } = evaluate(&a, &definition, &no_reference(), "x", at()).verdict else {
                 panic!("an unreadable definition always blocks")
             };
             assert_eq!(blockers, vec!["definition of ready for demo could not be read: ...".to_string()]);
@@ -3169,7 +3582,7 @@ mod tests {
             let mut a = assessment();
             a.checks = vec![CheckResult { id: "threat-model".into(), pass: false, evidence: "missing".into() }];
             a.complexity = 7;
-            let intake = open(Some(evaluate(&a, &definition, "x", at())));
+            let intake = open(Some(evaluate(&a, &definition, &no_reference(), "x", at())));
             let actions = next_actions(&intake, &definition);
             let info = actions.iter().find(|n| n.action == NextActionKind::AddInfo);
             assert!(info.is_some_and(|n| n.reasons.iter().any(|r| r.contains("threat-model"))), "{actions:?}");
@@ -3185,8 +3598,362 @@ mod tests {
                 ..Default::default()
             };
             let a = assessment();
-            let intake = open(Some(evaluate(&a, &definition, "x", at())));
+            let intake = open(Some(evaluate(&a, &definition, &no_reference(), "x", at())));
             assert!(next_actions(&intake, &definition).is_empty(), "nobody triaging can fix a broken authored file");
+        }
+    }
+
+    /// `#168`: the reference-class computation, its precedence against the
+    /// assessor's own range and the complexity table, and serde back-compat
+    /// for the two stored-shape additions.
+    mod reference_class {
+        use super::*;
+
+        fn identity(s: &str) -> String {
+            s.to_string()
+        }
+
+        fn done_task(id: &str, scope: &str, category: &str) -> Task {
+            let mut t = crate::adapter::store::task_from_new(
+                crate::task::NewTask { title: id.into(), category: Some(category.into()), ..Default::default() },
+                scope.into(),
+                "shell".into(),
+                "herdr".into(),
+            );
+            t.id = id.into();
+            t.status = TaskStatus::Done;
+            t.runs = 1;
+            t
+        }
+
+        fn known_cost(cost: f64) -> crate::usage::RunUsage {
+            crate::usage::RunUsage {
+                state: crate::usage::UsageState::Known,
+                reason: None,
+                as_of_point: Some(SnapshotPoint::RunEnd),
+                cost_usd: Some(cost),
+                ..crate::usage::RunUsage::unknown("placeholder", 1)
+            }
+        }
+
+        /// A single terminal run for `task_id`, ending `ended_days_ago` days
+        /// before `at()`, `wall_seconds` long, with a final known cost when
+        /// given -- unknown (no usage at all) otherwise.
+        fn done_run(task_id: &str, ended_days_ago: i64, wall_seconds: i64, cost: Option<f64>) -> Run {
+            let ended = at() - chrono::Duration::days(ended_days_ago);
+            let started = ended - chrono::Duration::seconds(wall_seconds);
+            Run {
+                id: format!("{task_id}-run"),
+                task_id: task_id.into(),
+                attempt: 1,
+                status: crate::run::RunStatus::Done,
+                trigger: crate::run::Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                worktree_path: None,
+                worktree_branch: None,
+                runtime: "herdr".into(),
+                session: None,
+                token: None,
+                original_estimate: None,
+                provider_account: None,
+                re_estimate: None,
+                result: None,
+                routed_to: None,
+                error: None,
+                started_at: started,
+                ended_at: Some(ended),
+                queued_at: None,
+                scheduled_for: None,
+                fail_kind: None,
+                blocked_since: None,
+                blocked_source: None,
+                block_suspected_since: None,
+                turn_ended_at: None,
+                turn_end_reason: None,
+                required_steps: Vec::new(),
+                usage: cost.map(known_cost),
+            }
+        }
+
+        /// Twelve completed bugfix tasks in `factory`, one run each, wall
+        /// times 60..720 seconds by 60s and cost `wall/100` -- the exact
+        /// sample the issue's own basis text is drawn from ("p10-p90 of 12
+        /// completed bugfix tasks in factory, last 90 days").
+        fn twelve_tasks() -> (Vec<Task>, Vec<Run>) {
+            let mut tasks = Vec::new();
+            let mut runs = Vec::new();
+            for n in 1..=12u64 {
+                let id = format!("t{n}");
+                tasks.push(done_task(&id, "factory", "bugfix"));
+                runs.push(done_run(&id, 1, (n * 60) as i64, Some(n as f64 * 0.6)));
+            }
+            (tasks, runs)
+        }
+
+        #[test]
+        fn nearest_rank_percentiles_over_a_known_sample() {
+            let (tasks, runs) = twelve_tasks();
+            let r = reference_estimate("factory", "bugfix", None, at(), &tasks, &runs, identity);
+            assert_eq!(r.time_samples, 12);
+            assert_eq!(r.time, Some(Percentiles { p10: 120, p50: 420, p90: 660 }));
+            assert_eq!(r.cost_samples, 12);
+            let cost = r.cost.expect("12 samples clears the minimum");
+            assert!((cost.p10 - 1.2).abs() < 1e-9, "{cost:?}");
+            assert!((cost.p50 - 4.2).abs() < 1e-9, "{cost:?}");
+            assert!((cost.p90 - 6.6).abs() < 1e-9, "{cost:?}");
+        }
+
+        #[test]
+        fn the_basis_text_matches_the_issues_own_example() {
+            let (tasks, runs) = twelve_tasks();
+            let r = reference_estimate("factory", "bugfix", None, at(), &tasks, &runs, identity);
+            let basis = EstimateBasis {
+                source: EstimateSource::ReferenceClass,
+                scope: r.scope.clone(),
+                category: r.category.clone(),
+                agent: None,
+                window: Some(r.window),
+                time_samples: r.time_samples,
+                cost_samples: r.cost_samples,
+                time: r.time,
+                cost: r.cost,
+                fallback_reason: None,
+            };
+            assert_eq!(basis.describe(), "p10\u{2013}p90 of 12 completed bugfix tasks in factory, last 90 days");
+        }
+
+        #[test]
+        fn below_five_samples_is_insufficient_not_zero() {
+            let mut tasks = Vec::new();
+            let mut runs = Vec::new();
+            for n in 1..=4u64 {
+                let id = format!("t{n}");
+                tasks.push(done_task(&id, "factory", "bugfix"));
+                runs.push(done_run(&id, 1, 100, Some(1.0)));
+            }
+            let r = reference_estimate("factory", "bugfix", None, at(), &tasks, &runs, identity);
+            assert_eq!(r.time_samples, 4);
+            assert_eq!(r.time, None);
+            assert_eq!(r.cost_samples, 4);
+            assert_eq!(r.cost, None);
+        }
+
+        #[test]
+        fn agent_narrowing_applies_only_at_five_samples_of_its_own() {
+            let mut tasks = Vec::new();
+            let mut runs = Vec::new();
+            for n in 1..=6u64 {
+                let id = format!("generalist-{n}");
+                let mut t = done_task(&id, "factory", "bugfix");
+                t.agent = "generalist".into();
+                tasks.push(t);
+                runs.push(done_run(&id, 1, 100, Some(1.0)));
+            }
+            for n in 1..=5u64 {
+                let id = format!("specialist-{n}");
+                let mut t = done_task(&id, "factory", "bugfix");
+                t.agent = "specialist".into();
+                tasks.push(t);
+                runs.push(done_run(&id, 1, 200, Some(2.0)));
+            }
+            // "specialist" alone clears the minimum: the sample narrows to it.
+            let narrowed = reference_estimate("factory", "bugfix", Some("specialist"), at(), &tasks, &runs, identity);
+            assert_eq!(narrowed.agent.as_deref(), Some("specialist"));
+            assert_eq!(narrowed.time_samples, 5);
+
+            // A third agent with no tasks of its own falls back to the whole
+            // scope+category class, not an empty one.
+            let unnarrowed = reference_estimate("factory", "bugfix", Some("nobody"), at(), &tasks, &runs, identity);
+            assert_eq!(unnarrowed.agent, None);
+            assert_eq!(unnarrowed.time_samples, 11);
+        }
+
+        #[test]
+        fn a_task_that_ended_outside_the_window_is_left_out() {
+            let mut tasks = Vec::new();
+            let mut runs = Vec::new();
+            for n in 1..=5u64 {
+                let id = format!("in-{n}");
+                tasks.push(done_task(&id, "factory", "bugfix"));
+                runs.push(done_run(&id, 89, 100, Some(1.0)));
+            }
+            let old_id = "too-old";
+            tasks.push(done_task(old_id, "factory", "bugfix"));
+            runs.push(done_run(old_id, 91, 100, Some(1.0)));
+            let r = reference_estimate("factory", "bugfix", None, at(), &tasks, &runs, identity);
+            assert_eq!(r.time_samples, 5, "the 91-day-old task must not count");
+        }
+
+        #[test]
+        fn a_child_scope_is_not_the_exact_scope() {
+            let mut tasks = Vec::new();
+            let mut runs = Vec::new();
+            for n in 1..=5u64 {
+                let id = format!("t{n}");
+                tasks.push(done_task(&id, "factory", "bugfix"));
+                runs.push(done_run(&id, 1, 100, Some(1.0)));
+            }
+            let child_id = "child-scope-task";
+            tasks.push(done_task(child_id, "factory/child", "bugfix"));
+            runs.push(done_run(child_id, 1, 999, Some(9.0)));
+            let r = reference_estimate("factory", "bugfix", None, at(), &tasks, &runs, identity);
+            assert_eq!(r.time_samples, 5, "a subtree scope must not train the parent's estimate");
+        }
+
+        #[test]
+        fn a_triage_bookkeeping_task_and_a_task_with_no_runs_are_excluded() {
+            let mut tasks = Vec::new();
+            let mut runs = Vec::new();
+            for n in 1..=5u64 {
+                let id = format!("t{n}");
+                tasks.push(done_task(&id, "factory", "bugfix"));
+                runs.push(done_run(&id, 1, 100, Some(1.0)));
+            }
+            let mut triage_task = done_task("triage-of-something", "factory", "bugfix");
+            triage_task.labels.insert(TRIAGE_LABEL.to_string(), "some-item".into());
+            tasks.push(triage_task);
+            runs.push(done_run("triage-of-something", 1, 999, Some(9.0)));
+
+            let mut no_run_task = done_task("no-runs", "factory", "bugfix");
+            no_run_task.runs = 0;
+            tasks.push(no_run_task);
+            // deliberately no `Run` pushed for "no-runs"
+
+            let r = reference_estimate("factory", "bugfix", None, at(), &tasks, &runs, identity);
+            assert_eq!(r.time_samples, 5);
+        }
+
+        #[test]
+        fn one_run_with_unmeasured_cost_leaves_the_whole_task_cost_unknown() {
+            let mut tasks = Vec::new();
+            let mut runs = Vec::new();
+            for n in 1..=3u64 {
+                let id = format!("known-{n}");
+                tasks.push(done_task(&id, "factory", "bugfix"));
+                runs.push(done_run(&id, 1, 100, Some(1.0)));
+            }
+            for n in 1..=2u64 {
+                let id = format!("unknown-{n}");
+                tasks.push(done_task(&id, "factory", "bugfix"));
+                runs.push(done_run(&id, 1, 100, None));
+            }
+            let r = reference_estimate("factory", "bugfix", None, at(), &tasks, &runs, identity);
+            assert_eq!(r.time_samples, 5, "time is known for every terminal run regardless of cost");
+            assert_eq!(r.cost_samples, 3, "a task with any unmeasured run's cost is left out, not counted as $0");
+        }
+
+        #[test]
+        fn a_non_terminal_run_excludes_its_task() {
+            let mut tasks = Vec::new();
+            let mut runs = Vec::new();
+            for n in 1..=4u64 {
+                let id = format!("t{n}");
+                tasks.push(done_task(&id, "factory", "bugfix"));
+                runs.push(done_run(&id, 1, 100, Some(1.0)));
+            }
+            let mut still_running = done_run("running", 1, 100, Some(1.0));
+            still_running.status = crate::run::RunStatus::Running;
+            still_running.ended_at = None;
+            tasks.push(done_task("running", "factory", "bugfix"));
+            runs.push(still_running);
+            let r = reference_estimate("factory", "bugfix", None, at(), &tasks, &runs, identity);
+            assert_eq!(r.time_samples, 4, "a task with a run still open cannot be sampled");
+        }
+
+        // ---------------------------------------------------------- evaluate
+
+        #[test]
+        fn the_assessors_own_range_wins_over_a_sufficient_reference_class() {
+            let (tasks, runs) = twelve_tasks();
+            let reference = reference_estimate("demo", "bugfix", None, at(), &tasks, &runs, identity);
+            let mut a = assessment();
+            a.estimate = Some(Estimate::new(600, 1200));
+            let t = evaluate(&a, &def(), &reference, "x", at());
+            assert_eq!(t.estimate, Some(Estimate::new(600, 1200)));
+            assert_eq!(t.estimate_basis.as_ref().map(|b| b.source), Some(EstimateSource::Assessor));
+        }
+
+        #[test]
+        fn a_sufficient_reference_class_wins_over_the_complexity_table() {
+            let (mut tasks, runs) = twelve_tasks();
+            for t in &mut tasks {
+                t.scope = "demo".into();
+            }
+            let reference = reference_estimate("demo", "bugfix", None, at(), &tasks, &runs, identity);
+            let a = assessment();
+            let t = evaluate(&a, &def(), &reference, "x", at());
+            assert_eq!(t.estimate, Some(Estimate::from_reference(reference.time.unwrap(), reference.cost)));
+            let basis = t.estimate_basis.expect("a sufficient reference class carries a basis");
+            assert_eq!(basis.source, EstimateSource::ReferenceClass);
+            assert_eq!(basis.fallback_reason, None);
+            assert_eq!(t.estimate.unwrap().expected_seconds, Some(420));
+        }
+
+        #[test]
+        fn an_insufficient_reference_class_falls_back_to_the_complexity_table_with_a_reason() {
+            let a = assessment();
+            let t = evaluate(&a, &def(), &no_reference(), "x", at());
+            assert_eq!(t.estimate, Estimate::from_complexity(a.complexity));
+            let basis = t.estimate_basis.expect("the complexity table is still a basis");
+            assert_eq!(basis.source, EstimateSource::ComplexityTable);
+            assert_eq!(basis.fallback_reason.as_deref(), Some("insufficient evidence (0 of 5)"));
+            assert_eq!(basis.describe(), "complexity table: 0 of 5 samples");
+        }
+
+        #[test]
+        fn complexity_nine_with_nothing_to_estimate_carries_no_basis_either() {
+            let mut a = assessment();
+            a.complexity = 9;
+            let t = evaluate(&a, &def(), &no_reference(), "x", at());
+            assert_eq!(t.estimate, None);
+            assert_eq!(t.estimate_basis, None, "there is no range to attribute a basis to");
+        }
+
+        #[test]
+        fn a_sufficient_reference_class_with_too_little_cost_still_gives_a_time_estimate() {
+            let mut tasks = Vec::new();
+            let mut runs = Vec::new();
+            for n in 1..=5u64 {
+                let id = format!("t{n}");
+                tasks.push(done_task(&id, "demo", "bugfix"));
+                runs.push(done_run(&id, 1, (n * 60) as i64, None));
+            }
+            let reference = reference_estimate("demo", "bugfix", None, at(), &tasks, &runs, identity);
+            let a = assessment();
+            let t = evaluate(&a, &def(), &reference, "x", at());
+            let basis = t.estimate_basis.expect("time alone still gives a basis");
+            assert_eq!(basis.source, EstimateSource::ReferenceClass);
+            assert_eq!(basis.cost_samples, 0);
+            assert_eq!(basis.fallback_reason.as_deref(), Some("insufficient cost evidence (0 of 5)"));
+            assert_eq!(t.estimate.unwrap().cost, None);
+        }
+
+        // -------------------------------------------------------- serde back-compat
+
+        #[test]
+        fn a_triage_without_estimate_basis_still_deserialises() {
+            let t = evaluate(&assessment(), &def(), &no_reference(), "x", at());
+            let mut json = serde_json::to_value(&t).unwrap();
+            json.as_object_mut().unwrap().remove("estimate_basis");
+            let back: Triage = serde_json::from_value(json).unwrap();
+            assert_eq!(back.estimate_basis, None);
+            assert_eq!(back.estimate, t.estimate);
+        }
+
+        #[test]
+        fn an_estimate_without_expected_seconds_or_cost_still_deserialises_and_midpoints() {
+            let json = serde_json::json!({ "min_seconds": 600, "max_seconds": 1200 });
+            let e: Estimate = serde_json::from_value(json).unwrap();
+            assert_eq!(e.expected_seconds, None);
+            assert_eq!(e.cost, None);
+            assert_eq!(e.midpoint(), 900, "with no explained projection, midpoint is the bare average");
+        }
+
+        #[test]
+        fn an_estimate_with_an_expected_seconds_midpoints_to_it_not_the_average() {
+            let e = Estimate::from_reference(Percentiles { p10: 100, p50: 300, p90: 900 }, None);
+            assert_eq!(e.midpoint(), 300, "the explained projection, never (min+max)/2");
         }
     }
 }

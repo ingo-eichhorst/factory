@@ -1116,6 +1116,24 @@ pub struct CostRow {
     pub runs_cost_unknown: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pricing_sources: Vec<String>,
+    /// Runs with an `original_estimate` at all -- `#168`'s estimate-vs-actual,
+    /// alongside the usage sums above rather than replacing them. A run with
+    /// no estimate is in neither this nor `within_range`: it has no range to
+    /// have missed. `#[serde(default)]`: absent on every report from before
+    /// this existed.
+    #[serde(default)]
+    pub estimated_runs: u32,
+    /// Of `estimated_runs`, how many are terminal with a wall time inside
+    /// their own `[low, high]`. A run still going is counted in
+    /// `estimated_runs` but not here -- it has no actual yet to compare.
+    #[serde(default)]
+    pub within_range: u32,
+    /// The nearest-rank median, over `estimated_runs`' own terminal ones, of
+    /// actual wall seconds over the estimate's `expected` -- 1.0 is exactly
+    /// on the mark, over 1.0 ran long. `None` with nothing to take a median
+    /// of, never 0 or 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub median_actual_over_expected: Option<f64>,
 }
 
 impl CostRow {
@@ -1152,6 +1170,21 @@ impl CostRow {
         for p in &u.pricing_sources {
             if !self.pricing_sources.contains(p) {
                 self.pricing_sources.push(p.clone());
+            }
+        }
+    }
+
+    /// Count one run's estimate-vs-actual (`#168`). `estimate` is the run's
+    /// own `original_estimate`; `terminal_wall_seconds` is its wall time
+    /// only when the run is terminal (`None` for one still going, which has
+    /// no actual yet). A run with no estimate touches neither counter --
+    /// see the fields' own doc comments for why.
+    pub fn add_estimate(&mut self, estimate: Option<&crate::task::Estimate>, terminal_wall_seconds: Option<u64>) {
+        let Some(estimate) = estimate else { return };
+        self.estimated_runs += 1;
+        if let Some(wall) = terminal_wall_seconds {
+            if wall >= estimate.time.low && wall <= estimate.time.high {
+                self.within_range += 1;
             }
         }
     }
@@ -1251,8 +1284,8 @@ fn measured(run: &crate::run::Run) -> Option<&RunUsage> {
     run.usage.as_ref().filter(|u| u.is_known() && !u.partial)
 }
 
-/// `tokens_per_run` and `unit_cost` over the runs that ended in
-/// `(to - days, to]`. `None` for any other id.
+/// `tokens_per_run`, `unit_cost` and `estimate_accuracy` (`#168`) over the
+/// runs that ended in `(to - days, to]`. `None` for any other id.
 ///
 /// * `tokens_per_run`: the mean of every token type summed, over finished
 ///   runs whose usage was fully measured.
@@ -1260,10 +1293,18 @@ fn measured(run: &crate::run::Run) -> Option<&RunUsage> {
 ///   included, since scrap is part of what a finished unit costs -- over
 ///   how many of them ended `done`. Only runs with a measured cost are in
 ///   either side of the division.
+/// * `estimate_accuracy`: over finished runs that carry an
+///   `original_estimate` -- the estimate the run was dispatched with,
+///   whatever ended it -- the share whose terminal wall time
+///   (`ended_at - started_at`) fell within `[time.low, time.high]`. A run
+///   with no `original_estimate` (every run from before `#117`, or one
+///   whose task had none) is left out of the denominator, never scored as a
+///   miss.
 ///
-/// Runs whose usage is unknown are left out of both, never counted as
-/// zero; with none left there is no value, and the reason says how many
-/// finished runs there were.
+/// Runs whose usage is unknown are left out of the first two, never counted
+/// as zero; with none left there is no value, and the reason says how many
+/// finished runs there were. `estimate_accuracy` follows the same rule for
+/// runs with no estimate to compare against.
 pub fn usage_metric(id: &str, runs: &[crate::run::Run], to: DateTime<Utc>, days: i64) -> Option<UsageFigure> {
     let from = to - chrono::Duration::days(days);
     let finished: Vec<&crate::run::Run> = runs
@@ -1316,6 +1357,26 @@ pub fn usage_metric(id: &str, runs: &[crate::run::Run], to: DateTime<Utc>, days:
             let rs: Vec<&crate::run::Run> = costed.iter().map(|(r, _)| *r).collect();
             Some(UsageFigure {
                 value: Some(spent / done as f64),
+                reason: None,
+                as_of: newest(&rs),
+            })
+        }
+        "estimate_accuracy" => {
+            let estimated: Vec<(&crate::run::Run, bool)> = finished
+                .iter()
+                .filter_map(|r| {
+                    let estimate = r.original_estimate.as_ref()?;
+                    let wall = (r.ended_at.unwrap_or(r.started_at) - r.started_at).num_seconds().max(0) as u64;
+                    Some((*r, wall >= estimate.time.low && wall <= estimate.time.high))
+                })
+                .collect();
+            if estimated.is_empty() {
+                return Some(none("an original estimate"));
+            }
+            let hits = estimated.iter().filter(|(_, within_range)| *within_range).count();
+            let rs: Vec<&crate::run::Run> = estimated.iter().map(|(r, _)| *r).collect();
+            Some(UsageFigure {
+                value: Some(hits as f64 / estimated.len() as f64),
                 reason: None,
                 as_of: newest(&rs),
             })
@@ -1546,6 +1607,21 @@ mod tests {
         assert_eq!(row.tokens.input, 10);
     }
 
+    #[test]
+    fn add_estimate_counts_only_runs_with_one_and_only_terminal_ones_can_be_within_range() {
+        let estimate = |low: u64, high: u64| crate::task::Estimate {
+            time: crate::task::TimeEstimateRange { low, expected: (low + high) / 2, high },
+            cost: None,
+        };
+        let mut row = CostRow::new("t1", None);
+        row.add_estimate(Some(&estimate(0, 100)), Some(50)); // within
+        row.add_estimate(Some(&estimate(0, 10)), Some(50)); // outside
+        row.add_estimate(Some(&estimate(0, 100)), None); // still running: counted, not scored
+        row.add_estimate(None, Some(50)); // no estimate at all: not counted either way
+        assert_eq!(row.estimated_runs, 3);
+        assert_eq!(row.within_range, 1);
+    }
+
     fn finished_run(id: &str, status: crate::run::RunStatus, ended_min: i64, usage: Option<RunUsage>) -> crate::run::Run {
         let mut run: crate::run::Run = serde_json::from_value(serde_json::json!({
             "id": id, "task_id": "t", "attempt": 1, "status": status.as_str(), "trigger": "manual",
@@ -1593,6 +1669,43 @@ mod tests {
         assert!(empty.reason.unwrap().contains("no run finished"));
     }
 
+    /// `finished_run`'s own run, given an `original_estimate` -- `#168`'s
+    /// `estimate_accuracy` reads it straight off the run, never the task.
+    fn estimated(run: crate::run::Run, low: u64, high: u64) -> crate::run::Run {
+        let mut run = run;
+        run.original_estimate =
+            Some(crate::task::Estimate { time: crate::task::TimeEstimateRange { low, expected: (low + high) / 2, high }, cost: None });
+        run
+    }
+
+    #[test]
+    fn estimate_accuracy_is_the_share_of_estimated_runs_inside_their_own_range() {
+        use crate::run::RunStatus::{Done, Failed};
+        // Every `finished_run` here has a 10-minute (600s) wall time.
+        let runs = vec![
+            estimated(finished_run("a", Done, 0, None), 0, 700), // within
+            estimated(finished_run("b", Done, 1, None), 0, 100), // outside -- too slow
+            // A failed run still counts: it ended, and the estimate was for
+            // wall time, not success.
+            estimated(finished_run("c", Failed, 2, None), 500, 700), // within
+            finished_run("d", Done, 3, None),                        // no estimate at all -- excluded
+        ];
+        let figure = usage_metric("estimate_accuracy", &runs, at(10), 28).unwrap();
+        assert_eq!(figure.value, Some(2.0 / 3.0));
+        assert_eq!(figure.as_of, Some(at(2)), "the newest estimated run behind the value, not run d");
+    }
+
+    #[test]
+    fn estimate_accuracy_with_no_estimated_runs_is_unavailable_not_zero() {
+        let runs = vec![finished_run("a", crate::run::RunStatus::Done, 0, None)];
+        let figure = usage_metric("estimate_accuracy", &runs, at(10), 28).unwrap();
+        assert_eq!(figure.value, None);
+        assert!(figure.reason.as_deref().unwrap_or_default().contains("an original estimate"));
+
+        let empty = usage_metric("estimate_accuracy", &[], at(10), 28).unwrap();
+        assert!(empty.reason.unwrap().contains("no run finished"));
+    }
+
     #[test]
     fn group_by_round_trips() {
         for g in [
@@ -1606,6 +1719,19 @@ mod tests {
             assert_eq!(serde_json::to_value(g).unwrap(), serde_json::json!(g.as_str()));
         }
         assert!("workflow".parse::<CostGroupBy>().is_err());
+    }
+
+    #[test]
+    fn a_cost_row_from_before_168_still_deserialises_with_nothing_estimated() {
+        let json = serde_json::json!({
+            "key": "t1", "runs": 2, "runs_unknown": 0, "runs_partial": 0,
+            "tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+            "runs_tokens_incomplete": 0, "cost_usd": 1.5, "runs_cost_unknown": 0,
+        });
+        let row: CostRow = serde_json::from_value(json).unwrap();
+        assert_eq!(row.estimated_runs, 0);
+        assert_eq!(row.within_range, 0);
+        assert_eq!(row.median_actual_over_expected, None);
     }
 
     fn plan_run(id: &str, ended: Option<i64>, provider: Option<&str>) -> crate::run::Run {

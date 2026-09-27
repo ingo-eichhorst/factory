@@ -423,6 +423,20 @@ fn tokens_per_run_def() -> MetricDef {
     )
 }
 
+fn estimate_accuracy_def() -> MetricDef {
+    fixed(
+        "estimate_accuracy",
+        "Estimate accuracy",
+        "The share of runs that finished in the trailing 28 days with an original estimate (`#117`'s \
+         Run.original_estimate) whose terminal wall time fell within that estimate's low-high range. A \
+         run with no original estimate is left out, never scored as a miss.",
+        Unit::Ratio,
+        Better::Higher,
+        "each run's original_estimate and wall time (started_at to ended_at) over runs that ended in the \
+         trailing 28 days (usage::usage_metric over TaskStore::runs_between)",
+    )
+}
+
 /// The intake metrics' shared source (#165): decision events read off the
 /// task journal, over the trailing 28 days -- `intake::registry_metric`
 /// mirrors `operations::registry_metric` for the run-backed families.
@@ -627,6 +641,7 @@ pub fn registry() -> Vec<MetricDef> {
         time_to_recover_p50_def(),
         unit_cost_def(),
         tokens_per_run_def(),
+        estimate_accuracy_def(),
         ready_rate_def(),
         needs_info_rate_def(),
         duplicate_rate_def(),
@@ -676,6 +691,7 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         ["time_to_recover_p50"] => time_to_recover_p50_def(),
         ["unit_cost"] => unit_cost_def(),
         ["tokens_per_run"] => tokens_per_run_def(),
+        ["estimate_accuracy"] => estimate_accuracy_def(),
         ["ready_rate"] => ready_rate_def(),
         ["needs_info_rate"] => needs_info_rate_def(),
         ["duplicate_rate"] => duplicate_rate_def(),
@@ -868,6 +884,7 @@ mod tests {
             "time_to_recover_p50",
             "unit_cost",
             "tokens_per_run",
+            "estimate_accuracy",
             "ready_rate",
             "needs_info_rate",
             "duplicate_rate",
@@ -946,6 +963,14 @@ mod tests {
             assert_eq!((def.unit, def.better), (unit, Better::Lower), "{id}");
         }
         assert_eq!(serde_json::to_value(Unit::Usd).unwrap(), serde_json::json!("usd"));
+    }
+
+    #[test]
+    fn estimate_accuracy_is_a_scope_aware_ratio_where_higher_is_better() {
+        let def = resolve(&MetricId::new("estimate_accuracy").unwrap()).unwrap();
+        assert!(def.available);
+        assert_eq!(def.unavailable_reason, None);
+        assert_eq!((def.unit, def.better, def.coverage), (Unit::Ratio, Better::Higher, MetricCoverage::ScopeAware));
     }
 
     #[test]
