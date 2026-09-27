@@ -2408,13 +2408,17 @@ impl Engine {
             // spamming the journal every time.
             Err(FactoryError::CapacityHeld { agent, in_use, max }) => {
                 let reason = format!("waiting for a {agent} slot ({in_use}/{max} in use)");
-                tracing::info!(task = task_id, "{reason}");
                 if let Ok(Some(task)) = self.store.get(task_id).await {
                     let already_this_wait = task
                         .slot_wait
                         .as_ref()
                         .is_some_and(|w| w.agent == agent && w.scope == task.scope);
-                    if !already_this_wait {
+                    // The tick sweep re-tries every waiting task every few
+                    // seconds; only the first hold is worth an info line.
+                    if already_this_wait {
+                        tracing::debug!(task = task_id, "{reason}");
+                    } else {
+                        tracing::info!(task = task_id, "{reason}");
                         let wait = SlotWait {
                             agent,
                             scope: task.scope.clone(),
