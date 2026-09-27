@@ -664,7 +664,9 @@ impl AgentContext {
                 Grant::IntakeAdd => format!(
                     "intake.add -> {bin} intake add \"<title>\" -i \"<what is asked>\" --scope {scope}; \
                      for work that is not yet clear, tested or known to be ours -- it is triaged before \
-                     it can run"
+                     it can run. Relaying an email or chat request on somebody else's behalf (#167): \
+                     add --source email|chat --provider <name> --reference <message-id> --requester <who> \
+                     [--received-at <RFC3339>] -- the daemon records who relayed it, never what you claim"
                 ),
                 Grant::IntakeInfo => format!(
                     "intake.info -> {bin} intake info <id> \"...\"; answers a needs-info and puts the \

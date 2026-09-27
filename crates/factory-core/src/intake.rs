@@ -117,6 +117,13 @@ pub enum SourceKind {
     /// An open GitHub issue carrying `needs-triage`. Set only by the daemon's
     /// read-only poller, never accepted as caller-supplied provenance.
     Github,
+    /// An email, relayed in on somebody else's behalf (`#167`) -- never a
+    /// daemon-run mailbox. `IntakeSource::provider` names the mail system
+    /// (`apple-mail`) and `reference` is its own message id, required.
+    Email,
+    /// A chat request, relayed the same way (`#167`) -- `provider` names the
+    /// channel (`imessage`), `reference` its own message id, required.
+    Chat,
 }
 
 impl SourceKind {
@@ -126,17 +133,61 @@ impl SourceKind {
             Self::Ui => "ui",
             Self::Agent => "agent",
             Self::Github => "github",
+            Self::Email => "email",
+            Self::Chat => "chat",
         }
     }
 }
 
+/// Where an item came from, and -- for a relayed [`SourceKind::Email`] or
+/// [`SourceKind::Chat`] (`#167`) -- who relayed it and through which
+/// provider. Relayed, not trusted: the daemon records `relayed_by` as the
+/// caller's own [`crate::role`]-vocabulary description
+/// (`Caller::describe`), never something a caller can claim to be, and
+/// `provider`/`reference` travel exactly as given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntakeSource {
     pub kind: SourceKind,
     /// Whatever identifies the item where it came from -- an issue URL, a
-    /// mail id, the task an agent was working on. Free text, never followed.
+    /// mail id, the task an agent was working on. Free text, never followed,
+    /// except that `email` and `chat` require it: the provider's own message
+    /// id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    /// The system that relayed an `email` or `chat` item in -- `apple-mail`,
+    /// `imessage` -- as the relay named it, never validated against a fixed
+    /// list. Absent for every other kind. `#[serde(default)]`: absent on
+    /// every row from before `#167`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Who handed an `email` or `chat` item in, when that is not the source
+    /// itself -- `Caller::describe`, the same vocabulary [`Intake::requester`]
+    /// uses. Absent for every kind that arrives on its own behalf (`cli`,
+    /// `ui`, `agent`, `github`). `#[serde(default)]`: absent on every row
+    /// from before `#167`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relayed_by: Option<String>,
+}
+
+impl IntakeSource {
+    /// The identity a receipt is deduplicated by: `(kind, provider,
+    /// reference)`, and only for the three kinds whose reference is a
+    /// provider's own stable id, never free text a person typed --
+    /// `Github` (the poller's own canonical issue URL) and a relayed
+    /// `Email` or `Chat`'s message id (`#167`). `None` for `Cli`, `Ui` and
+    /// `Agent`, and for a reference that is empty or absent: there, receipt
+    /// stays exactly as it always has -- always creates, and `#166`'s
+    /// `duplicate_candidates` is the only signal a repeat gets.
+    pub fn identity(&self) -> Option<(SourceKind, Option<String>, String)> {
+        if !matches!(self.kind, SourceKind::Github | SourceKind::Email | SourceKind::Chat) {
+            return None;
+        }
+        let reference = self.reference.as_deref()?.trim();
+        if reference.is_empty() {
+            return None;
+        }
+        Some((self.kind, self.provider.clone(), reference.to_string()))
+    }
 }
 
 /// What a caller sends to put something into intake.
@@ -156,9 +207,22 @@ pub struct NewIntake {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
     /// On whose behalf, when that is not the caller -- a customer, a
-    /// colleague. Absent means the caller.
+    /// colleague. Absent means the caller. For a relayed `email` or `chat`
+    /// item (`#167`) this is the sender's own identity (an address, a
+    /// handle) and is required -- the caller who relayed it is recorded
+    /// separately, as `IntakeSource::relayed_by`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester: Option<String>,
+    /// The relay's own name for its system -- `apple-mail`, `imessage`.
+    /// Only meaningful with `source: email` or `source: chat` (`#167`);
+    /// ignored otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The provider's own receipt time for a relayed `email` or `chat` item
+    /// (`#167`). Refused if it is in the future; absent means now. Ignored
+    /// for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     /// `--security`/the UI checkbox: flag it as a possible security report
@@ -174,7 +238,16 @@ pub struct NewIntake {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Intake {
     pub stage: IntakeStage,
-    pub source: IntakeSource,
+    /// Boxed for the same reason `security` and `outbound` are below:
+    /// `Intake` rides unboxed inside `Task` and `TaskPatch`, both of which
+    /// travel by value through several deep, sequential `.await` chains
+    /// (`Engine::handle_request`'s dispatch), so a debug build's generated
+    /// state machine reserves stack for every live copy at once. `#167`
+    /// doubled `IntakeSource`'s size (`provider`, `relayed_by`); boxing it
+    /// keeps `Intake`, and everything that embeds it, the same shape this
+    /// stack budget was already sized for -- serde is transparent through
+    /// the box either way, so the wire format is unchanged.
+    pub source: Box<IntakeSource>,
     /// Who asked: a person's name, `the owner`, or `agent <name>`.
     pub requester: String,
     pub received_at: DateTime<Utc>,
@@ -363,7 +436,7 @@ pub fn confirmed_report(task: &Task) -> Option<ConfirmedSecurityReport> {
         item: task.id.clone(),
         scope: task.scope.clone(),
         awareness_at: intake.received_at,
-        source: intake.source.clone(),
+        source: (*intake.source).clone(),
         confirmed_by: flag.decided_by.clone().unwrap_or_default(),
         confirmed_at: flag.decided_at.unwrap_or(intake.received_at),
     })
@@ -543,6 +616,13 @@ fn overlap(a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSe
 /// match at or above [`TEXT_MATCH_THRESHOLD`] with at least
 /// [`MIN_SHARED_TOKENS`] in common. At most [`MAX_CANDIDATES`], ordered by
 /// score then reference, so the same input always gives the same list.
+///
+/// The source match stays keyed on `(kind, reference)`, not
+/// [`IntakeSource::identity`]'s stricter `(kind, provider, reference)`
+/// (`#167`): this is advice for a triager to confirm or reject, not the
+/// identity a receipt is deduplicated by, and two relays racing to reuse the
+/// same message id under different provider names is worth a look either
+/// way.
 pub fn duplicate_candidates(item: &Task, tasks: &[Task]) -> Vec<DuplicateCandidate> {
     let item_parent = item.labels.get(PARENT_LABEL).map(String::as_str);
     let item_source = item.intake.as_ref().map(|i| &i.source);
@@ -2383,7 +2463,7 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>, definitions: &BTreeMap<String, 
             scope: task.scope.clone(),
             status: task.status,
             stage: intake.stage,
-            source: intake.source.clone(),
+            source: (*intake.source).clone(),
             requester: intake.requester.clone(),
             received_at: intake.received_at,
             age_seconds: (decided_at.filter(|_| !intake.stage.is_open()).unwrap_or(now) - intake.received_at)
@@ -3074,7 +3154,7 @@ mod tests {
     fn open(triage: Option<Triage>) -> Intake {
         Intake {
             stage: IntakeStage::Triaging,
-            source: IntakeSource { kind: SourceKind::Cli, reference: None },
+            source: Box::new(IntakeSource { kind: SourceKind::Cli, reference: None, provider: None, relayed_by: None }),
             requester: "the owner".into(),
             received_at: at(),
             triage,
@@ -3285,7 +3365,7 @@ mod tests {
     fn received(reference: Option<&str>) -> Intake {
         Intake {
             stage: IntakeStage::Received,
-            source: IntakeSource { kind: SourceKind::Github, reference: reference.map(String::from) },
+            source: Box::new(IntakeSource { kind: SourceKind::Github, reference: reference.map(String::from), provider: None, relayed_by: None }),
             requester: "the owner".into(),
             received_at: at(),
             triage: None,

@@ -36,6 +36,7 @@ import {
   securityDecisionProblem,
   securityDecisionRequest,
   securityFlag,
+  sourceText,
   splitDraft,
   splitProblem,
   totalOpen,
@@ -391,6 +392,17 @@ test("only events touching an item or a triage run refresh the board", () => {
   assert.ok(!touchesIntake({ type: "task_updated", task: { labels: {} } }));
   assert.ok(!touchesIntake({ type: "run_updated", run: {} }));
   assert.ok(!touchesIntake(null));
+});
+
+test("sourceText labels every kind, including the two #167 adds, with provider and relayer", () => {
+  assert.equal(sourceText({ kind: "cli" }), "CLI");
+  assert.equal(sourceText({ kind: "ui" }), "UI");
+  assert.equal(sourceText({ kind: "agent" }), "agent");
+  assert.equal(sourceText({ kind: "github" }), "GitHub");
+  assert.equal(sourceText({ kind: "email", provider: "apple-mail", relayed_by: "the owner" }), "email/apple-mail (relayed by the owner)");
+  assert.equal(sourceText({ kind: "chat", provider: "imessage", relayed_by: "w (worker) in demo" }), "chat/imessage (relayed by w (worker) in demo)");
+  assert.equal(sourceText({ kind: "email" }), "email", "provider and relayed_by are both optional");
+  assert.equal(sourceText(null), "");
 });
 
 test("ages read at a glance", () => {

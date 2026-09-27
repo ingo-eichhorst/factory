@@ -267,12 +267,29 @@ enum IntakeCmd {
         /// The scope it is thought to belong to; triage routes it.
         #[arg(long)]
         scope: Option<String>,
-        /// Where it came from: an issue URL, a mail id.
+        /// `email` or `chat`: relayed on somebody else's behalf (`#167`) --
+        /// open to any caller holding `intake.add`, recorded as relayed,
+        /// never trusted. Absent means an ordinary item from whoever is
+        /// asking.
+        #[arg(long, value_parser = ["email", "chat"])]
+        source: Option<String>,
+        /// Where it came from: an issue URL, a mail id -- and, with
+        /// `--source email|chat`, the provider's own message id, required.
         #[arg(long)]
         reference: Option<String>,
-        /// On whose behalf, when that is not you.
+        /// The system that relayed it -- `apple-mail`, `imessage`. Only
+        /// with `--source email|chat`.
+        #[arg(long)]
+        provider: Option<String>,
+        /// On whose behalf, when that is not you -- with `--source
+        /// email|chat` this is the sender's own address or handle, and is
+        /// required.
         #[arg(long)]
         requester: Option<String>,
+        /// RFC 3339: the provider's own receipt time. Absent means now;
+        /// refused if it is in the future. Only with `--source email|chat`.
+        #[arg(long)]
+        received_at: Option<String>,
         /// Repeatable: `--label area=infra`.
         #[arg(long = "label")]
         labels: Vec<String>,
@@ -1678,9 +1695,29 @@ async fn main() -> Result<()> {
             let cmd = match command {
                 None => IntakeCmd::List { scope },
                 Some(IntakeCmd::List { scope: s }) => IntakeCmd::List { scope: s.or(scope) },
-                Some(IntakeCmd::Add { scope: s, title, instructions, reference, requester, labels, security }) => {
-                    IntakeCmd::Add { scope: s.or(scope), title, instructions, reference, requester, labels, security }
-                }
+                Some(IntakeCmd::Add {
+                    scope: s,
+                    title,
+                    instructions,
+                    source,
+                    reference,
+                    provider,
+                    requester,
+                    received_at,
+                    labels,
+                    security,
+                }) => IntakeCmd::Add {
+                    scope: s.or(scope),
+                    title,
+                    instructions,
+                    source,
+                    reference,
+                    provider,
+                    requester,
+                    received_at,
+                    labels,
+                    security,
+                },
                 Some(IntakeCmd::SecurityReports { scope: s }) => IntakeCmd::SecurityReports { scope: s.or(scope) },
                 Some(_) if scope.is_some() => {
                     return Err(anyhow!(
@@ -1699,15 +1736,30 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
     use factory_core::intake::{Decision, NewIntake, SecurityVerdict, SourceKind, WontfixReason};
     let payload = match cmd {
         IntakeCmd::List { scope } => client.send(Request::IntakeBoard { scope }).await?,
-        IntakeCmd::Add { title, instructions, scope, reference, requester, labels, security } => {
+        IntakeCmd::Add { title, instructions, scope, source, reference, provider, requester, received_at, labels, security } => {
+            let source = match source.as_deref() {
+                Some("email") => SourceKind::Email,
+                Some("chat") => SourceKind::Chat,
+                _ => SourceKind::Cli,
+            };
+            let received_at = match received_at {
+                Some(t) => Some(
+                    chrono::DateTime::parse_from_rfc3339(t.trim())
+                        .map(|t| t.with_timezone(&chrono::Utc))
+                        .map_err(|e| anyhow!("--received-at {t:?} is not RFC 3339: {e}"))?,
+                ),
+                None => None,
+            };
             client
                 .send(Request::IntakeAdd(NewIntake {
                     title,
                     instructions,
                     scope,
-                    source: Some(SourceKind::Cli),
+                    source: Some(source),
                     reference,
+                    provider,
                     requester,
+                    received_at,
                     labels: parse_labels(&labels)?,
                     security,
                 }))
@@ -1809,6 +1861,25 @@ fn next_actions_text(id: &str, actions: &[factory_core::intake::NextAction], ind
     out
 }
 
+/// `email/apple-mail (<abc@x>) relayed by the owner` -- what a card and
+/// `intake show` print for where an item came from (`#167`): the kind, its
+/// provider when there is one, the reference, and who relayed it when that
+/// was not the source itself.
+fn intake_source_text(source: &factory_core::intake::IntakeSource) -> String {
+    let mut text = source.kind.as_str().to_string();
+    if let Some(p) = &source.provider {
+        text.push('/');
+        text.push_str(p);
+    }
+    if let Some(r) = &source.reference {
+        text.push_str(&format!(" ({r})"));
+    }
+    if let Some(by) = &source.relayed_by {
+        text.push_str(&format!(" relayed by {by}"));
+    }
+    text
+}
+
 fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
     let (verdict, marks) = match &c.triage {
         Some(t) => (
@@ -1831,14 +1902,15 @@ fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
         _ => "  ",
     };
     let mut line = format!(
-        "{sec_mark}{}  {:>7}  {}  {:<24} {} [{}] from {}",
+        "{sec_mark}{}  {:>7}  {}  {:<24} {} [{}] from {} ({})",
         c.id,
         duration(c.age_seconds.max(0) as u64),
         marks,
         verdict,
         c.title,
         c.scope,
-        c.requester
+        c.requester,
+        intake_source_text(&c.source),
     );
     if let Some(f) = &c.security {
         line.push_str(&format!(
@@ -1971,15 +2043,14 @@ fn intake_security_reports_text(reports: &[factory_core::intake::ConfirmedSecuri
 fn intake_item_text(task: &Task) -> String {
     let Some(i) = &task.intake else { return detail(task) };
     let mut out = format!(
-        "{}\n  {}\n  status     {} ({})\n  scope      {}\n  from       {} via {}{}\n  received   {}\n",
+        "{}\n  {}\n  status     {} ({})\n  scope      {}\n  from       {} via {}\n  received   {}\n",
         task.id,
         task.title,
         task.status.as_str(),
         i.stage.as_str().replace('_', "-"),
         task.scope,
         i.requester,
-        i.source.kind.as_str(),
-        i.source.reference.as_ref().map(|r| format!(" ({r})")).unwrap_or_default(),
+        intake_source_text(&i.source),
         i.received_at.to_rfc3339(),
     );
     if let Some(f) = &i.security {
@@ -6449,6 +6520,54 @@ mod tests {
             Command::Intake { command: Some(IntakeCmd::Publish { id }), .. } => assert_eq!(id, "abc"),
             _ => panic!("not a publish"),
         }
+    }
+
+    #[test]
+    fn intake_parses_the_relay_flags_and_refuses_an_unknown_source() {
+        match parse(&[
+            "intake",
+            "add",
+            "Invoice question",
+            "--source",
+            "email",
+            "--provider",
+            "apple-mail",
+            "--reference",
+            "<abc@x>",
+            "--requester",
+            "a@b.c",
+            "--received-at",
+            "2026-09-26T08:00:00Z",
+        ])
+        .command
+        {
+            Command::Intake {
+                command:
+                    Some(IntakeCmd::Add {
+                        source: Some(source),
+                        provider: Some(provider),
+                        reference: Some(reference),
+                        requester: Some(requester),
+                        received_at: Some(received_at),
+                        ..
+                    }),
+                ..
+            } => {
+                assert_eq!(
+                    (source.as_str(), provider.as_str(), reference.as_str(), requester.as_str(), received_at.as_str()),
+                    ("email", "apple-mail", "<abc@x>", "a@b.c", "2026-09-26T08:00:00Z")
+                );
+            }
+            _ => panic!("not a relayed add"),
+        }
+        match parse(&["intake", "add", "A chat request", "--source", "chat"]).command {
+            Command::Intake { command: Some(IntakeCmd::Add { source: Some(s), .. }), .. } => assert_eq!(s, "chat"),
+            _ => panic!("not a chat add"),
+        }
+        assert!(
+            Cli::try_parse_from(["factory", "intake", "add", "x", "--source", "github"]).is_err(),
+            "github is never a caller-chosen source"
+        );
     }
 
     #[test]

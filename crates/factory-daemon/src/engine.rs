@@ -321,6 +321,13 @@ pub struct Engine {
     /// fallible steps dispatch takes afterward (the worktree, the harness's
     /// own launch).
     pub(crate) admission_lock: tokio::sync::Mutex<()>,
+    /// Serializes an intake receipt's identity lookup with its create
+    /// (`#167`): whether an item with the same `(kind, provider, reference)`
+    /// already exists, and minting a new one if not, all under one lock --
+    /// the same shape `admission_lock` uses for a dispatch's read-decide-write.
+    /// GitHub's poller and a relayed email/chat's `intake_add` both go
+    /// through `Engine::receive_intake`, so the rule lives in one place.
+    pub(crate) intake_receipt_lock: tokio::sync::Mutex<()>,
     /// A run ending, or the scheduler tick, sends a [`CapacityEvent`] here so
     /// one worker admits waiting tasks one event at a time -- without the
     /// `&self` sites that notice a run end (`report`, `cancel_task_run`)
@@ -389,6 +396,7 @@ impl Engine {
             schedule_lock: tokio::sync::Mutex::new(()),
             signpost_cache: std::sync::Mutex::new(None),
             admission_lock: tokio::sync::Mutex::new(()),
+            intake_receipt_lock: tokio::sync::Mutex::new(()),
             capacity_release_tx,
             capacity_release_rx: std::sync::Mutex::new(Some(capacity_release_rx)),
         }
@@ -1147,8 +1155,13 @@ impl Engine {
             // `TaskUpdated` itself; the board is a read over tasks. The
             // big ones are boxed: releasing starts a workflow and splitting
             // makes tasks, and inline they would size every request's
-            // future -- enough to overflow a test thread's stack.
-            Request::IntakeAdd(new) => Ok(Payload::Task { task: self.intake_add(caller, new).await? }),
+            // future -- enough to overflow a test thread's stack. `add`
+            // joined them in `#167`: relaying grew `NewIntake` and
+            // `IntakeSource` enough that the HTTP interface's own deeper
+            // extractor-and-routing chain, on top of this dispatch, on top
+            // of `intake_add`'s own chain, overflowed the default stack a
+            // socket caller's shallower path did not.
+            Request::IntakeAdd(new) => Ok(Payload::Task { task: Box::pin(self.intake_add(caller, new)).await? }),
             Request::IntakeBoard { scope } => Ok(Payload::IntakeBoard {
                 board: Box::pin(self.intake_board(scope.as_deref())).await?,
             }),

@@ -36,10 +36,29 @@ use std::sync::Arc;
 pub(crate) const TRIAGE_VERDICT_KIND: &str = "triage_verdict";
 
 impl Engine {
-    /// `Request::IntakeAdd`.
+    /// `Request::IntakeAdd`. A relayed `email` or `chat` item (`#167`) is
+    /// its own path, open to Owner and Agent alike; every other kind keeps
+    /// exactly the per-caller provenance it always had.
     pub(crate) async fn intake_add(&self, caller: &Caller, new: NewIntake) -> Result<Task> {
         if new.title.trim().is_empty() {
             return Err(FactoryError::BadRequest("an intake item needs a title".into()));
+        }
+        if matches!(new.source, Some(SourceKind::Email) | Some(SourceKind::Chat)) {
+            // Boxed: this is one more nested `.await` on top of an already
+            // tight chain (`Engine::handle_request`'s own dispatch already
+            // boxes `intake_add`'s call), so it inlining here would size
+            // every request's future -- the same reason `intake_decide` and
+            // friends box their own calls above.
+            return Box::pin(self.relay_intake(caller, new)).await;
+        }
+        // `provider`/`received_at` only mean anything for a relayed item:
+        // carrying either one here is a malformed relay, whatever kind it
+        // claims (including a bare `github`, which never becomes trusted
+        // provenance this way regardless -- see the arm below).
+        if new.provider.is_some() || new.received_at.is_some() {
+            return Err(FactoryError::BadRequest(
+                "provider and received_at only apply to a relayed item -- pass --source email or --source chat".into(),
+            ));
         }
         let requested_by = caller.describe();
         let flagged_by = requested_by.clone();
@@ -59,7 +78,9 @@ impl Engine {
                 (SourceKind::Agent, requester, clean(new.reference).or(from_run))
             }
             Caller::Owner => {
-                // A person cannot pass something off as an agent's request.
+                // A person cannot pass something off as an agent's request,
+                // and never off as GitHub's either -- that stays the
+                // poller's alone, whatever a caller claims.
                 let kind = match new.source {
                     Some(SourceKind::Ui) => SourceKind::Ui,
                     _ => SourceKind::Cli,
@@ -79,7 +100,7 @@ impl Engine {
         };
         let record = Intake {
             stage: IntakeStage::Received,
-            source: IntakeSource { kind, reference },
+            source: Box::new(IntakeSource { kind, reference, provider: None, relayed_by: None }),
             requester,
             received_at: now,
             triage: None,
@@ -90,7 +111,7 @@ impl Engine {
             security,
             outbound: None,
         };
-        self.receive_intake(
+        Box::pin(self.receive_intake(
             NewTask {
                 title: new.title,
                 instructions: new.instructions,
@@ -99,18 +120,110 @@ impl Engine {
                 ..Default::default()
             },
             record,
-        )
+        ))
+        .await
+    }
+
+    /// The relayed-provenance path (`#167`) for `source: email` or `source:
+    /// chat`: open to Owner and Agent alike, since neither is the source
+    /// itself, only the one handing it in. Nothing the caller sends is
+    /// trusted beyond that it is relaying: `relayed_by` is always
+    /// `caller.describe()`, never a claim. What *is* required, because
+    /// there is no other way to identify or attribute the item: the
+    /// provider's own message id (`reference`) and who it is from
+    /// (`requester`, the sender's own address or handle -- unlike the
+    /// ordinary Agent path above, never folded into a "via" suffix, since
+    /// `relayed_by` already carries that). `received_at` is the provider's
+    /// own receipt time, refused if it is in the future, defaulted to now
+    /// when absent.
+    async fn relay_intake(&self, caller: &Caller, new: NewIntake) -> Result<Task> {
+        let now = Utc::now();
+        let kind = match new.source {
+            Some(kind @ (SourceKind::Email | SourceKind::Chat)) => kind,
+            // Unreachable from `intake_add`'s own gate above; kept as the
+            // relay's own refusal in case another caller ever reaches this
+            // directly -- github and every other kind arrive their own way,
+            // never relayed.
+            _ => return Err(FactoryError::BadRequest("only email and chat are relayed this way".into())),
+        };
+        let reference = clean(new.reference).ok_or_else(|| {
+            FactoryError::BadRequest(format!(
+                "a relayed {} item needs the provider's own message id as --reference",
+                kind.as_str()
+            ))
+        })?;
+        let requester = clean(new.requester)
+            .ok_or_else(|| FactoryError::BadRequest("a relayed item needs --requester -- who it is from".into()))?;
+        let received_at = match new.received_at {
+            Some(at) if at > now => {
+                return Err(FactoryError::BadRequest("received_at cannot be in the future".into()));
+            }
+            Some(at) => at,
+            None => now,
+        };
+        let relayed_by = caller.describe();
+        let flagged_by = relayed_by.clone();
+        let security = if new.security {
+            Some(Box::new(intake::flag_security(None, "flagged at intake", &flagged_by, now).expect(
+                "a record that does not exist yet never already carries a flag",
+            )))
+        } else {
+            None
+        };
+        let record = Intake {
+            stage: IntakeStage::Received,
+            source: Box::new(IntakeSource { kind, reference: Some(reference), provider: clean(new.provider), relayed_by: Some(relayed_by) }),
+            requester,
+            received_at,
+            triage: None,
+            triage_task: None,
+            questions: Vec::new(),
+            decision: None,
+            candidates: Vec::new(),
+            security,
+            outbound: None,
+        };
+        Box::pin(self.receive_intake(
+            NewTask {
+                title: new.title,
+                instructions: new.instructions,
+                scope: new.scope,
+                labels: new.labels,
+                ..Default::default()
+            },
+            record,
+        ))
         .await
     }
 
     /// Receive an item whose provenance was established inside the daemon.
     /// Keeping this separate from `NewIntake` means public callers cannot
-    /// choose a trusted source kind or its timestamp. Searches for
-    /// duplicate candidates (`#166`) right away, for every source
-    /// including GitHub, and stores what it finds on the record.
+    /// choose a trusted source kind or its timestamp. Idempotent by
+    /// identity (`#167`, `IntakeSource::identity`): for GitHub, a relayed
+    /// email or a relayed chat, a second receipt with the same `(kind,
+    /// provider, reference)` returns the existing item unchanged -- no
+    /// second task, no second `intake_received` entry -- so the GitHub
+    /// poller's own retries and a relay's own retries are both safe. The
+    /// lookup and the create happen under one lock
+    /// (`Engine::intake_receipt_lock`), so two identical requests racing
+    /// each other still produce exactly one item. Every other kind (`cli`,
+    /// `ui`, `agent`) always creates, exactly as it always has; `#166`'s
+    /// duplicate candidate search, below, is its only signal that a repeat
+    /// came in.
     pub(crate) async fn receive_intake(&self, new: NewTask, record: Intake) -> Result<Task> {
-        let task = self.create_intake_task(new, record.clone()).await?;
+        let _guard = self.intake_receipt_lock.lock().await;
         let all = self.store.list(&TaskFilter::default()).await?;
+        if let Some(identity) = record.source.identity() {
+            if let Some(existing) =
+                all.iter().find(|t| t.intake.as_ref().and_then(|i| i.source.identity()) == Some(identity.clone()))
+            {
+                return Ok(existing.clone());
+            }
+        }
+        let task = self.create_intake_task(new, record.clone()).await?;
+        // `all` was read before `task` was created, so it never contains
+        // `task` itself -- the same set `duplicate_candidates` would search
+        // after excluding the item by id, one list call doing both jobs.
         let candidates = intake::duplicate_candidates(&task, &all);
         let task = if candidates.is_empty() {
             task
@@ -1332,6 +1445,195 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_or_received_at_without_a_relay_source_is_refused_including_a_bare_github_claim() {
+        let engine = engine();
+        for new in [
+            NewIntake { title: "x".into(), provider: Some("apple-mail".into()), ..Default::default() },
+            NewIntake { title: "x".into(), received_at: Some(Utc::now()), ..Default::default() },
+            NewIntake {
+                title: "x".into(),
+                source: Some(SourceKind::Github),
+                reference: Some("https://github.com/example/repo/issues/1".into()),
+                provider: Some("apple-mail".into()),
+                ..Default::default()
+            },
+        ] {
+            let why = engine.intake_add(&Caller::Owner, new).await.unwrap_err().to_string();
+            assert!(why.contains("only apply to a relayed"), "{why}");
+        }
+        // The daemon keeps serving after every refusal.
+        add(&engine, "still fine").await;
+    }
+
+    fn email_relay(title: &str, reference: &str, requester: &str, received_at: DateTime<Utc>) -> NewIntake {
+        NewIntake {
+            title: title.into(),
+            instructions: "please look at this".into(),
+            scope: Some("demo".into()),
+            source: Some(SourceKind::Email),
+            provider: Some("apple-mail".into()),
+            reference: Some(reference.into()),
+            requester: Some(requester.into()),
+            received_at: Some(received_at),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_owner_relayed_email_item_carries_its_own_provenance_and_who_relayed_it() {
+        let engine = engine();
+        let at = Utc::now() - chrono::Duration::hours(2);
+        let item = engine.intake_add(&Caller::Owner, email_relay("Invoice question", "<abc@x>", "a@b.c", at)).await.unwrap();
+        let record = item.intake.unwrap();
+        assert_eq!(record.source.kind, SourceKind::Email);
+        assert_eq!(record.source.provider.as_deref(), Some("apple-mail"));
+        assert_eq!(record.source.reference.as_deref(), Some("<abc@x>"));
+        assert_eq!(record.source.relayed_by.as_deref(), Some("the owner"));
+        assert_eq!(record.requester, "a@b.c", "the sender, never folded into a 'via' suffix");
+        assert_eq!(record.received_at, at);
+        assert!(kinds(&engine, &item.id).await.contains(&"intake_received".to_string()));
+    }
+
+    #[tokio::test]
+    async fn an_agent_relayed_chat_item_carries_its_own_provenance_and_who_relayed_it() {
+        let engine = engine();
+        let at = Utc::now() - chrono::Duration::minutes(5);
+        let new = NewIntake {
+            title: "Can Factory look at this?".into(),
+            source: Some(SourceKind::Chat),
+            provider: Some("imessage".into()),
+            reference: Some("imsg-42".into()),
+            requester: Some("+15551234567".into()),
+            received_at: Some(at),
+            ..Default::default()
+        };
+        let item = engine.intake_add(&worker(None), new).await.unwrap();
+        let record = item.intake.unwrap();
+        assert_eq!(record.source.kind, SourceKind::Chat);
+        assert_eq!(record.source.provider.as_deref(), Some("imessage"));
+        assert_eq!(record.source.reference.as_deref(), Some("imsg-42"));
+        assert_eq!(record.source.relayed_by.as_deref(), Some("w (worker) in demo"));
+        assert_eq!(record.requester, "+15551234567");
+        assert_eq!(record.received_at, at);
+    }
+
+    #[tokio::test]
+    async fn a_relayed_items_received_at_defaults_to_now_when_absent() {
+        let engine = engine();
+        let before = Utc::now();
+        let new = NewIntake {
+            title: "x".into(),
+            source: Some(SourceKind::Email),
+            reference: Some("<no-time@x>".into()),
+            requester: Some("a@b.c".into()),
+            ..Default::default()
+        };
+        let item = engine.intake_add(&Caller::Owner, new).await.unwrap();
+        let record = item.intake.unwrap();
+        assert!(record.received_at >= before, "defaulted to now");
+    }
+
+    #[tokio::test]
+    async fn a_relay_missing_its_message_id_is_refused() {
+        let engine = engine();
+        let new = NewIntake {
+            title: "x".into(),
+            source: Some(SourceKind::Email),
+            requester: Some("a@b.c".into()),
+            ..Default::default()
+        };
+        let why = engine.intake_add(&Caller::Owner, new).await.unwrap_err().to_string();
+        assert!(why.contains("message id"), "{why}");
+        add(&engine, "still fine").await;
+    }
+
+    #[tokio::test]
+    async fn a_relay_missing_its_requester_is_refused() {
+        let engine = engine();
+        let new =
+            NewIntake { title: "x".into(), source: Some(SourceKind::Chat), reference: Some("m1".into()), ..Default::default() };
+        let why = engine.intake_add(&Caller::Owner, new).await.unwrap_err().to_string();
+        assert!(why.contains("--requester"), "{why}");
+        add(&engine, "still fine").await;
+    }
+
+    #[tokio::test]
+    async fn a_relay_with_a_future_received_at_is_refused() {
+        let engine = engine();
+        let future = Utc::now() + chrono::Duration::days(1);
+        let why = engine
+            .intake_add(&Caller::Owner, email_relay("x", "<future@x>", "a@b.c", future))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("future"), "{why}");
+        add(&engine, "still fine").await;
+    }
+
+    /// `#167`: a replay with the same `(kind, provider, reference)` returns
+    /// the existing item, never a second one, and writes no second
+    /// `intake_received` entry.
+    #[tokio::test]
+    async fn replaying_a_relayed_receipt_returns_the_same_item_with_no_second_receipt() {
+        let engine = engine();
+        let at = Utc::now() - chrono::Duration::hours(1);
+        let first = engine.intake_add(&Caller::Owner, email_relay("Invoice question", "<abc@x>", "a@b.c", at)).await.unwrap();
+        let second = engine.intake_add(&Caller::Owner, email_relay("Invoice question", "<abc@x>", "a@b.c", at)).await.unwrap();
+        assert_eq!(first.id, second.id);
+        let receipts = kinds(&engine, &first.id).await.into_iter().filter(|k| k == "intake_received").count();
+        assert_eq!(receipts, 1, "the replay wrote nothing new");
+        let all = engine.store.list(&TaskFilter::default()).await.unwrap();
+        let emails = all.iter().filter(|t| t.intake.as_ref().is_some_and(|i| i.source.kind == SourceKind::Email)).count();
+        assert_eq!(emails, 1, "exactly one task exists for the identity");
+    }
+
+    /// `#171`'s outbound record is GitHub-only (`awaiting_approval_outbound`
+    /// gates on `source.kind == Github`) -- a relayed email or chat item
+    /// must never get one, whatever it is decided. `#167` never sends
+    /// anywhere but Factory itself, so this holds by construction; asserted
+    /// here so a later change to that gate cannot silently widen it.
+    #[tokio::test]
+    async fn a_relayed_item_is_decided_ready_but_never_gets_outbound_state() {
+        let engine = engine();
+        let at = Utc::now() - chrono::Duration::hours(1);
+        let item = engine.intake_add(&Caller::Owner, email_relay("Invoice question", "<outbound@x>", "a@b.c", at)).await.unwrap();
+        let released =
+            engine.intake_assess(&Caller::Owner, &item.id, assessment("demo"), true).await.unwrap();
+        let record = released.intake.unwrap();
+        assert_eq!(record.decision.as_ref().map(|d| &d.decision), Some(&Decision::Ready { run: false }));
+        assert!(record.outbound.is_none(), "an email item is never published to GitHub");
+    }
+
+    /// The atomicity guarantee itself (`#167`, the same shape as
+    /// `capacity_ten_concurrent_dispatches_against_a_limit_of_one_never_open_more_than_one_run`):
+    /// two identical relays racing each other, however they interleave,
+    /// never mint more than one item.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_concurrent_identical_relays_create_exactly_one_item() {
+        let engine = engine();
+        let at = Utc::now() - chrono::Duration::minutes(1);
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let engine = engine.clone();
+            let new = email_relay("Race", "<race@x>", "a@b.c", at);
+            handles.push(tokio::spawn(async move { engine.intake_add(&Caller::Owner, new).await.unwrap() }));
+        }
+        let mut ids = Vec::new();
+        for h in handles {
+            ids.push(h.await.unwrap().id);
+        }
+        assert_eq!(ids[0], ids[1], "both callers land on the same item");
+        let all = engine.store.list(&TaskFilter::default()).await.unwrap();
+        let matching = all
+            .iter()
+            .filter(|t| {
+                t.intake.as_ref().is_some_and(|i| i.source.reference.as_deref() == Some("<race@x>"))
+            })
+            .count();
+        assert_eq!(matching, 1, "never more than one item for the identity, however the calls interleaved");
+    }
+
+    #[tokio::test]
     async fn ready_releases_the_item_with_category_priority_estimate_and_a_journaled_verdict() {
         let engine = engine();
         let item = add(&engine, "Broken link").await;
@@ -2128,10 +2430,12 @@ mod tests {
             let engine = engine_at(&db, scopes());
             let record = Intake {
                 stage: IntakeStage::Received,
-                source: IntakeSource {
+                source: Box::new(IntakeSource {
                     kind: SourceKind::Github,
                     reference: Some("https://github.com/o/r/issues/9".into()),
-                },
+                    provider: None,
+                    relayed_by: None,
+                }),
                 requester: "octocat".into(),
                 received_at,
                 triage: None,

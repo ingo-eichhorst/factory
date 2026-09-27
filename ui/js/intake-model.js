@@ -22,6 +22,28 @@ export const WONTFIX_REASONS = [
   { key: "out_of_scope", label: "Out of scope" },
 ];
 
+/// A card's `source.kind`, as a person reads it -- `cli`/`ui`/`agent`/
+/// `github` unchanged, plus the two relayed kinds `#167` adds.
+export const SOURCE_LABELS = {
+  cli: "CLI",
+  ui: "UI",
+  agent: "agent",
+  github: "GitHub",
+  email: "email",
+  chat: "chat",
+};
+
+/// Where a card came from, for the board and the item modal (`#167`): the
+/// kind, its provider when there is one (`email`/`chat`, always given),
+/// and who relayed it when that was not the source itself.
+export function sourceText(source) {
+  if (!source) return "";
+  let text = SOURCE_LABELS[source.kind] || source.kind;
+  if (source.provider) text += `/${source.provider}`;
+  if (source.relayed_by) text += ` (relayed by ${source.relayed_by})`;
+  return text;
+}
+
 /// Impact x urgency, the daemon's matrix (`factory_core::intake::priority`)
 /// -- only for the form's live preview.
 export function priorityOf(impact, urgency) {

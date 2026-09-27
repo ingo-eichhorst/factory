@@ -54,6 +54,7 @@ import {
   securityDecisionProblem,
   securityDecisionRequest,
   securityFlag,
+  sourceText,
   splitDraft,
   splitProblem,
   totalOpen,
@@ -143,7 +144,7 @@ export function intakeCard(card, axes = board ? board.axes : []) {
         <span class="sub" title="waiting since ${esc(card.received_at)}">${esc(fmtAge(card.age_seconds))}</span></div>
       ${badge ? `<div class="ik-chips">${badge}</div>` : ""}
       <div class="title">${esc(card.title)}</div>
-      <div class="sub">${esc(card.scope)} · from ${esc(card.requester)} · ${esc(card.source.kind)}</div>
+      <div class="sub">${esc(card.scope)} · from ${esc(card.requester)} · ${esc(sourceText(card.source))}</div>
       ${chips(card)}
       ${card.questions && card.questions.length ? `<div class="sub ik-q">? ${esc(card.questions[0])}${card.questions.length > 1 ? ` (+${card.questions.length - 1})` : ""}</div>` : ""}
       ${note ? `<div class="sub ik-note">${esc(note)}</div>` : ""}
@@ -274,7 +275,7 @@ export function openItem(id) {
     <header><div><h2>${esc(card.title)}</h2><code class="id">${esc(card.id)}</code></div>
       <button class="x" id="ik-close" aria-label="Close">&times;</button></header>
     <div class="body">
-      <p class="sub">${esc(card.stage.replace("_", " "))} · ${esc(card.scope)} · from ${esc(card.requester)} (${esc(card.source.kind)}${card.source.reference ? `: ${esc(card.source.reference)}` : ""}) · waiting ${esc(fmtAge(card.age_seconds))}</p>
+      <p class="sub">${esc(card.stage.replace("_", " "))} · ${esc(card.scope)} · from ${esc(card.requester)} (${esc(sourceText(card.source))}${card.source.reference ? `: ${esc(card.source.reference)}` : ""}) · waiting ${esc(fmtAge(card.age_seconds))}</p>
       ${securityBlock(card)}
       ${outboundBlock(card)}
       ${t ? `<p><span class="badge ik-p ik-${esc(t.priority)}">${esc(t.priority)}</span> <span class="tag">${esc(t.assessment.category)}</span>

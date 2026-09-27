@@ -114,10 +114,12 @@ async fn poll_once(engine: &Engine, gh: &Path) {
                 .unwrap_or_else(|| "unknown GitHub user".into());
             let record = Intake {
                 stage: IntakeStage::Received,
-                source: IntakeSource {
+                source: Box::new(IntakeSource {
                     kind: SourceKind::Github,
                     reference: Some(reference.clone()),
-                },
+                    provider: None,
+                    relayed_by: None,
+                }),
                 requester,
                 received_at: issue.created_at,
                 triage: None,
