@@ -384,15 +384,27 @@ pub enum Request {
     /// Unpack a snapshot into a temporary directory and prove it would
     /// restore: every checksum in its manifest, `integrity_check` on the
     /// database copy, and every authored-content loader. `snapshot: None`
-    /// is the newest. The same grant as `BackupRun`. Nothing in the
-    /// destination or the instance is changed; the result is recorded.
+    /// is the newest. The same grant as `BackupRun` -- unless `identity` is
+    /// `Some`, which decrypts an encrypted snapshot and is the owner's alone
+    /// (`#152`): a role grant must never become "read this key file".
+    /// Nothing in the destination or the instance is changed; the result is
+    /// recorded (an encrypted snapshot given no identity is refused before
+    /// anything is recorded -- see the daemon's `backup` module).
     #[serde(rename = "backup.verify")]
     BackupVerify {
         #[serde(default)]
         snapshot: Option<String>,
+        /// A path to a file holding one native `AGE-SECRET-KEY-1…` identity
+        /// (`#152`), read once by the daemon and never stored, logged or
+        /// echoed back. Required to verify an encrypted snapshot; refused
+        /// for a path inside the instance's own `.factory/`. The HTTP verify
+        /// endpoint never accepts one.
+        #[serde(default)]
+        identity: Option<PathBuf>,
     },
-    /// Verify and materialize a plaintext snapshot as a new instance root.
-    /// The destination must not exist or must be empty; the daemon stages it
+    /// Verify and materialize a snapshot as a new instance root -- plaintext
+    /// as v1 did, or encrypted with `identity` supplied (`#152`). The
+    /// destination must not exist or must be empty; the daemon stages it
     /// beside that destination and renames only after every required check
     /// passes. CLI-only and owner-only: there is intentionally no grant or
     /// HTTP endpoint for restore.
@@ -400,6 +412,9 @@ pub enum Request {
     BackupRestore {
         snapshot: String,
         into: PathBuf,
+        /// See `BackupVerify::identity`.
+        #[serde(default)]
+        identity: Option<PathBuf>,
     },
     /// The L5 Knowledge tab: an index of `<root>/.factory/knowledge/`,
     /// rebuilt from the files on every request. Read-only, like
@@ -2222,12 +2237,35 @@ mod tests {
         let env: Envelope = serde_json::from_str(json).expect("request parses");
         assert!(matches!(
             &env.request,
-            Request::BackupRestore { snapshot, into }
+            Request::BackupRestore { snapshot, into, identity: None }
                 if snapshot.ends_with(".tar.zst") && into == &PathBuf::from("/tmp/restored")
         ));
         let back = serde_json::to_string(&env).unwrap();
         let again: Envelope = serde_json::from_str(&back).unwrap();
         assert!(matches!(again.request, Request::BackupRestore { .. }));
+    }
+
+    /// `#152`: an identity is opt in on the wire, and old clients that never
+    /// send one still parse.
+    #[test]
+    fn backup_verify_and_restore_carry_an_optional_identity_path() {
+        let json = r#"{"op":"backup.verify","params":{"snapshot":"s.tar.zst.age","identity":"/home/me/key.txt"}}"#;
+        let env: Envelope = serde_json::from_str(json).expect("request parses");
+        assert!(matches!(
+            &env.request,
+            Request::BackupVerify { snapshot: Some(s), identity: Some(path) }
+                if s == "s.tar.zst.age" && path == &PathBuf::from("/home/me/key.txt")
+        ));
+
+        let no_identity: Envelope = serde_json::from_str(r#"{"op":"backup.verify","params":{}}"#).unwrap();
+        assert!(matches!(no_identity.request, Request::BackupVerify { snapshot: None, identity: None }));
+
+        let restore_json = r#"{"op":"backup.restore","params":{"snapshot":"s.tar.zst.age","into":"/tmp/r","identity":"/home/me/key.txt"}}"#;
+        let restore: Envelope = serde_json::from_str(restore_json).unwrap();
+        assert!(matches!(
+            &restore.request,
+            Request::BackupRestore { identity: Some(path), .. } if path == &PathBuf::from("/home/me/key.txt")
+        ));
     }
 
     #[test]
