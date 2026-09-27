@@ -88,6 +88,7 @@ impl Engine {
             decision: None,
             candidates: Vec::new(),
             security,
+            outbound: None,
         };
         self.receive_intake(
             NewTask {
@@ -639,6 +640,7 @@ impl Engine {
                 next.stage = IntakeStage::Ready;
                 next.questions.clear();
                 next.decision = Some(decided.clone());
+                next.outbound = crate::github_outbound::awaiting_approval_outbound(&record, &decided);
                 let task = self.write_intake(&item.id, next, patch).await?;
                 self.journal_verdict(&task, &asked, &decided, &triage, Some(&released_into)).await;
                 if *run && routing.workflow.is_none() {
@@ -664,6 +666,7 @@ impl Engine {
                 next.stage = IntakeStage::NeedsInfo;
                 next.questions = questions.clone();
                 next.decision = Some(decided.clone());
+                next.outbound = crate::github_outbound::awaiting_approval_outbound(&record, &decided);
                 let task = self.write_intake(&item.id, next, TaskPatch::default()).await?;
                 match &record.triage {
                     Some(triage) => self.journal_verdict(&task, &asked, &decided, triage, None).await,
@@ -690,6 +693,7 @@ impl Engine {
                 next.stage = IntakeStage::Wontfix;
                 next.questions.clear();
                 next.decision = Some(decided.clone());
+                next.outbound = crate::github_outbound::awaiting_approval_outbound(&record, &decided);
                 let patch = TaskPatch {
                     status: Some(TaskStatus::Cancelled),
                     result: Some(why.clone()),
@@ -778,6 +782,10 @@ impl Engine {
                         // (`check_decision`), so this is only ever `None`,
                         // `confirmed` or `dismissed`.
                         security: record.security.clone(),
+                        // A part is a fresh intake item: nothing has been
+                        // decided or published for it yet, whatever the
+                        // parent's own outbound state was.
+                        outbound: None,
                     },
                 )
                 .await?;
@@ -972,7 +980,9 @@ impl Engine {
 
     /// The one place the intake record is written. Straight to the store,
     /// past `Engine::update`, which refuses the field from any caller.
-    async fn write_intake(&self, id: &str, record: Intake, mut patch: TaskPatch) -> Result<Task> {
+    /// `pub(crate)`: `github_outbound.rs` (`#171`) writes through it too,
+    /// rather than duplicate the store-write and event-publish it does.
+    pub(crate) async fn write_intake(&self, id: &str, record: Intake, mut patch: TaskPatch) -> Result<Task> {
         patch.intake = Some(record);
         let task = self.store.update(id, &patch).await?;
         if task.intake.is_none() {
@@ -1214,6 +1224,7 @@ mod tests {
             split: vec![],
             duplicates: vec![],
             checks: vec![],
+            areas: vec![],
         }
     }
 
@@ -2129,6 +2140,7 @@ mod tests {
                 decision: None,
                 candidates: Vec::new(),
                 security: None,
+                outbound: None,
             };
             let item = engine
                 .receive_intake(

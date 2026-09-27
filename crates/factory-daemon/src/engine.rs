@@ -1173,6 +1173,9 @@ impl Engine {
             Request::IntakeSecurityReports { scope } => Ok(Payload::IntakeSecurityReports {
                 reports: self.confirmed_security_reports(scope.as_deref()).await?,
             }),
+            Request::IntakePublish { id } => Ok(Payload::Task {
+                task: Box::pin(self.intake_publish(caller, &id)).await?,
+            }),
 
             Request::WorkflowCreate(draft) => Ok(Payload::Workflow {
                 workflow: self.create_workflow(draft).await?,

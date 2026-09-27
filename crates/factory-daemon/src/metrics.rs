@@ -2765,6 +2765,7 @@ mod tests {
             split: vec![],
             duplicates: vec![],
             checks: vec![],
+            areas: vec![],
         }
     }
 

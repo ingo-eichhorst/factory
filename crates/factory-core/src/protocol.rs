@@ -861,6 +861,16 @@ pub enum Request {
         #[serde(default)]
         scope: Option<String>,
     },
+    /// Approve and post a decided GitHub item's triage comment and labels to
+    /// the issue it came from (`#171`). The daemon never does this on its
+    /// own -- a decision only records `awaiting_approval`; this request is
+    /// the approval. Needs `intake.publish`, named exactly: never a
+    /// wildcard, never in `foreman` or `triager`. Refused for anything not
+    /// sourced from GitHub, for an item with no decision or no assessment to
+    /// publish, and for one carrying a possible or confirmed security
+    /// report -- posting triage details publicly would disclose it.
+    #[serde(rename = "intake.publish")]
+    IntakePublish { id: String },
     /// One task's usage and cost: every run's, and their sum (#117).
     /// Read-only, derived from what the runs already carry.
     #[serde(rename = "task.usage")]

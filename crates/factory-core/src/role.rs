@@ -179,10 +179,17 @@ pub enum Grant {
     /// it, or close it (wontfix).
     #[serde(rename = "intake.decide")]
     IntakeDecide,
+    /// Publish a decided GitHub item's triage comment and labels to the
+    /// issue it came from (`#171`). The one outward-effect grant intake
+    /// has: it is never in `foreman` or `triager`, and never in a wildcard
+    /// (`*`, `intake.*`) -- see [`Grant::expand`] -- so a role gets it only
+    /// by naming it. The owner always passes; publishing *is* the approval.
+    #[serde(rename = "intake.publish")]
+    IntakePublish,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 29] = [
+    pub const ALL: [Grant; 30] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -212,6 +219,7 @@ impl Grant {
         Grant::IntakeTriage,
         Grant::IntakeAssess,
         Grant::IntakeDecide,
+        Grant::IntakePublish,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -245,6 +253,7 @@ impl Grant {
             Self::IntakeTriage => "intake.triage",
             Self::IntakeAssess => "intake.assess",
             Self::IntakeDecide => "intake.decide",
+            Self::IntakePublish => "intake.publish",
         }
     }
 
@@ -280,6 +289,7 @@ impl Grant {
             Self::IntakeTriage => "start a triage run on an intake item",
             Self::IntakeAssess => "record an assessment on an intake item",
             Self::IntakeDecide => "release, send back, split or close an intake item",
+            Self::IntakePublish => "publish a decided GitHub item's triage comment and labels to its issue",
         }
     }
 
@@ -311,10 +321,22 @@ impl Grant {
             Self::PolicyAttest => "Policy",
             Self::GoalsCheckIn => "Goals",
             Self::BackupRun => "Backup",
-            Self::IntakeAdd | Self::IntakeInfo | Self::IntakeTriage | Self::IntakeAssess | Self::IntakeDecide => {
-                "Intake"
-            }
+            Self::IntakeAdd
+            | Self::IntakeInfo
+            | Self::IntakeTriage
+            | Self::IntakeAssess
+            | Self::IntakeDecide
+            | Self::IntakePublish => "Intake",
         }
+    }
+
+    /// Left out of wildcard expansion (`expand`'s `*` and `prefix.*`
+    /// branches): an outward effect a role must be given by its exact name,
+    /// never swept in by a wildcard written before the grant existed or
+    /// written broad on purpose. `intake.publish` is the only one today
+    /// (`#171`).
+    fn wildcard_excluded(self) -> bool {
+        matches!(self, Self::IntakePublish)
     }
 
     /// One written grant, which may be a wildcard: `task.*`, `agent.*`, `*`.
@@ -322,12 +344,12 @@ impl Grant {
     /// that quietly grants less is the failure nobody notices.
     pub fn expand(written: &str) -> Result<Vec<Grant>> {
         let matched: Vec<Grant> = match written.trim() {
-            "*" => Self::ALL.to_vec(),
+            "*" => Self::ALL.into_iter().filter(|g| !g.wildcard_excluded()).collect(),
             prefixed if prefixed.ends_with(".*") => {
                 let prefix = &prefixed[..prefixed.len() - 1];
                 Self::ALL
                     .into_iter()
-                    .filter(|g| g.as_str().starts_with(prefix))
+                    .filter(|g| g.as_str().starts_with(prefix) && !g.wildcard_excluded())
                     .collect()
             }
             exact => Self::ALL
@@ -471,13 +493,22 @@ impl Roles {
         let foreman = RoleDef {
             name: Role::foreman(),
             describe: "runs a scope: creates the work in it and hands it out".into(),
-            grants: Grant::ALL.into_iter().collect(),
+            // Every grant but `intake.publish` (`#171`): an outward GitHub
+            // effect is not something running a scope implies, so foreman
+            // is written out explicitly rather than reusing `Grant::ALL`.
+            grants: Grant::ALL
+                .into_iter()
+                .filter(|g| *g != Grant::IntakePublish)
+                .collect(),
             reach: Reach::Scope,
         };
         // Coordinates the intake gate and executes nothing (`#172`): it holds
         // exactly the five intake grants, named rather than `intake.*`, so
         // that a sixth one added later needs a deliberate line here rather
-        // than falling into the preset by default. No `task.report` -- with
+        // than falling into the preset by default -- `intake.publish` is
+        // that sixth one (`#171`), deliberately left out: coordinating
+        // triage is not the standing permission to post outside Factory.
+        // No `task.report` -- with
         // `reach: scope` that would let it report on any task in its scope,
         // because the grant check in `authorize` precedes the run-token
         // fallback that would otherwise narrow it to its own triage run.
@@ -602,15 +633,21 @@ mod tests {
         assert!(!worker.allows(Grant::IntakeAdd), "worker never had task.create, so never intake.add either");
         assert!(!worker.allows(Grant::IntakeTriage));
         assert!(!worker.allows(Grant::IntakeInfo));
+        assert!(!worker.allows(Grant::IntakePublish));
 
         let foreman = roles.get(&Role::foreman()).unwrap();
         assert_eq!(foreman.reach, Reach::Scope);
         for grant in Grant::ALL {
+            if grant == Grant::IntakePublish {
+                assert!(!foreman.allows(grant), "foreman must not get an outward GitHub effect for free (#171)");
+                continue;
+            }
             assert!(foreman.allows(grant), "a foreman may {}", grant.as_str());
         }
 
         let triager = roles.get(&Role::triager()).unwrap();
         assert_eq!(triager.reach, Reach::Scope);
+        assert!(!triager.allows(Grant::IntakePublish), "coordinating triage is not the standing permission to publish");
         for grant in [
             Grant::IntakeAdd,
             Grant::IntakeInfo,
@@ -646,7 +683,10 @@ mod tests {
 
     #[test]
     fn a_wildcard_names_every_grant_under_it() {
-        assert_eq!(Grant::expand("*").unwrap().len(), Grant::ALL.len());
+        // `*` names every grant but the one or more excluded from wildcard
+        // expansion (`intake.publish`, `#171`) -- see
+        // `intake_publish_is_excluded_from_wildcard_expansion`.
+        assert_eq!(Grant::expand("*").unwrap().len(), Grant::ALL.len() - 1);
         let tasks = Grant::expand("task.*").unwrap();
         assert!(tasks.contains(&Grant::TaskCreate));
         assert!(!tasks.contains(&Grant::AgentStart));
@@ -764,27 +804,29 @@ mod tests {
             Grant::IntakeTriage,
             Grant::IntakeAssess,
             Grant::IntakeDecide,
+            Grant::IntakePublish,
         ] {
             assert_eq!(grant.group(), "Intake");
         }
     }
 
     #[test]
-    fn dataset_edit_through_intake_decide_are_appended_at_the_end_and_a_wildcard_still_catches_them() {
+    fn dataset_edit_through_intake_publish_are_appended_at_the_end_and_a_wildcard_still_catches_most_of_them() {
         // The task's own instructions: these land at the end of the enum
         // and of `Grant::ALL`, in the order each was added, so a parallel
         // track appending its own grant there too merges without a real
         // conflict.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::DatasetEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::BenchRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::PolicyAttest);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::GoalsCheckIn);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::BackupRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeAdd);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakeInfo);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::IntakeTriage);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::IntakeAssess);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::IntakeDecide);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::DatasetEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::BenchRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::PolicyAttest);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::GoalsCheckIn);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::BackupRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeAdd);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeInfo);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakeTriage);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::IntakeAssess);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::IntakeDecide);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::IntakePublish);
         let all = Grant::expand("*").unwrap();
         assert!(all.contains(&Grant::DatasetEdit));
         assert!(all.contains(&Grant::BenchRun));
@@ -796,6 +838,8 @@ mod tests {
         assert!(all.contains(&Grant::IntakeTriage));
         assert!(all.contains(&Grant::IntakeAssess));
         assert!(all.contains(&Grant::IntakeDecide));
+        // The one exception: see `intake_publish_is_excluded_from_wildcard_expansion`.
+        assert!(!all.contains(&Grant::IntakePublish));
     }
 
     #[test]
@@ -807,6 +851,7 @@ mod tests {
             Grant::IntakeTriage,
             Grant::IntakeAssess,
             Grant::IntakeDecide,
+            Grant::IntakePublish,
         ] {
             assert!(!tasks.contains(&grant), "task.* must not grant {}", grant.as_str());
         }
@@ -825,6 +870,16 @@ mod tests {
         ] {
             assert!(intake.contains(&grant), "intake.* must grant {}", grant.as_str());
         }
+        // `intake.publish` is the sixth intake grant and the one excluded
+        // from `intake.*` -- named exactly, or not at all (`#171`).
+        assert!(!intake.contains(&Grant::IntakePublish));
+    }
+
+    #[test]
+    fn intake_publish_is_excluded_from_wildcard_expansion_but_grantable_by_name() {
+        assert!(!Grant::expand("*").unwrap().contains(&Grant::IntakePublish));
+        assert!(!Grant::expand("intake.*").unwrap().contains(&Grant::IntakePublish));
+        assert_eq!(Grant::expand("intake.publish").unwrap(), vec![Grant::IntakePublish]);
     }
 
     #[test]

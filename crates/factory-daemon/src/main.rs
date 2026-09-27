@@ -14,6 +14,7 @@ mod discovery;
 mod engine;
 mod goals;
 mod github_intake;
+mod github_outbound;
 mod harness_health;
 mod host;
 mod intake;
