@@ -39,6 +39,15 @@ test("no browser dialogs, no poll, and nothing posted outside Factory", () => {
   for (const path of code.match(/\/api\/[a-z/]+/g) || []) assert.match(path, /^\/api\/intake/, path);
 });
 
+test("the assess dialog renders the routed scope's own extra checks and holds the assessment to them (#169)", () => {
+  assert.match(view, /function checksHtml\(route, prior\)/);
+  assert.match(view, /data-check="/);
+  assert.match(view, /data-check-evidence="/);
+  assert.match(view, /\$\("ik-checks"\)\.innerHTML = checksHtml\(r, prior\);/);
+  assert.match(view, /assessmentProblem\(a, candidates, definition\)/);
+  assert.match(view, /previewVerdict\(a, definition\)/);
+});
+
 test("an item still in intake never lands on the Tasks board's closed column", () => {
   assert.match(tasks, /if \(t\.status !== "intake"\) byCol\.get\(columnFor\(t\)\)\.push\(t\);/);
   assert.match(css, /\.s-intake \{/);

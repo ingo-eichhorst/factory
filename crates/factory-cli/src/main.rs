@@ -1802,6 +1802,50 @@ fn intake_board_text(board: &factory_core::intake::IntakeBoard) -> String {
         board.wontfix,
         board.axes.iter().map(|a| a.label.as_str()).collect::<Vec<_>>().join(", ")
     ));
+    let definitions = intake_definitions_text(&board.routes);
+    if !definitions.is_empty() {
+        out.push_str("\ndefinitions of ready (#169):\n");
+        out.push_str(&definitions);
+    }
+    out
+}
+
+/// Each route's effective definition of ready and its findings (`#169`),
+/// for `factory intake` / `factory intake list --scope`. Silent for a scope
+/// whose chain adds nothing and reads cleanly -- the common case, and
+/// exactly today's seven axes.
+fn intake_definitions_text(routes: &[factory_core::intake::RouteOptions]) -> String {
+    let mut out = String::new();
+    for r in routes {
+        let d = &r.definition;
+        let default = d.checks.is_empty()
+            && d.max_complexity == factory_core::ready::DEFAULT_MAX_COMPLEXITY
+            && d.observability_tolerance == factory_core::ready::Tolerance::default()
+            && d.unreadable.is_empty()
+            && r.findings.is_empty();
+        if default {
+            continue;
+        }
+        out.push_str(&format!("  scope `{}`\n", r.scope));
+        if !d.unreadable.is_empty() {
+            for line in &d.unreadable {
+                out.push_str(&format!("    ! {line}\n"));
+            }
+        }
+        for c in &d.checks {
+            let categories = if c.categories.is_empty() { "every category".to_string() } else { c.categories.join(", ") };
+            out.push_str(&format!("    check `{}` ({categories}) -- {}\n", c.id, c.pass_condition));
+        }
+        if d.max_complexity != factory_core::ready::DEFAULT_MAX_COMPLEXITY {
+            out.push_str(&format!("    max_complexity: {}\n", d.max_complexity));
+        }
+        if d.observability_tolerance != factory_core::ready::Tolerance::default() {
+            out.push_str(&format!("    observability_tolerance: {}\n", d.observability_tolerance.as_str()));
+        }
+        for f in &r.findings {
+            out.push_str(&format!("    finding [{}] {:?}: {}\n", f.subject, f.kind, f.detail));
+        }
+    }
     out
 }
 
@@ -6298,5 +6342,58 @@ mod tests {
         assert!(text.contains("issue=117"), "{text}");
         assert!(!text.contains("$0.00"), "a group with nothing measured is ?, not free: {text}");
         assert!(text.contains("1 of 1 runs have no measured cost"), "{text}");
+    }
+
+    #[test]
+    fn intake_definitions_text_is_silent_for_a_scope_with_nothing_declared() {
+        let plain = factory_core::intake::RouteOptions { scope: "demo".into(), ..Default::default() };
+        assert_eq!(intake_definitions_text(&[plain]), "");
+    }
+
+    #[test]
+    fn intake_definitions_text_names_the_scope_its_extra_checks_limits_and_findings() {
+        use factory_core::ready::{AppliedCheck, Finding, FindingKind, Origin, ReadyDefinition, Tolerance};
+        let route = factory_core::intake::RouteOptions {
+            scope: "security-team".into(),
+            definition: ReadyDefinition {
+                scope: "security-team".into(),
+                checks: vec![AppliedCheck {
+                    id: "threat-model".into(),
+                    pass_condition: "names a threat model".into(),
+                    categories: vec!["security-report".into()],
+                    declared_at: Origin { scope: "security-team".into(), file: "security".into() },
+                }],
+                max_complexity: 6,
+                observability_tolerance: Tolerance::Low,
+                unreadable: vec![],
+            },
+            findings: vec![Finding {
+                kind: FindingKind::Loosening,
+                subject: "security-team".into(),
+                detail: "max_complexity 8 loosens the inherited 6".into(),
+            }],
+            ..Default::default()
+        };
+        let text = intake_definitions_text(&[route]);
+        assert!(text.contains("scope `security-team`"), "{text}");
+        assert!(text.contains("threat-model") && text.contains("security-report"), "{text}");
+        assert!(text.contains("max_complexity: 6"), "{text}");
+        assert!(text.contains("observability_tolerance: low"), "{text}");
+        assert!(text.contains("loosens the inherited 6"), "{text}");
+    }
+
+    #[test]
+    fn intake_definitions_text_shows_an_unreadable_definition_even_with_nothing_else_declared() {
+        let route = factory_core::intake::RouteOptions {
+            scope: "demo".into(),
+            definition: factory_core::ready::ReadyDefinition {
+                scope: "demo".into(),
+                unreadable: vec!["definition of ready for demo could not be read: ...".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = intake_definitions_text(&[route]);
+        assert!(text.contains("could not be read"), "{text}");
     }
 }
