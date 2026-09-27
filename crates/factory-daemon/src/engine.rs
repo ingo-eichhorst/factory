@@ -3865,6 +3865,7 @@ mod tests {
                 runtime: None,
                 git: None,
                 task_store: None,
+                max_sessions: None,
                 roles: Default::default(),
                 dashboard: None,
                 policies: Default::default(),
@@ -4295,6 +4296,7 @@ mod tests {
                 args: Vec::new(),
                 sandbox: Sandbox::Docker,
                 provider: None,
+                max_sessions: None,
             });
         }
 
@@ -4710,6 +4712,7 @@ mod tests {
                 args: vec!["--model".into(), "opus".into(), "--api-key".into(), "s3cret".into()],
                 sandbox: Sandbox::None,
                 provider: None,
+                max_sessions: None,
             });
             factory.config.daemon.foreman.enabled = true;
         }

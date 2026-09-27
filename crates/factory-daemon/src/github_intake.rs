@@ -277,6 +277,7 @@ mod tests {
             runtime: Some("herdr".into()),
             git: Some(remote.into()),
             task_store: None,
+            max_sessions: None,
             roles: Default::default(),
             dashboard: None,
             policies: Default::default(),

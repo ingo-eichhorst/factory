@@ -158,6 +158,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         runtime: None,
         git: None,
         task_store: None,
+        max_sessions: None,
         roles: Default::default(),
         dashboard: None,
         policies: Default::default(),

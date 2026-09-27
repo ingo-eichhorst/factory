@@ -443,6 +443,7 @@ impl Config {
         self.infrastructure.validate()?;
         for scope in self.scope.iter().chain(&self.scopes) {
             scope.validate_dependencies()?;
+            refuse_zero_max_sessions(scope)?;
             let roles = self.roles_for_scope(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
@@ -481,6 +482,7 @@ impl Config {
         self.infrastructure.validate()?;
         if let Some(scope) = &self.scope {
             scope.validate_dependencies()?;
+            refuse_zero_max_sessions(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
                 self.infrastructure.refuse_unknown_provider(scope, &agent)?;
@@ -584,6 +586,31 @@ fn refuse_shell_args(scope: &Scope, agent: &ScopeAgent) -> Result<()> {
             scope.name,
             agent.name(),
         )));
+    }
+    Ok(())
+}
+
+/// A `max_sessions: 0` would never run anything -- which is never what
+/// somebody meant by it, only ever a stand-in for "unlimited" that should
+/// have been left out (`#179`). Refused at load, naming the scope's path so
+/// there is no ambiguity about which of two same-named scopes it was.
+fn refuse_zero_max_sessions(scope: &Scope) -> Result<()> {
+    if scope.max_sessions == Some(0) {
+        return Err(FactoryError::BadRequest(format!(
+            "scope {:?} at {} sets max_sessions: 0, which would never run anything; leave it out for no limit",
+            scope.name,
+            scope.path.display(),
+        )));
+    }
+    for agent in scope.declared_agents() {
+        if agent.max_sessions == Some(0) {
+            return Err(FactoryError::BadRequest(format!(
+                "scope {:?} at {} gives {:?} max_sessions: 0, which would never run anything; leave it out for no limit",
+                scope.name,
+                scope.path.display(),
+                agent.name(),
+            )));
+        }
     }
     Ok(())
 }
@@ -1243,6 +1270,10 @@ pub enum AgentRef {
         /// See `ScopeAgent::provider`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
+        /// See `ScopeAgent::max_sessions`. Instances written before `#179`
+        /// already carried this key; it just had no effect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_sessions: Option<u32>,
     },
 }
 
@@ -1270,9 +1301,9 @@ impl<'de> Deserialize<'de> for AgentRef {
             #[serde(default)]
             provider: Option<String>,
             // Older Factory configs wrote this in the singular declaration.
-            // It has no effect now, but those files must continue to load.
-            #[serde(default, rename = "max_sessions")]
-            _max_sessions: Option<u32>,
+            // It used to have no effect; `#179` makes it live.
+            #[serde(default)]
+            max_sessions: Option<u32>,
         }
 
         let value = serde_yaml_ng::Value::deserialize(deserializer)?;
@@ -1290,6 +1321,7 @@ impl<'de> Deserialize<'de> for AgentRef {
                     args: declaration.args,
                     sandbox: declaration.sandbox,
                     provider: declaration.provider,
+                    max_sessions: declaration.max_sessions,
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -1347,6 +1379,12 @@ pub struct ScopeAgent {
     /// is refused at load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// How many sessions of this agent may be open at once -- a run
+    /// `Dispatching` or holding a session, plus one for a live permanent
+    /// agent of this name (`#179`). Absent is unlimited, today's behaviour.
+    /// `0` is refused at load: it would never run anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<u32>,
 }
 
 impl ScopeAgent {
@@ -1384,6 +1422,12 @@ pub struct Scope {
     /// instance default, `daemon.task_store`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_store: Option<String>,
+    /// How many sessions this scope may hold open at once, across every
+    /// agent in it -- counted the same way an agent's own `max_sessions` is
+    /// (`#179`). Absent is unlimited. `0` is refused at load. The root
+    /// scope's own `scope:` block may set this too, for an instance-wide cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<u32>,
     /// Roles this scope names for itself and for every scope below it by
     /// path. A same-named role here replaces the inherited one whole. Only a
     /// nested scope writes these: the instance root uses its top-level
@@ -1519,6 +1563,8 @@ impl Scope {
             sandbox: Sandbox::None,
             // Likewise: its harness's default provider, if one claims it.
             provider: None,
+            // And no cap of its own -- only the scope's, if it has one.
+            max_sessions: None,
         });
         out
     }
@@ -1543,6 +1589,7 @@ impl Scope {
             args,
             sandbox,
             provider,
+            max_sessions,
         }) = &self.agent
         {
             out.push(ScopeAgent {
@@ -1554,6 +1601,7 @@ impl Scope {
                 args: args.clone(),
                 sandbox: *sandbox,
                 provider: provider.clone(),
+                max_sessions: *max_sessions,
             });
         }
         for a in &self.agents {
@@ -3001,6 +3049,7 @@ mod tests {
         assert_eq!(a.name(), "reviewer");
         assert_eq!(a.lifetime, Lifetime::Temporary);
         assert!(!a.autostart(), "temporary agents wait to be asked for");
+        assert_eq!(a.max_sessions, Some(1), "the legacy singular block's value is kept, not thrown away (#179)");
     }
 
     #[test]
@@ -3017,6 +3066,43 @@ mod tests {
         assert!(!s.standing_agents()[0].autostart());
     }
 
+    /// `max_sessions` has to be added in three places -- `ScopeAgent`, the
+    /// hand-written `Declaration` inside `AgentRef`'s `Deserialize`, and the
+    /// `AgentRef::Declared` variant it builds -- exactly like `sandbox`'s own
+    /// comment on this file describes. Prove both spellings, plus a scope's
+    /// own cap, rather than assume the third site was enough (`#179`).
+    #[test]
+    fn max_sessions_loads_from_both_agent_spellings_and_from_the_scope_itself() {
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\nmax_sessions: 4\nagents:\n  - name: codex\n    harness: codex\n    max_sessions: 3\n\
+             \x20 - name: bare\n    harness: shell\n",
+        )
+        .unwrap();
+        assert_eq!(s.max_sessions, Some(4), "the scope's own cap");
+        let declared = s.declared_agents();
+        assert_eq!(declared[0].max_sessions, Some(3), "the agents: list spelling");
+        assert_eq!(declared[1].max_sessions, None, "absent means unlimited");
+    }
+
+    #[test]
+    fn a_zero_max_sessions_is_refused_at_load_naming_the_scopes_path() {
+        let c = config_with(
+            "scopes:\n  - name: demo\n    path: projects/demo\n    agents:\n      - name: codex\n        harness: codex\n        max_sessions: 0\n",
+        );
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("projects/demo"), "{e}");
+        assert!(e.contains("codex"), "{e}");
+        assert!(e.contains("max_sessions: 0"), "{e}");
+    }
+
+    #[test]
+    fn a_zero_scope_max_sessions_is_refused_at_load() {
+        let c = config_with("scopes:\n  - name: demo\n    path: projects/demo\n    max_sessions: 0\n");
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("projects/demo"), "{e}");
+        assert!(e.contains("max_sessions: 0"), "{e}");
+    }
+
     #[test]
     fn a_scope_may_name_its_agent_either_way() {
         let plain: Scope = serde_yaml_ng::from_str("name: a\npath: .\nagent: pi\n").unwrap();
@@ -3027,6 +3113,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(declared.agent_adapter(), Some("pi"));
+        assert_eq!(declared.declared_agents()[0].max_sessions, Some(1));
 
         let none: Scope = serde_yaml_ng::from_str("name: a\npath: .\n").unwrap();
         assert_eq!(none.agent_adapter(), None);
