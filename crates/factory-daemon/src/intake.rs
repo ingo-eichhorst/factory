@@ -42,6 +42,8 @@ impl Engine {
             return Err(FactoryError::BadRequest("an intake item needs a title".into()));
         }
         let requested_by = caller.describe();
+        let flagged_by = requested_by.clone();
+        let now = Utc::now();
         let (kind, requester, reference) = match caller {
             // The delegation path: where it came from is the caller, not a
             // claim, and the run it came out of is the natural reference.
@@ -65,16 +67,27 @@ impl Engine {
                 (kind, clean(new.requester).unwrap_or(requested_by), clean(new.reference))
             }
         };
+        // `--security`/the UI checkbox: flag it before it is even stored
+        // (`#170`). A caller can only add scrutiny this way, so it needs
+        // nothing beyond `intake.add` itself.
+        let security = if new.security {
+            Some(Box::new(intake::flag_security(None, "flagged at intake", &flagged_by, now).expect(
+                "a record that does not exist yet never already carries a flag",
+            )))
+        } else {
+            None
+        };
         let record = Intake {
             stage: IntakeStage::Received,
             source: IntakeSource { kind, reference },
             requester,
-            received_at: Utc::now(),
+            received_at: now,
             triage: None,
             triage_task: None,
             questions: Vec::new(),
             decision: None,
             candidates: Vec::new(),
+            security,
         };
         self.receive_intake(
             NewTask {
@@ -423,6 +436,17 @@ impl Engine {
         let mut next = record.clone();
         next.triage = Some(triage.clone());
         next.stage = IntakeStage::Triaging;
+        // A `security-report` assessment flags the item automatically
+        // (`#170`) -- deterministic, no classifier, and only once: a manual
+        // flag, or an earlier person's decision, is never overwritten by a
+        // later re-triage.
+        let auto_flagged = next.security.is_none() && assessment.category == "security-report";
+        if auto_flagged {
+            next.security = Some(Box::new(
+                intake::flag_security(None, "assessed as a security report", &caller.describe(), Utc::now())
+                    .expect("a never-flagged item cannot refuse its first flag"),
+            ));
+        }
         let item = self.write_intake(&item.id, next, TaskPatch::default()).await?;
         let asked = Asked::new(caller, None);
         self.entry(
@@ -441,6 +465,17 @@ impl Engine {
             ),
         )
         .await;
+        if auto_flagged {
+            self.entry(
+                &item.id,
+                asked.entry(
+                    "intake_security_flagged",
+                    format!("flagged as a possible security report {}: category security-report", asked.words()),
+                    serde_json::json!({ "reason": "assessed as a security report" }),
+                ),
+            )
+            .await;
+        }
         if !decide {
             return Ok(item);
         }
@@ -716,6 +751,12 @@ impl Engine {
                         questions: Vec::new(),
                         decision: None,
                         candidates: Vec::new(),
+                        // A confirmed report's evidence trail, and the fast
+                        // lane, carry over to every part (`#170`) -- a split
+                        // never happens while it is still `possible`
+                        // (`check_decision`), so this is only ever `None`,
+                        // `confirmed` or `dismissed`.
+                        security: record.security.clone(),
                     },
                 )
                 .await?;
@@ -786,6 +827,99 @@ impl Engine {
         )
         .await;
         Ok(task)
+    }
+
+    /// `Request::IntakeFlagSecurity`: flag an item still in the gate as a
+    /// possible security report. `intake.assess` reach, the same as
+    /// `IntakeAssess` (`access.rs`) -- flagging only adds scrutiny, so it is
+    /// open to whoever could assess the item at all.
+    pub(crate) async fn intake_flag_security(&self, caller: &Caller, id: &str, reason: &str) -> Result<Task> {
+        let item = self.require(id).await?;
+        let record = open_record(&item)?.clone();
+        let by = caller.describe();
+        let flag = intake::flag_security(record.security.as_deref(), reason, &by, Utc::now())
+            .map_err(FactoryError::BadRequest)?;
+        let mut next = record;
+        next.security = Some(Box::new(flag));
+        let task = self.write_intake(&item.id, next, TaskPatch::default()).await?;
+        let asked = Asked::new(caller, None);
+        self.entry(
+            &task.id,
+            asked.entry(
+                "intake_security_flagged",
+                format!("flagged as a possible security report {}: {}", asked.words(), reason.trim()),
+                serde_json::json!({ "reason": reason }),
+            ),
+        )
+        .await;
+        Ok(task)
+    }
+
+    /// `Request::IntakeSecurity`: a person confirms or dismisses a possible
+    /// security report. `Needs::Owner` (`access.rs`) already refused anyone
+    /// else before this runs.
+    pub(crate) async fn intake_security_decision(
+        &self,
+        caller: &Caller,
+        id: &str,
+        verdict: intake::SecurityVerdict,
+        evidence: &str,
+    ) -> Result<Task> {
+        let item = self.require(id).await?;
+        let record = open_record(&item)?.clone();
+        let by = caller.describe();
+        let flag = intake::decide_security(&record, verdict, evidence, &by, Utc::now())
+            .map_err(FactoryError::BadRequest)?;
+        let mut next = record;
+        next.security = Some(Box::new(flag.clone()));
+        let task = self.write_intake(&item.id, next, TaskPatch::default()).await?;
+        let asked = Asked::new(caller, None);
+        let (kind, verb) = match verdict {
+            intake::SecurityVerdict::Confirm => ("intake_security_confirmed", "confirmed"),
+            intake::SecurityVerdict::Dismiss => ("intake_security_dismissed", "dismissed"),
+        };
+        let evidence_note = flag.evidence.as_deref().map(|e| format!(": {e}")).unwrap_or_default();
+        self.entry(
+            &task.id,
+            asked.entry(
+                kind,
+                format!("security report {verb} {}{evidence_note}", asked.words()),
+                serde_json::json!({ "verdict": verdict, "evidence": flag.evidence }),
+            ),
+        )
+        .await;
+        Ok(task)
+    }
+
+    /// `Request::IntakeSecurityReports`: every confirmed security report
+    /// over `scope`'s subtree (every scope, when `scope` is `None`), read
+    /// live off the store -- including an item that has since left intake.
+    /// The L4 fact `#157`'s reporting clock will read; the same subtree
+    /// resolution `intake_board` uses.
+    pub(crate) async fn confirmed_security_reports(
+        &self,
+        scope: Option<&str>,
+    ) -> Result<Vec<intake::ConfirmedSecurityReport>> {
+        let snapshot = self.factory_snapshot();
+        let members: Option<BTreeSet<String>> = match scope {
+            None => None,
+            Some(name) => {
+                let (asked, subtree) = crate::policies::subtree_scopes(&snapshot, Some(name))?;
+                let mut members: BTreeSet<String> = subtree.into_iter().map(|s| s.name).collect();
+                if let Some(asked) = asked {
+                    members.insert(asked.name);
+                }
+                Some(members)
+            }
+        };
+        let all = self.store.list(&TaskFilter::default()).await?;
+        let mut reports: Vec<intake::ConfirmedSecurityReport> = all
+            .iter()
+            .filter(|t| members.as_ref().is_none_or(|m| m.contains(&t.scope)))
+            .filter_map(intake::confirmed_report)
+            .collect();
+        reports.sort_by(|a, b| a.awareness_at.cmp(&b.awareness_at).then(a.item.cmp(&b.item)));
+        Ok(reports)
     }
 
     /// Whether `caller` is the run of this item's own triage task -- the one
@@ -915,7 +1049,7 @@ mod tests {
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
     use factory_core::intake::{
         Assessment, Axis, AxisCheck, DuplicateCandidate, DuplicateKind, DuplicateMatch, DuplicateVerdict, Level,
-        NextActionKind, Routing, WontfixReason,
+        NextActionKind, Routing, SecurityState, SecurityVerdict, WontfixReason,
     };
     use factory_core::protocol::{Payload, Request, Response};
     use factory_core::role::Role;
@@ -1003,6 +1137,36 @@ mod tests {
             Factory { root, config },
             registry,
             Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("/bin/factory"),
+            Vec::new(),
+        ))
+    }
+
+    /// The same, but backed by a real file rather than `:memory:` -- so a
+    /// second call against the same `path` sees what the first one wrote,
+    /// the shape a daemon restart takes (`#170`'s awareness-time test).
+    fn engine_at(path: &std::path::Path, scopes: Vec<Scope>) -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-intake-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig { power_assertion: false, default_agent: "shell".into(), ..DaemonConfig::default() },
+            roles: Default::default(),
+            dashboard: None,
+            policies: Default::default(),
+            quality: Default::default(),
+            scope: None,
+            scopes,
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let mut registry = Registry::with_builtins();
+        registry.add_runtime(Arc::new(QuietRuntime), "test");
+        Arc::new(Engine::new(
+            Factory { root, config },
+            registry,
+            Arc::new(SqliteStore::open(path).unwrap()),
             PathBuf::from("/bin/factory"),
             Vec::new(),
         ))
@@ -1811,5 +1975,162 @@ mod tests {
             blockers.iter().any(|b| b.contains("definition of ready for demo could not be read")),
             "{blockers:?}"
         );
+    }
+
+    // -- the security fast lane (`#170`) -------------------------------
+
+    #[tokio::test]
+    async fn flag_confirm_gates_release_and_both_are_journaled() {
+        let engine = engine();
+        let item = add(&engine, "Possible RCE").await;
+        let flagged = engine.intake_flag_security(&Caller::Owner, &item.id, "looks like an injection").await.unwrap();
+        let flag = flagged.intake.as_ref().unwrap().security.as_ref().expect("flagged");
+        assert_eq!(flag.state, SecurityState::Possible);
+        assert_eq!(flag.flagged_by, "the owner");
+        assert!(kinds(&engine, &item.id).await.contains(&"intake_security_flagged".to_string()));
+
+        // Assessed ready, but still refused while the report is only
+        // `possible` -- a person has to look first.
+        engine.intake_assess(&Caller::Owner, &item.id, assessment("demo"), false).await.unwrap();
+        let why = engine
+            .intake_decide(&Caller::Owner, &item.id, Decision::Ready { run: false })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("confirm or dismiss"), "{why}");
+
+        let confirmed = engine
+            .intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "")
+            .await
+            .unwrap();
+        let flag = confirmed.intake.as_ref().unwrap().security.as_ref().unwrap();
+        assert_eq!(flag.state, SecurityState::Confirmed);
+        assert!(kinds(&engine, &item.id).await.contains(&"intake_security_confirmed".to_string()));
+
+        // Now it releases.
+        let released = engine.intake_decide(&Caller::Owner, &item.id, Decision::Ready { run: false }).await.unwrap();
+        assert_eq!(released.status, TaskStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn dismissing_without_evidence_is_refused_and_with_it_is_journaled() {
+        let engine = engine();
+        let item = add(&engine, "False alarm").await;
+        engine.intake_flag_security(&Caller::Owner, &item.id, "maybe").await.unwrap();
+        let why = engine
+            .intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Dismiss, "  ")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("no silent dismissal"), "{why}");
+        assert!(!kinds(&engine, &item.id).await.contains(&"intake_security_dismissed".to_string()));
+
+        let dismissed = engine
+            .intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Dismiss, "false positive")
+            .await
+            .unwrap();
+        let flag = dismissed.intake.as_ref().unwrap().security.as_ref().unwrap();
+        assert_eq!(flag.state, SecurityState::Dismissed);
+        assert_eq!(flag.evidence.as_deref(), Some("false positive"));
+        assert!(kinds(&engine, &item.id).await.contains(&"intake_security_dismissed".to_string()));
+
+        // Dismissed is an ordinary item again: wontfix is accepted.
+        let wontfix = Decision::Wontfix { reason: WontfixReason::Invalid, evidence: "confirmed false alarm".into(), duplicate_of: None };
+        assert!(engine.intake_decide(&Caller::Owner, &item.id, wontfix).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_assessment_categorised_security_report_auto_flags_and_blocks_auto_release() {
+        let engine = engine();
+        let item = add(&engine, "Possible RCE").await;
+        let mut a = assessment("demo");
+        a.category = "security-report".into();
+        let assessed = engine.intake_assess(&Caller::Owner, &item.id, a.clone(), false).await.unwrap();
+        let flag = assessed.intake.as_ref().unwrap().security.as_ref().expect("auto-flagged");
+        assert_eq!(flag.state, SecurityState::Possible);
+        assert_eq!(flag.flagged_by, "the owner");
+        assert!(kinds(&engine, &item.id).await.contains(&"intake_security_flagged".to_string()));
+
+        // `--decide` records the (re-)assessment but cannot auto-release a
+        // security report while it is only `possible`.
+        let why = engine.intake_assess(&Caller::Owner, &item.id, a, true).await.unwrap_err().to_string();
+        assert!(why.contains("confirm or dismiss"), "{why}");
+
+        // A second assessment never overwrites a flag already there.
+        let still = engine.require(&item.id).await.unwrap();
+        assert_eq!(still.intake.unwrap().security.unwrap().state, SecurityState::Possible);
+    }
+
+    #[tokio::test]
+    async fn task_delete_refuses_a_task_carrying_a_confirmed_security_report() {
+        let engine = engine();
+        let item = add(&engine, "Possible RCE").await;
+        engine.intake_flag_security(&Caller::Owner, &item.id, "looks bad").await.unwrap();
+        engine.intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "").await.unwrap();
+        let why = refused(engine.handle_request(Request::TaskDelete { id: item.id.clone() }).await);
+        assert!(why.contains("CRA evidence") && why.contains(&item.id), "{why}");
+        assert!(engine.require(&item.id).await.is_ok(), "never deleted");
+
+        // An ordinary item, or one only possible or dismissed, deletes fine.
+        let plain = add(&engine, "Ordinary").await;
+        assert!(matches!(
+            engine.handle_request(Request::TaskDelete { id: plain.id.clone() }).await,
+            Response::Ok { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn confirmed_security_reports_awareness_time_is_received_at_and_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("factory-intake-restart-{}", uuid::Uuid::new_v4()));
+        let db = dir.join("f.sqlite");
+        let scopes = || vec![scope("demo"), scope("web")];
+        let received_at = Utc::now() - chrono::Duration::hours(30);
+        let confirmed_at;
+        let item_id;
+        {
+            let engine = engine_at(&db, scopes());
+            let record = Intake {
+                stage: IntakeStage::Received,
+                source: IntakeSource {
+                    kind: SourceKind::Github,
+                    reference: Some("https://github.com/o/r/issues/9".into()),
+                },
+                requester: "octocat".into(),
+                received_at,
+                triage: None,
+                triage_task: None,
+                questions: Vec::new(),
+                decision: None,
+                candidates: Vec::new(),
+                security: None,
+            };
+            let item = engine
+                .receive_intake(
+                    NewTask { title: "Unauthenticated RCE".into(), scope: Some("demo".into()), ..Default::default() },
+                    record,
+                )
+                .await
+                .unwrap();
+            item_id = item.id.clone();
+            engine.intake_flag_security(&Caller::Owner, &item.id, "reported upstream").await.unwrap();
+            let confirmed = engine
+                .intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "")
+                .await
+                .unwrap();
+            confirmed_at = confirmed.intake.as_ref().unwrap().security.as_ref().unwrap().decided_at.unwrap();
+            assert_ne!(confirmed_at, received_at, "the test would prove nothing if these ever collided");
+        }
+        // A fresh engine over the same store -- what a restart looks like.
+        let restarted = engine_at(&db, scopes());
+        let reports = restarted.confirmed_security_reports(None).await.unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].item, item_id);
+        assert_eq!(reports[0].awareness_at, received_at, "never the confirmation time");
+        assert_eq!(reports[0].confirmed_at, confirmed_at);
+        assert_eq!(reports[0].source.kind, SourceKind::Github);
+
+        // Scoped the same way `intake_board` is: a sibling scope sees none.
+        let none = restarted.confirmed_security_reports(Some("web")).await.unwrap();
+        assert!(none.is_empty());
     }
 }
