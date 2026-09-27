@@ -2394,6 +2394,16 @@ fn backup_status_text(payload: &Payload) -> Option<String> {
             out.push_str(&format!("  next         {}\n", utc(next)));
         }
         out.push_str(&format!(
+            "  verify       {}\n",
+            config.verify_schedule.as_ref().map(|s| s.describe()).unwrap_or_else(|| "no drill scheduled".into())
+        ));
+        if let Some(next) = &report.next_verify {
+            out.push_str(&format!("  next drill   {}\n", utc(next)));
+        }
+        if let Some(reason) = &report.verify_skipped {
+            out.push_str(&format!("  drill skip   {reason}\n"));
+        }
+        out.push_str(&format!(
             "  keep         {} daily, {} weekly, {} monthly{}\n",
             config.keep.daily,
             config.keep.weekly,
@@ -6024,6 +6034,7 @@ mod tests {
             config: Some(BackupConfig {
                 destination: PathBuf::from("/Volumes/Backup"),
                 schedule: None,
+                verify_schedule: None,
                 keep: Keep::default(),
                 include_logs: false,
                 encrypt_to: Some("age1exampleexampleexampleexampleexampleexampleexampleexample".into()),
@@ -6038,6 +6049,8 @@ mod tests {
             age: AgeLevel::Fresh,
             due_by: None,
             next_run: None,
+            next_verify: None,
+            verify_skipped: None,
             running: false,
             last_verified: None,
             last_failure: None,
@@ -6063,6 +6076,33 @@ mod tests {
         let payload = Payload::Backup { report: Box::new(encrypted_report()) };
         let text = backup_status_text(&payload).unwrap();
         assert!(text.contains("encrypted    yes, to age1example"), "{text}");
+    }
+
+    /// `#156`: `factory backup status` prints the drill's own schedule, its
+    /// next slot and, when set, why it would currently skip -- right beside
+    /// the backup's own "next".
+    #[test]
+    fn backup_status_prints_the_next_drill_and_its_skip_reason_when_set() {
+        use factory_core::backup::BackupSchedule;
+        let mut report = encrypted_report();
+        report.config.as_mut().unwrap().verify_schedule =
+            Some(BackupSchedule { cron: "*/30 * * * *".into(), timezone: None });
+        report.next_verify = Some(report.now + chrono::Duration::minutes(10));
+        report.verify_skipped = Some("newest snapshot is encrypted; verify it with --identity".into());
+        let payload = Payload::Backup { report: Box::new(report) };
+        let text = backup_status_text(&payload).unwrap();
+        assert!(text.contains("verify       */30 * * * * (UTC)"), "{text}");
+        assert!(text.contains("next drill   "), "{text}");
+        assert!(text.contains("drill skip   newest snapshot is encrypted; verify it with --identity"), "{text}");
+    }
+
+    #[test]
+    fn backup_status_names_no_drill_scheduled_when_verify_schedule_is_unset() {
+        let payload = Payload::Backup { report: Box::new(encrypted_report()) };
+        let text = backup_status_text(&payload).unwrap();
+        assert!(text.contains("verify       no drill scheduled"), "{text}");
+        assert!(!text.contains("next drill"), "{text}");
+        assert!(!text.contains("drill skip"), "{text}");
     }
 
     #[test]

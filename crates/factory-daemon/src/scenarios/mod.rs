@@ -1379,4 +1379,96 @@ mod tests {
         let err = engine.scenario_whatif(None, overrides).await.unwrap_err();
         assert!(err.to_string().contains("capacity_factor"), "{err}");
     }
+
+    // -- #156: backup metrics as signposts ---------------------------------
+    //
+    // `backup_age_hours`/`backup_verified_age_days` (`#154`) are registry
+    // metrics like any other -- no scenario code changed to support them.
+    // These are lock tests proving the wiring holds: a scenario naming one
+    // loads with no `UnknownMetric` finding, and `evaluate_signpost` (tested
+    // on its own in `factory_core::scenario`) reads a real value through it.
+
+    /// A throwaway instance with `infrastructure.backup` configured and one
+    /// scenario, `backup-watch`, whose only signpost is
+    /// `{ metric: backup_age_hours, above: 30 }`.
+    fn backup_signpost_test_engine(destination: &str) -> Arc<Engine> {
+        let base = std::env::temp_dir().join(format!("factory-scenarios-backup-signpost-{}", uuid::Uuid::new_v4()));
+        let root = base.join("instance");
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
+        std::fs::write(root.join(".factory/config.yaml"), "version: 1\ninstance:\n  id: test\n  name: test\n").unwrap();
+        std::fs::write(root.join(".factory/knowledge/page.md"), "# A page\n").unwrap();
+        std::fs::create_dir_all(root.join(".factory/scenarios")).unwrap();
+        std::fs::write(
+            root.join(".factory/scenarios/backup-watch.yaml"),
+            "name: backup-watch\ntitle: Backup age\nsignposts:\n  - { metric: backup_age_hours, above: 30 }\n",
+        )
+        .unwrap();
+        let database = root.join(".factory/factory.sqlite");
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
+        let mut company: Scope = serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let destination = base.join(destination);
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: serde_yaml_ng::from_str(&format!(
+                "backup:\n  destination: {}\n  keep: {{ daily: 7 }}\n",
+                destination.display()
+            ))
+            .unwrap(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
+            .with_backup_store(crate::backup::BackupStore::open(&database).unwrap());
+        Arc::new(engine)
+    }
+
+    #[tokio::test]
+    async fn a_signpost_on_backup_age_hours_loads_with_no_unknown_metric_finding_and_is_quiet_for_a_fresh_backup() {
+        let engine = backup_signpost_test_engine("destination");
+        engine.backup_run(factory_core::backup::BackupTrigger::Manual, "owner".into()).await.unwrap();
+
+        let report = engine.scenarios_report(None).await.unwrap();
+        assert!(
+            !report.findings.iter().any(|f| f.kind == scenario::FindingKind::UnknownMetric),
+            "{:?}",
+            report.findings
+        );
+        let result = find(&report, "backup-watch");
+        let sp = result.signposts.iter().find(|s| s.metric.as_str() == "backup_age_hours").unwrap();
+        assert_eq!(sp.state, scenario::SignpostState::Quiet, "{sp:?}");
+        assert!(!report.triggered.iter().any(|t| t.scenario == "backup-watch"), "{:?}", report.triggered);
+    }
+
+    #[tokio::test]
+    async fn a_signpost_on_backup_age_hours_triggers_once_the_newest_snapshot_is_old_enough() {
+        let engine = backup_signpost_test_engine("destination");
+        let snapshot = engine.backup_run(factory_core::backup::BackupTrigger::Manual, "owner".into()).await.unwrap();
+
+        // `list_archives` reads a snapshot's age off its file name, never
+        // its mtime, so renaming it back 31 hours -- past the signpost's
+        // `above: 30` -- is enough, the same way `#152`'s own
+        // `retention_prunes_across_a_mixed_plaintext_and_encrypted_history`
+        // fixture plants an aged archive.
+        let old_name = factory_core::backup::archive_name("test", snapshot.at - chrono::Duration::hours(31), false);
+        let destination = snapshot.path.rsplit_once('/').unwrap().0.to_string();
+        std::fs::rename(&snapshot.path, format!("{destination}/{old_name}")).unwrap();
+
+        let report = engine.scenarios_report(None).await.unwrap();
+        let result = find(&report, "backup-watch");
+        let sp = result.signposts.iter().find(|s| s.metric.as_str() == "backup_age_hours").unwrap();
+        assert_eq!(sp.state, scenario::SignpostState::Triggered, "{sp:?}");
+        assert!(report.triggered.iter().any(|t| t.scenario == "backup-watch"), "{:?}", report.triggered);
+
+        let live = engine.triggered_signposts(chrono::Utc::now()).await.unwrap();
+        assert!(live.iter().any(|t| t.scenario == "backup-watch"), "{live:?}");
+    }
 }

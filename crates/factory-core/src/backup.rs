@@ -90,6 +90,17 @@ pub struct BackupConfig {
     /// when somebody runs one -- and the page says so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<BackupSchedule>,
+    /// When the daemon runs a verification drill on its own (`#156`),
+    /// independent of when a backup itself runs -- the same shape as
+    /// `schedule`. `None` (the default) means no drill: verification then
+    /// happens only when somebody runs `factory backup verify`. Due is
+    /// counted from the newest verification recorded of any trigger (a
+    /// manual verify satisfies the slot too), or from when the daemon
+    /// booted if there is none yet, so a daemon down across several slots
+    /// drills exactly once when it returns -- `factory_daemon::backup::run`'s
+    /// own job loop, not this crate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_schedule: Option<BackupSchedule>,
     #[serde(default)]
     pub keep: Keep,
     /// Also copy `.factory/guides/` and `.factory/logs/`: useful, not
@@ -181,6 +192,13 @@ impl BackupConfig {
             if schedule.cron.trim().is_empty() {
                 return Err(FactoryError::BadRequest(
                     "infrastructure.backup.schedule has no cron expression".into(),
+                ));
+            }
+        }
+        if let Some(schedule) = &self.verify_schedule {
+            if schedule.cron.trim().is_empty() {
+                return Err(FactoryError::BadRequest(
+                    "infrastructure.backup.verify_schedule has no cron expression".into(),
                 ));
             }
         }
@@ -943,6 +961,20 @@ pub struct BackupReport {
     pub due_by: Option<DateTime<Utc>>,
     /// When the schedule next takes one.
     pub next_run: Option<DateTime<Utc>>,
+    /// `#156`: when the verification drill's own schedule next runs one --
+    /// `None` when no `verify_schedule` is configured (or none fires,
+    /// which `validate_config` refuses at start, so only shows up here for
+    /// a config edited on disk without a restart). `#[serde(default)]` so a
+    /// daemon built before this exists still parses to a CLI built after.
+    #[serde(default)]
+    pub next_verify: Option<DateTime<Utc>>,
+    /// `#156`: why a drill attempted right now would skip -- the newest
+    /// snapshot is encrypted, which the drill can never supply an identity
+    /// for. `None` when nothing would stop it, including when no drill is
+    /// configured at all. `#[serde(default)]` for the same reason as
+    /// `next_verify`.
+    #[serde(default)]
+    pub verify_skipped: Option<String>,
     /// A backup, verification or restore is in progress right now.
     pub running: bool,
     pub last_verified: Option<VerifySummary>,
@@ -1151,6 +1183,44 @@ mod tests {
         let none: BackupConfig = serde_yaml_ng::from_str("destination: /x\n").unwrap();
         assert_eq!(none.encrypt_to, None);
         assert!(!serde_json::to_string(&none).unwrap().contains("encrypt_to"), "omitted, not null, when unset");
+    }
+
+    /// `#156`: `verify_schedule` is optional, the same shape as `schedule`,
+    /// round-trips, and is validated (empty cron refused) the same way --
+    /// the cron expression itself is only parsed for real at daemon load
+    /// (`factory_daemon::backup::validate_config`), like `schedule`'s.
+    #[test]
+    fn verify_schedule_is_optional_like_schedule_and_validated_the_same_way() {
+        let none: BackupConfig = serde_yaml_ng::from_str("destination: /b\n").unwrap();
+        assert_eq!(none.verify_schedule, None);
+        assert!(!serde_json::to_string(&none).unwrap().contains("verify_schedule"), "omitted, not null, when unset");
+
+        let c: BackupConfig =
+            serde_yaml_ng::from_str("destination: /b\nverify_schedule: { cron: \"*/2 * * * *\" }\n").unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.verify_schedule.as_ref().unwrap().describe(), "*/2 * * * * (UTC)");
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("verify_schedule"), "{json}");
+        assert_eq!(serde_json::from_str::<BackupConfig>(&json).unwrap(), c);
+
+        let empty_cron: BackupConfig =
+            serde_yaml_ng::from_str("destination: /b\nverify_schedule: { cron: \"\" }\n").unwrap();
+        assert!(empty_cron.validate().unwrap_err().to_string().contains("verify_schedule"));
+    }
+
+    /// `#156`: a `BackupReport` serialized before `next_verify`/
+    /// `verify_skipped` existed still deserializes -- `#[serde(default)]`,
+    /// the same guarantee `code`/`time_machine` (`#155`) already rely on.
+    #[test]
+    fn a_report_from_before_156_still_deserializes_with_no_drill_scheduled() {
+        let json = r#"{
+            "now": "2026-01-01T00:00:00Z", "config": null, "destination": null, "age": "none",
+            "due_by": null, "next_run": null, "running": false, "last_verified": null,
+            "last_failure": null, "warnings": [], "snapshots": [], "include": [], "exclude": []
+        }"#;
+        let report: BackupReport = serde_json::from_str(json).unwrap();
+        assert_eq!(report.next_verify, None);
+        assert_eq!(report.verify_skipped, None);
     }
 
     #[test]

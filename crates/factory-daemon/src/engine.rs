@@ -192,6 +192,15 @@ pub struct Engine {
     /// person can never run two at once over one destination. Taken with
     /// `try_lock`: a second request is refused, never queued.
     pub(crate) backup_busy: tokio::sync::Mutex<()>,
+    /// `#156`: the due slot and reason a verification drill last skipped for
+    /// (an encrypted newest snapshot with no identity), so the job logs it
+    /// once per slot rather than on every tick -- the same skip can recur
+    /// for as long as the newest snapshot stays encrypted and unverified.
+    /// Lost on restart, like `seen_status`: the first tick after one is
+    /// genuinely new information. Never read by `backup_report`'s own
+    /// `verify_skipped`, which is a plain projection of the live facts
+    /// instead -- see `backup::report`'s own comment.
+    pub(crate) verify_drill_skip: std::sync::Mutex<Option<(chrono::DateTime<Utc>, String)>>,
     /// Serializes a bench run's own read-modify-write: choosing which
     /// pending attempts to start, and recomputing the run's own status once
     /// every attempt has settled. Coarse -- one lock for every run, the same
@@ -370,6 +379,7 @@ impl Engine {
             backups: crate::backup::BackupStore::in_memory()
                 .expect("an in-memory backup store should open"),
             backup_busy: tokio::sync::Mutex::new(()),
+            verify_drill_skip: std::sync::Mutex::new(None),
             bench_edit: tokio::sync::Mutex::new(()),
             usage_edit: tokio::sync::Mutex::new(()),
             turn_usage_pending: Default::default(),
