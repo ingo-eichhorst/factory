@@ -483,6 +483,27 @@ impl Engine {
             Verdict::Ready => Decision::Ready { run: false },
             Verdict::NeedsInfo { .. } => Decision::NeedsInfo { questions: Vec::new() },
         };
+        // A possible security report waits for a person (`#170`): a ready
+        // verdict is held here, not refused -- the assessment is already
+        // saved, and a triage run that did what its instructions say should
+        // not see an error for it. Needs-info still goes through.
+        let possible = item
+            .intake
+            .as_ref()
+            .and_then(|i| i.security.as_ref())
+            .is_some_and(|f| f.state == intake::SecurityState::Possible);
+        if possible && matches!(decision, Decision::Ready { .. }) {
+            self.entry(
+                &item.id,
+                asked.entry(
+                    "intake_security_held",
+                    "not released: a possible security report waits for a person to confirm or dismiss it".into(),
+                    serde_json::json!({}),
+                ),
+            )
+            .await;
+            return Ok(item);
+        }
         self.intake_decide(caller, id, decision).await
     }
 
@@ -2051,9 +2072,14 @@ mod tests {
         assert_eq!(flag.flagged_by, "the owner");
         assert!(kinds(&engine, &item.id).await.contains(&"intake_security_flagged".to_string()));
 
-        // `--decide` records the (re-)assessment but cannot auto-release a
-        // security report while it is only `possible`.
-        let why = engine.intake_assess(&Caller::Owner, &item.id, a, true).await.unwrap_err().to_string();
+        // `--decide` records the (re-)assessment but holds a ready verdict
+        // for a person rather than releasing -- or erroring at -- a security
+        // report that is only `possible`.
+        let held = engine.intake_assess(&Caller::Owner, &item.id, a, true).await.unwrap();
+        assert_eq!(held.status, TaskStatus::Intake, "not released");
+        assert!(kinds(&engine, &item.id).await.contains(&"intake_security_held".to_string()));
+        // A person deciding ready directly is still refused.
+        let why = engine.intake_decide(&Caller::Owner, &item.id, Decision::Ready { run: false }).await.unwrap_err().to_string();
         assert!(why.contains("confirm or dismiss"), "{why}");
 
         // A second assessment never overwrites a flag already there.
