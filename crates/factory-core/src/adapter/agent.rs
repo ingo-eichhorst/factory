@@ -690,6 +690,11 @@ impl AgentContext {
                      applies the labels to the GitHub issue it came from -- only once you approve it; \
                      Factory never posts on its own"
                 ),
+                Grant::DashboardEdit => {
+                    "dashboard.edit -> save or reset the dashboard layout for a scope; today that is the \
+                     web UI's Dashboard > Customise, or PUT/DELETE /api/dashboard?scope=, not this CLI"
+                        .to_string()
+                }
             });
         }
         lines

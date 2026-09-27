@@ -206,6 +206,10 @@ impl Engine {
             Request::TaskAttach { .. } => Grant::TaskAttach,
             Request::AgentStart { .. } => Grant::AgentStart,
             Request::AgentConfigure { .. } | Request::AgentDelete { .. } => Grant::AgentConfigure,
+            // Saving or resetting a scope's own dashboard layout (`#160`).
+            // An ordinary grant, unlike the role-layer writes it otherwise
+            // resembles: a layout cannot widen what an agent may do.
+            Request::DashboardSet { .. } | Request::DashboardReset { .. } => Grant::DashboardEdit,
             Request::AgentStop { .. } => Grant::AgentStop,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
@@ -585,6 +589,13 @@ impl Engine {
                 Reach::Scope => in_scope(s),
                 Reach::Own => Err(deny("configure an agent declaration")),
             },
+
+            Request::DashboardSet { scope: s, .. } | Request::DashboardReset { scope: s } => {
+                match def.reach {
+                    Reach::Scope => in_scope(s),
+                    Reach::Own => Err(deny("edit a scope's dashboard layout")),
+                }
+            }
 
             Request::AgentStop { id } | Request::AgentInput { id, .. } => match def.reach {
                 Reach::Scope => match self.store.get_agent(id).await? {
@@ -2489,6 +2500,45 @@ mod tests {
         let e = engine();
         assert!(allowed(&e, &worker("w"), Request::Dashboard { scope: None }).await);
         assert!(allowed(&e, &Caller::Owner, Request::Dashboard { scope: None }).await);
+    }
+
+    fn a_tile() -> factory_core::dashboard::Tile {
+        serde_yaml_ng::from_str("view: kpis\nsize: s\n").unwrap()
+    }
+
+    #[tokio::test]
+    async fn setting_or_resetting_the_dashboard_needs_dashboard_edit_and_scope_reach() {
+        let e = engine_with_roles(
+            "roles:\n  self-editor:\n    grants: [dashboard.edit]\n    reach: own\n  scope-editor:\n    grants: [dashboard.edit]\n    reach: scope\n",
+        );
+        let set = |scope: &str| Request::DashboardSet { scope: scope.into(), tiles: vec![a_tile()] };
+        let reset = |scope: &str| Request::DashboardReset { scope: scope.into() };
+
+        // Own reach cannot edit a dashboard at all -- there is no "its own"
+        // dashboard the way there is its own task.
+        assert!(!allowed(&e, &wearing("self-editor"), set("demo")).await);
+        assert!(!allowed(&e, &wearing("self-editor"), reset("demo")).await);
+
+        // Scope reach can, and stops at the caller's own scope.
+        assert!(allowed(&e, &wearing("scope-editor"), set("demo")).await);
+        assert!(allowed(&e, &wearing("scope-editor"), reset("demo")).await);
+        assert!(!allowed(&e, &wearing("scope-editor"), set("other")).await);
+        assert!(!allowed(&e, &wearing("scope-editor"), reset("other")).await);
+
+        // Neither a worker, nor a custom role that simply does not hold the
+        // grant, gets it by accident.
+        assert!(!allowed(&e, &worker("w"), set("demo")).await);
+        let plain = engine_with_roles("roles:\n  plain:\n    grants: [task.edit]\n    reach: scope\n");
+        assert!(!allowed(&plain, &wearing("plain"), set("demo")).await);
+
+        // `foreman` holds every grant, `dashboard.edit` included, and a
+        // foreman outside the target scope's reach is still denied.
+        assert!(allowed(&e, &foreman(), set("demo")).await);
+        assert!(!allowed(&e, &foreman(), set("other")).await);
+
+        // The owner always passes.
+        assert!(allowed(&e, &Caller::Owner, set("other")).await);
+        assert!(allowed(&e, &Caller::Owner, reset("other")).await);
     }
 
     // -- giving an agent a role --------------------------------------------

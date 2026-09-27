@@ -186,10 +186,19 @@ pub enum Grant {
     /// by naming it. The owner always passes; publishing *is* the approval.
     #[serde(rename = "intake.publish")]
     IntakePublish,
+    /// Save or reset one scope's own dashboard layout (`#160`, phase 5 of
+    /// `#150`). An ordinary grant, unlike the role-layer writes it otherwise
+    /// resembles: a layout cannot widen what an agent may do the way a role
+    /// definition could, so it needs no `Needs::Owner` carve-out and no
+    /// exclusion from a wildcard -- `foreman` gets it through `Grant::ALL`,
+    /// `worker` and `triager` do not, the same as every other grant they
+    /// leave out.
+    #[serde(rename = "dashboard.edit")]
+    DashboardEdit,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 30] = [
+    pub const ALL: [Grant; 31] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -220,6 +229,7 @@ impl Grant {
         Grant::IntakeAssess,
         Grant::IntakeDecide,
         Grant::IntakePublish,
+        Grant::DashboardEdit,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -254,6 +264,7 @@ impl Grant {
             Self::IntakeAssess => "intake.assess",
             Self::IntakeDecide => "intake.decide",
             Self::IntakePublish => "intake.publish",
+            Self::DashboardEdit => "dashboard.edit",
         }
     }
 
@@ -290,6 +301,7 @@ impl Grant {
             Self::IntakeAssess => "record an assessment on an intake item",
             Self::IntakeDecide => "release, send back, split or close an intake item",
             Self::IntakePublish => "publish a decided GitHub item's triage comment and labels to its issue",
+            Self::DashboardEdit => "save or reset a scope's dashboard layout",
         }
     }
 
@@ -327,6 +339,7 @@ impl Grant {
             | Self::IntakeAssess
             | Self::IntakeDecide
             | Self::IntakePublish => "Intake",
+            Self::DashboardEdit => "Dashboard",
         }
     }
 
@@ -634,6 +647,7 @@ mod tests {
         assert!(!worker.allows(Grant::IntakeTriage));
         assert!(!worker.allows(Grant::IntakeInfo));
         assert!(!worker.allows(Grant::IntakePublish));
+        assert!(!worker.allows(Grant::DashboardEdit));
 
         let foreman = roles.get(&Role::foreman()).unwrap();
         assert_eq!(foreman.reach, Reach::Scope);
@@ -644,6 +658,9 @@ mod tests {
             }
             assert!(foreman.allows(grant), "a foreman may {}", grant.as_str());
         }
+        // An ordinary grant, unlike the role-layer writes it resembles: it
+        // rides in on `Grant::ALL` the same as `agent.configure` does (#160).
+        assert!(foreman.allows(Grant::DashboardEdit));
 
         let triager = roles.get(&Role::triager()).unwrap();
         assert_eq!(triager.reach, Reach::Scope);
@@ -666,6 +683,7 @@ mod tests {
         assert!(!triager.allows(Grant::AgentStart));
         assert!(!triager.allows(Grant::AgentConfigure));
         assert!(!triager.allows(Grant::WorkflowRun));
+        assert!(!triager.allows(Grant::DashboardEdit));
     }
 
     #[test]
@@ -784,7 +802,7 @@ mod tests {
     fn every_grant_belongs_to_a_group_a_person_reads() {
         for grant in Grant::ALL {
             assert!(
-                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals", "Backup", "Intake"]
+                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals", "Backup", "Intake", "Dashboard"]
                     .contains(&grant.group()),
                 "{} has no group",
                 grant.as_str()
@@ -798,6 +816,7 @@ mod tests {
         assert_eq!(Grant::PolicyAttest.group(), "Policy");
         assert_eq!(Grant::GoalsCheckIn.group(), "Goals");
         assert_eq!(Grant::BackupRun.group(), "Backup");
+        assert_eq!(Grant::DashboardEdit.group(), "Dashboard");
         for grant in [
             Grant::IntakeAdd,
             Grant::IntakeInfo,
@@ -816,17 +835,21 @@ mod tests {
         // and of `Grant::ALL`, in the order each was added, so a parallel
         // track appending its own grant there too merges without a real
         // conflict.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::DatasetEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::BenchRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::PolicyAttest);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::GoalsCheckIn);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::BackupRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeAdd);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeInfo);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakeTriage);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::IntakeAssess);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::IntakeDecide);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::IntakePublish);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::DatasetEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::BenchRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::PolicyAttest);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::GoalsCheckIn);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::BackupRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakeAdd);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeInfo);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeTriage);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakeAssess);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::IntakeDecide);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::IntakePublish);
+        // `#160`: the same seam, one grant later -- `dashboard.edit` lands at
+        // the end too, so a parallel track adding its own grant after this
+        // one merges without a real conflict either.
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::DashboardEdit);
         let all = Grant::expand("*").unwrap();
         assert!(all.contains(&Grant::DatasetEdit));
         assert!(all.contains(&Grant::BenchRun));
@@ -838,8 +861,16 @@ mod tests {
         assert!(all.contains(&Grant::IntakeTriage));
         assert!(all.contains(&Grant::IntakeAssess));
         assert!(all.contains(&Grant::IntakeDecide));
+        assert!(all.contains(&Grant::DashboardEdit), "an ordinary grant, not excluded from `*`");
         // The one exception: see `intake_publish_is_excluded_from_wildcard_expansion`.
         assert!(!all.contains(&Grant::IntakePublish));
+    }
+
+    #[test]
+    fn dashboard_edit_is_an_ordinary_grant_named_by_a_wildcard() {
+        assert!(Grant::expand("*").unwrap().contains(&Grant::DashboardEdit));
+        assert_eq!(Grant::expand("dashboard.*").unwrap(), vec![Grant::DashboardEdit]);
+        assert_eq!(Grant::expand("dashboard.edit").unwrap(), vec![Grant::DashboardEdit]);
     }
 
     #[test]
