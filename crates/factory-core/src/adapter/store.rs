@@ -181,6 +181,7 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         intake: None,
         failure: None,
         closure: None,
+        slot_wait: None,
     }
 }
 

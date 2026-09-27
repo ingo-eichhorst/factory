@@ -471,6 +471,7 @@ function kpis(tasks, scopes, prod, everFinished) {
 function notStartedSub(w) {
   const parts = [`${w.manual.length} manual, not run`];
   if (w.later.length) parts.push(`${w.later.length} scheduled later`);
+  if (w.waiting.length) parts.push(`${w.waiting.length} waiting for a slot`);
   return parts.join(" · ");
 }
 
@@ -572,7 +573,7 @@ function onTheLine(tasks, prod, everFinished) {
   const running = tasks.filter((t) => t.status === "running" || t.status === "dispatching");
   const blocked = tasks.filter((t) => t.status === "blocked");
   const waiting = notStarted(tasks, Date.now());
-  const pending = waiting.due.length + waiting.later.length + waiting.manual.length;
+  const pending = waiting.due.length + waiting.later.length + waiting.manual.length + waiting.waiting.length;
   const holding = running.length + blocked.length;
 
   const today = prod && prod.daily.length ? prod.daily[prod.daily.length - 1] : null;
@@ -605,6 +606,7 @@ function onTheLine(tasks, prod, everFinished) {
     ${stnRow("Due", waiting.due.length, pending || 1, "idle")}
     ${stnRow("Scheduled later", waiting.later.length, pending || 1, "idle")}
     ${stnRow("Manual, not run", waiting.manual.length, pending || 1, "idle")}
+    ${stnRow("Waiting for a slot", waiting.waiting.length, pending || 1, "idle")}
     ${stnGroup(`Left the line today${today ? ` · against ${today.finished} finished` : ""}`)}
     ${todayRows}
     <p class="dnote">${holding} above hold an agent -- the same count the In flight KPI shows. ${pending} more

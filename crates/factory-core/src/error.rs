@@ -32,6 +32,13 @@ pub enum FactoryError {
     #[error("{0}")]
     HarnessUnhealthy(String),
 
+    /// `agent`, or its scope, already has `max_sessions` sessions in use
+    /// (`#179`). Held at the same point `HarnessUnhealthy` is -- before any
+    /// run row exists -- but the task stays `Pending`, waiting for a slot,
+    /// rather than `Blocked` waiting for a person.
+    #[error("waiting for a {agent} slot ({in_use}/{max} in use)")]
+    CapacityHeld { agent: String, in_use: u32, max: u32 },
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -54,6 +61,7 @@ impl FactoryError {
             Self::BadRequest(_) => "bad_request",
             Self::Denied(_) => "denied",
             Self::HarnessUnhealthy(_) => "harness_unhealthy",
+            Self::CapacityHeld { .. } => "capacity_held",
             Self::Other(_) => "internal",
         }
     }

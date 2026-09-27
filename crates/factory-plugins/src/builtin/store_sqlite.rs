@@ -497,6 +497,12 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.closure {
                 task.closure = Some(v);
             }
+            if patch.clear_slot_wait {
+                task.slot_wait = None;
+            }
+            if let Some(v) = patch.slot_wait {
+                task.slot_wait = Some(v);
+            }
             task.updated_at = Utc::now();
 
             write_task(conn, &task)?;
@@ -590,6 +596,9 @@ impl TaskStore for SqliteStore {
                 task.failure = None;
                 task.closure = None;
                 task.routed_to = None;
+                // The wait, if there was one, is over: a run now exists
+                // (`#179`).
+                task.slot_wait = None;
                 task.updated_at = Utc::now();
                 write_task(&tx, &task)?;
             }
@@ -1093,6 +1102,7 @@ mod tests {
             intake: None,
             failure: None,
             closure: None,
+            slot_wait: None,
         }
     }
 

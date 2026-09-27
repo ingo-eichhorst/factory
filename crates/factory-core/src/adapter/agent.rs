@@ -919,6 +919,7 @@ mod tests {
             intake: None,
             failure: None,
             closure: None,
+            slot_wait: None,
         }
     }
 

@@ -1251,6 +1251,7 @@ mod tests {
             args: vec!["--model".into(), "local model".into()],
             sandbox: Sandbox::None,
             provider: None,
+            max_sessions: None,
         }
     }
 

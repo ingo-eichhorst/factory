@@ -825,6 +825,7 @@ mod tests {
                 runtime: None,
                 git: None,
                 task_store: None,
+                max_sessions: None,
                 roles: Default::default(),
                 dashboard: None,
                 policies: Default::default(),

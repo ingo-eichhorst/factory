@@ -290,11 +290,20 @@ function flowHtml() {
     </div>`).join("");
   const table = tableBlock("Flow as a table", ["Scope", ...STAGES, "Wait p50", "Wait p95", "Sessions", "Retrying"],
     bars.map((f) => [esc(f.scope), ...STAGES.map((s) => String(f.wip[s])), figureCell(f.wait_p50), figureCell(f.wait_p95), esc(capacityText(f)), String(f.retrying)]));
+  // A scope with no `max_sessions` of its own still reads "unknown" here
+  // (`#179`): an agent's own cap is enforced at dispatch but is not summed
+  // into one scope figure, so there is no single ceiling to draw a
+  // percentage against even where a limit exists.
+  const capacityNote = bars.some((f) => f.sessions_max !== undefined && f.sessions_max !== null)
+    ? `Sessions counts a run still dispatching or already holding one; an approval hold with no session yet does not
+      use one. An agent's own <code>max_sessions</code> is enforced but not summed into a scope figure, so a scope
+      with only agent caps still shows no percentage here.`
+    : `Capacity is unknown here: no scope in view declares a scope-wide <code>max_sessions</code>, so no utilisation is drawn.`;
   return `<section class="dcard ops-card">
     <h3>Flow now<span class="r">work in flight by state, per scope · waits over ${esc(windowKey)}</span></h3>
     <div class="chleg">${legend}</div>
     ${rows}
-    <p class="dnote">Capacity is unknown while <code>max_sessions</code> has no effect, so no utilisation is drawn. A retrying task
+    <p class="dnote">${capacityNote} A retrying task
       is failing with retries left -- it is counted here and only reaches Needs attention once they run out.
       * a wait marked so leaves out runs from before queue waits were recorded.</p>
     ${table}

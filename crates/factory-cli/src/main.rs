@@ -1157,19 +1157,37 @@ async fn main() -> Result<()> {
         Command::Status => {
             let payload = client.send(Request::Status).await?;
             print(&payload, cli.json, |p| match p {
-                Payload::Status { status } => Some(format!(
-                    "{}  ({})\n  root        {}\n  version     {}\n  uptime      {}s\n  tasks       {} total, {} active\n  interfaces  {}\n  watching    {} subscriber(s)\n  socket      {}",
-                    status.instance,
-                    status.instance_id,
-                    status.root,
-                    status.version,
-                    status.uptime_seconds,
-                    status.tasks_total,
-                    status.tasks_active,
-                    status.interfaces.join(", "),
-                    status.subscribers,
-                    client.socket_path().display(),
-                )),
+                Payload::Status { status } => {
+                    let mut out = format!(
+                        "{}  ({})\n  root        {}\n  version     {}\n  uptime      {}s\n  tasks       {} total, {} active\n  interfaces  {}\n  watching    {} subscriber(s)\n  socket      {}",
+                        status.instance,
+                        status.instance_id,
+                        status.root,
+                        status.version,
+                        status.uptime_seconds,
+                        status.tasks_total,
+                        status.tasks_active,
+                        status.interfaces.join(", "),
+                        status.subscribers,
+                        client.socket_path().display(),
+                    );
+                    if !status.capacity.is_empty() {
+                        out.push_str("\n  capacity    ");
+                        let rows: Vec<String> = status
+                            .capacity
+                            .iter()
+                            .map(|c| {
+                                if c.waiting > 0 {
+                                    format!("{} {}/{}, {} waiting", c.agent, c.in_use, c.max, c.waiting)
+                                } else {
+                                    format!("{} {}/{}", c.agent, c.in_use, c.max)
+                                }
+                            })
+                            .collect();
+                        out.push_str(&rows.join("; "));
+                    }
+                    Some(out)
+                }
                 _ => None,
             })
         }

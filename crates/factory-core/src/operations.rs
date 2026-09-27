@@ -973,7 +973,14 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
         let scope = task.map(|t| t.scope.clone()).unwrap_or_default();
         let title = task.map(|t| t.title.clone()).unwrap_or_else(|| run.task_id.clone());
         let mut f = flow_for(&mut flow, &scope);
-        f.sessions_in_use += 1;
+        // The same rule `#179`'s admission counts against a declared limit:
+        // still dispatching, or already holding a session. A run this
+        // daemon is holding open on someone's answer with no session of its
+        // own (an approval hold, `#184`) is open but is not spending
+        // anything the harness or the account is charged for.
+        if run.status == RunStatus::Dispatching || run.session.is_some() {
+            f.sessions_in_use += 1;
+        }
         let stage = match run.status {
             RunStatus::Dispatching => {
                 f.wip.dispatching += 1;
@@ -1120,26 +1127,51 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             flow.insert(task.scope.clone(), f);
         }
 
-        // Due and not dispatched: the queue.
-        let overdue = task
-            .next_run_at
-            .filter(|at| *at <= now && task.schedule.is_some() && !task.schedule_paused && !active);
-        if let Some(at) = overdue {
-            if task.status == TaskStatus::Pending {
-                let mut f = flow_for(&mut flow, &task.scope);
-                f.wip.queued += 1;
-                f.queue_depth += 1;
-                flow.insert(task.scope.clone(), f);
-                aging_items.push(AgingItem {
-                    run_id: None,
-                    task_id: task.id.clone(),
-                    title: task.title.clone(),
-                    scope: task.scope.clone(),
-                    stage: Stage::Queued,
-                    age_s: seconds(now - at),
-                    pace: None,
-                    basis: PaceBasis::NotPaced,
-                });
+        // Waiting for a `max_sessions` slot (`#179`): the queue, same as a
+        // due-and-not-dispatched schedule below, but aged from when the
+        // wait began rather than from a schedule slot -- a manual or
+        // retried run has no slot to measure from anyway. Checked first and
+        // ahead of the schedule branch's own `!active` (which a waiting
+        // task, having no run, already satisfies) so a scheduled task whose
+        // own next slot also happens to have passed while it waits is
+        // counted once, not twice.
+        if let Some(wait) = &task.slot_wait {
+            let mut f = flow_for(&mut flow, &task.scope);
+            f.wip.queued += 1;
+            f.queue_depth += 1;
+            flow.insert(task.scope.clone(), f);
+            aging_items.push(AgingItem {
+                run_id: None,
+                task_id: task.id.clone(),
+                title: task.title.clone(),
+                scope: task.scope.clone(),
+                stage: Stage::Queued,
+                age_s: seconds(now - wait.since),
+                pace: None,
+                basis: PaceBasis::NotPaced,
+            });
+        } else {
+            // Due and not dispatched: the queue.
+            let overdue = task
+                .next_run_at
+                .filter(|at| *at <= now && task.schedule.is_some() && !task.schedule_paused && !active);
+            if let Some(at) = overdue {
+                if task.status == TaskStatus::Pending {
+                    let mut f = flow_for(&mut flow, &task.scope);
+                    f.wip.queued += 1;
+                    f.queue_depth += 1;
+                    flow.insert(task.scope.clone(), f);
+                    aging_items.push(AgingItem {
+                        run_id: None,
+                        task_id: task.id.clone(),
+                        title: task.title.clone(),
+                        scope: task.scope.clone(),
+                        stage: Stage::Queued,
+                        age_s: seconds(now - at),
+                        pace: None,
+                        basis: PaceBasis::NotPaced,
+                    });
+                }
             }
         }
 
@@ -1230,6 +1262,11 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             };
             let reason = if active {
                 format!("{what} passed while the previous run was still going")
+            } else if task.slot_wait.is_some() {
+                // `#179`: dispatch was tried and held on `max_sessions`, not
+                // skipped outright -- the Queued item beside this exception
+                // already says so; this just avoids contradicting it.
+                format!("{what} passed while it was waiting for a capacity slot")
             } else {
                 format!("{what} passed and nothing was dispatched")
             };
@@ -1648,7 +1685,12 @@ fn human(secs: f64) -> String {
 mod tests {
     use super::*;
     use crate::agent::Role;
-    use crate::task::{CronSchedule, PendingRetry};
+    use crate::task::{CronSchedule, PendingRetry, SessionRef};
+
+    fn with_session(mut r: Run) -> Run {
+        r.session = Some(SessionRef { runtime: "herdr".into(), handle: "h".into(), meta: Default::default() });
+        r
+    }
 
     fn now() -> DateTime<Utc> {
         "2026-09-25T12:00:00Z".parse().unwrap()
@@ -1694,6 +1736,7 @@ mod tests {
             intake: None,
             failure: None,
             closure: None,
+            slot_wait: None,
         }
     }
 
@@ -2009,6 +2052,64 @@ mod tests {
         assert_eq!(queued.basis, PaceBasis::NotPaced);
     }
 
+    /// `#179`: a late slot held on capacity says so, rather than claiming
+    /// nothing was dispatched right beside the Queued item that says
+    /// otherwise.
+    #[test]
+    fn a_late_slot_held_on_capacity_says_so_not_that_nothing_was_dispatched() {
+        let mut t = scheduled(task("held", "demo"), ago(30));
+        t.slot_wait = Some(crate::task::SlotWait {
+            agent: "codex".into(),
+            scope: "demo".into(),
+            trigger: crate::run::Trigger::Schedule,
+            queued_at: ago(30),
+            scheduled_for: Some(ago(30)),
+            since: ago(30),
+        });
+        let r = report(&input(&[t], &[]));
+        let e = r.attention.iter().find(|e| e.kind == ExceptionKind::ScheduleLate).unwrap();
+        assert!(e.reason.ends_with("waiting for a capacity slot"), "{}", e.reason);
+    }
+
+    /// `#179`: a task waiting for a `max_sessions` slot counts in the queue
+    /// too, aged from when the wait began rather than from a schedule slot
+    /// -- the only anchor a manual or retried wait even has.
+    #[test]
+    fn a_task_waiting_for_a_capacity_slot_counts_in_the_queue_aged_from_the_wait() {
+        let mut t = task("waiting", "demo");
+        t.slot_wait = Some(crate::task::SlotWait {
+            agent: "codex".into(),
+            scope: "demo".into(),
+            trigger: crate::run::Trigger::Manual,
+            queued_at: ago(40),
+            scheduled_for: None,
+            since: ago(20),
+        });
+        let r = report(&input(&[t], &[]));
+        assert_eq!(r.flow[0].wip.queued, 1);
+        assert_eq!(r.flow[0].queue_depth, 1);
+        let queued = r.aging.items.iter().find(|i| i.stage == Stage::Queued).unwrap();
+        assert_eq!(queued.age_s, 20.0 * 60.0, "aged from slot_wait.since, not queued_at");
+    }
+
+    /// A scheduled task's own next slot can pass while it is still waiting
+    /// for capacity -- it must count once, as a capacity wait, not twice.
+    #[test]
+    fn a_scheduled_tasks_own_late_slot_does_not_double_count_a_capacity_wait() {
+        let mut t = scheduled(task("both", "demo"), ago(30));
+        t.slot_wait = Some(crate::task::SlotWait {
+            agent: "codex".into(),
+            scope: "demo".into(),
+            trigger: crate::run::Trigger::Schedule,
+            queued_at: ago(30),
+            scheduled_for: Some(ago(30)),
+            since: ago(30),
+        });
+        let r = report(&input(&[t], &[]));
+        assert_eq!(r.flow[0].wip.queued, 1, "counted once");
+        assert_eq!(r.aging.items.iter().filter(|i| i.stage == Stage::Queued).count(), 1);
+    }
+
     #[test]
     fn an_overdue_retry_is_named_a_retry_not_a_slot() {
         let mut t = scheduled(task("t", "demo"), ago(10));
@@ -2196,11 +2297,11 @@ mod tests {
     #[test]
     fn a_scope_filter_keeps_only_that_scopes_work() {
         let tasks = vec![task("here", "demo"), task("there", "other")];
-        let mut a = run("a", "here", 1, RunStatus::Blocked, 10, None);
+        let mut a = with_session(run("a", "here", 1, RunStatus::Blocked, 10, None));
         a.blocked_since = Some(ago(5));
-        let mut b = run("b", "there", 1, RunStatus::Blocked, 10, None);
+        let mut b = with_session(run("b", "there", 1, RunStatus::Blocked, 10, None));
         b.blocked_since = Some(ago(5));
-        let orphan = run("c", "deleted", 1, RunStatus::Running, 10, None);
+        let orphan = with_session(run("c", "deleted", 1, RunStatus::Running, 10, None));
         let runs = vec![a, b, orphan];
         let mut inp = input(&tasks, &runs);
         inp.scope = Some(ScopeFilter::exactly("demo"));
@@ -2220,9 +2321,10 @@ mod tests {
     fn flow_counts_wip_by_state_sessions_and_capacity() {
         let tasks = vec![task("a", "demo"), task("b", "demo"), task("c", "demo")];
         let runs = vec![
+            // Still dispatching -- no session yet, but it already counts.
             run("1", "a", 1, RunStatus::Dispatching, 1, None),
-            run("2", "b", 1, RunStatus::Running, 1, None),
-            run("3", "c", 1, RunStatus::Blocked, 1, None),
+            with_session(run("2", "b", 1, RunStatus::Running, 1, None)),
+            with_session(run("3", "c", 1, RunStatus::Blocked, 1, None)),
         ];
         let mut inp = input(&tasks, &runs);
         inp.capacity.insert("demo".into(), 4);
@@ -2231,6 +2333,33 @@ mod tests {
         assert_eq!(f.wip, Wip { queued: 0, dispatching: 1, running: 1, blocked: 1 });
         assert_eq!(f.sessions_in_use, 3);
         assert_eq!(f.sessions_max, Some(4));
+    }
+
+    /// The counterpart `#179` asks for: a run this daemon is holding open on
+    /// someone's answer, with no session of its own (the `#184` shape), is
+    /// open work -- it shows up in `wip.blocked` -- but is not spending
+    /// anything a `max_sessions` limit would count against, so it must not
+    /// inflate `sessions_in_use` either.
+    #[test]
+    fn a_session_less_blocked_run_is_open_but_does_not_use_a_session() {
+        let tasks = vec![task("a", "demo")];
+        let runs = vec![run("1", "a", 1, RunStatus::Blocked, 1, None)];
+        let r = report(&input(&tasks, &runs));
+        let f = &r.flow[0];
+        assert_eq!(f.wip.blocked, 1, "still open work");
+        assert_eq!(f.sessions_in_use, 0, "but no session to count against a limit");
+    }
+
+    /// Triage's own "no limit -> sessions_max absent" pairing: when the
+    /// config declares a cap, `sessions_max` states it instead of leaving it
+    /// unknown -- `flow_counts_wip_by_state_sessions_and_capacity` already
+    /// covers that half; this locks the other.
+    #[test]
+    fn no_declared_capacity_leaves_sessions_max_absent() {
+        let tasks = vec![task("a", "demo")];
+        let runs = vec![run("1", "a", 1, RunStatus::Running, 1, None)];
+        let r = report(&input(&tasks, &runs));
+        assert_eq!(r.flow[0].sessions_max, None);
     }
 
     #[test]

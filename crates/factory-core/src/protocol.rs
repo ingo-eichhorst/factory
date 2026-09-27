@@ -1106,6 +1106,18 @@ impl Response {
     }
 }
 
+/// One declared agent's `max_sessions` picture, for `factory status`
+/// (`#179`). Only an agent that declares its own cap gets a row -- a
+/// scope-wide cap alone already shows in `factory stats`' Flow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapacityRow {
+    pub scope: String,
+    pub agent: String,
+    pub in_use: u32,
+    pub max: u32,
+    pub waiting: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusInfo {
     pub instance: String,
@@ -1117,6 +1129,11 @@ pub struct StatusInfo {
     pub tasks_active: usize,
     pub subscribers: usize,
     pub interfaces: Vec<String>,
+    /// Every agent that declares its own `max_sessions`, across every scope.
+    /// Absent on a build old enough to predate this, which reads as no
+    /// declared agent caps -- the same as today.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capacity: Vec<CapacityRow>,
     pub scopes: Vec<String>,
 }
 
