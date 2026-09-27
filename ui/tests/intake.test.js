@@ -64,6 +64,12 @@ test("the security fast lane has its own badge, band styling and owner dialogs (
   assert.match(view, /securityDecisionRequest\(card\.id, verdict/);
 });
 
+test("approving a GitHub publish is its own dialog, journaled through the daemon like every other action (#171)", () => {
+  assert.match(view, /function openPublishDialog\(card\)/);
+  assert.match(view, /publishRequest\(card\.id\)/);
+  assert.match(view, /if \(action === "publish"\) return openPublishDialog\(card\);/);
+});
+
 // ------------------------------------------------------------- rendering
 
 function stubElement() {
@@ -200,6 +206,18 @@ test("a card's security reason is escaped", () => {
   };
   const html = intakeCard(evil, DATA.board.axes);
   assert.doesNotMatch(html, /<img/);
+});
+
+test("a decided GitHub card shows its outbound state, awaiting, published or failed (#171)", () => {
+  const github = (outbound) => ({
+    ...DATA.board.columns.needs_info[0],
+    source: { kind: "github", reference: "https://github.com/acme/widgets/issues/9" },
+    outbound,
+  });
+  assert.match(intakeCard(github({ state: "awaiting_approval", by: "the owner", at: "t" }), DATA.board.axes), /awaiting approval/);
+  assert.match(intakeCard(github({ state: "published", by: "the owner", at: "t" }), DATA.board.axes), /published to GitHub/);
+  assert.match(intakeCard(github({ state: "failed", by: "the owner", at: "t" }), DATA.board.axes), /GitHub publish failed/);
+  assert.doesNotMatch(intakeCard(DATA.board.columns.needs_info[0], DATA.board.axes), /GitHub/, "nothing outbound, nothing shown");
 });
 
 // ------------------------------------------------------------ duplicates (#166)
