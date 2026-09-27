@@ -33,6 +33,7 @@ import {
   keepText,
   keptByText,
   lastVerifiedText,
+  rowVerifyState,
   scheduleText,
   timeMachineText,
   verifiedCell,
@@ -90,7 +91,9 @@ function hero(report) {
         ${fact("Schedule", scheduleText(config), config.schedule ? null : "warn")}
         ${fact("Next backup", report.next_run ? `${fmtIn(report.now, report.next_run)} · ${fmtWhen(report.next_run)}` : "only when somebody runs one")}
         ${fact("Last verified", lastVerifiedText(report), report.last_verified ? (report.last_verified.ok ? "ok" : "bad") : "warn")}
-        ${fact("Encrypted", "no -- v1 writes plaintext archives; keep the destination private")}
+        ${fact("Encrypted", config.encrypt_to
+          ? `encrypted to ${config.encrypt_to}`
+          : "no -- writes plaintext archives; keep the destination private")}
         ${fact("Retention", keepText(config))}
         ${fact("Logs", config.include_logs ? "included" : "not included")}
       </dl>`
@@ -147,13 +150,16 @@ function history(report) {
   const can = actions(report);
   const body = rows.map(s => {
     const v = verifiedCell(s.verified);
+    const verify = rowVerifyState(s);
+    const disabled = !can.run || !verify.enabled;
     return `<tr>
-      <td><div class="title bk-nowrap">${esc(fmtWhen(s.at))}</div><div class="sub mono bk-name">${esc(s.name)}</div></td>
+      <td><div class="title bk-nowrap">${esc(fmtWhen(s.at))}</div><div class="sub mono bk-name">${esc(s.name)}
+        ${s.encrypted ? `<span class="tag bk-enc" title="encrypted">encrypted</span>` : ""}</div></td>
       <td class="bk-nowrap">${esc(fmtBytes(s.size_bytes))}</td>
       <td>${typeof s.files === "number" ? s.files : `<span class="infra-missing" title="taken before this daemon's history began">${MISSING}</span>`}</td>
       <td class="bk-${v.level} bk-nowrap">${esc(v.text)}</td>
       <td>${esc(keptByText(s.kept_by))}</td>
-      <td><button class="btn" data-verify="${esc(s.name)}" ${can.run ? "" : "disabled"}>Verify</button></td>
+      <td><button class="btn" data-verify="${esc(s.name)}" ${disabled ? "disabled" : ""} title="${esc(verify.title)}">Verify</button></td>
     </tr>`;
   }).join("");
   return `<section class="bk-section"><h3>History <span class="sub">newest first · ${rows.length} in the destination</span></h3>

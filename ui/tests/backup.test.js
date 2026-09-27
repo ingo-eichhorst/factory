@@ -16,11 +16,13 @@ import {
   fmtIn,
   fmtSpan,
   fmtWhen,
+  identityHint,
   includeCount,
   isBackupEvent,
   keepText,
   keptByText,
   lastVerifiedText,
+  rowVerifyState,
   scheduleText,
   timeMachineText,
   verifiedCell,
@@ -183,7 +185,7 @@ test("the schedule, retention and last verification read as a person would say t
   assert.equal(lastVerifiedText({ ...REPORT, last_verified: null }), "never");
 });
 
-test("the config snippet is the issue's block, without the encryption v1 refuses", () => {
+test("the config snippet is the issue's block, minimal -- encrypt_to is optional and left out", () => {
   assert.match(CONFIG_SNIPPET, /^infrastructure:\n {2}backup:/m);
   assert.match(CONFIG_SNIPPET, /keep: \{ daily: 7, weekly: 4, monthly: 6 \}/);
   assert.doesNotMatch(CONFIG_SNIPPET, /encrypt_to/);
@@ -214,6 +216,46 @@ test("the buttons: nothing before a config, nothing while running, no verify wit
   assert.equal(empty.run, true);
   assert.equal(empty.verify, false);
   assert.match(empty.why, /no snapshot/);
+});
+
+// -------------------------------------------------------------------- #152
+
+test("an encrypted newest snapshot disables the hero Verify with the CLI hint, but never Back up now", () => {
+  const encrypted = {
+    ...REPORT,
+    snapshots: [{ ...REPORT.snapshots[0], name: "factory-backup-dev-20260925T090000Z.tar.zst.age", encrypted: true }],
+  };
+  const can = actions(encrypted);
+  assert.equal(can.run, true, "encryption never stops taking a backup");
+  assert.equal(can.verify, false);
+  assert.match(can.why, /--identity/);
+  assert.match(can.why, /factory backup verify/);
+});
+
+test("identityHint names the CLI command for the given snapshot", () => {
+  assert.equal(
+    identityHint("factory-backup-dev-20260925T090000Z.tar.zst.age"),
+    "encrypted: run `factory backup verify factory-backup-dev-20260925T090000Z.tar.zst.age --identity <file>`"
+  );
+});
+
+test("a row's Verify is enabled for a plaintext snapshot and disabled with a hint for an encrypted one", () => {
+  const plain = REPORT.snapshots[0];
+  assert.deepEqual(rowVerifyState(plain), { enabled: true, title: "" });
+  const encrypted = { ...plain, encrypted: true };
+  const state = rowVerifyState(encrypted);
+  assert.equal(state.enabled, false);
+  assert.match(state.title, /--identity/);
+  assert.deepEqual(rowVerifyState(null), { enabled: true, title: "" });
+});
+
+test("the hero reads the configured recipient from encrypt_to, never a hardcoded no", () => {
+  assert.match(view, /config\.encrypt_to/, "the hero reads encrypt_to from the config");
+  assert.doesNotMatch(view, /no -- v1 writes plaintext archives/, "the old v1-only line is gone");
+});
+
+test("history rows read encrypted state through rowVerifyState, not their own logic", () => {
+  assert.match(view, /rowVerifyState/);
 });
 
 test("a verification's steps keep their order and draw a failure red", () => {

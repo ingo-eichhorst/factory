@@ -15,7 +15,9 @@ import { MISSING, fmtBytes } from "./infra-model.js";
 export { MISSING, fmtBytes };
 
 /// What the root config needs for the page to have anything to show.
-/// Mirrors the issue's own example, less `encrypt_to`, which v1 refuses.
+/// Mirrors the issue's own example, less `encrypt_to`: it stays optional
+/// and off by default, and the hero explains it once a backup is
+/// configured, so the quickstart snippet stays minimal (see the README).
 export const CONFIG_SNIPPET = `# root .factory/config.yaml
 infrastructure:
   backup:
@@ -141,6 +143,22 @@ export function verifiedCell(verified) {
     : { level: "bad", text: `FAILED ${fmtWhen(verified.at)}` };
 }
 
+/// The CLI a person needs to verify or restore an encrypted snapshot by
+/// name (`#152`) -- the same hint the daemon's own refusal names.
+export function identityHint(name) {
+  return `encrypted: run \`factory backup verify ${name} --identity <file>\``;
+}
+
+/// Whether a history row's Verify button may be clicked, and why not when it
+/// may not: an encrypted snapshot decrypts only with an identity the CLI
+/// supplies, never this page (`#152`).
+export function rowVerifyState(snapshot) {
+  if (snapshot && snapshot.encrypted) {
+    return { enabled: false, title: identityHint(snapshot.name) };
+  }
+  return { enabled: true, title: "" };
+}
+
 /// The hero's "last verified" line.
 export function lastVerifiedText(report) {
   const v = report && report.last_verified;
@@ -157,6 +175,8 @@ export function includeCount(row) {
 }
 
 /// What the two buttons may do right now, and why not when they may not.
+/// The hero's Verify targets the newest snapshot, so an encrypted newest
+/// (`#152`) disables it with the CLI hint, the same as its row would be.
 export function actions(report) {
   if (!report || !report.config) {
     return { run: false, verify: false, why: "configure infrastructure.backup first" };
@@ -164,8 +184,14 @@ export function actions(report) {
   if (report.running) {
     return { run: false, verify: false, why: "a backup operation is running" };
   }
-  const any = Array.isArray(report.snapshots) && report.snapshots.length > 0;
-  return { run: true, verify: any, why: any ? "" : "there is no snapshot to verify yet" };
+  const newest = Array.isArray(report.snapshots) ? report.snapshots[0] : null;
+  if (!newest) {
+    return { run: true, verify: false, why: "there is no snapshot to verify yet" };
+  }
+  if (newest.encrypted) {
+    return { run: true, verify: false, why: identityHint(newest.name) };
+  }
+  return { run: true, verify: true, why: "" };
 }
 
 /// A verification's steps, each with the colour its status is drawn in.

@@ -1473,6 +1473,7 @@ button.linklike:hover { color: var(--signal); }
 .bk-path code { white-space: nowrap; }
 .bk-name { overflow-wrap: anywhere; }
 .bk-nowrap { white-space: nowrap; }
+.tag.bk-enc { color: var(--signal-ink); border-color: var(--signal); margin-left: 6px; text-transform: none; }
 .bk-off td { color: var(--faint); }
 .bk-contents { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 14px; }
 .bk-contents > section { min-width: 0; }
