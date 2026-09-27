@@ -241,6 +241,7 @@ rather than ignored, and so is an agent given a role the instance never defined
     workflow.create  workflow.edit  workflow.delete  workflow.run  workflow.cancel
     knowledge.write  dataset.edit  bench.run  policy.attest  goals.checkin
     intake.add  intake.info  intake.triage  intake.assess  intake.decide
+    dashboard.edit
 
 Reading is not among them, because reading is open to every agent: one that
 cannot see the board cannot coordinate with anyone.
@@ -2700,8 +2701,9 @@ what an ancestor declared -- a layout is always one list a person can read
 top to bottom. With no `dashboard:` block anywhere in the chain, the
 dashboard renders its built-in default (today's page, unchanged; the list
 itself lives in `ui/js/dashboard-model.js`, not in this config).
-**Removing the block reveals whatever it was overriding** -- there is no
-separate reset action, because the config file already is the reset.
+**Removing the block reveals whatever it was overriding** -- the config file
+already is the reset, so `Request::DashboardReset` (below) does nothing more
+than remove it.
 
 **Validation, at load**, in the same style an unknown role is refused: a
 `dashboard:` block with no tiles is refused outright
@@ -2738,9 +2740,33 @@ is refused (404 over HTTP), unlike `roles_for`'s tolerant fallback to the
 built-in roles for a scope that has since gone -- a dashboard request
 names a place to show, and a place that resolves to nothing has none to
 show. `GET /api/dashboard?scope=demo` or `factory dashboard --scope demo`
-read the same thing. No write or reset request exists yet -- editing the
-block by hand is the only way in, until the tile catalogue editor (phase
-5) lands.
+read the same thing.
+
+**Writing it** (`#160`, phase 5): `Request::DashboardSet { scope, tiles }`
+saves `scope`'s own layout whole, and `Request::DashboardReset { scope }`
+removes it, revealing whatever it was overriding -- both answer with the
+same `Payload::Dashboard { tiles, source }` a follow-up read would. Unlike
+the read, `scope` is required on both: writing means naming which scope's
+own block this is, the same reason `Request::RoleDefine`/`AgentConfigure`
+require it rather than falling back to the caller's own. The instance
+root's own configured scope writes the top-level `dashboard:`; any other
+scope writes `scope.dashboard` in its own config -- the same split, and the
+same one-write-path-under-a-lock discipline, `role.rs`'s layer writes
+already follow. Validated the same way loading does (`Config::validate`,
+whole, before a byte is written), so an empty `tiles`, an unknown metric or
+a bad size is refused with the block and the tile named and nothing
+written; `Request::DashboardReset` is refused with a clear message when
+`scope` writes no block of its own to remove. Both need `dashboard.edit` in
+`scope` -- an ordinary grant (`foreman` gets it through `Grant::ALL`,
+`worker` and `triager` do not), checked with the target scope as the
+subject and reach the same way `agent.configure` is: `own` reach may not
+edit a dashboard at all, `scope` reach stops at the caller's own scope.
+`Event::DashboardChanged { scope }` is published on either, beside
+`Event::RolesChanged`. HTTP: `PUT /api/dashboard?scope=` (body `{tiles}`)
+and `DELETE /api/dashboard?scope=`, on the same route the read answers.
+The web UI's Dashboard > Customise (`ui/js/dashboard.js`, catalogue and
+list edits in `ui/js/dashboard-editor-model.js`) is the one place either is
+called from today; no CLI, the same choice role writes already made.
 
 The dashboard page itself (`ui/js/dashboard.js`) fetches this alongside
 `/api/production` on load and on a scope change, never on a window change

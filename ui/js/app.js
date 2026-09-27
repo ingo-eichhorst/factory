@@ -12,7 +12,7 @@ import { legacyAgentRoute, loadRuntimeConnections, renderRuntimeConnections } fr
 import { loadRoles, wireRoles } from "./roles.js";
 import { openCreate } from "./task-form.js";
 import { acceptWorkflowEvent, loadWorkflows, readWorkflowTail, renderWorkflows, wireWorkflows, workflowTail } from "./workflows.js";
-import { loadDashboard, renderDashboard, loadInbox, renderInbox, wireDashboard } from "./dashboard.js";
+import { loadDashboard, renderDashboard, loadInbox, renderInbox, wireDashboard, isDashboardEditorOpen } from "./dashboard.js";
 import { loadOperations, showOperations, hideOperations, wireOperations } from "./operations.js";
 import { loadIntake, showIntake, hideIntake, refreshIntake, wireIntake } from "./intake.js";
 import { touchesIntake } from "./intake-model.js";
@@ -729,6 +729,12 @@ function onEvent(ev) {
   // `/api/production` answers -- the dashboard's history cards refetch on it
   // rather than waiting for the window or scope to change.
   if (ev.type === "run_updated" && state.tab === "dashboard") loadDashboard();
+  // A dashboard layout was saved or reset, here or from another session
+  // (`#160`). Skipped while Customise is open on this page: a saver's own
+  // submit already refreshes locally and closes the editor before this
+  // could fire for it, so a refetch arriving here is always someone else's
+  // change, and it must never clobber a draft in progress.
+  if (ev.type === "dashboard_changed" && state.tab === "dashboard" && !isDashboardEditorOpen()) loadDashboard();
   // An attestation recorded or withdrawn, published on both -- see
   // `Event::PolicyChanged`. Reload whenever the tab is open, not only when
   // the scope it names is the one on screen: an ancestor's attestation can

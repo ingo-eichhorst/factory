@@ -150,7 +150,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/policy/remediate", post(policy_remediate))
         .route("/api/policy/export", get(policy_export))
         .route("/api/metrics", get(metrics))
-        .route("/api/dashboard", get(dashboard))
+        .route("/api/dashboard", get(dashboard).put(dashboard_set).delete(dashboard_reset))
         .route("/api/costs", get(costs))
         .route("/api/goals", get(goals))
         .route("/api/goals/checkins", post(create_goals_checkin))
@@ -775,6 +775,53 @@ async fn dashboard(State(engine): State<Arc<Engine>>, Query(q): Query<DashboardQ
         },
     )
     .await
+}
+
+#[derive(serde::Deserialize)]
+struct DashboardSetBody {
+    tiles: Vec<factory_core::dashboard::Tile>,
+}
+
+/// `scope` is required on the write side of `/api/dashboard`, unlike the
+/// read: saving or resetting means naming which scope's own block this is,
+/// not falling back to the caller's (`#160`). `None` for missing or blank;
+/// the caller turns that into the 400 -- kept a plain `Option` rather than a
+/// `Result<_, AxumResponse>` so a missing scope does not make every success
+/// path carry a whole HTTP response's worth of `Err` around with it.
+fn required_scope(q: &DashboardQuery) -> Option<String> {
+    q.scope.clone().filter(|s| !s.trim().is_empty())
+}
+
+fn scope_required_response() -> AxumResponse {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(Response::error("bad_request", "scope is required")),
+    )
+        .into_response()
+}
+
+/// `PUT /api/dashboard?scope=` -- save `scope`'s own layout whole (`#160`).
+/// An unknown metric or an empty `tiles` is refused with a 400 naming the
+/// tile; an unknown scope is a 404, the same as the read side.
+async fn dashboard_set(
+    State(engine): State<Arc<Engine>>,
+    Query(q): Query<DashboardQuery>,
+    Json(body): Json<DashboardSetBody>,
+) -> AxumResponse {
+    let Some(scope) = required_scope(&q) else {
+        return scope_required_response();
+    };
+    run(&engine, Request::DashboardSet { scope, tiles: body.tiles }).await
+}
+
+/// `DELETE /api/dashboard?scope=` -- remove `scope`'s own block and reveal
+/// whatever it was overriding (`#160`). Refused with a 400 when `scope`
+/// writes no block of its own to remove.
+async fn dashboard_reset(State(engine): State<Arc<Engine>>, Query(q): Query<DashboardQuery>) -> AxumResponse {
+    let Some(scope) = required_scope(&q) else {
+        return scope_required_response();
+    };
+    run(&engine, Request::DashboardReset { scope }).await
 }
 
 #[derive(serde::Deserialize)]
@@ -2205,6 +2252,88 @@ mod tests {
         assert_eq!(status, 200, "{json}");
         assert_eq!(json["data"]["tiles"], serde_json::Value::Null, "use the UI's built-in default");
         assert_eq!(json["data"]["source"], serde_json::Value::Null, "never the word \"default\"");
+    }
+
+    /// A real instance on disk, root and one nested scope, so `PUT`/`DELETE`
+    /// (which read and rewrite a real config file, unlike the in-memory-only
+    /// `engine_with_dashboard` above) have something to write to.
+    fn engine_with_dashboard_files() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-http-dashboard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory")).unwrap();
+        std::fs::write(
+            root.join(".factory/config.yaml"),
+            "version: 1\ninstance:\n  id: test\n  name: test\nscope:\n  id: company-id\n  name: company\n\
+             dashboard:\n  tiles:\n    - { metric: throughput_week, size: s }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("demo/.factory")).unwrap();
+        std::fs::write(
+            root.join("demo/.factory/config.yaml"),
+            "version: 1\nscope:\n  id: demo-id\n  name: demo\n",
+        )
+        .unwrap();
+        let mut factory = factory_core::config::Factory::load(&root).unwrap();
+        crate::discovery::apply(&mut factory).unwrap();
+        factory.config.validate().unwrap();
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    #[tokio::test]
+    async fn put_api_dashboard_saves_and_round_trips_through_a_get() {
+        let engine = engine_with_dashboard_files();
+        let body = r#"{"tiles":[{"view":"kpis","size":"m"}]}"#;
+        let (status, json) = request(engine.clone(), "PUT", "/api/dashboard?scope=demo", Some(body)).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["kind"], "dashboard");
+        assert_eq!(json["data"]["source"], "demo");
+        assert_eq!(json["data"]["tiles"][0]["view"], "kpis");
+
+        let (status, json) = request(engine, "GET", "/api/dashboard?scope=demo", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["source"], "demo");
+        assert_eq!(json["data"]["tiles"][0]["view"], "kpis");
+    }
+
+    #[tokio::test]
+    async fn put_api_dashboard_needs_scope_and_refuses_an_unknown_metric_or_scope() {
+        let engine = engine_with_dashboard_files();
+
+        let (status, json) = request(engine.clone(), "PUT", "/api/dashboard", Some(r#"{"tiles":[]}"#)).await;
+        assert_eq!(status, 400, "{json}");
+        assert!(json["message"].as_str().unwrap_or_default().contains("scope"), "{json}");
+
+        let bad = r#"{"tiles":[{"metric":"not_a_metric","size":"s"}]}"#;
+        let (status, json) = request(engine.clone(), "PUT", "/api/dashboard?scope=demo", Some(bad)).await;
+        assert_eq!(status, 400, "{json}");
+        let message = json["message"].as_str().unwrap_or_default();
+        assert!(message.contains("dashboard.tiles[0].metric"), "names the block and the tile: {json}");
+        assert!(message.contains("not_a_metric"), "{json}");
+
+        let ok = r#"{"tiles":[{"view":"kpis","size":"s"}]}"#;
+        let (status, _) = request(engine, "PUT", "/api/dashboard?scope=nope", Some(ok)).await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn delete_api_dashboard_resets_and_is_refused_with_no_block_of_its_own() {
+        let engine = engine_with_dashboard_files();
+
+        // `demo` writes no `dashboard:` of its own yet.
+        let (status, json) = request(engine.clone(), "DELETE", "/api/dashboard?scope=demo", None).await;
+        assert_eq!(status, 400, "{json}");
+        assert!(json["message"].as_str().unwrap_or_default().contains("defines no dashboard"), "{json}");
+
+        let put = r#"{"tiles":[{"view":"kpis","size":"m"}]}"#;
+        let (status, _) = request(engine.clone(), "PUT", "/api/dashboard?scope=demo", Some(put)).await;
+        assert_eq!(status, 200);
+
+        let (status, json) = request(engine.clone(), "DELETE", "/api/dashboard?scope=demo", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["source"], "company", "falls back to the root's own layout");
+
+        let (status, _) = request(engine, "DELETE", "/api/dashboard", None).await;
+        assert_eq!(status, 400, "scope is required on the write side, unlike the read");
     }
 
     async fn serve() -> std::net::SocketAddr {

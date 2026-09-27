@@ -501,6 +501,16 @@ impl Engine {
         factory.config.roles = roles;
     }
 
+    /// The instance root's own top-level `dashboard:`, after a write to its
+    /// config -- `replace_instance_roles`, for the dashboard layer (`#160`).
+    pub(crate) fn replace_instance_dashboard(&self, dashboard: Option<factory_core::dashboard::DashboardConfig>) {
+        let mut factory = self
+            .factory
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        factory.config.dashboard = dashboard;
+    }
+
     pub(crate) fn replace_scope(&self, id: &str, replacement: factory_core::config::Scope) {
         let mut factory = self
             .factory
@@ -871,6 +881,24 @@ impl Engine {
             }
             Request::Dashboard { scope } => {
                 let (dashboard, source) = self.dashboard_for(scope.as_deref())?;
+                Ok(Payload::Dashboard {
+                    tiles: dashboard.map(|d| d.tiles),
+                    source,
+                })
+            }
+            Request::DashboardSet { scope, tiles } => {
+                let scope = self.set_dashboard(&scope, tiles)?;
+                self.bus.publish(Event::DashboardChanged { scope: scope.clone() });
+                let (dashboard, source) = self.dashboard_for(Some(&scope))?;
+                Ok(Payload::Dashboard {
+                    tiles: dashboard.map(|d| d.tiles),
+                    source,
+                })
+            }
+            Request::DashboardReset { scope } => {
+                let scope = self.reset_dashboard(&scope)?;
+                self.bus.publish(Event::DashboardChanged { scope: scope.clone() });
+                let (dashboard, source) = self.dashboard_for(Some(&scope))?;
                 Ok(Payload::Dashboard {
                     tiles: dashboard.map(|d| d.tiles),
                     source,

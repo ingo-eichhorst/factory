@@ -658,6 +658,29 @@ pub enum Request {
         #[serde(default)]
         scope: Option<String>,
     },
+    /// Save `scope`'s own dashboard layout whole (`#160`, phase 5 of `#150`):
+    /// the instance root's own configured scope writes its top-level
+    /// `dashboard:`, any other scope writes `scope.dashboard` in its own
+    /// config -- the same split `Request::RoleDefine` makes for a role
+    /// layer, and `scope` is required for the same reason: naming which
+    /// scope's own block this is, not a fallback to the caller's. Refused
+    /// (`FactoryError::BadRequest`) when `tiles` is empty, names an unknown
+    /// metric, or is otherwise invalid -- `Config::validate` checked whole,
+    /// the same gate every other write here passes through before a byte is
+    /// written. Answered with the resolved `Payload::Dashboard { tiles,
+    /// source }` for `scope`, same as `Request::Dashboard` would answer
+    /// right after. Needs `dashboard.edit` in `scope`.
+    #[serde(rename = "dashboard.set")]
+    DashboardSet {
+        scope: String,
+        tiles: Vec<crate::dashboard::Tile>,
+    },
+    /// Remove `scope`'s own `dashboard:` block and reveal whatever it was
+    /// overriding -- the nearest ancestor's layout, or the built-in default.
+    /// Refused when `scope` writes no block of its own to remove. Answered
+    /// like `Request::DashboardSet`. Needs `dashboard.edit` in `scope`.
+    #[serde(rename = "dashboard.reset")]
+    DashboardReset { scope: String },
     /// The L6 Goals tab: vision, mission, the north star and its inputs,
     /// every cycle's own summary, the asked-for (or current) cycle's full
     /// graded report, and the roadmap -- narrowed to `scope` (and its
@@ -2336,6 +2359,38 @@ mod tests {
         let env: Envelope =
             serde_json::from_str(r#"{"op":"dashboard","params":{"scope":"demo"}}"#).expect("request parses");
         assert!(matches!(env.request, Request::Dashboard { scope: Some(s) } if s == "demo"));
+    }
+
+    #[test]
+    fn dashboard_set_and_reset_require_a_scope_named_exactly() {
+        let env: Envelope = serde_json::from_str(
+            r#"{"op":"dashboard.set","params":{"scope":"demo","tiles":[{"view":"kpis","size":"s"}]}}"#,
+        )
+        .expect("request parses");
+        match &env.request {
+            Request::DashboardSet { scope, tiles } => {
+                assert_eq!(scope, "demo");
+                assert_eq!(tiles.len(), 1);
+                assert_eq!(tiles[0].view, Some(crate::dashboard::ViewId::Kpis));
+            }
+            other => panic!("wrong request: {other:?}"),
+        }
+        let back = serde_json::to_string(&env).unwrap();
+        let again: Envelope = serde_json::from_str(&back).unwrap();
+        assert!(matches!(again.request, Request::DashboardSet { .. }));
+
+        // No default: unlike the read, a write must name which scope's own
+        // block this is.
+        let missing_scope = serde_json::from_str::<Envelope>(
+            r#"{"op":"dashboard.set","params":{"tiles":[{"view":"kpis","size":"s"}]}}"#,
+        );
+        assert!(missing_scope.is_err());
+
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"dashboard.reset","params":{"scope":"demo"}}"#).expect("request parses");
+        assert!(matches!(env.request, Request::DashboardReset { scope } if scope == "demo"));
+        let missing_scope = serde_json::from_str::<Envelope>(r#"{"op":"dashboard.reset","params":{}}"#);
+        assert!(missing_scope.is_err());
     }
 
     #[test]

@@ -73,7 +73,8 @@ import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 import { hasFailed } from "./task-model.js";
 import { notStarted } from "./pending-model.js";
-import { packRows, resolveDashboard, isTileRenderable, tileKind, rowTemplate, rowIsAllSmall } from "./dashboard-model.js";
+import { scrim, closeModal, dropModal } from "./modal.js";
+import { packRows, resolveDashboard, isTileRenderable, tileKind, rowTemplate, rowIsAllSmall, SIZES } from "./dashboard-model.js";
 import {
   neededEndpoints,
   neededMetricIds,
@@ -85,6 +86,20 @@ import {
   topCostRows,
   windowDays,
 } from "./dashboard-tiles-model.js";
+import {
+  VIEW_LABELS,
+  buildCatalogue,
+  searchCatalogue,
+  seedTiles,
+  addTile,
+  removeTile,
+  moveTileUp,
+  moveTileDown,
+  setTileSize,
+  editorErrors,
+  canReset,
+  rootScopeName,
+} from "./dashboard-editor-model.js";
 
 /// The three presets the window selector offers. `bin` travels with every
 /// request rather than being guessed from `minutes` server-side, so a caller
@@ -1022,6 +1037,9 @@ export function wireDashboard() {
   const btn = $("newTaskFromDash");
   if (btn) btn.onclick = () => openCreate();
 
+  const customise = $("dashCustomise");
+  if (customise) customise.onclick = () => openDashboardEditor();
+
   const seg = $("dash-window");
   if (seg) {
     for (const b of seg.querySelectorAll("button")) {
@@ -1033,4 +1051,224 @@ export function wireDashboard() {
       };
     }
   }
+}
+
+// ----------------------------------------------------- Customise (#160)
+
+/// The scope this session is editing right now, or `null` between opens --
+/// so `app.js`'s `DashboardChanged` handler can tell a refetch not to
+/// clobber a draft in progress (`isDashboardEditorOpen`).
+let editorScope = null;
+let editorTiles = [];
+let editorQuery = "";
+/// `buildCatalogue`'s answer, off `/api/metrics`' `registry` -- fetched once
+/// per open, never per keystroke; empty until that fetch lands, which is
+/// also the shape a failed fetch leaves it in, so the catalogue side just
+/// keeps showing "loading…" rather than a confusing empty search.
+let editorCatalogue = [];
+let editorSaving = false;
+
+export function isDashboardEditorOpen() {
+  return editorScope !== null;
+}
+
+/// Which scope Customise edits: the one selected in the rail, or the
+/// instance root's own when nothing is selected -- the same fallback
+/// `Request::Dashboard { scope: None }` reads, resolved by path
+/// (`rootScopeName`, `dashboard-editor-model.js`) rather than by name.
+/// `null` when the instance never opted itself into being a scope at all:
+/// there is then no name the write side (`Request::DashboardSet`/
+/// `DashboardReset`, unlike the read) could be given, so Customise has
+/// nothing to edit.
+function editingScopeName() {
+  return state.scope || rootScopeName(state.scopes, state.root);
+}
+
+/// A tile's display name in the "Layout" column: `VIEW_LABELS` for a view
+/// tile, or the catalogue's own title for a metric tile once it has loaded
+/// (falling back to the bare id before then, or for a metric the registry
+/// never named).
+function editorTileLabel(tile) {
+  if (tile.view) return VIEW_LABELS[tile.view] || tile.view;
+  const found = editorCatalogue.find((e) => e.kind === "metric" && e.id === tile.metric);
+  return (found && found.title) || tile.metric;
+}
+
+function editorHtml(offerReset) {
+  return `
+    <header><div><h2>Customise dashboard</h2><span class="sub">${esc(editorScope)}</span></div>
+      <button class="x" id="de-close">&times;</button></header>
+    <div class="body">
+      <div class="de-cols">
+        <div class="de-col">
+          <h3>Layout</h3>
+          <div id="de-tiles"></div>
+        </div>
+        <div class="de-col">
+          <h3>Add a tile</h3>
+          <input id="de-search" type="text" placeholder="Search views and metrics…">
+          <div id="de-results"></div>
+        </div>
+      </div>
+      <div class="err" id="de-err"></div>
+      <div class="row-btns" style="margin-top:16px">
+        <button class="btn primary" id="de-save">Save</button>
+        ${offerReset ? '<button class="btn" id="de-reset">Reset to inherited</button>' : ""}
+        <button class="btn" id="de-cancel">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function closeEditor() {
+  editorScope = null;
+  closeModal();
+}
+
+function renderEditorTiles() {
+  const host = $("de-tiles");
+  if (!host) return;
+  if (!editorTiles.length) {
+    host.innerHTML = `<div class="empty">No tiles yet -- add one from the catalogue.</div>`;
+    return;
+  }
+  const sizes = Object.keys(SIZES);
+  host.innerHTML = editorTiles
+    .map(
+      (tile, i) => `
+    <div class="de-tile">
+      <span class="de-tile-name">${esc(editorTileLabel(tile))}</span>
+      <select class="de-tile-size" data-i="${i}" title="size">
+        ${sizes.map((s) => `<option value="${s}"${tile.size === s ? " selected" : ""}>${s}</option>`).join("")}
+      </select>
+      <button class="btn small" data-act="up" data-i="${i}"${i === 0 ? " disabled" : ""} title="move up">&uarr;</button>
+      <button class="btn small" data-act="down" data-i="${i}"${i === editorTiles.length - 1 ? " disabled" : ""} title="move down">&darr;</button>
+      <button class="btn small danger" data-act="remove" data-i="${i}">Remove</button>
+    </div>`
+    )
+    .join("");
+  for (const sel of host.querySelectorAll(".de-tile-size")) {
+    sel.onchange = () => {
+      editorTiles = setTileSize(editorTiles, Number(sel.dataset.i), sel.value);
+      renderEditorBody();
+    };
+  }
+  for (const b of host.querySelectorAll("button[data-act]")) {
+    b.onclick = () => {
+      const i = Number(b.dataset.i);
+      if (b.dataset.act === "up") editorTiles = moveTileUp(editorTiles, i);
+      else if (b.dataset.act === "down") editorTiles = moveTileDown(editorTiles, i);
+      else editorTiles = removeTile(editorTiles, i);
+      renderEditorBody();
+    };
+  }
+}
+
+function renderEditorResults() {
+  const host = $("de-results");
+  if (!host) return;
+  if (!editorCatalogue.length) {
+    host.innerHTML = `<div class="empty">loading…</div>`;
+    return;
+  }
+  const results = searchCatalogue(editorCatalogue, editorQuery).slice(0, 40);
+  if (!results.length) {
+    host.innerHTML = `<div class="empty">No matches.</div>`;
+    return;
+  }
+  host.innerHTML = results
+    .map(
+      (e) => `
+    <div class="de-result">
+      <span class="de-result-name">${esc(e.title)}<span class="de-result-sub"> · ${esc(e.subtitle)}</span></span>
+      <button class="btn small" data-kind="${e.kind}" data-id="${esc(e.id)}">Add</button>
+    </div>`
+    )
+    .join("");
+  for (const b of host.querySelectorAll("button[data-id]")) {
+    b.onclick = () => {
+      const entry = editorCatalogue.find((e) => e.kind === b.dataset.kind && e.id === b.dataset.id);
+      if (entry) editorTiles = addTile(editorTiles, entry, "m");
+      renderEditorBody();
+    };
+  }
+}
+
+function renderEditorBody() {
+  renderEditorTiles();
+  renderEditorResults();
+  const errors = editorErrors(editorTiles);
+  const err = $("de-err");
+  if (err && !editorSaving) err.textContent = errors[0] || "";
+  const save = $("de-save");
+  if (save) save.disabled = errors.length > 0 || editorSaving;
+  const reset = $("de-reset");
+  if (reset) reset.disabled = editorSaving;
+}
+
+/// Saves or resets, then refreshes the page's own layout state
+/// (`layoutTiles`/`layoutSource`) from the daemon's answer directly --
+/// `loadLayout` would refetch the same thing over the wire a second time,
+/// and `Request::DashboardSet`/`DashboardReset` already answer with exactly
+/// what a follow-up `Request::Dashboard` would.
+async function submitEditor(method) {
+  editorSaving = true;
+  renderEditorBody();
+  try {
+    const answer = await api(`/api/dashboard?scope=${encodeURIComponent(editorScope)}`, {
+      method,
+      ...(method === "PUT" ? { body: JSON.stringify({ tiles: editorTiles }) } : {}),
+    });
+    layoutTiles = answer.tiles;
+    layoutSource = answer.source;
+    closeEditor();
+    await loadTileData(resolveDashboard(layoutTiles));
+    renderDashboard();
+  } catch (e) {
+    editorSaving = false;
+    const err = $("de-err");
+    if (err) err.textContent = e.message;
+    renderEditorBody();
+  }
+}
+
+function wireEditorChrome() {
+  $("de-close").onclick = closeEditor;
+  $("de-cancel").onclick = closeEditor;
+  $("de-search").oninput = () => {
+    editorQuery = $("de-search").value;
+    renderEditorResults();
+  };
+  $("de-save").onclick = () => submitEditor("PUT");
+  const reset = $("de-reset");
+  if (reset) reset.onclick = () => submitEditor("DELETE");
+}
+
+/// Opens the editor over a working copy of what is on screen
+/// (`seedTiles`), then fetches the metric registry once for the catalogue's
+/// other half -- the view half (`VIEW_IDS`) needs no fetch at all. A scope
+/// that resolves to nothing (the instance never opted into being a scope,
+/// and none is selected) has no write target, so this is a no-op rather
+/// than a modal with a Save button that can only ever fail.
+async function openDashboardEditor() {
+  const scope = editingScopeName();
+  if (!scope) return;
+  dropModal();
+  editorScope = scope;
+  editorTiles = seedTiles(layoutTiles);
+  editorQuery = "";
+  editorCatalogue = [];
+  editorSaving = false;
+  scrim(editorHtml(canReset(layoutSource, editorScope)));
+  wireEditorChrome();
+  renderEditorBody();
+
+  let registry = [];
+  try {
+    registry = (await api("/api/metrics")).registry;
+  } catch {
+    registry = [];
+  }
+  if (!isDashboardEditorOpen()) return; // closed while the fetch was in flight
+  editorCatalogue = buildCatalogue(registry);
+  renderEditorBody();
 }

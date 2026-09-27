@@ -5869,6 +5869,9 @@ fn describe_event(e: &Event) -> String {
         Event::RolesChanged { scope, name } => {
             format!("role     {name} in {scope}  changed")
         }
+        Event::DashboardChanged { scope } => {
+            format!("dashboard {scope}  changed")
+        }
         Event::PolicyChanged { scope, control } => {
             format!("policy   {control} in {scope}  changed")
         }
