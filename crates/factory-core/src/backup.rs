@@ -18,7 +18,7 @@
 //! the path, size and sha256 of every other file in it. Secrets are never
 //! read, let alone copied.
 
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -611,6 +611,106 @@ pub fn parse_destinationinfo(output: &str, success: bool) -> TimeMachineFact {
     } else {
         TimeMachineFact::Configured { destinations }
     }
+}
+
+// =========================================================== the L1 fact
+
+/// A verification passing counts for [`resolve_backup_fact`]'s `verified`
+/// only within this many days of it -- an old pass proves less each day the
+/// archive could have silently rotted since.
+pub const VERIFIED_WITHIN_DAYS: i64 = 30;
+
+/// The one L1 fact a policy `daemon` check or a registry metric reads about
+/// backups (`#154`) -- computed by one `Engine::backup_fact(now)` in
+/// `factory-daemon`'s `backup` module, off the same captured state
+/// `backup_report` reads, via [`resolve_backup_fact`]. Plain data: nothing
+/// here reads a clock, a store or a disk. `#155`'s repository and Time
+/// Machine probes are deliberately not part of this fact -- see the
+/// module's own header.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupFact {
+    /// The instant this fact was derived -- the same "now" a policy report
+    /// or a metric call reads every other fact against, and a metric
+    /// value's own `as_of`.
+    pub at: DateTime<Utc>,
+    /// Whether `infrastructure.backup` names a destination at all.
+    pub configured: bool,
+    /// The newest archive's timestamp -- `None` before the first backup, or
+    /// when the destination cannot be listed at all.
+    pub newest: Option<DateTime<Utc>>,
+    /// Within its schedule (or the unscheduled yardstick) plus
+    /// [`GRACE_HOURS`]. `None` when the destination is missing or
+    /// unmounted: even "no" would be a guess about an archive nobody can
+    /// currently list.
+    pub recent: Option<bool>,
+    /// The destination is not on the same device as the instance root.
+    /// `None` when that cannot be determined -- the destination is
+    /// missing, or its device could not be read.
+    pub offsite: Option<bool>,
+    /// The newest verification of a snapshot still in the destination
+    /// passed, within [`VERIFIED_WITHIN_DAYS`] days of `at`. `None` when
+    /// the destination is missing or unmounted.
+    pub verified: Option<bool>,
+    /// The same verification `verified` is read from, whatever it decided
+    /// -- present even when `verified` is `Some(false)` (failed, or too
+    /// old), so a reader can say why.
+    pub last_verified: Option<VerifySummary>,
+}
+
+/// [`BackupFact`]'s whole derivation, pure so every row of the triage's
+/// semantics table (issue `#154`) is a plain unit test with no filesystem,
+/// store or clock of its own. The caller does the I/O and hands in
+/// primitives it already has: `age` is its own [`age_level`] against
+/// `newest` (`AgeLevel::None` when there is none, from `deadlines`/
+/// `age_level` exactly as `backup_report` computes them), and
+/// `last_verified` is already filtered to a snapshot still present in the
+/// destination -- the same "verifications of archives still present" rule
+/// [`warnings`] applies.
+///
+/// Order matters: not configured beats everything (all three `Some(false)`
+/// -- there is no backup to be indeterminate about); an unreachable
+/// destination beats a fresh reading (all three `None` -- not even "no" is
+/// honest about an archive nobody can currently list); only then do
+/// `recent`/`offsite`/`verified` read the age, the device and the newest
+/// still-present verification, each independently of whether a snapshot
+/// exists at all.
+pub fn resolve_backup_fact(
+    now: DateTime<Utc>,
+    configured: bool,
+    destination_exists: bool,
+    same_device: Option<bool>,
+    newest: Option<DateTime<Utc>>,
+    age: AgeLevel,
+    last_verified: Option<VerifySummary>,
+) -> BackupFact {
+    if !configured {
+        return BackupFact {
+            at: now,
+            configured: false,
+            newest: None,
+            recent: Some(false),
+            offsite: Some(false),
+            verified: Some(false),
+            last_verified: None,
+        };
+    }
+    if !destination_exists {
+        return BackupFact {
+            at: now,
+            configured: true,
+            newest: None,
+            recent: None,
+            offsite: None,
+            verified: None,
+            last_verified: None,
+        };
+    }
+    let recent = Some(matches!(age, AgeLevel::Fresh));
+    let offsite = same_device.map(|same| !same);
+    let verified = Some(last_verified.as_ref().is_some_and(|v| {
+        v.ok && now.signed_duration_since(v.at) <= Duration::days(VERIFIED_WITHIN_DAYS)
+    }));
+    BackupFact { at: now, configured: true, newest, recent, offsite, verified, last_verified }
 }
 
 // ================================================================ warnings
@@ -1209,6 +1309,103 @@ mod tests {
         assert_eq!(redact_remote("ssh://git@host/o/r.git"), "ssh://git@host/o/r.git", "ssh: not http(s)");
         assert_eq!(redact_remote("https://github.com/o/r.git"), "https://github.com/o/r.git", "nothing to redact");
         assert_eq!(redact_remote("/Volumes/Backup/bare.git"), "/Volumes/Backup/bare.git", "a local path");
+    }
+
+    // -- resolve_backup_fact (#154): one test per semantics-table row -----
+
+    fn passed(at: DateTime<Utc>) -> VerifySummary {
+        VerifySummary { snapshot: "s".into(), at, ok: true }
+    }
+    fn failed(at: DateTime<Utc>) -> VerifySummary {
+        VerifySummary { snapshot: "s".into(), at, ok: false }
+    }
+
+    #[test]
+    fn not_configured_reads_false_on_every_fact_never_indeterminate() {
+        let fact = resolve_backup_fact(Utc::now(), false, false, None, None, AgeLevel::None, None);
+        assert!(!fact.configured);
+        assert_eq!(fact.newest, None);
+        assert_eq!((fact.recent, fact.offsite, fact.verified), (Some(false), Some(false), Some(false)));
+        assert_eq!(fact.last_verified, None);
+    }
+
+    #[test]
+    fn a_missing_or_unmounted_destination_reads_indeterminate_on_every_fact() {
+        let now = Utc::now();
+        // Even a same_device or last_verified the caller somehow still had
+        // is disregarded: an archive nobody can currently list is not
+        // "still there" to be true or false about.
+        let fact = resolve_backup_fact(now, true, false, Some(true), Some(now), AgeLevel::Fresh, Some(passed(now)));
+        assert_eq!(fact.newest, None);
+        assert_eq!((fact.recent, fact.offsite, fact.verified), (None, None, None));
+        assert_eq!(fact.last_verified, None);
+    }
+
+    #[test]
+    fn configured_with_no_snapshot_yet_is_not_recent_or_verified_but_offsite_still_reads_the_device() {
+        let now = Utc::now();
+        let fact = resolve_backup_fact(now, true, true, Some(false), None, AgeLevel::None, None);
+        assert_eq!(fact.recent, Some(false));
+        assert_eq!(fact.verified, Some(false));
+        assert_eq!(fact.offsite, Some(true), "not the same device as the instance root");
+    }
+
+    #[test]
+    fn same_device_reads_offsite_false_whatever_recent_and_verified_say() {
+        let now = Utc::now();
+        let fact = resolve_backup_fact(now, true, true, Some(true), Some(now), AgeLevel::Fresh, Some(passed(now)));
+        assert_eq!(fact.offsite, Some(false));
+    }
+
+    #[test]
+    fn an_undeterminable_device_reads_offsite_indeterminate() {
+        let now = Utc::now();
+        let fact = resolve_backup_fact(now, true, true, None, Some(now), AgeLevel::Fresh, Some(passed(now)));
+        assert_eq!(fact.offsite, None);
+    }
+
+    #[test]
+    fn a_fresh_newest_backup_reads_recent_true() {
+        let now = Utc::now();
+        let fact = resolve_backup_fact(now, true, true, Some(false), Some(now), AgeLevel::Fresh, None);
+        assert_eq!(fact.recent, Some(true));
+    }
+
+    #[test]
+    fn a_stale_or_overdue_newest_backup_reads_recent_false() {
+        let now = Utc::now();
+        for age in [AgeLevel::Stale, AgeLevel::Overdue] {
+            let fact = resolve_backup_fact(now, true, true, Some(false), Some(now), age, None);
+            assert_eq!(fact.recent, Some(false), "{age:?}");
+        }
+    }
+
+    #[test]
+    fn a_present_snapshot_verified_within_thirty_days_reads_verified_true() {
+        let now = Utc::now();
+        let at = now - Duration::days(29) - Duration::hours(23);
+        let fact = resolve_backup_fact(now, true, true, Some(false), Some(now), AgeLevel::Fresh, Some(passed(at)));
+        assert_eq!(fact.verified, Some(true));
+        assert_eq!(fact.last_verified.as_ref().map(|v| v.ok), Some(true));
+    }
+
+    #[test]
+    fn verified_reads_false_past_thirty_days_on_a_failure_or_with_nothing_verified() {
+        let now = Utc::now();
+        let too_old = resolve_backup_fact(
+            now, true, true, Some(false), Some(now), AgeLevel::Fresh,
+            Some(passed(now - Duration::days(31))),
+        );
+        assert_eq!(too_old.verified, Some(false), "a pass more than 30 days ago proves nothing today");
+
+        let just_failed = resolve_backup_fact(
+            now, true, true, Some(false), Some(now), AgeLevel::Fresh,
+            Some(failed(now)),
+        );
+        assert_eq!(just_failed.verified, Some(false));
+
+        let never = resolve_backup_fact(now, true, true, Some(false), Some(now), AgeLevel::Fresh, None);
+        assert_eq!(never.verified, Some(false));
     }
 
     #[test]

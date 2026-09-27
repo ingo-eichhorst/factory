@@ -197,6 +197,9 @@ pub enum Unit {
     PerWeek,
     Seconds,
     Hours,
+    /// `backup_verified_age_days` (`#154`): a day is the unit a verification
+    /// this stale is actually read in, never a fraction of an hour.
+    Days,
     /// US dollars, API-equivalent (`unit_cost`) -- what the run's usage
     /// would have cost at the price table it was snapshotted with.
     Usd,
@@ -479,6 +482,38 @@ fn intake_lead_time_def() -> MetricDef {
     )
 }
 
+/// The backup fact's own shared source (`#154`): `BackupFact`, derived at
+/// most once per call, off the same captured state `GET /api/backup`
+/// itself reads -- never the report's own repository or Time Machine
+/// probes, which stay out of it.
+const BACKUP_SOURCE: &str = "factory_core::backup::resolve_backup_fact over the daemon's captured backup state (BackupFact)";
+
+fn backup_age_hours_def() -> MetricDef {
+    instance_wide(fixed(
+        "backup_age_hours",
+        "Backup age",
+        "Hours since the newest backup snapshot, whether or not it has been verified. No value, \
+         with a reason, when no backup is configured, the destination cannot be reached, or none \
+         has been taken yet.",
+        Unit::Hours,
+        Better::Lower,
+        BACKUP_SOURCE,
+    ))
+}
+
+fn backup_verified_age_days_def() -> MetricDef {
+    instance_wide(fixed(
+        "backup_verified_age_days",
+        "Backup verified age",
+        "Days since the newest verification of a snapshot still in the destination that passed. \
+         No value, with a reason, when no backup is configured, the destination cannot be reached, \
+         no snapshot exists yet, none has ever been verified, or the newest verification failed.",
+        Unit::Days,
+        Better::Lower,
+        BACKUP_SOURCE,
+    ))
+}
+
 fn agent_hours_def() -> MetricDef {
     fixed(
         "agent_hours",
@@ -577,6 +612,8 @@ pub fn registry() -> Vec<MetricDef> {
         scrap_rate_def(),
         agent_hours_def(),
         blocked_hours_def(),
+        backup_age_hours_def(),
+        backup_verified_age_days_def(),
         compliance_def("<framework>"),
         open_controls_def("<framework>"),
         bench_resolve_rate_def("<dataset>"),
@@ -645,6 +682,8 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         ["intake_lead_time"] => intake_lead_time_def(),
         ["agent_hours"] => agent_hours_def(),
         ["blocked_hours"] => blocked_hours_def(),
+        ["backup_age_hours"] => backup_age_hours_def(),
+        ["backup_verified_age_days"] => backup_verified_age_days_def(),
         ["compliance", framework] => compliance_def(framework),
         ["open_controls", framework] => open_controls_def(framework),
         ["bench", "resolve_rate", dataset] => bench_resolve_rate_def(dataset),
@@ -833,6 +872,8 @@ mod tests {
             "needs_info_rate",
             "duplicate_rate",
             "intake_lead_time",
+            "backup_age_hours",
+            "backup_verified_age_days",
         ] {
             assert!(ids.iter().any(|id| id == expect), "missing {expect} in {ids:?}");
         }
@@ -855,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn hour_metrics_are_scope_aware_and_only_goal_and_bench_families_are_instance_wide() {
+    fn hour_metrics_are_scope_aware_and_only_goal_bench_and_backup_families_are_instance_wide() {
         for id in ["agent_hours", "blocked_hours"] {
             let def = resolve(&MetricId::new(id).unwrap()).unwrap();
             assert_eq!(def.unit, Unit::Hours, "{id}");
@@ -864,6 +905,8 @@ mod tests {
         for id in [
             "bench.resolve_rate.eval-set-a",
             "goal_tasks_done.ship-compliant.cra-open-zero",
+            "backup_age_hours",
+            "backup_verified_age_days",
         ] {
             assert_eq!(
                 resolve(&MetricId::new(id).unwrap()).unwrap().coverage,
@@ -874,7 +917,22 @@ mod tests {
         assert!(registry()
             .into_iter()
             .filter(|d| d.coverage == MetricCoverage::InstanceWide)
-            .all(|d| d.id.starts_with("bench.") || d.id.starts_with("goal_tasks_done.")));
+            .all(|d| d.id.starts_with("bench.")
+                || d.id.starts_with("goal_tasks_done.")
+                || d.id.starts_with("backup_")));
+    }
+
+    #[test]
+    fn the_backup_metrics_are_hours_and_days_with_lower_the_better() {
+        let hours = resolve(&MetricId::new("backup_age_hours").unwrap()).unwrap();
+        assert_eq!((hours.unit, hours.better), (Unit::Hours, Better::Lower));
+        assert!(hours.available);
+
+        let days = resolve(&MetricId::new("backup_verified_age_days").unwrap()).unwrap();
+        assert_eq!((days.unit, days.better), (Unit::Days, Better::Lower));
+        assert!(days.available);
+
+        assert_eq!(serde_json::to_value(Unit::Days).unwrap(), serde_json::json!("days"));
     }
 
     #[test]

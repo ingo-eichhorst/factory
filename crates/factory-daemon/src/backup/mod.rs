@@ -23,10 +23,11 @@ pub use store::BackupStore;
 
 use chrono::{DateTime, Duration, Utc};
 use factory_core::backup::{
-    age_level, parse_archive_name, refuse_bad_snapshot_name, retain, warnings, AgeLevel, BackupConfig,
-    BackupFailure, BackupReport, BackupTrigger, CheckStatus, DestinationFacts, ExcludeRow, Group, IncludeRow,
-    KeptBy, ManifestInstance, Restoration, Snapshot, SnapshotRow, Verification, VerifySummary, WarningFacts, AUTHORED,
-    EXCLUDED, GRACE_HOURS, OPTIONAL, UNSCHEDULED_OVERDUE_HOURS, UNSCHEDULED_STALE_HOURS,
+    age_level, parse_archive_name, refuse_bad_snapshot_name, resolve_backup_fact, retain, warnings, AgeLevel,
+    BackupConfig, BackupFact, BackupFailure, BackupReport, BackupTrigger, CheckStatus, DestinationFacts, ExcludeRow,
+    Group, IncludeRow, KeptBy, ManifestInstance, RepositoryFact, Restoration, Snapshot, SnapshotRow, TimeMachineFact,
+    Verification, VerifySummary, WarningFacts, AUTHORED, EXCLUDED, GRACE_HOURS, OPTIONAL, UNSCHEDULED_OVERDUE_HOURS,
+    UNSCHEDULED_STALE_HOURS,
 };
 use factory_core::config::{Factory, CONFIG_FILE, FACTORY_DIR};
 use factory_core::error::{FactoryError, Result};
@@ -180,33 +181,41 @@ impl Engine {
     pub(crate) async fn backup_report(&self) -> Result<BackupReport> {
         let now = Utc::now();
         let factory = self.factory_snapshot();
-        let running = self.backup_busy.try_lock().is_err();
-        let recorded = self.backups.all().await?;
         // `#155`: gathered whether or not a backup is even configured --
         // source code is backed up by pushing it, not by this snapshot --
-        // so both branches below carry them.
+        // so both branches `report` handles carry them. Deliberately not
+        // part of `capture`: `backup_fact` (`#154`) must never spawn `git`
+        // or `tmutil`.
         let (code, time_machine) = tokio::join!(
             repos::repository_facts(&factory.root, &factory.config.scopes),
             repos::time_machine_fact(),
         );
+        let state = self.capture(now).await?;
+        Ok(report(&state, code, time_machine))
+    }
+
+    /// `#154`'s `BackupFact`, `at` bound to `now` -- the one L1 fact a
+    /// policy `daemon` check or a registry metric reads. Shares `capture`
+    /// with `backup_report`, but never the repository or Time Machine
+    /// probes above: this is the whole reason the two were split apart.
+    pub(crate) async fn backup_fact(&self, now: DateTime<Utc>) -> Result<BackupFact> {
+        let state = self.capture(now).await?;
+        Ok(fact(&state))
+    }
+
+    /// The one gather behind both `backup_report` and `backup_fact`: the
+    /// live config, whether an operation is already running, every
+    /// recorded `backup_events` row, and -- only when a backup is
+    /// configured -- the destination's own facts and its archive listing,
+    /// off-thread as today. `now` is a parameter so a metric's `as_of` and
+    /// a report's own clock are always the same instant this state was
+    /// gathered at.
+    async fn capture(&self, now: DateTime<Utc>) -> Result<Captured> {
+        let factory = self.factory_snapshot();
+        let running = self.backup_busy.try_lock().is_err();
+        let recorded = self.backups.all().await?;
         let Some(config) = factory.config.infrastructure.backup.clone() else {
-            return Ok(BackupReport {
-                now,
-                config: None,
-                destination: None,
-                age: AgeLevel::None,
-                due_by: None,
-                next_run: None,
-                running,
-                last_verified: None,
-                last_failure: None,
-                warnings: warnings(&WarningFacts { code: code.clone(), time_machine: Some(time_machine.clone()), ..Default::default() }),
-                snapshots: Vec::new(),
-                include: include_rows(false, None),
-                exclude: exclude_rows(false),
-                code,
-                time_machine: Some(time_machine),
-            });
+            return Ok(Captured { now, running, recorded, config: None, destination: None, found: Vec::new(), next_run: None });
         };
 
         let (root, destination, instance) =
@@ -217,97 +226,26 @@ impl Engine {
         .await
         .map_err(|e| FactoryError::Other(anyhow::anyhow!("listing the destination: {e}")))?;
 
-        let completed: Vec<&Snapshot> = recorded
-            .iter()
-            .filter_map(|r| match r {
-                Recorded::Completed { snapshot } => Some(snapshot),
-                _ => None,
-            })
-            .collect();
-        let verifications: Vec<&Verification> = recorded
-            .iter()
-            .filter_map(|r| match r {
-                Recorded::Verified { verification } => Some(verification),
-                _ => None,
-            })
-            .collect();
-        let kept = kept_by(&found, &config);
-        let snapshots: Vec<SnapshotRow> = found
-            .iter()
-            .zip(kept)
-            .map(|(f, kept_by)| SnapshotRow {
-                name: f.name.clone(),
-                at: f.at,
-                size_bytes: f.size_bytes,
-                files: completed.iter().find(|s| s.name == f.name).map(|s| s.files),
-                // Newest first, so the first one found is the latest word.
-                verified: verifications.iter().find(|v| v.snapshot == f.name).map(|v| v.summary()),
-                kept_by,
-                encrypted: false,
-            })
-            .collect();
-
-        let newest = snapshots.first().map(|s| s.at);
-        let (due_by, overdue_by) = match newest {
-            Some(at) => deadlines(&config, at),
-            None => (None, None),
-        };
-        let age = age_level(now, newest, due_by, overdue_by);
-        // Only verifications of archives still in the destination count: a
-        // pass on a snapshot since deleted proves nothing about what is left.
-        let last_verified: Option<VerifySummary> = verifications
-            .iter()
-            .find(|v| found.iter().any(|f| f.name == v.snapshot))
-            .map(|v| v.summary());
-        let last_failure: Option<BackupFailure> = recorded.iter().find_map(|r| match r {
-            Recorded::Failed { failure } => Some(failure.clone()),
-            _ => None,
-        });
         let next_run = match &config.schedule {
             Some(schedule) => {
-                let base = self.last_attempt(&factory, &config).await.unwrap_or(self.booted_at);
+                // The same "later of the newest attempt and the newest
+                // archive" `last_attempt` computes -- inlined against
+                // `recorded`/`found` already in hand, rather than a second
+                // `backups.all()` and a second `list_archives` over the
+                // same destination for the one gather this method promises.
+                let attempted = recorded
+                    .iter()
+                    .filter(|r| matches!(r, Recorded::Completed { .. } | Recorded::Failed { .. }))
+                    .map(|r| r.at())
+                    .max();
+                let base = attempted.max(found.first().map(|f| f.at)).unwrap_or(self.booted_at);
                 crate::schedule::next_after(&schedule.as_task_schedule(), base)
                     .ok()
                     .map(|next| next.max(now))
             }
             None => None,
         };
-        let warning_facts = WarningFacts {
-            configured: true,
-            destination: Some(facts.path.clone()),
-            destination_exists: facts.exists,
-            same_device: facts.same_device,
-            scheduled: config.schedule.is_some(),
-            newest,
-            age: Some(age),
-            last_verified: last_verified.as_ref().map(|v| (v.at, v.ok)),
-            failure_since_newest: last_failure
-                .as_ref()
-                .filter(|f| newest.is_none_or(|n| f.at > n))
-                .map(|f| (f.at, f.reason.clone())),
-            code: code.clone(),
-            time_machine: Some(time_machine.clone()),
-        };
-        // The include table's numbers are the newest snapshot this daemon
-        // took itself: the one it has a manifest summary for.
-        let newest_taken = snapshots.first().and_then(|row| completed.iter().find(|s| s.name == row.name).copied());
-        Ok(BackupReport {
-            now,
-            include: include_rows(config.include_logs, newest_taken),
-            exclude: exclude_rows(config.include_logs),
-            config: Some(config),
-            destination: Some(facts),
-            age,
-            due_by,
-            next_run,
-            running,
-            last_verified,
-            last_failure,
-            warnings: warnings(&warning_facts),
-            snapshots,
-            code,
-            time_machine: Some(time_machine),
-        })
+        Ok(Captured { now, running, recorded, config: Some(config), destination: Some(facts), found, next_run })
     }
 
     /// Take a backup now and apply retention after it. Refused while another
@@ -525,6 +463,180 @@ impl Engine {
     }
 }
 
+/// `Engine::capture`'s whole gather, shared by the `report` and `fact`
+/// projections below -- neither ever reads a file, the store or the clock
+/// again once this exists. `#155`'s repository and Time Machine probes are
+/// deliberately not here: `report` takes them as separate arguments, and
+/// `fact` never sees them at all.
+struct Captured {
+    now: DateTime<Utc>,
+    running: bool,
+    /// Every `backup_events` row: completed, failed and verified attempts.
+    recorded: Vec<Recorded>,
+    /// `None` when `infrastructure.backup` is not set.
+    config: Option<BackupConfig>,
+    /// `Some` exactly when `config` is -- the destination's own facts,
+    /// whether or not it turned out to exist.
+    destination: Option<DestinationFacts>,
+    /// Every archive of this instance found in the destination, newest
+    /// first. Empty when unconfigured or when the destination could not be
+    /// listed.
+    found: Vec<Found>,
+    next_run: Option<DateTime<Utc>>,
+}
+
+fn completed_of(recorded: &[Recorded]) -> Vec<&Snapshot> {
+    recorded
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Completed { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .collect()
+}
+
+fn verifications_of(recorded: &[Recorded]) -> Vec<&Verification> {
+    recorded
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Verified { verification } => Some(verification),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The newest verification of a snapshot still in the destination --
+/// `warnings`' and now `resolve_backup_fact`'s own rule: a pass on a
+/// snapshot retention has since deleted proves nothing about what is left.
+fn last_verified_of_present(verifications: &[&Verification], found: &[Found]) -> Option<VerifySummary> {
+    verifications.iter().find(|v| found.iter().any(|f| f.name == v.snapshot)).map(|v| v.summary())
+}
+
+/// `GET /api/backup`'s whole page, from a `Captured` state plus `#155`'s
+/// code and Time Machine facts (gathered separately, never part of
+/// `capture`). Byte-identical to the pre-`#154` `backup_report` for every
+/// existing case -- the split changed nothing about what the page shows.
+fn report(state: &Captured, code: Vec<RepositoryFact>, time_machine: TimeMachineFact) -> BackupReport {
+    let Some(config) = &state.config else {
+        return BackupReport {
+            now: state.now,
+            config: None,
+            destination: None,
+            age: AgeLevel::None,
+            due_by: None,
+            next_run: None,
+            running: state.running,
+            last_verified: None,
+            last_failure: None,
+            warnings: warnings(&WarningFacts {
+                code: code.clone(),
+                time_machine: Some(time_machine.clone()),
+                ..Default::default()
+            }),
+            snapshots: Vec::new(),
+            include: include_rows(false, None),
+            exclude: exclude_rows(false),
+            code,
+            time_machine: Some(time_machine),
+        };
+    };
+    let destination = state
+        .destination
+        .clone()
+        .expect("capture gathers destination facts whenever a backup is configured");
+
+    let completed = completed_of(&state.recorded);
+    let verifications = verifications_of(&state.recorded);
+    let kept = kept_by(&state.found, config);
+    let snapshots: Vec<SnapshotRow> = state
+        .found
+        .iter()
+        .zip(kept)
+        .map(|(f, kept_by)| SnapshotRow {
+            name: f.name.clone(),
+            at: f.at,
+            size_bytes: f.size_bytes,
+            files: completed.iter().find(|s| s.name == f.name).map(|s| s.files),
+            // Newest first, so the first one found is the latest word.
+            verified: verifications.iter().find(|v| v.snapshot == f.name).map(|v| v.summary()),
+            kept_by,
+            encrypted: false,
+        })
+        .collect();
+
+    let newest = snapshots.first().map(|s| s.at);
+    let (due_by, overdue_by) = match newest {
+        Some(at) => deadlines(config, at),
+        None => (None, None),
+    };
+    let age = age_level(state.now, newest, due_by, overdue_by);
+    let last_verified = last_verified_of_present(&verifications, &state.found);
+    let last_failure: Option<BackupFailure> = state.recorded.iter().find_map(|r| match r {
+        Recorded::Failed { failure } => Some(failure.clone()),
+        _ => None,
+    });
+    let warning_facts = WarningFacts {
+        configured: true,
+        destination: Some(destination.path.clone()),
+        destination_exists: destination.exists,
+        same_device: destination.same_device,
+        scheduled: config.schedule.is_some(),
+        newest,
+        age: Some(age),
+        last_verified: last_verified.as_ref().map(|v| (v.at, v.ok)),
+        failure_since_newest: last_failure
+            .as_ref()
+            .filter(|f| newest.is_none_or(|n| f.at > n))
+            .map(|f| (f.at, f.reason.clone())),
+        code: code.clone(),
+        time_machine: Some(time_machine.clone()),
+    };
+    // The include table's numbers are the newest snapshot this daemon took
+    // itself: the one it has a manifest summary for.
+    let newest_taken = snapshots.first().and_then(|row| completed.iter().find(|s| s.name == row.name).copied());
+    BackupReport {
+        now: state.now,
+        include: include_rows(config.include_logs, newest_taken),
+        exclude: exclude_rows(config.include_logs),
+        config: Some(config.clone()),
+        destination: Some(destination),
+        age,
+        due_by,
+        next_run: state.next_run,
+        running: state.running,
+        last_verified,
+        last_failure,
+        warnings: warnings(&warning_facts),
+        snapshots,
+        code,
+        time_machine: Some(time_machine),
+    }
+}
+
+/// `#154`'s `BackupFact`, from the same `Captured` state -- never the
+/// repository or Time Machine probes `report` takes as extra arguments:
+/// this is the whole reason a policy report or a metric call, which only
+/// ever wants this projection, never spawns `git` or `tmutil`.
+fn fact(state: &Captured) -> BackupFact {
+    let configured = state.config.is_some();
+    let destination_exists = state.destination.as_ref().is_some_and(|d| d.exists);
+    let same_device = state.destination.as_ref().and_then(|d| d.same_device);
+    let (newest, age, last_verified) = if let (Some(config), true) = (&state.config, destination_exists) {
+        let newest = state.found.first().map(|f| f.at);
+        let (due_by, overdue_by) = match newest {
+            Some(at) => deadlines(config, at),
+            None => (None, None),
+        };
+        let age = age_level(state.now, newest, due_by, overdue_by);
+        let verifications = verifications_of(&state.recorded);
+        let last_verified = last_verified_of_present(&verifications, &state.found);
+        (newest, age, last_verified)
+    } else {
+        (None, AgeLevel::None, None)
+    };
+    resolve_backup_fact(state.now, configured, destination_exists, same_device, newest, age, last_verified)
+}
+
 /// The include table: the database, the configs, every authored directory,
 /// and the two optional ones -- with numbers from the newest snapshot this
 /// daemon took, when there is one.
@@ -659,6 +771,90 @@ mod tests {
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
             .with_backup_store(BackupStore::open(&database).unwrap());
         (Arc::new(engine), base)
+    }
+
+    /// `engine_backing_up`, plus a `dsgvo` catalogue naming `backup_verified`
+    /// and `backup_offsite` -- `#154`'s engine test needs a real policy
+    /// report to prove the lazy evidence wiring end to end, not just
+    /// `resolve_backup_fact` on its own.
+    fn engine_backing_up_with_backup_policy(keep: &str, destination: &str) -> (Arc<Engine>, PathBuf) {
+        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_plugins::{Registry, SqliteStore};
+        let base = std::env::temp_dir().join(format!("factory-backup-policy-engine-{}", uuid::Uuid::new_v4()));
+        let root = base.join("instance");
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(root.join(".factory/config.yaml"), "version: 1\ninstance:\n  id: test\n  name: test\n").unwrap();
+        std::fs::write(root.join(".factory/knowledge/page.md"), "# A page\n").unwrap();
+        std::fs::write(
+            root.join(".factory/policies/dsgvo.yaml"),
+            "framework: dsgvo\n\
+             title: DSGVO\n\
+             kind: regulation\n\
+             controls:\n\
+             \x20\x20- id: art-32-restore\n\x20\x20\x20\x20title: Availability can be restored\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: daemon\n\x20\x20\x20\x20\x20\x20\x20\x20fact: backup_verified\n\
+             \x20\x20- id: art-32-offsite\n\x20\x20\x20\x20title: Offsite copy\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: daemon\n\x20\x20\x20\x20\x20\x20\x20\x20fact: backup_offsite\n",
+        )
+        .unwrap();
+        let database = root.join(".factory/factory.sqlite");
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
+        let mut company: factory_core::config::Scope =
+            serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let destination = base.join(destination);
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration { frameworks: vec!["dsgvo".to_string()], ..Default::default() },
+            quality: Default::default(),
+            infrastructure: serde_yaml_ng::from_str(&format!(
+                "backup:\n  destination: {}\n  keep: {keep}\n",
+                destination.display()
+            ))
+            .unwrap(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
+            .with_backup_store(BackupStore::open(&database).unwrap());
+        (Arc::new(engine), base)
+    }
+
+    /// `#154`, end to end: back up and verify, then a policy report's
+    /// `daemon: backup_verified` control reads `Satisfied` and its
+    /// `backup_offsite` control stays `Open` -- the temp destination sits
+    /// beside the instance, so it is not offsite.
+    #[tokio::test]
+    async fn backup_and_verify_satisfy_a_backup_verified_control_and_leave_backup_offsite_open() {
+        let (engine, base) = engine_backing_up_with_backup_policy("{ daily: 7 }", "destination");
+        engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        engine.backup_verify(None, "owner".into()).await.unwrap();
+
+        let report = engine.policy_report(None).await.unwrap();
+        let company = &report.rows.iter().find(|r| r.scope == "company").unwrap().statuses;
+
+        let verified = company.iter().find(|s| s.control.id == "art-32-restore").unwrap();
+        assert_eq!(
+            verified.status.kind(),
+            factory_core::policy::StatusKind::Satisfied,
+            "{:?}",
+            verified.status
+        );
+
+        let offsite = company.iter().find(|s| s.control.id == "art-32-offsite").unwrap();
+        assert_eq!(
+            offsite.status.kind(),
+            factory_core::policy::StatusKind::Open,
+            "the temp destination is on the same device as the instance: {:?}",
+            offsite.status
+        );
+
+        std::fs::remove_dir_all(base).ok();
     }
 
     /// `#155`, end to end through the engine: a scope's remote can carry a

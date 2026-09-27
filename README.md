@@ -763,7 +763,11 @@ evaluated scope, by id or by exact title; a title matching more than one is
 a finding, reported `open` rather than guessed at.
 
 The remaining four read facts the engine resolves once, synchronously, from
-the live config snapshot rather than a store:
+the live config snapshot rather than a store — except the `backup_*` names
+`daemon` also carries (`#154`), which read L1 Backup's own captured state
+(`Engine::backup_fact`: the backup store and one destination listing), and
+so are gathered lazily and asynchronously, only when some scope's applied
+controls actually name one:
 
 - **`roles { forbid: [grant...] }`** — satisfied when no agent Factory would
   actually dispatch in the scope (`Scope::agents_with`, resolved against
@@ -796,8 +800,28 @@ the live config snapshot rather than a store:
   mounted `http` interface binds to a loopback address, or none is mounted
   at all — `Some(true)` either way; a `bind` that does not parse as a socket
   address is left undetermined rather than guessed at with a DNS lookup),
-  and `power_assertion` (`daemon.power_assertion`). A `fact` outside this
-  set is a finding at catalogue load time and stays `open`.
+  `power_assertion` (`daemon.power_assertion`), and three read off L1
+  Backup's own fact (`#154`): `backup_recent` (the newest backup is within
+  its schedule, or the unscheduled yardstick, plus grace), `backup_offsite`
+  (the destination is not on the same device as the instance root), and
+  `backup_verified` (the newest verification of a snapshot still in the
+  destination passed, within 30 days). All three read `false` when no
+  backup is configured at all, and indeterminate (`open`, "could not be
+  determined") when the destination is missing or unmounted — neither
+  "yes" nor "no" is honest about an archive nobody can currently list. A
+  `fact` outside this whole set is a finding at catalogue load time and
+  stays `open`. For example, DSGVO Art. 32(1)(c),(d) (restore availability,
+  tested regularly) is not mechanically provable end to end, so it pairs a
+  daemon check with a person's attestation:
+
+  ```yaml
+  - id: art-32-restore
+    title: Availability of personal data can be restored in a timely manner, and restoring is tested regularly (Art. 32(1)(c),(d))
+    evidence:
+      - check: daemon
+        fact: backup_verified
+      - check: attestation
+  ```
 - **`dependencies`** — satisfied when the newest declared SBOM is within
   `sbom_max_age`, a build SBOM exists for the newest release when
   `built_sbom: true`, open findings do not exceed each `max_open` severity
@@ -947,6 +971,8 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `needs_info_rate` | needs-info decisions over every intake decision event, trailing 28 days -- the same shared denominator as `ready_rate` | the task journal's intake decision events (#165) |
 | `duplicate_rate` | wontfix decisions closed as a duplicate over every intake decision event, trailing 28 days -- an invalid or out-of-scope wontfix, and a split, count in the denominator only | the task journal's intake decision events (#165) |
 | `intake_lead_time` | median (nearest rank) of a ready decision's own time minus the item's `Intake.received_at`, seconds, over items released ready, trailing 28 days | the task journal's intake decision events (#165) |
+| `backup_age_hours` | hours since the newest backup snapshot | L1 Backup's own captured state (`BackupFact`, #154) |
+| `backup_verified_age_days` | days since the newest verification of a snapshot still in the destination that passed | L1 Backup's own captured state (`BackupFact`, #154) |
 
 `factory metrics --scope <name> --window day|14d|90d [ids…]` and `GET
 /api/metrics?ids=a,b&scope=<name>&window=day|14d|90d` select one scope plus
@@ -961,8 +987,10 @@ unsupported windows are errors, not empty reports.
 Every definition in the response registry carries `coverage`:
 `scope_aware` means it follows that subtree; `instance_wide` means it does
 not. `bench.*` and `goal_tasks_done.*` are deliberately instance-wide
-because neither underlying record belongs to a scope. All other current
-families are scope-aware.
+because neither underlying record belongs to a scope; `backup_age_hours`
+and `backup_verified_age_days` (#154) are instance-wide for the same
+reason L1 Backup itself is -- one instance, one destination. All other
+current families are scope-aware.
 
 `throughput_week`/`first_pass_yield`/`scrap_rate` read `production.rs`'s own
 daily grid directly rather than re-deriving "finished"/"scrapped"/
@@ -991,7 +1019,12 @@ day's ratio), `bench.resolve_rate.<dataset>` as of
 the run it came from settling. `throughput_week` stays as of now — a count
 over a window ending now is a current fact even when it is zero. The intake
 metrics (above) follow the same rule: as of the newest decision event
-counted, never the moment asked for. This is
+counted, never the moment asked for. `backup_age_hours`/
+`backup_verified_age_days` (#154) are as of the instant L1 Backup's own
+state was captured (`BackupFact.at`), read at most once per call; `None`,
+with the reason, when no backup is configured, the destination cannot be
+reached, no snapshot exists yet, none has ever been verified, or the newest
+verification failed — never a bare `0`. This is
 what lets a freshness window (a quality scenario's `max_age`) read a value
 as stale at all.
 
@@ -2662,9 +2695,22 @@ Every backup and verification is an event -- `backup_completed`,
 `backup_failed`, `backup_verified` -- and a row in an append-only
 `backup_events` table. A failure is never a crash: a full disk or an
 unmounted volume is a `backup_failed` with the reason, a warning on the page
-and a line in the log. Not yet: `age` encryption (a config asking for
-`encrypt_to` is refused at load rather than given plaintext it thinks is
-encrypted) and the policy facts and metrics.
+and a line in the log.
+
+**Policy facts and metrics (`#154`).** One `BackupFact` -- `configured`, the
+newest snapshot's timestamp, and `recent`/`offsite`/`verified`, each an
+`Option<bool>` -- is derived from the same captured state as the page above,
+off `Engine::backup_fact(now)`, but never the repository or Time Machine
+probes: a policy report or a metric call never spawns `git` or `tmutil`. No
+backup configured reads `false` on all three; a destination missing or
+unmounted reads indeterminate on all three, since even "no" would be a
+guess about an archive nobody can currently list. The "Policies" section
+above documents the three `daemon` facts this backs
+(`backup_recent`/`backup_offsite`/`backup_verified`) and the "Goals"
+section the two registry metrics (`backup_age_hours`/
+`backup_verified_age_days`) it also backs. Not yet: `age` encryption (a
+config asking for `encrypt_to` is refused at load rather than given
+plaintext it thinks is encrypted).
 
 ## Writing a plugin
 

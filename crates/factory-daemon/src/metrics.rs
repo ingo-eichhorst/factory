@@ -56,6 +56,16 @@
 //! by the task's own current scope, canonicalised, the same rule the
 //! run-backed families follow.
 //!
+//! `backup_age_hours` and `backup_verified_age_days` (#154) are read off one
+//! `Engine::backup_fact(now)` call, at most once per `metrics_for` call --
+//! the same `BackupFact` a policy `daemon` check reads, never the report's
+//! own repository or Time Machine probes. Both are `as_of` the fact's own
+//! `at` (the `now` passed to `backup_fact`), not the moment the metric was
+//! asked for -- the same rule every other family here keeps. A value with no
+//! backup configured, an unreachable destination, no snapshot yet, no
+//! verification yet, or a failed newest verification is `None`, with the
+//! reason spelled out rather than a bare `0`.
+//!
 //! ## Unknown vs. unavailable
 //!
 //! An id `metrics::resolve` has never heard of refuses the whole call --
@@ -120,6 +130,12 @@ fn is_usage_metric(id: &str) -> bool {
 
 fn is_hours_metric(id: &str) -> bool {
     matches!(id, "agent_hours" | "blocked_hours")
+}
+
+/// `#154`'s two backup metrics -- both read off one `Engine::backup_fact`
+/// call, at most once per `metrics_for` call.
+fn is_backup_metric(id: &str) -> bool {
+    matches!(id, "backup_age_hours" | "backup_verified_age_days")
 }
 
 fn is_intake_metric(id: &str) -> bool {
@@ -229,6 +245,7 @@ impl Engine {
             .any(|(id, r)| r.is_ok() && (is_operations_metric(id.as_str()) || is_usage_metric(id.as_str())));
         let needs_hours = computing.iter().any(|(id, r)| r.is_ok() && is_hours_metric(id.as_str()));
         let needs_intake = computing.iter().any(|(id, r)| r.is_ok() && is_intake_metric(id.as_str()));
+        let needs_backup = computing.iter().any(|(id, r)| r.is_ok() && is_backup_metric(id.as_str()));
 
         let production = if needs_production {
             Some(self.metric_production(canonical_scope, &target_scopes, window, now).await?)
@@ -279,6 +296,10 @@ impl Engine {
         } else {
             None
         };
+        // `#154`: never spawns `git`/`tmutil` -- `Engine::backup_fact` shares
+        // `capture` with `backup_report` but not its repository or Time
+        // Machine probes.
+        let backup_fact = if needs_backup { Some(self.backup_fact(now).await?) } else { None };
 
         let sources = ComputeSources {
             production: production.as_ref(),
@@ -286,6 +307,7 @@ impl Engine {
             runs: runs.as_deref(),
             hours: hours.as_ref(),
             intake: intake_input.as_ref(),
+            backup: backup_fact.as_ref(),
         };
         let mut computed: BTreeMap<MetricId, MetricValue> = BTreeMap::new();
         let mut computed_series: BTreeMap<MetricId, MetricSeries> = BTreeMap::new();
@@ -495,6 +517,8 @@ impl Engine {
             (MetricValue { id: id.clone(), value: Some(seconds as f64 / 3600.0), as_of: now, reason: None }, None)
         } else if is_intake_metric(id.as_str()) {
             (intake_value(id, sources.intake.expect("needs_intake set"), now), None)
+        } else if is_backup_metric(id.as_str()) {
+            (backup_metric_value(id, sources.backup.expect("needs_backup set")), None)
         } else if let Some(framework) = id.as_str().strip_prefix("compliance.") {
             (compliance_value(id, policy_report.expect("needs_policy set"), framework, now), None)
         } else if let Some(framework) = id.as_str().strip_prefix("open_controls.") {
@@ -985,6 +1009,7 @@ struct ComputeSources<'a> {
     runs: Option<&'a [factory_core::run::Run]>,
     hours: Option<&'a HoursTotals>,
     intake: Option<&'a IntakeInput>,
+    backup: Option<&'a factory_core::backup::BackupFact>,
 }
 
 /// What `Engine::intake_facts` read for one call: the decision facts
@@ -1026,6 +1051,56 @@ fn unavailable_value(id: &MetricId, reason: &str, now: DateTime<Utc>) -> MetricV
         value: None,
         as_of: now,
         reason: Some(reason.to_string()),
+    }
+}
+
+/// `backup_age_hours`/`backup_verified_age_days` (#154), off one
+/// `Engine::backup_fact` call -- `as_of` is always `fact.at`, the instant it
+/// was derived, never the moment the metric was asked for. `fact.recent`/
+/// `fact.verified` being `None` is `resolve_backup_fact`'s own signal that
+/// the destination could not be reached at all -- the only way either field
+/// reads indeterminate rather than a plain `false`.
+fn backup_metric_value(id: &MetricId, fact: &factory_core::backup::BackupFact) -> MetricValue {
+    if !fact.configured {
+        return unavailable_value(id, "no backup is configured", fact.at);
+    }
+    match id.as_str() {
+        "backup_age_hours" => match (fact.recent, fact.newest) {
+            (None, _) => unavailable_value(id, "the destination is not reachable", fact.at),
+            (Some(_), None) => unavailable_value(id, "no snapshot yet", fact.at),
+            (Some(_), Some(newest)) => MetricValue {
+                id: id.clone(),
+                value: Some(fact.at.signed_duration_since(newest).num_seconds() as f64 / 3600.0),
+                as_of: fact.at,
+                reason: None,
+            },
+        },
+        "backup_verified_age_days" => {
+            if fact.verified.is_none() {
+                return unavailable_value(id, "the destination is not reachable", fact.at);
+            }
+            if fact.newest.is_none() {
+                return unavailable_value(id, "no snapshot yet", fact.at);
+            }
+            match &fact.last_verified {
+                None => unavailable_value(id, "no snapshot in the destination has been verified", fact.at),
+                Some(v) if !v.ok => unavailable_value(
+                    id,
+                    &format!("the newest verification failed at {}", v.at.format("%Y-%m-%d %H:%M UTC")),
+                    fact.at,
+                ),
+                Some(v) => MetricValue {
+                    id: id.clone(),
+                    value: Some(fact.at.signed_duration_since(v.at).num_seconds() as f64 / 86400.0),
+                    as_of: fact.at,
+                    reason: None,
+                },
+            }
+        }
+        // `metrics::resolve` names only the two ids above for this family;
+        // an id it never returns cannot reach here (`compute_one`'s own
+        // catch-all doc comment).
+        _ => unavailable_value(id, "no computation wired for this metric yet", fact.at),
     }
 }
 
@@ -2424,6 +2499,158 @@ mod tests {
         let get = |id: &str| computed.values.iter().find(|v| v.id.as_str() == id).unwrap();
         assert_eq!(get("unit_cost").value, Some(3.0), "a failed run's cost is spread over what got done");
         assert_eq!(get("tokens_per_run").value, Some(2_000.0));
+    }
+
+    // -------------------------------------------------------------- backup (#154)
+
+    /// A throwaway instance with `infrastructure.backup` configured, for the
+    /// two backup metrics -- the daemon-side twin of `backup::tests`'
+    /// `engine_backing_up`, since that fixture is private to its own module.
+    fn backup_metrics_test_engine(destination: &str) -> (Arc<Engine>, PathBuf) {
+        let base = std::env::temp_dir().join(format!("factory-metrics-backup-{}", uuid::Uuid::new_v4()));
+        let root = base.join("instance");
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
+        std::fs::write(root.join(".factory/config.yaml"), "version: 1\ninstance:\n  id: test\n  name: test\n").unwrap();
+        std::fs::write(root.join(".factory/knowledge/page.md"), "# A page\n").unwrap();
+        let database = root.join(".factory/factory.sqlite");
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
+        let mut company: Scope = serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let destination = base.join(destination);
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: serde_yaml_ng::from_str(&format!(
+                "backup:\n  destination: {}\n  keep: {{ daily: 7 }}\n",
+                destination.display()
+            ))
+            .unwrap(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
+            .with_backup_store(crate::backup::BackupStore::open(&database).unwrap());
+        (Arc::new(engine), base)
+    }
+
+    #[tokio::test]
+    async fn backup_metrics_are_none_with_a_reason_when_no_backup_is_configured() {
+        let engine = test_engine(Vec::new());
+        let ids = [MetricId::new("backup_age_hours").unwrap(), MetricId::new("backup_verified_age_days").unwrap()];
+        let computed = engine.metrics(&ids, Utc::now()).await.unwrap();
+        for id in ["backup_age_hours", "backup_verified_age_days"] {
+            let v = computed.values.iter().find(|v| v.id.as_str() == id).unwrap();
+            assert_eq!(v.value, None, "{id}");
+            assert_eq!(v.reason.as_deref(), Some("no backup is configured"), "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn backup_metrics_read_the_newest_snapshot_and_verification_as_of_the_capture_instant() {
+        let (engine, base) = backup_metrics_test_engine("destination");
+        engine.backup_run(factory_core::backup::BackupTrigger::Manual, "owner".into()).await.unwrap();
+        engine.backup_verify(None, "owner".into()).await.unwrap();
+
+        let now = Utc::now();
+        let ids = [MetricId::new("backup_age_hours").unwrap(), MetricId::new("backup_verified_age_days").unwrap()];
+        let computed = engine.metrics(&ids, now).await.unwrap();
+
+        let age = computed.values.iter().find(|v| v.id.as_str() == "backup_age_hours").unwrap();
+        assert_eq!(age.reason, None, "{age:?}");
+        assert!(age.value.is_some_and(|h| (0.0..0.05).contains(&h)), "just taken: {age:?}");
+        assert_eq!(age.as_of, now, "as_of is the capture instant passed to Engine::metrics, never a stored timestamp");
+
+        let verified = computed.values.iter().find(|v| v.id.as_str() == "backup_verified_age_days").unwrap();
+        assert_eq!(verified.reason, None, "{verified:?}");
+        assert!(verified.value.is_some_and(|d| (0.0..0.05).contains(&d)), "just verified: {verified:?}");
+        assert_eq!(verified.as_of, now);
+
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[tokio::test]
+    async fn backup_verified_age_days_is_none_with_a_reason_before_anything_is_verified() {
+        let (engine, base) = backup_metrics_test_engine("destination");
+        engine.backup_run(factory_core::backup::BackupTrigger::Manual, "owner".into()).await.unwrap();
+
+        let computed = engine
+            .metrics(&[MetricId::new("backup_verified_age_days").unwrap()], Utc::now())
+            .await
+            .unwrap();
+        let v = &computed.values[0];
+        assert_eq!(v.value, None);
+        assert_eq!(v.reason.as_deref(), Some("no snapshot in the destination has been verified"));
+
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failed_verification_reads_backup_verified_age_days_none_but_leaves_backup_age_hours_alone() {
+        let (engine, base) = backup_metrics_test_engine("destination");
+        let snapshot = engine.backup_run(factory_core::backup::BackupTrigger::Manual, "owner".into()).await.unwrap();
+
+        // Flip a byte in the middle of the archive -- the same corruption
+        // `archive::tests::a_damaged_archive_fails_verification_and_says_so`
+        // uses -- so verification fails honestly rather than being refused
+        // outright (a lock held, or the snapshot not found).
+        let mut bytes = std::fs::read(&snapshot.path).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0xff;
+        std::fs::write(&snapshot.path, &bytes).unwrap();
+        let verification = engine.backup_verify(None, "owner".into()).await.unwrap();
+        assert!(!verification.ok, "{:?}", verification.checks);
+
+        let ids = [MetricId::new("backup_age_hours").unwrap(), MetricId::new("backup_verified_age_days").unwrap()];
+        let computed = engine.metrics(&ids, Utc::now()).await.unwrap();
+
+        let age = computed.values.iter().find(|v| v.id.as_str() == "backup_age_hours").unwrap();
+        assert!(age.value.is_some(), "the snapshot exists whether or not it verifies: {age:?}");
+
+        let verified = computed.values.iter().find(|v| v.id.as_str() == "backup_verified_age_days").unwrap();
+        assert_eq!(verified.value, None, "never a bare 0 for a failed verification: {verified:?}");
+        assert!(
+            verified.reason.as_deref().is_some_and(|r| r.starts_with("the newest verification failed at")),
+            "{verified:?}"
+        );
+
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[tokio::test]
+    async fn backup_age_hours_reads_the_destination_unreachable_before_it_is_ever_mounted() {
+        // Before any backup has run, the configured destination has never
+        // been created -- indeterminate, never "no snapshot yet", which
+        // would claim more than a missing mount point can honestly say.
+        let (engine, base) = backup_metrics_test_engine("destination");
+        let computed = engine
+            .metrics(&[MetricId::new("backup_age_hours").unwrap()], Utc::now())
+            .await
+            .unwrap();
+        let v = &computed.values[0];
+        assert_eq!(v.value, None);
+        assert_eq!(v.reason.as_deref(), Some("the destination is not reachable"));
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[tokio::test]
+    async fn backup_age_hours_reads_no_snapshot_yet_once_the_destination_exists_but_is_empty() {
+        let (engine, base) = backup_metrics_test_engine("destination");
+        std::fs::create_dir_all(base.join("destination")).unwrap();
+        let computed = engine
+            .metrics(&[MetricId::new("backup_age_hours").unwrap()], Utc::now())
+            .await
+            .unwrap();
+        let v = &computed.values[0];
+        assert_eq!(v.value, None);
+        assert_eq!(v.reason.as_deref(), Some("no snapshot yet"));
+        std::fs::remove_dir_all(base).ok();
     }
 
     // -------------------------------------------------------- default ids

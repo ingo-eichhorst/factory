@@ -241,13 +241,16 @@ export function seriesIndex(metricsAnswer) {
 }
 
 /// `{value, as_of, reason}` -> a plain number string per `Unit`
-/// (`ratio`/`count`/`per_week`/`seconds`/`hours`/`usd`), or an em dash for
-/// `null` -- display only, never used in a computation. `unit` is `null` for
-/// a manual key result (no registry entry backs it) or when the registry has
-/// not answered yet; either way this falls back to a trimmed plain number
-/// rather than guessing a unit. `hours` is #150/#162's `agent_hours`/
+/// (`ratio`/`count`/`per_week`/`seconds`/`hours`/`days`/`usd`), or an em dash
+/// for `null` -- display only, never used in a computation. `unit` is `null`
+/// for a manual key result (no registry entry backs it) or when the registry
+/// has not answered yet; either way this falls back to a trimmed plain
+/// number rather than guessing a unit. `hours` is #150/#162's `agent_hours`/
 /// `blocked_hours`: one decimal, the same precision the dashboard's own
-/// agent-hours tiles show, never rounded to a whole hour.
+/// agent-hours tiles show, never rounded to a whole hour. `days` is #154's
+/// `backup_verified_age_days`: the same one-decimal precision as `hours`,
+/// since a verification's age is read in whole-ish days, not fractions of
+/// an hour.
 export function formatUnitValue(value, unit) {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
   switch (unit) {
@@ -261,6 +264,8 @@ export function formatUnitValue(value, unit) {
       return formatSeconds(value);
     case "hours":
       return `${value.toFixed(1)}h`;
+    case "days":
+      return `${value.toFixed(1)}d`;
     case "usd":
       return value > 0 && value < 0.005 ? "<$0.01" : `$${value.toFixed(2)}`;
     default:
