@@ -33,6 +33,8 @@ import {
   keepText,
   keptByText,
   lastVerifiedText,
+  nextDrillLevel,
+  nextDrillText,
   rowVerifyState,
   scheduleText,
   timeMachineText,
@@ -90,6 +92,7 @@ function hero(report) {
         ${fact("Where it is", destinationText(dest), destinationLevel(dest))}
         ${fact("Schedule", scheduleText(config), config.schedule ? null : "warn")}
         ${fact("Next backup", report.next_run ? `${fmtIn(report.now, report.next_run)} · ${fmtWhen(report.next_run)}` : "only when somebody runs one")}
+        ${fact("Next drill", nextDrillText(report), nextDrillLevel(report))}
         ${fact("Last verified", lastVerifiedText(report), report.last_verified ? (report.last_verified.ok ? "ok" : "bad") : "warn")}
         ${fact("Encrypted", config.encrypt_to
           ? `encrypted to ${config.encrypt_to}`

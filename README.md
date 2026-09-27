@@ -1275,7 +1275,15 @@ currently-`Triggered` signpost across every scenario, named alongside the
 scenario it belongs to, so a dashboard or inbox reader does not have to
 walk every card itself. The L6 Scenarios UI slice
 (`ui/js/{scenarios,scenarios-model}.js`, not part of this slice) is
-expected to read this field and render it on the dashboard.
+expected to read this field and render it on the dashboard. A signpost
+names any registry metric with no scenario code of its own required to
+support it -- `backup_age_hours` and `backup_verified_age_days` (`#154`,
+"Policy facts and metrics" under "Backup") work exactly the same way as
+`throughput_week` or `unit_cost`:
+`signposts: [{ metric: backup_age_hours, above: 30 }]` reads `Triggered`
+once the newest snapshot is more than 30 hours old, a scenario-authored
+signpost on top of the backup job's own drills (`#156`), not a
+replacement for them.
 
 **Promote.** `factory scenario promote <name> --scope S [--agent A]`
 creates one ordinary task per newly-open control in `S`'s own slice of the
@@ -2983,6 +2991,47 @@ names that are this instance's archives -- nothing else in a shared folder is
 ever listed or deleted -- and never deletes the newest. Each rule keeps the
 newest snapshot of each of its most recent days, ISO weeks or months (in the
 schedule's timezone) that have one.
+
+**Verification drills (`#156`).** `infrastructure.backup.verify_schedule`
+(`{ cron, timezone }`, the same shape as `schedule`) is a second, independent
+schedule for `factory backup verify` itself, so a restore is proven on a
+cadence, not only when somebody remembers to run one:
+
+```yaml
+infrastructure:
+  backup:
+    destination: /Volumes/Backup/factory
+    schedule: { cron: "0 3 * * *", timezone: Europe/Berlin }
+    verify_schedule: { cron: "0 4 * * 0", timezone: Europe/Berlin } # weekly drill
+```
+
+The same job loop runs it, right after the backup check: a drill is due at
+the verification schedule's next slot after the newest verification recorded
+of *any* trigger -- a manual `factory backup verify` satisfies it too -- or
+after the daemon booted if nothing has ever been verified, so a daemon down
+across several slots drills exactly once when it returns, the same catch-up
+the backup itself gets. When a backup and a drill are due on the same tick,
+the backup runs first and the drill waits for a later tick, so it always
+verifies the fresh snapshot rather than racing it. The drill calls the same
+`backup_verify` a person would, unnamed (the newest snapshot) and with no
+identity, so it takes the same `backup_busy` exclusion and records the same
+`backup_verified` event and row, `by: "schedule"` -- pass or fail feeds
+`last_verified` and the policy facts and metrics below exactly as a manual
+verify does. Busy or no snapshot yet record nothing, so the slot stays due
+and the next tick tries again; a corrupted archive is recorded `ok: false`,
+same as a manual verify's own failure. An encrypted newest snapshot
+(`#152`) is never drilled -- the job never holds an identity -- so it is a
+skip, not a failure: nothing is recorded, and the reason (`newest snapshot
+is encrypted; verify it with --identity`) is logged once per due slot,
+never once a minute for as long as it stays that way. `factory backup
+status` prints the drill's own schedule and its next slot as `next drill`,
+and the skip reason when one applies; the L1 › Backup page's hero shows the
+same next to "Next backup". `verify_schedule` is optional and
+`BackupConfig` stays `deny_unknown_fields`, so an existing config without it
+is unchanged and an older daemon refuses the new key outright rather than
+silently ignoring it. Out of scope: taking a backup as part of a drill,
+auto-restore, and a backup-specific scenario path -- see "Signposts" below
+for how a scenario reads backup age instead.
 
 **Warnings are facts, not guesses:** no backup configured; the last attempt
 failed, with its reason; the destination missing (only its last component is

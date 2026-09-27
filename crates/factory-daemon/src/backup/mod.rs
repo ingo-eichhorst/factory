@@ -24,10 +24,10 @@ pub use store::BackupStore;
 use chrono::{DateTime, Duration, Utc};
 use factory_core::backup::{
     age_level, looks_encrypted, parse_archive_name, refuse_bad_snapshot_name, resolve_backup_fact, retain, warnings,
-    AgeLevel, BackupConfig, BackupFact, BackupFailure, BackupReport, BackupTrigger, CheckStatus, DestinationFacts,
-    ExcludeRow, Group, IncludeRow, KeptBy, ManifestInstance, RepositoryFact, Restoration, Snapshot, SnapshotRow,
-    TimeMachineFact, Verification, VerifyCheck, VerifySummary, WarningFacts, AUTHORED, ENCRYPTED_ARCHIVE_SUFFIX,
-    EXCLUDED, GRACE_HOURS, OPTIONAL, UNSCHEDULED_OVERDUE_HOURS, UNSCHEDULED_STALE_HOURS,
+    AgeLevel, BackupConfig, BackupFact, BackupFailure, BackupReport, BackupTrigger, CheckStatus,
+    DestinationFacts, ExcludeRow, Group, IncludeRow, KeptBy, ManifestInstance, RepositoryFact, Restoration, Snapshot,
+    SnapshotRow, TimeMachineFact, Verification, VerifyCheck, VerifySummary, WarningFacts, AUTHORED,
+    ENCRYPTED_ARCHIVE_SUFFIX, EXCLUDED, GRACE_HOURS, OPTIONAL, UNSCHEDULED_OVERDUE_HOURS, UNSCHEDULED_STALE_HOURS,
 };
 use factory_core::config::{Factory, CONFIG_FILE, FACTORY_DIR};
 use factory_core::error::{FactoryError, Result};
@@ -163,6 +163,10 @@ pub fn validate_config(factory: &Factory) -> Result<()> {
         crate::schedule::next_after(&schedule.as_task_schedule(), Utc::now())
             .map_err(|e| FactoryError::BadRequest(format!("infrastructure.backup.schedule: {e}")))?;
     }
+    if let Some(schedule) = &backup.verify_schedule {
+        crate::schedule::next_after(&schedule.as_task_schedule(), Utc::now())
+            .map_err(|e| FactoryError::BadRequest(format!("infrastructure.backup.verify_schedule: {e}")))?;
+    }
     if let Some(encrypt_to) = &backup.encrypt_to {
         parse_recipient(encrypt_to)?;
     }
@@ -214,6 +218,21 @@ impl Engine {
         attempted.max(newest)
     }
 
+    /// `#156`: the newest verification recorded of any trigger -- a manual
+    /// verify satisfies a drill's own slot exactly as a manual backup
+    /// satisfies `last_attempt`'s. `None` before anything has ever been
+    /// verified, so the caller falls back to `booted_at`.
+    async fn last_verified_at(&self) -> Option<DateTime<Utc>> {
+        let recorded = self.backups.all().await.unwrap_or_default();
+        recorded
+            .iter()
+            .filter_map(|r| match r {
+                Recorded::Verified { verification } => Some(verification.at),
+                _ => None,
+            })
+            .max()
+    }
+
     /// `GET /api/backup`. Never fails for a destination that is missing or
     /// unreadable: that is a fact the report carries, and a warning.
     pub(crate) async fn backup_report(&self) -> Result<BackupReport> {
@@ -253,7 +272,16 @@ impl Engine {
         let running = self.backup_busy.try_lock().is_err();
         let recorded = self.backups.all().await?;
         let Some(config) = factory.config.infrastructure.backup.clone() else {
-            return Ok(Captured { now, running, recorded, config: None, destination: None, found: Vec::new(), next_run: None });
+            return Ok(Captured {
+                now,
+                running,
+                recorded,
+                config: None,
+                destination: None,
+                found: Vec::new(),
+                next_run: None,
+                next_verify: None,
+            });
         };
 
         let (root, destination, instance) =
@@ -283,7 +311,34 @@ impl Engine {
             }
             None => None,
         };
-        Ok(Captured { now, running, recorded, config: Some(config), destination: Some(facts), found, next_run })
+
+        // `#156`: the drill's own next slot -- the same "inline against
+        // `recorded` already in hand" `next_run` follows above, so this
+        // gather still costs one `backups.all()`, not two.
+        let next_verify = match &config.verify_schedule {
+            Some(schedule) => {
+                let last_verified = recorded
+                    .iter()
+                    .filter_map(|r| match r {
+                        Recorded::Verified { verification } => Some(verification.at),
+                        _ => None,
+                    })
+                    .max();
+                let base = last_verified.unwrap_or(self.booted_at);
+                crate::schedule::next_after(&schedule.as_task_schedule(), base).ok().map(|next| next.max(now))
+            }
+            None => None,
+        };
+        Ok(Captured {
+            now,
+            running,
+            recorded,
+            config: Some(config),
+            destination: Some(facts),
+            found,
+            next_run,
+            next_verify,
+        })
     }
 
     /// Take a backup now and apply retention after it. Refused while another
@@ -410,6 +465,22 @@ impl Engine {
         identity: Option<PathBuf>,
         by: String,
     ) -> Result<Verification> {
+        self.backup_verify_at(snapshot, identity, by, Utc::now()).await
+    }
+
+    /// `backup_verify`, with the verification's own `at` supplied rather
+    /// than read off the clock. `#156`'s job loop passes its own tick's
+    /// `now` here, so a scheduled drill's `Recorded::Verified.at` -- and so
+    /// the next slot `next_after` computes from -- is exactly the clock a
+    /// test drives, never a race against real time. Every other caller goes
+    /// through `backup_verify` above, which is just this with `Utc::now()`.
+    async fn backup_verify_at(
+        self: &Arc<Self>,
+        snapshot: Option<String>,
+        identity: Option<PathBuf>,
+        by: String,
+        at: DateTime<Utc>,
+    ) -> Result<Verification> {
         let (factory, config) = self.backup_config()?;
         if let Some(name) = &snapshot {
             refuse_bad_snapshot_name(name)?;
@@ -439,7 +510,6 @@ impl Engine {
             })?,
         };
 
-        let at = Utc::now();
         let started = std::time::Instant::now();
         let path: PathBuf = destination.join(&target.name);
         let instance_id = factory.config.instance.id.clone();
@@ -472,6 +542,69 @@ impl Engine {
         tracing::info!(snapshot = %verification.snapshot, ok = verification.ok, "backup verified");
         self.bus.publish(Event::BackupVerified { verification: verification.summary() });
         Ok(verification)
+    }
+
+    /// `#156`: run a verification drill if `verify_schedule`'s own next slot
+    /// is due at `now`. Shares `backup_verify`'s `backup_busy` exclusion,
+    /// `backup_verified` event and row -- busy or no snapshot leave nothing
+    /// recorded, so the slot stays due and the next tick tries again. An
+    /// encrypted newest snapshot is checked here, directly off the listing,
+    /// rather than by matching `backup_verify_at`'s own refusal text: the
+    /// drill never holds an identity, so it never even attempts one, and
+    /// logs the skip once per slot rather than every tick. Never panics:
+    /// any other error `backup_verify_at` returns (busy, or anything else)
+    /// is logged and swallowed -- the job's whole promise.
+    async fn maybe_verify(self: &Arc<Self>, factory: &Factory, config: &BackupConfig, now: DateTime<Utc>) {
+        let Some(schedule) = &config.verify_schedule else {
+            self.clear_verify_skip();
+            return;
+        };
+        let base = self.last_verified_at().await.unwrap_or(self.booted_at);
+        let due = match crate::schedule::next_after(&schedule.as_task_schedule(), base) {
+            Ok(due) => due,
+            Err(e) => {
+                tracing::warn!("infrastructure.backup.verify_schedule: {e}");
+                return;
+            }
+        };
+        if due > now {
+            self.clear_verify_skip();
+            return;
+        }
+
+        let destination = config.destination.clone();
+        let instance = factory.config.instance.name.clone();
+        let found = tokio::task::spawn_blocking(move || list_archives(&destination, &instance)).await.unwrap_or_default();
+        let Some(newest) = found.first() else {
+            // No snapshot: nothing to verify, nothing recorded. The slot
+            // stays due, so the very next tick with a snapshot drills it.
+            self.clear_verify_skip();
+            return;
+        };
+        if newest.encrypted {
+            self.log_verify_skip_once(due, "newest snapshot is encrypted; verify it with --identity");
+            return;
+        }
+        self.clear_verify_skip();
+        if let Err(e) = self.backup_verify_at(None, None, "schedule".into(), now).await {
+            tracing::warn!("verification drill: {e}");
+        }
+    }
+
+    /// Log `reason` at most once for a given due `slot` -- otherwise an
+    /// encrypted newest snapshot with no identity would log the same line
+    /// on every tick for as long as it stays that way.
+    fn log_verify_skip_once(&self, slot: DateTime<Utc>, reason: &str) {
+        let mut state = self.verify_drill_skip.lock().unwrap_or_else(|p| p.into_inner());
+        let unchanged = state.as_ref().is_some_and(|(s, r)| *s == slot && r == reason);
+        if !unchanged {
+            tracing::info!("verification drill skipped: {reason}");
+        }
+        *state = Some((slot, reason.to_string()));
+    }
+
+    fn clear_verify_skip(&self) {
+        *self.verify_drill_skip.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     /// Restore one named snapshot into a new root. Authorization makes this
@@ -561,6 +694,9 @@ struct Captured {
     /// listed.
     found: Vec<Found>,
     next_run: Option<DateTime<Utc>>,
+    /// `#156`: the verification drill's own next slot -- `None` when
+    /// `verify_schedule` is not configured.
+    next_verify: Option<DateTime<Utc>>,
 }
 
 fn completed_of(recorded: &[Recorded]) -> Vec<&Snapshot> {
@@ -603,6 +739,8 @@ fn report(state: &Captured, code: Vec<RepositoryFact>, time_machine: TimeMachine
             age: AgeLevel::None,
             due_by: None,
             next_run: None,
+            next_verify: None,
+            verify_skipped: None,
             running: state.running,
             last_verified: None,
             last_failure: None,
@@ -674,6 +812,13 @@ fn report(state: &Captured, code: Vec<RepositoryFact>, time_machine: TimeMachine
     // The include table's numbers are the newest snapshot this daemon took
     // itself: the one it has a manifest summary for.
     let newest_taken = snapshots.first().and_then(|row| completed.iter().find(|s| s.name == row.name).copied());
+    // `#156`: a plain projection of the same `newest_encrypted` fact the
+    // warnings strip already reads -- never the job loop's own
+    // `verify_drill_skip` state, which only throttles how often it logs and
+    // would otherwise make this field stale for up to a tick after the
+    // config or the destination changes.
+    let verify_skipped = (config.verify_schedule.is_some() && newest_encrypted)
+        .then(|| "newest snapshot is encrypted; verify it with --identity".to_string());
     BackupReport {
         now: state.now,
         include: include_rows(config.include_logs, newest_taken),
@@ -683,6 +828,8 @@ fn report(state: &Captured, code: Vec<RepositoryFact>, time_machine: TimeMachine
         age,
         due_by,
         next_run: state.next_run,
+        next_verify: state.next_verify,
+        verify_skipped,
         running: state.running,
         last_verified,
         last_failure,
@@ -766,10 +913,16 @@ fn exclude_rows(include_logs: bool) -> Vec<ExcludeRow> {
 }
 
 /// The daemon job: once a minute, take a backup if the schedule says one is
-/// due. Due is counted from the later of the newest attempt and the newest
-/// archive, so a daemon that was down at 03:00 takes the night's backup as
-/// soon as it is back, exactly once -- the same "survives a missed night"
-/// a scheduled task gets. With no schedule configured this does nothing.
+/// due, then -- `#156` -- run a verification drill if `verify_schedule`'s
+/// own schedule says one is. Each is counted from its own base: a backup
+/// from the later of the newest attempt and the newest archive, a drill
+/// from the newest verification recorded of any trigger; either falls back
+/// to when the daemon booted if there is nothing yet. So a daemon that was
+/// down across several slots catches up exactly once for each, the same
+/// "survives a missed night" a scheduled task gets. When a backup is also
+/// due, it runs first and the drill waits for a later tick, so it never
+/// verifies a snapshot mid-write. With neither configured this does
+/// nothing.
 pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     let mut ticker = tokio::time::interval(JOB_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -780,29 +933,41 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 if *shutdown.borrow() { return; }
             }
         }
-        let factory = engine.factory_snapshot();
-        let Some(config) = factory.config.infrastructure.backup.clone() else { continue };
-        let Some(schedule) = config.schedule.clone() else { continue };
-        let base = engine.last_attempt(&factory, &config).await.unwrap_or(engine.booted_at);
-        let due = match crate::schedule::next_after(&schedule.as_task_schedule(), base) {
-            Ok(due) => due,
-            Err(e) => {
-                tracing::warn!("infrastructure.backup.schedule: {e}");
-                continue;
-            }
-        };
-        if due > Utc::now() {
-            continue;
-        }
-        // Busy (a person's backup operation) is not a failure: the
-        // next tick looks again.
-        if engine.backup_busy.try_lock().is_err() {
-            continue;
-        }
-        // Its failures are recorded, published and logged inside; nothing
-        // here can take the daemon down.
-        let _ = engine.backup_run(BackupTrigger::Schedule, "schedule".into()).await;
+        tick(&engine, Utc::now()).await;
     }
+}
+
+/// One tick of [`run`]'s loop, `now` passed in rather than read off the
+/// clock so a test can drive it directly instead of waiting on real time.
+/// Never takes the daemon down: every failure below is logged and
+/// swallowed, the same promise `backup_run`'s and `backup_verify`'s own
+/// callers already keep.
+async fn tick(engine: &Arc<Engine>, now: DateTime<Utc>) {
+    let factory = engine.factory_snapshot();
+    let Some(config) = factory.config.infrastructure.backup.clone() else { return };
+
+    if let Some(schedule) = &config.schedule {
+        let base = engine.last_attempt(&factory, &config).await.unwrap_or(engine.booted_at);
+        match crate::schedule::next_after(&schedule.as_task_schedule(), base) {
+            Ok(due) if due <= now => {
+                // Busy (a person's backup operation) is not a failure: the
+                // next tick looks again, and the drill waits for it too.
+                if engine.backup_busy.try_lock().is_err() {
+                    return;
+                }
+                // Its failures are recorded, published and logged inside;
+                // nothing here can take the daemon down.
+                let _ = engine.backup_run(BackupTrigger::Schedule, "schedule".into()).await;
+                // The drill runs on a later tick, against the fresh
+                // snapshot this one just took.
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("infrastructure.backup.schedule: {e}"),
+        }
+    }
+
+    engine.maybe_verify(&factory, &config, now).await;
 }
 
 #[cfg(test)]
@@ -951,6 +1116,282 @@ mod tests {
         let path = std::env::temp_dir().join(format!("factory-backup-identity-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&path, identity.to_string().expose_secret()).unwrap();
         (path, recipient)
+    }
+
+    /// A fixed instant, so a job-loop test's own math never depends on when
+    /// the test happened to run.
+    fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
+    }
+
+    /// `engine_backing_up`, plus `verify_schedule` (and, optionally,
+    /// `encrypt_to`) and a `booted_at` fixed at construction rather than at
+    /// whatever instant the test happened to run -- `#156`'s own fixture for
+    /// the drill's job-loop tests, so `tick`'s due/catch-up math is exact
+    /// date arithmetic, never a race against real time.
+    fn engine_with_drill(
+        keep: &str,
+        destination: &str,
+        verify_cron: &str,
+        encrypt_to: Option<&str>,
+        booted_at: DateTime<Utc>,
+    ) -> (Arc<Engine>, PathBuf) {
+        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_plugins::{Registry, SqliteStore};
+        let base = std::env::temp_dir().join(format!("factory-backup-drill-engine-{}", uuid::Uuid::new_v4()));
+        let root = base.join("instance");
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
+        std::fs::write(root.join(".factory/config.yaml"), "version: 1\ninstance:\n  id: test\n  name: test\n").unwrap();
+        std::fs::write(root.join(".factory/knowledge/page.md"), "# A page\n").unwrap();
+        let database = root.join(".factory/factory.sqlite");
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
+        let mut company: factory_core::config::Scope =
+            serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let destination = base.join(destination);
+        let encrypt_line = encrypt_to.map(|r| format!("\n  encrypt_to: {r}")).unwrap_or_default();
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: serde_yaml_ng::from_str(&format!(
+                "backup:\n  destination: {}\n  keep: {keep}\n  verify_schedule: {{ cron: \"{verify_cron}\" }}{encrypt_line}\n",
+                destination.display()
+            ))
+            .unwrap(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let mut engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
+            .with_backup_store(BackupStore::open(&database).unwrap());
+        engine.booted_at = booted_at;
+        (Arc::new(engine), base)
+    }
+
+    /// `#156`: a due slot with a snapshot already in the destination records
+    /// exactly one `Verified { by: "schedule" }` row and a `backup_verified`
+    /// event, and never rewrites the archive.
+    #[tokio::test]
+    async fn a_due_drill_records_exactly_one_verified_by_schedule_and_leaves_the_archive_untouched() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        let mut events = engine.bus.subscribe();
+        let path = PathBuf::from(&snapshot.path);
+        let before_bytes = std::fs::read(&path).unwrap();
+        let before_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let now = booted_at + Duration::minutes(2);
+        tick(&engine, now).await;
+
+        assert!(matches!(events.recv().await.unwrap(), Event::BackupVerified { .. }));
+        let verified: Vec<Verification> = engine
+            .backups
+            .all()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r {
+                Recorded::Verified { verification } => Some(verification),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verified.len(), 1, "{verified:?}");
+        assert_eq!(verified[0].by, "schedule");
+        assert_eq!(verified[0].at, now, "the drill's own clock, never the wall clock");
+        assert_eq!(verified[0].snapshot, snapshot.name);
+
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes, "a drill never rewrites the archive");
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before_mtime);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A second tick in the same due slot drills nothing more: the first
+    /// tick's own `Verified` already moved the base past it.
+    #[tokio::test]
+    async fn a_second_tick_in_the_same_slot_drills_nothing_more() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        let now = booted_at + Duration::minutes(2);
+        tick(&engine, now).await;
+        let after_first = engine.backups.all().await.unwrap().len();
+        tick(&engine, now).await;
+        assert_eq!(engine.backups.all().await.unwrap().len(), after_first, "the same due slot drills only once");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A manual verify satisfies the drill's own slot, and catch-up drills
+    /// exactly once regardless of how many slots were missed -- never one
+    /// per missed slot.
+    #[tokio::test]
+    async fn a_manual_verify_satisfies_the_slot_and_catch_up_drills_exactly_once() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        let now = booted_at + Duration::minutes(5);
+        engine
+            .backups
+            .append(Recorded::Verified {
+                verification: Verification {
+                    snapshot: snapshot.name.clone(),
+                    at: now - Duration::minutes(3),
+                    by: "owner".into(),
+                    ok: true,
+                    checks: vec![],
+                    duration_ms: 0,
+                },
+            })
+            .await
+            .unwrap();
+
+        tick(&engine, now).await;
+        let verified_count =
+            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+        assert_eq!(verified_count, 2, "the seeded manual verify, plus exactly one catch-up drill");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// Busy (a person's own backup operation) is not a failure: the drill
+    /// records nothing and the next tick runs it.
+    #[tokio::test]
+    async fn a_busy_drill_is_skipped_and_the_next_tick_runs_it() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        let now = booted_at + Duration::minutes(2);
+
+        let guard = engine.backup_busy.lock().await;
+        tick(&engine, now).await;
+        assert!(
+            !engine.backups.all().await.unwrap().iter().any(|r| matches!(r, Recorded::Verified { .. })),
+            "busy: nothing recorded"
+        );
+        drop(guard);
+
+        tick(&engine, now).await;
+        let verified_count =
+            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+        assert_eq!(verified_count, 1);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// An empty destination records nothing -- the slot stays due -- and a
+    /// backup taken afterward makes the next tick drill exactly once.
+    #[tokio::test]
+    async fn no_snapshot_yet_leaves_the_slot_due_until_a_backup_exists() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        let now = booted_at + Duration::minutes(2);
+
+        tick(&engine, now).await;
+        assert!(engine.backups.all().await.unwrap().is_empty(), "no snapshot: nothing recorded");
+
+        engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        tick(&engine, now).await;
+        let verified_count =
+            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+        assert_eq!(verified_count, 1);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A corrupted archive is recorded `ok: false`, exactly like a manual
+    /// verify's own failure, and the loop keeps drilling on later slots.
+    #[tokio::test]
+    async fn a_corrupted_archive_drill_records_ok_false_and_the_next_slot_still_drills() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        let mut bytes = std::fs::read(&snapshot.path).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xff;
+        std::fs::write(&snapshot.path, &bytes).unwrap();
+
+        let now = booted_at + Duration::minutes(2);
+        tick(&engine, now).await;
+        let recorded = engine.backups.all().await.unwrap();
+        let first = recorded
+            .iter()
+            .find_map(|r| match r { Recorded::Verified { verification } => Some(verification), _ => None })
+            .unwrap();
+        assert!(!first.ok, "{:?}", first.checks);
+        assert_eq!(first.by, "schedule");
+
+        // The loop keeps going: the next slot still drills.
+        tick(&engine, now + Duration::minutes(1)).await;
+        let verified_count =
+            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+        assert_eq!(verified_count, 2);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// An encrypted newest snapshot is a skip, never a record: the drill
+    /// never holds an identity. The report names the reason regardless of
+    /// ticking (a plain projection of the live facts), and the job's own
+    /// skip tracker moves only when the due slot changes, so the log is not
+    /// spammed every tick.
+    #[tokio::test]
+    async fn an_encrypted_newest_snapshot_is_skipped_and_the_report_names_the_reason() {
+        let (_, recipient) = generated_identity();
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", Some(&recipient), booted_at);
+        engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+
+        let report = engine.backup_report().await.unwrap();
+        assert_eq!(
+            report.verify_skipped.as_deref(),
+            Some("newest snapshot is encrypted; verify it with --identity")
+        );
+        assert!(report.next_verify.is_some());
+
+        let now = booted_at + Duration::minutes(2);
+        assert_eq!(*engine.verify_drill_skip.lock().unwrap(), None);
+        tick(&engine, now).await;
+        assert!(
+            !engine.backups.all().await.unwrap().iter().any(|r| matches!(r, Recorded::Verified { .. })),
+            "an encrypted snapshot with no identity is refused, never recorded"
+        );
+        let logged = engine.verify_drill_skip.lock().unwrap().clone();
+        assert!(logged.is_some(), "the skip is tracked so the job logs it only once per slot");
+
+        // Ticking again in the same slot must not move the tracked slot.
+        tick(&engine, now).await;
+        assert_eq!(engine.verify_drill_skip.lock().unwrap().clone(), logged);
+
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A config with no `verify_schedule` round-trips with no drill
+    /// scheduled -- `next_verify`/`verify_skipped` are both `None`, and
+    /// every existing backup-only behaviour is unchanged.
+    #[tokio::test]
+    async fn a_config_without_verify_schedule_round_trips_with_no_drill_scheduled() {
+        let (engine, base) = engine_backing_up("{ daily: 7 }", "destination");
+        let report = engine.backup_report().await.unwrap();
+        assert_eq!(report.next_verify, None);
+        assert_eq!(report.verify_skipped, None);
+        assert_eq!(report.config.as_ref().unwrap().verify_schedule, None);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// The daemon-start refusal covers `verify_schedule` exactly like
+    /// `schedule`: an unfireable cron is refused before the daemon does
+    /// anything else, never discovered a minute later as a warning log.
+    #[tokio::test]
+    async fn validate_config_refuses_an_unfireable_verify_schedule_the_same_way_it_refuses_a_bad_backup_schedule() {
+        let (engine, base) = engine_backing_up("{ daily: 7 }", "destination");
+        let mut factory = engine.factory_snapshot();
+        factory.config.infrastructure.backup.as_mut().unwrap().verify_schedule =
+            Some(factory_core::backup::BackupSchedule { cron: "not a cron".into(), timezone: None });
+        let e = validate_config(&factory).unwrap_err();
+        assert!(e.to_string().contains("verify_schedule"), "{e}");
+        std::fs::remove_dir_all(base).ok();
     }
 
     /// `engine_backing_up`, plus a `dsgvo` catalogue naming `backup_verified`

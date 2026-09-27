@@ -22,6 +22,8 @@ import {
   keepText,
   keptByText,
   lastVerifiedText,
+  nextDrillLevel,
+  nextDrillText,
   rowVerifyState,
   scheduleText,
   timeMachineText,
@@ -183,6 +185,34 @@ test("the schedule, retention and last verification read as a person would say t
   assert.equal(keepText(REPORT.config), "7 daily · 4 weekly · 6 monthly");
   assert.equal(lastVerifiedText(REPORT), "passed 2h 55m ago (2026-09-25 09:05 UTC)");
   assert.equal(lastVerifiedText({ ...REPORT, last_verified: null }), "never");
+});
+
+// -------------------------------------------------------------------- #156
+
+test("nextDrillText reads next_verify against the report's own clock, and names a skip reason", () => {
+  const withDrill = {
+    ...REPORT,
+    config: { ...REPORT.config, verify_schedule: { cron: "*/30 * * * *" } },
+    next_verify: "2026-09-26T00:00:00Z",
+  };
+  assert.match(nextDrillText(withDrill), /^in /);
+  assert.match(nextDrillText(withDrill), /2026-09-26 00:00 UTC/);
+  assert.equal(nextDrillLevel(withDrill), null);
+
+  const skipped = { ...withDrill, verify_skipped: "newest snapshot is encrypted; verify it with --identity" };
+  assert.match(nextDrillText(skipped), /skipped: newest snapshot is encrypted/);
+  assert.equal(nextDrillLevel(skipped), "warn");
+
+  const none = { ...REPORT, config: { ...REPORT.config, verify_schedule: undefined }, next_verify: null, verify_skipped: null };
+  assert.equal(nextDrillText(none), "no drill scheduled");
+  assert.equal(nextDrillLevel(none), "warn");
+
+  assert.equal(nextDrillText(null), "no drill scheduled");
+});
+
+test("the hero draws the next drill from the report, not recomputed here", () => {
+  assert.match(view, /nextDrillText\(report\)/);
+  assert.match(view, /Next drill/);
 });
 
 test("the config snippet is the issue's block, minimal -- encrypt_to is optional and left out", () => {

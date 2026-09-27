@@ -121,6 +121,26 @@ export function scheduleText(config) {
   return `${s.cron} (${s.timezone || "UTC"})`;
 }
 
+/// `#156`: the verification drill's own next slot, next to the backup's
+/// own "Next backup". `report.verify_skipped` is a plain fact from the
+/// daemon (the newest snapshot is currently encrypted, say) -- never
+/// recomputed here, only appended.
+export function nextDrillText(report) {
+  const config = report && report.config;
+  if (!config || !config.verify_schedule) return "no drill scheduled";
+  const base = report.next_verify ? `${fmtIn(report.now, report.next_verify)} · ${fmtWhen(report.next_verify)}` : "no drill scheduled";
+  return report.verify_skipped ? `${base} (skipped: ${report.verify_skipped})` : base;
+}
+
+/// The level the "Next drill" fact is drawn at: a warning when there is
+/// none configured, or when the one that is would currently be skipped.
+export function nextDrillLevel(report) {
+  const config = report && report.config;
+  if (!config || !config.verify_schedule) return "warn";
+  if (report.verify_skipped) return "warn";
+  return null;
+}
+
 export function keepText(config) {
   const k = config && config.keep;
   if (!k) return MISSING;
