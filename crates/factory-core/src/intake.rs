@@ -22,10 +22,20 @@
 //! answers, and what a triager adds itself from a vault search. A confirmed
 //! one blocks the verdict in [`evaluate`], same as a failed axis.
 //!
+//! A possible security report (`#170` phase 1) moves to the front of every
+//! open column ([`board`]) and blocks `ready`, `split` and `wontfix` until a
+//! person confirms or dismisses it ([`check_decision`]) -- flagged by
+//! `intake add --security`, `flag-security`, or an assessment whose category
+//! is `security-report`. The confirmed record ([`ConfirmedSecurityReport`])
+//! is written as plain data with no methods, so `#193`'s later L0 fact port
+//! moves it unchanged; the CRA reporting clock that reads it (24h/72h/14d
+//! deadlines) is `#157`'s, phase 2 of this issue -- intake never computes a
+//! deadline or calls up into it.
+//!
 //! What this slice leaves out, on purpose: auto-closing a duplicate, any
 //! embedding or LLM search, closed tasks or GitHub search, the per-child
-//! check (`#180`), the security fast lane with its CRA clock, the `triager`
-//! role, and every outbound effect. An assessment is never posted anywhere;
+//! check (`#180`), the CRA reporting clock and its deadlines (`#170` phase
+//! 2, `#157`), and every outbound effect. An assessment is never posted anywhere;
 //! it is only journaled. The four intake registry metrics (`#165`,
 //! [`registry_metric`]) are the one exception: they read the decision
 //! events this module already defines, but still no store --
@@ -151,6 +161,12 @@ pub struct NewIntake {
     pub requester: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// `--security`/the UI checkbox: flag it as a possible security report
+    /// at receipt, the same as `flag-security` right after (`#170`). A
+    /// caller can only *add* scrutiny this way, never remove it, so it is
+    /// safe to accept from anyone who may hand something in at all.
+    #[serde(default)]
+    pub security: bool,
 }
 
 /// The intake record on a task. Lives in the task's JSON row, so it needed
@@ -181,6 +197,182 @@ pub struct Intake {
     /// [`candidates_with_verdicts`] for the two put together.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<DuplicateCandidate>,
+    /// A possible, confirmed or dismissed security report (`#170` phase 1).
+    /// Absent for every item nobody has ever flagged. Boxed: `Intake` rides
+    /// as part of `Task` through several deep, unboxed async call chains
+    /// (`fail_run`, `mirror_to_task`, `due_now`), and `SecurityFlag`'s three
+    /// strings and two optional decisions would otherwise inflate every one
+    /// of them in a debug build -- the same reason `Payload::Operations`
+    /// boxes its report. Serde is transparent through the box either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<Box<SecurityFlag>>,
+}
+
+// ----------------------------------------------------------------- security
+
+/// Where a security flag stands. `Possible` is a suspicion, not a finding:
+/// [`check_decision`] refuses to release, split or close the item on it
+/// alone, and [`board`] moves it to the front of the queue instead --
+/// visible, never auto-rejected, never auto-released either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityState {
+    Possible,
+    Confirmed,
+    Dismissed,
+}
+
+impl SecurityState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Possible => "possible",
+            Self::Confirmed => "confirmed",
+            Self::Dismissed => "dismissed",
+        }
+    }
+}
+
+/// A security flag on an [`Intake`] record: who raised it and why, and --
+/// once a person has looked -- who decided, when, and on what evidence.
+/// Evidence is required for a dismissal, optional for a confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityFlag {
+    pub state: SecurityState,
+    /// A person's name, `the owner`, or `agent <name>` -- `Caller::describe`,
+    /// the same vocabulary `Intake::requester` uses.
+    pub flagged_by: String,
+    pub flagged_at: DateTime<Utc>,
+    /// One line: why this might be a security report. May be empty for
+    /// `intake add --security`, which flags before anyone has looked.
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<DateTime<Utc>>,
+    /// What verifies the decision -- required to dismiss, optional to
+    /// confirm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+/// Flag `intake`'s item as a possible security report -- `intake add
+/// --security`/the UI checkbox at receipt, `flag-security` on an item
+/// already in the gate, or an assessment whose category is
+/// `security-report` (`intake_assess`, deterministic, no classifier).
+/// Refused once the item already carries a flag of any kind: a flag a
+/// person has already confirmed or dismissed is a decision, not something a
+/// second flag reopens, and a flag still `possible` is not restated either
+/// -- there is nothing a second flag would add to it.
+pub fn flag_security(existing: Option<&SecurityFlag>, reason: &str, by: &str, now: DateTime<Utc>) -> Result<SecurityFlag, String> {
+    if let Some(f) = existing {
+        return Err(format!(
+            "this item already carries a security flag ({}); flagging it again changes nothing",
+            f.state.as_str()
+        ));
+    }
+    Ok(SecurityFlag {
+        state: SecurityState::Possible,
+        flagged_by: by.to_string(),
+        flagged_at: now,
+        reason: reason.trim().to_string(),
+        decided_by: None,
+        decided_at: None,
+        evidence: None,
+    })
+}
+
+/// A person confirms or dismisses. `Owner`-only (`access.rs`) -- flagging is
+/// an agent's to do, deciding never is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityVerdict {
+    Confirm,
+    Dismiss,
+}
+
+/// Confirm or dismiss a `possible` security flag. Refused when there is no
+/// flag, when it was already decided, and -- for a dismissal -- when no
+/// evidence clears it. A confirmation's evidence is optional: what makes a
+/// report real is often the report itself.
+pub fn decide_security(
+    intake: &Intake,
+    verdict: SecurityVerdict,
+    evidence: &str,
+    by: &str,
+    now: DateTime<Utc>,
+) -> Result<SecurityFlag, String> {
+    let flag = intake.security.as_deref().ok_or("this item carries no security flag to confirm or dismiss")?;
+    if flag.state != SecurityState::Possible {
+        return Err(format!(
+            "this item's security report was already {} by {}",
+            flag.state.as_str(),
+            flag.decided_by.as_deref().unwrap_or("someone")
+        ));
+    }
+    let evidence = evidence.trim().to_string();
+    if verdict == SecurityVerdict::Dismiss && evidence.is_empty() {
+        return Err("dismissing a security report needs the evidence that clears it -- no silent dismissal".into());
+    }
+    Ok(SecurityFlag {
+        state: match verdict {
+            SecurityVerdict::Confirm => SecurityState::Confirmed,
+            SecurityVerdict::Dismiss => SecurityState::Dismissed,
+        },
+        decided_by: Some(by.to_string()),
+        decided_at: Some(now),
+        evidence: if evidence.is_empty() { None } else { Some(evidence) },
+        ..flag.clone()
+    })
+}
+
+/// A confirmed security report, once it has left `possible` behind: the
+/// awareness time (always [`Intake::received_at`], never the confirmation or
+/// fix time), the source and who confirmed it, over the scope subtree
+/// (`Engine::confirmed_security_reports`). Plain serde data with no methods,
+/// so `#193`'s later move into an L0 fact port carries it unchanged; the CRA
+/// reporting clock (`#157`, phase 2) is the one thing that ever reads it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfirmedSecurityReport {
+    pub item: String,
+    pub scope: String,
+    pub awareness_at: DateTime<Utc>,
+    pub source: IntakeSource,
+    pub confirmed_by: String,
+    pub confirmed_at: DateTime<Utc>,
+}
+
+/// `task`'s confirmed report, if it has one -- whatever the task's current
+/// status or stage, since a confirmed report survives release
+/// (`TaskDelete`'s own guard, below). `None` for every other task, flagged
+/// or not.
+pub fn confirmed_report(task: &Task) -> Option<ConfirmedSecurityReport> {
+    let intake = task.intake.as_ref()?;
+    let flag = intake.security.as_ref()?;
+    if flag.state != SecurityState::Confirmed {
+        return None;
+    }
+    Some(ConfirmedSecurityReport {
+        item: task.id.clone(),
+        scope: task.scope.clone(),
+        awareness_at: intake.received_at,
+        source: intake.source.clone(),
+        confirmed_by: flag.decided_by.clone().unwrap_or_default(),
+        confirmed_at: flag.decided_at.unwrap_or(intake.received_at),
+    })
+}
+
+/// Why `task` may not be deleted, when a confirmed security report makes it
+/// CRA evidence -- `None` for anything else. Checked before every delete,
+/// whatever the task's status: released, done, or still in intake.
+pub fn confirmed_security_delete_guard(task: &Task) -> Option<String> {
+    let report = confirmed_report(task)?;
+    Some(format!(
+        "task {} carries a confirmed security report (confirmed by {} at {}); it is CRA evidence and may not be deleted",
+        task.id,
+        report.confirmed_by,
+        report.confirmed_at.to_rfc3339(),
+    ))
 }
 
 // --------------------------------------------------------------- duplicates
@@ -1523,6 +1715,33 @@ pub fn check_decision(intake: &Intake, decision: &Decision) -> Result<Vec<String
             intake.stage.as_str()
         ));
     }
+    // No auto-rejection, and no auto-release either (`#170`). A `possible`
+    // security report refuses everything but needs-info -- asking the
+    // requester is not a rejection -- until a person confirms or dismisses
+    // it (`intake security <id> confirm|dismiss`). Once confirmed, wontfix
+    // still refuses: a real security report is not "won't fix", only a
+    // dismissal is. A dismissed one is an ordinary item again.
+    if let Some(flag) = &intake.security {
+        match (flag.state, decision) {
+            (SecurityState::Possible, Decision::NeedsInfo { .. }) => {}
+            (SecurityState::Possible, _) => {
+                return Err(
+                    "this item is a possible security report: a person must confirm or dismiss it \
+                     first (`intake security <id> confirm|dismiss`) before it can be released, split \
+                     or closed"
+                        .into(),
+                );
+            }
+            (SecurityState::Confirmed, Decision::Wontfix { .. }) => {
+                return Err(
+                    "this item is a confirmed security report: wontfix is for a dismissal, not a \
+                     confirmed one"
+                        .into(),
+                );
+            }
+            _ => {}
+        }
+    }
     match decision {
         Decision::Ready { .. } => match &intake.triage {
             None => Err("nothing to release on: assess the item first".into()),
@@ -1771,6 +1990,16 @@ pub struct IntakeCard {
     /// triager's answer (`#166`, [`candidates_with_verdicts`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<DuplicateCandidate>,
+    /// A possible, confirmed or dismissed security report (`#170`). Absent
+    /// for every item nobody has ever flagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<SecurityFlag>,
+}
+
+/// `possible` or `confirmed` -- the fast lane [`board`] moves to the front
+/// of every open column. `dismissed` is an ordinary item again.
+fn in_fast_lane(card: &IntakeCard) -> bool {
+    matches!(&card.security, Some(f) if matches!(f.state, SecurityState::Possible | SecurityState::Confirmed))
 }
 
 /// The label a part carries: the id of the item it was split from.
@@ -1953,6 +2182,9 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>, definitions: &BTreeMap<String, 
             next_actions: next_actions(intake, definitions.get(&task.scope).unwrap_or(&default_definition)),
             parent: task.labels.get(PARENT_LABEL).cloned(),
             candidates: candidates_with_verdicts(intake),
+            // Unboxed here: a card is never part of a `Task` on a deep,
+            // unboxed async call chain the way `Intake` itself is.
+            security: intake.security.as_deref().cloned(),
         };
         match intake.stage {
             IntakeStage::Received => columns.received.push(card),
@@ -1978,8 +2210,13 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>, definitions: &BTreeMap<String, 
             }
         }
     }
+    // A possible or confirmed security report goes first in every open
+    // column, oldest first within that band (`#170`); an ordinary item, or a
+    // dismissed one, sorts exactly as it always has.
     for column in [&mut columns.received, &mut columns.triaging, &mut columns.needs_info] {
-        column.sort_by(|a, b| a.received_at.cmp(&b.received_at).then(a.id.cmp(&b.id)));
+        column.sort_by(|a, b| {
+            in_fast_lane(b).cmp(&in_fast_lane(a)).then(a.received_at.cmp(&b.received_at)).then(a.id.cmp(&b.id))
+        });
     }
     columns.ready.sort_by(|a, b| {
         let at = |c: &IntakeCard| c.decision.as_ref().map(|d| d.at);
@@ -2027,6 +2264,15 @@ pub fn triage_instructions(item: &Task, record: &Intake, definition: &ReadyDefin
         title = item.title,
         body = if item.instructions.trim().is_empty() { "(no description)" } else { item.instructions.trim() },
     ));
+    if let Some(flag) = &record.security {
+        out.push_str(&format!(
+            "This item is already flagged as a {state} security report ({reason}). `--decide` will \
+             not release, split or close it while it stays `possible` -- a person has to confirm or \
+             dismiss it first.\n\n",
+            state = flag.state.as_str(),
+            reason = if flag.reason.trim().is_empty() { "no reason given" } else { flag.reason.trim() },
+        ));
+    }
     out.push_str("## Possible duplicates\n\n");
     if record.candidates.is_empty() {
         out.push_str("None found among the open tasks Factory searched.\n\n");
@@ -2099,7 +2345,10 @@ pub fn triage_instructions(item: &Task, record: &Intake, definition: &ReadyDefin
     );
     out.push_str(&CATEGORIES.join(", "));
     out.push_str(
-        " -- or another if none fits.\n\
+        " -- or another if none fits. A suspected vulnerability or security incident is always \
+         `security-report`, whatever else it might also look like -- Factory flags it as a \
+         possible security report on your submission, and you may never propose `wontfix` for \
+         one: only a person confirms or dismisses it.\n\
          6. Impact and urgency, each high, medium or low; the priority (P1-P4) follows from \
          the two.\n\
          7. Complexity 1-10 from the expected touch points, one level more per material \
@@ -2610,6 +2859,7 @@ mod tests {
             questions: vec![],
             decision: None,
             candidates: vec![],
+            security: None,
         }
     }
 
@@ -2654,6 +2904,116 @@ mod tests {
             duplicate_of: Some("t-42".into()),
         };
         assert!(check_decision(&item, &named).is_ok());
+    }
+
+    fn flagged(state: SecurityState) -> SecurityFlag {
+        let flag = flag_security(None, "looks like an injection", "agent triager", at()).unwrap();
+        match state {
+            SecurityState::Possible => flag,
+            SecurityState::Confirmed => SecurityFlag { state, decided_by: Some("the owner".into()), decided_at: Some(at()), ..flag },
+            SecurityState::Dismissed => SecurityFlag {
+                state,
+                decided_by: Some("the owner".into()),
+                decided_at: Some(at()),
+                evidence: Some("not exploitable".into()),
+                ..flag
+            },
+        }
+    }
+
+    #[test]
+    fn a_possible_security_report_refuses_ready_split_and_wontfix_but_allows_needs_info() {
+        let mut item = open(Some(evaluate(&assessment(), &def(), &no_reference(), "x", at())));
+        item.security = Some(Box::new(flagged(SecurityState::Possible)));
+        let ready = Decision::Ready { run: false };
+        assert!(check_decision(&item, &ready).unwrap_err().contains("confirm or dismiss"));
+        assert!(check_decision(&item, &Decision::Split { parts: vec![] }).unwrap_err().contains("confirm or dismiss"));
+        let wontfix =
+            Decision::Wontfix { reason: WontfixReason::Invalid, evidence: "e".into(), duplicate_of: None };
+        assert!(check_decision(&item, &wontfix).unwrap_err().contains("confirm or dismiss"));
+        assert!(check_decision(&item, &Decision::NeedsInfo { questions: vec!["which endpoint?".into()] }).is_ok());
+    }
+
+    #[test]
+    fn a_confirmed_security_report_may_release_but_never_wontfix() {
+        let mut item = open(Some(evaluate(&assessment(), &def(), &no_reference(), "x", at())));
+        item.security = Some(Box::new(flagged(SecurityState::Confirmed)));
+        assert!(check_decision(&item, &Decision::Ready { run: false }).is_ok());
+        let wontfix =
+            Decision::Wontfix { reason: WontfixReason::Invalid, evidence: "e".into(), duplicate_of: None };
+        assert!(check_decision(&item, &wontfix).unwrap_err().contains("dismissal"));
+    }
+
+    #[test]
+    fn a_dismissed_security_report_is_an_ordinary_item_again() {
+        let mut item = open(Some(evaluate(&assessment(), &def(), &no_reference(), "x", at())));
+        item.security = Some(Box::new(flagged(SecurityState::Dismissed)));
+        assert!(check_decision(&item, &Decision::Ready { run: false }).is_ok());
+        let wontfix =
+            Decision::Wontfix { reason: WontfixReason::Invalid, evidence: "e".into(), duplicate_of: None };
+        assert!(check_decision(&item, &wontfix).is_ok());
+    }
+
+    #[test]
+    fn flag_security_refuses_once_the_item_already_carries_a_flag() {
+        let flag = flag_security(None, "reported at intake", "the owner", at()).unwrap();
+        assert_eq!(flag.state, SecurityState::Possible);
+        assert_eq!(flag.flagged_by, "the owner");
+        let err = flag_security(Some(&flag), "again", "someone else", at()).unwrap_err();
+        assert!(err.contains("already carries a security flag"));
+    }
+
+    #[test]
+    fn decide_security_needs_an_existing_possible_flag_and_evidence_to_dismiss() {
+        let item = open(None);
+        assert!(
+            decide_security(&item, SecurityVerdict::Confirm, "", "the owner", at()).unwrap_err().contains("no security flag")
+        );
+        let mut flagged_item = item.clone();
+        flagged_item.security = Some(Box::new(flag_security(None, "suspicious", "agent triager", at()).unwrap()));
+        let err =
+            decide_security(&flagged_item, SecurityVerdict::Dismiss, "  ", "the owner", at()).unwrap_err();
+        assert!(err.contains("no silent dismissal"));
+        let confirmed =
+            decide_security(&flagged_item, SecurityVerdict::Confirm, "", "the owner", at()).unwrap();
+        assert_eq!(confirmed.state, SecurityState::Confirmed);
+        assert_eq!(confirmed.decided_by.as_deref(), Some("the owner"));
+        assert_eq!(confirmed.evidence, None);
+        let mut decided_item = flagged_item.clone();
+        decided_item.security = Some(Box::new(confirmed));
+        let again = decide_security(&decided_item, SecurityVerdict::Dismiss, "actually exploitable", "the owner", at());
+        assert!(again.unwrap_err().contains("already confirmed"));
+        let dismissed =
+            decide_security(&flagged_item, SecurityVerdict::Dismiss, "false positive", "the owner", at()).unwrap();
+        assert_eq!(dismissed.state, SecurityState::Dismissed);
+        assert_eq!(dismissed.evidence.as_deref(), Some("false positive"));
+    }
+
+    #[test]
+    fn confirmed_report_reads_awareness_at_as_received_at_never_the_decision_time() {
+        let mut record = received(Some("https://github.com/o/r/issues/9"));
+        record.received_at = at() - chrono::Duration::hours(30);
+        record.security = Some(Box::new(SecurityFlag {
+            state: SecurityState::Confirmed,
+            flagged_by: "agent triager".into(),
+            flagged_at: record.received_at,
+            reason: "unauthenticated RCE".into(),
+            decided_by: Some("the owner".into()),
+            decided_at: Some(at()),
+            evidence: None,
+        }));
+        let t = task("sec-1", TaskStatus::Pending, Some(record.clone()));
+        let report = confirmed_report(&t).expect("a confirmed flag makes a report");
+        assert_eq!(report.awareness_at, record.received_at);
+        assert_ne!(report.awareness_at, at());
+        assert_eq!(report.confirmed_at, at());
+        assert!(confirmed_security_delete_guard(&t).is_some_and(|why| why.contains("CRA evidence")));
+
+        let mut possible = received(None);
+        possible.security = Some(Box::new(flag_security(None, "maybe", "x", at()).unwrap()));
+        let unconfirmed = task("sec-2", TaskStatus::Intake, Some(possible));
+        assert!(confirmed_report(&unconfirmed).is_none());
+        assert!(confirmed_security_delete_guard(&unconfirmed).is_none());
     }
 
     #[test]
@@ -2709,6 +3069,7 @@ mod tests {
             questions: vec![],
             decision: None,
             candidates: vec![],
+            security: None,
         }
     }
 
@@ -3032,6 +3393,44 @@ mod tests {
         assert_eq!(b.columns.received[0].age_seconds, 5 * 3600);
         assert_eq!(b.columns.ready[0].age_seconds, 9 * 3600, "receipt to release");
         assert_eq!(b.axes.len(), 7);
+    }
+
+    #[test]
+    fn board_puts_a_possible_or_confirmed_security_report_first_in_every_open_column_oldest_first() {
+        let now = at();
+        let mut plain_old = open(None);
+        plain_old.stage = IntakeStage::Received;
+        plain_old.received_at = now - chrono::Duration::hours(20);
+        let mut plain_new = open(None);
+        plain_new.stage = IntakeStage::Received;
+        plain_new.received_at = now - chrono::Duration::hours(1);
+        let mut flagged_new = open(None);
+        flagged_new.stage = IntakeStage::Received;
+        flagged_new.received_at = now - chrono::Duration::hours(2);
+        flagged_new.security = Some(Box::new(flagged(SecurityState::Possible)));
+        let mut flagged_older = open(None);
+        flagged_older.stage = IntakeStage::Received;
+        flagged_older.received_at = now - chrono::Duration::hours(10);
+        flagged_older.security = Some(Box::new(flagged(SecurityState::Confirmed)));
+        let mut dismissed = open(None);
+        dismissed.stage = IntakeStage::Received;
+        dismissed.received_at = now - chrono::Duration::hours(50);
+        dismissed.security = Some(Box::new(flagged(SecurityState::Dismissed)));
+        let tasks = vec![
+            task("plain-old", TaskStatus::Intake, Some(plain_old)),
+            task("plain-new", TaskStatus::Intake, Some(plain_new)),
+            task("flag-new", TaskStatus::Intake, Some(flagged_new)),
+            task("flag-older", TaskStatus::Intake, Some(flagged_older)),
+            task("dismissed", TaskStatus::Intake, Some(dismissed)),
+        ];
+        let b = board(&tasks, now, &BTreeMap::new());
+        let ids = b.columns.received.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        // The fast lane (possible/confirmed) first, oldest first within it;
+        // then the ordinary band -- a dismissed flag sorts as ordinary,
+        // oldest first, exactly by its own age.
+        assert_eq!(ids, vec!["flag-older", "flag-new", "dismissed", "plain-old", "plain-new"]);
+        let card = b.columns.received.iter().find(|c| c.id == "flag-new").unwrap();
+        assert_eq!(card.security.as_ref().unwrap().state, SecurityState::Possible);
     }
 
     #[test]

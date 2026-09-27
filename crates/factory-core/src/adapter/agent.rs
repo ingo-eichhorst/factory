@@ -675,7 +675,9 @@ impl AgentContext {
                      that assesses the item and submits it"
                 ),
                 Grant::IntakeAssess => format!(
-                    "intake.assess -> {bin} intake assess <id> --file <assessment.json> [--decide]"
+                    "intake.assess -> {bin} intake assess <id> --file <assessment.json> [--decide]; also \
+                     {bin} intake flag-security <id> --reason \"...\" to flag a possible security report -- \
+                     confirming or dismissing one is the owner's alone, never yours"
                 ),
                 Grant::IntakeDecide => format!(
                     "intake.decide -> {bin} intake decide <id> ready|needs-info|split|wontfix [--run] \
