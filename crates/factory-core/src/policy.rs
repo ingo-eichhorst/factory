@@ -362,7 +362,15 @@ pub enum Check {
 /// - `http_loopback_only` -- every `http` interface the daemon mounts binds
 ///   to a loopback address, or none is mounted at all.
 /// - `power_assertion` -- `daemon.power_assertion`.
-pub const KNOWN_DAEMON_FACTS: &[&str] = &["foreman_enabled", "http_loopback_only", "power_assertion"];
+/// - `backup_recent` -- `#154`: the newest backup is within its schedule (or
+///   the unscheduled yardstick) plus grace -- [`crate::backup::BackupFact::recent`].
+/// - `backup_offsite` -- `#154`: the destination is not on the same device
+///   as the instance root -- [`crate::backup::BackupFact::offsite`].
+/// - `backup_verified` -- `#154`: the newest verification of a snapshot
+///   still in the destination passed, within 30 days --
+///   [`crate::backup::BackupFact::verified`].
+pub const KNOWN_DAEMON_FACTS: &[&str] =
+    &["foreman_enabled", "http_loopback_only", "power_assertion", "backup_recent", "backup_offsite", "backup_verified"];
 
 /// The `secrets` check's fixed vocabulary -- exactly the locations the L2
 /// Secrets tab already reports on (`Engine::credential_inventory`): the
@@ -1173,16 +1181,23 @@ pub struct DaemonFact {
     pub power_assertion: bool,
 }
 
-/// The value [`KNOWN_DAEMON_FACTS`]'s names read off a [`DaemonFact`] --
-/// `None` for a name outside that list, which `direct_status` never passes
-/// in (it checks membership itself, to give the "not a fact this build
-/// knows" reason its own wording), so in practice `None` here only ever
-/// means `http_loopback_only`'s own "could not be determined".
-fn daemon_fact_value(fact: &str, facts: &DaemonFact) -> Option<bool> {
+/// The value [`KNOWN_DAEMON_FACTS`]'s names read off `evidence` -- outer
+/// `None` for a name whose source was never gathered (`evidence.daemon`/
+/// `evidence.backup` is `None`), inner `None` for a name that was gathered
+/// but could not itself be determined (`http_loopback_only`'s own
+/// indeterminate reading, or a `backup_*` fact while the destination is
+/// missing or unmounted). `direct_status` never passes in a name outside
+/// [`KNOWN_DAEMON_FACTS`] (it checks membership itself, to give the "not a
+/// fact this build knows" reason its own wording), so in practice the `_`
+/// arm below is unreachable.
+fn daemon_fact_value(fact: &str, evidence: &Evidence) -> Option<Option<bool>> {
     match fact {
-        "foreman_enabled" => Some(facts.foreman_enabled),
-        "http_loopback_only" => facts.http_loopback_only,
-        "power_assertion" => Some(facts.power_assertion),
+        "foreman_enabled" => evidence.daemon.map(|facts| Some(facts.foreman_enabled)),
+        "http_loopback_only" => evidence.daemon.map(|facts| facts.http_loopback_only),
+        "power_assertion" => evidence.daemon.map(|facts| Some(facts.power_assertion)),
+        "backup_recent" => evidence.backup.as_ref().map(|facts| facts.recent),
+        "backup_offsite" => evidence.backup.as_ref().map(|facts| facts.offsite),
+        "backup_verified" => evidence.backup.as_ref().map(|facts| facts.verified),
         _ => None,
     }
 }
@@ -1243,6 +1258,12 @@ pub struct Evidence {
     /// never gathered, not an empty inventory.
     #[serde(default)]
     pub dependencies: Option<DependenciesFact>,
+    /// `#154`: the `backup_recent`/`backup_offsite`/`backup_verified` names
+    /// `Check::Daemon` can also mean -- see [`crate::backup::BackupFact`].
+    /// `None` means "never gathered", the same as `daemon`; gathered lazily,
+    /// only when some applicable control names a `backup_*` fact.
+    #[serde(default)]
+    pub backup: Option<crate::backup::BackupFact>,
 }
 
 // =============================================================== evaluate
@@ -1796,13 +1817,11 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                         "daemon: `{fact}` is not a fact this build knows -- see the README's \"Policies\" section for the list"
                     ));
                 } else {
-                    match evidence.daemon.as_ref().and_then(|facts| daemon_fact_value(fact, facts)) {
-                        Some(true) => satisfied.push(format!("daemon: `{fact}` holds")),
-                        Some(false) => open.push(format!("daemon: `{fact}` does not hold")),
-                        None if evidence.daemon.is_none() => {
-                            open.push(format!("daemon: not resolved for `{fact}`"));
-                        }
-                        None => open.push(format!("daemon: `{fact}` could not be determined")),
+                    match daemon_fact_value(fact, evidence) {
+                        Some(Some(true)) => satisfied.push(format!("daemon: `{fact}` holds")),
+                        Some(Some(false)) => open.push(format!("daemon: `{fact}` does not hold")),
+                        Some(None) => open.push(format!("daemon: `{fact}` could not be determined")),
+                        None => open.push(format!("daemon: not resolved for `{fact}`")),
                     }
                 }
             }
@@ -2204,6 +2223,15 @@ mod tests {
         assert!(check_vocabulary(&Check::Sandbox).is_empty());
         assert!(check_vocabulary(&Check::Daemon { fact: "power_assertion".into() }).is_empty());
         let found = check_vocabulary(&Check::Daemon { fact: "power_asertion".into() });
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, FindingKind::UnknownDaemonFact);
+        // #154: the three backup facts are known, and a misspelling of one
+        // is caught the same way, at load time rather than only once
+        // evaluated.
+        for fact in ["backup_recent", "backup_offsite", "backup_verified"] {
+            assert!(check_vocabulary(&Check::Daemon { fact: fact.into() }).is_empty(), "{fact}");
+        }
+        let found = check_vocabulary(&Check::Daemon { fact: "backup_verfied".into() });
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, FindingKind::UnknownDaemonFact);
         let found = check_vocabulary(&Check::Secrets { absent: vec!["github".into(), "gitlab".into(), "nope".into()] });
@@ -3005,6 +3033,63 @@ mod tests {
             "{:?}",
             statuses[0].status
         );
+    }
+
+    /// `#154`: `evidence.backup` missing (never gathered) is "not resolved",
+    /// distinct from gathered-but-indeterminate ("could not be determined")
+    /// -- the same two-level reading `daemon_fact_value` now gives every
+    /// `daemon` name, backup or not.
+    #[test]
+    fn a_backup_fact_check_reads_not_resolved_when_never_gathered_and_could_not_be_determined_when_indeterminate() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Daemon { fact: "backup_verified".to_string() }],
+            Vec::new(),
+        )];
+        let statuses = evaluate(&applied, &Evidence::default(), Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons().iter().any(|r| r.contains("not resolved")), "{:?}", statuses[0].status);
+
+        let backup_fact = crate::backup::BackupFact {
+            at: Utc::now(),
+            configured: true,
+            newest: None,
+            recent: None,
+            offsite: None,
+            verified: None,
+            last_verified: None,
+        };
+        let evidence = Evidence { backup: Some(backup_fact), ..Default::default() };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(
+            statuses[0].status.reasons().iter().any(|r| r.contains("could not be determined")),
+            "{:?}",
+            statuses[0].status
+        );
+    }
+
+    #[test]
+    fn backup_daemon_checks_read_satisfied_or_open_off_the_backup_fact() {
+        let fact_with = |recent: Option<bool>, offsite: Option<bool>, verified: Option<bool>| crate::backup::BackupFact {
+            at: Utc::now(),
+            configured: true,
+            newest: Some(Utc::now()),
+            recent,
+            offsite,
+            verified,
+            last_verified: None,
+        };
+
+        let recent_applied = vec![applied_control("a", vec![Check::Daemon { fact: "backup_recent".to_string() }], Vec::new())];
+        let evidence = Evidence { backup: Some(fact_with(Some(true), Some(false), Some(false))), ..Default::default() };
+        assert_eq!(evaluate(&recent_applied, &evidence, Utc::now())[0].status.kind(), StatusKind::Satisfied);
+
+        let offsite_applied = vec![applied_control("a", vec![Check::Daemon { fact: "backup_offsite".to_string() }], Vec::new())];
+        let evidence = Evidence { backup: Some(fact_with(Some(true), Some(false), Some(false))), ..Default::default() };
+        let statuses = evaluate(&offsite_applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open, "the temp destination is the same device");
+        assert!(statuses[0].status.reasons().iter().any(|r| r.contains("does not hold")), "{:?}", statuses[0].status);
     }
 
     #[test]
