@@ -406,8 +406,15 @@ impl Engine {
             }
         }
 
+        let now = Utc::now();
         let mut rows: BTreeMap<String, CostRow> = BTreeMap::new();
         let mut total = CostRow::new("total", None);
+        // `median_actual_over_expected` (`#168`) needs every ratio at once
+        // (a nearest-rank median), so each group's own ratios are gathered
+        // here and folded into its `CostRow` after the loop, rather than
+        // carried on the row itself the way a running sum would be.
+        let mut ratios: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        let mut total_ratios: Vec<f64> = Vec::new();
         for run in &runs {
             let task = tasks.get(&run.task_id).and_then(Option::as_ref);
             if let Some(members) = &members {
@@ -417,11 +424,35 @@ impl Engine {
                 }
             }
             let (key, label) = group_key(group_by, run, task, |s| snapshot.canonical_scope_name(s));
-            rows.entry(key.clone())
-                .or_insert_with(|| CostRow::new(key, label))
-                .add(run.usage.as_ref());
+            let terminal_wall = run
+                .status
+                .is_terminal()
+                .then(|| (run.ended_at.unwrap_or(now) - run.started_at).num_seconds().max(0) as u64);
+            if let (Some(estimate), Some(wall)) = (run.original_estimate.as_ref(), terminal_wall) {
+                if estimate.time.expected > 0 {
+                    let ratio = wall as f64 / estimate.time.expected as f64;
+                    ratios.entry(key.clone()).or_default().push(ratio);
+                    total_ratios.push(ratio);
+                }
+            }
+            let row = rows.entry(key.clone()).or_insert_with(|| CostRow::new(key, label));
+            row.add(run.usage.as_ref());
+            row.add_estimate(run.original_estimate.as_ref(), terminal_wall);
             total.add(run.usage.as_ref());
+            total.add_estimate(run.original_estimate.as_ref(), terminal_wall);
         }
+        let median = |values: &mut [f64]| {
+            (!values.is_empty()).then(|| {
+                values.sort_by(f64::total_cmp);
+                values[factory_core::scenario::nearest_rank(values.len(), 0.5)]
+            })
+        };
+        for row in rows.values_mut() {
+            if let Some(values) = ratios.get_mut(&row.key) {
+                row.median_actual_over_expected = median(values);
+            }
+        }
+        total.median_actual_over_expected = median(&mut total_ratios);
         let mut rows: Vec<CostRow> = rows.into_values().collect();
         CostReport::sort_rows(&mut rows);
         Ok(CostReport {
@@ -559,7 +590,7 @@ mod tests {
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
     use factory_core::error::FactoryError;
     use factory_core::run::{RunStatus, Trigger};
-    use factory_core::task::{NewTask, SessionRef, TaskReport};
+    use factory_core::task::{NewTask, SessionRef, TaskPatch, TaskReport};
     use factory_core::usage::{HarnessUsage, SessionUsage, TokenCounts, UsageCost, UsageState};
     use factory_plugins::{Registry, SqliteStore};
     use std::collections::VecDeque;
@@ -1236,5 +1267,60 @@ mod tests {
         assert!(none.rows.is_empty());
         assert!(engine.costs_report(CostGroupBy::Task, Some(past), Some(past), None).await.is_err());
         assert!(engine.costs_report(CostGroupBy::Task, None, None, Some("nope")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn costs_report_carries_estimate_vs_actual_per_group() {
+        let engine = engine(vec![]);
+        // `dispatched`'s own point(900) estimate: a real test run never
+        // takes exactly 900 seconds, so this one always lands outside its
+        // own range.
+        let (t1, r1) = dispatched(&engine, None).await;
+        done(&engine, &t1, &r1).await;
+
+        // A range starting at zero any wall time clears -- written straight
+        // to the store, past `Engine::update`'s "at least one second" check,
+        // since a real test run may complete inside the same second it
+        // started.
+        let wide = engine
+            .create(NewTask {
+                title: "wide".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update(
+                &wide.id,
+                &TaskPatch {
+                    estimate: Some(factory_core::task::Estimate {
+                        time: factory_core::task::TimeEstimateRange { low: 0, expected: 1, high: 3600 },
+                        cost: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        engine.start_run(&wide.id, Trigger::Manual).await;
+        let wide_run = engine.store.active_run(&wide.id).await.unwrap().expect("dispatched");
+        done(&engine, &wide, &wide_run).await;
+
+        let report = engine.costs_report(CostGroupBy::Task, None, None, None).await.unwrap();
+        let t1_row = report.rows.iter().find(|r| r.key == t1.id).expect("t1's own row");
+        assert_eq!(t1_row.estimated_runs, 1);
+        assert_eq!(t1_row.within_range, 0, "a real run is never exactly 900s long");
+        let wide_row = report.rows.iter().find(|r| r.key == wide.id).expect("wide's own row");
+        assert_eq!(wide_row.estimated_runs, 1);
+        assert_eq!(wide_row.within_range, 1);
+        assert!(wide_row.median_actual_over_expected.is_some());
+        assert_eq!(report.total.estimated_runs, 2);
+        assert_eq!(report.total.within_range, 1);
+        assert!(report.total.median_actual_over_expected.is_some());
     }
 }

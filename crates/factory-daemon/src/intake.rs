@@ -18,8 +18,9 @@
 use crate::access::Caller;
 use crate::engine::{Due, Engine};
 use crate::operations::Asked;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use factory_core::config::Factory;
+use factory_core::control_plan;
 use factory_core::intake::{
     self, AgentOption, Decision, DecisionRecord, Intake, IntakeBoard, IntakeSource, IntakeStage, NewIntake,
     RouteOptions, SourceKind, Verdict, WorkflowOption, TRIAGE_LABEL,
@@ -369,6 +370,13 @@ impl Engine {
         let definition = self.ready_definition_for(&factory, &routed_scope);
         intake::validate(&assessment, &definition).map_err(FactoryError::BadRequest)?;
         intake::validate_duplicates(&record.candidates, &assessment.duplicates).map_err(FactoryError::BadRequest)?;
+        // Normalized once, here, the same way `routing.scope`/`agent` are
+        // resolved below: `validate` itself only checks the trimmed form, so
+        // an untrimmed category would otherwise reach the reference-class
+        // sample match, the release patch's `Task.category`, and the
+        // `category` label still carrying whitespace `effective_category`'s
+        // own trim on the *task* side would never line up with.
+        assessment.category = assessment.category.trim().to_string();
         let scope = routed_scope.name.clone();
         assessment.routing.scope = scope.clone();
         if let Some(agent) = &assessment.routing.agent {
@@ -408,7 +416,10 @@ impl Engine {
             assessment.routing.agents = agents;
             assessment.routing.workflow = Some(found.id);
         }
-        let triage = intake::evaluate(&assessment, &definition, caller.describe(), Utc::now());
+        let reference = self
+            .reference_estimate_for(&scope, &assessment.category, assessment.routing.agent.as_deref(), Utc::now())
+            .await?;
+        let triage = intake::evaluate(&assessment, &definition, &reference, caller.describe(), Utc::now());
         let mut next = record.clone();
         next.triage = Some(triage.clone());
         next.stage = IntakeStage::Triaging;
@@ -424,7 +435,7 @@ impl Engine {
                     verdict_words(&triage.verdict),
                     triage.assessment.category,
                     triage.priority.as_str(),
-                    triage.estimate.map(|e| e.describe()).unwrap_or_else(|| "no estimate".into()),
+                    estimate_words(&triage),
                 ),
                 serde_json::json!({ "triage": triage }),
             ),
@@ -438,6 +449,49 @@ impl Engine {
             Verdict::NeedsInfo { .. } => Decision::NeedsInfo { questions: Vec::new() },
         };
         self.intake_decide(caller, id, decision).await
+    }
+
+    /// `#168`'s reference class for `scope`+`category` (narrowed to `agent`
+    /// when that alone clears the minimum), gathered from the store the same
+    /// way `#117`'s own first-turn cohort is (`record_re_estimate` in
+    /// `costs.rs`): a cheap pre-filter over the task list -- `Done`, not a
+    /// triage bookkeeping task, the same effective category, the same exact
+    /// canonical scope -- then each survivor's own runs.
+    /// `factory_core::intake::reference_estimate` does the actual sample
+    /// selection, exclusions and percentiles; everything here only fetches
+    /// what it needs and re-checks nothing.
+    async fn reference_estimate_for(
+        &self,
+        scope: &str,
+        category: &str,
+        agent: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> Result<intake::ReferenceEstimate> {
+        let snapshot = self.factory_snapshot();
+        let target = snapshot.canonical_scope_name(scope);
+        let tasks = self.store.list(&TaskFilter::default()).await?;
+        let mut sample_tasks = Vec::new();
+        let mut sample_runs = Vec::new();
+        for task in tasks {
+            if task.status != TaskStatus::Done {
+                continue;
+            }
+            if task.labels.contains_key(TRIAGE_LABEL) {
+                continue;
+            }
+            if snapshot.canonical_scope_name(&task.scope) != target {
+                continue;
+            }
+            if control_plan::effective_category(task.category.as_deref()) != category {
+                continue;
+            }
+            let Ok(runs) = self.store.runs(&task.id, u32::MAX).await else { continue };
+            sample_runs.extend(runs);
+            sample_tasks.push(task);
+        }
+        Ok(intake::reference_estimate(scope, category, agent, at, &sample_tasks, &sample_runs, |s| {
+            snapshot.canonical_scope_name(s)
+        }))
     }
 
     /// `Request::IntakeDecide`.
@@ -474,11 +528,29 @@ impl Engine {
                 let (agent, _, _) = self.resolve_agent(&declared.name, &agent)?;
                 let mut labels = item.labels.clone();
                 labels.extend(intake::release_labels(&triage));
+                // The full range, not just its midpoint (`estimate_seconds`
+                // is advisory only) -- and the category itself, not only its
+                // label copy: `#117`'s reference classes and `#118`'s
+                // control plan both key on `Task.category`, and until this
+                // (`#168`) a released item was invisible to either (the
+                // triage's own finding). Setting it here means a released
+                // item now also picks up any control plan declared for its
+                // category, which it did not before.
+                let task_estimate = triage.estimate.map(|e| factory_core::task::Estimate {
+                    time: factory_core::task::TimeEstimateRange {
+                        low: e.min_seconds,
+                        expected: e.midpoint(),
+                        high: e.max_seconds,
+                    },
+                    cost: e.cost,
+                });
                 let mut patch = TaskPatch {
                     scope: Some(declared.name.clone()),
                     agent: Some(agent.clone()),
                     labels: Some(labels),
-                    estimate_seconds: triage.estimate.map(|e| e.midpoint()),
+                    estimate_seconds: task_estimate.as_ref().map(|e| e.time.expected),
+                    estimate: task_estimate,
+                    category: Some(triage.assessment.category.clone()),
                     ..Default::default()
                 };
                 if moved {
@@ -771,7 +843,7 @@ impl Engine {
                 "triage verdict: ready -- {}, {}, {}; released into {into} {}",
                 triage.assessment.category,
                 triage.priority.as_str(),
-                triage.estimate.map(|e| e.describe()).unwrap_or_else(|| "no estimate".into()),
+                estimate_words(triage),
                 asked.words(),
             ),
             None => format!(
@@ -825,6 +897,17 @@ fn verdict_words(verdict: &Verdict) -> String {
     }
 }
 
+/// `45m-2h (p10-p90 of 12 completed bugfix tasks in factory, last 90 days)`
+/// -- a triage's estimate with its basis (`#168`), for the two places a
+/// verdict is journaled in plain words.
+fn estimate_words(triage: &intake::Triage) -> String {
+    match (&triage.estimate, &triage.estimate_basis) {
+        (Some(e), Some(basis)) => format!("{} ({})", e.describe(), basis.describe()),
+        (Some(e), None) => e.describe(),
+        (None, _) => "no estimate".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,7 +919,8 @@ mod tests {
     };
     use factory_core::protocol::{Payload, Request, Response};
     use factory_core::role::Role;
-    use factory_core::task::SessionRef;
+    use factory_core::run::RunStatus;
+    use factory_core::task::{SessionRef, TaskReport};
     use factory_core::workflow::{CanvasPoint, WorkflowDraft, WorkflowNode, WorkflowNodeKind};
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
@@ -1064,6 +1148,13 @@ mod tests {
         assert_eq!(released.labels["priority"], "P2");
         assert_eq!(released.labels["estimate"], "45m-2h");
         assert_eq!(released.estimate_seconds, Some((45 * 60 + 2 * 3600) / 2));
+        // `#168`: the category is a real field now, not only a label -- so
+        // `#117`'s reference classes and `#118`'s control plan can both read
+        // it -- and `Task.estimate` carries the full range the complexity
+        // table gave, not only its midpoint.
+        assert_eq!(released.category.as_deref(), Some("bugfix"));
+        let estimate = released.estimate.as_ref().expect("the full range, not only estimate_seconds");
+        assert_eq!((estimate.time.low, estimate.time.expected, estimate.time.high), (45 * 60, (45 * 60 + 2 * 3600) / 2, 2 * 3600));
         let record = released.intake.as_ref().unwrap();
         assert_eq!(record.stage, IntakeStage::Ready);
         assert!(matches!(record.decision.as_ref().unwrap().decision, Decision::Ready { run: false }));
@@ -1075,6 +1166,10 @@ mod tests {
         assert_eq!(data["verdict"], "ready");
         assert_eq!(data["triage"]["priority"], "P2");
         assert_eq!(data["triage"]["assessment"]["axes"].as_array().unwrap().len(), 7);
+        // A scope with nothing behind it yet falls back to the complexity
+        // table, and says so.
+        assert_eq!(data["triage"]["estimate_basis"]["source"], "complexity_table");
+        assert_eq!(data["triage"]["estimate_basis"]["fallback_reason"], "insufficient evidence (0 of 5)");
 
         // And now it is ordinary work: dispatch goes ahead rather than
         // holding it. (It then fails on the test scope not being a git
@@ -1083,6 +1178,78 @@ mod tests {
         assert!(!kinds(&engine, &item.id).await.contains(&"intake_held".to_string()));
         let t = engine.require(&item.id).await.unwrap();
         assert!(t.error.as_deref().unwrap_or("").contains("git"), "{:?} {:?}", t.status, t.error);
+    }
+
+    #[tokio::test]
+    async fn an_assessors_padded_category_is_trimmed_everywhere_it_lands() {
+        // `validate` only checks the trimmed form (`intake::validate`'s own
+        // `category.trim()`), so a padded category must be normalized before
+        // it reaches the reference-class sample match, `Task.category` and
+        // the `category` label -- `control_plan::effective_category` trims
+        // the *task* side, and an untrimmed release would never match it.
+        let engine = engine();
+        let item = add(&engine, "Broken link").await;
+        let mut a = assessment("web");
+        a.category = "  bugfix  ".into();
+        let released = engine.intake_assess(&Caller::Owner, &item.id, a, true).await.unwrap();
+        assert_eq!(released.category.as_deref(), Some("bugfix"));
+        assert_eq!(released.labels["category"], "bugfix");
+    }
+
+    /// A completed `bugfix` task in `scope`, dispatched and reported done at
+    /// once -- `QuietRuntime` has no usage to answer, so cost stays unknown;
+    /// only wall time (`#168`'s time dimension) is exercised here.
+    async fn done_bugfix_task(engine: &Arc<Engine>, scope: &str, title: &str) {
+        let task = engine
+            .create(NewTask {
+                title: title.into(),
+                instructions: "true".into(),
+                scope: Some(scope.into()),
+                agent: Some("shell".into()),
+                category: Some("bugfix".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let run = engine.store.active_run(&task.id).await.unwrap().expect("dispatched");
+        engine
+            .report(
+                &task.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some("fixed".into()),
+                    send_to: None,
+                    error: None,
+                    token: run.token.clone(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_scope_with_five_completed_bugfix_tasks_estimates_from_them_and_sets_the_category() {
+        let engine = engine();
+        for n in 0..5 {
+            done_bugfix_task(&engine, "web", &format!("fixed thing {n}")).await;
+        }
+        let item = add(&engine, "Another broken link").await;
+        let released = engine.intake_assess(&Caller::Owner, &item.id, assessment("web"), true).await.unwrap();
+        assert_eq!(released.category.as_deref(), Some("bugfix"));
+        let estimate = released.estimate.as_ref().expect("five samples clear the minimum");
+        assert_eq!(released.estimate_seconds, Some(estimate.time.expected));
+
+        let entries = engine.store.entries(&item.id, 200).await.unwrap();
+        let verdict = entries.iter().find(|e| e.kind == TRIAGE_VERDICT_KIND).expect("the verdict is journaled");
+        let basis = &verdict.data.as_ref().unwrap()["triage"]["estimate_basis"];
+        assert_eq!(basis["source"], "reference_class");
+        assert_eq!(basis["scope"], "web");
+        assert_eq!(basis["category"], "bugfix");
+        assert_eq!(basis["time_samples"], 5);
+        assert!(basis.get("fallback_reason").is_some(), "cost is unmeasured here, so the fallback names it");
     }
 
     #[tokio::test]
