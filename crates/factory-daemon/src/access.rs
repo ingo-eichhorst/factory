@@ -230,6 +230,11 @@ impl Engine {
             // Checked against the root scope for the same reason
             // `policy.attest` is -- see `in_root_scope`.
             Request::GoalsCheckIn { .. } => Grant::GoalsCheckIn,
+            // Verifying with a supplied identity decrypts an encrypted
+            // snapshot (`#152`) -- the owner's alone, like restore, and
+            // checked before the shared arm below: a role grant must never
+            // become "read this key file".
+            Request::BackupVerify { identity: Some(_), .. } => return Needs::Owner,
             // Checked against the root scope too: a backup is of the whole
             // instance's state (`#116`).
             Request::BackupRun | Request::BackupVerify { .. } => Grant::BackupRun,
@@ -1014,7 +1019,7 @@ mod tests {
             role: Role::new(role),
             run_id: None,
         };
-        let verify = Request::BackupVerify { snapshot: None };
+        let verify = Request::BackupVerify { snapshot: None, identity: None };
 
         assert!(allowed(&e, &caller("demo", "keeper"), Request::BackupRun).await);
         assert!(allowed(&e, &caller("demo", "keeper"), verify.clone()).await);
@@ -1032,12 +1037,34 @@ mod tests {
         assert!(allowed(&e, &Caller::Owner, Request::BackupRun).await);
     }
 
+    /// `#152`: verifying an encrypted snapshot decrypts it, so an `identity`
+    /// makes the request the owner's alone -- even for a caller whose role
+    /// holds `backup.run` and reaches the whole scope.
+    #[tokio::test]
+    async fn backup_verify_with_an_identity_is_the_owners_alone_even_with_backup_run() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  keeper:\n    grants: [backup.run]\n    reach: scope\n",
+        );
+        let caller = Caller::Agent { scope: "demo".into(), name: "w".into(), role: Role::new("keeper"), run_id: None };
+        let with_identity = Request::BackupVerify { snapshot: None, identity: Some(PathBuf::from("/tmp/key.txt")) };
+        assert!(
+            !allowed(&e, &caller, with_identity.clone()).await,
+            "a role grant must never become \"read this key file\""
+        );
+        assert!(allowed(&e, &Caller::Owner, with_identity).await);
+        // Without an identity, the same caller's `backup.run` still works --
+        // this is not a general backup.verify regression.
+        assert!(allowed(&e, &caller, Request::BackupVerify { snapshot: None, identity: None }).await);
+    }
+
     #[tokio::test]
     async fn backup_restore_is_the_owners_alone_even_when_a_role_has_every_grant() {
         let e = engine_with_roles("roles:\n  everything:\n    grants: ['*']\n    reach: scope\n");
         let request = Request::BackupRestore {
             snapshot: "factory-backup-demo-20260925T030000Z.tar.zst".into(),
             into: PathBuf::from("/tmp/restored-factory"),
+            identity: None,
         };
         assert!(allowed(&e, &Caller::Owner, request.clone()).await);
         assert!(!allowed(&e, &wearing("everything"), request.clone()).await);

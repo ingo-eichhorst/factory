@@ -475,15 +475,24 @@ enum BackupCmd {
     List,
     /// Unpack a snapshot into a temporary directory and prove it would
     /// restore: its checksums, the database's integrity_check and every
-    /// authored-content loader. Exits non-zero when a check fails.
+    /// authored-content loader. Exits non-zero when a check fails. An
+    /// encrypted snapshot needs `--identity`, and decrypting it that way is
+    /// the owner's alone (`#152`).
     Verify {
         /// The snapshot's file name, as `list` shows it. The newest when
         /// left out.
         snapshot: Option<String>,
+        /// A file holding the one native age identity (`AGE-SECRET-KEY-1…`)
+        /// that decrypts this snapshot. Required for an encrypted one;
+        /// refused for a path inside this instance's own `.factory/`. Never
+        /// stored, logged or sent anywhere but read once by the daemon.
+        #[arg(long)]
+        identity: Option<PathBuf>,
     },
-    /// Verify a plaintext snapshot, then materialize it into a new instance
-    /// root. Owner-only. The destination must not exist or must be empty;
-    /// this never stops the current daemon or switches roots for you.
+    /// Verify a snapshot, then materialize it into a new instance root --
+    /// plaintext as before, or encrypted with `--identity` (`#152`).
+    /// Owner-only. The destination must not exist or must be empty; this
+    /// never stops the current daemon or switches roots for you.
     Restore {
         /// The snapshot's file name, as `list` shows it.
         snapshot: String,
@@ -491,6 +500,9 @@ enum BackupCmd {
         /// CLI before the request reaches the daemon.
         #[arg(long)]
         into: PathBuf,
+        /// See `verify --identity`.
+        #[arg(long)]
+        identity: Option<PathBuf>,
     },
 }
 
@@ -1210,8 +1222,9 @@ async fn main() -> Result<()> {
                 let payload = client.send(Request::BackupRun).await?;
                 print(&payload, cli.json, backup_run_text)
             }
-            BackupCmd::Verify { snapshot } => {
-                let payload = client.send(Request::BackupVerify { snapshot }).await?;
+            BackupCmd::Verify { snapshot, identity } => {
+                let identity = identity.as_deref().map(absolute);
+                let payload = client.send(Request::BackupVerify { snapshot, identity }).await?;
                 print(&payload, cli.json, backup_verify_text)?;
                 match payload {
                     Payload::BackupVerify { verification } if !verification.ok => {
@@ -1220,13 +1233,10 @@ async fn main() -> Result<()> {
                     _ => Ok(()),
                 }
             }
-            BackupCmd::Restore { snapshot, into } => {
-                let into = if into.is_absolute() {
-                    into
-                } else {
-                    std::env::current_dir()?.join(into)
-                };
-                let payload = client.send(Request::BackupRestore { snapshot, into }).await?;
+            BackupCmd::Restore { snapshot, into, identity } => {
+                let into = absolute(&into);
+                let identity = identity.as_deref().map(absolute);
+                let payload = client.send(Request::BackupRestore { snapshot, into, identity }).await?;
                 print(&payload, cli.json, backup_restore_text)
             }
         },
@@ -2211,7 +2221,13 @@ fn backup_status_text(payload: &Payload) -> Option<String> {
                 None => "never".into(),
             }
         ));
-        out.push_str("  encrypted    no (v1 writes plaintext archives)\n");
+        out.push_str(&format!(
+            "  encrypted    {}\n",
+            match &config.encrypt_to {
+                Some(recipient) => format!("yes, to {recipient}"),
+                None => "no".into(),
+            }
+        ));
         if report.running {
             out.push_str("  running      a backup operation is in progress\n");
         }
@@ -2269,17 +2285,18 @@ fn backup_list_text(payload: &Payload) -> Option<String> {
     if report.snapshots.is_empty() {
         return Some(format!("no snapshots in {}", config.destination.display()));
     }
-    let mut out = format!("{:<58} {:>10} {:>6}  {:<22} KEPT BY\n", "SNAPSHOT", "SIZE", "FILES", "VERIFIED");
+    let mut out = format!("{:<62} {:>10} {:>6} {:<3} {:<22} KEPT BY\n", "SNAPSHOT", "SIZE", "FILES", "ENC", "VERIFIED");
     for s in &report.snapshots {
         let verified = match &s.verified {
             Some(v) => format!("{} {}", if v.ok { "ok" } else { "FAILED" }, v.at.format("%Y-%m-%d %H:%M")),
             None => "--".into(),
         };
         out.push_str(&format!(
-            "{:<58} {:>10} {:>6}  {:<22} {}\n",
+            "{:<62} {:>10} {:>6} {:<3} {:<22} {}\n",
             s.name,
             bytes(s.size_bytes),
             s.files.map(|n| n.to_string()).unwrap_or_else(|| "--".into()),
+            if s.encrypted { "yes" } else { "" },
             verified,
             kept_by_text(&s.kept_by)
         ));
@@ -5751,10 +5768,27 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Backup {
-                command: Some(BackupCmd::Restore { snapshot, into })
+                command: Some(BackupCmd::Restore { snapshot, into, identity: None })
             } if snapshot.ends_with(".tar.zst") && into == PathBuf::from("/tmp/restored factory")
         ));
         assert!(Cli::try_parse_from(["factory", "backup", "restore", "snapshot"]).is_err());
+
+        let with_identity = Cli::try_parse_from([
+            "factory",
+            "backup",
+            "restore",
+            "factory-backup-demo-20260925T030000Z.tar.zst.age",
+            "--into",
+            "/tmp/restored",
+            "--identity",
+            "/tmp/key.txt",
+        ])
+        .unwrap();
+        assert!(matches!(
+            with_identity.command,
+            Command::Backup { command: Some(BackupCmd::Restore { identity: Some(path), .. }) }
+                if path == Path::new("/tmp/key.txt")
+        ));
 
         let payload = Payload::BackupRestore {
             restoration: factory_core::backup::Restoration {
@@ -5770,6 +5804,84 @@ mod tests {
         assert!(text.contains("Nothing was switched or started"), "{text}");
         assert!(text.contains("factory-daemon --root '/tmp/restored factory' run"), "{text}");
         assert!(text.contains("factory --root '/tmp/restored factory' status"), "{text}");
+    }
+
+    /// `#152`: `--identity` is optional on `backup verify`, and absent by
+    /// default so a plaintext snapshot's verify is unchanged.
+    #[test]
+    fn backup_verify_takes_an_optional_identity() {
+        let cli = Cli::try_parse_from(["factory", "backup", "verify"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Backup { command: Some(BackupCmd::Verify { snapshot: None, identity: None }) }
+        ));
+        let cli = Cli::try_parse_from(["factory", "backup", "verify", "snap.tar.zst.age", "--identity", "/tmp/key.txt"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Backup { command: Some(BackupCmd::Verify { snapshot: Some(s), identity: Some(path) }) }
+                if s == "snap.tar.zst.age" && path == Path::new("/tmp/key.txt")
+        ));
+    }
+
+    /// A minimal but complete `BackupReport` with one encrypted snapshot, for
+    /// `#152`'s status/list text.
+    fn encrypted_report() -> factory_core::backup::BackupReport {
+        use factory_core::backup::*;
+        let now = chrono::Utc::now();
+        BackupReport {
+            now,
+            config: Some(BackupConfig {
+                destination: PathBuf::from("/Volumes/Backup"),
+                schedule: None,
+                keep: Keep::default(),
+                include_logs: false,
+                encrypt_to: Some("age1exampleexampleexampleexampleexampleexampleexampleexample".into()),
+            }),
+            destination: Some(DestinationFacts {
+                path: "/Volumes/Backup".into(),
+                exists: true,
+                same_device: Some(false),
+                free_bytes: None,
+                total_bytes: None,
+            }),
+            age: AgeLevel::Fresh,
+            due_by: None,
+            next_run: None,
+            running: false,
+            last_verified: None,
+            last_failure: None,
+            warnings: vec![],
+            snapshots: vec![SnapshotRow {
+                name: "factory-backup-demo-20260925T030000Z.tar.zst.age".into(),
+                at: now,
+                size_bytes: 1024,
+                files: Some(3),
+                verified: None,
+                kept_by: vec![KeptBy::Newest],
+                encrypted: true,
+            }],
+            include: vec![],
+            exclude: vec![],
+            code: vec![],
+            time_machine: None,
+        }
+    }
+
+    #[test]
+    fn backup_status_names_the_configured_recipient_when_encrypted() {
+        let payload = Payload::Backup { report: Box::new(encrypted_report()) };
+        let text = backup_status_text(&payload).unwrap();
+        assert!(text.contains("encrypted    yes, to age1example"), "{text}");
+    }
+
+    #[test]
+    fn backup_list_marks_an_encrypted_snapshot() {
+        let payload = Payload::Backup { report: Box::new(encrypted_report()) };
+        let text = backup_list_text(&payload).unwrap();
+        assert!(text.contains("ENC"), "{text}");
+        let row = text.lines().find(|l| l.contains("tar.zst.age")).unwrap();
+        assert!(row.contains("yes"), "{row}");
     }
 
     #[test]

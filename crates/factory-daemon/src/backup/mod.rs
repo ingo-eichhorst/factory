@@ -23,11 +23,11 @@ pub use store::BackupStore;
 
 use chrono::{DateTime, Duration, Utc};
 use factory_core::backup::{
-    age_level, parse_archive_name, refuse_bad_snapshot_name, resolve_backup_fact, retain, warnings, AgeLevel,
-    BackupConfig, BackupFact, BackupFailure, BackupReport, BackupTrigger, CheckStatus, DestinationFacts, ExcludeRow,
-    Group, IncludeRow, KeptBy, ManifestInstance, RepositoryFact, Restoration, Snapshot, SnapshotRow, TimeMachineFact,
-    Verification, VerifySummary, WarningFacts, AUTHORED, EXCLUDED, GRACE_HOURS, OPTIONAL, UNSCHEDULED_OVERDUE_HOURS,
-    UNSCHEDULED_STALE_HOURS,
+    age_level, looks_encrypted, parse_archive_name, refuse_bad_snapshot_name, resolve_backup_fact, retain, warnings,
+    AgeLevel, BackupConfig, BackupFact, BackupFailure, BackupReport, BackupTrigger, CheckStatus, DestinationFacts,
+    ExcludeRow, Group, IncludeRow, KeptBy, ManifestInstance, RepositoryFact, Restoration, Snapshot, SnapshotRow,
+    TimeMachineFact, Verification, VerifyCheck, VerifySummary, WarningFacts, AUTHORED, ENCRYPTED_ARCHIVE_SUFFIX,
+    EXCLUDED, GRACE_HOURS, OPTIONAL, UNSCHEDULED_OVERDUE_HOURS, UNSCHEDULED_STALE_HOURS,
 };
 use factory_core::config::{Factory, CONFIG_FILE, FACTORY_DIR};
 use factory_core::error::{FactoryError, Result};
@@ -48,6 +48,9 @@ struct Found {
     name: String,
     at: DateTime<Utc>,
     size_bytes: u64,
+    /// Read from the file's own bytes, never its name or the config -- see
+    /// [`peek_encrypted`].
+    encrypted: bool,
 }
 
 /// Every archive of this instance in `destination`, newest first -- only
@@ -61,11 +64,27 @@ fn list_archives(destination: &Path, instance: &str) -> Vec<Found> {
             let name = entry.file_name().to_string_lossy().into_owned();
             let at = parse_archive_name(instance, &name)?;
             let meta = entry.metadata().ok().filter(|m| m.is_file())?;
-            Some(Found { name, at, size_bytes: meta.len() })
+            let encrypted = peek_encrypted(&entry.path(), &name);
+            Some(Found { name, at, size_bytes: meta.len(), encrypted })
         })
         .collect();
     found.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| b.name.cmp(&a.name)));
     found
+}
+
+/// Whether `path` is age-encrypted (`#152`): read from its own first bytes,
+/// never trusted from `name`'s suffix or the live config, so a renamed file
+/// or a config changed since it was written can never be misreported --
+/// falling back to the name only when the file itself could not even be
+/// opened, so a listing never wrongly calls an encrypted archive plain and
+/// so never asks nobody for the identity it actually needs.
+fn peek_encrypted(path: &Path, name: &str) -> bool {
+    use std::io::Read;
+    let mut header = [0u8; factory_core::backup::AGE_MAGIC.len()];
+    match std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut header)) {
+        Ok(()) => looks_encrypted(&header),
+        Err(_) => name.ends_with(ENCRYPTED_ARCHIVE_SUFFIX),
+    }
 }
 
 /// What retention says about each archive, in the same order. Days, weeks
@@ -133,16 +152,35 @@ fn deadlines(config: &BackupConfig, newest: DateTime<Utc>) -> (Option<DateTime<U
     }
 }
 
-/// Refuse at start a schedule the job could never fire, the same way an
-/// unregistered knowledge provider is refused there -- in front of whoever
-/// started the daemon, not as a `backup_failed` every minute afterwards.
-pub fn validate_schedule(factory: &Factory) -> Result<()> {
-    if let Some(schedule) = factory.config.infrastructure.backup.as_ref().and_then(|b| b.schedule.as_ref()) {
-        crate::schedule::next_after(&schedule.as_task_schedule(), Utc::now()).map_err(|e| {
-            FactoryError::BadRequest(format!("infrastructure.backup.schedule: {e}"))
-        })?;
+/// Refuse at start a schedule the job could never fire and an `encrypt_to`
+/// that is not a usable recipient, the same way an unregistered knowledge
+/// provider is refused there -- in front of whoever started the daemon, not
+/// as a `backup_failed` every minute (or every backup, `#152`) afterwards.
+/// `archive.rs`'s own verification calls this too, on a restored config.
+pub fn validate_config(factory: &Factory) -> Result<()> {
+    let Some(backup) = factory.config.infrastructure.backup.as_ref() else { return Ok(()) };
+    if let Some(schedule) = &backup.schedule {
+        crate::schedule::next_after(&schedule.as_task_schedule(), Utc::now())
+            .map_err(|e| FactoryError::BadRequest(format!("infrastructure.backup.schedule: {e}")))?;
+    }
+    if let Some(encrypt_to) = &backup.encrypt_to {
+        parse_recipient(encrypt_to)?;
     }
     Ok(())
+}
+
+/// The one place `age::x25519::Recipient` is parsed from config (`#152`): a
+/// single native X25519 recipient only. An SSH public key or a plugin
+/// recipient (`age1yubikey1…`) fails the very same bech32 HRP check the
+/// `age` crate applies to a native one, so refusing them needs no
+/// special-casing here -- only a clearer message than the crate's own.
+pub fn parse_recipient(encrypt_to: &str) -> Result<age::x25519::Recipient> {
+    encrypt_to.parse::<age::x25519::Recipient>().map_err(|e| {
+        FactoryError::BadRequest(format!(
+            "infrastructure.backup.encrypt_to {encrypt_to:?} is not usable: {e} -- only a single native X25519 \
+             recipient (age1…) is supported; SSH and plugin recipients (age1yubikey1…, ssh-ed25519 …) are refused"
+        ))
+    })
 }
 
 impl Engine {
@@ -314,11 +352,13 @@ impl Engine {
                 })
                 .collect(),
             include_logs: config.include_logs,
+            encrypt_to: config.encrypt_to.clone(),
         };
-        let name = factory_core::backup::archive_name(&factory.config.instance.name, at);
+        let name = factory_core::backup::archive_name(&factory.config.instance.name, at, config.encrypt_to.is_some());
         let destination = config.destination.clone();
         let config_destination = config.destination.clone();
         let instance = factory.config.instance.name.clone();
+        let encrypted_to = config.encrypt_to.clone();
         let config = config.clone();
         let started = std::time::Instant::now();
         let (taken, pruned) = tokio::task::spawn_blocking(move || -> Result<(archive::Taken, Vec<String>)> {
@@ -354,13 +394,22 @@ impl Engine {
             duration_ms: started.elapsed().as_millis() as u64,
             pruned,
             groups: taken.groups,
+            encrypted_to,
         })
     }
 
     /// Verify `snapshot`, or the newest. The result is recorded and
     /// published whether it passed or not; only a snapshot that cannot be
-    /// found, or a lock already held, is refused without a record.
-    pub(crate) async fn backup_verify(self: &Arc<Self>, snapshot: Option<String>, by: String) -> Result<Verification> {
+    /// found, a lock already held, or -- for an encrypted snapshot -- a
+    /// missing or unusable `identity` (`#152`), is refused without a record.
+    /// A `BadRequest` here is never a verdict about the archive: it is
+    /// refused before `archive::verify` runs at all.
+    pub(crate) async fn backup_verify(
+        self: &Arc<Self>,
+        snapshot: Option<String>,
+        identity: Option<PathBuf>,
+        by: String,
+    ) -> Result<Verification> {
         let (factory, config) = self.backup_config()?;
         if let Some(name) = &snapshot {
             refuse_bad_snapshot_name(name)?;
@@ -378,34 +427,42 @@ impl Engine {
         })
         .await
         .unwrap_or_default();
-        let name = match snapshot {
-            Some(name) => found.iter().find(|f| f.name == name).map(|f| f.name.clone()).ok_or_else(|| {
+        let target = match snapshot {
+            Some(name) => found.iter().find(|f| f.name == name).cloned().ok_or_else(|| {
                 FactoryError::BadRequest(format!(
                     "no snapshot {name:?} in {}; `factory backup list` shows them",
                     destination.display()
                 ))
             })?,
-            None => found.first().map(|f| f.name.clone()).ok_or_else(|| {
+            None => found.first().cloned().ok_or_else(|| {
                 FactoryError::BadRequest(format!("there is no snapshot in {} to verify", destination.display()))
             })?,
         };
 
         let at = Utc::now();
         let started = std::time::Instant::now();
-        let path: PathBuf = destination.join(&name);
+        let path: PathBuf = destination.join(&target.name);
         let instance_id = factory.config.instance.id.clone();
-        let checks = tokio::task::spawn_blocking(move || archive::verify(&path, &instance_id))
-            .await
-            .unwrap_or_else(|e| {
-                vec![factory_core::backup::VerifyCheck {
-                    name: "archive".into(),
-                    status: CheckStatus::Fail,
-                    detail: format!("the verification task stopped: {e}"),
-                }]
-            });
+        let root = factory.root.clone();
+        let encrypted = target.encrypted;
+        let name = target.name.clone();
+        let checks: Vec<VerifyCheck> = tokio::task::spawn_blocking(move || -> Result<Vec<VerifyCheck>> {
+            let owner_identity = match (encrypted, identity) {
+                (true, None) => {
+                    return Err(FactoryError::BadRequest(format!(
+                        "snapshot {name:?} is encrypted; run `factory backup verify {name} --identity <file>`"
+                    )))
+                }
+                (true, Some(path)) => Some(archive::OwnerIdentity::read(&path, &root)?),
+                (false, _) => None,
+            };
+            Ok(archive::verify(&path, &instance_id, owner_identity.as_ref()))
+        })
+        .await
+        .map_err(|e| FactoryError::adapter("backup", format!("the verification task stopped: {e}")))??;
         let verification = Verification {
             ok: !checks.iter().any(|c| c.status == CheckStatus::Fail),
-            snapshot: name,
+            snapshot: target.name,
             at,
             by,
             checks,
@@ -421,7 +478,15 @@ impl Engine {
     /// owner-only before it reaches here; the daemon supplies its active root
     /// so the archive layer can refuse aliases of the live instance. Unlike a
     /// backup or verify, restore never changes this instance's history.
-    pub(crate) async fn backup_restore(self: &Arc<Self>, snapshot: String, into: PathBuf) -> Result<Restoration> {
+    /// `identity` decrypts an encrypted snapshot (`#152`) -- missing or
+    /// unusable, restore is refused the same way verify is, before anything
+    /// is staged.
+    pub(crate) async fn backup_restore(
+        self: &Arc<Self>,
+        snapshot: String,
+        into: PathBuf,
+        identity: Option<PathBuf>,
+    ) -> Result<Restoration> {
         let (factory, config) = self.backup_config()?;
         refuse_bad_snapshot_name(&snapshot)?;
         let Ok(_busy) = self.backup_busy.try_lock() else {
@@ -437,24 +502,37 @@ impl Engine {
         })
         .await
         .unwrap_or_default();
-        if !found.iter().any(|f| f.name == snapshot) {
-            return Err(FactoryError::BadRequest(format!(
+        let target = found.iter().find(|f| f.name == snapshot).cloned().ok_or_else(|| {
+            FactoryError::BadRequest(format!(
                 "no snapshot {snapshot:?} in {}; `factory backup list` shows them",
                 destination.display()
-            )));
-        }
+            ))
+        })?;
 
         let started = std::time::Instant::now();
-        let archive_path = destination.join(&snapshot);
+        let archive_path = destination.join(&target.name);
         let instance_id = factory.config.instance.id.clone();
         let active_root = factory.root.clone();
-        let restored = tokio::task::spawn_blocking(move || {
-            archive::restore(&archive_path, &instance_id, &active_root, &into)
+        let root = factory.root.clone();
+        let encrypted = target.encrypted;
+        let name = target.name.clone();
+        let restored = tokio::task::spawn_blocking(move || -> Result<archive::Restored> {
+            let owner_identity = match (encrypted, identity) {
+                (true, None) => {
+                    return Err(FactoryError::BadRequest(format!(
+                        "snapshot {name:?} is encrypted; run `factory backup restore {name} --into <new-root> \
+                         --identity <file>`"
+                    )))
+                }
+                (true, Some(path)) => Some(archive::OwnerIdentity::read(&path, &root)?),
+                (false, _) => None,
+            };
+            archive::restore(&archive_path, &instance_id, &active_root, &into, owner_identity.as_ref())
         })
         .await
         .map_err(|e| FactoryError::adapter("backup", format!("the restore task stopped: {e}")))??;
         Ok(Restoration {
-            snapshot,
+            snapshot: target.name,
             into: restored.into.display().to_string(),
             files: restored.files,
             checks: restored.checks,
@@ -560,11 +638,12 @@ fn report(state: &Captured, code: Vec<RepositoryFact>, time_machine: TimeMachine
             // Newest first, so the first one found is the latest word.
             verified: verifications.iter().find(|v| v.snapshot == f.name).map(|v| v.summary()),
             kept_by,
-            encrypted: false,
+            encrypted: f.encrypted,
         })
         .collect();
 
     let newest = snapshots.first().map(|s| s.at);
+    let newest_encrypted = snapshots.first().is_some_and(|s| s.encrypted);
     let (due_by, overdue_by) = match newest {
         Some(at) => deadlines(config, at),
         None => (None, None),
@@ -588,6 +667,7 @@ fn report(state: &Captured, code: Vec<RepositoryFact>, time_machine: TimeMachine
             .as_ref()
             .filter(|f| newest.is_none_or(|n| f.at > n))
             .map(|f| (f.at, f.reason.clone())),
+        newest_encrypted,
         code: code.clone(),
         time_machine: Some(time_machine.clone()),
     };
@@ -734,6 +814,50 @@ mod tests {
         serde_yaml_ng::from_str(yaml).unwrap()
     }
 
+    /// `#152`: `parse_recipient` is the one place the `age` crate actually
+    /// parses `encrypt_to` -- `factory_core::backup::BackupConfig::validate`
+    /// stays dependency-free and accepts any non-empty string, so this is
+    /// the only test proving an SSH or plugin recipient is truly refused,
+    /// not just deferred to nowhere.
+    #[test]
+    fn parse_recipient_accepts_only_a_native_x25519_recipient() {
+        let recipient = age::x25519::Identity::generate().to_public().to_string();
+        parse_recipient(&recipient).unwrap();
+
+        let ssh = parse_recipient("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogusnotarealkeyatall").unwrap_err();
+        assert!(ssh.to_string().contains("encrypt_to"), "{ssh}");
+
+        // A plugin recipient's HRP is "age1<plugin-name>", never bare "age" --
+        // the same bech32 check that accepts a native recipient refuses this
+        // without any special-casing.
+        let plugin = parse_recipient("age1yubikey1qtn67d3z5jnzq2crf0zgz2u9r5c9z9x8g3p3f9x7hqjxdq0h4z0").unwrap_err();
+        assert!(plugin.to_string().contains("encrypt_to"), "{plugin}");
+
+        let garbage = parse_recipient("age1not-a-real-recipient").unwrap_err();
+        assert!(garbage.to_string().contains("encrypt_to"), "{garbage}");
+    }
+
+    /// The daemon-start refusal in practice: `main.rs` calls `validate_config`
+    /// on the live config before the daemon does anything else, and it must
+    /// reject a config asking to encrypt to something that is not a native
+    /// recipient just as reliably as it already rejects an unfireable cron
+    /// expression.
+    #[tokio::test]
+    async fn validate_config_refuses_a_bad_recipient_the_same_way_it_refuses_a_bad_schedule() {
+        let (engine, base) = engine_backing_up("{ daily: 7 }", "destination");
+        let mut factory = engine.factory_snapshot();
+        factory.config.infrastructure.backup.as_mut().unwrap().encrypt_to =
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogusnotarealkeyatall".into());
+        let e = validate_config(&factory).unwrap_err();
+        assert!(e.to_string().contains("encrypt_to"), "{e}");
+
+        let (_, recipient) = generated_identity();
+        factory.config.infrastructure.backup.as_mut().unwrap().encrypt_to = Some(recipient);
+        validate_config(&factory).unwrap();
+
+        std::fs::remove_dir_all(base).ok();
+    }
+
     /// A throwaway instance with a real database file, its root scope's own
     /// config and a knowledge page, backing up to a sibling directory.
     fn engine_backing_up(keep: &str, destination: &str) -> (Arc<Engine>, PathBuf) {
@@ -771,6 +895,62 @@ mod tests {
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
             .with_backup_store(BackupStore::open(&database).unwrap());
         (Arc::new(engine), base)
+    }
+
+    /// `engine_backing_up`, with `infrastructure.backup.encrypt_to` set to
+    /// `recipient` (`#152`) -- for the engine-level round trip through
+    /// `backup_run`/`backup_verify`/`backup_restore`, not just `archive.rs`'s
+    /// own unit tests.
+    fn engine_backing_up_encrypted(keep: &str, destination: &str, recipient: &str) -> (Arc<Engine>, PathBuf) {
+        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_plugins::{Registry, SqliteStore};
+        let base = std::env::temp_dir().join(format!("factory-backup-encrypted-engine-{}", uuid::Uuid::new_v4()));
+        let root = base.join("instance");
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
+        std::fs::write(root.join(".factory/config.yaml"), "version: 1\ninstance:\n  id: test\n  name: test\n").unwrap();
+        std::fs::write(root.join(".factory/knowledge/page.md"), "# A page\n").unwrap();
+        std::fs::write(root.join(".factory/secrets.yaml"), "api: hunter2-secret-marker").unwrap();
+        let database = root.join(".factory/factory.sqlite");
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
+        let mut company: factory_core::config::Scope =
+            serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let destination = base.join(destination);
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: serde_yaml_ng::from_str(&format!(
+                "backup:\n  destination: {}\n  keep: {keep}\n  encrypt_to: {recipient}\n",
+                destination.display()
+            ))
+            .unwrap(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
+            .with_backup_store(BackupStore::open(&database).unwrap());
+        (Arc::new(engine), base)
+    }
+
+    /// A generated age identity, written to its own file directly under the
+    /// OS temp directory (never inside an instance's own `.factory/`, and
+    /// independent of any one engine's own temp `base`, since the recipient
+    /// has to exist before a config naming it can be built), plus its public
+    /// recipient. The caller removes the file when it is done with it.
+    fn generated_identity() -> (PathBuf, String) {
+        use age::secrecy::ExposeSecret;
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let path = std::env::temp_dir().join(format!("factory-backup-identity-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&path, identity.to_string().expose_secret()).unwrap();
+        (path, recipient)
     }
 
     /// `engine_backing_up`, plus a `dsgvo` catalogue naming `backup_verified`
@@ -833,7 +1013,7 @@ mod tests {
     async fn backup_and_verify_satisfy_a_backup_verified_control_and_leave_backup_offsite_open() {
         let (engine, base) = engine_backing_up_with_backup_policy("{ daily: 7 }", "destination");
         engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
-        engine.backup_verify(None, "owner".into()).await.unwrap();
+        engine.backup_verify(None, None, "owner".into()).await.unwrap();
 
         let report = engine.policy_report(None).await.unwrap();
         let company = &report.rows.iter().find(|r| r.scope == "company").unwrap().statuses;
@@ -939,7 +1119,7 @@ mod tests {
         let knowledge = report.include.iter().find(|r| r.path == ".factory/knowledge/").unwrap();
         assert_eq!(knowledge.files, Some(1));
 
-        let verification = engine.backup_verify(None, "owner".into()).await.unwrap();
+        let verification = engine.backup_verify(None, None, "owner".into()).await.unwrap();
         assert!(verification.ok, "{:?}", verification.checks);
         assert_eq!(verification.snapshot, first.name);
         assert!(matches!(events.recv().await.unwrap(), Event::BackupVerified { .. }));
@@ -956,7 +1136,7 @@ mod tests {
         assert_eq!(report.snapshots.len(), 1);
         assert_eq!(report.last_verified, None, "the verified snapshot is gone, so nothing verified is left");
 
-        let e = engine.backup_verify(Some("../etc.tar.zst".into()), "owner".into()).await.unwrap_err();
+        let e = engine.backup_verify(Some("../etc.tar.zst".into()), None, "owner".into()).await.unwrap_err();
         assert!(e.to_string().contains("not a snapshot name"), "{e}");
         std::fs::remove_dir_all(base).ok();
     }
@@ -973,6 +1153,143 @@ mod tests {
         let report = engine.backup_report().await.unwrap();
         assert_eq!(report.last_failure.as_ref().map(|f| f.trigger), Some(BackupTrigger::Schedule));
         assert!(report.warnings.iter().any(|w| w.kind == "last_failed"));
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// The failure-cleanup path is shared code regardless of encryption, but
+    /// `#152` adds a new writer in front of it -- prove an encrypted backup
+    /// against an unmounted destination is still a clean, recorded failure,
+    /// never a partial `.age` file or a plaintext one left anywhere.
+    #[tokio::test]
+    async fn a_failed_encrypted_backup_is_recorded_and_leaves_the_destination_empty() {
+        let (_, recipient) = generated_identity();
+        let (engine, base) = engine_backing_up_encrypted("{ daily: 7 }", "unmounted/volume", &recipient);
+        let mut events = engine.bus.subscribe();
+        let e = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap_err();
+        assert!(e.to_string().contains("mounted"), "{e}");
+        assert!(matches!(events.recv().await.unwrap(), Event::BackupFailed { .. }));
+        let report = engine.backup_report().await.unwrap();
+        assert!(report.warnings.iter().any(|w| w.kind == "last_failed"));
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// `#152`, end to end through the engine: an encrypted backup names only
+    /// `.age` archives, verifying it needs the matching identity or is
+    /// refused before anything is recorded, a wrong identity still records a
+    /// failed `decrypt` check, and restore follows the same rule -- and
+    /// nowhere in any of it, including the serialized wire shapes and the
+    /// published events, does the identity's own secret ever appear.
+    #[tokio::test]
+    async fn an_encrypted_backup_round_trips_through_the_engine_and_never_leaks_its_identity() {
+        let (identity_path, recipient) = generated_identity();
+        let (engine, base) = engine_backing_up_encrypted("{ daily: 7 }", "destination", &recipient);
+        let mut events = engine.bus.subscribe();
+
+        let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        assert!(snapshot.name.ends_with(".tar.zst.age"), "{}", snapshot.name);
+        assert_eq!(snapshot.encrypted_to.as_deref(), Some(recipient.as_str()));
+        assert!(matches!(events.recv().await.unwrap(), Event::BackupCompleted { .. }));
+
+        // No plaintext byte anywhere in the destination.
+        let archive_path = std::path::PathBuf::from(&snapshot.path);
+        let bytes = std::fs::read(&archive_path).unwrap();
+        assert!(factory_core::backup::looks_encrypted(&bytes));
+        let haystack = String::from_utf8_lossy(&bytes);
+        assert!(!haystack.contains("hunter2-secret-marker"), "the secret reached the destination");
+        assert!(!haystack.contains(factory_core::backup::MANIFEST_FILE));
+
+        let report = engine.backup_report().await.unwrap();
+        assert_eq!(report.snapshots.len(), 1);
+        assert!(report.snapshots[0].encrypted, "encrypted is read from the archive's own bytes");
+        assert!(
+            report.warnings.iter().any(|w| w.kind == "never_verified" && w.message.contains("--identity")),
+            "{:?}",
+            report.warnings
+        );
+
+        // No identity: refused, and nothing recorded -- neither a store row
+        // nor a published event.
+        let before = engine.backups.all().await.unwrap().len();
+        let refused = engine.backup_verify(None, None, "owner".into()).await.unwrap_err();
+        assert!(refused.to_string().contains("--identity"), "{refused}");
+        assert_eq!(engine.backups.all().await.unwrap().len(), before, "a refusal records nothing");
+
+        // The right identity: verifies clean, decrypt named in the checks.
+        let verification =
+            engine.backup_verify(None, Some(identity_path.clone()), "owner".into()).await.unwrap();
+        assert!(verification.ok, "{:?}", verification.checks);
+        assert!(verification.checks.iter().any(|c| c.name == "decrypt" && c.status == CheckStatus::Ok));
+        assert!(matches!(events.recv().await.unwrap(), Event::BackupVerified { .. }));
+
+        // The wrong identity: still recorded, but only the decrypt check
+        // fails.
+        let (wrong_path, _) = generated_identity();
+        let wrong = engine.backup_verify(None, Some(wrong_path.clone()), "owner".into()).await.unwrap();
+        assert!(!wrong.ok);
+        assert!(wrong.checks.iter().any(|c| c.name == "decrypt" && c.status == CheckStatus::Fail));
+
+        // Restore: refused without an identity, works with the right one.
+        let restore_into = base.join("restored-no-identity");
+        let restore_refused =
+            engine.backup_restore(snapshot.name.clone(), restore_into.clone(), None).await.unwrap_err();
+        assert!(restore_refused.to_string().contains("--identity"), "{restore_refused}");
+        assert!(!restore_into.exists());
+
+        let restore_into = base.join("restored");
+        let restoration = engine
+            .backup_restore(snapshot.name.clone(), restore_into.clone(), Some(identity_path.clone()))
+            .await
+            .unwrap();
+        assert!(factory_core::config::Factory::load(&restore_into).is_ok());
+        assert!(!restore_into.join(".factory/secrets.yaml").exists());
+        assert_eq!(restoration.snapshot, snapshot.name);
+
+        // Never once does the identity's own secret text reach anything
+        // that got serialized or published.
+        let secret = std::fs::read_to_string(&identity_path).unwrap();
+        for haystack in [
+            serde_json::to_string(&verification).unwrap(),
+            serde_json::to_string(&wrong).unwrap(),
+            serde_json::to_string(&report).unwrap(),
+            refused.to_string(),
+            restore_refused.to_string(),
+        ] {
+            assert!(!haystack.contains(secret.trim()), "the identity's secret leaked: {haystack}");
+        }
+
+        std::fs::remove_file(&identity_path).ok();
+        std::fs::remove_file(&wrong_path).ok();
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// `#152`: retention treats a destination holding both formats as one
+    /// history -- a plaintext archive planted as if a pre-`#152` daemon had
+    /// taken it is pruned by the very same `daily: 1` rule an encrypted
+    /// backup taken afterwards is.
+    #[tokio::test]
+    async fn retention_prunes_across_a_mixed_plaintext_and_encrypted_history() {
+        let (identity_path, recipient) = generated_identity();
+        let (engine, base) =
+            engine_backing_up_encrypted("{ daily: 1, weekly: 0, monthly: 0 }", "destination", &recipient);
+        let destination = base.join("destination");
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(
+            destination.join("factory-backup-test-20200101T030000Z.tar.zst"),
+            b"not a real archive; retention only ever looks at a listed name and date",
+        )
+        .unwrap();
+
+        let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        assert_eq!(
+            snapshot.pruned,
+            ["factory-backup-test-20200101T030000Z.tar.zst"],
+            "the older plaintext archive is pruned by the same daily: 1 rule as the new encrypted one"
+        );
+        let report = engine.backup_report().await.unwrap();
+        assert_eq!(report.snapshots.len(), 1);
+        assert!(report.snapshots[0].encrypted);
+
+        std::fs::remove_file(&identity_path).ok();
         std::fs::remove_dir_all(base).ok();
     }
 
@@ -1013,6 +1330,34 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// `#152`: a mixed destination of plaintext and encrypted archives is
+    /// one history, newest first, each correctly marked from its own bytes
+    /// -- and a half-written `.age` archive, or another instance's, stays
+    /// exactly as invisible as the plaintext equivalents already are.
+    #[test]
+    fn a_mixed_plaintext_and_encrypted_destination_is_one_history() {
+        let dir = std::env::temp_dir().join(format!("factory-backup-list-mixed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("factory-backup-demo-20260924T030000Z.tar.zst"), b"not really zstd").unwrap();
+        std::fs::write(
+            dir.join("factory-backup-demo-20260925T030000Z.tar.zst.age"),
+            [factory_core::backup::AGE_MAGIC, b"\n-> X25519 ..."].concat(),
+        )
+        .unwrap();
+        std::fs::write(dir.join(".factory-backup-demo-20260926T030000Z.tar.zst.age.partial"), b"partial").unwrap();
+        std::fs::write(dir.join("factory-backup-other-20260925T030000Z.tar.zst.age"), b"not ours").unwrap();
+        let found = list_archives(&dir, "demo");
+        let rows: Vec<(&str, bool)> = found.iter().map(|f| (f.name.as_str(), f.encrypted)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("factory-backup-demo-20260925T030000Z.tar.zst.age", true),
+                ("factory-backup-demo-20260924T030000Z.tar.zst", false),
+            ]
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn the_include_table_reads_zero_for_an_empty_directory_and_unknown_before_any_backup() {
         let before = include_rows(false, None);
@@ -1030,6 +1375,7 @@ mod tests {
             duration_ms: 1,
             pruned: vec![],
             groups: vec![factory_core::backup::GroupTotal { group: Group::Knowledge, files: 3, bytes: 30 }],
+            encrypted_to: None,
         };
         let after = include_rows(false, Some(&snapshot));
         let knowledge = after.iter().find(|r| r.path == ".factory/knowledge/").unwrap();

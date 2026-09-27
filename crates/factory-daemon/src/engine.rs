@@ -641,13 +641,13 @@ impl Engine {
                     )
                     .await?,
             }),
-            Request::BackupVerify { snapshot } => Ok(Payload::BackupVerify {
+            Request::BackupVerify { snapshot, identity } => Ok(Payload::BackupVerify {
                 verification: self
-                    .backup_verify(snapshot, crate::policies::caller_name(caller))
+                    .backup_verify(snapshot, identity, crate::policies::caller_name(caller))
                     .await?,
             }),
-            Request::BackupRestore { snapshot, into } => Ok(Payload::BackupRestore {
-                restoration: self.backup_restore(snapshot, into).await?,
+            Request::BackupRestore { snapshot, into, identity } => Ok(Payload::BackupRestore {
+                restoration: self.backup_restore(snapshot, into, identity).await?,
             }),
             Request::Knowledge => {
                 let root = self.factory_snapshot().root;

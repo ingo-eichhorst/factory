@@ -2598,7 +2598,7 @@ mod tests {
     async fn backup_metrics_read_the_newest_snapshot_and_verification_as_of_the_capture_instant() {
         let (engine, base) = backup_metrics_test_engine("destination");
         engine.backup_run(factory_core::backup::BackupTrigger::Manual, "owner".into()).await.unwrap();
-        engine.backup_verify(None, "owner".into()).await.unwrap();
+        engine.backup_verify(None, None, "owner".into()).await.unwrap();
 
         let now = Utc::now();
         let ids = [MetricId::new("backup_age_hours").unwrap(), MetricId::new("backup_verified_age_days").unwrap()];
@@ -2646,7 +2646,7 @@ mod tests {
         let middle = bytes.len() / 2;
         bytes[middle] ^= 0xff;
         std::fs::write(&snapshot.path, &bytes).unwrap();
-        let verification = engine.backup_verify(None, "owner".into()).await.unwrap();
+        let verification = engine.backup_verify(None, None, "owner".into()).await.unwrap();
         assert!(!verification.ok, "{:?}", verification.checks);
 
         let ids = [MetricId::new("backup_age_hours").unwrap(), MetricId::new("backup_verified_age_days").unwrap()];
