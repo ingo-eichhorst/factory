@@ -33,3 +33,6 @@ libc = "0.2"
 tar = "0.4"
 zstd = "0.13"
 sha2.workspace = true
+# L1 Backup v2 (#152): encrypting a snapshot to a single native X25519
+# recipient. Default features only -- no ssh, plugin, armor or cli-common.
+age = "0.12"

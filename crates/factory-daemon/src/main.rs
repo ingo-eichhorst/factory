@@ -220,7 +220,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let discovery_started = std::time::Instant::now();
     discovery::apply(&mut factory)?;
     factory.config.validate()?;
-    backup::validate_schedule(&factory)?;
+    backup::validate_config(&factory)?;
     tracing::info!(
         instance = %factory.config.instance.name,
         root = %factory.root.display(),

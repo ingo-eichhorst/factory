@@ -2676,6 +2676,7 @@ infrastructure:
     schedule: { cron: "0 3 * * *", timezone: Europe/Berlin }
     keep: { daily: 7, weekly: 4, monthly: 6 } # grandfather-father-son
     include_logs: false                       # also .factory/guides/ and .factory/logs/
+    encrypt_to: age1...                       # optional (#152): encrypt every snapshot to this recipient
 ```
 
 A snapshot is one `factory-backup-<instance>-<utc>.tar.zst` holding:
@@ -2700,18 +2701,39 @@ same bytes, so the manifest cannot disagree with the archive. The archive is
 written as a hidden `.partial` and renamed into place only when complete and
 synced.
 
+**Encryption (`#152`).** `infrastructure.backup.encrypt_to` names a single
+native X25519 recipient (`age1…`, from `age-keygen` or an equivalent); an SSH
+or plugin recipient (`age1yubikey1…`, `ssh-ed25519 …`) is refused when the
+daemon starts, not silently downgraded to plaintext. With it set, the
+tar/zstd stream is written straight through an
+[`age`](https://age-encryption.org) stream encryptor into the same hidden
+`.partial` file, so no plaintext byte ever reaches the destination; the
+archive is named `factory-backup-<instance>-<utc>.tar.zst.age` instead of
+`...tar.zst`, and a destination holding both is one retention history.
+Whether a given archive is encrypted is read from its own bytes (the age
+format's magic header), never from its name or the live config, so a renamed
+file or a config changed after the fact is never misreported. The daemon
+never stores the recipient's matching identity -- only an owner, supplying
+one with `--identity <file>` on `verify` or `restore`, can decrypt a
+snapshot; a config asking for encryption gets it, but nothing here can prove
+that encrypted snapshot restores without a person doing so by hand.
+
     factory backup [status]          the hero: age against the schedule, destination, last verify, warnings
     factory backup list              every snapshot, verified or not, and the rule that keeps it
     factory backup run               take one now, then apply retention
-    factory backup verify [<name>]   prove one would restore; exits non-zero on a failed check
-    factory backup restore <name> --into <new-root>
+    factory backup verify [<name>] [--identity <file>]
+                                      prove one would restore; an encrypted snapshot needs --identity; exits
+                                      non-zero on a failed check
+    factory backup restore <name> --into <new-root> [--identity <file>]
                                       verify, then restore into a new root
 
 `GET /api/backup`, `POST /api/backup/run` and
 `POST /api/backup/verify?snapshot=` are the same three over HTTP, and the
 **L1 › Backup** page draws them. `run` and `verify` need `backup.run`, which
 only an agent in the root scope may hold, like `policy.attest`; reading is
-open to every agent.
+open to every agent. The HTTP verify endpoint never accepts an identity --
+decrypting an encrypted snapshot is CLI-only and owner-only, the same as
+restore, whatever grants a role holds.
 
 **Restore** is CLI-only and owner-only; there is deliberately no HTTP or UI
 endpoint and no role grant for it. It runs the same archive-path, manifest,
@@ -2723,8 +2745,10 @@ incomplete, unsafe or database-incompatible archive leaves neither a partial
 root nor a staging directory. The command prints the exact
 `factory-daemon --root <new-root> run` and `factory --root <new-root> status`
 commands for a switch-over, but never stops a daemon, switches roots or starts
-the restored instance itself. V1 plaintext archives are supported; encrypted
-input belongs to the separate encryption follow-up.
+the restored instance itself. Both plaintext and encrypted archives are
+supported; an encrypted one needs `--identity <file>` holding the one native
+age identity that matches its recipient, or restore is refused before
+anything is staged.
 
 **Verify** unpacks a snapshot into a temporary directory -- never over the
 instance -- refusing any entry that would land outside it, then checks every
@@ -2736,7 +2760,13 @@ profiles, CycloneDX VEX judgments, datasets and the knowledge index. A file
 one of those loaders cannot parse is a warning, not a failure: the checksums
 have already proved it is byte for byte what was backed up, so it is broken
 in the live instance too. Every verification is recorded; the page's "last
-verified" only counts snapshots still in the destination.
+verified" only counts snapshots still in the destination. An encrypted
+snapshot (`#152`) decrypts first, given `--identity <file>`; a `decrypt`
+check names the identity's public recipient. Without an identity, verifying
+an encrypted snapshot is refused outright -- `snapshot X is encrypted; run
+factory backup verify X --identity <file>` -- and nothing is recorded: that
+is a fact about the request, not a verdict on the archive. A wrong identity
+still runs and is recorded, failing only the `decrypt` check.
 
 **The job.** Once a minute the daemon looks whether the schedule's next slot
 after the later of the last attempt and the newest archive has passed, so a
@@ -2803,9 +2833,10 @@ guess about an archive nobody can currently list. The "Policies" section
 above documents the three `daemon` facts this backs
 (`backup_recent`/`backup_offsite`/`backup_verified`) and the "Goals"
 section the two registry metrics (`backup_age_hours`/
-`backup_verified_age_days`) it also backs. Not yet: `age` encryption (a
-config asking for `encrypt_to` is refused at load rather than given
-plaintext it thinks is encrypted).
+`backup_verified_age_days`) it also backs. `encrypt_to` (`#152`) needs no
+special case here: an encrypted newest snapshot counts toward
+`backup_verified` only once an owner has actually verified it with its
+identity, exactly as a plaintext one does.
 
 ## Writing a plugin
 

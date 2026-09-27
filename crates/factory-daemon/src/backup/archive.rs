@@ -40,6 +40,120 @@ fn fail(message: impl Into<String>) -> FactoryError {
     FactoryError::adapter("backup", message)
 }
 
+// ============================================================ encryption
+//
+// `#152`: a snapshot is optionally encrypted to one native X25519 recipient
+// with the `age` crate's streaming API. Writing goes straight from the tar/
+// zstd stream through an age stream encryptor into the same hidden
+// `.partial` file `take` always wrote to -- no plaintext byte ever reaches
+// the destination. Reading decrypts the same way, given an owner-supplied
+// identity `verify`/`restore` never store past the call that used it.
+
+/// An owner-supplied identity for decrypting one encrypted snapshot: read
+/// once from a file the daemon does not otherwise control, kept only in
+/// memory for the one call that needed it, and never logged, recorded or
+/// echoed back -- see [`OwnerIdentity::read`]. Named apart from
+/// `age::Identity` (the trait every identity type implements) to keep the
+/// two apart at a glance.
+pub struct OwnerIdentity {
+    inner: age::x25519::Identity,
+    recipient: String,
+}
+
+impl OwnerIdentity {
+    /// Refuses a path inside the instance's own `.factory/` -- a key the
+    /// daemon can read on its own is a standing key, which an owner-supplied
+    /// identity is meant never to be (`#116`) -- then reads the file and
+    /// accepts exactly one native `AGE-SECRET-KEY-1…` line. A passphrase-
+    /// protected identity file (binary, or otherwise not plain identity
+    /// lines), a plugin identity (`AGE-PLUGIN-…`), an SSH identity, or more
+    /// than one identity are all refused -- every error names the identity's
+    /// path and, at most, a line number, never the line's own text.
+    pub fn read(path: &Path, instance_root: &Path) -> Result<Self> {
+        if !path.is_absolute() {
+            return Err(fail(format!("the identity path {} must be absolute", path.display())));
+        }
+        let factory_dir = instance_root.join(FACTORY_DIR);
+        let canonical_factory_dir = factory_dir.canonicalize().unwrap_or(factory_dir);
+        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if canonical_path.starts_with(&canonical_factory_dir) {
+            return Err(fail(format!(
+                "the identity path {} is inside this instance's own {}; a key the daemon can read on its own is a \
+                 standing key, which an owner-supplied identity must never be",
+                path.display(),
+                canonical_factory_dir.display()
+            )));
+        }
+        let text = fs::read_to_string(path)
+            .map_err(|e| fail(format!("reading the identity file {}: {e}", path.display())))?;
+        let mut found: Option<age::x25519::Identity> = None;
+        for (n, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parsed = line.parse::<age::x25519::Identity>().map_err(|_| {
+                fail(format!(
+                    "the identity file {}'s line {} is not a native age identity (AGE-SECRET-KEY-1…); \
+                     passphrase-protected, plugin and ssh identities are not supported",
+                    path.display(),
+                    n + 1
+                ))
+            })?;
+            if found.is_some() {
+                return Err(fail(format!(
+                    "the identity file {} holds more than one identity; only a single native age identity is \
+                     supported",
+                    path.display()
+                )));
+            }
+            found = Some(parsed);
+        }
+        let inner = found.ok_or_else(|| fail(format!("the identity file {} holds no identity", path.display())))?;
+        let recipient = inner.to_public().to_string();
+        Ok(Self { inner, recipient })
+    }
+
+    /// The identity's public recipient (`age1…`), for a check's detail --
+    /// never the identity itself.
+    pub fn recipient(&self) -> &str {
+        &self.recipient
+    }
+}
+
+/// The innermost writer for a snapshot archive: plain, or wrapped through an
+/// age stream encryptor when `Plan::encrypt_to` is set. `finish` -- never
+/// `Write::flush` -- is what actually closes the age container's last chunk;
+/// skipping it would truncate a file that decrypts into one that does not.
+enum Sink<W: Write> {
+    Plain(W),
+    Encrypted(age::stream::StreamWriter<W>),
+}
+
+impl<W: Write> Write for Sink<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Sink::Plain(w) => w.write(buf),
+            Sink::Encrypted(w) => w.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Sink::Plain(w) => w.flush(),
+            Sink::Encrypted(w) => w.flush(),
+        }
+    }
+}
+
+impl<W: Write> Sink<W> {
+    fn finish(self) -> Result<W> {
+        match self {
+            Sink::Plain(w) => Ok(w),
+            Sink::Encrypted(w) => w.finish().map_err(|e| fail(format!("finishing the age stream: {e}"))),
+        }
+    }
+}
+
 /// What to put in a snapshot.
 pub struct Plan {
     pub root: PathBuf,
@@ -49,6 +163,10 @@ pub struct Plan {
     /// separated. The root's own `.factory/config.yaml` is always taken.
     pub scope_configs: Vec<String>,
     pub include_logs: bool,
+    /// `infrastructure.backup.encrypt_to` (`#152`), already load-time
+    /// validated -- `take` still re-parses it, cheaply, rather than trust a
+    /// config that could in principle have changed underneath it.
+    pub encrypt_to: Option<String>,
 }
 
 /// A snapshot as written.
@@ -135,6 +253,10 @@ pub fn take(plan: &Plan, destination: &Path, name: &str, at: DateTime<Utc>) -> R
         return Err(fail(format!("{} already exists", final_path.display())));
     }
     let scratch = Scratch::new("backup")?;
+    let recipient = match &plan.encrypt_to {
+        Some(s) => Some(super::parse_recipient(s)?),
+        None => None,
+    };
 
     // -- the database, consistent and checked -----------------------------
     if !plan.database.is_file() {
@@ -177,7 +299,19 @@ pub fn take(plan: &Plan, destination: &Path, name: &str, at: DateTime<Utc>) -> R
     let partial = destination.join(format!(".{name}.partial"));
     let written = (|| -> Result<(u64, Vec<ManifestFile>)> {
         let file = File::create(&partial).map_err(|e| fail(format!("creating {}: {e}", partial.display())))?;
-        let encoder = zstd::Encoder::new(BufWriter::new(file), 3).map_err(|e| fail(format!("zstd: {e}")))?;
+        let buffered = BufWriter::new(file);
+        let sink: Sink<BufWriter<File>> = match &recipient {
+            Some(recipient) => {
+                let encryptor = age::Encryptor::with_recipients(std::iter::once(recipient as &dyn age::Recipient))
+                    .map_err(|e| fail(format!("preparing the age recipient: {e}")))?;
+                let writer = encryptor
+                    .wrap_output(buffered)
+                    .map_err(|e| fail(format!("writing the age header: {e}")))?;
+                Sink::Encrypted(writer)
+            }
+            None => Sink::Plain(buffered),
+        };
+        let encoder = zstd::Encoder::new(sink, 3).map_err(|e| fail(format!("zstd: {e}")))?;
         let mut tar = tar::Builder::new(encoder);
         let mut files = Vec::new();
         let mtime = at.timestamp().max(0) as u64;
@@ -232,7 +366,8 @@ pub fn take(plan: &Plan, destination: &Path, name: &str, at: DateTime<Utc>) -> R
             .map_err(|e| fail(format!("archiving the manifest: {e}")))?;
 
         let encoder = tar.into_inner().map_err(|e| fail(format!("finishing the archive: {e}")))?;
-        let buffered = encoder.finish().map_err(|e| fail(format!("finishing zstd: {e}")))?;
+        let sink = encoder.finish().map_err(|e| fail(format!("finishing zstd: {e}")))?;
+        let buffered = sink.finish()?;
         let file = buffered.into_inner().map_err(|e| fail(format!("flushing the archive: {e}")))?;
         file.sync_all().map_err(|e| fail(format!("syncing the archive: {e}")))?;
         Ok((database_bytes, files))
@@ -368,28 +503,73 @@ fn safe_relative(path: &Path) -> Option<PathBuf> {
 
 /// Every step of proving `archive` would restore, in the order they ran.
 /// `instance_id` is this instance's own, which the manifest is compared to.
-pub fn verify(archive: &Path, instance_id: &str) -> Vec<VerifyCheck> {
+/// `identity` decrypts an encrypted archive (`#152`); `None` for a plaintext
+/// one, verified and restored exactly as v1's were.
+pub fn verify(archive: &Path, instance_id: &str, identity: Option<&OwnerIdentity>) -> Vec<VerifyCheck> {
     let scratch = match Scratch::new("verify") {
         Ok(s) => s,
         Err(e) => {
             return vec![check("archive", CheckStatus::Fail, e.to_string())];
         }
     };
-    verify_into(archive, instance_id, &scratch.0)
+    verify_into(archive, instance_id, &scratch.0, identity)
 }
 
 /// The verification shared by `verify` and restore. `tmp` must be an empty,
 /// private directory: archive entries are materialized there while they are
 /// hashed, then all loaders inspect those exact bytes.
-fn verify_into(archive: &Path, instance_id: &str, tmp: &Path) -> Vec<VerifyCheck> {
+fn verify_into(archive: &Path, instance_id: &str, tmp: &Path, identity: Option<&OwnerIdentity>) -> Vec<VerifyCheck> {
     let mut checks = Vec::new();
+
+    let file = match File::open(archive) {
+        Ok(f) => f,
+        Err(e) => {
+            checks.push(check("archive", CheckStatus::Fail, format!("opening {}: {e}", archive.display())));
+            return checks;
+        }
+    };
+
+    // -- decrypt, when an identity was supplied (`#152`) ---------------------
+    //
+    // A separate check from "archive" below: a wrong identity or a corrupt
+    // ciphertext is a fact about decryption, not about the tar/zstd stream
+    // underneath, which nothing here has looked at yet.
+    let reader: Box<dyn Read> = match identity {
+        Some(identity) => {
+            let decrypted = age::Decryptor::new(file)
+                .map_err(|e| e.to_string())
+                .and_then(|decryptor| {
+                    decryptor
+                        .decrypt(std::iter::once(&identity.inner as &dyn age::Identity))
+                        .map_err(|e| e.to_string())
+                });
+            match decrypted {
+                Ok(reader) => {
+                    checks.push(check(
+                        "decrypt",
+                        CheckStatus::Ok,
+                        format!("decrypted with the identity for {}", identity.recipient()),
+                    ));
+                    Box::new(reader)
+                }
+                Err(e) => {
+                    checks.push(check(
+                        "decrypt",
+                        CheckStatus::Fail,
+                        format!("could not decrypt with the identity for {}: {e}", identity.recipient()),
+                    ));
+                    return checks;
+                }
+            }
+        }
+        None => Box::new(file),
+    };
 
     // -- unpack, hashing every entry on its way to disk ---------------------
     let mut unpacked: BTreeMap<String, (u64, String)> = BTreeMap::new();
     let mut manifest_text: Option<String> = None;
     let unpacking = (|| -> std::result::Result<(), String> {
-        let file = File::open(archive).map_err(|e| format!("opening {}: {e}", archive.display()))?;
-        let decoder = zstd::Decoder::new(file).map_err(|e| format!("zstd: {e}"))?;
+        let decoder = zstd::Decoder::new(reader).map_err(|e| format!("zstd: {e}"))?;
         let mut tar = tar::Archive::new(decoder);
         for entry in tar.entries().map_err(|e| format!("reading the archive: {e}"))? {
             let mut entry = entry.map_err(|e| format!("reading the archive: {e}"))?;
@@ -502,8 +682,8 @@ fn verify_into(archive: &Path, instance_id: &str, tmp: &Path) -> Vec<VerifyCheck
                 bad.push(format!("scope discovery: {e}"));
             } else if let Err(e) = factory.config.validate() {
                 bad.push(format!("instance config: {e}"));
-            } else if let Err(e) = super::validate_schedule(&factory) {
-                bad.push(format!("backup schedule: {e}"));
+            } else if let Err(e) = super::validate_config(&factory) {
+                bad.push(format!("backup config: {e}"));
             }
         }
         Err(e) => bad.push(format!("the root config: {e}")),
@@ -542,14 +722,21 @@ pub struct Restored {
     pub checks: Vec<VerifyCheck>,
 }
 
-/// Validate, stage and atomically commit a plaintext snapshot as a new root.
-/// Nothing is written under `into` until all of `verify`'s required checks
-/// pass. The staging directory is a sibling so the last operation is a rename
-/// on one filesystem; its guard removes every failed attempt.
-pub fn restore(archive: &Path, instance_id: &str, active_root: &Path, into: &Path) -> Result<Restored> {
+/// Validate, stage and atomically commit a snapshot as a new root -- plain,
+/// or encrypted with `identity` supplied (`#152`). Nothing is written under
+/// `into` until all of `verify`'s required checks pass. The staging
+/// directory is a sibling so the last operation is a rename on one
+/// filesystem; its guard removes every failed attempt.
+pub fn restore(
+    archive: &Path,
+    instance_id: &str,
+    active_root: &Path,
+    into: &Path,
+    identity: Option<&OwnerIdentity>,
+) -> Result<Restored> {
     let (target, existed) = restore_target(active_root, into)?;
     let stage = Scratch::sibling(&target)?;
-    let checks = verify_into(archive, instance_id, &stage.0);
+    let checks = verify_into(archive, instance_id, &stage.0, identity);
     let failures: Vec<String> = checks
         .iter()
         .filter(|c| c.status == CheckStatus::Fail)
@@ -960,24 +1147,41 @@ mod tests {
             Self { root, destination }
         }
 
-        fn plan(&self, include_logs: bool) -> Plan {
+        fn plan_with(&self, include_logs: bool, encrypt_to: Option<String>) -> Plan {
             Plan {
                 root: self.root.clone(),
                 database: self.root.join(".factory/factory.sqlite"),
                 instance: ManifestInstance { id: "inst-1".into(), name: "Test Instance".into() },
                 scope_configs: vec!["projects/demo/.factory/config.yaml".into()],
                 include_logs,
+                encrypt_to,
             }
         }
 
         fn take(&self, include_logs: bool) -> Taken {
+            self.take_with(include_logs, None)
+        }
+
+        fn take_with(&self, include_logs: bool, encrypt_to: Option<String>) -> Taken {
             let destination = prepare_destination(&self.root, &self.destination).unwrap();
-            let name = archive_name("Test Instance", Utc::now());
-            take(&self.plan(include_logs), &destination, &name, Utc::now()).unwrap()
+            let name = archive_name("Test Instance", Utc::now(), encrypt_to.is_some());
+            take(&self.plan_with(include_logs, encrypt_to), &destination, &name, Utc::now()).unwrap()
         }
 
         fn manifest(archive: &Path) -> Manifest {
-            let decoder = zstd::Decoder::new(File::open(archive).unwrap()).unwrap();
+            Self::manifest_with(archive, None)
+        }
+
+        fn manifest_with(archive: &Path, identity: Option<&OwnerIdentity>) -> Manifest {
+            let file = File::open(archive).unwrap();
+            let reader: Box<dyn Read> = match identity {
+                Some(identity) => {
+                    let decryptor = age::Decryptor::new(file).unwrap();
+                    Box::new(decryptor.decrypt(std::iter::once(&identity.inner as &dyn age::Identity)).unwrap())
+                }
+                None => Box::new(file),
+            };
+            let decoder = zstd::Decoder::new(reader).unwrap();
             let mut tar = tar::Archive::new(decoder);
             for entry in tar.entries().unwrap() {
                 let mut entry = entry.unwrap();
@@ -1061,7 +1265,7 @@ mod tests {
     fn a_fresh_snapshot_verifies_with_the_broken_policy_as_a_warning_only() {
         let instance = Instance::new("verify");
         let taken = instance.take(false);
-        let checks = verify(&taken.path, "inst-1");
+        let checks = verify(&taken.path, "inst-1", None);
         let by_name: BTreeMap<&str, &VerifyCheck> = checks.iter().map(|c| (c.name.as_str(), c)).collect();
         for name in [
             "archive", "manifest", "checksums", "database", "config", "goals", "scenarios", "quality", "vex", "intake",
@@ -1083,7 +1287,7 @@ mod tests {
         )
         .unwrap();
         let taken = instance.take(false);
-        let checks = verify(&taken.path, "inst-1");
+        let checks = verify(&taken.path, "inst-1", None);
         let vex = checks.iter().find(|check| check.name == "vex").unwrap();
         assert_eq!(vex.status, CheckStatus::Warn);
         assert!(vex.detail.contains("demo/broken.cdx.json"), "{}", vex.detail);
@@ -1095,7 +1299,7 @@ mod tests {
         let instance = Instance::new("broken-intake");
         fs::write(instance.root.join(".factory/intake/ready.yaml"), "checks: [unclosed").unwrap();
         let taken = instance.take(false);
-        let checks = verify(&taken.path, "inst-1");
+        let checks = verify(&taken.path, "inst-1", None);
         let intake = checks.iter().find(|check| check.name == "intake").unwrap();
         assert_eq!(intake.status, CheckStatus::Warn);
         assert!(intake.detail.contains("ready.yaml"), "{}", intake.detail);
@@ -1109,7 +1313,7 @@ mod tests {
         let middle = bytes.len() / 2;
         bytes[middle] ^= 0xff;
         fs::write(&taken.path, &bytes).unwrap();
-        let checks = verify(&taken.path, "inst-1");
+        let checks = verify(&taken.path, "inst-1", None);
         assert!(checks.iter().any(|c| c.status == CheckStatus::Fail), "{checks:?}");
     }
 
@@ -1120,7 +1324,7 @@ mod tests {
         let base = instance.root.parent().unwrap();
 
         let into = base.join("restored");
-        let restored = restore(&taken.path, "inst-1", &instance.root, &into).unwrap();
+        let restored = restore(&taken.path, "inst-1", &instance.root, &into, None).unwrap();
         assert_eq!(restored.into, into.canonicalize().unwrap());
         assert_eq!(restored.files, 7);
         assert!(!restored.checks.iter().any(|c| c.status == CheckStatus::Fail));
@@ -1142,7 +1346,7 @@ mod tests {
 
         let empty = base.join("restored-empty");
         fs::create_dir(&empty).unwrap();
-        restore(&taken.path, "inst-1", &instance.root, &empty).unwrap();
+        restore(&taken.path, "inst-1", &instance.root, &empty, None).unwrap();
         assert!(empty.join(DATABASE_ENTRY).is_file());
     }
 
@@ -1150,7 +1354,7 @@ mod tests {
     fn restore_refuses_the_active_or_populated_root_without_changing_it() {
         let instance = Instance::new("restore-refuse");
         let taken = instance.take(false);
-        let active = restore(&taken.path, "inst-1", &instance.root, &instance.root)
+        let active = restore(&taken.path, "inst-1", &instance.root, &instance.root, None)
             .unwrap_err()
             .to_string();
         assert!(active.contains("running instance root"), "{active}");
@@ -1158,7 +1362,7 @@ mod tests {
         let occupied = instance.root.parent().unwrap().join("occupied");
         fs::create_dir(&occupied).unwrap();
         fs::write(occupied.join("keep.txt"), "untouched").unwrap();
-        let error = restore(&taken.path, "inst-1", &instance.root, &occupied)
+        let error = restore(&taken.path, "inst-1", &instance.root, &occupied, None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("not empty"), "{error}");
@@ -1166,7 +1370,7 @@ mod tests {
 
         let dangling = instance.root.parent().unwrap().join("dangling");
         std::os::unix::fs::symlink("missing", &dangling).unwrap();
-        let error = restore(&taken.path, "inst-1", &instance.root, &dangling)
+        let error = restore(&taken.path, "inst-1", &instance.root, &dangling, None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("symbolic link"), "{error}");
@@ -1183,7 +1387,7 @@ mod tests {
         fs::write(&taken.path, bytes).unwrap();
         let parent = instance.root.parent().unwrap();
         let into = parent.join("not-committed");
-        let error = restore(&taken.path, "inst-1", &instance.root, &into)
+        let error = restore(&taken.path, "inst-1", &instance.root, &into, None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("verification failed"), "{error}");
@@ -1227,5 +1431,171 @@ mod tests {
         assert!(safe_relative(Path::new("../../etc/passwd")).is_none());
         assert!(safe_relative(Path::new("/etc/passwd")).is_none());
         assert_eq!(safe_relative(Path::new("./.factory/x")), Some(PathBuf::from(".factory/x")));
+    }
+
+    // ============================================================ #152: age
+
+    /// A generated identity, written to a file under `base` (never inside an
+    /// instance's own `.factory/`), plus its public recipient.
+    fn generated_identity(base: &Path) -> (PathBuf, String) {
+        use age::secrecy::ExposeSecret;
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let path = base.join(format!("identity-{}.txt", uuid::Uuid::new_v4()));
+        fs::write(&path, identity.to_string().expose_secret()).unwrap();
+        (path, recipient)
+    }
+
+    /// `OwnerIdentity` deliberately has no `Debug` impl (nothing should be
+    /// able to print it, even by accident), so `Result::unwrap_err` -- which
+    /// needs `T: Debug` to format the `Ok` case it did not get -- cannot be
+    /// used on it directly. This is that assertion instead.
+    fn identity_err(result: Result<OwnerIdentity>) -> String {
+        match result {
+            Ok(_) => panic!("expected the identity to be refused"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_encrypted_snapshot_is_named_and_written_with_no_plaintext_byte_in_the_destination() {
+        let instance = Instance::new("encrypt-take");
+        let (_, recipient) = generated_identity(instance.root.parent().unwrap());
+        let taken = instance.take_with(false, Some(recipient));
+        let name = taken.path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.ends_with(".tar.zst.age"), "{name}");
+
+        let bytes = fs::read(&taken.path).unwrap();
+        assert!(
+            factory_core::backup::looks_encrypted(&bytes),
+            "the archive does not start with the age magic"
+        );
+        assert_ne!(&bytes[..4], &[0x28, 0xb5, 0x2f, 0xfd], "the first bytes are a zstd frame, not ciphertext");
+        let haystack = String::from_utf8_lossy(&bytes);
+        for marker in ["manifest.json", "Test Instance", "README", "Company", MANIFEST_FILE] {
+            assert!(!haystack.contains(marker), "plaintext marker {marker:?} leaked into the archive");
+        }
+
+        // Nothing but the one encrypted archive in the destination: no
+        // partial, no plaintext sibling.
+        let left: Vec<String> = fs::read_dir(&instance.destination)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, [name]);
+    }
+
+    #[test]
+    fn an_encrypted_snapshot_verifies_with_the_right_identity_and_fails_cleanly_with_the_wrong_one() {
+        let instance = Instance::new("encrypt-verify");
+        let base = instance.root.parent().unwrap().to_path_buf();
+        let (identity_path, recipient) = generated_identity(&base);
+        let taken = instance.take_with(false, Some(recipient.clone()));
+
+        let manifest = Instance::manifest_with(&taken.path, Some(&OwnerIdentity::read(&identity_path, &instance.root).unwrap()));
+        assert!(manifest.files.iter().any(|f| f.path == ".factory/config.yaml"), "the manifest decrypts and parses");
+
+        let identity = OwnerIdentity::read(&identity_path, &instance.root).unwrap();
+        assert_eq!(identity.recipient(), recipient);
+        let checks = verify(&taken.path, "inst-1", Some(&identity));
+        assert!(!checks.iter().any(|c| c.status == CheckStatus::Fail), "{checks:?}");
+        let decrypt = checks.iter().find(|c| c.name == "decrypt").expect("a decrypt check");
+        assert_eq!(decrypt.status, CheckStatus::Ok);
+        assert!(decrypt.detail.contains(&recipient), "{}", decrypt.detail);
+
+        let (wrong_path, wrong_recipient) = generated_identity(&base);
+        let wrong = OwnerIdentity::read(&wrong_path, &instance.root).unwrap();
+        let checks = verify(&taken.path, "inst-1", Some(&wrong));
+        assert_eq!(checks.len(), 1, "decryption fails before anything else is even attempted: {checks:?}");
+        let decrypt = &checks[0];
+        assert_eq!(decrypt.name, "decrypt");
+        assert_eq!(decrypt.status, CheckStatus::Fail);
+        assert!(decrypt.detail.contains(&wrong_recipient), "{}", decrypt.detail);
+    }
+
+    #[test]
+    fn an_encrypted_archive_verified_with_no_identity_fails_at_the_archive_step_rather_than_panicking() {
+        // The daemon (`backup::mod`) refuses this before it ever calls
+        // `verify` at all; this only proves the archive layer itself never
+        // panics or silently succeeds if that gate were ever bypassed.
+        let instance = Instance::new("encrypt-no-identity");
+        let (_, recipient) = generated_identity(instance.root.parent().unwrap());
+        let taken = instance.take_with(false, Some(recipient));
+        let checks = verify(&taken.path, "inst-1", None);
+        assert!(checks.iter().any(|c| c.status == CheckStatus::Fail), "{checks:?}");
+    }
+
+    #[test]
+    fn an_encrypted_snapshot_restores_with_the_right_identity_and_refuses_without_one() {
+        let instance = Instance::new("encrypt-restore");
+        let base = instance.root.parent().unwrap().to_path_buf();
+        let (identity_path, recipient) = generated_identity(&base);
+        let taken = instance.take_with(false, Some(recipient));
+        let identity = OwnerIdentity::read(&identity_path, &instance.root).unwrap();
+
+        let into = base.join("restored-encrypted");
+        let restored = restore(&taken.path, "inst-1", &instance.root, &into, Some(&identity)).unwrap();
+        assert!(factory_core::config::Factory::load(&restored.into).is_ok());
+        assert!(!restored.into.join(".factory/secrets.yaml").exists());
+
+        let into_refused = base.join("restored-encrypted-no-identity");
+        let error = restore(&taken.path, "inst-1", &instance.root, &into_refused, None).unwrap_err().to_string();
+        assert!(error.contains("verification failed"), "{error}");
+        assert!(!into_refused.exists());
+    }
+
+    #[test]
+    fn owner_identity_refuses_a_path_inside_factory_and_anything_but_one_native_key() {
+        let instance = Instance::new("identity-refuse");
+        let base = instance.root.parent().unwrap().to_path_buf();
+
+        let inside = instance.root.join(".factory/identity.txt");
+        fs::write(&inside, "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ\n").unwrap();
+        let e = identity_err(OwnerIdentity::read(&inside, &instance.root));
+        assert!(e.contains("inside this instance's own"), "{e}");
+
+        let relative = PathBuf::from("relative/identity.txt");
+        let e = identity_err(OwnerIdentity::read(&relative, &instance.root));
+        assert!(e.contains("absolute"), "{e}");
+
+        let ssh = base.join("ssh-identity.txt");
+        fs::write(&ssh, "# a comment, never quoted back\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogus not-a-real-key\n").unwrap();
+        let e = identity_err(OwnerIdentity::read(&ssh, &instance.root));
+        assert!(e.contains("line 2"), "{e}");
+        assert!(!e.contains("ssh-ed25519"), "the line's own text must never appear in the error: {e}");
+
+        let empty = base.join("empty-identity.txt");
+        fs::write(&empty, "# only a comment\n").unwrap();
+        let e = identity_err(OwnerIdentity::read(&empty, &instance.root));
+        assert!(e.contains("no identity"), "{e}");
+
+        let (one_path, _) = generated_identity(&base);
+        let (two_path, _) = generated_identity(&base);
+        let both = format!(
+            "{}\n{}\n",
+            fs::read_to_string(&one_path).unwrap().trim(),
+            fs::read_to_string(&two_path).unwrap().trim()
+        );
+        let multi = base.join("multi-identity.txt");
+        fs::write(&multi, &both).unwrap();
+        let e = identity_err(OwnerIdentity::read(&multi, &instance.root));
+        assert!(e.contains("more than one identity"), "{e}");
+    }
+
+    #[test]
+    fn a_generated_identitys_secret_never_appears_in_an_owner_identity_error() {
+        let instance = Instance::new("identity-secret");
+        let base = instance.root.parent().unwrap().to_path_buf();
+        let (identity_path, _) = generated_identity(&base);
+        let secret_line = fs::read_to_string(&identity_path).unwrap().trim().to_string();
+        // A file holding the real secret plus a second, unparsable line: the
+        // resulting error must name the line number, never quote either
+        // line's own text.
+        let corrupted = format!("{secret_line}\nnot-an-identity-at-all\n");
+        fs::write(&identity_path, &corrupted).unwrap();
+        let e = identity_err(OwnerIdentity::read(&identity_path, &instance.root));
+        assert!(e.contains("line 2"), "{e}");
+        assert!(!e.contains(&secret_line), "the identity's own secret text leaked into the error: {e}");
+        assert!(!e.contains("not-an-identity-at-all"), "the offending line's own text leaked into the error: {e}");
     }
 }

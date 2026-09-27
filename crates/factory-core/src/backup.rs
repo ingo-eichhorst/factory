@@ -27,8 +27,17 @@ use crate::error::{FactoryError, Result};
 
 /// Every archive's name starts with this, then the instance's slug.
 pub const ARCHIVE_PREFIX: &str = "factory-backup-";
-/// And ends with this.
+/// And ends with this, or -- when it is encrypted (`#152`) --
+/// [`ENCRYPTED_ARCHIVE_SUFFIX`].
 pub const ARCHIVE_SUFFIX: &str = ".tar.zst";
+/// An archive encrypted to `infrastructure.backup.encrypt_to` ends with this
+/// instead. `parse_archive_name` and `refuse_bad_snapshot_name` accept
+/// either, so retention and listing treat one archive history across both.
+pub const ENCRYPTED_ARCHIVE_SUFFIX: &str = ".tar.zst.age";
+/// The first bytes of every age-encrypted file (the `age-encryption.org/v1`
+/// version line, without its newline) -- what [`looks_encrypted`] reads,
+/// straight from the archive, never from its name or the config.
+pub const AGE_MAGIC: &[u8] = b"age-encryption.org/v1";
 /// Written into every archive, after every file it describes -- see
 /// [`Manifest`].
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -64,9 +73,13 @@ pub const UNSCHEDULED_OVERDUE_HOURS: i64 = 7 * 24;
 ///     include_logs: false
 /// ```
 ///
-/// `deny_unknown_fields`, like the rest of `infrastructure:`: `encrypt_to`
-/// is v2 (`age`), and a config that asks for encryption must be refused
-/// rather than quietly given plaintext archives it believes are encrypted.
+/// `deny_unknown_fields`, like the rest of `infrastructure:`. `encrypt_to`
+/// is v2 (`#152`, `age`): a single native X25519 recipient (`age1…`) every
+/// snapshot is encrypted to. The `age` crate that actually parses it lives
+/// in `factory-daemon`, not here -- this struct and [`BackupConfig::validate`]
+/// stay dependency-free, the same way the cron expression below is only
+/// checked for emptiness here and parsed for real at daemon load (`croner`,
+/// `chrono-tz`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackupConfig {
@@ -83,6 +96,13 @@ pub struct BackupConfig {
     /// essential, and the one part of a snapshot that may grow without bound.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_logs: bool,
+    /// A single native X25519 recipient (`age1…`) to encrypt every snapshot
+    /// to (`#152`). An SSH or plugin recipient (`age1yubikey1…`,
+    /// `ssh-ed25519 …`) is refused at daemon load
+    /// (`factory_daemon::backup::validate_config`), not here. `None`
+    /// (the default) writes plaintext archives, exactly as v1 did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypt_to: Option<String>,
 }
 
 /// A cron expression and the timezone its fields are read in, exactly as a
@@ -170,6 +190,11 @@ impl BackupConfig {
                  after each backup. Keep at least one daily, weekly or monthly snapshot"
                     .into(),
             ));
+        }
+        if let Some(encrypt_to) = &self.encrypt_to {
+            if encrypt_to.trim().is_empty() {
+                return Err(FactoryError::BadRequest("infrastructure.backup.encrypt_to is empty".into()));
+            }
         }
         Ok(())
     }
@@ -268,21 +293,34 @@ pub fn is_excluded(relative: &str) -> Option<&'static str> {
 }
 
 /// The archive name for a snapshot taken at `at`:
-/// `factory-backup-<instance>-20260925T030000Z.tar.zst`.
-pub fn archive_name(instance: &str, at: DateTime<Utc>) -> String {
-    format!("{ARCHIVE_PREFIX}{}-{}{ARCHIVE_SUFFIX}", slug(instance), at.format(STAMP_FORMAT))
+/// `factory-backup-<instance>-20260925T030000Z.tar.zst`, or
+/// `...tar.zst.age` when `encrypted`.
+pub fn archive_name(instance: &str, at: DateTime<Utc>, encrypted: bool) -> String {
+    let suffix = if encrypted { ENCRYPTED_ARCHIVE_SUFFIX } else { ARCHIVE_SUFFIX };
+    format!("{ARCHIVE_PREFIX}{}-{}{suffix}", slug(instance), at.format(STAMP_FORMAT))
 }
 
 /// The time an archive of `instance` was taken, read back off its name --
 /// `None` for anything that is not one of this instance's archives. The only
 /// test retention and the listing apply before they look at a file: nothing
 /// in a destination that does not match is ever listed, verified or deleted.
+/// Accepts either suffix (`#152`), so a mixed destination of plaintext and
+/// encrypted archives is one history.
 pub fn parse_archive_name(instance: &str, name: &str) -> Option<DateTime<Utc>> {
-    let rest = name.strip_prefix(ARCHIVE_PREFIX)?.strip_suffix(ARCHIVE_SUFFIX)?;
+    let rest = name.strip_prefix(ARCHIVE_PREFIX)?;
+    let rest = rest.strip_suffix(ENCRYPTED_ARCHIVE_SUFFIX).or_else(|| rest.strip_suffix(ARCHIVE_SUFFIX))?;
     let stamp = rest.strip_prefix(&slug(instance))?.strip_prefix('-')?;
     chrono::NaiveDateTime::parse_from_str(stamp, STAMP_FORMAT)
         .ok()
         .map(|t| t.and_utc())
+}
+
+/// Whether a header of at least [`AGE_MAGIC`]'s length starts with it -- the
+/// one honest source of `SnapshotRow.encrypted`: read from the archive
+/// itself, never trusted from its name's suffix or the config, so a renamed
+/// or hand-copied file can never be misreported either way.
+pub fn looks_encrypted(header: &[u8]) -> bool {
+    header.starts_with(AGE_MAGIC)
 }
 
 /// The instance name as it appears in a file name: lowercase ASCII letters,
@@ -308,11 +346,11 @@ pub fn refuse_bad_snapshot_name(name: &str) -> Result<()> {
         || name.contains('\\')
         || name.starts_with('.')
         || !name.starts_with(ARCHIVE_PREFIX)
-        || !name.ends_with(ARCHIVE_SUFFIX)
+        || !(name.ends_with(ARCHIVE_SUFFIX) || name.ends_with(ENCRYPTED_ARCHIVE_SUFFIX))
     {
         return Err(FactoryError::BadRequest(format!(
             "{name:?} is not a snapshot name; `factory backup list` shows them \
-             ({ARCHIVE_PREFIX}<instance>-<utc>{ARCHIVE_SUFFIX})"
+             ({ARCHIVE_PREFIX}<instance>-<utc>{ARCHIVE_SUFFIX} or {ENCRYPTED_ARCHIVE_SUFFIX})"
         )));
     }
     Ok(())
@@ -749,6 +787,10 @@ pub struct WarningFacts {
     pub last_verified: Option<(DateTime<Utc>, bool)>,
     /// The newest failed attempt, when it is newer than the newest success.
     pub failure_since_newest: Option<(DateTime<Utc>, String)>,
+    /// Whether the newest snapshot is encrypted (`#152`) -- changes
+    /// `never_verified`'s message to name the `--identity` flag verifying
+    /// it needs, since a plain "run Verify" would fail without one.
+    pub newest_encrypted: bool,
     /// `#155`: every registered scope's repository fact, gathered whether or
     /// not a backup is configured at all -- source code is backed up by
     /// pushing it, not by this report's `configured`.
@@ -825,6 +867,13 @@ pub fn warnings(f: &WarningFacts) -> Vec<BackupWarning> {
             );
         }
         match f.last_verified {
+            None if f.newest.is_some() && f.newest_encrypted => push(
+                "never_verified",
+                WarningLevel::Warn,
+                "No snapshot in the destination has been verified, so nobody knows whether one would restore. \
+                 The newest is encrypted: run `factory backup verify --identity <file>`."
+                    .into(),
+            ),
             None if f.newest.is_some() => push(
                 "never_verified",
                 WarningLevel::Warn,
@@ -935,7 +984,9 @@ pub struct SnapshotRow {
     pub files: Option<u64>,
     pub verified: Option<VerifySummary>,
     pub kept_by: Vec<KeptBy>,
-    /// Always false in v1: `age` encryption is v2.
+    /// Read from the archive's own bytes (`#152`'s [`looks_encrypted`]),
+    /// never from its name's suffix or the live config -- so a renamed file
+    /// or a config changed since it was written can never be misreported.
     pub encrypted: bool,
 }
 
@@ -1007,6 +1058,11 @@ pub struct Snapshot {
     /// numbers, kept so the page never has to open an archive to draw them.
     #[serde(default)]
     pub groups: Vec<GroupTotal>,
+    /// The recipient this snapshot was encrypted to (`#152`), `None` for a
+    /// plaintext one. `#[serde(default)]` so a daemon built before this
+    /// exists still parses to a CLI built after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1062,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn the_issue_example_block_parses_and_refuses_encrypt_to() {
+    fn the_issue_example_block_parses_with_no_encrypt_to() {
         let c: BackupConfig = serde_yaml_ng::from_str(
             "destination: /Volumes/Backup/factory\nschedule: { cron: \"0 3 * * *\", timezone: Europe/Berlin }\n\
              keep: { daily: 7, weekly: 4, monthly: 6 }\ninclude_logs: false\n",
@@ -1071,11 +1127,30 @@ mod tests {
         c.validate().unwrap();
         assert_eq!(c.schedule.as_ref().unwrap().describe(), "0 3 * * * (Europe/Berlin)");
         assert_eq!(c.keep, Keep::default());
-        // v2's age encryption: refused, never silently ignored.
-        let e = serde_yaml_ng::from_str::<BackupConfig>("destination: /x\nencrypt_to: age1abc\n")
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("encrypt_to"), "{e}");
+        assert_eq!(c.encrypt_to, None);
+    }
+
+    #[test]
+    fn encrypt_to_parses_and_round_trips_but_is_not_checked_here() {
+        // `#152`: this crate stays dependency-free, so it accepts any
+        // non-empty string here -- `factory_daemon::backup::validate_config`
+        // is where an SSH or plugin recipient is actually refused, with the
+        // `age` crate.
+        let c: BackupConfig =
+            serde_yaml_ng::from_str("destination: /x\nencrypt_to: age1not-a-real-recipient-just-a-string-here\n")
+                .unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.encrypt_to.as_deref(), Some("age1not-a-real-recipient-just-a-string-here"));
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("encrypt_to"), "{json}");
+        assert_eq!(serde_json::from_str::<BackupConfig>(&json).unwrap(), c);
+
+        let empty = serde_yaml_ng::from_str::<BackupConfig>("destination: /x\nencrypt_to: \"\"\n").unwrap();
+        assert!(empty.validate().unwrap_err().to_string().contains("encrypt_to"));
+
+        let none: BackupConfig = serde_yaml_ng::from_str("destination: /x\n").unwrap();
+        assert_eq!(none.encrypt_to, None);
+        assert!(!serde_json::to_string(&none).unwrap().contains("encrypt_to"), "omitted, not null, when unset");
     }
 
     #[test]
@@ -1092,7 +1167,7 @@ mod tests {
     #[test]
     fn archive_names_round_trip_and_ignore_everything_else() {
         let at = Utc.with_ymd_and_hms(2026, 9, 25, 3, 0, 7).unwrap();
-        let name = archive_name("Business Factory", at);
+        let name = archive_name("Business Factory", at, false);
         assert_eq!(name, "factory-backup-business-factory-20260925T030007Z.tar.zst");
         assert_eq!(parse_archive_name("Business Factory", &name), Some(at));
         assert_eq!(parse_archive_name("other", &name), None, "another instance's archive is not ours");
@@ -1106,11 +1181,42 @@ mod tests {
     }
 
     #[test]
+    fn an_encrypted_archive_name_round_trips_alongside_a_plaintext_one() {
+        let at = Utc.with_ymd_and_hms(2026, 9, 25, 3, 0, 7).unwrap();
+        let name = archive_name("Business Factory", at, true);
+        assert_eq!(name, "factory-backup-business-factory-20260925T030007Z.tar.zst.age");
+        assert_eq!(parse_archive_name("Business Factory", &name), Some(at));
+        assert_eq!(
+            parse_archive_name("business-factory", "factory-backup-business-factory-20260925T030007Z.tar.zst.age.partial"),
+            None,
+            "a half-written encrypted archive is never listed either"
+        );
+        // The two suffixes never bleed into each other.
+        assert_ne!(archive_name("x", at, false), archive_name("x", at, true));
+    }
+
+    #[test]
     fn a_snapshot_name_off_the_wire_cannot_leave_the_destination() {
         refuse_bad_snapshot_name("factory-backup-x-20260925T030000Z.tar.zst").unwrap();
-        for bad in ["", "../factory-backup-x.tar.zst", "factory-backup-x/../../etc.tar.zst", "notes.txt", ".factory-backup-x.tar.zst"] {
+        refuse_bad_snapshot_name("factory-backup-x-20260925T030000Z.tar.zst.age").unwrap();
+        for bad in [
+            "",
+            "../factory-backup-x.tar.zst",
+            "factory-backup-x/../../etc.tar.zst",
+            "notes.txt",
+            ".factory-backup-x.tar.zst",
+            "factory-backup-x-20260925T030000Z.tar.zst.age.partial",
+        ] {
             assert!(refuse_bad_snapshot_name(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn looks_encrypted_reads_the_age_magic_and_nothing_else() {
+        assert!(looks_encrypted(b"age-encryption.org/v1\n-> X25519 ..."));
+        assert!(!looks_encrypted(b"\x28\xb5\x2f\xfd"), "a zstd frame is not age");
+        assert!(!looks_encrypted(b""));
+        assert!(!looks_encrypted(b"age-encryption.org/v"), "too short to be the whole magic");
     }
 
     #[test]
@@ -1176,6 +1282,7 @@ mod tests {
             age: Some(AgeLevel::Fresh),
             last_verified: Some((Utc::now(), true)),
             failure_since_newest: None,
+            newest_encrypted: false,
             code: Vec::new(),
             time_machine: None,
         };
@@ -1198,6 +1305,30 @@ mod tests {
         let never = WarningFacts { newest: None, age: Some(AgeLevel::None), last_verified: None, ..fine };
         let kinds: Vec<String> = warnings(&never).into_iter().map(|w| w.kind).collect();
         assert_eq!(kinds, ["no_backup"], "never_verified says nothing new when there is nothing to verify");
+    }
+
+    /// `#152`: an unverified encrypted newest snapshot names the `--identity`
+    /// flag, so a person is not told to run a Verify that will just be
+    /// refused.
+    #[test]
+    fn never_verified_names_the_identity_flag_when_the_newest_is_encrypted() {
+        let facts = WarningFacts {
+            configured: true,
+            destination: Some("/Volumes/Backup".into()),
+            destination_exists: true,
+            same_device: Some(false),
+            scheduled: true,
+            newest: Some(Utc::now()),
+            age: Some(AgeLevel::Fresh),
+            last_verified: None,
+            failure_since_newest: None,
+            newest_encrypted: true,
+            code: Vec::new(),
+            time_machine: None,
+        };
+        let found = warnings(&facts);
+        assert_eq!(found.iter().map(|w| w.kind.as_str()).collect::<Vec<_>>(), ["never_verified"]);
+        assert!(found[0].message.contains("--identity"), "{}", found[0].message);
     }
 
     fn tracked(scopes: &[&str], path: &str, remote: &str, upstream: &str, ahead: u64) -> RepositoryFact {
@@ -1232,6 +1363,7 @@ mod tests {
             age: Some(AgeLevel::Fresh),
             last_verified: Some((Utc::now(), true)),
             failure_since_newest: None,
+            newest_encrypted: false,
             code: Vec::new(),
             time_machine: None,
         };

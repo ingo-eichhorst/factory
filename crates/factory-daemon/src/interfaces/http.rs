@@ -386,9 +386,10 @@ struct VerifyQuery {
 
 /// `POST /api/backup/verify?snapshot=` -- the newest when `snapshot` is left
 /// out. A query parameter, like `withdraw_attestation`'s `reason`, so a bare
-/// POST works.
+/// POST works. `identity` (`#152`) is never accepted over HTTP: decrypting
+/// an encrypted snapshot is CLI-only, like restore.
 async fn backup_verify(State(engine): State<Arc<Engine>>, Query(q): Query<VerifyQuery>) -> AxumResponse {
-    run(&engine, Request::BackupVerify { snapshot: q.snapshot }).await
+    run(&engine, Request::BackupVerify { snapshot: q.snapshot, identity: None }).await
 }
 
 async fn knowledge(State(engine): State<Arc<Engine>>) -> AxumResponse {
