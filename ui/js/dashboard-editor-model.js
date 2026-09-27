@@ -152,6 +152,35 @@ export function canReset(source, editingScope) {
   return !!source && !!editingScope && source === editingScope;
 }
 
+/// A path's segments, `.` and empty ones dropped -- the same normalisation
+/// `scopes.js`'s own `segments()` applies before comparing two paths, needed
+/// here for the same reason: a discovered root scope's own `Scope.path` is
+/// the literal `.` Rust's `PathBuf::join` never collapses, so `ScopeView.path`
+/// for it arrives over the wire as `"<root>/."`, not `"<root>"`. A plain
+/// string comparison (or a bare trailing-slash trim) never matches that,
+/// which silently makes the root scope unfindable.
+function pathSegments(path) {
+  return String(path ?? "")
+    .split("/")
+    .filter((s) => s !== "" && s !== ".");
+}
+
+/// Which of `scopes` (`state.scopes`) sits at `root` (`state.root`) itself --
+/// the instance root's own configured scope, found by comparing path
+/// segments rather than by name, since nothing about a scope's name says
+/// where it sits on disk. `null` when `root` is empty/unknown, or when
+/// nothing in `scopes` sits there: the instance never opted itself into
+/// being a scope at all, so there is no name a write could be given.
+export function rootScopeName(scopes, root) {
+  if (!String(root ?? "").trim()) return null;
+  const want = pathSegments(root);
+  const found = (scopes || []).find((s) => {
+    const have = pathSegments(s.path);
+    return have.length === want.length && have.every((seg, i) => seg === want[i]);
+  });
+  return found ? found.name : null;
+}
+
 // Re-exported so a caller that only needs the editor never has to import
 // `dashboard-model.js` too just for the one check it shares with the read
 // side.

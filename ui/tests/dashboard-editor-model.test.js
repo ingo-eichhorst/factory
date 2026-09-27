@@ -15,6 +15,7 @@ import {
   setTileSize,
   editorErrors,
   canReset,
+  rootScopeName,
 } from "../js/dashboard-editor-model.js";
 
 // ------------------------------------------------------------- catalogue
@@ -168,4 +169,37 @@ test("canReset is true only when the scope being edited is the one currently ans
   assert.equal(canReset("projects", "demo"), false, "demo inherits projects' layout; nothing of its own to reset");
   assert.equal(canReset(null, "demo"), false, "the built-in default has no block anywhere to remove");
   assert.equal(canReset("demo", null), false, "nothing selected to edit");
+});
+
+// ------------------------------------------------------------ root scope
+
+test("rootScopeName finds the scope at the instance root, even through the trailing /. Rust's PathBuf::join(\".\") leaves in", () => {
+  const scopes = [
+    { name: "company", path: "/tmp/x/." },
+    { name: "demo", path: "/tmp/x/demo" },
+  ];
+  assert.equal(rootScopeName(scopes, "/tmp/x"), "company");
+  // A bare string/trailing-slash comparison would miss this -- the whole
+  // reason this is its own function instead of an inline `===`.
+  assert.notEqual("/tmp/x/.".replace(/\/+$/, ""), "/tmp/x", "the bug this guards against");
+});
+
+test("rootScopeName also matches a root scope path with no trailing dot at all", () => {
+  const scopes = [{ name: "company", path: "/tmp/x" }];
+  assert.equal(rootScopeName(scopes, "/tmp/x"), "company");
+});
+
+test("rootScopeName is null when no scope sits at the root, or the root is unknown", () => {
+  const scopes = [{ name: "demo", path: "/tmp/x/demo" }];
+  assert.equal(rootScopeName(scopes, "/tmp/x"), null, "the instance never opted into being a scope");
+  assert.equal(rootScopeName(scopes, ""), null);
+  assert.equal(rootScopeName(scopes, null), null);
+  assert.equal(rootScopeName(scopes, undefined), null);
+  assert.equal(rootScopeName([], "/tmp/x"), null);
+  assert.equal(rootScopeName(undefined, "/tmp/x"), null);
+});
+
+test("rootScopeName never mistakes a nested scope for the root", () => {
+  const scopes = [{ name: "demo", path: "/tmp/x/demo/." }];
+  assert.equal(rootScopeName(scopes, "/tmp/x"), null);
 });

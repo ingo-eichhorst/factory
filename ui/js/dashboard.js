@@ -98,6 +98,7 @@ import {
   setTileSize,
   editorErrors,
   canReset,
+  rootScopeName,
 } from "./dashboard-editor-model.js";
 
 /// The three presets the window selector offers. `bin` travels with every
@@ -1071,24 +1072,16 @@ export function isDashboardEditorOpen() {
   return editorScope !== null;
 }
 
-/// The instance root's own configured scope, found by absolute path rather
-/// than by name -- the same identity `scopes.js`'s tree building strips off
-/// every other path (`state.root`), so this reads whichever scope actually
-/// sits at the instance root, whatever it happens to be called.
-function rootScopeName() {
-  const root = String(state.root ?? "").replace(/\/+$/, "");
-  const found = state.scopes.find((s) => String(s.path ?? "").replace(/\/+$/, "") === root);
-  return found ? found.name : null;
-}
-
 /// Which scope Customise edits: the one selected in the rail, or the
 /// instance root's own when nothing is selected -- the same fallback
-/// `Request::Dashboard { scope: None }` reads. `null` when the instance
-/// never opted itself into being a scope at all: there is then no name the
-/// write side (`Request::DashboardSet`/`DashboardReset`, unlike the read)
-/// could be given, so Customise has nothing to edit.
+/// `Request::Dashboard { scope: None }` reads, resolved by path
+/// (`rootScopeName`, `dashboard-editor-model.js`) rather than by name.
+/// `null` when the instance never opted itself into being a scope at all:
+/// there is then no name the write side (`Request::DashboardSet`/
+/// `DashboardReset`, unlike the read) could be given, so Customise has
+/// nothing to edit.
 function editingScopeName() {
-  return state.scope || rootScopeName();
+  return state.scope || rootScopeName(state.scopes, state.root);
 }
 
 /// A tile's display name in the "Layout" column: `VIEW_LABELS` for a view
