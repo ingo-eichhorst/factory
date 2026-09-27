@@ -88,6 +88,9 @@ scope:
       harness: claude-code
       lifetime: task          # not standing: offered for tasks in this scope
       sandbox: docker         # declared, not yet enforced -- see below
+    - name: codex
+      harness: codex
+      max_sessions: 3         # at most 3 sessions of this agent at once (#179)
 ```
 
 A permanent agent is **never failed for being quiet** — being quiet is what it
@@ -117,6 +120,27 @@ whose `.git` is a pointer file into the scope's repository — which is why
 process on the same host, is the likelier one to arrive first.
 
 [srt]: https://github.com/anthropic-experimental/sandbox-runtime
+
+**`max_sessions` is enforced (`#179`).** An agent declaring it may have at
+most that many sessions open at once -- a run of it `Dispatching` or already
+holding a session, plus one if it is also a live permanent agent under the
+same name. A scope may declare its own `max_sessions` too (in its `scope:`
+block, root included), a cap shared across every agent in it; the two apply
+together, whichever is tighter. `0` is refused at load, naming the scope,
+since it would never run anything. Absent, on either, is unlimited -- today's
+behaviour for a config that names neither. A dispatch that would exceed
+either cap is **held**, not failed: the task stays `Pending`, carrying a
+`slot_wait` (agent, scope, trigger, when it became due, when the hold began)
+and a `capacity_held` journal entry, and starts the moment a slot opens --
+another run of the same agent ending, or a scope-mate's. Every trigger goes
+through the same admission check (manual, a schedule's slot, a queued retry,
+a workflow node, a bench attempt), so all are held the same way and released
+the same way: FIFO by when they became due, oldest first. `factory status`
+prints each capped agent's `in_use/max` and how many are waiting; the
+Operations tab's Flow card and `factory stats` show a scope's own cap the
+same way they show everything else about a scope (see "Operations" below).
+A held task appears in the L4 pending board as "waiting for a slot" rather
+than "due" or "manual, not run".
 
 `args` works in both the singular `agent:` block and entries in `agents:`. The
 daemon appends these arguments after any defaults supplied by the adapter, so a
@@ -1568,9 +1592,15 @@ read too -- so a parent shows its children's work:
 - `attention` -- what needs a human now, most severe first, then oldest.
 - `flow` -- per scope, work in flight by state (queued, dispatching,
   running, blocked), queue depth, queue wait p50/p95, sessions in use and
-  how many runs are waiting on a retry. Nothing in Factory limits a scope's
-  sessions -- the `max_sessions` older configs carry is read and ignored --
-  so `sessions_max` is absent, never a made-up limit.
+  how many runs are waiting on a retry. `sessions_max` states the scope's
+  own `max_sessions` (`#179`, see "Agents" below) where one is declared,
+  and stays absent otherwise -- never a made-up limit. An agent's own cap
+  is enforced at dispatch but is not summed into this figure: two agents'
+  limits do not add into one meaningful scope ceiling. `sessions_in_use`
+  counts a run still dispatching or already holding a session -- an
+  approval hold with no session yet does not spend one. A task held on
+  either cap counts in `queue_depth` as an ordinary queued item, aged from
+  when the hold began.
 - `aging` -- every run in progress with its age against the p50/p70/p85/p95
   of the same task's finished runs (five or more), else its scope's, else
   "not enough history" and no colour at all.
