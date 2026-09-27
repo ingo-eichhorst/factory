@@ -53,6 +53,17 @@ test("an item still in intake never lands on the Tasks board's closed column", (
   assert.match(css, /\.s-intake \{/);
 });
 
+test("the security fast lane has its own badge, band styling and owner dialogs (#170)", () => {
+  assert.match(css, /\.ik-fast-lane \{/);
+  assert.match(css, /\.ik-sec-possible \{/);
+  assert.match(css, /\.ik-sec-confirmed \{/);
+  assert.match(css, /\.ik-sec-dismissed \{/);
+  assert.match(view, /function openFlagSecurityDialog\(card\)/);
+  assert.match(view, /function openSecurityDecisionDialog\(verdict, card\)/);
+  assert.match(view, /flagSecurityRequest\(card\.id/);
+  assert.match(view, /securityDecisionRequest\(card\.id, verdict/);
+});
+
 // ------------------------------------------------------------- rendering
 
 function stubElement() {
@@ -162,6 +173,33 @@ test("a card's estimate chip carries the complexity-table fallback as a tooltip 
 test("a card from before #168 has no estimate_basis and shows no tooltip", () => {
   const html = intakeCard(DATA.board.columns.ready[0], DATA.board.axes);
   assert.match(html, /class="sub" title="">45m-2h/);
+});
+
+test("a card flagged as a possible security report carries the badge and the fast-lane band (#170)", () => {
+  const flagged = {
+    ...DATA.board.columns.received[0],
+    security: { state: "possible", flagged_by: "agent triager", flagged_at: "t", reason: "looks exploitable" },
+  };
+  const html = intakeCard(flagged, DATA.board.axes);
+  assert.match(html, /ik-fast-lane/);
+  assert.match(html, /ik-sec-possible/);
+  assert.match(html, /possible security report/);
+  assert.match(html, /title="looks exploitable"/);
+});
+
+test("a card with no security flag draws no badge and no fast-lane band", () => {
+  const html = intakeCard(DATA.board.columns.received[0], DATA.board.axes);
+  assert.doesNotMatch(html, /ik-fast-lane/);
+  assert.doesNotMatch(html, /ik-sec-/);
+});
+
+test("a card's security reason is escaped", () => {
+  const evil = {
+    ...DATA.board.columns.received[0],
+    security: { state: "confirmed", flagged_by: "<b>x</b>", flagged_at: "t", reason: "<img src=x onerror=alert(1)>" },
+  };
+  const html = intakeCard(evil, DATA.board.axes);
+  assert.doesNotMatch(html, /<img/);
 });
 
 // ------------------------------------------------------------ duplicates (#166)

@@ -39,12 +39,16 @@ import {
   estimateOf,
   estimateText,
   fmtAge,
+  flagSecurityRequest,
   infoRequest,
   nextActions,
   previewVerdict,
   priorityOf,
   routeFor,
   routeProblem,
+  securityDecisionProblem,
+  securityDecisionRequest,
+  securityFlag,
   splitDraft,
   splitProblem,
   totalOpen,
@@ -104,13 +108,25 @@ function chips(card) {
     <span class="tag">${esc(v.category)}</span><span class="sub" title="${v.basis ? esc(v.basis) : ""}">${esc(v.estimate)}</span></div>`;
 }
 
+/// A security flag's badge (`#170`): the fast-lane band `board()` already
+/// sorted into place, shown so a card in it is never a mystery. `null` for
+/// an item nobody has ever flagged.
+function securityBadge(card) {
+  const flag = securityFlag(card);
+  if (!flag) return "";
+  const label = { possible: "possible security report", confirmed: "confirmed security report", dismissed: "security report dismissed" }[flag.state] || flag.state;
+  return `<span class="badge ik-sec ik-sec-${esc(flag.state)}" title="${esc(flag.reason || "")}">${esc(label)}</span>`;
+}
+
 /// One card. `axes` is the board's own list, so a card never keeps a copy.
 export function intakeCard(card, axes = board ? board.axes : []) {
   const note = cardNote(card);
+  const badge = securityBadge(card);
   return `
-    <div class="kbc ik-card" data-id="${esc(card.id)}" tabindex="0" role="button">
+    <div class="kbc ik-card${badge ? " ik-fast-lane" : ""}" data-id="${esc(card.id)}" tabindex="0" role="button">
       <div class="kbc-top"><span class="ik-marks" aria-label="readiness axes">${marksRow(card, axes)}</span>
         <span class="sub" title="waiting since ${esc(card.received_at)}">${esc(fmtAge(card.age_seconds))}</span></div>
+      ${badge ? `<div class="ik-chips">${badge}</div>` : ""}
       <div class="title">${esc(card.title)}</div>
       <div class="sub">${esc(card.scope)} · from ${esc(card.requester)} · ${esc(card.source.kind)}</div>
       ${chips(card)}
@@ -203,6 +219,19 @@ export function candidatesBlock(card) {
 }
 
 /// One item: its axes with evidence, what was asked, and what can be done.
+/// The item modal's security block (`#170`): the flag's state and reason,
+/// then -- once a person has decided -- who and on what evidence. Empty for
+/// an item nobody has ever flagged.
+function securityBlock(card) {
+  const flag = securityFlag(card);
+  if (!flag) return "";
+  const decided = flag.decided_by && flag.decided_at
+    ? `<br><span class="sub">decided by ${esc(flag.decided_by)} at ${esc(flag.decided_at)}${flag.evidence ? `: ${esc(flag.evidence)}` : ""}</span>`
+    : "";
+  return `<p>${securityBadge(card)} ${flag.reason ? esc(flag.reason) : `<span class="sub">no reason given</span>`}
+    <br><span class="sub">flagged by ${esc(flag.flagged_by)} at ${esc(flag.flagged_at)}</span>${decided}</p>`;
+}
+
 export function openItem(id) {
   const card = findCard(id);
   if (!card) return;
@@ -216,6 +245,7 @@ export function openItem(id) {
       <button class="x" id="ik-close" aria-label="Close">&times;</button></header>
     <div class="body">
       <p class="sub">${esc(card.stage.replace("_", " "))} · ${esc(card.scope)} · from ${esc(card.requester)} (${esc(card.source.kind)}${card.source.reference ? `: ${esc(card.source.reference)}` : ""}) · waiting ${esc(fmtAge(card.age_seconds))}</p>
+      ${securityBlock(card)}
       ${t ? `<p><span class="badge ik-p ik-${esc(t.priority)}">${esc(t.priority)}</span> <span class="tag">${esc(t.assessment.category)}</span>
         impact ${esc(t.assessment.impact)} × urgency ${esc(t.assessment.urgency)} · complexity ${esc(t.assessment.complexity)} · ${esc(estimateText(t.estimate))}
         · route ${esc(routeText(t.assessment.routing))}
@@ -247,7 +277,38 @@ function openAction(action, card) {
   if (action === "triage") return openTriageDialog(card);
   if (action === "info") return openInfoDialog(card);
   if (action === "split") return openSplitDialog(card);
+  if (action === "flag_security") return openFlagSecurityDialog(card);
+  if (action === "security_confirm") return openSecurityDecisionDialog("confirm", card);
+  if (action === "security_dismiss") return openSecurityDecisionDialog("dismiss", card);
   return openDecideDialog(action, card);
+}
+
+function openFlagSecurityDialog(card) {
+  dialog("Flag as a possible security report", card.title, `
+    <p class="env-note">Moves it to the front of the queue in every open column. Nothing may release, split or
+      close it until a person confirms or dismisses the flag.</p>
+    <label for="ik-sec-reason">Reason <span class="sub">why this might be a security report</span></label>
+    <textarea id="ik-sec-reason" rows="3"></textarea>`,
+  "Flag it",
+  () => flagSecurityRequest(card.id, $("ik-sec-reason").value));
+}
+
+/// The owner's confirm or dismiss (`#170`) -- the daemon refuses anyone else,
+/// whatever role they hold; the UI itself sends no token, so this is always
+/// the owner asking. Evidence is required to dismiss, optional to confirm.
+function openSecurityDecisionDialog(verdict, card) {
+  const title = verdict === "confirm" ? "Confirm security report" : "Dismiss security report";
+  const evidenceHint = verdict === "confirm" ? "optional" : "what clears it -- required";
+  dialog(title, card.title, `
+    <p class="env-note">${verdict === "confirm"
+      ? "Marks it a real security report. It journals the decision and stays evidence even if the task is later released or closed."
+      : "Marks it not a security report after all. Releasing, splitting and closing it work normally again."}</p>
+    <label for="ik-sec-evidence">Evidence <span class="sub">${evidenceHint}</span></label>
+    <textarea id="ik-sec-evidence" rows="3"></textarea>`,
+  title,
+  () => securityDecisionRequest(card.id, verdict, $("ik-sec-evidence").value),
+  () => securityDecisionProblem(verdict, $("ik-sec-evidence") ? $("ik-sec-evidence").value : ""),
+  verdict === "dismiss");
 }
 
 /// A dialog whose single button sends one request; a refusal stays in the
@@ -319,10 +380,11 @@ function openAddDialog() {
     <label for="ik-scope">Scope <span class="sub">where it is thought to belong; triage routes it</span></label>
     <select id="ik-scope">${scopeOptions(state.scope || (state.scopeNames || [])[0])}</select>
     <label for="ik-requester">On behalf of <span class="sub">optional</span></label><input id="ik-requester">
-    <label for="ik-ref">Reference <span class="sub">optional: an issue URL, a mail id</span></label><input id="ik-ref">`,
+    <label for="ik-ref">Reference <span class="sub">optional: an issue URL, a mail id</span></label><input id="ik-ref">
+    <label class="checkrow"><input type="checkbox" id="ik-security"><span>Possible security report -- moves it to the front of the queue and holds it until a person confirms or dismisses it</span></label>`,
   "Hand in",
   () => addRequest({ title: $("ik-title").value, instructions: $("ik-text").value, scope: $("ik-scope").value,
-    requester: $("ik-requester").value, reference: $("ik-ref").value }),
+    requester: $("ik-requester").value, reference: $("ik-ref").value, security: $("ik-security").checked }),
   () => ($("ik-title") && $("ik-title").value.trim() ? null : "give it a title"));
   $("ik-title").focus();
 }

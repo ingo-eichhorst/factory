@@ -1628,6 +1628,70 @@ Left out on purpose: re-estimating at the first turn (`#117` already owns
 that), budgets and forecasting (`#164`), and pooling samples across scopes
 or up a subtree.
 
+**The security fast lane (`#170` phase 1).** A possible security report gets
+ahead of the ordinary queue and nothing may quietly release, split or close
+it away.
+
+- **Flagging.** `Intake.security: Option<SecurityFlag>` holds the state
+  (`possible` | `confirmed` | `dismissed`), who flagged it and when, a
+  reason, and -- once a person has looked -- who decided, when and on what
+  evidence (required to dismiss, optional to confirm). Three sources, all
+  deterministic, no classifier: `intake add --security` (or the UI
+  checkbox) at receipt, `intake flag-security <id> --reason "..."` on an
+  item already in the gate, from anyone who could assess it, and an
+  assessment whose category is `security-report`, flagged automatically the
+  moment it is recorded. Flagging only adds scrutiny, so it needs no more
+  than `intake.assess` already grants; refused once the item already
+  carries a flag of any kind -- a decided flag is not reopened by a second
+  one, and a `possible` one is not restated.
+- **The fast lane.** `board()` sorts a `possible` or `confirmed` item ahead
+  of everything else in every open column (received, triaging, needs-info),
+  oldest first within that band; a `dismissed` one sorts as ordinary. The
+  card carries the flag, and the triage instructions say a suspected
+  vulnerability is always `security-report`, whatever else it might also
+  look like, and is never proposed `wontfix`.
+- **No auto-rejection, and no auto-release either.** While a report stays
+  `possible`, `check_decision` refuses `ready`, `split` and `wontfix` for
+  every caller -- needs-info still goes through, since asking the requester
+  is not a rejection. Once confirmed, `wontfix` alone stays refused: a real
+  security report is not "won't fix", only a dismissal is. Once dismissed,
+  the item is ordinary again.
+- **Confirm or dismiss.** `IntakeSecurity { id, verdict: confirm | dismiss,
+  evidence }` is the one decision `Needs::Owner` gates outright -- an agent
+  may flag, whatever role it holds, but never decide (AGENTS.md's "bounds
+  what an agent does by accident, not what it could do", not a stronger
+  claim). Both verdicts are journaled (`intake_security_confirmed` /
+  `intake_security_dismissed`) with the evidence.
+- **Durability.** A confirmed report is CRA evidence: `TaskDelete` refuses a
+  task that carries one, naming why, and the record survives release --
+  `Intake` (and the flag on it) stays on the task whatever stage or status
+  it reaches next.
+- **The fact, ahead of fact ports.** `Engine::confirmed_security_reports`
+  reads every confirmed report live over a scope's subtree, including an
+  item that has since left intake -- `awareness_at` is always
+  `Intake.received_at` (for a GitHub-sourced item, the issue's own
+  `createdAt`, never the confirmation or fix time). Exposed as
+  `Request::IntakeSecurityReports`, `GET /api/intake/security-reports` and
+  `factory intake security-reports`; plain serde data with no methods, so
+  `#193`'s later L0 fact port can take it unchanged. The CRA reporting
+  clock that turns awareness into the 24-hour, 72-hour and 14-day deadlines
+  is `#157`, phase 2 of this issue -- intake persists and exposes the fact,
+  and never computes a deadline or calls up into the clock itself.
+- **Surfaces.** CLI: `intake add --security`, `intake flag-security <id>
+  --reason "..."`, `intake security <id> confirm|dismiss [--evidence
+  "..."]`, `intake security-reports [--scope]`. HTTP: `POST
+  /api/intake/{id}/flag-security`, `POST /api/intake/{id}/security`, `GET
+  /api/intake/security-reports`, beside the other intake routes. UI: a
+  badge and a left band on a fast-lane card, the flag's detail in the item
+  modal, and confirm/dismiss buttons with an evidence prompt -- the browser
+  sends no token, so every UI caller already is the owner `IntakeSecurity`
+  requires. The agent guide's `intake.assess` line mentions `flag-security`
+  and says confirming or dismissing is the owner's alone.
+
+Left out on purpose, for phase 2 (`#157`): the 24-hour/72-hour/14-day
+deadlines and any countdown state, notifications, a text or LLM classifier,
+GitHub security advisories, and the Inbox.
+
 ## Operations
 
 L4 Process's third tab (`#106`), next to Tasks and Workflows: how the line
