@@ -13,6 +13,7 @@ import {
   buildAssessment,
   buildDuplicateAnswer,
   buildParts,
+  canPublish,
   cardActions,
   cardNote,
   cards,
@@ -26,8 +27,10 @@ import {
   flagSecurityRequest,
   infoRequest,
   nextActions,
+  outboundInfo,
   previewVerdict,
   priorityOf,
+  publishRequest,
   routeFor,
   routeProblem,
   securityDecisionProblem,
@@ -153,6 +156,58 @@ test("the security fast lane gates release, split and wontfix, and only the owne
   assert.ok(dismissedActions.includes("wontfix"), "an ordinary item again");
   assert.ok(!dismissedActions.includes("flag_security"), "already carries a flag");
   assert.ok(!dismissedActions.includes("security_confirm") && !dismissedActions.includes("security_dismiss"));
+});
+
+test("a decided GitHub item with an outbound record offers publish, on a ready card too (#171)", () => {
+  const github = (stage, outbound) => ({ ...card(stage), source: { kind: "github", reference: "https://github.com/acme/widgets/issues/9" }, outbound });
+  const awaiting = { state: "awaiting_approval", by: "the owner", at: "t" };
+
+  assert.ok(canPublish(github("needs_info", awaiting)));
+  assert.ok(!canPublish(card("needs_info")), "a cli/ui item never publishes");
+  assert.ok(!canPublish({ ...card("needs_info"), source: { kind: "github" } }), "no outbound recorded yet");
+
+  const readyGithub = github("ready", awaiting);
+  assert.deepEqual(cardActions(readyGithub), ["publish"], "a ready card otherwise has no actions (#119)");
+  assert.ok(cardActions(github("needs_info", awaiting)).includes("publish"), "alongside the ordinary needs-info actions");
+
+  assert.deepEqual(cardActions(github("ready", null)), [], "no outbound yet -- nothing decided for GitHub to publish");
+});
+
+test("outboundInfo shapes the awaiting/published/failed states for the modal (#171)", () => {
+  assert.equal(outboundInfo(card("needs_info")), null, "the fixture carries nothing outbound");
+  assert.equal(outboundInfo(null), null);
+
+  const awaiting = { ...card("needs_info"), outbound: { state: "awaiting_approval", by: "the owner", at: "t" } };
+  const info = outboundInfo(awaiting);
+  assert.equal(info.state, "awaiting_approval");
+  assert.equal(info.commentUrl, null);
+  assert.deepEqual(info.labelsApplied, []);
+  assert.deepEqual(info.labelsSkipped, []);
+  assert.equal(info.error, null);
+
+  const published = {
+    ...card("needs_info"),
+    outbound: {
+      state: "published",
+      comment_id: 501,
+      comment_url: "https://github.com/acme/widgets/issues/9#issuecomment-501",
+      labels_applied: ["needs-info"],
+      labels_skipped: ["triage"],
+      by: "the owner",
+      at: "t",
+    },
+  };
+  const publishedInfo = outboundInfo(published);
+  assert.equal(publishedInfo.commentUrl, "https://github.com/acme/widgets/issues/9#issuecomment-501");
+  assert.deepEqual(publishedInfo.labelsApplied, ["needs-info"]);
+  assert.deepEqual(publishedInfo.labelsSkipped, ["triage"]);
+
+  const failed = { ...card("needs_info"), outbound: { state: "failed", last_error: "gh: not found", by: "the owner", at: "t" } };
+  assert.equal(outboundInfo(failed).error, "gh: not found");
+});
+
+test("publishRequest posts to the item's own publish route with no body fields", () => {
+  assert.deepEqual(publishRequest("abc"), { path: "/api/intake/abc/publish", method: "POST", body: {} });
 });
 
 test("a card says what is happening to it", () => {

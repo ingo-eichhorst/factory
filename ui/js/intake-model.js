@@ -197,13 +197,27 @@ export function securityFlag(card) {
   return (card && card.security) || null;
 }
 
+/// A decided GitHub item with something to publish (`#171`): the daemon
+/// only ever records `outbound` for a GitHub-sourced item once it carries
+/// both a decision and the assessment behind it, and never for a possible
+/// or confirmed security report -- so its mere presence is the whole
+/// eligibility check; a dismissed report's item is ordinary again the same
+/// way `securityFlag` treats it everywhere else.
+export function canPublish(card) {
+  return !!(card && card.source && card.source.kind === "github" && card.outbound);
+}
+
 /// Which actions an item allows, in the order the buttons are drawn. A
-/// released or split item has none: it is a task now, and the task modal
-/// is where it is worked. Any open item can be split -- a person may cut
-/// one nobody could assess as a whole -- except a possible security report,
-/// which nothing may release, split or close until a person looks (`#170`).
+/// released item is a task now, and the task modal is where it is worked --
+/// except approving a GitHub publish, which stays available there too,
+/// since that is the one thing left to do with it here. Any open item can
+/// be split -- a person may cut one nobody could assess as a whole --
+/// except a possible security report, which nothing may release, split or
+/// close until a person looks (`#170`).
 export function cardActions(card) {
-  if (!card || !["received", "triaging", "needs_info"].includes(card.stage)) return [];
+  if (!card) return [];
+  if (card.stage === "ready") return canPublish(card) ? ["publish"] : [];
+  if (!["received", "triaging", "needs_info"].includes(card.stage)) return [];
   const triageRunning = card.triage_task && !card.triage && !triageEnded(card);
   const flag = securityFlag(card);
   const possible = !!flag && flag.state === "possible";
@@ -225,6 +239,9 @@ export function cardActions(card) {
   // Confirm or dismiss: the owner's alone (the daemon refuses anyone else),
   // and only while the report is still `possible`.
   if (possible) out.push("security_confirm", "security_dismiss");
+  // Approve and post to GitHub: a needs-info item can carry an outbound
+  // record too (a decision sent it back, and it came from GitHub).
+  if (canPublish(card)) out.push("publish");
   return out;
 }
 
@@ -239,6 +256,7 @@ export const ACTION_LABELS = {
   flag_security: "Flag as security report",
   security_confirm: "Confirm security report",
   security_dismiss: "Dismiss security report",
+  publish: "Approve and post to GitHub",
 };
 
 /// The daemon's next actions (`factory_core::intake::next_actions`), each
@@ -579,6 +597,34 @@ export function previewVerdict(a, definition = null) {
   else if (definition && a.complexity > (definition.max_complexity || 8)) blockers.push(`complexity ${a.complexity}`);
   return blockers.length ? { verdict: "needs_info", blockers } : { verdict: "ready", blockers };
 }
+
+/// `#171`: approve and post a decided GitHub item's triage comment and
+/// labels to the issue it came from. Factory never does this on its own.
+export function publishRequest(id) {
+  return { path: `/api/intake/${encodeURIComponent(id)}/publish`, method: "POST", body: {} };
+}
+
+/// A card's `outbound` record (`#171`), shaped for the modal: its state, the
+/// comment link once posted, and any labels the repository does not have or
+/// the error from the last attempt. Null for a card with nothing outbound
+/// yet.
+export function outboundInfo(card) {
+  const o = card && card.outbound;
+  if (!o) return null;
+  return {
+    state: o.state,
+    commentUrl: o.comment_url || null,
+    labelsApplied: o.labels_applied || [],
+    labelsSkipped: o.labels_skipped || [],
+    error: o.last_error || null,
+  };
+}
+
+export const OUTBOUND_STATE_LABELS = {
+  awaiting_approval: "awaiting approval",
+  published: "published to GitHub",
+  failed: "GitHub publish failed",
+};
 
 export function assessRequest(id, assessment, decide) {
   return {

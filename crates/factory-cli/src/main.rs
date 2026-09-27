@@ -330,6 +330,13 @@ enum IntakeCmd {
         #[arg(long)]
         duplicate_of: Option<String>,
     },
+    /// Approve and post a decided GitHub item's triage comment and labels to
+    /// the issue it came from (`#171`). Factory never does this on its own;
+    /// this is the approval. Needs `intake.publish`, named exactly -- never
+    /// a wildcard, never `foreman` or `triager`. Refused for anything not
+    /// sourced from GitHub, for an item with no decision or no assessment,
+    /// and for one carrying a possible or confirmed security report.
+    Publish { id: String },
     /// Add information to an item -- the answer to a needs-info, which puts
     /// it back in the queue.
     Info {
@@ -1740,6 +1747,7 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
             };
             client.send(Request::IntakeDecide { id, decision }).await?
         }
+        IntakeCmd::Publish { id } => client.send(Request::IntakePublish { id }).await?,
         IntakeCmd::Info { id, text, triage, agent } => {
             let answered = client.send(Request::IntakeInfo { id: id.clone(), text }).await?;
             if triage {
@@ -2091,6 +2099,19 @@ fn intake_item_text(task: &Task) -> String {
             out.push_str(&format!(" into {}", d.parts.join(", ")));
         }
         out.push('\n');
+    }
+    if let Some(o) = &i.outbound {
+        out.push_str(&format!("  outbound   {}", o.state.as_str()));
+        if let Some(url) = &o.comment_url {
+            out.push_str(&format!(" -- {url}"));
+        }
+        out.push('\n');
+        if !o.labels_skipped.is_empty() {
+            out.push_str(&format!("             labels skipped (missing in the repository): {}\n", o.labels_skipped.join(", ")));
+        }
+        if let Some(error) = &o.last_error {
+            out.push_str(&format!("             error: {error}\n"));
+        }
     }
     if let Some(r) = &task.result {
         out.push_str(&format!("  result     {r}\n"));
@@ -6424,6 +6445,10 @@ mod tests {
             Command::Intake { command: Some(IntakeCmd::Info { triage: true, agent: Some(_), .. }), .. }
         ));
         assert!(Cli::try_parse_from(["factory", "intake", "info", "abc", "x", "--agent", "codex"]).is_err());
+        match parse(&["intake", "publish", "abc"]).command {
+            Command::Intake { command: Some(IntakeCmd::Publish { id }), .. } => assert_eq!(id, "abc"),
+            _ => panic!("not a publish"),
+        }
     }
 
     #[test]

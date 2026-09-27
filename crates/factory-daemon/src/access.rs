@@ -183,6 +183,9 @@ impl Engine {
             Request::IntakeTriage { .. } => Grant::IntakeTriage,
             Request::IntakeAssess { .. } => Grant::IntakeAssess,
             Request::IntakeDecide { .. } => Grant::IntakeDecide,
+            // The one outward-effect grant: never `foreman`'s free ALL,
+            // never a wildcard, named exactly or not at all (`#171`).
+            Request::IntakePublish { .. } => Grant::IntakePublish,
             // Flagging only adds scrutiny -- the same door `intake.assess`
             // already opens, not a sixth grant (`#170`). Confirming or
             // dismissing is never an agent's, whatever it holds: see the
@@ -521,6 +524,13 @@ impl Engine {
                     _ => Ok(()),
                 }
             }
+            // Publishing: reach over the item, like `IntakeTriage` -- no
+            // triage-run fallback, since publishing is never a run's own
+            // work the way assessing or deciding can be.
+            Request::IntakePublish { id } => match self.store.get(id).await? {
+                Some(item) => task_in_reach(def, &item),
+                None => Ok(()),
+            },
             // Answering a needs-info: reach over the item, or having handed
             // it in.
             Request::IntakeInfo { id, .. } => {
@@ -1969,6 +1979,7 @@ mod tests {
             split: Vec::new(),
             duplicates: Vec::new(),
             checks: Vec::new(),
+            areas: Vec::new(),
         }
     }
 
@@ -2149,6 +2160,42 @@ mod tests {
             !allowed(&e, &triager, Request::IntakeDecide { id: "elsewhere".into(), decision: ready(false) }).await
         );
         assert!(!allowed(&e, &triager, Request::IntakeAdd(NewIntake { title: "x".into(), scope: Some("other".into()), ..Default::default() })).await);
+    }
+
+    #[tokio::test]
+    async fn intake_publish_needs_its_own_grant_named_exactly_and_reach_over_the_item() {
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        task_in(&e, "far", "other", "anyone").await;
+        let publish = |id: &str| Request::IntakePublish { id: id.into() };
+
+        // Nobody gets it by accident: not a worker (never held `task.create`,
+        // so never `intake.publish` either), not `foreman` (otherwise every
+        // grant), not `triager` (coordinates triage, never posts outward).
+        assert!(!allowed(&e, &worker("w"), publish("mine")).await);
+        assert!(!allowed(&e, &foreman(), publish("mine")).await, "foreman holds every grant but this one (#171)");
+        assert!(!allowed(&e, &wearing("triager"), publish("mine")).await);
+
+        // A role written `*` or `intake.*` does not pick it up either --
+        // `Grant::expand` excludes it from both wildcards.
+        let starred = engine_with_roles("roles:\n  starred:\n    grants: ['*']\n    reach: scope\n");
+        task_in(&starred, "s", "demo", "anyone").await;
+        assert!(!allowed(&starred, &wearing("starred"), Request::IntakePublish { id: "s".into() }).await, "`*` excludes it");
+
+        let dotted = engine_with_roles("roles:\n  dotted:\n    grants: ['intake.*']\n    reach: scope\n");
+        task_in(&dotted, "d", "demo", "anyone").await;
+        assert!(!allowed(&dotted, &wearing("dotted"), Request::IntakePublish { id: "d".into() }).await, "`intake.*` excludes it");
+
+        // Named exactly, it works, and stops at the scope boundary like any
+        // other grant.
+        let named = engine_with_roles("roles:\n  publisher:\n    grants: [intake.publish]\n    reach: scope\n");
+        task_in(&named, "n", "demo", "anyone").await;
+        task_in(&named, "far", "other", "anyone").await;
+        assert!(allowed(&named, &wearing("publisher"), publish("n")).await);
+        assert!(!allowed(&named, &wearing("publisher"), publish("far")).await, "out of the role's scope");
+
+        // The owner always passes -- publishing itself is the approval.
+        assert!(allowed(&e, &Caller::Owner, publish("far")).await);
     }
 
     // -- intake security fast lane (`#170`) ---------------------------------

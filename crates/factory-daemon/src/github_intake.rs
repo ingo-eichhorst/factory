@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
-const GH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Shared with `github_outbound.rs`: every `gh` call, wherever it is made
+/// from, gets the same 30-second ceiling.
+pub(crate) const GH_TIMEOUT: Duration = Duration::from_secs(30);
 const ISSUE_ARGS: [&str; 11] = [
     "issue",
     "list",
@@ -124,6 +126,7 @@ async fn poll_once(engine: &Engine, gh: &Path) {
                 decision: None,
                 candidates: Vec::new(),
                 security: None,
+                outbound: None,
             };
             let new = NewTask {
                 title: issue.title,
@@ -210,23 +213,37 @@ fn github_repo(remote: &str) -> Option<String> {
 /// case-insensitive and old remote names may redirect, while `gh` returns the
 /// repository's current canonical URL.
 fn github_issue_reference(url: &str, number: u64) -> Option<String> {
+    let (_, _, url_number) = parse_canonical_issue_url(url)?;
+    if url_number != number {
+        return None;
+    }
+    Some(url.to_owned())
+}
+
+/// Owner, repository and issue number out of a canonical
+/// `https://github.com/<owner>/<repo>/issues/<n>` URL, with nothing past the
+/// number -- the same shape check `github_issue_reference` runs against the
+/// number GitHub itself just returned. Shared with `github_outbound.rs`
+/// (`#171`), which has only the stored reference to go on and no fresh
+/// number to check it against.
+pub(crate) fn parse_canonical_issue_url(url: &str) -> Option<(String, String, u64)> {
     let path = url.strip_prefix("https://github.com/")?;
     let mut parts = path.split('/');
     let owner = parts.next()?;
     let repo = parts.next()?;
     let issues = parts.next()?;
-    let url_number = parts.next()?;
+    let number_str = parts.next()?;
+    let number: u64 = number_str.parse().ok()?;
     if owner.is_empty()
         || repo.is_empty()
         || issues != "issues"
-        || url_number.parse::<u64>().ok()? != number
         || parts.next().is_some()
         || owner.chars().any(char::is_whitespace)
         || repo.chars().any(char::is_whitespace)
     {
         return None;
     }
-    Some(url.to_owned())
+    Some((owner.to_string(), repo.to_string(), number))
 }
 
 #[cfg(test)]

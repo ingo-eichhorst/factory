@@ -169,6 +169,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/intake/{id}/info", post(intake_info))
         .route("/api/intake/{id}/flag-security", post(intake_flag_security))
         .route("/api/intake/{id}/security", post(intake_security))
+        .route("/api/intake/{id}/publish", post(intake_publish))
         .route("/api/benchmarks", get(benchmarks))
         .route("/api/datasets", get(list_datasets).post(create_dataset))
         .route("/api/datasets/{name}", get(get_dataset).delete(delete_dataset))
@@ -1011,6 +1012,14 @@ async fn intake_security(
 /// clock will read.
 async fn intake_security_reports(State(engine): State<Arc<Engine>>, Query(q): Query<IntakeQuery>) -> AxumResponse {
     run(&engine, Request::IntakeSecurityReports { scope: q.scope }).await
+}
+
+/// `POST /api/intake/{id}/publish` -- approve and post a decided GitHub
+/// item's triage comment and labels to the issue it came from (`#171`).
+/// Every browser caller is the owner (`run`, above, sends no token), which
+/// always passes; posting here *is* the approval.
+async fn intake_publish(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::IntakePublish { id }).await
 }
 
 /// `POST /api/scenarios/promote` -- turn a scenario into real work. Answers

@@ -206,6 +206,13 @@ pub struct Intake {
     /// boxes its report. Serde is transparent through the box either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<Box<SecurityFlag>>,
+    /// A GitHub item's outbound triage comment and labels (`#171`): absent
+    /// until a decision is recorded on a GitHub-sourced item that carries an
+    /// assessment, or for a security report a person must never see
+    /// disclosed in a public comment. Boxed for the same reason `security`
+    /// is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound: Option<Box<OutboundRecord>>,
 }
 
 // ----------------------------------------------------------------- security
@@ -1418,6 +1425,13 @@ pub struct Assessment {
     /// existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckResult>,
+    /// Zero or more slugs naming what part of the system the item touches,
+    /// e.g. `process`, `quality`, `intake` -- a triager's own call, free
+    /// text beyond the slug shape (`#171`). Carried through to a released
+    /// GitHub item's labels (`github_labels`) exactly as given; absent for
+    /// every assessment made before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<String>,
 }
 
 /// One of a scope's own extra checks (`crate::ready::AppliedCheck`),
@@ -1512,6 +1526,12 @@ pub fn validate(a: &Assessment, definition: &ReadyDefinition) -> Result<(), Stri
     }
     if !(1..=10).contains(&a.complexity) {
         return Err(format!("complexity {} is off the 1-10 scale", a.complexity));
+    }
+    for area in &a.areas {
+        let area = area.trim();
+        if area.is_empty() || !area.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            return Err(format!("area {area:?} is not a slug (lowercase letters, digits and dashes)"));
+        }
     }
     if let Some(e) = a.estimate {
         if e.min_seconds == 0 || e.min_seconds > e.max_seconds {
@@ -1810,6 +1830,198 @@ pub fn split_parts(intake: &Intake, given: &[SplitPart]) -> Result<Vec<SplitPart
         .collect())
 }
 
+// ---------------------------------------------------------------- outbound
+
+/// Where a GitHub item's outbound effect stands (`#171`). The daemon never
+/// moves an item to `Published` or `Failed` on its own: a decision on a
+/// GitHub-sourced item with an assessment records `AwaitingApproval`, and
+/// only an explicit `intake publish` (a person, or a role naming
+/// `intake.publish` exactly) attempts the GitHub calls that leave it
+/// `Published` or `Failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundState {
+    AwaitingApproval,
+    Published,
+    Failed,
+}
+
+impl OutboundState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Published => "published",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// The state of a GitHub item's outbound triage comment and labels: what the
+/// last attempt (or the last decision, before any attempt) left behind.
+/// Boxed on [`Intake`] for the same reason [`SecurityFlag`] is: `Intake`
+/// rides unboxed through several deep async call chains, and this record's
+/// several `String`s and two `Vec`s would otherwise inflate every one of
+/// them in a debug build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundRecord {
+    pub state: OutboundState,
+    /// The GitHub comment id, once posted -- present for `Published`, and
+    /// for a `Failed` attempt that replays a comment an earlier one made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_id: Option<u64>,
+    /// `<issue url>#issuecomment-<id>`, for a person to open directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_url: Option<String>,
+    /// The labels actually applied -- a subset of `LabelPlan::add`: a label
+    /// the repository does not have is never created, only skipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels_applied: Vec<String>,
+    /// `LabelPlan::add` labels the repository does not have -- shown on the
+    /// card so a missing label is visible, not silently dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels_skipped: Vec<String>,
+    /// A digest of the comment text and label plan this record reflects, so
+    /// a re-triage that changed nothing is easy to tell from one that did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// Set only for `Failed`: what the last attempt's `gh` call said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// Who caused this state and when -- the decider, for `AwaitingApproval`;
+    /// whoever ran `intake publish`, for `Published` or `Failed`.
+    pub by: String,
+    pub at: DateTime<Utc>,
+}
+
+/// What publishing would add and remove, as GitHub label names. `#171`'s own
+/// rules:
+/// - category: `bugfix` -> `bug`, `docs` -> `documentation`, everything
+///   else -> `enhancement`.
+/// - state: `ready` -> `ready-for-agent`, `needs_info` -> `needs-info`,
+///   `wontfix` -> `wontfix`, plus `duplicate` or `invalid` for those two
+///   wontfix reasons.
+/// - areas, exactly as the assessment gave them.
+/// - `remove` is the other two state labels, so the three are always
+///   mutually exclusive on the issue. `needs-triage` is never touched here:
+///   the poller keys on it, and removing it is a person's own decision.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelPlan {
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+}
+
+pub const LABEL_READY: &str = "ready-for-agent";
+pub const LABEL_NEEDS_INFO: &str = "needs-info";
+pub const LABEL_WONTFIX: &str = "wontfix";
+const STATE_LABELS: [&str; 3] = [LABEL_READY, LABEL_NEEDS_INFO, LABEL_WONTFIX];
+
+fn category_label(category: &str) -> &'static str {
+    match category.trim() {
+        "bugfix" => "bug",
+        "docs" => "documentation",
+        _ => "enhancement",
+    }
+}
+
+/// Pure; never called for a `Decision::Split` (a split has no comment or
+/// labels of its own to publish -- the daemon never asks for one), which
+/// gets no labels at all rather than a guess.
+pub fn github_labels(triage: &Triage, decision: &Decision) -> LabelPlan {
+    let (state_label, extra) = match decision {
+        Decision::Ready { .. } => (LABEL_READY, None),
+        Decision::NeedsInfo { .. } => (LABEL_NEEDS_INFO, None),
+        Decision::Wontfix { reason, .. } => (
+            LABEL_WONTFIX,
+            match reason {
+                WontfixReason::Duplicate => Some("duplicate"),
+                WontfixReason::Invalid => Some("invalid"),
+                WontfixReason::OutOfScope => None,
+            },
+        ),
+        Decision::Split { .. } => return LabelPlan::default(),
+    };
+    let mut add = vec![category_label(&triage.assessment.category).to_string(), state_label.to_string()];
+    if let Some(extra) = extra {
+        add.push(extra.to_string());
+    }
+    add.extend(triage.assessment.areas.iter().cloned());
+    let remove = STATE_LABELS.iter().filter(|&&label| label != state_label).map(|label| label.to_string()).collect();
+    LabelPlan { add, remove }
+}
+
+/// The hidden marker `intake_publish` (`factory-daemon`) reads back off the
+/// issue's comments to find the one this item owns, across a re-triage or a
+/// crash between the GitHub write and the local one.
+pub fn outbound_marker(item_id: &str) -> String {
+    format!("<!-- factory-intake:{item_id} -->")
+}
+
+/// The triage comment for a decided GitHub item: the triage skill's own
+/// assessment format, so a person reading the issue sees the same thing a
+/// person reading `factory intake show` does. Starts with the fixed
+/// disclosure line and ends with [`outbound_marker`]; `intake_publish`
+/// replaces the whole comment on a re-triage rather than editing around the
+/// marker. Pure; never called for a `Decision::Split`.
+pub fn triage_comment(item: &Task, triage: &Triage, decision: &Decision) -> String {
+    let mut out = String::from("> *This was generated by AI during triage.*\n\n## Triage Assessment\n\n");
+    out.push_str(&format!("**Category:** {}\n", triage.assessment.category));
+    out.push_str(&format!(
+        "**Priority:** {} ({} impact, {} urgency)\n",
+        triage.priority.as_str(),
+        triage.assessment.impact.as_str(),
+        triage.assessment.urgency.as_str(),
+    ));
+    if !triage.assessment.areas.is_empty() {
+        out.push_str(&format!("**Areas:** {}\n", triage.assessment.areas.join(", ")));
+    }
+    out.push_str(&format!("**Complexity:** {}\n", triage.assessment.complexity));
+    if let Some(estimate) = &triage.estimate {
+        out.push_str(&format!("**Estimate:** {}\n", estimate.describe()));
+    }
+    out.push('\n');
+    if !triage.assessment.summary.trim().is_empty() {
+        out.push_str(triage.assessment.summary.trim());
+        out.push_str("\n\n");
+    }
+    out.push_str("**Readiness**\n\n");
+    for axis in &triage.assessment.axes {
+        out.push_str(&format!(
+            "- {} **{}** -- {}\n",
+            if axis.pass { "\u{2713}" } else { "\u{2717}" },
+            axis.axis.label(),
+            axis.evidence.trim(),
+        ));
+    }
+    for check in &triage.assessment.checks {
+        out.push_str(&format!(
+            "- {} **{}** -- {}\n",
+            if check.pass { "\u{2713}" } else { "\u{2717}" },
+            check.id,
+            check.evidence.trim(),
+        ));
+    }
+    out.push_str("\n## Decision\n\n");
+    match decision {
+        Decision::Ready { .. } => out.push_str("**Ready** -- released into the line.\n"),
+        Decision::NeedsInfo { questions } => {
+            out.push_str("**Needs info**\n\n");
+            for q in questions {
+                out.push_str(&format!("- {}\n", q.trim()));
+            }
+        }
+        Decision::Wontfix { reason, evidence, duplicate_of } => {
+            out.push_str(&format!("**Won't fix** ({})\n\n{}\n", reason.as_str().replace('_', " "), evidence.trim()));
+            if let Some(duplicate_of) = duplicate_of {
+                out.push_str(&format!("\nDuplicate of {duplicate_of}.\n"));
+            }
+        }
+        Decision::Split { .. } => {}
+    }
+    out.push('\n');
+    out.push_str(&outbound_marker(&item.id));
+    out
+}
+
 // ------------------------------------------------------------ next actions
 
 /// What would move a held-back item forward.
@@ -1994,6 +2206,10 @@ pub struct IntakeCard {
     /// for every item nobody has ever flagged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<SecurityFlag>,
+    /// A GitHub item's outbound triage comment and labels (`#171`). Absent
+    /// for anything not from GitHub, or with nothing decided yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound: Option<OutboundRecord>,
 }
 
 /// `possible` or `confirmed` -- the fast lane [`board`] moves to the front
@@ -2185,6 +2401,7 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>, definitions: &BTreeMap<String, 
             // Unboxed here: a card is never part of a `Task` on a deep,
             // unboxed async call chain the way `Intake` itself is.
             security: intake.security.as_deref().cloned(),
+            outbound: intake.outbound.as_deref().cloned(),
         };
         match intake.stage {
             IntakeStage::Received => columns.received.push(card),
@@ -2351,6 +2568,9 @@ pub fn triage_instructions(item: &Task, record: &Intake, definition: &ReadyDefin
          one: only a person confirms or dismisses it.\n\
          6. Impact and urgency, each high, medium or low; the priority (P1-P4) follows from \
          the two.\n\
+         6a. Areas: zero or more slugs naming what part of the system this touches, e.g. \
+         `process`, `quality`, `intake` -- your own call. Carried through unchanged to a \
+         released GitHub item's labels.\n\
          7. Complexity 1-10 from the expected touch points, one level more per material \
          uncertainty: 1-2 one file, 3-4 one function or two files, 5-6 one slice across two to \
          four files, 7-8 cross-cutting, 9-10 a subsystem. It sets the estimate range (1-2: \
@@ -2400,6 +2620,7 @@ pub fn triage_instructions(item: &Task, record: &Intake, definition: &ReadyDefin
       "category": "bugfix",
       "impact": "medium",
       "urgency": "high",
+      "areas": ["process", "quality"],
       "complexity": 4,
       "routing": {
         "scope": "<scope>",
@@ -2424,7 +2645,8 @@ pub fn triage_instructions(item: &Task, record: &Intake, definition: &ReadyDefin
     out.push_str(
         "\nLeave out what does not apply: `split` unless it is too big, `inputs` and `agents` \
          without a workflow, `duplicates` only when nothing was found and your own search of \
-         the vault found nothing either, and `checks` entirely when this scope declares none. \
+         the vault found nothing either, `checks` entirely when this scope declares none, and \
+         `areas` when nothing fits. \
          Use wontfix only for a verified duplicate, an invalid \
          report or something out of scope -- and then do not decide it yourself: say so in \
          your task report with the evidence, and a person closes it.\n",
@@ -2700,6 +2922,7 @@ mod tests {
             split: vec![],
             duplicates: vec![],
             checks: vec![],
+            areas: vec![],
         }
     }
 
@@ -2860,6 +3083,7 @@ mod tests {
             decision: None,
             candidates: vec![],
             security: None,
+            outbound: None,
         }
     }
 
@@ -3070,6 +3294,7 @@ mod tests {
             decision: None,
             candidates: vec![],
             security: None,
+            outbound: None,
         }
     }
 
@@ -3533,10 +3758,123 @@ mod tests {
             "routing": {"scope": "demo"}, "summary": "s"
         }"#;
         let a: Assessment = serde_json::from_str(json).unwrap();
+        assert!(a.areas.is_empty(), "a row from before #171 reads as no areas");
         assert!(validate(&a, &def()).is_ok());
         assert_eq!(evaluate(&a, &def(), &no_reference(), "x", at()).verdict, Verdict::Ready);
         let decision: Decision = serde_json::from_str(r#"{"decision":"needs_info","questions":["q"]}"#).unwrap();
         assert_eq!(decision, Decision::NeedsInfo { questions: vec!["q".into()] });
+    }
+
+    #[test]
+    fn an_area_has_to_be_a_slug() {
+        let mut a = assessment();
+        a.areas = vec!["process".into(), "quality".into()];
+        assert!(validate(&a, &def()).is_ok());
+        a.areas = vec!["Not A Slug".into()];
+        let e = validate(&a, &def()).unwrap_err();
+        assert!(e.contains("Not A Slug"), "{e}");
+    }
+
+    // ---------------------------------------------------------- outbound (#171)
+
+    #[test]
+    fn the_triage_comment_starts_with_the_disclosure_line_and_ends_with_the_marker() {
+        let a = assessment();
+        let triage = evaluate(&a, &def(), &no_reference(), "x", at());
+        let item = task("item-1", TaskStatus::Intake, None);
+        let comment = triage_comment(&item, &triage, &Decision::Ready { run: false });
+        assert!(comment.starts_with("> *This was generated by AI during triage.*\n\n"), "{comment}");
+        assert!(comment.trim_end().ends_with(&outbound_marker(&item.id)), "{comment}");
+        assert!(comment.contains("bugfix"), "the category is in it: {comment}");
+        assert!(comment.contains("Ready"), "{comment}");
+    }
+
+    #[test]
+    fn the_triage_comment_carries_areas_and_needs_infos_questions() {
+        let mut a = assessment();
+        a.areas = vec!["process".into(), "quality".into()];
+        let triage = evaluate(&a, &def(), &no_reference(), "x", at());
+        let item = task("item-1", TaskStatus::Intake, None);
+        let decision = Decision::NeedsInfo { questions: vec!["which browser?".into()] };
+        let comment = triage_comment(&item, &triage, &decision);
+        assert!(comment.contains("process, quality"), "{comment}");
+        assert!(comment.contains("which browser?"), "{comment}");
+    }
+
+    #[test]
+    fn github_labels_map_category_and_state_and_remove_the_other_two_state_labels() {
+        let mut a = assessment();
+        a.category = "bugfix".into();
+        let triage = evaluate(&a, &def(), &no_reference(), "x", at());
+
+        let ready = github_labels(&triage, &Decision::Ready { run: false });
+        assert!(ready.add.contains(&"bug".to_string()));
+        assert!(ready.add.contains(&LABEL_READY.to_string()));
+        assert_eq!(ready.remove, vec![LABEL_NEEDS_INFO.to_string(), LABEL_WONTFIX.to_string()]);
+
+        let needs_info = github_labels(&triage, &Decision::NeedsInfo { questions: vec![] });
+        assert!(needs_info.add.contains(&LABEL_NEEDS_INFO.to_string()));
+        assert_eq!(needs_info.remove, vec![LABEL_READY.to_string(), LABEL_WONTFIX.to_string()]);
+
+        let mut docs = a.clone();
+        docs.category = "docs".into();
+        let docs_triage = evaluate(&docs, &def(), &no_reference(), "x", at());
+        assert!(github_labels(&docs_triage, &Decision::Ready { run: false }).add.contains(&"documentation".to_string()));
+
+        let mut chore = a.clone();
+        chore.category = "chore".into();
+        let chore_triage = evaluate(&chore, &def(), &no_reference(), "x", at());
+        assert!(
+            github_labels(&chore_triage, &Decision::Ready { run: false }).add.contains(&"enhancement".to_string()),
+            "anything but bugfix or docs is an enhancement"
+        );
+    }
+
+    #[test]
+    fn github_labels_for_wontfix_add_the_reason_and_areas() {
+        let mut a = assessment();
+        a.areas = vec!["process".into()];
+        let triage = evaluate(&a, &def(), &no_reference(), "x", at());
+
+        let duplicate = github_labels(
+            &triage,
+            &Decision::Wontfix { reason: WontfixReason::Duplicate, evidence: "e".into(), duplicate_of: Some("#1".into()) },
+        );
+        assert!(duplicate.add.contains(&LABEL_WONTFIX.to_string()));
+        assert!(duplicate.add.contains(&"duplicate".to_string()));
+        assert!(duplicate.add.contains(&"process".to_string()));
+        assert_eq!(duplicate.remove, vec![LABEL_READY.to_string(), LABEL_NEEDS_INFO.to_string()]);
+
+        let invalid =
+            github_labels(&triage, &Decision::Wontfix { reason: WontfixReason::Invalid, evidence: "e".into(), duplicate_of: None });
+        assert!(invalid.add.contains(&"invalid".to_string()));
+
+        let out_of_scope = github_labels(
+            &triage,
+            &Decision::Wontfix { reason: WontfixReason::OutOfScope, evidence: "e".into(), duplicate_of: None },
+        );
+        assert!(!out_of_scope.add.contains(&"duplicate".to_string()));
+        assert!(!out_of_scope.add.contains(&"invalid".to_string()));
+    }
+
+    #[test]
+    fn github_labels_for_a_split_is_empty_never_a_guess() {
+        let triage = evaluate(&assessment(), &def(), &no_reference(), "x", at());
+        let plan = github_labels(&triage, &Decision::Split { parts: vec![] });
+        assert!(plan.add.is_empty());
+        assert!(plan.remove.is_empty());
+    }
+
+    #[test]
+    fn an_intake_row_without_outbound_still_deserialises() {
+        let json = r#"{
+            "stage": "ready",
+            "source": {"kind": "github", "reference": "https://github.com/acme/widgets/issues/9"},
+            "requester": "octocat",
+            "received_at": "2026-09-25T10:00:00Z"
+        }"#;
+        let intake: Intake = serde_json::from_str(json).unwrap();
+        assert!(intake.outbound.is_none());
     }
 
     fn part(id: &str, deps: &[&str]) -> SplitPart {

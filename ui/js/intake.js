@@ -9,8 +9,10 @@
 //! and its subtree, the reading Operations uses.
 //!
 //! Every action is a dialog in the app's own modal and goes to the daemon,
-//! which journals it with who asked. Nothing here reaches outside Factory:
-//! no comment, label or reply is posted anywhere.
+//! which journals it with who asked. Every request here still only ever
+//! reaches Factory's own API -- the one outward effect, approving a decided
+//! GitHub item's comment and labels (`#171`), is the daemon's `gh` call to
+//! make once asked; nothing here talks to GitHub directly.
 
 import { $, api, esc, state } from "./core.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
@@ -42,8 +44,11 @@ import {
   flagSecurityRequest,
   infoRequest,
   nextActions,
+  outboundInfo,
+  OUTBOUND_STATE_LABELS,
   previewVerdict,
   priorityOf,
+  publishRequest,
   routeFor,
   routeProblem,
   securityDecisionProblem,
@@ -118,9 +123,19 @@ function securityBadge(card) {
   return `<span class="badge ik-sec ik-sec-${esc(flag.state)}" title="${esc(flag.reason || "")}">${esc(label)}</span>`;
 }
 
+/// A decided GitHub item's outbound state (`#171`), shown wherever a card or
+/// the item modal says what is happening to it -- empty for anything not
+/// from GitHub or with nothing decided yet.
+function outboundNote(card) {
+  const info = outboundInfo(card);
+  if (!info) return "";
+  return `GitHub: ${OUTBOUND_STATE_LABELS[info.state] || info.state}`;
+}
+
 /// One card. `axes` is the board's own list, so a card never keeps a copy.
 export function intakeCard(card, axes = board ? board.axes : []) {
   const note = cardNote(card);
+  const outbound = outboundNote(card);
   const badge = securityBadge(card);
   return `
     <div class="kbc ik-card${badge ? " ik-fast-lane" : ""}" data-id="${esc(card.id)}" tabindex="0" role="button">
@@ -132,6 +147,7 @@ export function intakeCard(card, axes = board ? board.axes : []) {
       ${chips(card)}
       ${card.questions && card.questions.length ? `<div class="sub ik-q">? ${esc(card.questions[0])}${card.questions.length > 1 ? ` (+${card.questions.length - 1})` : ""}</div>` : ""}
       ${note ? `<div class="sub ik-note">${esc(note)}</div>` : ""}
+      ${outbound ? `<div class="sub ik-note">${esc(outbound)}</div>` : ""}
     </div>`;
 }
 
@@ -232,6 +248,20 @@ function securityBlock(card) {
     <br><span class="sub">flagged by ${esc(flag.flagged_by)} at ${esc(flag.flagged_at)}</span>${decided}</p>`;
 }
 
+/// The item modal's outbound block (`#171`): the GitHub publish state, the
+/// comment link once posted, and any labels the repository does not have or
+/// the last attempt's error. Empty for an item with nothing outbound yet.
+function outboundBlock(card) {
+  const info = outboundInfo(card);
+  if (!info) return "";
+  const label = OUTBOUND_STATE_LABELS[info.state] || info.state;
+  return `<p><span class="tag">GitHub: ${esc(label)}</span>${info.commentUrl
+      ? ` <a href="${esc(info.commentUrl)}" target="_blank" rel="noopener">comment</a>`
+      : ""}
+    ${info.labelsSkipped.length ? `<br><span class="sub">labels skipped (missing in the repository): ${esc(info.labelsSkipped.join(", "))}</span>` : ""}
+    ${info.error ? `<br><span class="sub">${esc(info.error)}</span>` : ""}</p>`;
+}
+
 export function openItem(id) {
   const card = findCard(id);
   if (!card) return;
@@ -246,6 +276,7 @@ export function openItem(id) {
     <div class="body">
       <p class="sub">${esc(card.stage.replace("_", " "))} · ${esc(card.scope)} · from ${esc(card.requester)} (${esc(card.source.kind)}${card.source.reference ? `: ${esc(card.source.reference)}` : ""}) · waiting ${esc(fmtAge(card.age_seconds))}</p>
       ${securityBlock(card)}
+      ${outboundBlock(card)}
       ${t ? `<p><span class="badge ik-p ik-${esc(t.priority)}">${esc(t.priority)}</span> <span class="tag">${esc(t.assessment.category)}</span>
         impact ${esc(t.assessment.impact)} × urgency ${esc(t.assessment.urgency)} · complexity ${esc(t.assessment.complexity)} · ${esc(estimateText(t.estimate))}
         · route ${esc(routeText(t.assessment.routing))}
@@ -261,7 +292,7 @@ export function openItem(id) {
       ${nextActionsBlock(card)}
       ${card.decision ? `<p class="sub">decided ${esc(card.decision.decision.decision.replace("_", "-"))} by ${esc(card.decision.by)}</p>` : ""}
       <div class="row-btns" style="margin-top:16px">
-        ${actions.map(a => `<button class="btn ${a === "release" ? "primary" : a === "wontfix" ? "danger" : ""}" data-act="${a}">${esc(ACTION_LABELS[a])}</button>`).join("")}
+        ${actions.map(a => `<button class="btn ${a === "release" || a === "publish" ? "primary" : a === "wontfix" ? "danger" : ""}" data-act="${a}">${esc(ACTION_LABELS[a])}</button>`).join("")}
         <button class="btn" id="ik-task">Open as task</button>
       </div>
     </div>`);
@@ -280,7 +311,26 @@ function openAction(action, card) {
   if (action === "flag_security") return openFlagSecurityDialog(card);
   if (action === "security_confirm") return openSecurityDecisionDialog("confirm", card);
   if (action === "security_dismiss") return openSecurityDecisionDialog("dismiss", card);
+  if (action === "publish") return openPublishDialog(card);
   return openDecideDialog(action, card);
+}
+
+/// Approve and post a decided GitHub item's triage comment and labels
+/// (`#171`). Factory never does this on its own -- this dialog's one button
+/// is the approval. Shows the last attempt's state, if there was one, so a
+/// retry after a `gh` failure is not a shot in the dark.
+function openPublishDialog(card) {
+  const info = outboundInfo(card);
+  dialog("Approve and post to GitHub", card.title, `
+    <p class="env-note">Posts the decided triage comment and applies the labels to the GitHub issue this item
+      came from. Factory never does this on its own -- this is the approval.</p>
+    ${info ? `<p class="sub">last attempt: ${esc(OUTBOUND_STATE_LABELS[info.state] || info.state)}${info.commentUrl
+        ? ` -- <a href="${esc(info.commentUrl)}" target="_blank" rel="noopener">comment</a>`
+        : ""}</p>
+      ${info.labelsSkipped.length ? `<p class="sub">labels skipped (missing in the repository): ${esc(info.labelsSkipped.join(", "))}</p>` : ""}
+      ${info.error ? `<p class="sub">${esc(info.error)}</p>` : ""}` : ""}`,
+  "Approve and post",
+  () => publishRequest(card.id));
 }
 
 function openFlagSecurityDialog(card) {

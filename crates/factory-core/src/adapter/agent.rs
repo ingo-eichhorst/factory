@@ -683,6 +683,11 @@ impl AgentContext {
                     "intake.decide -> {bin} intake decide <id> ready|needs-info|split|wontfix [--run] \
                      (--run also needs task.run)"
                 ),
+                Grant::IntakePublish => format!(
+                    "intake.publish -> {bin} intake publish <id>; posts the decided triage comment and \
+                     applies the labels to the GitHub issue it came from -- only once you approve it; \
+                     Factory never posts on its own"
+                ),
             });
         }
         lines
@@ -1006,6 +1011,10 @@ mod tests {
             assert!(guide.contains(grant), "a foreman has {grant}: {guide}");
         }
         assert!(guide.contains("everything in your scope"));
+        // Every grant but the one outward GitHub effect (`#171`) -- a scope's
+        // day-to-day running is not the standing permission to post outside
+        // Factory.
+        assert!(!guide.contains("intake.publish"), "{guide}");
     }
 
     #[test]
@@ -1019,6 +1028,16 @@ mod tests {
         assert!(!guide.contains("task.report ->"), "the triager coordinates; it never reports a run: {guide}");
         assert!(!guide.contains("agent.start"), "{guide}");
         assert!(guide.contains("everything in your scope"));
+        assert!(!guide.contains("intake.publish"), "coordinating triage is not publishing (#171): {guide}");
+    }
+
+    #[test]
+    fn a_role_holding_intake_publish_is_told_the_command_and_a_worker_is_not() {
+        let guide = base(Some(custom(&[Grant::IntakePublish], Reach::Scope))).factory_guide();
+        assert!(guide.contains("intake.publish -> "), "{guide}");
+        assert!(guide.contains("factory intake publish"), "{guide}");
+        let worker_guide = base(Some(worker())).factory_guide();
+        assert!(!worker_guide.contains("intake.publish"), "{worker_guide}");
     }
 
     #[test]
