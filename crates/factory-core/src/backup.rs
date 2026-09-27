@@ -191,6 +191,7 @@ pub enum Group {
     Scenarios,
     Quality,
     Vex,
+    Intake,
     Guides,
     Logs,
 }
@@ -207,6 +208,7 @@ impl Group {
             Self::Scenarios => "scenarios",
             Self::Quality => "quality",
             Self::Vex => "vex",
+            Self::Intake => "intake",
             Self::Guides => "guides",
             Self::Logs => "logs",
         }
@@ -217,8 +219,9 @@ impl Group {
 /// the exception AGENTS.md makes to "everything under `.factory/` is the
 /// daemon's", because nothing regenerates them. `quality/` and `vex/` are
 /// here although the issue's table predates them -- AGENTS.md names them
-/// with the others.
-pub const AUTHORED: [(Group, &str, &str); 7] = [
+/// with the others. `intake/` (`#169`, per-scope definitions of ready) is
+/// the newest of the same kind.
+pub const AUTHORED: [(Group, &str, &str); 8] = [
     (Group::Knowledge, ".factory/knowledge/", "the knowledge vault: pages and documents"),
     (Group::Datasets, ".factory/datasets/", "benchmark datasets"),
     (Group::Policies, ".factory/policies/", "policy catalogues, drafts included"),
@@ -226,6 +229,7 @@ pub const AUTHORED: [(Group, &str, &str); 7] = [
     (Group::Scenarios, ".factory/scenarios/", "scenario files"),
     (Group::Quality, ".factory/quality/", "quality profiles"),
     (Group::Vex, ".factory/vex/", "authored CycloneDX VEX judgments"),
+    (Group::Intake, ".factory/intake/", "definitions of ready"),
 ];
 
 /// The two optional directories `include_logs: true` adds.
