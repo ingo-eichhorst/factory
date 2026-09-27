@@ -389,6 +389,38 @@ pub struct TaskFailure {
     pub at: DateTime<Utc>,
 }
 
+/// A dispatch held before any run row existed because its agent, or its
+/// scope, already had `max_sessions` sessions in use (`#179`). Distinct from
+/// `TaskFailure`: the task needs no person, only a slot, so it stays
+/// `Pending` rather than `Blocked` -- see `Task::fires`, which skips a task
+/// carrying this so a schedule's next slot does not try (and re-hold) it
+/// again on every tick while it waits.
+///
+/// Set by `start_run_due` the moment a dispatch is first held, and cleared
+/// the moment a run is finally created for it (`TaskStore::create_run`'s own
+/// mirror, the same place `failure` and `routed_to` are cleared for a new
+/// attempt) -- or the task is cancelled, closed, deleted, or moved to a
+/// different agent or scope, none of which leave the original wait still
+/// meaningful.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotWait {
+    /// The agent name the limit was declared on -- the bare adapter name for
+    /// a task with no declaration, held only by its scope's own cap.
+    pub agent: String,
+    pub scope: String,
+    pub trigger: crate::run::Trigger,
+    /// When this attempt actually became due -- carried straight onto the
+    /// eventual run's own `queued_at`/`scheduled_for` once a slot opens, so
+    /// the queue wait it reports is the whole wait, not just the moment the
+    /// slot happened to open.
+    pub queued_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_for: Option<DateTime<Utc>>,
+    /// When the hold itself began. Kept apart from `queued_at`, which can be
+    /// earlier still for a retry or a slot `dispatchable_from` moved back.
+    pub since: DateTime<Utc>,
+}
+
 /// The identity of a live agent session, as the runtime adapter that created it
 /// understands it. The daemon treats `handle` as opaque.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -528,6 +560,11 @@ pub struct Task {
     /// closed it on purpose -- see `TaskClosure`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closure: Option<TaskClosure>,
+    /// A dispatch held on a declared `max_sessions` limit (`#179`) -- see
+    /// `SlotWait`. Absent on every task written before this existed, which
+    /// reads as not waiting, exactly what those tasks were doing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_wait: Option<SlotWait>,
 }
 
 impl Task {
@@ -554,9 +591,12 @@ impl Task {
 
     /// Whether its schedule may fire it: pending, or blocked by a failure,
     /// which a later success clears (`#122`). Never a closed task, and
-    /// never one blocked on a question -- that one has a run.
+    /// never one blocked on a question -- that one has a run. Never one
+    /// already waiting for a capacity slot either (`#179`): it is already
+    /// claimed, and firing it again would only re-hold it and reset nothing
+    /// -- the wait it is already in is what will eventually dispatch it.
     pub fn fires(&self) -> bool {
-        self.status == TaskStatus::Pending || self.blocked_by_failure()
+        self.slot_wait.is_none() && (self.status == TaskStatus::Pending || self.blocked_by_failure())
     }
 
     /// Did it end in failure? Blocked by one, or a legacy `Failed` row.
@@ -745,6 +785,14 @@ pub struct TaskPatch {
     pub closure: Option<TaskClosure>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_closure: bool,
+    /// A dispatch held on `max_sessions` (`#179`) -- set the moment it is
+    /// first held, cleared everywhere `failure` is (a new run, a cancel, a
+    /// close, a delete) plus a change of agent or scope, which invalidate
+    /// the wait's own target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_wait: Option<SlotWait>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_slot_wait: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

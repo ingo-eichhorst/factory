@@ -886,6 +886,7 @@ mod tests {
             intake: None,
             failure: None,
             closure: None,
+            slot_wait: None,
         };
         let task = engine.store.create(&task).await.unwrap();
         let run = engine
@@ -1312,6 +1313,7 @@ mod tests {
             intake: None,
             failure: None,
             closure: None,
+            slot_wait: None,
         };
         engine.store.create(&task).await.unwrap();
 
