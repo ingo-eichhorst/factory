@@ -31,6 +31,7 @@ import {
   cardActions,
   cardNote,
   cards,
+  basisText,
   decideProblem,
   decideRequest,
   duplicateRows,
@@ -100,7 +101,7 @@ function chips(card) {
   const v = verdictChips(card);
   if (!v) return "";
   return `<div class="ik-chips"><span class="badge ik-p ik-${esc(v.priority)}">${esc(v.priority)}</span>
-    <span class="tag">${esc(v.category)}</span><span class="sub">${esc(v.estimate)}</span></div>`;
+    <span class="tag">${esc(v.category)}</span><span class="sub" title="${v.basis ? esc(v.basis) : ""}">${esc(v.estimate)}</span></div>`;
 }
 
 /// One card. `axes` is the board's own list, so a card never keeps a copy.
@@ -218,7 +219,7 @@ export function openItem(id) {
       ${t ? `<p><span class="badge ik-p ik-${esc(t.priority)}">${esc(t.priority)}</span> <span class="tag">${esc(t.assessment.category)}</span>
         impact ${esc(t.assessment.impact)} × urgency ${esc(t.assessment.urgency)} · complexity ${esc(t.assessment.complexity)} · ${esc(estimateText(t.estimate))}
         · route ${esc(routeText(t.assessment.routing))}
-        <br><span class="sub">assessed by ${esc(t.by)}: ${esc(t.verdict.verdict.replace("_", "-"))}</span></p>
+        <br><span class="sub">assessed by ${esc(t.by)}: ${esc(t.verdict.verdict.replace("_", "-"))}${basisText(t.estimate_basis) ? ` · ${esc(basisText(t.estimate_basis))}` : ""}</span></p>
         ${t.assessment.summary ? `<p>${esc(t.assessment.summary)}</p>` : ""}` : `<p class="sub">Not assessed yet.</p>`}
       <table class="ik-axes"><tbody>${marks.map(m => `
         <tr class="ik-${m.mark}"><td>${MARK_TEXT[m.mark]}</td><th scope="row">${esc(m.label)}</th>
@@ -404,7 +405,7 @@ function openDecideDialog(action, card) {
   if (action === "release") {
     const t = card.triage;
     body = `<p class="env-note">Releases it into ${esc(t.assessment.routing.workflow ? `workflow ${t.assessment.routing.workflow}` : t.assessment.routing.scope)}
-      as ${esc(t.assessment.category)}, ${esc(t.priority)}, ${esc(estimateText(t.estimate))}. The triage verdict is journaled as its first attestation.</p>
+      as ${esc(t.assessment.category)}, ${esc(t.priority)}, ${esc(estimateText(t.estimate))}${basisText(t.estimate_basis) ? ` (${esc(basisText(t.estimate_basis))})` : ""}. The triage verdict is journaled as its first attestation.</p>
       ${t.assessment.routing.workflow ? "" : `<label class="checkrow"><input type="checkbox" id="ik-run"><span>Run it now</span></label>`}`;
   } else if (action === "needs_info") {
     const suggested = (card.triage && card.triage.assessment.questions) || [];

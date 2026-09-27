@@ -991,6 +991,7 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met | the selected scope's quality subtree — see "Quality attributes" |
 | `unit_cost` | API-equivalent USD spent per run ended `done` (failed and cancelled runs' cost included), trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 | `tokens_per_run` | mean tokens of every type per finished run, trailing 28 days | each run's measured usage (`Run.usage`, #117) |
+| `estimate_accuracy` | share of finished runs with an `original_estimate` whose terminal wall time fell inside its `[low, high]`, trailing 28 days | each run's `original_estimate` and wall time (`Run.original_estimate`, #168) |
 | `ready_rate` | ready decisions over every intake decision event (ready, needs-info, wontfix, split), trailing 28 days | the task journal's intake decision events (#165) |
 | `needs_info_rate` | needs-info decisions over every intake decision event, trailing 28 days -- the same shared denominator as `ready_rate` | the task journal's intake decision events (#165) |
 | `duplicate_rate` | wontfix decisions closed as a duplicate over every intake decision event, trailing 28 days -- an invalid or out-of-scope wontfix, and a split, count in the denominator only | the task journal's intake decision events (#165) |
@@ -1029,7 +1030,9 @@ not come back as a quiet `None`); a metric named in the registry but not
 yet computable would come back as `value: None` with its reason, never an
 error — none is today. `unit_cost`/`tokens_per_run` count only runs whose
 usage the runtime measured start to end; an unmeasured run is left out,
-never taken as free, and with none left the value is `None` with a reason. `ids` empty means every non-parameterised metric
+never taken as free, and with none left the value is `None` with a reason.
+`estimate_accuracy` follows the same rule for a run with no `original_estimate`
+at all -- left out of the share, never scored as a miss. `ids` empty means every non-parameterised metric
 (available or not) plus whatever the loaded goals and policy catalogues
 themselves name. Only the three production-based metrics carry a history
 today: one point per day over the daily grid's own 53 weeks, each point
@@ -1574,6 +1577,57 @@ show <id>` is one item's whole record. `POST /api/intake/<id>/assess` is
 where `validate` and `evaluate` are enforced; `GET /api/intake` answers the
 `IntakeBoard` the UI and the CLI both read.
 
+**Reference-class estimates and measured accuracy (`#168`).** An assessment's
+range is `ir:triage`'s fixed complexity table (1–2: 15–45m, … 7–8: 2.5–5h) by
+default, but Factory replaces it with measured evidence when enough exists —
+completed work in the *same exact canonical scope* (never a subtree, so one
+project never trains another's estimate) and the *same effective category*.
+
+- **The sample.** `Done` tasks whose runs are all terminal, whose last run
+  ended in the trailing 90 days, that are not themselves a triage
+  bookkeeping task (`intake-triage`) and that have at least one run. A
+  task's time is the sum of its runs' wall seconds (the same total `#117`'s
+  task comparison measures); its cost is the sum of its runs' final
+  measured cost, and only when every run has one — one run with an
+  unmeasured or partial reading makes the whole task's cost unknown, never
+  zero.
+- **Harness narrowing.** The routed agent's own class (scope + category +
+  agent) is used instead of scope + category alone, but only when that
+  narrower class by itself has at least 5 samples; otherwise the agent is
+  not counted as evidence and the wider class is used.
+- **Percentiles.** At least 5 samples gives nearest-rank p10/p50/p90, for
+  time and, independently (its own sample count), for cost. Fewer gives an
+  explicit "insufficient evidence (n of 5)" rather than a guess.
+- **Precedence.** The assessor's own range (still only with a named driver
+  in the summary) beats the reference class, which beats the complexity
+  table. `Triage.estimate_basis` records which one applied — source, scope,
+  category, the agent when it narrowed the class, the window, the sample
+  counts and percentiles, and the fallback reason — and is what the intake
+  card, `factory intake show` and the `triage_verdict` journal entry read to
+  say, for example, "p10–p90 of 12 completed bugfix tasks in factory, last
+  90 days" or "complexity table: 2 of 5 samples". `intake::Estimate` itself
+  gained an optional `expected_seconds` (the explained projection — a
+  reference class's p50, or an assessor's own — as opposed to the plain
+  average `midpoint()` falls back to without one) and an optional `cost`
+  range; both are serde-defaulted, so a `Triage` from before this shipped
+  still deserialises exactly as it read before.
+- **On release**, the patch now writes the task's full `Estimate` range
+  (not only `estimate_seconds`, its expected value) and — the fix this
+  issue makes — sets `Task.category` from the assessment itself, not only
+  the `category=` label a released task already carried. This means a
+  released item now also picks up any control plan (`#118`) declared for
+  its category, which an intake-released task did not before: the
+  category label was cosmetic, and the field is what `#117`'s reference
+  classes and `#118`'s control plan actually key on.
+- **Measuring the accuracy** of every estimate, however it was set, is the
+  `estimate_accuracy` registry metric (see "Goals") and the cost report's
+  own `estimated_runs`/`within_range`/`median_actual_over_expected` (see
+  "What a run used").
+
+Left out on purpose: re-estimating at the first turn (`#117` already owns
+that), budgets and forecasting (`#164`), and pooling samples across scopes
+or up a subtree.
+
 ## Operations
 
 L4 Process's third tab (`#106`), next to Tasks and Workflows: how the line
@@ -1878,8 +1932,19 @@ factory cost --by provider --since 30d
 `GET /api/runs/{id}/usage` answer the same. Grouping by `issue` reads the
 task's `issue=<n>` label. Sums are over the runs that knew the number, and
 beside them is how many did not: an unmeasured run is counted, never dropped
-and never free. The registry metrics `unit_cost` and `tokens_per_run` read
-the same usage (see "Goals").
+and never free. The registry metrics `unit_cost`, `tokens_per_run` and
+`estimate_accuracy` (#168) read the same usage and run data (see "Goals").
+
+Each group's row also carries its own estimate-vs-actual (#168):
+`estimated_runs` (how many of the group's runs carry an `original_estimate`
+at all), `within_range` (of those, how many terminal ones landed inside their
+own `[low, high]`), and `median_actual_over_expected` (the nearest-rank
+median of actual wall seconds over the estimate's `expected`, over the same
+terminal ones). A run with no estimate is in none of the three -- it has no
+range to have missed, never a silent zero. `factory cost --by …` prints them
+as an `ESTIMATE` column (`3/5 in range, 1.20x median`, or `-` when nothing in
+the group carries one); `GET /api/costs` carries the same fields on every
+`CostRow`.
 
 Tasks can carry low/expected/high time and cost estimates. The CLI accepts
 `--estimate-low`, `--estimate`, and `--estimate-high` (and the corresponding
