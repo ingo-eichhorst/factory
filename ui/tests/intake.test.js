@@ -135,6 +135,35 @@ test("a card escapes what a requester typed", () => {
   assert.doesNotMatch(html, /<b>x/);
 });
 
+test("a card's estimate chip carries its reference-class basis as a tooltip (#168)", () => {
+  const withBasis = {
+    ...DATA.board.columns.ready[0],
+    triage: {
+      ...DATA.board.columns.ready[0].triage,
+      estimate_basis: { source: "reference_class", scope: "web", category: "bugfix", time_samples: 12 },
+    },
+  };
+  const html = intakeCard(withBasis, DATA.board.axes);
+  assert.match(html, /title="p10–p90 of 12 completed bugfix tasks in web, last 90 days"/);
+});
+
+test("a card's estimate chip carries the complexity-table fallback as a tooltip (#168)", () => {
+  const fallback = {
+    ...DATA.board.columns.ready[0],
+    triage: {
+      ...DATA.board.columns.ready[0].triage,
+      estimate_basis: { source: "complexity_table", scope: "web", category: "bugfix", time_samples: 2 },
+    },
+  };
+  const html = intakeCard(fallback, DATA.board.axes);
+  assert.match(html, /title="complexity table: 2 of 5 samples"/);
+});
+
+test("a card from before #168 has no estimate_basis and shows no tooltip", () => {
+  const html = intakeCard(DATA.board.columns.ready[0], DATA.board.axes);
+  assert.match(html, /class="sub" title="">45m-2h/);
+});
+
 // ------------------------------------------------------------ duplicates (#166)
 
 test("the item modal lists each possible duplicate with its match and verdict", () => {

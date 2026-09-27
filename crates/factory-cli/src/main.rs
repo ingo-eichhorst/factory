@@ -1890,7 +1890,7 @@ fn intake_item_text(task: &Task) -> String {
     }
     if let Some(t) = &i.triage {
         out.push_str(&format!(
-            "  assessed   by {} at {}: {}\n  category   {}\n  priority   {} (impact {}, urgency {})\n  estimate   {} (complexity {})\n  route      {}{}{}{}{}\n",
+            "  assessed   by {} at {}: {}\n  category   {}\n  priority   {} (impact {}, urgency {})\n  estimate   {} (complexity {}){}\n  route      {}{}{}{}{}\n",
             t.by,
             t.at.to_rfc3339(),
             t.verdict.as_str().replace('_', "-"),
@@ -1900,6 +1900,7 @@ fn intake_item_text(task: &Task) -> String {
             t.assessment.urgency.as_str(),
             t.estimate.map(|e| e.describe()).unwrap_or_else(|| "none".into()),
             t.assessment.complexity,
+            t.estimate_basis.as_ref().map(|b| format!("\n  basis      {}", b.describe())).unwrap_or_default(),
             t.assessment.routing.scope,
             t.assessment.routing.agent.as_ref().map(|a| format!(" as {a}")).unwrap_or_default(),
             t.assessment.routing.workflow.as_ref().map(|w| format!(", workflow {w}")).unwrap_or_default(),
@@ -5385,6 +5386,18 @@ fn unknown_suffix(row: &factory_core::usage::CostRow) -> String {
     }
 }
 
+/// `3/5 in range, 1.20x median` -- `#168`'s estimate vs actual for one
+/// group, or `-` when nothing in it carries an `original_estimate` at all.
+fn estimate_vs_actual(row: &factory_core::usage::CostRow) -> String {
+    if row.estimated_runs == 0 {
+        return "-".into();
+    }
+    match row.median_actual_over_expected {
+        Some(ratio) => format!("{}/{} in range, {ratio:.2}x median", row.within_range, row.estimated_runs),
+        None => format!("{}/{} in range", row.within_range, row.estimated_runs),
+    }
+}
+
 fn costs_text(r: &factory_core::usage::CostReport) -> String {
     let mut s = format!(
         "cost by {}, runs started {} to {}{}\n",
@@ -5399,18 +5412,19 @@ fn costs_text(r: &factory_core::usage::CostReport) -> String {
     }
     let key_width = r.rows.iter().map(|row| row.key.chars().count().min(40)).max().unwrap_or(3).max(5);
     s.push_str(&format!(
-        "{:<key_width$}  {:>5}  {:>7}  {:>8}  {:>9}  {}\n",
-        "GROUP", "RUNS", "UNKNOWN", "TOKENS", "COST", ""
+        "{:<key_width$}  {:>5}  {:>7}  {:>8}  {:>9}  {:<28}  {}\n",
+        "GROUP", "RUNS", "UNKNOWN", "TOKENS", "COST", "ESTIMATE", ""
     ));
     let line = |row: &factory_core::usage::CostRow| {
         let key: String = row.key.chars().take(40).collect();
         format!(
-            "{:<key_width$}  {:>5}  {:>7}  {:>8}  {:>9}  {}",
+            "{:<key_width$}  {:>5}  {:>7}  {:>8}  {:>9}  {:<28}  {}",
             key,
             row.runs,
             row.runs_unknown + row.runs_cost_unknown,
             if row.runs_unknown == row.runs { "?".to_string() } else { fmt_tokens(row.tokens.total()) },
             sum_usd(row),
+            estimate_vs_actual(row),
             row.label.as_deref().unwrap_or("")
         )
     };
@@ -6364,6 +6378,32 @@ mod tests {
         assert!(text.contains("issue=117"), "{text}");
         assert!(!text.contains("$0.00"), "a group with nothing measured is ?, not free: {text}");
         assert!(text.contains("1 of 1 runs have no measured cost"), "{text}");
+    }
+
+    #[test]
+    fn the_cost_table_shows_estimate_vs_actual_per_group_when_there_is_one() {
+        use factory_core::usage::{CostGroupBy, CostReport, CostRow};
+        let mut row = CostRow::new("scope=web", None);
+        row.runs = 5;
+        row.estimated_runs = 5;
+        row.within_range = 4;
+        row.median_actual_over_expected = Some(1.2);
+        let mut nothing = CostRow::new("scope=demo", None);
+        nothing.runs = 1;
+        let report = CostReport {
+            group_by: CostGroupBy::Scope,
+            from: chrono::Utc::now() - chrono::Duration::days(30),
+            to: chrono::Utc::now(),
+            scope: None,
+            rows: vec![row, nothing],
+            total: CostRow::new("total", None),
+        };
+        let text = costs_text(&report);
+        assert!(text.contains("4/5 in range, 1.20x median"), "{text}");
+        assert!(text.contains("scope=demo"), "{text}");
+        // A group with nothing estimated says so plainly, not "0/0".
+        let demo_line = text.lines().find(|l| l.contains("scope=demo")).unwrap();
+        assert!(demo_line.contains(" - "), "{demo_line}");
     }
 
     #[test]

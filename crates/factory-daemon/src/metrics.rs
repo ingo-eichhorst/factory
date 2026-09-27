@@ -39,12 +39,14 @@
 //! Every other metric is a single number with no time axis of its own to
 //! draw yet.
 //!
-//! `unit_cost` and `tokens_per_run` (#117) are
+//! `unit_cost`, `tokens_per_run` (#117) and `estimate_accuracy` (#168) are
 //! `factory_core::usage::usage_metric` over the same trailing 28 days of
-//! runs, reading the usage each run carries -- measured by the agent
-//! runtime, never guessed. A run whose usage is unknown is left out of both
-//! sides of the figure; with none left the value is `None` and the reason
-//! says how many finished runs there were.
+//! runs. The first two read the usage each run carries -- measured by the
+//! agent runtime, never guessed -- and leave a run whose usage is unknown
+//! out of both sides of the figure. `estimate_accuracy` instead reads each
+//! run's own `original_estimate` and wall time, and leaves out a run with
+//! no estimate to compare against. With none left in any of the three, the
+//! value is `None` and the reason says how many finished runs there were.
 //!
 //! The four intake metrics (`ready_rate`, `needs_info_rate`,
 //! `duplicate_rate`, `intake_lead_time`, #165) are
@@ -125,7 +127,7 @@ fn is_operations_metric(id: &str) -> bool {
 const OPERATIONS_WINDOW_DAYS: i64 = 28;
 
 fn is_usage_metric(id: &str) -> bool {
-    matches!(id, "unit_cost" | "tokens_per_run")
+    matches!(id, "unit_cost" | "tokens_per_run" | "estimate_accuracy")
 }
 
 fn is_hours_metric(id: &str) -> bool {
@@ -2501,6 +2503,46 @@ mod tests {
         assert_eq!(get("tokens_per_run").value, Some(2_000.0));
     }
 
+    #[tokio::test]
+    async fn estimate_accuracy_reads_each_runs_original_estimate_against_its_wall_time() {
+        let engine = test_engine(Vec::new());
+        let ids = [MetricId::new("estimate_accuracy").unwrap()];
+
+        // Nothing carries an original_estimate yet: unavailable, never zero.
+        finished_run(&engine, "no-estimate", RunStatus::Done, Trigger::Manual, chrono::Duration::hours(1)).await;
+        let computed = engine.metrics(&ids, Utc::now()).await.unwrap();
+        let value = &computed.values[0];
+        assert_eq!(value.value, None);
+        assert!(value.reason.as_deref().unwrap().contains("an original estimate"), "{value:?}");
+
+        // `finished_run` only moves `ended_at` back by `ended_ago`;
+        // `started_at` stays at creation, so every one of its runs has a
+        // wall time that clamps to ~0 seconds -- exploited here to make
+        // "within range" and "outside range" deterministic without
+        // controlling the clock.
+        for (label, low, high) in [("within", 0u64, 100u64), ("outside", 100u64, 200u64)] {
+            let task = finished_run(&engine, label, RunStatus::Done, Trigger::Manual, chrono::Duration::hours(1)).await;
+            let run = engine.store.runs(&task.id, 1).await.unwrap().remove(0);
+            engine
+                .store
+                .update_run(
+                    &run.id,
+                    &RunPatch {
+                        original_estimate: Some(factory_core::task::Estimate {
+                            time: factory_core::task::TimeEstimateRange { low, expected: (low + high) / 2, high },
+                            cost: None,
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let computed = engine.metrics(&ids, Utc::now()).await.unwrap();
+        let value = &computed.values[0];
+        assert_eq!(value.value, Some(0.5), "1 of the 2 estimated runs is within its own range; the third has no estimate at all: {value:?}");
+    }
+
     // -------------------------------------------------------------- backup (#154)
 
     /// A throwaway instance with `infrastructure.backup` configured, for the
@@ -2689,6 +2731,7 @@ mod tests {
         assert!(has("throughput_week"), "fixed metrics are always in the default set");
         assert!(has("unit_cost"), "a fixed metric, so in the default set");
         assert!(has("tokens_per_run"));
+        assert!(has("estimate_accuracy"), "a fixed metric, so in the default set (#168)");
         assert!(has("compliance.cra"), "implied by the loaded policy catalogue");
         assert!(has("open_controls.cra"));
         assert!(has("compliance.cra"), "also implied by the goals catalogue's own key result");

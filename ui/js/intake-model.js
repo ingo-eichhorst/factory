@@ -55,6 +55,27 @@ export function estimateText(estimate) {
   return `${shortDuration(estimate.min_seconds)}-${shortDuration(estimate.max_seconds)}`;
 }
 
+/// What an estimate rests on (`#168`, `EstimateBasis::describe` mirrored
+/// exactly): "p10-p90 of 12 completed bugfix tasks in factory, last 90
+/// days" for a reference class, "complexity table: 2 of 5 samples" for the
+/// fallback, "the assessor's own estimate" for one an assessor gave outright,
+/// null only for a `Triage` from before this existed (no `estimate_basis` at
+/// all) -- the one case with truly nothing to say.
+export function basisText(basis) {
+  if (!basis) return null;
+  if (basis.source === "reference_class") {
+    const n = basis.time_samples;
+    return `p10–p90 of ${n} completed ${basis.category} task${n === 1 ? "" : "s"} in ${basis.scope}, last 90 days`;
+  }
+  if (basis.source === "complexity_table") {
+    return `complexity table: ${basis.time_samples} of 5 samples`;
+  }
+  if (basis.source === "assessor") {
+    return "the assessor's own estimate";
+  }
+  return null;
+}
+
 /// How long an item has waited, at a glance.
 export function fmtAge(seconds) {
   const s = Math.max(0, Math.floor(seconds || 0));
@@ -96,6 +117,7 @@ export function verdictChips(card) {
     priority: t.priority,
     category: t.assessment.category,
     estimate: estimateText(t.estimate),
+    basis: basisText(t.estimate_basis),
     verdict: t.verdict.verdict,
   };
 }

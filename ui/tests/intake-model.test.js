@@ -9,6 +9,7 @@ import {
   assessRequest,
   assessmentProblem,
   axisMarks,
+  basisText,
   buildAssessment,
   buildDuplicateAnswer,
   buildParts,
@@ -75,6 +76,27 @@ test("the estimate preview is ir:triage's table and spells ranges as the daemon 
   assert.equal(estimateText(null), "no estimate");
   assert.equal(estimateText(card("ready").triage.estimate), "45m-2h");
   assert.equal(verdictChips(card("ready")).estimate, "45m-2h");
+});
+
+test("basisText mirrors the daemon's EstimateBasis::describe exactly (#168)", () => {
+  assert.equal(basisText(null), null, "no basis at all -- a Triage from before this existed");
+  assert.equal(
+    basisText({ source: "reference_class", scope: "factory", category: "bugfix", time_samples: 12 }),
+    "p10–p90 of 12 completed bugfix tasks in factory, last 90 days",
+  );
+  assert.equal(
+    basisText({ source: "reference_class", scope: "factory", category: "bugfix", time_samples: 1 }),
+    "p10–p90 of 1 completed bugfix task in factory, last 90 days",
+    "singular task, not tasks",
+  );
+  assert.equal(
+    basisText({ source: "complexity_table", scope: "factory", category: "bugfix", time_samples: 2 }),
+    "complexity table: 2 of 5 samples",
+  );
+  assert.equal(basisText({ source: "assessor" }), "the assessor's own estimate");
+  // The fixture card predates #168: its triage carries no estimate_basis at
+  // all, and verdictChips must read that as no basis, not throw.
+  assert.equal(verdictChips(card("ready")).basis, null);
 });
 
 test("axis marks: pass, fail, a tolerated cheap observability gap, and unassessed", () => {

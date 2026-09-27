@@ -911,8 +911,12 @@ pub fn seed_from(parts: &[&str]) -> u64 {
 /// `index = round(p * (len - 1))`, clamped into range. Monotone in `p` --
 /// `p * (len - 1)` is monotone in `p`, and rounding preserves monotonicity
 /// -- which is what keeps p10 <= p50 <= p90 a guarantee rather than a
-/// coincidence of the data (pinned directly by a test below).
-pub(crate) fn nearest_rank(len: usize, p: f64) -> usize {
+/// coincidence of the data (pinned directly by a test below). `pub`, not
+/// `pub(crate)`: `factory-daemon`'s cost report (`#168`,
+/// `CostRow::median_actual_over_expected`) uses the same rule as
+/// `intake::reference_estimate`'s percentiles and `operations`'s
+/// `cycle_time_p50` -- one formula, not three.
+pub fn nearest_rank(len: usize, p: f64) -> usize {
     if len == 0 {
         return 0;
     }
