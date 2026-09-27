@@ -26,6 +26,7 @@ pub mod policy;
 pub mod policy_export;
 pub mod protocol;
 pub mod quality;
+pub mod ready;
 pub mod role;
 pub mod run;
 pub mod scenario;

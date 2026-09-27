@@ -383,9 +383,17 @@ export function buildAssessment(values) {
   }
   const split = buildParts(values.split);
   const duplicates = (values.duplicates || []).map(buildDuplicateAnswer).filter(d => d.kind && d.reference);
+  const category = (values.category || "").trim();
+  // A scope's own extra checks (`#169`): each row carries the categories it
+  // applies to (from the routed scope's effective definition), so a check
+  // that does not apply to the category just chosen is left out here rather
+  // than submitted and refused by the daemon's own `validate`.
+  const checks = (values.checks || [])
+    .filter(c => !(c.categories || []).length || c.categories.includes(category))
+    .map(c => ({ id: c.id, pass: !!c.pass, evidence: (c.evidence || "").trim() }));
   return {
     axes,
-    category: (values.category || "").trim(),
+    category,
     impact: values.impact,
     urgency: values.urgency,
     complexity: Number(values.complexity),
@@ -394,6 +402,7 @@ export function buildAssessment(values) {
     questions: lines(values.questions),
     ...(split.length ? { split } : {}),
     ...(duplicates.length ? { duplicates } : {}),
+    ...(checks.length ? { checks } : {}),
   };
 }
 
@@ -406,11 +415,23 @@ function clean(map) {
   return out;
 }
 
+/// The checks of `definition` (`ReadyDefinition`, `#169`) that apply to
+/// `category`: none declared for it (the default, "every category"), or
+/// `category` named explicitly -- `ReadyDefinition::applicable` in JS.
+function applicableChecks(definition, category) {
+  return ((definition && definition.checks) || []).filter(
+    c => !(c.categories || []).length || c.categories.includes(category)
+  );
+}
+
 /// Mirror of `factory_core::intake::validate` and `validate_duplicates`,
 /// for the form: the first thing that would be refused, or null. `stored`
 /// is the item's own found candidates (`card.candidates`) -- omitted where
-/// there are none to leave unanswered.
-export function assessmentProblem(a, stored = []) {
+/// there are none to leave unanswered. `definition` is the routed scope's
+/// effective definition of ready (`#169`, `route.definition`) -- omitted
+/// for a scope whose chain adds nothing, where every existing check still
+/// passes unchanged.
+export function assessmentProblem(a, stored = [], definition = null) {
   for (const check of a.axes) {
     if (!check.evidence) return `${check.axis}: one sentence of evidence`;
     if (check.axis === "observability" && !check.pass && !check.cost) return "a failed observability axis needs its cost";
@@ -431,6 +452,10 @@ export function assessmentProblem(a, stored = []) {
     const answer = (a.duplicates || []).find(d => d.kind === s.kind && d.reference === s.reference);
     if (!answer || answer.verdict === "unverified") return `possible duplicate ${s.reference}: confirm or reject it`;
   }
+  for (const c of applicableChecks(definition, a.category)) {
+    const answer = (a.checks || []).find(x => x.id === c.id);
+    if (!answer || !(answer.evidence || "").trim()) return `check ${c.id}: one sentence of evidence`;
+  }
   return null;
 }
 
@@ -449,20 +474,39 @@ export function routeProblem(a, board) {
   return null;
 }
 
+/// Whether a failed observability axis at `cost` passes through `tolerance`
+/// -- `factory_core::ready::Tolerance::allows`, mirrored: at `medium` (the
+/// default, and today's only rule) low or medium cost passes, at `low` only
+/// low does, and `none` tolerates nothing.
+function toleranceAllows(tolerance, cost) {
+  if (tolerance === "low") return cost === "low";
+  if (tolerance === "none") return false;
+  return cost === "low" || cost === "medium";
+}
+
 /// What the rules will make of the form as it stands: `ready`, or
 /// `needs_info` with the reasons. Mirrors `evaluate`'s order -- a confirmed
-/// duplicate first, then the axes, then complexity.
-export function previewVerdict(a) {
+/// duplicate first, then the axes, then the scope's own extra checks
+/// (`#169`), then complexity. `definition` is the routed scope's effective
+/// definition of ready, as in `assessmentProblem`; omitted, this previews
+/// exactly what it always has.
+export function previewVerdict(a, definition = null) {
   const blockers = [];
   for (const d of a.duplicates || []) {
     if (d.verdict === "confirmed") blockers.push(`duplicate ${d.reference}`);
   }
+  const tolerance = (definition && definition.observability_tolerance) || "medium";
   for (const check of a.axes) {
     if (check.pass) continue;
-    if (check.axis === "observability" && (check.cost === "low" || check.cost === "medium")) continue;
+    if (check.axis === "observability" && toleranceAllows(tolerance, check.cost)) continue;
     blockers.push(check.axis);
   }
+  for (const c of applicableChecks(definition, a.category)) {
+    const answer = (a.checks || []).find(x => x.id === c.id);
+    if (answer && !answer.pass) blockers.push(c.id);
+  }
   if (a.complexity >= 9) blockers.push(`complexity ${a.complexity}`);
+  else if (definition && a.complexity > (definition.max_complexity || 8)) blockers.push(`complexity ${a.complexity}`);
   return blockers.length ? { verdict: "needs_info", blockers } : { verdict: "ready", blockers };
 }
 

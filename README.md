@@ -1423,6 +1423,100 @@ open tasks; the findings; the nine-characteristic catalogue (every column a
 heatmap draws); and the history of any metric a scenario reads, for a
 sparkline.
 
+## Intake
+
+L4 Process's second tab (`#119`), next to Tasks: the inbound quality gate
+before anything becomes a task. An item arrives as a task held in
+`TaskStatus::Intake` — no run, not on any board a scope works from — and is
+triaged against seven built-in readiness axes (scope, specification,
+verifiability, observability, context, independence, reversibility), each
+pass or fail with one sentence of evidence; a category; a priority from
+impact × urgency; a range estimate from a complexity level (1–10); and a
+route to a scope and, optionally, a workflow. `factory_core::intake` is pure
+— no store, no clock but the one passed in — and `factory-daemon/src/intake.rs`
+owns the transitions: receive, triage, assess, decide (`ready`, `needs-info`,
+`split`, or `wontfix` with a verified reason).
+
+**Per-scope definitions of ready (`#169`).** The seven axes are fixed —
+compiled in, never removed — but a scope can add its own checks on top of
+them, and tighten two of the built-in rules, the same add-or-tighten,
+authored-content pattern `quality.rs` uses for quality profiles. See
+`crates/factory-core/src/ready.rs` for every field; its module doc records
+the one deviation from the issue that first asked for this (below).
+
+- **Files.** `<root>/.factory/intake/ready.yaml` is the root layer: it
+  applies to every scope automatically, with no list to bind it — the one
+  way this differs from quality's top-level `quality: […]`. Every other
+  file, `<root>/.factory/intake/<name>.yaml`, is bound by a nested scope's
+  own `scope.intake: [name, …]` for itself and every scope below it by path
+  (`Config::intake_chain_for_scope`, ancestry by `Scope.path`, resolved
+  root-first — a sibling never inherits, and the instance root's own scope
+  entry refuses `scope.intake` outright, since it has no list of its own to
+  move a binding to).
+- **Schema.**
+
+  ```yaml
+  # .factory/intake/security.yaml
+  checks:
+    - id: threat-model                 # slug; an addition to the seven built-in axes
+      pass_condition: "A security-relevant change names its threat model."
+      categories: [security-report]    # optional; absent means every category
+  max_complexity: 6                    # 1-8, default 8; complexity 9-10 always needs info
+  observability_tolerance: low         # medium (default) | low | none
+  ```
+
+- **Add or tighten only.** Checks are combined by `id`, first-declared
+  order down the chain (a file bound at two layers folds once, at the
+  higher one). A descendant redeclaring an inherited check may only widen
+  its `categories` (absent is already the widest — every category);
+  `max_complexity` and `observability_tolerance` take the stricter of every
+  declared value. Anything looser — a narrower `categories`, a higher
+  `max_complexity`, a more permissive tolerance — is a finding, and the
+  inherited value is kept, never silently loosened.
+- **Fail closed.** A file that does not parse, or a name a `scope.intake`
+  binds with no file behind it, is never a silent fallback to what an
+  ancestor declared: it is a visible finding, and every assessment routed
+  to that scope gets its own blocker — "definition of ready for `<scope>`
+  could not be read: …" — so the verdict is needs-info until it is fixed. A
+  broken nearer file can therefore never weaken inherited readiness without
+  anyone seeing it. With no `ready.yaml` and no bindings anywhere, the
+  effective definition is exactly today's seven axes, unchanged.
+- **Enforcement.** `Assessment` gains a `checks: Vec<CheckResult>`
+  (serde-defaulted, so an assessment made before this feature still
+  deserialises and validates). `validate` requires exactly one evidenced
+  result for every check the routed scope's effective definition applies to
+  the assessment's own category, and refuses an unknown or inapplicable id.
+  `evaluate` blocks on a failed applicable check, on complexity over the
+  scope's own `max_complexity` (independently of the fixed 9-10 rule), and
+  on a failed Observability axis whose cost the scope's own tolerance does
+  not cover — `medium` (the default) tolerates low or medium cost exactly
+  as intake always has; `low` only low; `none` tolerates nothing.
+- **Surfaces.** The triage run's instructions list the item's own scope's
+  extra checks and limits, and extend the submitted JSON's shape with
+  `checks`. `IntakeBoard`'s routes each carry their scope's effective
+  definition and findings (`board.axes` itself stays the seven built-in
+  axes) — the assess dialog renders the extra checks against the routed
+  scope, and `factory intake` / `factory intake list --scope` prints them.
+  Every one of these re-reads `.factory/intake/` fresh on each request, the
+  same no-cache rule quality and policies follow.
+- **Backup.** `.factory/intake/` is authored content, copied whole in every
+  snapshot and parsed (never enforced) by `factory backup verify`, which
+  warns — never fails the backup — on a file it cannot read.
+- **Deviation from the issue text.** The issue names one file,
+  `.factory/intake/ready.yaml`, as if it were a scope's own. Two rules argue
+  against that literal reading — AGENTS.md's "a scope owns only its
+  `.factory/config.yaml`", and `backup::AUTHORED`, which only ever walks
+  paths under the instance root — so every definition lives under the
+  instance root instead, exactly as quality profiles and policy catalogues
+  already do, and a nested scope opts in with a name rather than a path.
+
+`factory intake [--scope S]` (or `factory intake list --scope S`) prints the
+board: every open item by column, the routes it can go to, and — since
+`#169` — each route's own extra checks, limits and findings. `factory intake
+show <id>` is one item's whole record. `POST /api/intake/<id>/assess` is
+where `validate` and `evaluate` are enforced; `GET /api/intake` answers the
+`IntakeBoard` the UI and the CLI both read.
+
 ## Operations
 
 L4 Process's third tab (`#106`), next to Tasks and Workflows: how the line

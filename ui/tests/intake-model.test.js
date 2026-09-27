@@ -141,6 +141,94 @@ test("an assessment is built to the wire's shape and checked the daemon's way", 
   assert.deepEqual(previewVerdict({ ...a, complexity: 9 }).blockers, ["complexity 9"]);
 });
 
+// -- definitions of ready (#169) --------------------------------------------
+
+const definition = {
+  scope: "demo",
+  checks: [
+    { id: "threat-model", pass_condition: "names a threat model", categories: ["security-report"], declared_at: { scope: "demo", file: "security" } },
+    { id: "changelog", pass_condition: "the changelog is updated", categories: [], declared_at: { scope: "demo", file: "ready" } },
+  ],
+  max_complexity: 6,
+  observability_tolerance: "medium",
+  unreadable: [],
+};
+
+/// `buildAssessment` base values for the fixture's routes -- one axis
+/// failing, per the shared `values` above, but every check answered.
+function readyValues(overrides = {}) {
+  return {
+    axes: board.axes.map(({ axis }) => ({ axis, pass: true, evidence: `${axis} ok`, cost: null })),
+    category: "security-report", impact: "high", urgency: "medium", complexity: "4",
+    scope: "demo", agent: "", workflow: "", summary: "s", questions: "",
+    checks: [
+      { id: "threat-model", categories: ["security-report"], pass: true, evidence: "documented" },
+      { id: "changelog", categories: [], pass: true, evidence: "updated" },
+    ],
+    ...overrides,
+  };
+}
+
+test("buildAssessment drops a check that does not apply to the chosen category", () => {
+  const a = buildAssessment(readyValues({ category: "bugfix" }));
+  assert.deepEqual(a.checks, [{ id: "changelog", pass: true, evidence: "updated" }], "threat-model needs security-report");
+
+  const b = buildAssessment(readyValues());
+  assert.deepEqual(b.checks, [
+    { id: "threat-model", pass: true, evidence: "documented" },
+    { id: "changelog", pass: true, evidence: "updated" },
+  ]);
+
+  const none = buildAssessment({ ...readyValues(), checks: [] });
+  assert.equal(none.checks, undefined, "no checks at all is left out entirely, like split and duplicates");
+});
+
+test("assessmentProblem requires evidence for every applicable check, and ignores the definition when there is none", () => {
+  const a = buildAssessment(readyValues());
+  assert.equal(assessmentProblem(a, [], definition), null);
+
+  const missing = buildAssessment({ ...readyValues(), checks: [{ id: "changelog", categories: [], pass: true, evidence: "updated" }] });
+  assert.match(assessmentProblem(missing, [], definition), /threat-model/);
+
+  const noEvidence = buildAssessment(readyValues({
+    checks: [
+      { id: "threat-model", categories: ["security-report"], pass: true, evidence: " " },
+      { id: "changelog", categories: [], pass: true, evidence: "updated" },
+    ],
+  }));
+  assert.match(assessmentProblem(noEvidence, [], definition), /threat-model/);
+
+  // Without a definition (a scope whose chain adds nothing), the same
+  // assessment is fine -- nothing here is enforced.
+  assert.equal(assessmentProblem(missing, []), null);
+});
+
+test("previewVerdict blocks on a failed applicable check and a tightened complexity cap, and honours the scope's own observability tolerance", () => {
+  const a = buildAssessment(readyValues());
+  assert.deepEqual(previewVerdict(a, definition), { verdict: "ready", blockers: [] });
+
+  const failedCheck = buildAssessment(readyValues({
+    checks: [
+      { id: "threat-model", categories: ["security-report"], pass: false, evidence: "not written yet" },
+      { id: "changelog", categories: [], pass: true, evidence: "updated" },
+    ],
+  }));
+  assert.deepEqual(previewVerdict(failedCheck, definition).blockers, ["threat-model"]);
+
+  const overCap = buildAssessment(readyValues({ complexity: "7" }));
+  assert.deepEqual(previewVerdict(overCap, definition).blockers, ["complexity 7"]);
+  assert.deepEqual(previewVerdict(overCap).blockers, [], "without a definition, 7 is under the default cap of 8");
+
+  const nine = buildAssessment(readyValues({ complexity: "9" }));
+  assert.deepEqual(previewVerdict(nine, definition).blockers, ["complexity 9"], "the fixed rule alone fires, not also the tighter cap");
+
+  const failedObs = buildAssessment(readyValues({
+    axes: board.axes.map(({ axis }) => ({ axis, pass: axis !== "observability", evidence: `${axis} ok`, cost: axis === "observability" ? "medium" : null })),
+  }));
+  assert.deepEqual(previewVerdict(failedObs, { ...definition, observability_tolerance: "low" }).blockers, ["observability"]);
+  assert.deepEqual(previewVerdict(failedObs, { ...definition, observability_tolerance: "medium" }).blockers, []);
+});
+
 test("the requests are the daemon's routes and bodies", () => {
   assert.deepEqual(addRequest({ title: " x ", instructions: "y", scope: "demo", reference: "", requester: " Kim " }), {
     path: "/api/intake", method: "POST",

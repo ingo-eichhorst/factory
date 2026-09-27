@@ -767,7 +767,7 @@ fn loaded(name: &str, what: String, unparsed: Vec<String>) -> VerifyCheck {
 
 fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
     use factory_core::dependencies::{validate_document, AttachmentKind};
-    use factory_core::{goals, knowledge, policy, quality, scenario};
+    use factory_core::{goals, knowledge, policy, quality, ready, scenario};
     let mut out = Vec::new();
 
     let (catalogues, findings) = policy::load_all(&policy::policies_dir(root));
@@ -818,6 +818,15 @@ fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
         .map(|f| f.subject.clone())
         .collect();
     out.push(loaded("quality", count(profiles.profiles.len(), "profile"), unparsed));
+
+    let readiness = ready::load(&ready::ready_dir(root));
+    let unparsed = readiness
+        .findings
+        .iter()
+        .filter(|f| f.kind == ready::FindingKind::ParseFailed)
+        .map(|f| f.subject.clone())
+        .collect();
+    out.push(loaded("intake", count(readiness.files.len(), "definition"), unparsed));
 
     let vex_dir = root.join(FACTORY_DIR).join("vex");
     let mut vex_paths = Vec::new();
@@ -918,6 +927,7 @@ mod tests {
             fs::create_dir_all(f.join("policies")).unwrap();
             fs::create_dir_all(f.join("goals")).unwrap();
             fs::create_dir_all(f.join("vex/demo")).unwrap();
+            fs::create_dir_all(f.join("intake")).unwrap();
             fs::create_dir_all(f.join("logs")).unwrap();
             fs::create_dir_all(root.join("projects/demo/.factory")).unwrap();
             fs::write(f.join("config.yaml"), "version: 1\ninstance:\n  id: inst-1\n  name: Test Instance\n").unwrap();
@@ -926,6 +936,7 @@ mod tests {
                 "version: 1\nscope:\n  id: demo-id\n  name: demo\n",
             )
             .unwrap();
+            fs::write(f.join("intake/ready.yaml"), "max_complexity: 8\n").unwrap();
             fs::write(f.join("knowledge/company/README.md"), "---\ntitle: readme\n---\n# Company\n").unwrap();
             fs::write(f.join("knowledge/data/secrets/token.txt"), "hunter2").unwrap();
             fs::write(f.join("knowledge/.env"), "KEY=hunter2").unwrap();
@@ -998,6 +1009,7 @@ mod tests {
             [
                 ".factory/config.yaml",
                 ".factory/factory.sqlite",
+                ".factory/intake/ready.yaml",
                 ".factory/knowledge/company/README.md",
                 ".factory/policies/broken.yaml",
                 ".factory/vex/demo/review.cdx.json",
@@ -1015,6 +1027,14 @@ mod tests {
                 .map(|file| file.group),
             Some(Group::Vex)
         );
+        assert_eq!(
+            manifest
+                .files
+                .iter()
+                .find(|file| file.path == ".factory/intake/ready.yaml")
+                .map(|file| file.group),
+            Some(Group::Intake)
+        );
         let excluded: Vec<&str> = manifest.excluded.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(
             excluded,
@@ -1027,7 +1047,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(left.len(), 1, "{left:?}");
-        assert_eq!(taken.files, 6);
+        assert_eq!(taken.files, 7);
     }
 
     #[test]
@@ -1043,7 +1063,10 @@ mod tests {
         let taken = instance.take(false);
         let checks = verify(&taken.path, "inst-1");
         let by_name: BTreeMap<&str, &VerifyCheck> = checks.iter().map(|c| (c.name.as_str(), c)).collect();
-        for name in ["archive", "manifest", "checksums", "database", "config", "goals", "scenarios", "quality", "vex", "datasets", "knowledge"] {
+        for name in [
+            "archive", "manifest", "checksums", "database", "config", "goals", "scenarios", "quality", "vex", "intake",
+            "datasets", "knowledge",
+        ] {
             assert_eq!(by_name[name].status, CheckStatus::Ok, "{name}: {}", by_name[name].detail);
         }
         assert_eq!(by_name["policies"].status, CheckStatus::Warn);
@@ -1068,6 +1091,17 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_definition_of_ready_is_named_by_verification() {
+        let instance = Instance::new("broken-intake");
+        fs::write(instance.root.join(".factory/intake/ready.yaml"), "checks: [unclosed").unwrap();
+        let taken = instance.take(false);
+        let checks = verify(&taken.path, "inst-1");
+        let intake = checks.iter().find(|check| check.name == "intake").unwrap();
+        assert_eq!(intake.status, CheckStatus::Warn);
+        assert!(intake.detail.contains("ready.yaml"), "{}", intake.detail);
+    }
+
+    #[test]
     fn a_damaged_archive_fails_verification_and_says_so() {
         let instance = Instance::new("damaged");
         let taken = instance.take(false);
@@ -1088,7 +1122,7 @@ mod tests {
         let into = base.join("restored");
         let restored = restore(&taken.path, "inst-1", &instance.root, &into).unwrap();
         assert_eq!(restored.into, into.canonicalize().unwrap());
-        assert_eq!(restored.files, 6);
+        assert_eq!(restored.files, 7);
         assert!(!restored.checks.iter().any(|c| c.status == CheckStatus::Fail));
         assert!(factory_core::config::Factory::load(&into).is_ok());
         assert_eq!(fs::read_to_string(into.join(".factory/knowledge/company/README.md")).unwrap(), "---\ntitle: readme\n---\n# Company\n");

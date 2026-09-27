@@ -19,13 +19,15 @@ use crate::access::Caller;
 use crate::engine::{Due, Engine};
 use crate::operations::Asked;
 use chrono::Utc;
+use factory_core::config::Factory;
 use factory_core::intake::{
     self, AgentOption, Decision, DecisionRecord, Intake, IntakeBoard, IntakeSource, IntakeStage, NewIntake,
     RouteOptions, SourceKind, Verdict, WorkflowOption, TRIAGE_LABEL,
 };
+use factory_core::ready::{self, ReadyDefinition};
 use factory_core::role::Grant;
 use factory_core::{Event, FactoryError, NewTask, Result, Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus, Trigger};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// The journal kind of a triage verdict -- the first attestation in a
@@ -142,9 +144,44 @@ impl Engine {
                 t.intake.is_none() || members.as_ref().is_none_or(|m| m.contains(&t.scope))
             })
             .collect();
-        let mut board = intake::board(&tasks, Utc::now());
-        board.routes = self.intake_routes().await?;
+        let ready = self.ready_definitions(&snapshot);
+        let definitions: BTreeMap<String, ReadyDefinition> =
+            ready.iter().map(|(scope, (def, _))| (scope.clone(), def.clone())).collect();
+        let mut board = intake::board(&tasks, Utc::now(), &definitions);
+        board.routes = self.intake_routes_with(&snapshot, &ready).await?;
         Ok(board)
+    }
+
+    /// Every scope's effective definition of ready (`#169`), keyed by scope
+    /// name: the authored files under `factory.intake_dir()` re-read fresh
+    /// (no watcher, no cache -- the same rule quality and policies follow),
+    /// folded down each scope's own chain
+    /// (`Config::intake_chain_for_scope`). `factory-core::ready` does the
+    /// actual add-or-tighten fold and the fail-closed handling; this is only
+    /// where the daemon resolves which chain applies to which live scope.
+    fn ready_definitions(&self, factory: &Factory) -> BTreeMap<String, (ReadyDefinition, Vec<ready::Finding>)> {
+        let catalogue = ready::load(&factory.intake_dir());
+        factory
+            .config
+            .scopes
+            .iter()
+            .map(|scope| {
+                let chain = factory.config.intake_chain_for_scope(scope);
+                let (def, findings) = ready::effective(&catalogue, &scope.name, &chain);
+                (scope.name.clone(), (def, findings))
+            })
+            .collect()
+    }
+
+    /// This scope's effective definition of ready, resolved fresh -- the one
+    /// `intake_assess` enforces and `intake_triage` shows in the run's
+    /// instructions. `scope` must already be the canonical name
+    /// (`Factory::scope` having resolved it), the same as every other
+    /// per-scope read here.
+    fn ready_definition_for(&self, factory: &Factory, scope: &factory_core::config::Scope) -> ReadyDefinition {
+        let catalogue = ready::load(&factory.intake_dir());
+        let chain = factory.config.intake_chain_for_scope(scope);
+        ready::effective(&catalogue, &scope.name, &chain).0
     }
 
     /// Every scope an item can be routed to, with the agents a task there
@@ -153,6 +190,15 @@ impl Engine {
     /// Standing agents are left out: they are not given tasks.
     pub(crate) async fn intake_routes(&self) -> Result<Vec<RouteOptions>> {
         let factory = self.factory_snapshot();
+        let ready = self.ready_definitions(&factory);
+        self.intake_routes_with(&factory, &ready).await
+    }
+
+    async fn intake_routes_with(
+        &self,
+        factory: &Factory,
+        ready: &BTreeMap<String, (ReadyDefinition, Vec<ready::Finding>)>,
+    ) -> Result<Vec<RouteOptions>> {
         let mut out = Vec::new();
         for scope in &factory.config.scopes {
             let default_agent = scope
@@ -176,7 +222,15 @@ impl Engine {
                 .filter(|d| d.scope == scope.name)
                 .map(WorkflowOption::from_definition)
                 .collect();
-            out.push(RouteOptions { scope: scope.name.clone(), default_agent: Some(default_agent), agents, workflows });
+            let (definition, findings) = ready.get(&scope.name).cloned().unwrap_or_default();
+            out.push(RouteOptions {
+                scope: scope.name.clone(),
+                default_agent: Some(default_agent),
+                agents,
+                workflows,
+                definition,
+                findings,
+            });
         }
         Ok(out)
     }
@@ -237,12 +291,20 @@ impl Engine {
         let mut record_now = record.clone();
         record_now.candidates = candidates;
         let routes = self.intake_routes().await?;
+        // Already computed for `item.scope` as part of `routes` above --
+        // reuse it rather than reading the definition files a second time.
+        let definition = routes
+            .iter()
+            .find(|r| r.scope == item.scope)
+            .map(|r| r.definition.clone())
+            .unwrap_or_default();
         let triage = self
             .create(NewTask {
                 title: format!("Triage: {}", item.title),
                 instructions: intake::triage_instructions(
                     &item,
                     &record_now,
+                    &definition,
                     &routes,
                     &self.factory_bin.display().to_string(),
                 ),
@@ -290,12 +352,24 @@ impl Engine {
     ) -> Result<Task> {
         let item = self.require(id).await?;
         let record = open_record(&item)?;
-        intake::validate(&assessment).map_err(FactoryError::BadRequest)?;
-        intake::validate_duplicates(&record.candidates, &assessment.duplicates).map_err(FactoryError::BadRequest)?;
+        // A blank route is the assessment's own problem, refused by
+        // `validate` itself with its own wording -- checked here, before
+        // resolving a scope out of it, so that message survives rather than
+        // `Factory::scope`'s "no such scope ''".
+        if assessment.routing.scope.trim().is_empty() {
+            return Err(FactoryError::BadRequest("an assessment has to route the item to a scope".into()));
+        }
         // The route has to be somewhere real now, not at release, when
-        // whoever assessed it has stopped watching.
+        // whoever assessed it has stopped watching -- and its effective
+        // definition of ready (`#169`) is what `validate` and `evaluate`
+        // hold the assessment to, resolved fresh (no cache, same as
+        // quality and policies).
         let factory = self.factory_snapshot();
-        let scope = factory.scope(&assessment.routing.scope)?.name.clone();
+        let routed_scope = factory.scope(&assessment.routing.scope)?.clone();
+        let definition = self.ready_definition_for(&factory, &routed_scope);
+        intake::validate(&assessment, &definition).map_err(FactoryError::BadRequest)?;
+        intake::validate_duplicates(&record.candidates, &assessment.duplicates).map_err(FactoryError::BadRequest)?;
+        let scope = routed_scope.name.clone();
         assessment.routing.scope = scope.clone();
         if let Some(agent) = &assessment.routing.agent {
             let (name, _, _) = self.resolve_agent(&scope, agent)?;
@@ -334,7 +408,7 @@ impl Engine {
             assessment.routing.agents = agents;
             assessment.routing.workflow = Some(found.id);
         }
-        let triage = intake::evaluate(&assessment, caller.describe(), Utc::now());
+        let triage = intake::evaluate(&assessment, &definition, caller.describe(), Utc::now());
         let mut next = record.clone();
         next.triage = Some(triage.clone());
         next.stage = IntakeStage::Triaging;
@@ -810,6 +884,7 @@ mod tests {
             dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
+            intake: Default::default(),
             dependencies: Default::default(),
         }
     }
@@ -868,6 +943,7 @@ mod tests {
             questions: vec![],
             split: vec![],
             duplicates: vec![],
+            checks: vec![],
         }
     }
 
@@ -1475,5 +1551,97 @@ mod tests {
         assert_eq!(flow.steps[0].id, "fix");
         assert_eq!(flow.steps[0].agent.as_deref(), Some("shell"));
         assert!(board.routes[1].workflows.is_empty());
+    }
+
+    // ------------------------------------------------------ definitions of ready (#169)
+
+    /// Write `<root>/.factory/intake/<name>.yaml`, creating the directory
+    /// the first time. The daemon re-reads this on every board, triage and
+    /// assess request -- no watcher, no cache -- so a test can rewrite it
+    /// between two calls and see the difference right away.
+    fn write_ready(engine: &Engine, name: &str, body: &str) {
+        let dir = engine.factory_snapshot().root.join(".factory/intake");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.yaml")), body).unwrap();
+    }
+
+    #[tokio::test]
+    async fn intake_assess_refuses_an_assessment_missing_a_required_check() {
+        let engine = engine();
+        write_ready(
+            &engine,
+            "ready",
+            "checks:\n  - id: threat-model\n    pass_condition: names a threat model\n",
+        );
+        let item = add(&engine, "Ship the new endpoint").await;
+        let why = engine.intake_assess(&Caller::Owner, &item.id, assessment("demo"), false).await.unwrap_err();
+        assert!(why.to_string().contains("threat-model"), "{why}");
+        assert!(why.to_string().contains("not assessed"), "{why}");
+
+        let mut a = assessment("demo");
+        a.checks = vec![factory_core::intake::CheckResult {
+            id: "threat-model".into(),
+            pass: true,
+            evidence: "documented in the PR".into(),
+        }];
+        let released = engine.intake_assess(&Caller::Owner, &item.id, a, true).await.unwrap();
+        assert_eq!(released.status, TaskStatus::Pending, "the extra check satisfied, released as usual");
+    }
+
+    #[tokio::test]
+    async fn the_triage_instructions_list_the_scopes_effective_checks() {
+        let engine = engine();
+        write_ready(
+            &engine,
+            "ready",
+            "checks:\n  - id: threat-model\n    pass_condition: names a threat model\n",
+        );
+        let item = add(&engine, "Ship the new endpoint").await;
+        let triage = engine.intake_triage(&Caller::Owner, &item.id, Some("shell".into())).await.unwrap();
+        assert!(triage.instructions.contains("threat-model"), "{}", triage.instructions);
+        assert!(triage.instructions.contains("names a threat model"), "{}", triage.instructions);
+    }
+
+    #[tokio::test]
+    async fn rewriting_the_definition_file_changes_the_next_evaluation_without_a_restart() {
+        let engine = engine();
+        let first = add(&engine, "First item").await;
+        let released = engine.intake_assess(&Caller::Owner, &first.id, assessment("demo"), true).await.unwrap();
+        assert_eq!(released.status, TaskStatus::Pending, "no definition file yet: today's seven axes only");
+
+        write_ready(&engine, "ready", "max_complexity: 2\n");
+        let second = add(&engine, "Second item").await;
+        // `--decide` only refuses releasing a needs-info verdict as ready;
+        // recording the assessment itself still succeeds, and the tighter
+        // cap shows up in the verdict it computed, no restart needed.
+        let recorded = engine.intake_assess(&Caller::Owner, &second.id, assessment("demo"), false).await.unwrap();
+        let Verdict::NeedsInfo { blockers } = recorded.intake.unwrap().triage.unwrap().verdict else {
+            panic!("complexity 3 over a cap of 2 should need info")
+        };
+        assert!(blockers.iter().any(|b| b.contains("over demo's own limit of 2")), "{blockers:?}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_definition_fails_closed_with_a_blocker_naming_the_scope() {
+        let engine = engine();
+        write_ready(&engine, "ready", "checks: [unclosed");
+        let item = add(&engine, "Anything at all").await;
+        let why = engine.intake_assess(&Caller::Owner, &item.id, assessment("demo"), false).await;
+        // `validate` refuses nothing extra here (no checks were declared,
+        // since the file never parsed), so the assessment itself validates;
+        // `evaluate` is where the fail-closed blocker actually shows, via
+        // `--decide`.
+        assert!(why.is_ok(), "{why:?}");
+        let decided =
+            engine.intake_assess(&Caller::Owner, &item.id, assessment("demo"), true).await.unwrap();
+        let record = decided.intake.unwrap();
+        let blockers = match record.triage.unwrap().verdict {
+            Verdict::NeedsInfo { blockers } => blockers,
+            Verdict::Ready => panic!("an unreadable definition must never be silently ready"),
+        };
+        assert!(
+            blockers.iter().any(|b| b.contains("definition of ready for demo could not be read")),
+            "{blockers:?}"
+        );
     }
 }

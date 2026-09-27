@@ -1916,6 +1916,7 @@ mod tests {
             questions: Vec::new(),
             split: Vec::new(),
             duplicates: Vec::new(),
+            checks: Vec::new(),
         }
     }
 

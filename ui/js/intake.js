@@ -490,6 +490,26 @@ function readKnowledgeRow() {
   };
 }
 
+/// The routed scope's own extra checks (`#169`, `route.definition.checks`),
+/// as a row per check -- `openAssessDialog`'s axes rows, without the cost
+/// column, and with a note when a check applies to only some categories.
+/// Empty for a scope whose chain adds none, the common case.
+function checksHtml(route, prior) {
+  const checks = (route.definition && route.definition.checks) || [];
+  if (!checks.length) return "";
+  const priorCheck = (id) => (prior && prior.checks || []).find(c => c.id === id) || { pass: true, evidence: "" };
+  const rows = checks.map(c => {
+    const p = priorCheck(c.id);
+    const note = c.categories && c.categories.length ? ` <span class="sub">(${esc(c.categories.join(", "))} only)</span>` : "";
+    return `<tr><th scope="row"><label class="checkrow"><input type="checkbox" data-check="${esc(c.id)}"${p.pass ? " checked" : ""}><span>${esc(c.id)}${note}</span></label></th>
+      <td><input data-check-evidence="${esc(c.id)}" data-check-categories="${esc((c.categories || []).join(","))}"
+        placeholder="${esc(c.pass_condition)}" value="${esc(p.evidence)}"></td></tr>`;
+  }).join("");
+  return `<label>${esc(route.scope)}'s own definition of ready adds these checks -- leave one out of your
+      category and it is dropped, never submitted</label>
+    <table class="ik-axes ik-form"><tbody>${rows}</tbody></table>`;
+}
+
 function openAssessDialog(card) {
   const prior = card.triage ? card.triage.assessment : null;
   const priorAxis = (axis) => (prior ? prior.axes.find(a => a.axis === axis) : null) || { pass: true, evidence: "" };
@@ -531,6 +551,14 @@ function openAssessDialog(card) {
       const knowledge = readKnowledgeRow();
       return knowledge ? [...readDupeRows(candidates), knowledge] : readDupeRows(candidates);
     })(),
+    // The routed scope's own extra checks (`#169`) -- `buildAssessment`
+    // drops one that does not apply to the category chosen above.
+    checks: routeFor(board, $("ik-route").value).definition?.checks?.map(c => ({
+      id: c.id,
+      categories: c.categories || [],
+      pass: document.querySelector(`.scrim [data-check="${c.id}"]`)?.checked ?? true,
+      evidence: document.querySelector(`.scrim [data-check-evidence="${c.id}"]`)?.value || "",
+    })) || [],
   });
   const sync = dialog("Assess", card.title, `
     <p class="env-note">Each axis passes or fails with one sentence of evidence. Any failure but a low- or
@@ -546,6 +574,7 @@ function openAssessDialog(card) {
     </div>
     <label for="ik-route">Route to</label><select id="ik-route">${scopeOptions(route.scope)}</select>
     <div id="ik-route-how"></div>
+    <div id="ik-checks"></div>
     <label for="ik-summary">Summary</label><textarea id="ik-summary" rows="2">${esc(prior ? prior.summary : "")}</textarea>
     <label for="ik-ask">Questions for a needs-info <span class="sub">one per line</span></label>
     <textarea id="ik-ask" rows="2">${esc(prior ? (prior.questions || []).join("\n") : "")}</textarea>
@@ -557,16 +586,18 @@ function openAssessDialog(card) {
   () => assessRequest(card.id, buildAssessment(values()), $("ik-decide").checked),
   () => {
     const a = buildAssessment(values());
-    const v = previewVerdict(a);
+    const definition = routeFor(board, a.routing.scope).definition;
+    const v = previewVerdict(a, definition);
     const pv = $("ik-preview");
     if (pv) {
       pv.textContent = `${v.verdict === "ready" ? "ready" : `needs-info (${v.blockers.join(", ")})`} · ${priorityOf(a.impact, a.urgency) || "-"} · ${estimateText(estimateOf(a.complexity))}`;
     }
-    return assessmentProblem(a, candidates) || routeProblem(a, board);
+    return assessmentProblem(a, candidates, definition) || routeProblem(a, board);
   });
   // How it runs there: an agent, or a workflow with its inputs and an
-  // agent -- and so a model -- per step. Redrawn when the scope or the
-  // workflow changes, keeping what was chosen where it still applies.
+  // agent -- and so a model -- per step, and its own extra checks (`#169`).
+  // Redrawn when the scope or the workflow changes, keeping what was chosen
+  // where it still applies.
   const drawRoute = (keep) => {
     const r = routeFor(board, $("ik-route").value);
     const w = workflowIn(r, keep.workflow);
@@ -584,7 +615,8 @@ function openAssessDialog(card) {
             <td><select data-step="${esc(s.id)}" title="agent, and so model, for this step">${agentOptions((keep.agents || {})[s.id], `as defined${s.agent ? `: ${s.agent}` : ""}`)}</select></td></tr>`).join("")}
         </tbody></table>`
       : `<label for="ik-route-agent">Agent</label><select id="ik-route-agent">${agentOptions(keep.agent, `the scope's own${r.default_agent ? `: ${r.default_agent}` : ""}`)}</select>`}`;
-    for (const el of document.querySelectorAll(".scrim #ik-route-how input, .scrim #ik-route-how select")) {
+    $("ik-checks").innerHTML = checksHtml(r, prior);
+    for (const el of document.querySelectorAll(".scrim #ik-route-how input, .scrim #ik-route-how select, .scrim #ik-checks input")) {
       el.oninput = sync; el.onchange = sync;
     }
     $("ik-route-workflow").onchange = () => {
