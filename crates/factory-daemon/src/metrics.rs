@@ -2494,6 +2494,7 @@ mod tests {
             questions: vec![],
             split: vec![],
             duplicates: vec![],
+            checks: vec![],
         }
     }
 

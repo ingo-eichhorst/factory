@@ -1896,7 +1896,16 @@ fn intake_item_text(task: &Task) -> String {
     for q in &i.questions {
         out.push_str(&format!("  ? {q}\n"));
     }
-    let next = next_actions_text(&task.id, &factory_core::intake::next_actions(i), "  ");
+    // `show` fetches one task, not the board, so it has no per-scope
+    // definition of ready (`#169`) to hold this against; the seven built-in
+    // axes' own next actions still show correctly, and the scope-aware ones
+    // (`factory intake` / `factory intake list --scope`, which read
+    // `board.routes`) are authoritative for a scope's extra checks and caps.
+    let next = next_actions_text(
+        &task.id,
+        &factory_core::intake::next_actions(i, &factory_core::ready::ReadyDefinition::default()),
+        "  ",
+    );
     if !next.is_empty() {
         out.push_str("  what moves it:\n");
         out.push_str(&next);

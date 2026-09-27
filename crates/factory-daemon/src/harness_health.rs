@@ -912,6 +912,7 @@ pub(crate) mod tests {
                     dashboard: None,
                     policies: Default::default(),
                     quality: Default::default(),
+                    intake: Default::default(),
                     dependencies: Default::default(),
                 }],
                 infrastructure: Default::default(),

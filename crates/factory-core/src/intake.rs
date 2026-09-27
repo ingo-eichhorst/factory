@@ -31,8 +31,18 @@
 //! events this module already defines, but still no store --
 //! `factory-daemon` builds the facts from the task journal and hands them
 //! over.
+//!
+//! A scope may add its own checks and tighten the seven axes' own limits on
+//! top (`#169`): [`Assessment::checks`] carries the extra evidence, and
+//! [`validate`] and [`evaluate`] take the routed scope's effective
+//! definition of ready, `crate::ready::ReadyDefinition` -- pure, authored,
+//! inheritable, and modelled on `quality.rs`. See `crate::ready` for the
+//! files, the chain and the fail-closed rule; a definition with no checks
+//! and the built-in limits (`ReadyDefinition::default()`) behaves exactly
+//! as intake always has.
 
 use crate::operations::Window;
+use crate::ready::ReadyDefinition;
 use crate::task::{Task, TaskStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -824,6 +834,24 @@ pub struct Assessment {
     /// answered without evidence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub duplicates: Vec<DuplicateCandidate>,
+    /// One result per check the routed scope's effective definition of
+    /// ready applies to the assessment's own category (`#169`) -- the seven
+    /// axes' own extension, evidenced the same way. Empty for a scope whose
+    /// chain declares none, and for every assessment made before this field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<CheckResult>,
+}
+
+/// One of a scope's own extra checks (`crate::ready::AppliedCheck`),
+/// answered -- [`AxisCheck`]'s shape, without the axis-only `cost`: a check
+/// a scope declares is add-or-tighten authored content, never Observability's
+/// own escape hatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckResult {
+    pub id: String,
+    pub pass: bool,
+    pub evidence: String,
 }
 
 /// What the rules make of an assessment.
@@ -832,8 +860,11 @@ pub struct Assessment {
 pub enum Verdict {
     Ready,
     NeedsInfo {
-        /// One line per reason: a confirmed duplicate first, then axis
-        /// order, the complexity rule last.
+        /// One line per reason: the routed scope's definition of ready
+        /// being unreadable first (`#169` -- fail closed, nothing else here
+        /// can be trusted either), then a confirmed duplicate, then axis
+        /// order, the scope's own extra checks, and the complexity rules
+        /// last (9-10 fixed, then the scope's own tighter `max_complexity`).
         blockers: Vec<String>,
     },
 }
@@ -864,8 +895,12 @@ pub struct Triage {
 
 /// Refuse an assessment that is not one: every axis once with evidence, a
 /// category slug, a complexity on the scale, a cost on a failed
-/// Observability, a sensible range and somewhere to route it.
-pub fn validate(a: &Assessment) -> Result<(), String> {
+/// Observability, a sensible range, somewhere to route it, and -- for the
+/// routed scope's effective `definition` (`#169`) -- exactly one evidenced
+/// result for every check that applies to the assessment's own category,
+/// no more and no less: an unknown id, or one that does not apply to this
+/// category, is refused the same as a missing one.
+pub fn validate(a: &Assessment, definition: &ReadyDefinition) -> Result<(), String> {
     for axis in Axis::ALL {
         let checks: Vec<&AxisCheck> = a.axes.iter().filter(|c| c.axis == axis).collect();
         match checks.as_slice() {
@@ -910,18 +945,48 @@ pub fn validate(a: &Assessment) -> Result<(), String> {
     if !a.split.is_empty() {
         validate_split(&a.split).map_err(|e| format!("the proposed split: {e}"))?;
     }
+    let applicable = definition.applicable(category);
+    for check in &applicable {
+        let answers: Vec<&CheckResult> = a.checks.iter().filter(|c| c.id == check.id).collect();
+        match answers.as_slice() {
+            [] => return Err(format!("check {:?} is not assessed; {} requires it here", check.id, definition.scope)),
+            [answer] => {
+                if answer.evidence.trim().is_empty() {
+                    return Err(format!("check {:?} needs one sentence of evidence", check.id));
+                }
+            }
+            _ => return Err(format!("check {:?} is assessed more than once", check.id)),
+        }
+    }
+    for answer in &a.checks {
+        if !applicable.iter().any(|c| c.id == answer.id) {
+            if definition.checks.iter().any(|c| c.id == answer.id) {
+                return Err(format!(
+                    "check {:?} does not apply to category {:?}; leave it out",
+                    answer.id, category
+                ));
+            }
+            return Err(format!("check {:?} is not one {} declares", answer.id, definition.scope));
+        }
+    }
     Ok(())
 }
 
-/// `ir:triage`'s rules, plus one of its own (`#166`): a confirmed duplicate
-/// always gives `needs-info`, so `--decide` can never release one. Any
-/// failed axis gives `needs-info` too, except Observability at low or
-/// medium cost: that gap is closed by the task itself, instrument first.
-/// Complexity 9-10 is a subsystem and is split before it is taken on.
-/// Everything else is ready -- a bounded, reversible item does not wait on
-/// an implementation choice the work can make.
-pub fn evaluate(a: &Assessment, by: impl Into<String>, at: DateTime<Utc>) -> Triage {
-    let mut blockers = Vec::new();
+/// `ir:triage`'s rules, plus two of its own: a confirmed duplicate always
+/// gives `needs-info` (`#166`), so `--decide` can never release one, and the
+/// routed scope's effective `definition` (`#169`) is enforced before any of
+/// it -- a scope whose chain could not be read blocks every assessment
+/// outright, since nothing else here can be trusted either. Any failed axis
+/// gives `needs-info` too, except Observability at a cost `definition`
+/// tolerates: that gap is closed by the task itself, instrument first. Any
+/// failed check the category applies to gives `needs-info` the same way.
+/// Complexity 9-10 is always a subsystem and is split before it is taken
+/// on; complexity over `definition.max_complexity` (8 unless a scope
+/// tightens it) gives `needs-info` too. Everything else is ready -- a
+/// bounded, reversible item does not wait on an implementation choice the
+/// work can make.
+pub fn evaluate(a: &Assessment, definition: &ReadyDefinition, by: impl Into<String>, at: DateTime<Utc>) -> Triage {
+    let mut blockers: Vec<String> = definition.unreadable.clone();
     for d in a.duplicates.iter().filter(|d| d.verdict == DuplicateVerdict::Confirmed) {
         blockers.push(format!("Duplicate: confirmed duplicate of {} -- {}", d.reference, d.evidence.trim()));
     }
@@ -931,15 +996,26 @@ pub fn evaluate(a: &Assessment, by: impl Into<String>, at: DateTime<Utc>) -> Tri
             continue;
         }
         let tolerated = axis == Axis::Observability
-            && matches!(check.cost, Some(ObservabilityCost::Low | ObservabilityCost::Medium));
+            && check.cost.is_some_and(|cost| definition.observability_tolerance.allows(cost));
         if !tolerated {
             blockers.push(format!("{}: {}", axis.label(), check.evidence.trim()));
+        }
+    }
+    for check in definition.applicable(a.category.trim()) {
+        let Some(answer) = a.checks.iter().find(|c| c.id == check.id) else { continue };
+        if !answer.pass {
+            blockers.push(format!("{}: {}", check.id, answer.evidence.trim()));
         }
     }
     if a.complexity >= 9 {
         blockers.push(format!(
             "Complexity {}: a subsystem or multi-phase change -- split it or bound it to one phase",
             a.complexity
+        ));
+    } else if a.complexity > definition.max_complexity {
+        blockers.push(format!(
+            "Complexity {}: over {}'s own limit of {}",
+            a.complexity, definition.scope, definition.max_complexity
         ));
     }
     let verdict = if blockers.is_empty() { Verdict::Ready } else { Verdict::NeedsInfo { blockers } };
@@ -1152,12 +1228,16 @@ pub struct NextAction {
 
 /// Every blocker of a needs-info verdict, turned into what would clear it:
 /// a confirmed duplicate by closing it; a failed Scope, a high-cost
-/// Observability gap and complexity 9-10 by splitting; the other axes by
-/// information. A confirmed duplicate comes first -- closing makes
-/// splitting or asking questions moot -- then split, since a part is
-/// triaged again anyway and questions asked of the whole may not apply to
-/// any part. Empty for an item the rules do not hold back.
-pub fn next_actions(intake: &Intake) -> Vec<NextAction> {
+/// Observability gap and too much complexity by splitting; the other axes
+/// and the scope's own extra checks (`#169`) by information. A confirmed
+/// duplicate comes first -- closing makes splitting or asking questions
+/// moot -- then split, since a part is triaged again anyway and questions
+/// asked of the whole may not apply to any part. Empty for an item the
+/// rules do not hold back -- including one held back only by its scope's
+/// definition of ready being unreadable: nobody triaging it can fix a
+/// broken authored file, so that blocker is shown (`Triage::verdict`) but
+/// suggests no action here.
+pub fn next_actions(intake: &Intake, definition: &ReadyDefinition) -> Vec<NextAction> {
     let Some(triage) = &intake.triage else { return Vec::new() };
     if !intake.stage.is_open() || triage.verdict == Verdict::Ready {
         return Vec::new();
@@ -1184,13 +1264,22 @@ pub fn next_actions(intake: &Intake) -> Vec<NextAction> {
     for check in a.axes.iter().filter(|c| !c.pass) {
         let line = format!("{}: {}", check.axis.label(), check.evidence.trim());
         match (check.axis, check.cost) {
-            (Axis::Observability, Some(ObservabilityCost::Low | ObservabilityCost::Medium)) => {}
+            (Axis::Observability, Some(cost)) if definition.observability_tolerance.allows(cost) => {}
             (Axis::Scope, _) | (Axis::Observability, _) => split.push(line),
             _ => info.push(line),
         }
     }
+    for check in definition.applicable(a.category.trim()) {
+        if let Some(answer) = a.checks.iter().find(|c| c.id == check.id) {
+            if !answer.pass {
+                info.push(format!("{}: {}", check.id, answer.evidence.trim()));
+            }
+        }
+    }
     if a.complexity >= 9 {
         split.push(format!("Complexity {}: a subsystem or multi-phase change", a.complexity));
+    } else if a.complexity > definition.max_complexity {
+        split.push(format!("Complexity {}: over {}'s own limit of {}", a.complexity, definition.scope, definition.max_complexity));
     }
     if !split.is_empty() {
         let hint = if a.split.is_empty() {
@@ -1330,6 +1419,18 @@ pub struct RouteOptions {
     pub default_agent: Option<String>,
     #[serde(default)]
     pub agents: Vec<AgentOption>,
+    /// This scope's effective definition of ready (`#169`): the extra
+    /// checks and limits it adds on top of the seven built-in axes, which
+    /// `board.axes` stays. `ReadyDefinition::default()` for a scope whose
+    /// chain binds nothing.
+    #[serde(default)]
+    pub definition: ReadyDefinition,
+    /// What is wrong with this scope's chain, if anything -- unparsable
+    /// files, a weakening attempt, a bound name with no file. Never stops a
+    /// route from being offered; `definition.unreadable` is what actually
+    /// blocks an assessment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<crate::ready::Finding>,
     #[serde(default)]
     pub workflows: Vec<WorkflowOption>,
 }
@@ -1410,7 +1511,12 @@ pub const READY_WINDOW_DAYS: i64 = 14;
 /// oldest first -- the one waiting longest is the one to look at -- and
 /// ready ones newest first. A `triaging` item whose triage task ended with
 /// no assessment is back in `received`: nothing is working on it any more.
-pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
+/// `definitions` is each scope's effective definition of ready (`#169`),
+/// keyed by scope name -- the daemon's, built alongside `routes` (a scope
+/// missing from it, one that no longer exists, reads as
+/// `ReadyDefinition::default()`, `next_actions`' fallback exactly).
+pub fn board(tasks: &[Task], now: DateTime<Utc>, definitions: &BTreeMap<String, ReadyDefinition>) -> IntakeBoard {
+    let default_definition = ReadyDefinition::default();
     let by_id: BTreeMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
     let since = now - chrono::Duration::days(READY_WINDOW_DAYS);
     let mut columns = IntakeColumns::default();
@@ -1440,7 +1546,7 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
             triage_task_status,
             triage_task_ended,
             decision: intake.decision.clone(),
-            next_actions: next_actions(intake),
+            next_actions: next_actions(intake, definitions.get(&task.scope).unwrap_or(&default_definition)),
             parent: task.labels.get(PARENT_LABEL).cloned(),
             candidates: candidates_with_verdicts(intake),
         };
@@ -1502,8 +1608,10 @@ pub fn board(tasks: &[Task], now: DateTime<Utc>) -> IntakeBoard {
 /// scope with its agents and workflows, so the run chooses from what exists.
 /// `record` is the item's own intake record, freshly searched for
 /// duplicates (`#166`) -- not necessarily `item.intake`, which may still be
-/// the record from before that search.
-pub fn triage_instructions(item: &Task, record: &Intake, routes: &[RouteOptions], bin: &str) -> String {
+/// the record from before that search. `definition` is the item's own
+/// scope's effective definition of ready (`#169`), the same one `validate`
+/// and `evaluate` will hold the submitted assessment to.
+pub fn triage_instructions(item: &Task, record: &Intake, definition: &ReadyDefinition, routes: &[RouteOptions], bin: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "Triage intake item {id} against the definition of ready. Do not do the work itself, \
@@ -1547,13 +1655,41 @@ pub fn triage_instructions(item: &Task, record: &Intake, routes: &[RouteOptions]
     for axis in Axis::ALL {
         out.push_str(&format!("   - {} -- {}\n", axis.as_str(), axis.pass_condition()));
     }
-    out.push_str(
+    out.push_str(&format!(
         "   A failed observability axis carries its cost: low (run an existing tool), medium \
          (extend an existing event, metric or fixture) or high (build a new observation \
-         system).\n\
-         4. Rules: a confirmed duplicate always gives needs-info, and `--decide` can never \
-         release it. Any failed axis gives needs-info too, except observability at low or \
-         medium cost. Complexity 9-10 gives needs-info (split it). Otherwise it is ready -- do \
+         system) -- {scope}'s own chain tolerates a failed observability axis up to {tolerance} \
+         cost.\n",
+        scope = item.scope,
+        tolerance = definition.observability_tolerance.as_str(),
+    ));
+    if !definition.checks.is_empty() {
+        out.push_str(&format!(
+            "   {scope}'s own definition of ready adds these checks on top of the seven axes -- score \
+             each in `checks` the same way, once your category (step 5) says which apply:\n",
+            scope = item.scope,
+        ));
+        for check in &definition.checks {
+            let scope_note = if check.categories.is_empty() {
+                "every category".to_string()
+            } else {
+                format!("category {}", check.categories.join(" or "))
+            };
+            out.push_str(&format!("   - {} ({}) -- {}\n", check.id, scope_note, check.pass_condition));
+        }
+    }
+    if definition.max_complexity < crate::ready::DEFAULT_MAX_COMPLEXITY {
+        out.push_str(&format!(
+            "   {scope}'s own chain caps complexity at {max}: above it, needs-info even under 9.\n",
+            scope = item.scope,
+            max = definition.max_complexity,
+        ));
+    }
+    out.push_str(
+        "   4. Rules: a confirmed duplicate always gives needs-info, and `--decide` can never \
+         release it. Any failed axis or extra check gives needs-info too, except observability \
+         at a cost this scope tolerates. Complexity 9-10 always gives needs-info (split it), and \
+         so does exceeding this scope's own cap when it sets one. Otherwise it is ready -- do \
          not block on a reversible implementation choice.\n\
          5. Category: one slug -- ",
     );
@@ -1603,6 +1739,9 @@ pub fn triage_instructions(item: &Task, record: &Intake, routes: &[RouteOptions]
         {"axis": "independence", "pass": true, "evidence": "..."},
         {"axis": "reversibility", "pass": true, "evidence": "..."}
       ],
+      "checks": [
+        {"id": "<the scope's own extra check id>", "pass": true, "evidence": "..."}
+      ],
       "category": "bugfix",
       "impact": "medium",
       "urgency": "high",
@@ -1630,7 +1769,8 @@ pub fn triage_instructions(item: &Task, record: &Intake, routes: &[RouteOptions]
     out.push_str(
         "\nLeave out what does not apply: `split` unless it is too big, `inputs` and `agents` \
          without a workflow, `duplicates` only when nothing was found and your own search of \
-         the vault found nothing either. Use wontfix only for a verified duplicate, an invalid \
+         the vault found nothing either, and `checks` entirely when this scope declares none. \
+         Use wontfix only for a verified duplicate, an invalid \
          report or something out of scope -- and then do not decide it yourself: say so in \
          your task report with the evidence, and a person closes it.\n",
     );
@@ -1647,6 +1787,19 @@ pub fn routes_text(routes: &[RouteOptions]) -> String {
             out.push_str(&format!(" (default agent {a})"));
         }
         out.push('\n');
+        if !r.definition.unreadable.is_empty() {
+            out.push_str("  its definition of ready could not be fully read -- routing here gives needs-info\n");
+        } else if !r.definition.checks.is_empty()
+            || r.definition.max_complexity < crate::ready::DEFAULT_MAX_COMPLEXITY
+            || r.definition.observability_tolerance != crate::ready::Tolerance::default()
+        {
+            out.push_str(&format!(
+                "  own definition of ready: {} extra check(s), max_complexity {}, observability tolerance {}\n",
+                r.definition.checks.len(),
+                r.definition.max_complexity,
+                r.definition.observability_tolerance.as_str(),
+            ));
+        }
         if !r.agents.is_empty() {
             let agents: Vec<String> = r
                 .agents
@@ -1891,6 +2044,7 @@ mod tests {
             questions: vec![],
             split: vec![],
             duplicates: vec![],
+            checks: vec![],
         }
     }
 
@@ -1905,6 +2059,13 @@ mod tests {
 
     fn at() -> DateTime<Utc> {
         "2026-09-25T10:00:00Z".parse().unwrap()
+    }
+
+    /// The definition every existing test asserted against before `#169`:
+    /// no extra checks, the built-in limits -- so `validate`/`evaluate`
+    /// behave exactly as they always have.
+    fn def() -> ReadyDefinition {
+        ReadyDefinition::default()
     }
 
     #[test]
@@ -1945,7 +2106,7 @@ mod tests {
 
     #[test]
     fn all_seven_passing_is_ready_with_priority_and_estimate() {
-        let t = evaluate(&assessment(), "the owner", at());
+        let t = evaluate(&assessment(), &def(), "the owner", at());
         assert_eq!(t.verdict, Verdict::Ready);
         assert_eq!(t.priority, Priority::P2);
         assert_eq!(t.estimate, Estimate::from_complexity(4));
@@ -1954,7 +2115,7 @@ mod tests {
     #[test]
     fn any_failed_axis_is_needs_info_naming_it() {
         for axis in Axis::ALL.into_iter().filter(|a| *a != Axis::Observability) {
-            let t = evaluate(&failing(axis, None), "x", at());
+            let t = evaluate(&failing(axis, None), &def(), "x", at());
             let Verdict::NeedsInfo { blockers } = t.verdict else { panic!("{axis:?} should block") };
             assert_eq!(blockers, vec![format!("{}: {} is open", axis.label(), axis.as_str())]);
         }
@@ -1963,10 +2124,10 @@ mod tests {
     #[test]
     fn observability_at_low_or_medium_cost_is_tolerated_and_high_is_not() {
         for cost in [ObservabilityCost::Low, ObservabilityCost::Medium] {
-            let t = evaluate(&failing(Axis::Observability, Some(cost)), "x", at());
+            let t = evaluate(&failing(Axis::Observability, Some(cost)), &def(), "x", at());
             assert_eq!(t.verdict, Verdict::Ready, "{cost:?}");
         }
-        let t = evaluate(&failing(Axis::Observability, Some(ObservabilityCost::High)), "x", at());
+        let t = evaluate(&failing(Axis::Observability, Some(ObservabilityCost::High)), &def(), "x", at());
         assert!(matches!(t.verdict, Verdict::NeedsInfo { .. }));
     }
 
@@ -1974,7 +2135,7 @@ mod tests {
     fn complexity_nine_or_ten_is_needs_info_even_when_every_axis_passes() {
         let mut a = assessment();
         a.complexity = 9;
-        let t = evaluate(&a, "x", at());
+        let t = evaluate(&a, &def(), "x", at());
         let Verdict::NeedsInfo { blockers } = t.verdict else { panic!("should block") };
         assert!(blockers[0].starts_with("Complexity 9"), "{blockers:?}");
         assert_eq!(t.estimate, None);
@@ -1984,45 +2145,45 @@ mod tests {
     fn an_own_estimate_replaces_the_tables() {
         let mut a = assessment();
         a.estimate = Some(Estimate::new(600, 1200));
-        assert_eq!(evaluate(&a, "x", at()).estimate, Some(Estimate::new(600, 1200)));
+        assert_eq!(evaluate(&a, &def(), "x", at()).estimate, Some(Estimate::new(600, 1200)));
     }
 
     #[test]
     fn validation_refuses_a_missing_duplicated_or_unevidenced_axis() {
         let mut a = assessment();
         a.axes.pop();
-        assert!(validate(&a).unwrap_err().contains("reversibility axis is not assessed"));
+        assert!(validate(&a, &def()).unwrap_err().contains("reversibility axis is not assessed"));
 
         let mut a = assessment();
         a.axes.push(a.axes[0].clone());
-        assert!(validate(&a).unwrap_err().contains("more than once"));
+        assert!(validate(&a, &def()).unwrap_err().contains("more than once"));
 
         let mut a = assessment();
         a.axes[2].evidence = "  ".into();
-        assert!(validate(&a).unwrap_err().contains("evidence"));
+        assert!(validate(&a, &def()).unwrap_err().contains("evidence"));
 
         let a = failing(Axis::Observability, None);
-        assert!(validate(&a).unwrap_err().contains("cost"));
+        assert!(validate(&a, &def()).unwrap_err().contains("cost"));
     }
 
     #[test]
     fn validation_refuses_a_bad_category_complexity_estimate_or_route() {
         let mut a = assessment();
         a.category = "Bug Fix".into();
-        assert!(validate(&a).unwrap_err().contains("not a slug"));
+        assert!(validate(&a, &def()).unwrap_err().contains("not a slug"));
         let mut a = assessment();
         a.complexity = 0;
-        assert!(validate(&a).is_err());
+        assert!(validate(&a, &def()).is_err());
         let mut a = assessment();
         a.estimate = Some(Estimate::new(900, 600));
-        assert!(validate(&a).is_err());
+        assert!(validate(&a, &def()).is_err());
         let mut a = assessment();
         a.routing.scope = " ".into();
-        assert!(validate(&a).is_err());
-        assert!(validate(&assessment()).is_ok());
+        assert!(validate(&a, &def()).is_err());
+        assert!(validate(&assessment(), &def()).is_ok());
         let mut a = assessment();
         a.category = "marketing-request".into();
-        assert!(validate(&a).is_ok(), "a category off the usual list is still a category");
+        assert!(validate(&a, &def()).is_ok(), "a category off the usual list is still a category");
     }
 
     fn open(triage: Option<Triage>) -> Intake {
@@ -2043,16 +2204,16 @@ mod tests {
     fn ready_is_refused_without_an_assessment_or_against_a_needs_info_verdict() {
         let ready = Decision::Ready { run: false };
         assert!(check_decision(&open(None), &ready).unwrap_err().contains("assess"));
-        let blocked = evaluate(&failing(Axis::Scope, None), "x", at());
+        let blocked = evaluate(&failing(Axis::Scope, None), &def(), "x", at());
         let err = check_decision(&open(Some(blocked)), &ready).unwrap_err();
         assert!(err.contains("needs-info") && err.contains("Scope: scope is open"), "{err}");
-        let fine = evaluate(&assessment(), "x", at());
+        let fine = evaluate(&assessment(), &def(), "x", at());
         assert!(check_decision(&open(Some(fine)), &ready).is_ok());
     }
 
     #[test]
     fn needs_info_asks_the_given_questions_then_the_assessments_then_the_blockers() {
-        let blocked = evaluate(&failing(Axis::Verifiability, None), "x", at());
+        let blocked = evaluate(&failing(Axis::Verifiability, None), &def(), "x", at());
         let item = open(Some(blocked.clone()));
         let given = Decision::NeedsInfo { questions: vec!["What does done look like?".into()] };
         assert_eq!(check_decision(&item, &given).unwrap(), vec!["What does done look like?"]);
@@ -2084,7 +2245,7 @@ mod tests {
 
     #[test]
     fn a_decided_item_takes_no_second_decision() {
-        let mut item = open(Some(evaluate(&assessment(), "x", at())));
+        let mut item = open(Some(evaluate(&assessment(), &def(), "x", at())));
         item.stage = IntakeStage::Ready;
         assert!(check_decision(&item, &Decision::Ready { run: false }).unwrap_err().contains("already left"));
     }
@@ -2093,7 +2254,7 @@ mod tests {
     fn release_labels_carry_category_priority_estimate_and_the_triage_mark() {
         let mut a = assessment();
         a.routing.workflow = Some("release-train".into());
-        let labels = release_labels(&evaluate(&a, "x", at()));
+        let labels = release_labels(&evaluate(&a, &def(), "x", at()));
         assert_eq!(labels["triage"], "ready");
         assert_eq!(labels["category"], "bugfix");
         assert_eq!(labels["priority"], "P2");
@@ -2306,13 +2467,13 @@ mod tests {
             score: None,
             verdict: DuplicateVerdict::Confirmed,
         }];
-        let triage = evaluate(&a, "x", at());
+        let triage = evaluate(&a, &def(), "x", at());
         let Verdict::NeedsInfo { blockers } = &triage.verdict else { panic!("expected needs-info") };
         assert!(blockers[0].contains("confirmed duplicate of t-1"), "{blockers:?}");
 
         let mut intake = received(None);
         intake.triage = Some(triage);
-        let actions = next_actions(&intake);
+        let actions = next_actions(&intake, &def());
         assert_eq!(actions[0].action, NextActionKind::CloseDuplicate);
         assert_eq!(actions[0].reference.as_deref(), Some("t-1"));
         assert!(actions[0].hint.contains("never the triage run"));
@@ -2330,7 +2491,7 @@ mod tests {
             score: None,
             verdict: DuplicateVerdict::Rejected,
         }];
-        assert_eq!(evaluate(&a, "x", at()).verdict, Verdict::Ready);
+        assert_eq!(evaluate(&a, &def(), "x", at()).verdict, Verdict::Ready);
     }
 
     #[test]
@@ -2398,7 +2559,7 @@ mod tests {
                 verdict: DuplicateVerdict::Confirmed,
             },
         ];
-        intake.triage = Some(evaluate(&a, "x", at()));
+        intake.triage = Some(evaluate(&a, &def(), "x", at()));
         let overlaid = candidates_with_verdicts(&intake);
         assert_eq!(overlaid.len(), 2);
         assert_eq!(overlaid[0].verdict, DuplicateVerdict::Confirmed);
@@ -2417,7 +2578,7 @@ mod tests {
         let mut needs = open(None);
         needs.stage = IntakeStage::NeedsInfo;
         needs.questions = vec!["which?".into()];
-        let mut ready = open(Some(evaluate(&assessment(), "x", now)));
+        let mut ready = open(Some(evaluate(&assessment(), &def(), "x", now)));
         ready.stage = IntakeStage::Ready;
         ready.received_at = now - chrono::Duration::hours(10);
         ready.decision = Some(DecisionRecord {
@@ -2448,7 +2609,7 @@ mod tests {
             task("wf", TaskStatus::Cancelled, Some(closed)),
             task("plain", TaskStatus::Pending, None),
         ];
-        let b = board(&tasks, now);
+        let b = board(&tasks, now, &BTreeMap::new());
         let ids = |c: &[IntakeCard]| c.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
         assert_eq!(ids(&b.columns.received), vec!["r0", "r1"], "oldest first");
         assert_eq!(ids(&b.columns.triaging), vec!["tr"]);
@@ -2474,7 +2635,7 @@ mod tests {
             at: at(),
         });
         let tasks = vec![task("item", TaskStatus::Intake, Some(item.clone())), failed];
-        let b = board(&tasks, at());
+        let b = board(&tasks, at(), &BTreeMap::new());
         assert_eq!(b.columns.received.len(), 1);
         assert_eq!(b.columns.received[0].triage_task_status, Some(TaskStatus::Blocked));
         assert!(b.columns.received[0].triage_task_ended);
@@ -2482,7 +2643,7 @@ mod tests {
 
         // One blocked on a question is still working on it.
         let asking = task("triage-run", TaskStatus::Blocked, None);
-        let b = board(&[task("item", TaskStatus::Intake, Some(item)), asking], at());
+        let b = board(&[task("item", TaskStatus::Intake, Some(item)), asking], at(), &BTreeMap::new());
         assert_eq!(b.columns.triaging.len(), 1);
         assert!(!b.columns.triaging[0].triage_task_ended);
     }
@@ -2504,9 +2665,10 @@ mod tests {
                     inputs: vec![crate::workflow::WorkflowInput { name: "issue".into(), description: "the number".into() }],
                     steps: vec![WorkflowStep { id: "review".into(), title: "Review #{{issue}}".into(), agent: Some("builder".into()) }],
                 }],
+                ..Default::default()
             },
         ];
-        let text = triage_instructions(&item, &record, &routes, "/bin/factory");
+        let text = triage_instructions(&item, &record, &def(), &routes, "/bin/factory");
         for axis in Axis::ALL {
             assert!(text.contains(axis.pass_condition()), "{axis:?}");
         }
@@ -2535,7 +2697,7 @@ mod tests {
             verdict: DuplicateVerdict::Unverified,
         }];
         let item = task("item-1", TaskStatus::Intake, Some(record.clone()));
-        let text = triage_instructions(&item, &record, &[], "/bin/factory");
+        let text = triage_instructions(&item, &record, &def(), &[], "/bin/factory");
         assert!(text.contains("item-9"));
         assert!(text.contains("\"match\": \"source\""));
         assert!(text.contains("confirm or reject each"));
@@ -2559,8 +2721,8 @@ mod tests {
             "routing": {"scope": "demo"}, "summary": "s"
         }"#;
         let a: Assessment = serde_json::from_str(json).unwrap();
-        assert!(validate(&a).is_ok());
-        assert_eq!(evaluate(&a, "x", at()).verdict, Verdict::Ready);
+        assert!(validate(&a, &def()).is_ok());
+        assert_eq!(evaluate(&a, &def(), "x", at()).verdict, Verdict::Ready);
         let decision: Decision = serde_json::from_str(r#"{"decision":"needs_info","questions":["q"]}"#).unwrap();
         assert_eq!(decision, Decision::NeedsInfo { questions: vec!["q".into()] });
     }
@@ -2600,20 +2762,20 @@ mod tests {
         let mut a = failing(Axis::Scope, None);
         a.complexity = 10;
         a.split = vec![part("a", &[])];
-        assert!(validate(&a).unwrap_err().contains("proposed split"));
+        assert!(validate(&a, &def()).unwrap_err().contains("proposed split"));
         a.split = vec![part("a", &[]), part("b", &["a"])];
-        assert!(validate(&a).is_ok());
-        assert!(matches!(evaluate(&a, "x", at()).verdict, Verdict::NeedsInfo { .. }));
+        assert!(validate(&a, &def()).is_ok());
+        assert!(matches!(evaluate(&a, &def(), "x", at()).verdict, Verdict::NeedsInfo { .. }));
     }
 
     #[test]
     fn inputs_and_step_agents_need_a_workflow() {
         let mut a = assessment();
         a.routing.inputs.insert("issue".into(), "178".into());
-        assert!(validate(&a).unwrap_err().contains("need a workflow"));
+        assert!(validate(&a, &def()).unwrap_err().contains("need a workflow"));
         a.routing.workflow = Some("github-issue".into());
         a.routing.agents.insert("review".into(), "codex".into());
-        assert!(validate(&a).is_ok());
+        assert!(validate(&a, &def()).is_ok());
         let json = serde_json::to_value(&a.routing).unwrap();
         assert_eq!(json["inputs"]["issue"], "178");
         assert_eq!(json["agents"]["review"], "codex");
@@ -2625,7 +2787,7 @@ mod tests {
     fn split_takes_the_given_parts_or_the_proposal_and_refuses_neither() {
         let mut a = failing(Axis::Scope, None);
         a.split = vec![part("a", &[]), part("b", &["a"])];
-        let item = open(Some(evaluate(&a, "x", at())));
+        let item = open(Some(evaluate(&a, &def(), "x", at())));
         let from_proposal = split_parts(&item, &[]).unwrap();
         assert_eq!(from_proposal.len(), 2);
         let given = split_parts(&item, &[part("x", &[]), part("y", &[])]).unwrap();
@@ -2650,9 +2812,9 @@ mod tests {
         let v = a.axes.iter_mut().find(|c| c.axis == Axis::Verifiability).unwrap();
         v.pass = false;
         v.evidence = "no done signal".into();
-        let mut item = open(Some(evaluate(&a, "x", at())));
+        let mut item = open(Some(evaluate(&a, &def(), "x", at())));
         item.stage = IntakeStage::NeedsInfo;
-        let actions = next_actions(&item);
+        let actions = next_actions(&item, &def());
         assert_eq!(actions.iter().map(|n| n.action).collect::<Vec<_>>(), vec![NextActionKind::Split, NextActionKind::AddInfo]);
         assert_eq!(actions[0].reasons.len(), 2, "{:?}", actions[0].reasons);
         assert!(actions[0].reasons[1].starts_with("Complexity 10"));
@@ -2660,15 +2822,15 @@ mod tests {
         assert_eq!(actions[1].reasons, vec!["Verifiability: no done signal"]);
 
         a.split = vec![part("a", &[]), part("b", &[])];
-        item.triage = Some(evaluate(&a, "x", at()));
-        assert!(next_actions(&item)[0].hint.contains("2 parts: Part a; Part b"));
+        item.triage = Some(evaluate(&a, &def(), "x", at()));
+        assert!(next_actions(&item, &def())[0].hint.contains("2 parts: Part a; Part b"));
 
         // A high-cost observability gap is split out; a tolerated one is nothing.
-        let high = open(Some(evaluate(&failing(Axis::Observability, Some(ObservabilityCost::High)), "x", at())));
-        assert_eq!(next_actions(&high)[0].action, NextActionKind::Split);
-        let low = open(Some(evaluate(&failing(Axis::Observability, Some(ObservabilityCost::Low)), "x", at())));
-        assert!(next_actions(&low).is_empty(), "ready: nothing to unblock");
-        assert!(next_actions(&open(None)).is_empty(), "not assessed: nothing to say yet");
+        let high = open(Some(evaluate(&failing(Axis::Observability, Some(ObservabilityCost::High)), &def(), "x", at())));
+        assert_eq!(next_actions(&high, &def())[0].action, NextActionKind::Split);
+        let low = open(Some(evaluate(&failing(Axis::Observability, Some(ObservabilityCost::Low)), &def(), "x", at())));
+        assert!(next_actions(&low, &def()).is_empty(), "ready: nothing to unblock");
+        assert!(next_actions(&open(None), &def()).is_empty(), "not assessed: nothing to say yet");
     }
 
     #[test]
@@ -2696,7 +2858,7 @@ mod tests {
         child.stage = IntakeStage::Received;
         let mut part_task = task("c1", TaskStatus::Intake, Some(child));
         part_task.labels.insert(PARENT_LABEL.into(), "big".into());
-        let b = board(&[task("big", TaskStatus::Done, Some(split)), part_task], now);
+        let b = board(&[task("big", TaskStatus::Done, Some(split)), part_task], now, &BTreeMap::new());
         assert_eq!(b.split, 1);
         assert_eq!(b.columns.received.len(), 1);
         assert_eq!(b.columns.received[0].parent.as_deref(), Some("big"));
@@ -2859,5 +3021,172 @@ mod tests {
             one_skip.reason.as_deref(),
             Some("1 decision entry could not be read and was left out of this count")
         );
+    }
+
+    // ------------------------------------------------------ definitions of ready (#169)
+
+    mod ready_gate {
+        use super::*;
+        use crate::ready::{AppliedCheck, Origin, Tolerance};
+
+        fn check(id: &str, categories: &[&str]) -> AppliedCheck {
+            AppliedCheck {
+                id: id.into(),
+                pass_condition: format!("{id} holds"),
+                categories: categories.iter().map(|c| c.to_string()).collect(),
+                declared_at: Origin { scope: "demo".into(), file: "ready".into() },
+            }
+        }
+
+        fn definition_with(checks: Vec<AppliedCheck>) -> ReadyDefinition {
+            ReadyDefinition { scope: "demo".into(), checks, ..Default::default() }
+        }
+
+        #[test]
+        fn an_assessment_without_checks_still_deserialises_and_validates() {
+            let json = serde_json::to_value(assessment()).unwrap();
+            let mut map = json.as_object().unwrap().clone();
+            map.remove("checks");
+            let old: Assessment = serde_json::from_value(serde_json::Value::Object(map)).unwrap();
+            assert!(old.checks.is_empty());
+            assert!(validate(&old, &def()).is_ok());
+        }
+
+        #[test]
+        fn validate_requires_each_applicable_check_exactly_once_with_evidence() {
+            let definition = definition_with(vec![check("threat-model", &["security-report"])]);
+            let mut a = assessment();
+            a.category = "security-report".into();
+
+            let e = validate(&a, &definition).unwrap_err();
+            assert!(e.contains("threat-model") && e.contains("not assessed"), "{e}");
+
+            a.checks = vec![CheckResult { id: "threat-model".into(), pass: true, evidence: "  ".into() }];
+            let e = validate(&a, &definition).unwrap_err();
+            assert!(e.contains("evidence"), "{e}");
+
+            a.checks = vec![
+                CheckResult { id: "threat-model".into(), pass: true, evidence: "ok".into() },
+                CheckResult { id: "threat-model".into(), pass: true, evidence: "ok".into() },
+            ];
+            let e = validate(&a, &definition).unwrap_err();
+            assert!(e.contains("more than once"), "{e}");
+
+            a.checks = vec![
+                CheckResult { id: "threat-model".into(), pass: true, evidence: "ok".into() },
+                CheckResult { id: "unknown".into(), pass: true, evidence: "ok".into() },
+            ];
+            let e = validate(&a, &definition).unwrap_err();
+            assert!(e.contains("not one") && e.contains("demo"), "{e}");
+
+            a.category = "bugfix".into();
+            a.checks = vec![CheckResult { id: "threat-model".into(), pass: true, evidence: "ok".into() }];
+            let e = validate(&a, &definition).unwrap_err();
+            assert!(e.contains("does not apply to category"), "{e}");
+
+            a.category = "security-report".into();
+            a.checks = vec![CheckResult { id: "threat-model".into(), pass: true, evidence: "ok".into() }];
+            assert!(validate(&a, &definition).is_ok());
+        }
+
+        #[test]
+        fn a_failed_applicable_check_blocks_naming_it() {
+            let definition = definition_with(vec![check("threat-model", &[])]);
+            let mut a = assessment();
+            a.checks = vec![CheckResult { id: "threat-model".into(), pass: false, evidence: "no threat model yet".into() }];
+            let t = evaluate(&a, &definition, "x", at());
+            let Verdict::NeedsInfo { blockers } = t.verdict else { panic!("should block") };
+            assert!(blockers.iter().any(|b| b == "threat-model: no threat model yet"), "{blockers:?}");
+        }
+
+        #[test]
+        fn a_check_inapplicable_to_the_category_is_never_evaluated() {
+            let definition = definition_with(vec![check("threat-model", &["security-report"])]);
+            let a = assessment(); // category "bugfix", no checks answered
+            assert_eq!(evaluate(&a, &definition, "x", at()).verdict, Verdict::Ready);
+        }
+
+        #[test]
+        fn complexity_over_the_scopes_own_cap_blocks_once_not_twice_with_the_fixed_rule() {
+            let definition = ReadyDefinition { scope: "demo".into(), max_complexity: 6, ..Default::default() };
+            let mut a = assessment();
+            a.complexity = 7;
+            let Verdict::NeedsInfo { blockers } = evaluate(&a, &definition, "x", at()).verdict else {
+                panic!("7 over a cap of 6 should block")
+            };
+            assert_eq!(blockers.len(), 1, "{blockers:?}");
+            assert!(blockers[0].contains("over demo's own limit of 6"), "{}", blockers[0]);
+
+            a.complexity = 6;
+            assert_eq!(evaluate(&a, &definition, "x", at()).verdict, Verdict::Ready);
+
+            a.complexity = 9;
+            let Verdict::NeedsInfo { blockers } = evaluate(&a, &definition, "x", at()).verdict else {
+                panic!("9 always blocks")
+            };
+            assert_eq!(blockers.len(), 1, "the fixed 9-10 rule alone fires, not also the tighter cap: {blockers:?}");
+            assert!(blockers[0].contains("subsystem"), "{}", blockers[0]);
+        }
+
+        #[test]
+        fn observability_tolerance_low_blocks_medium_cost_but_not_low_cost() {
+            let definition = ReadyDefinition { scope: "demo".into(), observability_tolerance: Tolerance::Low, ..Default::default() };
+            let medium = failing(Axis::Observability, Some(ObservabilityCost::Medium));
+            assert!(matches!(evaluate(&medium, &definition, "x", at()).verdict, Verdict::NeedsInfo { .. }));
+            let low = failing(Axis::Observability, Some(ObservabilityCost::Low));
+            assert_eq!(evaluate(&low, &definition, "x", at()).verdict, Verdict::Ready);
+        }
+
+        #[test]
+        fn observability_tolerance_none_blocks_even_low_cost() {
+            let definition = ReadyDefinition { scope: "demo".into(), observability_tolerance: Tolerance::None, ..Default::default() };
+            let low = failing(Axis::Observability, Some(ObservabilityCost::Low));
+            assert!(matches!(evaluate(&low, &definition, "x", at()).verdict, Verdict::NeedsInfo { .. }));
+        }
+
+        #[test]
+        fn an_unreadable_definition_blocks_even_when_everything_else_passes() {
+            let definition = ReadyDefinition {
+                scope: "demo".into(),
+                unreadable: vec!["definition of ready for demo could not be read: ...".into()],
+                ..Default::default()
+            };
+            let a = assessment();
+            let Verdict::NeedsInfo { blockers } = evaluate(&a, &definition, "x", at()).verdict else {
+                panic!("an unreadable definition always blocks")
+            };
+            assert_eq!(blockers, vec!["definition of ready for demo could not be read: ...".to_string()]);
+        }
+
+        #[test]
+        fn next_actions_puts_a_failed_check_in_add_info_and_over_cap_in_split() {
+            let definition = ReadyDefinition {
+                scope: "demo".into(),
+                checks: vec![check("threat-model", &[])],
+                max_complexity: 6,
+                ..Default::default()
+            };
+            let mut a = assessment();
+            a.checks = vec![CheckResult { id: "threat-model".into(), pass: false, evidence: "missing".into() }];
+            a.complexity = 7;
+            let intake = open(Some(evaluate(&a, &definition, "x", at())));
+            let actions = next_actions(&intake, &definition);
+            let info = actions.iter().find(|n| n.action == NextActionKind::AddInfo);
+            assert!(info.is_some_and(|n| n.reasons.iter().any(|r| r.contains("threat-model"))), "{actions:?}");
+            let split = actions.iter().find(|n| n.action == NextActionKind::Split);
+            assert!(split.is_some_and(|n| n.reasons.iter().any(|r| r.contains("over demo's own limit"))), "{actions:?}");
+        }
+
+        #[test]
+        fn next_actions_is_empty_when_only_the_definition_itself_is_unreadable() {
+            let definition = ReadyDefinition {
+                scope: "demo".into(),
+                unreadable: vec!["definition of ready for demo could not be read: ...".into()],
+                ..Default::default()
+            };
+            let a = assessment();
+            let intake = open(Some(evaluate(&a, &definition, "x", at())));
+            assert!(next_actions(&intake, &definition).is_empty(), "nobody triaging can fix a broken authored file");
+        }
     }
 }

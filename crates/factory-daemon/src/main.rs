@@ -162,6 +162,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         dashboard: None,
         policies: Default::default(),
         quality: Default::default(),
+        intake: Default::default(),
         dependencies: Default::default(),
     };
     let config = Config {
