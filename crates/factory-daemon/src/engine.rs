@@ -2738,11 +2738,11 @@ impl Engine {
         // regardless, since this run is `--continue`'s answer either way;
         // `resumed_session` only when it truly resumed.
         if let Some(prev) = &continue_from {
-            let mut superseded = prev.superseded_tokens.clone();
-            if let Some(spent) = &prev.spent_token {
+            let mut superseded = prev.superseded_token_sha256s.clone();
+            if let Some(spent) = &prev.spent_token_sha256 {
                 superseded.push(spent.clone());
             }
-            initial_patch.superseded_tokens = superseded;
+            initial_patch.superseded_token_sha256s = superseded;
             initial_patch.continued_from = Some(prev.id.clone());
         }
         if let Some(ContinueOutcome::Resume(plan)) = &continue_outcome {
@@ -3002,7 +3002,12 @@ impl Engine {
         let workspace = if task.worktree {
             match &prev.worktree_path {
                 Some(path) if worktree::is_registered(scope_path, Path::new(path)).await => {
-                    Some((PathBuf::from(path), prev.worktree_branch.clone().unwrap_or_default()))
+                    let Some(branch) = &prev.worktree_branch else {
+                        return ContinueOutcome::Fresh {
+                            reason: "the previous run's worktree branch was not recorded".into(),
+                        };
+                    };
+                    Some((PathBuf::from(path), branch.clone()))
                 }
                 _ => {
                     return ContinueOutcome::Fresh { reason: "the previous run's worktree is gone".into() };
@@ -3263,10 +3268,17 @@ impl Engine {
             Some(given) if given == expected => Ok(()),
             // `#178`: a stale token this exact run's `--continue` replaced,
             // told apart from a plain wrong one -- see `caller_for`'s own
-            // copy of this check.
-            Some(given) if run.superseded_tokens.iter().any(|t| t == given) => Err(FactoryError::Denied(format!(
-                "a newer run of task {task_id} exists; use the latest reporting commands"
-            ))),
+            // copy of this check. Only the digest is ever compared.
+            Some(given)
+                if run
+                    .superseded_token_sha256s
+                    .iter()
+                    .any(|d| d == &factory_core::run::token_digest(given)) =>
+            {
+                Err(FactoryError::Denied(format!(
+                    "a newer run of task {task_id} exists; use the latest reporting commands"
+                )))
+            }
             Some(_) => Err(FactoryError::Denied(format!(
                 "wrong token for attempt {} of task {task_id}",
                 run.attempt
@@ -3443,12 +3455,21 @@ impl Engine {
         _why: &str,
     ) -> Result<Run> {
         // `#178`: what `token` is about to lose to `clear_token` below,
-        // carried forward as `spent_token` -- read back off the store rather
-        // than trusted from a caller, since nothing that reaches `finish_run`
-        // is handed the run it is closing. A later `--continue`'s new run
-        // copies this into `superseded_tokens`, which is the only thing that
-        // ever reads it; no request is ever authorized by it.
-        let spent_token = self.store.get_run(run_id).await.ok().flatten().and_then(|r| r.token);
+        // carried forward as a digest (`spent_token_sha256`) -- never the
+        // token itself, which is read back off the store rather than
+        // trusted from a caller only long enough to hash it, since nothing
+        // that reaches `finish_run` is handed the run it is closing. A later
+        // `--continue`'s new run copies the digest into
+        // `superseded_token_sha256s`, which is the only thing that ever
+        // reads it; a digest match authorizes nothing.
+        let spent_token_sha256 = self
+            .store
+            .get_run(run_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.token)
+            .map(|t| factory_core::run::token_digest(&t));
         let run = self
             .store
             .update_run(
@@ -3457,7 +3478,7 @@ impl Engine {
                     status: Some(status),
                     clear_session: true,
                     clear_token: true,
-                    spent_token,
+                    spent_token_sha256,
                     // A run that has ended is not waiting on anybody, so the
                     // block's own clock and the runtime's standing guess both
                     // go with the session -- `blocked_since` is documented to
@@ -6924,8 +6945,8 @@ mod tests {
             session: None,
             last_session: None,
             token: None,
-            spent_token: None,
-            superseded_tokens: Vec::new(),
+            spent_token_sha256: None,
+            superseded_token_sha256s: Vec::new(),
             continued_from: None,
             resumed_session: None,
             original_estimate: None,
@@ -6977,8 +6998,8 @@ mod tests {
             session: None,
             last_session: None,
             token: None,
-            spent_token: None,
-            superseded_tokens: Vec::new(),
+            spent_token_sha256: None,
+            superseded_token_sha256s: Vec::new(),
             continued_from: None,
             resumed_session: None,
             original_estimate: None,
@@ -7148,8 +7169,8 @@ mod tests {
             session: None,
             last_session: None,
             token: None,
-            spent_token: None,
-            superseded_tokens: Vec::new(),
+            spent_token_sha256: None,
+            superseded_token_sha256s: Vec::new(),
             continued_from: None,
             resumed_session: None,
             original_estimate: None,
@@ -7868,7 +7889,11 @@ mod tests {
             assert_eq!(run.resumed_session.as_deref(), Some("sess-123"));
             assert_eq!(run.continued_from.as_deref(), Some(prev.id.as_str()));
             assert_ne!(run.token, prev.token, "a new token");
-            assert!(run.superseded_tokens.contains(prev.spent_token.as_ref().unwrap()), "{:?}", run.superseded_tokens);
+            assert!(
+                run.superseded_token_sha256s.contains(prev.spent_token_sha256.as_ref().unwrap()),
+                "{:?}",
+                run.superseded_token_sha256s
+            );
 
             let starts = runtime.starts.lock().unwrap();
             let start = starts.last().unwrap();
@@ -7953,6 +7978,34 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_the_worktree_branch_was_not_recorded() {
+            let scope_dir = git_scope_dir("continue-worktree-no-branch").await;
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, true).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &prev, "sess-no-branch").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            assert!(prev.worktree_path.is_some(), "sanity: the failed run got a worktree");
+            assert!(prev.worktree_branch.is_some(), "sanity: a real dispatch always records both");
+            // Nothing in this codebase ever clears `worktree_branch` once
+            // set -- this simulates the one way it could still be missing:
+            // a run row from before the field existed, the same shape
+            // `queued_at`/`fail_kind` handle for an older row elsewhere.
+            let mut old_shape = serde_json::to_value(&prev).unwrap();
+            old_shape.as_object_mut().unwrap().remove("worktree_branch");
+            let prev: Run = serde_json::from_value(old_shape).unwrap();
+            assert!(prev.worktree_branch.is_none(), "sanity: the field really is gone now");
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            assert_ne!(run.worktree_path, prev.worktree_path, "a fresh worktree, not one reused with a guessed branch");
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("worktree branch was not recorded")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
         async fn continue_falls_back_to_fresh_when_the_agent_changed_since_the_previous_run() {
             let scope_dir = temp_dir("continue-agent-changed");
             let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
@@ -8014,10 +8067,20 @@ mod tests {
             let scope_dir = temp_dir("continue-stale-token");
             let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
             let task = task_for(&engine, false).await;
-            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            // Inlined, not `dispatched_then_failed`: the raw token has to be
+            // captured before `fail_run` clears it -- once cleared, only its
+            // digest (`spent_token_sha256`) survives, by design.
+            let first = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            let old_token = first.token.clone().expect("sanity: a fresh run has a token");
+            engine.fail_run(&first.id, FailKind::AckTimeout, "infra hiccup").await;
+            let prev = engine.store.get_run(&first.id).await.unwrap().unwrap();
+            assert_eq!(
+                prev.spent_token_sha256.as_deref(),
+                Some(factory_core::run::token_digest(&old_token).as_str()),
+                "sanity: finish_run recorded the digest of the token that just cleared"
+            );
             seed_session_id(&engine, &prev, "sess-stale").await;
             let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
-            let old_token = prev.spent_token.clone().expect("sanity: finish_run recorded it");
 
             let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
             assert!(run.resumed_session.is_some(), "sanity: this one actually resumed");

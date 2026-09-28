@@ -2608,8 +2608,10 @@ journal entry naming the one reason it fell back.
   token is refused with "a newer run of task `<id>` exists; use the latest
   reporting commands" rather than the generic wrong-token message, in both
   `Engine::caller_for` and `Engine::check_run_token` -- the token itself is
-  never kept usable; only the fact that it *used to be* this task's is, in
-  `Run::superseded_tokens`, chained forward across repeated continues.
+  never kept, in the clear or otherwise: `Run::spent_token_sha256` and
+  `Run::superseded_token_sha256s` hold only `run::token_digest`'s SHA-256, so
+  the daemon can recognise that a rejected token *used to be* this task's
+  without anything that could authorize a request ever being persisted.
 - **Usage.** A resumed session's baseline falls back to the previous run's
   own `RunEnd` reading when this run's `Dispatch` snapshot does not yet show
   that session -- see `usage::run_usage_with_prior`.

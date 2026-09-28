@@ -260,27 +260,31 @@ pub struct Run {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_session: Option<SessionRef>,
     /// The secret the agent presents when reporting on this run. Cleared the
-    /// moment the run ends (`RunPatch::clear_token`) -- see `spent_token`.
+    /// moment the run ends (`RunPatch::clear_token`) -- see
+    /// `spent_token_sha256`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// What `token` held just before it was cleared. Kept only so a later
-    /// `--continue`'s new run can carry it forward in `superseded_tokens`,
-    /// which is the only thing that ever reads this: no request is ever
-    /// authorized by a `spent_token` match, on this run or any other.
+    /// `token_digest` of what `token` held just before it was cleared --
+    /// never the token itself, which is gone for good once `finish_run`
+    /// clears it. Kept only so a later `--continue`'s new run can carry the
+    /// digest forward in `superseded_token_sha256s`, which is the only thing
+    /// that ever reads this: a digest match grants nothing -- it only tells
+    /// `caller_for`/`check_run_token` that a rejected token *used to be*
+    /// this task's, so they can say why rather than refuse it as unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spent_token: Option<String>,
-    /// Every token that used to be valid for this task's conversation and
-    /// no longer is: the run(s) `--continue` replaced. An agent resumed
-    /// after an infrastructure failure may still have an old report command
-    /// in its own history (`AGENTS.md` rule 2) -- `caller_for` and
-    /// `check_run_token` recognise a token in this list and refuse it with
-    /// "a newer run ... exists" rather than the generic "wrong token",
-    /// which is the only use this list is ever put to. Chained forward
-    /// across repeated continues, so a second one still voids the first
-    /// run's commands too. Empty on every run that was not itself a
-    /// continuation.
+    pub spent_token_sha256: Option<String>,
+    /// `token_digest` of every token that used to be valid for this task's
+    /// conversation and no longer is: the run(s) `--continue` replaced. An
+    /// agent resumed after an infrastructure failure may still have an old
+    /// report command in its own history (`AGENTS.md` rule 2) -- `caller_for`
+    /// and `check_run_token` digest a rejected token and recognise it in
+    /// this list, refusing it with "a newer run ... exists" rather than the
+    /// generic "wrong token" -- the only use this list is ever put to; a
+    /// match here authorizes nothing. Chained forward across repeated
+    /// continues, so a second one still voids the first run's commands too.
+    /// Empty on every run that was not itself a continuation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub superseded_tokens: Vec<String>,
+    pub superseded_token_sha256s: Vec<String>,
     /// Set when this run was dispatched by `factory task run --continue`:
     /// the previous run's id, whether or not the continuation actually
     /// managed to resume a session (see `resumed_session` for that).
@@ -405,16 +409,31 @@ pub struct Run {
 impl Run {
     /// The view that leaves the daemon. `token` is the field a run's own
     /// observers must not see -- it is what stops one agent closing
-    /// another's -- and `spent_token`/`superseded_tokens` are exactly as
-    /// secret: they are former or still-recognised tokens, just not this
-    /// run's own.
+    /// another's. `spent_token_sha256`/`superseded_token_sha256s` grant
+    /// nothing on their own (a digest cannot be presented back as a token),
+    /// but redacted the same way regardless: what tokens a run used to
+    /// recognise is not a run's own observers' business either.
     pub fn redacted(&self) -> Run {
         let mut r = self.clone();
         r.token = None;
-        r.spent_token = None;
-        r.superseded_tokens = Vec::new();
+        r.spent_token_sha256 = None;
+        r.superseded_token_sha256s = Vec::new();
         r
     }
+}
+
+/// SHA-256 of `token`, lowercase hex. What `Run::spent_token_sha256` and
+/// `Run::superseded_token_sha256s` store instead of the token itself:
+/// enough to recognise a rejected token as one that used to be valid for
+/// this task (`caller_for`, `check_run_token`), never enough to reconstruct
+/// or replay it -- a digest match authorizes nothing. `sha2` is already a
+/// `factory-core` dependency (`scenario::seed_from`), so this adds no new
+/// one.
+pub fn token_digest(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 /// What the engine hands the store. Everything the store owns -- the id, the
@@ -465,16 +484,16 @@ pub struct RunPatch {
     /// A finished run has no more use for its token.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_token: bool,
-    /// See `Run::spent_token`. Set by `finish_run`, in the same patch as
-    /// `clear_token`, to what `token` held a moment before -- read back off
-    /// the store rather than trusted from a caller, since a patch has no
-    /// other way to see the value it is about to clear.
+    /// See `Run::spent_token_sha256`. Set by `finish_run`, in the same patch
+    /// as `clear_token`, to `token_digest` of what `token` held a moment
+    /// before -- read back off the store rather than trusted from a caller,
+    /// since a patch has no other way to see the value it is about to clear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spent_token: Option<String>,
-    /// See `Run::superseded_tokens`. Set once, at dispatch, on a run created
-    /// by `--continue`; never patched again.
+    pub spent_token_sha256: Option<String>,
+    /// See `Run::superseded_token_sha256s`. Set once, at dispatch, on a run
+    /// created by `--continue`; never patched again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub superseded_tokens: Vec<String>,
+    pub superseded_token_sha256s: Vec<String>,
     /// See `Run::continued_from`. Set once, at dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continued_from: Option<String>,
@@ -594,6 +613,64 @@ mod tests {
         ] {
             assert!(!kind.is_infrastructure(), "{kind:?}");
         }
+    }
+
+    // -- #178: a former token is kept only as a digest ----------------------
+
+    #[test]
+    fn token_digest_is_deterministic_and_distinct_per_input() {
+        let a = token_digest("the-actual-secret");
+        let b = token_digest("the-actual-secret");
+        let c = token_digest("a-different-secret");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.len(), 64, "sha-256 as lowercase hex is 64 characters");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(a, "the-actual-secret", "a digest, never the token itself");
+    }
+
+    fn minimal_finished_run() -> Run {
+        let json = r#"{
+            "id": "r1", "task_id": "t1", "attempt": 1, "status": "failed",
+            "trigger": "manual", "agent": "shell", "runtime": "herdr",
+            "started_at": "2024-01-01T00:00:00Z", "ended_at": "2024-01-01T00:05:00Z"
+        }"#;
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn a_finished_runs_serialized_row_holds_no_plaintext_token_anywhere() {
+        let mut run = minimal_finished_run();
+        let secret = "sk-live-do-not-leak-this-token";
+        let digest = token_digest(secret);
+        // `token` itself is already `None` on a finished run (`clear_token`);
+        // what `finish_run` actually stores going forward is the digest.
+        run.token = None;
+        run.spent_token_sha256 = Some(digest.clone());
+        run.superseded_token_sha256s = vec![digest.clone()];
+
+        let serialized = serde_json::to_string(&run).unwrap();
+        assert!(!serialized.contains(secret), "the raw token must never be serialized: {serialized}");
+        assert!(serialized.contains(&digest), "sanity: the digest itself is present, so this is not a vacuous check");
+
+        // Not just the top-level JSON text -- no field, named or not, holds it.
+        let value = serde_json::to_value(&run).unwrap();
+        for (key, field) in value.as_object().unwrap() {
+            if let Some(s) = field.as_str() {
+                assert_ne!(s, secret, "field {key:?} must not hold the raw token");
+            }
+        }
+    }
+
+    #[test]
+    fn redacted_blanks_the_digest_fields_too() {
+        let mut run = minimal_finished_run();
+        let digest = token_digest("whatever");
+        run.spent_token_sha256 = Some(digest.clone());
+        run.superseded_token_sha256s = vec![digest];
+        let r = run.redacted();
+        assert!(r.spent_token_sha256.is_none());
+        assert!(r.superseded_token_sha256s.is_empty());
     }
 
     #[test]

@@ -111,10 +111,12 @@ impl Engine {
         // `#178`: a token from a run `--continue` replaced is not just
         // unknown -- it is *this task's own*, one generation stale. Told
         // apart from a genuinely unknown token so the caller hears why,
-        // rather than the generic denial below; never a grant, since the
+        // rather than the generic denial below; never a grant (only a
+        // digest is ever compared, never the token itself), since the
         // active run above already had its chance to match.
+        let given_digest = factory_core::run::token_digest(token);
         for run in &active {
-            if run.superseded_tokens.iter().any(|t| t == token) {
+            if run.superseded_token_sha256s.iter().any(|d| d == &given_digest) {
                 return Err(FactoryError::Denied(format!(
                     "a newer run of task {} exists; use the latest reporting commands",
                     run.task_id

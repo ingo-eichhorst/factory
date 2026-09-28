@@ -559,12 +559,12 @@ impl TaskStore for SqliteStore {
                 session: None,
                 last_session: None,
                 token: Some(new.token.clone()),
-                spent_token: None,
+                spent_token_sha256: None,
                 // Set right after, in the same `update_run` call that
                 // records `original_estimate`/`provider_account`, when this
                 // is a `--continue` dispatch -- `create_run` itself has no
                 // notion of a previous run.
-                superseded_tokens: Vec::new(),
+                superseded_token_sha256s: Vec::new(),
                 continued_from: None,
                 resumed_session: None,
                 original_estimate: None,
@@ -680,11 +680,11 @@ impl TaskStore for SqliteStore {
             if patch.clear_token {
                 run.token = None;
             }
-            if let Some(v) = patch.spent_token {
-                run.spent_token = Some(v);
+            if let Some(v) = patch.spent_token_sha256 {
+                run.spent_token_sha256 = Some(v);
             }
-            if !patch.superseded_tokens.is_empty() {
-                run.superseded_tokens = patch.superseded_tokens;
+            if !patch.superseded_token_sha256s.is_empty() {
+                run.superseded_token_sha256s = patch.superseded_token_sha256s;
             }
             if let Some(v) = patch.continued_from {
                 run.continued_from = Some(v);
