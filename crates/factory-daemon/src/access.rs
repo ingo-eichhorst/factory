@@ -89,7 +89,8 @@ impl Engine {
             return Ok(Caller::Owner);
         };
 
-        for run in self.store.active_runs().await? {
+        let active = self.store.active_runs().await?;
+        for run in &active {
             if run.token.as_deref() == Some(token) {
                 let scope = self
                     .store
@@ -100,10 +101,26 @@ impl Engine {
                 let role = self.effective_role(&scope, &run.agent).await;
                 return Ok(Caller::Agent {
                     scope,
-                    name: run.agent,
+                    name: run.agent.clone(),
                     role,
-                    run_id: Some(run.id),
+                    run_id: Some(run.id.clone()),
                 });
+            }
+        }
+
+        // `#178`: a token from a run `--continue` replaced is not just
+        // unknown -- it is *this task's own*, one generation stale. Told
+        // apart from a genuinely unknown token so the caller hears why,
+        // rather than the generic denial below; never a grant (only a
+        // digest is ever compared, never the token itself), since the
+        // active run above already had its chance to match.
+        let given_digest = factory_core::run::token_digest(token);
+        for run in &active {
+            if run.superseded_token_sha256s.iter().any(|d| d == &given_digest) {
+                return Err(FactoryError::Denied(format!(
+                    "a newer run of task {} exists; use the latest reporting commands",
+                    run.task_id
+                )));
             }
         }
 
@@ -720,6 +737,7 @@ impl Engine {
             &Request::TaskRun {
                 id: uuid::Uuid::new_v4().to_string(),
                 reason: None,
+                continue_run: false,
             },
         )
         .await
@@ -1537,6 +1555,7 @@ mod tests {
             error_details: None,
             last_message: None,
             token: None,
+            session_id: None,
         };
         assert!(allowed(&e, &worker("w"), Request::TaskTurnEnded { id: "mine".into(), turn: turn() }).await);
         assert!(!allowed(&e, &worker("w"), Request::TaskTurnEnded { id: "theirs".into(), turn: turn() }).await);
@@ -1652,7 +1671,7 @@ mod tests {
         for request in [
             Request::TaskCreate(NewTask::default()),
             Request::TaskDelete { id: "t".into() },
-            Request::TaskRun { id: "t".into(), reason: None },
+            Request::TaskRun { id: "t".into(), reason: None, continue_run: false },
             Request::TaskCancel { id: "t".into(), reason: None, run: None },
             // Closing a task is a decision about it, not work on it (`#122`).
             Request::TaskClose {
@@ -1714,7 +1733,7 @@ mod tests {
                 reason: None,
             },
             Request::TaskDelete { id: "here".into() },
-            Request::TaskRun { id: "here".into(), reason: None },
+            Request::TaskRun { id: "here".into(), reason: None, continue_run: false },
             Request::TaskCancel { id: "here".into(), reason: None, run: None },
             Request::TaskSkipNext { id: "here".into(), reason: None, slot: None },
             Request::TaskReport {
@@ -1769,6 +1788,7 @@ mod tests {
             Request::TaskRun {
                 id: "elsewhere".into(),
                 reason: None,
+                continue_run: false,
             },
             Request::TaskCancel {
                 id: "elsewhere".into(),
@@ -1858,7 +1878,7 @@ mod tests {
             "roles:\n  runner:\n    grants: [task.run, task.cancel]\n    reach: scope\n",
         );
         task_in(&e, "here", "demo", "somebody").await;
-        assert!(allowed(&e, &wearing("runner"), Request::TaskRun { id: "here".into(), reason: None }).await);
+        assert!(allowed(&e, &wearing("runner"), Request::TaskRun { id: "here".into(), reason: None, continue_run: false }).await);
         assert!(allowed(&e, &wearing("runner"), Request::TaskCancel { id: "here".into(), reason: None, run: None }).await);
         // Not granted: it may look at the board, and start what is on it.
         assert!(allowed(&e, &wearing("runner"), Request::TaskList(Default::default())).await);
@@ -2139,7 +2159,7 @@ mod tests {
         assert!(
             !allowed(&e, &triager, Request::TaskUpdate { id: "t".into(), patch: titled("renamed"), reason: None }).await
         );
-        assert!(!allowed(&e, &triager, Request::TaskRun { id: "t".into(), reason: None }).await);
+        assert!(!allowed(&e, &triager, Request::TaskRun { id: "t".into(), reason: None, continue_run: false }).await);
         assert!(
             !allowed(
                 &e,
@@ -2320,7 +2340,7 @@ mod tests {
             allowed(&e, &critic, Request::TaskReport { id: "mine".into(), report: report() }).await,
             "demo-app is below projects on disk, so it has engineering's reviewer"
         );
-        assert!(!allowed(&e, &critic, Request::TaskRun { id: "mine".into(), reason: None }).await);
+        assert!(!allowed(&e, &critic, Request::TaskRun { id: "mine".into(), reason: None, continue_run: false }).await);
     }
 
     #[tokio::test]
@@ -2352,10 +2372,10 @@ mod tests {
             task_in(&e, id, scope, "somebody").await;
         }
         let lead = in_scope("demo-app", "boss", "lead");
-        assert!(allowed(&e, &lead, Request::TaskRun { id: "here".into(), reason: None }).await);
+        assert!(allowed(&e, &lead, Request::TaskRun { id: "here".into(), reason: None, continue_run: false }).await);
         for elsewhere in ["parent", "sibling", "child"] {
             assert!(
-                !allowed(&e, &lead, Request::TaskRun { id: elsewhere.into(), reason: None }).await,
+                !allowed(&e, &lead, Request::TaskRun { id: elsewhere.into(), reason: None, continue_run: false }).await,
                 "inheriting lead from projects gives no authority over {elsewhere}"
             );
             assert!(!allowed(&e, &lead, Request::TaskCancel { id: elsewhere.into(), reason: None, run: None }).await);

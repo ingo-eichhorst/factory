@@ -144,11 +144,20 @@ pub enum Request {
     #[serde(rename = "task.delete")]
     TaskDelete { id: String },
     /// Journaled with who asked, and `reason` when there is one (`#106`).
+    /// `continue_run` (`continue` on the wire -- a Rust keyword) is
+    /// `factory task run --continue` (`#178`): resume the task's newest
+    /// run's harness session rather than start a fresh one. Refused outright
+    /// unless that newest run is terminal and ended on an infrastructure
+    /// failure; from there, `Engine::dispatch` falls back to a fresh session
+    /// -- journaled with the exact reason -- for anything that stops the
+    /// resume itself from going through.
     #[serde(rename = "task.run")]
     TaskRun {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        #[serde(default, rename = "continue", skip_serializing_if = "std::ops::Not::not")]
+        continue_run: bool,
     },
     /// Journaled with who asked, and `reason` when there is one (`#106`).
     #[serde(rename = "task.cancel")]

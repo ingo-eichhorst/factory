@@ -2561,6 +2561,71 @@ sees launchd's `PATH`, not a login shell's, so a harness a pane can find but
 the daemon cannot is reported as not found -- give the service the same `PATH`
 the panes have.
 
+### Continuing after an infrastructure failure (#178)
+
+`factory task run --continue <id>` (also `task.run`'s `continue` field on the
+socket and HTTP interfaces) resumes a task's newest run instead of starting a
+fresh one. It is refused outright unless that run is terminal and ended on an
+infrastructure failure -- `FailKind::AckTimeout`, `RunTimeout`, `SessionGone`,
+or `DispatchFailed` after a session had already come up -- never on an
+ordinary retry, a workflow rework, or a feedback round, which all keep
+today's fresh-session behaviour unchanged. Everything below that gate is a
+fallback, never an error: a `--continue` that cannot actually resume still
+dispatches, exactly as a plain `task run` would, with a `continue_fallback`
+journal entry naming the one reason it fell back.
+
+- **Resume capability is an adapter declaration.** `Agent::resume_spec(&self,
+  session_id: &str) -> Option<ResumeSpec>` sits beside `health_probe` on the
+  Agent seam: declared, never run, `None` by default and for every
+  out-of-process plugin (the plugin protocol does not change). `claude-code`
+  answers `--resume <id>`, `codex` answers the subcommand `resume <id>`;
+  `pi`, `opencode` and `shell` declare none, which sends `--continue` straight
+  to the fresh-session fallback for them. `ResumeSpec::args` is prepended to
+  the launch, ahead of anything `launch_spec` or a scope's own declared args
+  add, so a subcommand like codex's stays first.
+- **Which session.** The previous run's newest usage snapshot entry whose
+  `adapter` matches this run's, or -- failing that -- the session id a
+  `turn-ended` hook payload named (Claude Code's `Stop`/`StopFailure` always
+  carries one), kept on the run. Never "the latest session in this
+  directory."
+- **Which workspace.** A task with a worktree of its own reuses the previous
+  run's exact directory and branch, once `resolve_continue` confirms it is
+  still one of the scope's registered worktrees (`git worktree list
+  --porcelain`) -- no fresh `git worktree add`, and no bench reset, which
+  would wipe the very work being resumed.
+- **Falls back to fresh, journaled with the reason, when:** the task's agent
+  or adapter changed since the previous run; no session id was recorded; the
+  adapter declares no resume; the worktree is gone; or the runtime does not
+  confirm the previous session is gone (`AgentRuntime::status`, asked at
+  `--continue` time) -- Factory never runs two processes on one conversation,
+  so an unconfirmed answer refuses rather than risks it.
+- **New run, new token, and a short prompt.** The resumed turn's prompt is a
+  brief continue note plus the new run's reporting contract, not the task
+  replayed in full -- the resumed conversation already has the original
+  instructions. The contract itself gains one sentence, only on a run that
+  actually resumed: any report command earlier in the conversation's history
+  belongs to the run that just ended and is void. A report with that stale
+  token is refused with "a newer run of task `<id>` exists; use the latest
+  reporting commands" rather than the generic wrong-token message, in both
+  `Engine::caller_for` and `Engine::check_run_token` -- the token itself is
+  never kept, in the clear or otherwise: `Run::spent_token_sha256` and
+  `Run::superseded_token_sha256s` hold only `run::token_digest`'s SHA-256, so
+  the daemon can recognise that a rejected token *used to be* this task's
+  without anything that could authorize a request ever being persisted.
+- **Usage.** A resumed session's baseline falls back to the previous run's
+  own `RunEnd` reading when this run's `Dispatch` snapshot does not yet show
+  that session -- see `usage::run_usage_with_prior`.
+- **Manual gate.** The owner runs one real resume each with `codex` and
+  `claude` on a throwaway instance before trusting this in production; the
+  automated tests exercise every fallback with stub adapters and runtimes,
+  never a real harness login.
+
+Left out of this first slice (tracked on
+[#178](https://github.com/ingo-eichhorst/factory/issues/178)): resume as the
+default for workflow feedback rounds, a "what changed since" summary in the
+resumed prompt, `pi`'s own session-file resume, and any worktree lifetime or
+cleanup policy.
+
 ## Configuration
 
 The instance root's `.factory/config.yaml` owns daemon-wide settings and may

@@ -129,6 +129,35 @@ pub async fn create(scope_path: &Path, dir: &Path, branch: &str, base: Option<&s
     })
 }
 
+/// Whether `dir` is still one of `scope_path`'s registered worktrees --
+/// `git worktree list --porcelain`, read rather than assumed. `factory task
+/// run --continue` (`#178`) checks this before it will ever hand a resumed
+/// agent back a previous run's directory: a person (or anything else) that
+/// removed it by hand -- Factory itself never does -- must not have that
+/// worktree treated as still there. `false` on any git failure: a scope
+/// `git` cannot read is not one this can vouch for either.
+pub async fn is_registered(scope_path: &Path, dir: &Path) -> bool {
+    let target = match tokio::fs::canonicalize(dir).await {
+        Ok(p) => p,
+        // Gone entirely, or never existed -- either way, not registered.
+        Err(_) => return false,
+    };
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(scope_path)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .await;
+    let Ok(output) = output else { return false };
+    if !output.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .any(|path| std::fs::canonicalize(path).map(|p| p == target).unwrap_or(false))
+}
+
 /// Remove a worktree and the branch it was on, best-effort: a bench run's
 /// evidence is kept until a person explicitly asks to clean it, and cleaning
 /// one worktree that is already gone must not stop the rest of a run's from
@@ -288,6 +317,93 @@ mod tests {
         assert!(target.join(".git").exists());
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(target.parent().unwrap().parent().unwrap()).ok();
+    }
+
+    // -- #178: `--continue`'s "is this worktree still there" check ----------
+
+    #[tokio::test]
+    async fn a_freshly_made_worktree_is_registered() {
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        let target = std::env::temp_dir()
+            .join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()))
+            .join("worktrees")
+            .join("run-registered");
+        create(&dir, &target, "factory/registered", None).await.unwrap();
+
+        assert!(is_registered(&dir, &target).await);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(target.parent().unwrap().parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn a_worktree_removed_by_hand_is_not_registered() {
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        let target = std::env::temp_dir()
+            .join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()))
+            .join("worktrees")
+            .join("run-removed");
+        create(&dir, &target, "factory/removed", None).await.unwrap();
+        // A person deleting the directory outright, rather than going
+        // through `git worktree remove` -- the case `--continue` (#178) has
+        // to catch before it ever hands the directory back to a resumed
+        // agent.
+        std::fs::remove_dir_all(&target).unwrap();
+
+        assert!(!is_registered(&dir, &target).await);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(target.parent().unwrap().parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn a_directory_that_was_never_a_worktree_is_not_registered() {
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        // Exists, but was never `git worktree add`-ed.
+        let never = dir.join("never-a-worktree");
+        std::fs::create_dir_all(&never).unwrap();
+        assert!(!is_registered(&dir, &never).await);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_scopes_own_directory_is_itself_a_registered_worktree() {
+        // `git worktree list` names the primary checkout too, not only the
+        // ones `git worktree add` made -- worth pinning down since
+        // `resolve_continue` (#178) never actually asks this question (a
+        // previous run's `worktree_path` is always a dedicated directory
+        // under `worktrees_dir()`, never the scope itself), but a reader of
+        // `is_registered` should not have to rediscover this from git's
+        // manual.
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        assert!(is_registered(&dir, &dir).await);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_worktree_removed_the_proper_way_is_no_longer_registered() {
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        let target = std::env::temp_dir()
+            .join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()))
+            .join("worktrees")
+            .join("run-clean-removed");
+        let branch = "factory/clean-removed";
+        create(&dir, &target, branch, None).await.unwrap();
+        remove(&dir, &target, branch).await.unwrap();
+
+        assert!(!is_registered(&dir, &target).await);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

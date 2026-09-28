@@ -501,6 +501,21 @@ fn reason_for(unavailable: Option<&BTreeMap<String, String>>, path: &str) -> Str
 /// A field unknown for any one contributor makes that field's total
 /// unknown.
 pub fn run_usage(snapshots: &[UsageSnapshot]) -> RunUsage {
+    run_usage_with_prior(snapshots, None)
+}
+
+/// Like [`run_usage`], but for a run that may have resumed another's session
+/// (`#178`, `factory task run --continue`): `prior` names the session id
+/// being resumed and carries the *previous* run's own `RunEnd` reading for
+/// it. When this run's own `Dispatch` snapshot never saw that session --
+/// the ordinary case, since the runtime is asked for a baseline the moment
+/// the new session comes up, before the resumed harness has reported back in
+/// -- that reading is spliced into the baseline in its place, so growth is
+/// measured from where the previous run left off rather than credited whole
+/// to this one (the same rule [`run_usage`] already applies to any session
+/// genuinely born after the baseline, which this deliberately does not
+/// touch). `None` behaves exactly like `run_usage`.
+pub fn run_usage_with_prior(snapshots: &[UsageSnapshot], prior: Option<(&str, &HarnessUsage)>) -> RunUsage {
     let count = snapshots.len() as u32;
     if snapshots.is_empty() {
         return RunUsage::unknown("no usage was recorded for this run", 0);
@@ -516,9 +531,21 @@ pub fn run_usage(snapshots: &[UsageSnapshot]) -> RunUsage {
         return RunUsage::unknown("no baseline was taken when this run was dispatched", count);
     };
     let base = &snapshots[base_at];
-    let Some(baseline) = &base.usage else {
+    let Some(base_usage) = &base.usage else {
         let why = base.unknown.as_deref().unwrap_or("the runtime did not answer");
         return RunUsage::unknown(format!("no baseline at dispatch: {why}"), count);
+    };
+    // Splice the resumed session's prior ending in as though the baseline
+    // had seen it -- only when it did not, since a runtime quick enough to
+    // already report the resumed session at dispatch has the truer number.
+    let mut spliced;
+    let baseline = match prior {
+        Some((session_id, prior_usage)) if !base_usage.sessions.iter().any(|s| s.session_id == session_id) => {
+            spliced = base_usage.clone();
+            spliced.sessions.push(prior_usage.clone());
+            &spliced
+        }
+        _ => base_usage,
     };
     let later = &snapshots[base_at + 1..];
     let Some(latest_snap) = later.iter().rev().find(|s| s.usage.is_some()) else {
@@ -675,6 +702,29 @@ pub fn run_usage(snapshots: &[UsageSnapshot]) -> RunUsage {
         snapshots: count,
         notes,
     }
+}
+
+/// The session id `factory task run --continue` (#178) should resume: from
+/// `snapshots` (a previous run's own), the harness session named by the
+/// *newest* snapshot that saw one whose `adapter` matches. Older snapshots
+/// are never consulted even if a newer one is unknown -- an unanswered
+/// reading says nothing either way, so this looks further back only when the
+/// newer snapshot's `usage` is missing entirely, never when it simply lacks
+/// a session on this adapter (rule 6: never "latest session in this
+/// directory", only what this task's own adapter was actually seen running
+/// as).
+pub fn newest_session_id_for_adapter(snapshots: &[UsageSnapshot], adapter: &str) -> Option<String> {
+    let mut ordered: Vec<&UsageSnapshot> = snapshots.iter().collect();
+    ordered.sort_by_key(|s| s.at);
+    ordered.iter().rev().find_map(|snapshot| {
+        snapshot
+            .usage
+            .as_ref()?
+            .sessions
+            .iter()
+            .find(|s| s.adapter.as_deref() == Some(adapter))
+            .map(|s| s.session_id.clone())
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1523,6 +1573,61 @@ mod tests {
         assert_eq!(u.tokens.input, Some(30));
         assert_eq!(u.tokens.total(), Some(37));
         assert_eq!(u.cost_usd, Some(0.3));
+    }
+
+    // -- #178: a resumed session's baseline can fall back to the previous
+    // run's own `RunEnd` reading -----------------------------------------
+
+    #[test]
+    fn a_resumed_session_missing_from_the_dispatch_baseline_is_measured_from_the_prior_run_end() {
+        let snaps = vec![
+            snap(SnapshotPoint::Dispatch, 0, Some(usage(vec![]))),
+            snap(SnapshotPoint::RunEnd, 9, Some(usage(vec![session("a", Some(30), 7, Some(0.3))]))),
+        ];
+        // Without a prior, `run_usage` treats "a" as born in this run --
+        // the whole reading is credited to it (same as the test above).
+        let fresh = run_usage(&snaps);
+        assert_eq!(fresh.tokens.input, Some(30));
+
+        // With the previous run's own `RunEnd` reading for "a" as the
+        // prior, only the growth since then is this run's.
+        let prior = session("a", Some(10), 5, Some(0.1));
+        let resumed = run_usage_with_prior(&snaps, Some(("a", &prior)));
+        assert_eq!(resumed.tokens.input, Some(20));
+        assert_eq!(resumed.tokens.output, Some(2));
+        assert_eq!(resumed.tokens.total(), Some(22));
+        assert!((resumed.cost_usd.unwrap() - 0.2).abs() < 1e-9, "{:?}", resumed.cost_usd);
+    }
+
+    #[test]
+    fn a_dispatch_snapshot_that_already_saw_the_resumed_session_keeps_its_own_baseline() {
+        let snaps = vec![
+            snap(SnapshotPoint::Dispatch, 0, Some(usage(vec![session("a", Some(5), 1, Some(0.05))]))),
+            snap(SnapshotPoint::RunEnd, 9, Some(usage(vec![session("a", Some(30), 7, Some(0.3))]))),
+        ];
+        // Wildly different from the real baseline -- proof it is ignored
+        // once the run's own `Dispatch` snapshot already answered for "a".
+        let prior = session("a", Some(1000), 1000, Some(1000.0));
+        let u = run_usage_with_prior(&snaps, Some(("a", &prior)));
+        assert_eq!(u.tokens.input, Some(25), "30 - 5, the run's own baseline, not 30 - 1000");
+    }
+
+    #[test]
+    fn newest_session_id_for_adapter_matches_by_adapter_and_prefers_the_newest_snapshot() {
+        let mut old_codex = session("old-codex", Some(1), 1, None);
+        old_codex.adapter = Some("codex".into());
+        let mut claude = session("the-claude-one", Some(1), 1, None);
+        claude.adapter = Some("claude-code".into());
+        let mut new_codex = session("new-codex", Some(1), 1, None);
+        new_codex.adapter = Some("codex".into());
+        let snaps = vec![
+            snap(SnapshotPoint::Dispatch, 0, Some(usage(vec![old_codex]))),
+            snap(SnapshotPoint::TurnEnded, 5, Some(usage(vec![claude]))),
+            snap(SnapshotPoint::RunEnd, 9, Some(usage(vec![new_codex]))),
+        ];
+        assert_eq!(newest_session_id_for_adapter(&snaps, "codex"), Some("new-codex".into()));
+        assert_eq!(newest_session_id_for_adapter(&snaps, "claude-code"), Some("the-claude-one".into()));
+        assert_eq!(newest_session_id_for_adapter(&snaps, "pi"), None, "never seen running as pi");
     }
 
     #[test]

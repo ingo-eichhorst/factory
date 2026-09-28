@@ -1375,13 +1375,33 @@ fn refused(why: String) -> AxumResponse {
     (StatusCode::BAD_REQUEST, Json(response)).into_response()
 }
 
+/// `POST /api/tasks/{id}/run`'s body: `{"reason": "...", "continue": true}`,
+/// either field optional, or nothing at all. `#178`'s `continue` mirrors the
+/// CLI's `--continue` and the socket's `task.run.continue`.
+#[derive(serde::Deserialize, Default)]
+struct RunTaskBody {
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default, rename = "continue")]
+    continue_run: bool,
+}
+
+/// Read the same way `reason_of` reads `ReasonBody` -- an empty body is
+/// every field at its default, not a parse error.
+fn run_task_body_of(body: &[u8]) -> std::result::Result<RunTaskBody, String> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(RunTaskBody::default());
+    }
+    serde_json::from_slice::<RunTaskBody>(body).map_err(|e| format!("not a reason body: {e}"))
+}
+
 async fn run_task(
     State(engine): State<Arc<Engine>>,
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> AxumResponse {
-    match reason_of(&body) {
-        Ok(reason) => run(&engine, Request::TaskRun { id, reason }).await,
+    match run_task_body_of(&body) {
+        Ok(body) => run(&engine, Request::TaskRun { id, reason: body.reason, continue_run: body.continue_run }).await,
         Err(why) => refused(why),
     }
 }
