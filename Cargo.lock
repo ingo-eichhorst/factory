@@ -752,6 +752,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "csv",
+ "factory-kernel",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -774,6 +775,7 @@ dependencies = [
  "clap",
  "croner",
  "factory-core",
+ "factory-kernel",
  "factory-plugins",
  "futures-util",
  "libc",
@@ -788,6 +790,15 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "factory-kernel"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

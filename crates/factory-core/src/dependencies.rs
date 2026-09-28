@@ -5,8 +5,8 @@
 //! scan attaches; it is deliberately not a sixth adapter seam.
 
 use crate::config::DependencyService;
-use crate::policy::Duration;
 use chrono::{DateTime, Utc};
+use factory_kernel::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;

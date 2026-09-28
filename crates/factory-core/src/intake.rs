@@ -1032,7 +1032,7 @@ pub const REFERENCE_WINDOW_DAYS: i64 = 90;
 pub const REFERENCE_MIN_SAMPLES: u32 = 5;
 
 /// Nearest-rank p10/p50/p90, over one sample -- always non-decreasing
-/// (`scenario::nearest_rank`'s own guarantee), whatever the data looks like.
+/// (`factory_kernel::nearest_rank`'s own guarantee), whatever the data looks like.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Percentiles<T> {
     pub p10: T,
@@ -1044,9 +1044,9 @@ fn percentiles_u64(mut values: Vec<u64>) -> Percentiles<u64> {
     values.sort_unstable();
     let n = values.len();
     Percentiles {
-        p10: values[crate::scenario::nearest_rank(n, 0.10)],
-        p50: values[crate::scenario::nearest_rank(n, 0.50)],
-        p90: values[crate::scenario::nearest_rank(n, 0.90)],
+        p10: values[factory_kernel::nearest_rank(n, 0.10)],
+        p50: values[factory_kernel::nearest_rank(n, 0.50)],
+        p90: values[factory_kernel::nearest_rank(n, 0.90)],
     }
 }
 
@@ -1054,9 +1054,9 @@ fn percentiles_f64(mut values: Vec<f64>) -> Percentiles<f64> {
     values.sort_by(f64::total_cmp);
     let n = values.len();
     Percentiles {
-        p10: values[crate::scenario::nearest_rank(n, 0.10)],
-        p50: values[crate::scenario::nearest_rank(n, 0.50)],
-        p90: values[crate::scenario::nearest_rank(n, 0.90)],
+        p10: values[factory_kernel::nearest_rank(n, 0.10)],
+        p50: values[factory_kernel::nearest_rank(n, 0.50)],
+        p90: values[factory_kernel::nearest_rank(n, 0.90)],
     }
 }
 
@@ -2925,7 +2925,7 @@ fn rate(denom: usize, hits: usize, empty_reason: &str, caveat: &Option<String>, 
 /// there are none of those.
 /// `intake_lead_time` is the nearest-rank median, in seconds, of a ready
 /// decision's own time minus the item's `received_at`, over items released
-/// ready in `window` -- [`crate::scenario::nearest_rank`], the same rule
+/// ready in `window` -- [`factory_kernel::nearest_rank`], the same rule
 /// `operations::registry_metric`'s `cycle_time_p50` uses.
 ///
 /// `skipped` -- how many decision-kind entries [`decision_event`] could not
@@ -2970,7 +2970,7 @@ pub fn registry_metric(
             let mut lead_times: Vec<f64> =
                 ready.iter().map(|f| (f.at - f.received_at).num_seconds() as f64).collect();
             lead_times.sort_by(|a, b| a.total_cmp(b));
-            let median = lead_times[crate::scenario::nearest_rank(lead_times.len(), 0.5)];
+            let median = lead_times[factory_kernel::nearest_rank(lead_times.len(), 0.5)];
             IntakeFigure { value: Some(median), reason: caveat, as_of: ready.last().map(|f| f.at) }
         }
         _ => return None,

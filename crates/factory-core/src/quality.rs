@@ -68,8 +68,9 @@
 
 use crate::dataset::is_slug;
 use crate::metrics::{self, MetricError, MetricId, MetricValue};
-use crate::policy::{self, Applied, Check, ControlRef, Duration, Evidence, EvidenceRef, Kind, StatusKind};
+use crate::policy::{self, Applied, Check, ControlRef, Evidence, EvidenceRef, Kind, StatusKind};
 use chrono::{DateTime, Utc};
+use factory_kernel::Duration;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

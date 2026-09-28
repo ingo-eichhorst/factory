@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 factory-core = { path = "../factory-core" }
+factory-kernel = { path = "../factory-kernel" }
 factory-plugins = { path = "../factory-plugins" }
 anyhow.workspace = true
 async-trait.workspace = true

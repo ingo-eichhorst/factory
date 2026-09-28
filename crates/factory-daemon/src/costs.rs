@@ -444,7 +444,7 @@ impl Engine {
         let median = |values: &mut [f64]| {
             (!values.is_empty()).then(|| {
                 values.sort_by(f64::total_cmp);
-                values[factory_core::scenario::nearest_rank(values.len(), 0.5)]
+                values[factory_kernel::nearest_rank(values.len(), 0.5)]
             })
         };
         for row in rows.values_mut() {
