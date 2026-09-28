@@ -907,16 +907,6 @@ pub fn seed_from(parts: &[&str]) -> u64 {
     u64::from_le_bytes(digest[0..8].try_into().unwrap())
 }
 
-// Nearest-rank percentile arithmetic moved to the L0 kernel (#193, phase 1,
-// F7): `factory-daemon`'s cost report (`#168`,
-// `CostRow::median_actual_over_expected`), `intake::reference_estimate`'s
-// percentiles, and `operations`'s `cycle_time_p50` all used the same rule
-// as this module's own forecasts -- one formula in the kernel, not several
-// copies above it. Every one of those callers was switched to
-// `factory_kernel::nearest_rank` directly; this module's own wrappers below
-// call it the same way, for the same reason `nearest_rank` no longer lives
-// here at all.
-
 fn percentile_f64(sorted: &[f64], p: f64) -> f64 {
     sorted[factory_kernel::nearest_rank(sorted.len(), p)]
 }
