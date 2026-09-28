@@ -539,8 +539,20 @@ Policy catalogues may read the same evidence:
 ```
 
 The v2 scan workflow supplies the build and installed-binary evidence used by
-`built_sbom` and Doctor. Observed services, reachability, and the CRA Article
-14 clock remain future work.
+`built_sbom` and Doctor. Observed services and reachability remain future
+work; the CRA Article 14 reporting clock's 24-hour and 72-hour deadlines
+(`#157`, phase 1) read this same evidence -- see "Policies" below.
+
+`Engine::exploited_findings` (daemon `dependencies.rs`) is that clock's L2
+read: one `ExploitedFinding` per (scope, vulnerability id) sighted against a
+`built` or `running` SBOM that carries `factory:kev` or `factory:euvd` and
+whose `analysis.state` is not `not_affected`, `false_positive`, `resolved`,
+or `resolved_with_pedigree` -- a `declared` SBOM never counts. Once sighted,
+CRA counts from that first sighting's own document time regardless of what a
+later scan shows: the item survives a scan that drops or resolves it
+(`reported_now: false`), and is excluded only when the *newest* built or
+running document that still mentions the vulnerability reports it
+`not_affected` or `false_positive`.
 
 ## Knowledge
 
@@ -949,6 +961,59 @@ charset=utf-8` or `application/json; charset=utf-8`, and `Content-Disposition:
 attachment; filename="policy-<scope|instance>-<date>.<format>"`, so a browser
 click downloads it directly. The L6 tab's header carries an "Export" link
 that does exactly that click, for the scope currently selected on the rail.
+
+**The CRA Article 14 reporting clock** (`#157`, phase 1) is L6 Policy's own
+projection over evidence two other levels already keep: L2's exploited
+findings (`Engine::exploited_findings`, see "Dependencies" above) and L4's
+confirmed security reports (`Engine::confirmed_security_reports`, `#170`).
+Phase 1 covers only the 24-hour early warning and 72-hour notification
+deadlines Art. 14(2)(a)/(b) sets from awareness — a finding's first
+qualifying sighting, or a report's `received_at` — never the 14-day final
+report, which has no source yet for the corrective-measure time it would run
+from. A confirmed report that was split (`#170`'s intake split,
+`ConfirmedSecurityReport.parent`) counts once, at its split chain's root
+awareness, however many parts of it are also confirmed.
+
+`factory_core::reporting_clock::compute` is pure and stateless — no status
+table, computed fresh from its three inputs on every read (ADR 0004) — and
+is the one place `ClockItemRef` (`finding:<scope>:<vulnerability>` or
+`report:<task-id>`, the CLI's own text form for either) and a deadline's
+`due`/`overdue`/`met`/`late` state are decided. `factory policy clock
+[--scope S]` and `GET /api/policy/clock?scope=` read it, rolled up over a
+subtree exactly like `factory policy`/`GET /api/policy` themselves are;
+`policy.clock` needs no grant, the same as `policy`.
+
+A submission — an early warning or a notification actually sent — is
+recorded as an ordinary attestation carrying a `clock: {item, deadline}`
+mark, through the same `policy.attest` door and the same root-scope rule
+every other attestation goes through:
+
+```sh
+factory policy attest cra/art-14 --scope demo \
+  --evidence https://example.com/early-warning-sent \
+  --clock-item finding:demo:CVE-2026-1234 --deadline early-warning
+```
+
+`--expires` defaults to `520w` (ten years — `Duration` has no year unit) once
+`--clock-item` is given, since CRA evidence is kept far longer than an
+ordinary attestation's expiry is ever checked against; the clock itself
+ignores `expires_at` entirely; only a withdrawal ever un-meets a deadline.
+`policy_attest` refuses a `clock` mark against any control but `cra/art-14`
+(the only control phase 1 wires — `examples/policies/cra.yaml` shows it), an
+item that does not exist or whose own scope is not *exactly* the canonical
+`--scope` given (a subtree read would otherwise let a root-scope attestation
+cover a child's item), an excluded item (a later `not_affected`/
+`false_positive` finding has nothing left to report), and a deadline that
+already has a live, unwithdrawn submission. A row carrying `clock` is
+deliberately never enough on its own to satisfy `cra/art-14`'s `check:
+attestation` — `direct_status` skips it — so an ordinary attestation still
+has to cover the control as a whole; the clock mark is additional evidence
+of one specific deadline, not a substitute.
+
+Left for a later phase: the 14-day final report, whether reachability
+(C(2026) 5252) gates reportability or is display-only, observed services,
+and all of the UI — Intake, the Inbox and L6 Policy showing these deadlines
+by reading `/api/policy/clock` is `#170` phase 2's own work.
 
 ## Goals
 

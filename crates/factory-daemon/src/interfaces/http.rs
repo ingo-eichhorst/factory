@@ -136,6 +136,9 @@ fn router(engine: Arc<Engine>) -> Router {
         // against evidence Factory already has, re-read on every call like
         // knowledge and datasets above.
         .route("/api/policy", get(policy))
+        // The CRA Art. 14 reporting clock (`#157`, phase 1) -- read-only,
+        // the same subtree-or-instance resolution `GET /api/policy` uses.
+        .route("/api/policy/clock", get(policy_clock))
         .route("/api/policy/controls/{framework}/{id}", get(policy_control))
         .route("/api/policy/attestations", post(create_attestation))
         .route(
@@ -480,6 +483,19 @@ async fn policy(State(engine): State<Arc<Engine>>, Query(q): Query<PolicyQuery>)
     .await
 }
 
+/// `GET /api/policy/clock?scope=` -- the CRA Art. 14 reporting clock
+/// (`#157`, phase 1): `scope` empty or absent means the whole instance,
+/// exactly like `GET /api/policy` itself.
+async fn policy_clock(State(engine): State<Arc<Engine>>, Query(q): Query<PolicyQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::PolicyClock {
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+        },
+    )
+    .await
+}
+
 #[derive(serde::Deserialize)]
 struct PolicyControlQuery {
     scope: String,
@@ -524,6 +540,15 @@ struct AttestBody {
     /// have to compute one by hand; an RFC3339 timestamp is still accepted
     /// here exactly as it is on the CLI's `--expires`.
     expires: String,
+    /// A CRA Art. 14 reporting-clock item this attestation also submits
+    /// against (`#157`, phase 1): `finding:<scope>:<vulnerability>` or
+    /// `report:<task-id>`. Given together with `deadline` or not at all.
+    #[serde(default)]
+    clock_item: Option<String>,
+    /// Which of the clock item's two deadlines `clock_item` submits:
+    /// `early_warning`/`early-warning` or `notification`.
+    #[serde(default)]
+    deadline: Option<String>,
 }
 
 /// `POST /api/policy/attestations` -- record an attestation. `control` and
@@ -547,6 +572,31 @@ async fn create_attestation(
             return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response()
         }
     };
+    let clock = match (body.clock_item, body.deadline) {
+        (Some(item), Some(deadline)) => {
+            let item: factory_core::reporting_clock::ClockItemRef = match item.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response()
+                }
+            };
+            let deadline: factory_core::reporting_clock::ClockDeadlineKind = match deadline.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response()
+                }
+            };
+            Some(factory_core::reporting_clock::ClockMark { item, deadline })
+        }
+        (None, None) => None,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(Response::error("bad_request", "clock_item and deadline must be given together")),
+            )
+                .into_response()
+        }
+    };
     run(
         &engine,
         Request::PolicyAttest {
@@ -555,6 +605,7 @@ async fn create_attestation(
             evidence: body.evidence,
             note: body.note,
             expires_at,
+            clock,
         },
     )
     .await

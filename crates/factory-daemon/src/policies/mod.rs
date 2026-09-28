@@ -10,6 +10,7 @@
 //! The one piece of state this module owns is the attestations themselves,
 //! kept in `PolicyStore` (`store.rs`), append-only.
 
+mod clock;
 mod store;
 pub use store::PolicyStore;
 
@@ -21,6 +22,7 @@ use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
 use factory_core::policy_export;
 use factory_core::protocol::{CatalogueSummary, CredentialRow, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy};
+use factory_core::reporting_clock::{self, ClockDeadlineState, ClockMark};
 use factory_core::role::Roles;
 use factory_core::task::{NewTask, Task, TaskFilter};
 use factory_core::workflow::WorkflowDefinition;
@@ -770,7 +772,14 @@ impl Engine {
 
     /// Record an attestation: `Request::PolicyAttest`. Refuses empty
     /// evidence, a past or missing expiry, an unknown control, and a
-    /// control that does not apply -- or is `n/a` -- at `scope`.
+    /// control that does not apply -- or is `n/a` -- at `scope`. With
+    /// `clock` set (a submission against the CRA Art. 14 reporting clock,
+    /// `#157` phase 1), also refuses any control but `cra/art-14`, an
+    /// unknown clock item, one whose own scope is not exactly `scope` (a
+    /// subtree read would otherwise let a root-scope attestation cover a
+    /// child's item), an excluded item, and a deadline that already has a
+    /// live (unwithdrawn) submission.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn policy_attest(
         &self,
         caller: &Caller,
@@ -779,6 +788,7 @@ impl Engine {
         evidence: String,
         note: Option<String>,
         expires_at: chrono::DateTime<Utc>,
+        clock: Option<ClockMark>,
     ) -> Result<Attestation> {
         if evidence.trim().is_empty() {
             return Err(FactoryError::BadRequest("evidence must not be empty".into()));
@@ -788,6 +798,14 @@ impl Engine {
             return Err(FactoryError::BadRequest(format!(
                 "expires_at {expires_at} must be in the future"
             )));
+        }
+        if clock.is_some() {
+            let art_14 = reporting_clock::art_14();
+            if control != art_14 {
+                return Err(FactoryError::BadRequest(format!(
+                    "a reporting-clock submission may only be recorded against {art_14}, not {control}"
+                )));
+            }
         }
 
         let snapshot = self.factory_snapshot();
@@ -809,6 +827,43 @@ impl Engine {
             )));
         }
 
+        if let Some(mark) = &clock {
+            // The item's own scope must *equal* the canonical `scope` --
+            // `policy_clock(Some(&scope))` rolls up the subtree the same way
+            // `Request::Policy` does, so a descendant's item can appear in
+            // it too; only an exact match may be attested here.
+            let clock_now = self.policy_clock(Some(&scope)).await?;
+            let item = clock_now.items.iter().find(|i| i.item == mark.item).ok_or_else(|| {
+                FactoryError::BadRequest(format!(
+                    "{} is not a reporting-clock item in {scope:?}'s subtree",
+                    mark.item
+                ))
+            })?;
+            if item.scope != scope {
+                return Err(FactoryError::BadRequest(format!(
+                    "{} belongs to scope {:?}, not {scope:?} -- attest it there",
+                    mark.item, item.scope
+                )));
+            }
+            if let Some(state) = &item.excluded {
+                return Err(FactoryError::BadRequest(format!(
+                    "{} is excluded ({state}); there is nothing left to report",
+                    mark.item
+                )));
+            }
+            let deadline = item
+                .deadlines
+                .iter()
+                .find(|d| d.deadline == mark.deadline)
+                .expect("compute always emits both deadlines for an unexcluded item");
+            if matches!(deadline.state, ClockDeadlineState::Met | ClockDeadlineState::Late) {
+                return Err(FactoryError::BadRequest(format!(
+                    "{} already has a live submission for its {} deadline",
+                    mark.item, mark.deadline
+                )));
+            }
+        }
+
         let attestation = Attestation {
             id: uuid::Uuid::new_v4().to_string(),
             control,
@@ -819,6 +874,7 @@ impl Engine {
             attested_at: now,
             expires_at,
             withdrawn: None,
+            clock,
         };
         self.policies.append_attestation(&attestation).await?;
         Ok(attestation)
@@ -1034,6 +1090,7 @@ mod tests {
     use super::*;
     use factory_core::adapter::TaskStore;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, InterfaceConfig, PolicyDeclaration, Scope};
+    use factory_core::dependencies::AttachmentKind;
     use factory_core::policy::{ControlStatus, StatusKind};
     use factory_core::protocol::Payload;
     use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
@@ -1198,6 +1255,7 @@ mod tests {
                 "https://example.com/policy".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
             )
             .await
             .unwrap();
@@ -1245,6 +1303,7 @@ mod tests {
                 "".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(1),
+                None,
             )
             .await
             .unwrap_err();
@@ -1258,6 +1317,7 @@ mod tests {
                 "https://example.com".to_string(),
                 None,
                 Utc::now() - chrono::Duration::days(1),
+                None,
             )
             .await
             .unwrap_err();
@@ -1271,6 +1331,7 @@ mod tests {
                 "https://example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(1),
+                None,
             )
             .await
             .unwrap_err();
@@ -1287,6 +1348,7 @@ mod tests {
                 "https://example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(1),
+                None,
             )
             .await
             .unwrap_err();
@@ -1306,6 +1368,7 @@ mod tests {
                 "https://one.example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
             )
             .await
             .unwrap();
@@ -1318,6 +1381,7 @@ mod tests {
                 "https://two.example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
             )
             .await
             .unwrap();
@@ -1896,6 +1960,7 @@ mod tests {
                 "https://example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
             )
             .await
             .unwrap();
@@ -1924,6 +1989,7 @@ mod tests {
                 "https://example.com/company".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
             )
             .await
             .unwrap();
@@ -1948,5 +2014,207 @@ mod tests {
 
         let err = engine.policy_export_render(Some("engineering"), "yaml").await.unwrap_err();
         assert!(err.to_string().contains("unknown export format"), "{err}");
+    }
+
+    // ------------------------------------------------ the reporting clock
+
+    /// Writes one dependency document straight to disk in the exact layout
+    /// `dependencies::write_attachment` itself produces -- there is no
+    /// active run to attach through in these tests, and the daemon's write
+    /// path (`Engine::attach_dependency`) needs one.
+    fn write_dep_doc(
+        root: &std::path::Path,
+        scope: &str,
+        run_id: &str,
+        kind: factory_core::dependencies::AttachmentKind,
+        bytes: &[u8],
+        attached_at: chrono::DateTime<Utc>,
+        id: &str,
+    ) {
+        let dir = root.join(".factory/dependencies").join(scope).join(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let filename = format!("{id}.cdx.json");
+        std::fs::write(dir.join(&filename), bytes).unwrap();
+        let attachment = factory_core::dependencies::Attachment {
+            id: id.to_string(),
+            kind,
+            scope: scope.to_string(),
+            run_id: run_id.to_string(),
+            task_id: "t1".to_string(),
+            attempt: 1,
+            attached_at,
+            filename,
+            spec_version: "1.6".to_string(),
+            states: match kind {
+                factory_core::dependencies::AttachmentKind::Sbom => {
+                    vec![factory_core::dependencies::LifecycleState::Built]
+                }
+                factory_core::dependencies::AttachmentKind::Vulnerabilities => Vec::new(),
+            },
+        };
+        std::fs::write(
+            dir.join(format!("{id}.meta.json")),
+            serde_json::to_vec_pretty(&attachment).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A single-scope (`demo`) instance whose only control is `cra/art-14`,
+    /// backed by a real `PolicyStore` file at `db` -- so a second `Engine`
+    /// built over the same `root`/`db` is what a restart looks like, the
+    /// same pattern `intake.rs`'s own restart test uses.
+    fn clock_engine(root: &std::path::Path, db: &std::path::Path) -> Arc<Engine> {
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: None,
+            scopes: vec![scope_at("demo-id", "demo", "demo", "")],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration { frameworks: vec!["cra".to_string()], ..Default::default() },
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root: root.to_path_buf(), config };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let policies = PolicyStore::open(db).unwrap();
+        Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()).with_policy_store(policies))
+    }
+
+    #[tokio::test]
+    async fn policy_attest_with_clock_refuses_the_wrong_control_an_unknown_item_and_an_excluded_one() {
+        let root = std::env::temp_dir().join(format!("factory-policies-clock-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/cra.yaml"),
+            "framework: cra\ntitle: Cyber Resilience Act\nkind: regulation\ncontrols:\n  - id: art-14\n    title: Reporting\n    evidence:\n      - check: attestation\n",
+        )
+        .unwrap();
+
+        let now = Utc::now();
+        let sbom = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","metadata":{"lifecycles":[{"phase":"build"}]},"components":[{"type":"library","name":"demo-lib","version":"1.2.3","bom-ref":"pkg:cargo/demo-lib@1.2.3"}]}"#;
+        let sighting = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[{"id":"CVE-2026-8888","affects":[{"ref":"pkg:cargo/demo-lib@1.2.3"}],"properties":[{"name":"factory:kev","value":"true"}]}]}"#;
+        let excluded = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[{"id":"CVE-2026-8888","affects":[{"ref":"pkg:cargo/demo-lib@1.2.3"}],"properties":[{"name":"factory:kev","value":"true"}],"analysis":{"state":"not_affected"}}]}"#;
+        write_dep_doc(&root, "demo", "r1", AttachmentKind::Sbom, sbom, now - chrono::Duration::hours(2), "s1");
+        write_dep_doc(&root, "demo", "r1", AttachmentKind::Vulnerabilities, sighting, now - chrono::Duration::hours(2), "v1");
+        write_dep_doc(&root, "demo", "r2", AttachmentKind::Sbom, sbom, now - chrono::Duration::minutes(5), "s2");
+        write_dep_doc(&root, "demo", "r2", AttachmentKind::Vulnerabilities, excluded, now - chrono::Duration::minutes(5), "v2");
+
+        let db = root.join("policies.sqlite");
+        let engine = clock_engine(&root, &db);
+        let owner = Caller::Owner;
+        let item = reporting_clock::ClockItemRef::Finding { scope: "demo".into(), vulnerability: "CVE-2026-8888".into() };
+        let mark = |item: reporting_clock::ClockItemRef| ClockMark { item, deadline: reporting_clock::ClockDeadlineKind::EarlyWarning };
+
+        let err = engine
+            .policy_attest(
+                &owner,
+                "cra/other".parse().unwrap(),
+                "demo".to_string(),
+                "https://example.com/notice".to_string(),
+                None,
+                now + chrono::Duration::weeks(520),
+                Some(mark(item.clone())),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("cra/art-14"), "{err}");
+
+        let unknown = reporting_clock::ClockItemRef::Finding { scope: "demo".into(), vulnerability: "CVE-0000-0000".into() };
+        let err = engine
+            .policy_attest(
+                &owner,
+                "cra/art-14".parse().unwrap(),
+                "demo".to_string(),
+                "https://example.com/notice".to_string(),
+                None,
+                now + chrono::Duration::weeks(520),
+                Some(mark(unknown)),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not a reporting-clock item"), "{err}");
+
+        // CVE-2026-8888's newest built document reports it `not_affected` --
+        // excluded, so there is nothing left to attest.
+        let err = engine
+            .policy_attest(
+                &owner,
+                "cra/art-14".parse().unwrap(),
+                "demo".to_string(),
+                "https://example.com/notice".to_string(),
+                None,
+                now + chrono::Duration::weeks(520),
+                Some(mark(item)),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("excluded"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_valid_clock_submission_flips_the_deadline_to_met_refuses_a_duplicate_and_survives_a_restart() {
+        let root = std::env::temp_dir().join(format!("factory-policies-clock-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/cra.yaml"),
+            "framework: cra\ntitle: Cyber Resilience Act\nkind: regulation\ncontrols:\n  - id: art-14\n    title: Reporting\n    evidence:\n      - check: attestation\n",
+        )
+        .unwrap();
+
+        let now = Utc::now();
+        let sbom = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","metadata":{"lifecycles":[{"phase":"build"}]},"components":[{"type":"library","name":"demo-lib","version":"1.2.3","bom-ref":"pkg:cargo/demo-lib@1.2.3"}]}"#;
+        let vulns = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[{"id":"CVE-2026-9999","affects":[{"ref":"pkg:cargo/demo-lib@1.2.3"}],"properties":[{"name":"factory:kev","value":"true"}]}]}"#;
+        write_dep_doc(&root, "demo", "r1", AttachmentKind::Sbom, sbom, now - chrono::Duration::hours(1), "s1");
+        write_dep_doc(&root, "demo", "r1", AttachmentKind::Vulnerabilities, vulns, now - chrono::Duration::hours(1), "v1");
+
+        let db = root.join("policies.sqlite");
+        let engine = clock_engine(&root, &db);
+        let owner = Caller::Owner;
+        let item = reporting_clock::ClockItemRef::Finding { scope: "demo".into(), vulnerability: "CVE-2026-9999".into() };
+
+        let attestation = engine
+            .policy_attest(
+                &owner,
+                "cra/art-14".parse().unwrap(),
+                "demo".to_string(),
+                "https://example.com/notice".to_string(),
+                None,
+                now + chrono::Duration::weeks(520),
+                Some(ClockMark { item: item.clone(), deadline: reporting_clock::ClockDeadlineKind::EarlyWarning }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(attestation.clock.as_ref().unwrap().item, item);
+
+        let clock = engine.policy_clock(Some("demo")).await.unwrap();
+        let found = clock.items.iter().find(|i| i.item == item).unwrap();
+        assert_eq!(found.deadlines[0].state, ClockDeadlineState::Met);
+
+        // A second submission against the same (item, deadline) is refused
+        // while the first one is still live.
+        let err = engine
+            .policy_attest(
+                &owner,
+                "cra/art-14".parse().unwrap(),
+                "demo".to_string(),
+                "https://example.com/again".to_string(),
+                None,
+                now + chrono::Duration::weeks(520),
+                Some(ClockMark { item: item.clone(), deadline: reporting_clock::ClockDeadlineKind::EarlyWarning }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already has a live submission"), "{err}");
+
+        // A fresh `Engine` over the same `root` and the same `PolicyStore`
+        // file -- what a restart looks like -- still reads `met`.
+        let restarted = clock_engine(&root, &db);
+        let clock = restarted.policy_clock(Some("demo")).await.unwrap();
+        let found = clock.items.iter().find(|i| i.item == item).unwrap();
+        assert_eq!(found.deadlines[0].state, ClockDeadlineState::Met);
     }
 }

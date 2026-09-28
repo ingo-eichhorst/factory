@@ -935,6 +935,14 @@ pub struct Attestation {
     pub expires_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub withdrawn: Option<Withdrawal>,
+    /// A submission against the CRA Art. 14 reporting clock, phase 1 of
+    /// `#157` -- absent for every attestation recorded before this and for
+    /// an ordinary one recorded since. `direct_status`'s `attestation`
+    /// check skips a row that carries one: a single notification is not the
+    /// whole control being met. `policy_attest` (`factory-daemon/src/
+    /// policies/mod.rs`) is the only writer, and only for `cra/art-14`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<crate::reporting_clock::ClockMark>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1421,7 +1429,10 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                 let mut expired: Option<&Attestation> = None;
                 let mut any_valid = false;
                 for att in &evidence.attestations {
-                    if att.control != applied.control || att.withdrawn.is_some() {
+                    // A clock submission (`#157`) is evidence for one
+                    // deadline, not for the control as a whole -- skip it
+                    // here exactly like a withdrawn row.
+                    if att.control != applied.control || att.withdrawn.is_some() || att.clock.is_some() {
                         continue;
                     }
                     if att.expires_at > now {
@@ -3030,6 +3041,7 @@ mod tests {
                 attested_at: now,
                 expires_at: now + chrono::Duration::days(30),
                 withdrawn: None,
+                clock: None,
             }],
             ..Default::default()
         };
@@ -3052,6 +3064,7 @@ mod tests {
                 attested_at: now - chrono::Duration::days(400),
                 expires_at: now - chrono::Duration::days(1),
                 withdrawn: None,
+                clock: None,
             }],
             ..Default::default()
         };
@@ -3078,11 +3091,67 @@ mod tests {
                     by: "owner".to_string(),
                     reason: None,
                 }),
+                clock: None,
             }],
             ..Default::default()
         };
         let statuses = evaluate(&applied, &evidence, now);
         assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+    }
+
+    /// A CRA Art. 14 clock submission (`#157`, phase 1) is evidence for one
+    /// deadline, not for the whole control -- `direct_status` must skip it
+    /// exactly like a withdrawn row, leaving the control `open`.
+    #[test]
+    fn an_attestation_carrying_a_clock_mark_does_not_satisfy_the_control() {
+        let now = Utc::now();
+        let applied = vec![applied_control("a", vec![Check::Attestation], Vec::new())];
+        let evidence = Evidence {
+            attestations: vec![Attestation {
+                id: "att-1".to_string(),
+                control: ControlRef::new("cra", "a"),
+                scope: "root".to_string(),
+                evidence: "https://example.com/notice".to_string(),
+                note: None,
+                attested_by: "owner".to_string(),
+                attested_at: now,
+                expires_at: now + chrono::Duration::days(30),
+                withdrawn: None,
+                clock: Some(crate::reporting_clock::ClockMark {
+                    item: crate::reporting_clock::ClockItemRef::Finding {
+                        scope: "demo".to_string(),
+                        vulnerability: "CVE-2026-1234".to_string(),
+                    },
+                    deadline: crate::reporting_clock::ClockDeadlineKind::EarlyWarning,
+                }),
+            }],
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+    }
+
+    /// A row recorded before `#157` carries no `clock` field at all -- it
+    /// must still deserialize, and still count as an ordinary attestation.
+    #[test]
+    fn an_attestation_with_no_clock_field_still_deserializes_and_counts() {
+        let now = Utc::now();
+        let json = serde_json::json!({
+            "id": "att-1",
+            "control": "cra/a",
+            "scope": "root",
+            "evidence": "https://example.com/policy",
+            "attested_by": "owner",
+            "attested_at": now,
+            "expires_at": now + chrono::Duration::days(30),
+        });
+        let attestation: Attestation = serde_json::from_value(json).unwrap();
+        assert_eq!(attestation.clock, None);
+
+        let applied = vec![applied_control("a", vec![Check::Attestation], Vec::new())];
+        let evidence = Evidence { attestations: vec![attestation], ..Default::default() };
+        let statuses = evaluate(&applied, &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Attested);
     }
 
     #[test]
@@ -3104,6 +3173,7 @@ mod tests {
                 attested_at: now - chrono::Duration::days(400),
                 expires_at: now - chrono::Duration::days(1),
                 withdrawn: None,
+                clock: None,
             }],
             ..Default::default()
         };
@@ -3165,6 +3235,7 @@ mod tests {
                 attested_at: now,
                 expires_at: now + chrono::Duration::days(30),
                 withdrawn: None,
+                clock: None,
             }],
             ..Default::default()
         };

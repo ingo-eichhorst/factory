@@ -14,6 +14,7 @@ use factory_core::knowledge::FindingKind;
 use factory_core::metrics::{MetricId, MetricsWindow};
 use factory_core::operations::{self as ops, HealthWindow, OperationsReport};
 use factory_core::policy::{self, ControlRef};
+use factory_core::reporting_clock::{self, ClockDeadlineKind, ClockItemRef, ClockMark};
 use factory_core::protocol::{
     GoalsReport, Payload, PolicyControlDetail, PolicyReport, Request, Response, ScenarioPromoteResult, ScenarioResult, ScenariosReport,
 };
@@ -592,11 +593,33 @@ enum PolicyCmd {
         #[arg(long)]
         evidence: String,
         /// `30d`, `12w`, a bare date (`2027-01-01`), or a full RFC3339
-        /// timestamp.
+        /// timestamp. Defaults to `520w` (chosen since `Duration` has no
+        /// years) when `--clock-item` is given -- CRA evidence is kept far
+        /// longer than an ordinary attestation's expiry ever matters for --
+        /// and is otherwise required.
         #[arg(long)]
-        expires: String,
+        expires: Option<String>,
         #[arg(long)]
         note: Option<String>,
+        /// Also submit against a CRA Art. 14 reporting-clock item (`#157`,
+        /// phase 1): `finding:<scope>:<vulnerability>` or
+        /// `report:<task-id>`, from `factory policy clock`. Requires
+        /// `--deadline`.
+        #[arg(long = "clock-item", requires = "deadline")]
+        clock_item: Option<String>,
+        /// Which of `--clock-item`'s two deadlines this submits:
+        /// `early-warning` or `notification`. Requires `--clock-item`.
+        #[arg(long, requires = "clock_item")]
+        deadline: Option<String>,
+    },
+    /// The CRA Art. 14 reporting clock (`#157`, phase 1): every exploited L2
+    /// finding and confirmed L4 security report's 24-hour early-warning and
+    /// 72-hour notification deadlines. `--scope` narrows to that subtree,
+    /// the whole instance when absent -- the same rollup `status` itself
+    /// uses.
+    Clock {
+        #[arg(long)]
+        scope: Option<String>,
     },
     /// Withdraw a previously recorded attestation. Appends a new row; the
     /// one it names is never edited.
@@ -2886,14 +2909,35 @@ async fn policy_cmd(json: bool, client: &Client, cmd: PolicyCmd) -> Result<()> {
             })
         }
 
-        PolicyCmd::Attest { control, scope, evidence, expires, note } => {
+        PolicyCmd::Attest { control, scope, evidence, expires, note, clock_item, deadline } => {
             let control: ControlRef = control.parse().map_err(|e: String| anyhow!(e))?;
+            let clock = match (clock_item, deadline) {
+                (Some(item), Some(deadline)) => {
+                    let item: ClockItemRef = item.parse().map_err(|e: String| anyhow!(e))?;
+                    let deadline: ClockDeadlineKind = deadline.parse().map_err(|e: String| anyhow!(e))?;
+                    Some(ClockMark { item, deadline })
+                }
+                _ => None,
+            };
+            let expires = match expires {
+                Some(e) => e,
+                None if clock.is_some() => "520w".to_string(),
+                None => return Err(anyhow!("--expires is required unless --clock-item is given")),
+            };
             let expires_at = policy::parse_expiry(&expires, chrono::Utc::now()).map_err(|e| anyhow!(e))?;
             let payload = client
-                .send(Request::PolicyAttest { control, scope, evidence, note, expires_at })
+                .send(Request::PolicyAttest { control, scope, evidence, note, expires_at, clock })
                 .await?;
             print(&payload, json, |p| match p {
                 Payload::PolicyAttestation { attestation } => Some(attestation_line(attestation)),
+                _ => None,
+            })
+        }
+
+        PolicyCmd::Clock { scope } => {
+            let payload = client.send(Request::PolicyClock { scope }).await?;
+            print(&payload, json, |p| match p {
+                Payload::PolicyClock { clock } => Some(policy_clock_text(clock)),
                 _ => None,
             })
         }
@@ -3112,6 +3156,42 @@ fn attestation_line(a: &factory_core::policy::Attestation) -> String {
         a.attested_at.to_rfc3339(),
         a.expires_at.to_rfc3339(),
     )
+}
+
+/// `factory policy clock [--scope]`: one block per item, its awareness time
+/// and whether the newest evidence still reports it, then either why it is
+/// excluded or its two deadlines and whatever submission met (or missed)
+/// each one.
+fn policy_clock_text(clock: &reporting_clock::ReportingClock) -> String {
+    if clock.items.is_empty() {
+        return "no reporting-clock items".to_string();
+    }
+    let mut out = String::new();
+    for item in &clock.items {
+        out.push_str(&format!(
+            "{}  scope={}  aware {}{}\n",
+            item.item,
+            item.scope,
+            item.awareness_at.to_rfc3339(),
+            if item.reported_now { "" } else { "  (not in the newest scan)" },
+        ));
+        if let Some(state) = &item.excluded {
+            out.push_str(&format!("  excluded: {state}\n"));
+            continue;
+        }
+        for deadline in &item.deadlines {
+            let submission = deadline
+                .submission
+                .as_ref()
+                .map(|s| format!("  ({} by {} at {})", s.attestation, s.by, s.at.to_rfc3339()))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "  {:<14} due {}  {}{submission}\n",
+                deadline.deadline, deadline.due_at.to_rfc3339(), deadline.state,
+            ));
+        }
+    }
+    out.trim_end().to_string()
 }
 
 // ================================================================== metrics
