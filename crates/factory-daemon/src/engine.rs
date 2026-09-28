@@ -873,6 +873,9 @@ impl Engine {
             Request::Policy { scope } => Ok(Payload::Policy {
                 report: self.policy_report(scope.as_deref()).await?,
             }),
+            Request::PolicyClock { scope } => Ok(Payload::PolicyClock {
+                clock: self.policy_clock(scope.as_deref()).await?,
+            }),
             Request::PolicyControl { control, scope } => Ok(Payload::PolicyControl {
                 detail: self.policy_control(control, &scope).await?,
             }),
@@ -882,9 +885,10 @@ impl Engine {
                 evidence,
                 note,
                 expires_at,
+                clock,
             } => {
                 let attestation = self
-                    .policy_attest(caller, control, scope, evidence, note, expires_at)
+                    .policy_attest(caller, control, scope, evidence, note, expires_at, clock)
                     .await?;
                 self.bus.publish(Event::PolicyChanged {
                     scope: attestation.scope.clone(),

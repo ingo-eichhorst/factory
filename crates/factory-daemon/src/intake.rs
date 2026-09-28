@@ -2479,4 +2479,44 @@ mod tests {
         let none = restarted.confirmed_security_reports(Some("web")).await.unwrap();
         assert!(none.is_empty());
     }
+
+    /// The CRA reporting clock's own reason for `ConfirmedSecurityReport.parent`
+    /// (`#157`, phase 1): a confirmed report split through the real path
+    /// (`intake_split`) carries `parent`, and folding every report in the
+    /// chain through `reporting_clock::compute` shows exactly one item, at
+    /// the *root's* `received_at` -- never a part's own (later) split time.
+    #[tokio::test]
+    async fn a_split_confirmed_report_carries_parent_and_the_clock_counts_it_once() {
+        let engine = engine();
+        let item = add(&engine, "Everything at once, and it's exploited").await;
+        engine.intake_flag_security(&Caller::Owner, &item.id, "reported upstream").await.unwrap();
+        let confirmed = engine
+            .intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "verified")
+            .await
+            .unwrap();
+        let root_awareness = confirmed.intake.as_ref().unwrap().received_at;
+
+        engine.intake_assess(&Caller::Owner, &item.id, too_big(), true).await.unwrap();
+        let split = engine.intake_decide(&Caller::Owner, &item.id, Decision::Split { parts: vec![] }).await.unwrap();
+        let parts = split.intake.as_ref().unwrap().decision.as_ref().unwrap().parts.clone();
+        assert_eq!(parts.len(), 2);
+
+        let reports = engine.confirmed_security_reports(None).await.unwrap();
+        assert_eq!(reports.len(), 3, "the root and both parts are each their own confirmed report");
+        let root_report = reports.iter().find(|r| r.item == item.id).unwrap();
+        assert_eq!(root_report.parent, None);
+        for part_id in &parts {
+            let part_report = reports.iter().find(|r| &r.item == part_id).unwrap();
+            assert_eq!(part_report.parent.as_deref(), Some(item.id.as_str()));
+            assert_ne!(
+                part_report.awareness_at, root_awareness,
+                "a part's own received_at is the split's time, not proof the test is meaningless"
+            );
+        }
+
+        let clock = factory_core::reporting_clock::compute(&[], &reports, &[], Utc::now());
+        assert_eq!(clock.items.len(), 1, "the whole chain counts once");
+        assert_eq!(clock.items[0].item, factory_core::reporting_clock::ClockItemRef::Report { item: item.id.clone() });
+        assert_eq!(clock.items[0].awareness_at, root_awareness, "the root's own awareness, never a part's");
+    }
 }

@@ -420,6 +420,13 @@ pub struct ConfirmedSecurityReport {
     pub source: IntakeSource,
     pub confirmed_by: String,
     pub confirmed_at: DateTime<Utc>,
+    /// The intake item this was split from (`PARENT_LABEL`), if any. The CRA
+    /// reporting clock (`#157`, phase 1) follows this upward while the
+    /// parent is itself a confirmed report, and counts a whole split chain
+    /// once, at its root's own `awareness_at` -- a part's own `received_at`
+    /// is the split's time, not the original receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 /// `task`'s confirmed report, if it has one -- whatever the task's current
@@ -439,6 +446,7 @@ pub fn confirmed_report(task: &Task) -> Option<ConfirmedSecurityReport> {
         source: (*intake.source).clone(),
         confirmed_by: flag.decided_by.clone().unwrap_or_default(),
         confirmed_at: flag.decided_at.unwrap_or(intake.received_at),
+        parent: task.labels.get(PARENT_LABEL).cloned(),
     })
 }
 

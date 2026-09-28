@@ -54,3 +54,13 @@ controls:
     title: A coordinated vulnerability disclosure policy is published
     evidence:
       - check: knowledge
+
+  - id: art-14
+    title: Actively exploited vulnerabilities and severe incidents are reported (Art. 14)
+    remediation: |
+      Submit the early warning or notification the CRA Art. 14 reporting
+      clock (`factory policy clock`) is waiting on, then record it with
+      `factory policy attest cra/art-14 --scope <scope> --evidence <pointer>
+      --clock-item <item> --deadline <early-warning|notification>`.
+    evidence:
+      - check: attestation

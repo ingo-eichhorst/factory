@@ -572,6 +572,17 @@ pub enum Request {
         #[serde(default)]
         scope: Option<String>,
     },
+    /// The CRA Art. 14 reporting clock (`#157`, phase 1): the 24-hour early
+    /// warning and 72-hour notification deadlines for every exploited L2
+    /// finding and confirmed L4 security report over `scope`'s subtree (the
+    /// whole instance when `scope` is `None`) -- the same rollup
+    /// `Request::Policy` itself uses. Computed fresh on every read, like
+    /// `Policy` (ADR 0004: no status table). Read-only.
+    #[serde(rename = "policy.clock")]
+    PolicyClock {
+        #[serde(default)]
+        scope: Option<String>,
+    },
     /// One control's full detail at `scope`: its catalogue data, its status
     /// there, and its whole attestation history for that scope and its
     /// ancestors. Read-only.
@@ -595,6 +606,15 @@ pub enum Request {
         #[serde(default)]
         note: Option<String>,
         expires_at: chrono::DateTime<chrono::Utc>,
+        /// A submission against the CRA Art. 14 reporting clock (`#157`,
+        /// phase 1) -- absent for an ordinary attestation. `policy_attest`
+        /// refuses it against any control but `cra/art-14`, an item that
+        /// does not exist or belongs to a scope other than the canonical
+        /// `scope` above, an excluded item, or a deadline that already has
+        /// a live (unwithdrawn) submission. Uses the same grant and
+        /// root-scope reach as an ordinary attestation -- not a new door.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clock: Option<crate::reporting_clock::ClockMark>,
     },
     /// Withdraw a previously recorded attestation. Append-only like the rest
     /// of the store: this writes a new row that references `id`, and never
@@ -1079,6 +1099,8 @@ pub enum Payload {
     BenchRuns { runs: Vec<crate::bench::BenchRun> },
     /// The L6 Policy tab -- see `PolicyReport`.
     Policy { report: PolicyReport },
+    /// The answer to `Request::PolicyClock`.
+    PolicyClock { clock: crate::reporting_clock::ReportingClock },
     /// The answer to `Request::PolicyControl`.
     PolicyControl { detail: PolicyControlDetail },
     /// The answer to `Request::PolicyAttest`/`Request::PolicyWithdraw`: the

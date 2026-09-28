@@ -228,6 +228,7 @@ mod tests {
             attested_at: t(2026, 1, 1),
             expires_at: t(2026, 6, 1),
             withdrawn: None,
+            clock: None,
         };
         let report = PolicyReport {
             scope: Some("demo".to_string()),

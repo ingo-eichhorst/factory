@@ -296,6 +296,10 @@ impl Engine {
             | Request::BenchRuns { .. }
             | Request::BenchRunGet { .. }
             | Request::Policy { .. }
+            // The CRA Art. 14 reporting clock (`#157`, phase 1): a
+            // projection over the same L2/L4 reads `Policy` folds, and
+            // itself computed fresh on every call. Open the same way.
+            | Request::PolicyClock { .. }
             | Request::PolicyControl { .. }
             | Request::PolicyExport { .. }
             | Request::Metrics { .. }
@@ -1001,6 +1005,7 @@ mod tests {
             evidence: "https://example.com/policy".into(),
             note: None,
             expires_at: Utc::now() + chrono::Duration::days(30),
+            clock: None,
         };
         let withdraw = Request::PolicyWithdraw { id: "att-1".into(), reason: None };
 
@@ -1044,6 +1049,7 @@ mod tests {
                     evidence: "https://example.com/policy".into(),
                     note: None,
                     expires_at: Utc::now() + chrono::Duration::days(30),
+                    clock: None,
                 }
             )
             .await
@@ -1060,6 +1066,7 @@ mod tests {
                     evidence: "https://example.com/policy".into(),
                     note: None,
                     expires_at: Utc::now() + chrono::Duration::days(30),
+                    clock: None,
                 }
             )
             .await
@@ -2271,6 +2278,48 @@ mod tests {
         let e = engine();
         assert!(allowed(&e, &worker("w"), Request::IntakeSecurityReports { scope: None }).await);
         assert!(allowed(&e, &Caller::Owner, Request::IntakeSecurityReports { scope: None }).await);
+    }
+
+    /// The CRA Art. 14 reporting clock (`#157`, phase 1) is a read, open the
+    /// same way `Request::Policy`/`Request::IntakeSecurityReports` are.
+    #[tokio::test]
+    async fn policy_clock_needs_no_grant() {
+        let e = engine();
+        assert!(allowed(&e, &worker("w"), Request::PolicyClock { scope: None }).await);
+        assert!(allowed(&e, &Caller::Owner, Request::PolicyClock { scope: None }).await);
+    }
+
+    /// A clock submission (`Request::PolicyAttest.clock`) is still an
+    /// ordinary `policy.attest` write underneath -- carrying one must never
+    /// let a `reach: own` role bypass the scope-reach rule an ordinary
+    /// attestation is already checked against.
+    #[tokio::test]
+    async fn policy_attest_with_a_clock_mark_is_still_refused_to_an_own_reach_agent() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  attestor:\n    grants: [policy.attest]\n    reach: own\n",
+        );
+        let caller = Caller::Agent {
+            scope: "demo".into(),
+            name: "w".into(),
+            role: Role::new("attestor"),
+            run_id: None,
+        };
+        let attest = Request::PolicyAttest {
+            control: "cra/art-14".parse().unwrap(),
+            scope: "demo".into(),
+            evidence: "https://example.com/notice".into(),
+            note: None,
+            expires_at: Utc::now() + chrono::Duration::days(30),
+            clock: Some(factory_core::reporting_clock::ClockMark {
+                item: factory_core::reporting_clock::ClockItemRef::Finding {
+                    scope: "demo".into(),
+                    vulnerability: "CVE-2026-1".into(),
+                },
+                deadline: factory_core::reporting_clock::ClockDeadlineKind::EarlyWarning,
+            }),
+        };
+        assert!(!allowed(&e, &caller, attest).await);
     }
 
     // -- roles inherited down the scope tree -------------------------------
