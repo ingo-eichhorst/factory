@@ -125,85 +125,14 @@ pub enum Kind {
 }
 
 /// A freshness window, written in the catalogue as `Nd`, `Nh`, or `Nw`
-/// (days, hours, weeks). Stored as whole hours, so two durations compare
-/// and take a minimum exactly, with nothing to round at the edges.
-/// `chrono::Duration` has no serde support of its own and no `Ord`, so this
-/// is its own small type rather than a wrapper around that one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Duration {
-    hours: u64,
-}
-
-impl Duration {
-    pub fn from_hours(hours: u64) -> Self {
-        Self { hours }
-    }
-
-    pub fn as_hours(&self) -> u64 {
-        self.hours
-    }
-
-    /// This window as a `chrono::TimeDelta`, capped at `TimeDelta::MAX`
-    /// rather than panicking. The grammar happily parses `9999999999999999h`,
-    /// which is far past what a `TimeDelta` holds, and `TimeDelta::hours`
-    /// panics on that; a window that long means "never stale" either way.
-    /// The one conversion every freshness check here and in `quality.rs`
-    /// goes through.
-    pub fn as_time_delta(&self) -> chrono::TimeDelta {
-        i64::try_from(self.hours)
-            .ok()
-            .and_then(chrono::TimeDelta::try_hours)
-            .unwrap_or(chrono::TimeDelta::MAX)
-    }
-}
-
-impl std::str::FromStr for Duration {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let bad = || format!("{s:?} is not a duration like 30d, 12h, or 2w");
-        if s.len() < 2 {
-            return Err(bad());
-        }
-        let (num, unit) = s.split_at(s.len() - 1);
-        let n: u64 = num.parse().map_err(|_| bad())?;
-        let hours = match unit {
-            "h" => Some(n),
-            "d" => n.checked_mul(24),
-            "w" => n.checked_mul(24 * 7),
-            _ => None,
-        }
-        .ok_or_else(bad)?;
-        Ok(Duration { hours })
-    }
-}
-
-impl std::fmt::Display for Duration {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.hours != 0 && self.hours.is_multiple_of(24 * 7) {
-            write!(f, "{}w", self.hours / (24 * 7))
-        } else if self.hours != 0 && self.hours.is_multiple_of(24) {
-            write!(f, "{}d", self.hours / 24)
-        } else {
-            write!(f, "{}h", self.hours)
-        }
-    }
-}
-
-impl TryFrom<String> for Duration {
-    type Error = String;
-
-    fn try_from(s: String) -> std::result::Result<Self, Self::Error> {
-        s.parse()
-    }
-}
-
-impl From<Duration> for String {
-    fn from(d: Duration) -> String {
-        d.to_string()
-    }
-}
+/// (days, hours, weeks). Moved to the L0 kernel (#193, phase 1, F7): it is
+/// imported below L6 (`dependencies.rs`, `quality.rs`, `config.rs`, and the
+/// daemon's own `dependencies.rs` tests), so it belongs where nothing above
+/// it can accidentally deepen the dependency the wrong way. Re-exported
+/// here unchanged, so `policy.rs` and everything L6 and up keeps naming it
+/// `policy::Duration` and the serialized form -- `"30d"`, `"12h"`, `"2w"` --
+/// stays exactly what it was.
+pub use factory_kernel::Duration;
 
 /// A control's stable identity, everywhere but inside the file that defines
 /// it: `framework/id`, e.g. `cra/annex-i-2-1`. Serializes as exactly that
@@ -2198,20 +2127,17 @@ mod tests {
         assert!("framework/".parse::<ControlRef>().is_err());
     }
 
-    // -- Duration ----------------------------------------------------------
+    // -- Duration ------------------------------------------------------------
+    //
+    // `Duration` itself -- parsing, `Display`, and the overflow cap -- moved
+    // to `factory-kernel` with the type (#193, phase 1, F7); see
+    // `factory_kernel::duration::tests`. What is left here is policy-level:
+    // `within_max_age` and `parse_expiry` are this module's own functions,
+    // not the kernel's, so their tests stay, using the re-exported type.
 
     #[test]
-    fn a_duration_parses_days_hours_and_weeks() {
-        assert_eq!("30d".parse::<Duration>().unwrap().as_hours(), 30 * 24);
-        assert_eq!("12h".parse::<Duration>().unwrap().as_hours(), 12);
-        assert_eq!("2w".parse::<Duration>().unwrap().as_hours(), 2 * 24 * 7);
-    }
-
-    #[test]
-    fn an_absurdly_long_duration_caps_instead_of_panicking() {
+    fn an_absurdly_long_max_age_never_looks_stale_and_refuses_as_an_expiry() {
         let huge: Duration = "9999999999999999h".parse().unwrap();
-        assert_eq!(huge.as_time_delta(), chrono::TimeDelta::MAX);
-        assert_eq!("2d".parse::<Duration>().unwrap().as_time_delta(), chrono::TimeDelta::hours(48));
         let now = Utc::now();
         assert!(within_max_age(Some(huge), now - chrono::TimeDelta::days(10_000), now), "never stale");
         let e = parse_expiry("9999999999999999h", now).unwrap_err();
@@ -2240,13 +2166,6 @@ mod tests {
             vec![FindingKind::UnknownSecretsLocation, FindingKind::UnknownSecretsLocation]
         );
         assert!(found[0].1.contains("gitlab"), "{}", found[0].1);
-    }
-
-    #[test]
-    fn a_duration_refuses_an_unknown_unit_or_a_bare_number() {
-        assert!("30m".parse::<Duration>().is_err());
-        assert!("30".parse::<Duration>().is_err());
-        assert!("abc".parse::<Duration>().is_err());
     }
 
     // -- parse_expiry --------------------------------------------------------

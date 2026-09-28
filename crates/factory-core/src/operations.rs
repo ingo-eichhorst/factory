@@ -55,7 +55,7 @@
 //!
 //! Every percentile here is nearest-rank over the sorted samples --
 //! `index = round(p * (n - 1))`, the rule `scenario.rs` already uses for its
-//! forecasts (one method, one place: [`crate::scenario::nearest_rank`]).
+//! forecasts (one method, one place: [`factory_kernel::nearest_rank`]).
 //! A run's pace is judged against the cycle times of its own task's
 //! finished runs when there are at least [`MIN_HISTORY`] of them, else its
 //! scope's, else not at all: fewer than [`MIN_HISTORY`] finished runs is
@@ -174,12 +174,7 @@ pub fn queue_wait(run: &Run) -> Option<f64> {
 
 /// Nearest-rank percentile of `values` (any order), `None` when empty.
 pub fn percentile(values: &[f64], p: f64) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.total_cmp(b));
-    Some(sorted[crate::scenario::nearest_rank(sorted.len(), p)])
+    factory_kernel::percentile(values, p)
 }
 
 /// The four lines of the Aging WIP chart, from finished runs' cycle times.

@@ -15,9 +15,9 @@ use factory_core::config::{Factory, Sandbox, ScopeAgent, SHELL_HARNESS};
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
-    AgentActivity, AgentView, CapacityRow, CredentialRow, DaemonFacts, Envelope, InterfaceFacts, Payload,
-    ProviderAgent, ProviderRow, ProviderRun, ProviderWindow, Request, Response, RuntimeConnectionView,
-    SandboxRow, ScopeView, StatusInfo, StoreFacts, UnassignedAgent,
+    AgentActivity, AgentView, CapacityRow, CredentialRow, DaemonFacts, Envelope, Payload, ProviderAgent,
+    ProviderRow, ProviderRun, ProviderWindow, Request, Response, RuntimeConnectionView, SandboxRow,
+    ScopeView, StatusInfo, StoreFacts, UnassignedAgent,
 };
 use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
@@ -1446,23 +1446,7 @@ impl Engine {
 
         let database = factory.database_path();
         let size_bytes = tokio::fs::metadata(&database).await.ok().map(|m| m.len());
-        let interfaces = daemon_config
-            .interfaces
-            .iter()
-            .map(|interface| InterfaceFacts {
-                kind: interface.kind.clone(),
-                bind: match interface.kind.as_str() {
-                    // A socket, shown on its own line, not an address.
-                    "cli" => None,
-                    "http" => Some(
-                        interface
-                            .string("bind")
-                            .unwrap_or_else(|| crate::interfaces::http::DEFAULT_BIND.to_string()),
-                    ),
-                    _ => interface.string("bind"),
-                },
-            })
-            .collect();
+        let interfaces = crate::interfaces::interface_facts(&daemon_config.interfaces);
         // The herdr session is the daemon's own operational setting, which
         // its service definition sets and every herdr call it makes
         // inherits -- not a credential, and not a provider's `env:`, which is
@@ -4844,7 +4828,7 @@ mod tests {
             daemon.interfaces.iter().map(|i| (i.kind.as_str(), i.bind.as_deref())).collect();
         assert_eq!(
             interfaces,
-            vec![("cli", None), ("http", Some(crate::interfaces::http::DEFAULT_BIND))],
+            vec![("cli", None), ("http", Some(factory_core::config::DEFAULT_HTTP_BIND))],
             "the default interfaces, with the address http falls back to"
         );
         assert!(daemon.started_at <= Utc::now());

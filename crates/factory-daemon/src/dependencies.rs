@@ -792,7 +792,7 @@ mod tests {
         }
     }
 
-    fn scope(max_age: Option<factory_core::policy::Duration>) -> Scope {
+    fn scope(max_age: Option<factory_kernel::Duration>) -> Scope {
         serde_yaml_ng::from_str::<Scope>("name: demo")
             .map(|mut scope| {
                 scope.dependencies = DependenciesConfig {

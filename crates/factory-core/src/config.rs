@@ -1,6 +1,7 @@
 use crate::agent::Lifetime;
 use crate::dashboard::DashboardConfig;
-use crate::policy::{ControlRef, Duration, NotApplicable, PolicyLayer, Tighten};
+use crate::policy::{ControlRef, NotApplicable, PolicyLayer, Tighten};
+use factory_kernel::Duration;
 use crate::quality::QualityLayer;
 use crate::ready::IntakeLayer;
 use crate::role::{Role, RoleOrigin, RoleSpec, Roles};
@@ -964,6 +965,15 @@ impl Default for DaemonConfig {
     }
 }
 
+/// The `http` interface's bind address when its own `settings` name none --
+/// the listener's fallback, and now the one place that fallback is written
+/// down (#193, phase 1, F8): `interfaces/http.rs`'s listener,
+/// `Engine::infrastructure` (`DaemonFacts.interfaces`), and
+/// `policies::daemon_facts` (`http_loopback_only`) all resolve an http
+/// interface's bind through [`InterfaceConfig::http_bind`] rather than each
+/// keeping its own copy of this constant.
+pub const DEFAULT_HTTP_BIND: &str = "127.0.0.1:8787";
+
 /// An interface adapter to mount. `kind` names the adapter; everything else is
 /// passed through untouched, so a plugin interface can carry its own settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -979,6 +989,14 @@ impl InterfaceConfig {
             serde_yaml_ng::Value::String(s) => Some(s.clone()),
             other => serde_yaml_ng::to_string(other).ok().map(|s| s.trim().to_string()),
         })
+    }
+
+    /// The bind this interface would use as `http`: its own `settings.bind`
+    /// when it names one, else [`DEFAULT_HTTP_BIND`]. Every reader of a
+    /// configured http interface's address goes through this rather than
+    /// repeating the fallback.
+    pub fn http_bind(&self) -> String {
+        self.string("bind").unwrap_or_else(|| DEFAULT_HTTP_BIND.to_string())
     }
 }
 
@@ -1997,6 +2015,24 @@ mod tests {
         .unwrap();
         scope.path = PathBuf::from(path);
         scope
+    }
+
+    /// Locks `Duration`'s wire form inside a real config struct, not just
+    /// the type on its own: moving it into `factory-kernel` must not change
+    /// so much as a byte of what `max_age: 30d` looks like on disk (#193,
+    /// phase 1, F7). See `factory_kernel::duration::tests` for the JSON side
+    /// of the same lock.
+    #[test]
+    fn a_dependencies_max_age_round_trips_through_yaml_byte_identically() {
+        let cfg = DependenciesConfig {
+            scan_workflow: None,
+            max_age: Some("30d".parse().unwrap()),
+            services: Vec::new(),
+        };
+        let yaml = serde_yaml_ng::to_string(&cfg).unwrap();
+        assert_eq!(yaml, "max_age: 30d\n", "serialized form must stay byte-identical");
+        let back: DependenciesConfig = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(back.max_age, cfg.max_age);
     }
 
     #[test]

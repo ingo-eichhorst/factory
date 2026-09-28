@@ -23,8 +23,6 @@ use std::sync::Arc;
 
 use crate::engine::Engine;
 
-pub const DEFAULT_BIND: &str = "127.0.0.1:8787";
-
 pub struct HttpInterface;
 
 #[async_trait]
@@ -43,10 +41,7 @@ impl Interface<Engine> for HttpInterface {
         ctx: InterfaceContext,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<()> {
-        let bind = ctx
-            .config
-            .string("bind")
-            .unwrap_or_else(|| DEFAULT_BIND.to_string());
+        let bind = ctx.config.http_bind();
 
         let app = router(engine);
 

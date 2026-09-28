@@ -280,20 +280,19 @@ impl Engine {
     /// config snapshot -- the same for every scope a report evaluates
     /// (`Evidence::gates`' own reasoning), so this is resolved once, not per
     /// scope, and it is a plain sync read: no store, no filesystem walk,
-    /// just the config `Engine::infrastructure` already reads for
-    /// `DaemonFacts.interfaces`.
+    /// no call through `Engine::infrastructure` (which does both, for the
+    /// host and store facts `DaemonFacts` also carries). It shares
+    /// `crate::interfaces::interface_facts` with `infrastructure` instead --
+    /// the one derivation of what each configured interface actually binds
+    /// to (#193, phase 1, F8) -- so the two never drift apart.
     fn daemon_facts(&self) -> policy::DaemonFact {
         let snapshot = self.factory_snapshot();
         let daemon_config = &snapshot.config.daemon;
 
-        let http_binds: Vec<String> = daemon_config
-            .interfaces
-            .iter()
+        let http_binds: Vec<String> = crate::interfaces::interface_facts(&daemon_config.interfaces)
+            .into_iter()
             .filter(|i| i.kind == "http")
-            .map(|i| {
-                i.string("bind")
-                    .unwrap_or_else(|| crate::interfaces::http::DEFAULT_BIND.to_string())
-            })
+            .filter_map(|i| i.bind)
             .collect();
         // No `http` interface at all is vacuously loopback-only -- nothing
         // is exposed beyond loopback either way. A `bind` that does not
@@ -1034,8 +1033,9 @@ mod tests {
 
     use super::*;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance, InterfaceConfig, PolicyDeclaration, Scope};
     use factory_core::policy::{ControlStatus, StatusKind};
+    use factory_core::protocol::Payload;
     use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
     use factory_plugins::{Registry, SqliteStore};
     use std::collections::BTreeMap;
@@ -1555,6 +1555,39 @@ mod tests {
         Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()))
     }
 
+    /// A bare-bones engine for the F8 mutation test below (`#193`, phase 1):
+    /// no policy catalogue at all -- `infrastructure()` and `daemon_facts()`
+    /// need none -- just an interfaces list the caller sets directly.
+    fn engine_with_interfaces(interfaces: Vec<InterfaceConfig>) -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-policies-f8-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig { interfaces, ..DaemonConfig::default() },
+            scope: None,
+            scopes: Vec::new(),
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    fn http_interface(bind: Option<&str>) -> InterfaceConfig {
+        let mut settings = BTreeMap::new();
+        if let Some(bind) = bind {
+            settings.insert("bind".to_string(), serde_yaml_ng::Value::String(bind.to_string()));
+        }
+        InterfaceConfig { kind: "http".into(), settings }
+    }
+
     #[tokio::test]
     async fn roles_is_satisfied_with_no_agent_and_open_once_a_synthesised_foreman_holds_the_forbidden_grant() {
         let engine = l123_test_engine();
@@ -1626,6 +1659,52 @@ mod tests {
         assert!(facts.foreman_enabled);
         assert_eq!(facts.http_loopback_only, Some(true), "the default bind, 127.0.0.1:8787, is loopback");
         assert!(facts.power_assertion);
+    }
+
+    /// `#193`, phase 1, F8's mutation test: `daemon_facts`'s
+    /// `http_loopback_only` must equal "all HTTP binds in
+    /// `infrastructure().interfaces` are loopback" over four configs -- no
+    /// `http` interface at all, an explicit loopback bind, a wide-open
+    /// `0.0.0.0` bind, and a bare hostname that cannot be parsed as a socket
+    /// address. Checking against both an oracle computed straight from
+    /// `infrastructure()`'s own output *and* a hardcoded expectation catches
+    /// either side silently going back to deriving the bind on its own --
+    /// two derivations that drifted the same wrong way would still agree
+    /// with each other, but not with the hardcoded value.
+    #[tokio::test]
+    async fn http_loopback_only_matches_infrastructures_own_interfaces_over_four_configs() {
+        async fn check(interfaces: Vec<InterfaceConfig>, want: Option<bool>) {
+            let engine = engine_with_interfaces(interfaces);
+
+            let Payload::Infrastructure { daemon, .. } = engine.infrastructure().await else {
+                panic!("not an infrastructure payload");
+            };
+            let oracle: Option<bool> = {
+                let http_binds: Vec<&str> =
+                    daemon.interfaces.iter().filter(|i| i.kind == "http").filter_map(|i| i.bind.as_deref()).collect();
+                if http_binds.is_empty() {
+                    Some(true)
+                } else {
+                    http_binds
+                        .iter()
+                        .map(|bind| bind.parse::<std::net::SocketAddr>().map(|addr| addr.ip().is_loopback()))
+                        .collect::<std::result::Result<Vec<bool>, _>>()
+                        .ok()
+                        .map(|loopback| loopback.iter().all(|l| *l))
+                }
+            };
+            assert_eq!(oracle, want, "the oracle itself must match the fixed expectation for this config");
+            assert_eq!(
+                engine.daemon_facts().http_loopback_only,
+                oracle,
+                "policy's http_loopback_only must equal infrastructure()'s own interfaces"
+            );
+        }
+
+        check(vec![], Some(true)).await;
+        check(vec![http_interface(Some("127.0.0.1:9000"))], Some(true)).await;
+        check(vec![http_interface(Some("0.0.0.0:8787"))], Some(false)).await;
+        check(vec![http_interface(Some("example.internal:8787"))], None).await;
     }
 
     /// `#154`: `dataset_level_facts` never gathers the backup fact when no

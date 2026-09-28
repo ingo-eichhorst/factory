@@ -3418,6 +3418,7 @@ unchanged.
 
 ## Layout
 
+    crates/factory-kernel    L0: pure vocabulary shared by every level (Duration, nearest_rank/percentile) -- depends on no other factory-* crate
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
