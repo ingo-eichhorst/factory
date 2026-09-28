@@ -1360,7 +1360,9 @@ impl Engine {
                 usage: self.task_usage(&id).await?,
             }),
             Request::Costs { group_by, from, to, scope } => Ok(Payload::Costs {
-                report: self.costs_report(group_by, from, to, scope.as_deref()).await?,
+                report: self
+                    .spend(&factory_core::usage::SpendQuery { scope, from, to, group_by })
+                    .await?,
             }),
             Request::RunEntries { id, limit } => Ok(Payload::Entries {
                 entries: self.store.run_entries(&id, limit.unwrap_or(200)).await?,

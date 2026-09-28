@@ -992,6 +992,7 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met | the selected scope's quality subtree — see "Quality attributes" |
 | `unit_cost` | API-equivalent USD spent per run ended `done` (failed and cancelled runs' cost included), trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 | `tokens_per_run` | mean tokens of every type per finished run, trailing 28 days | each run's measured usage (`Run.usage`, #117) |
+| `cost_week` | known API-equivalent USD spent over runs *started* (not ended) in the trailing 7 days; no value if any run in the window is unknown, cost-unknown or partial | `Engine::spend`, the same read `factory cost` and `GET /api/costs` answer from (#164) |
 | `estimate_accuracy` | share of finished runs with an `original_estimate` whose terminal wall time fell inside its `[low, high]`, trailing 28 days | each run's `original_estimate` and wall time (`Run.original_estimate`, #168) |
 | `ready_rate` | ready decisions over every intake decision event (ready, needs-info, wontfix, split), trailing 28 days | the task journal's intake decision events (#165) |
 | `needs_info_rate` | needs-info decisions over every intake decision event, trailing 28 days -- the same shared denominator as `ready_rate` | the task journal's intake decision events (#165) |
@@ -1004,11 +1005,12 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 /api/metrics?ids=a,b&scope=<name>&window=day|14d|90d` select one scope plus
 its descendants and one trailing interval. Both parameters are optional.
 Without `scope`, scope-aware metrics cover the whole instance. Without
-`window`, established defaults stay unchanged: seven days for throughput,
-28 days for production ratios, operations, usage, and the intake metrics,
-and 14 days for the hour metrics. An explicit window overrides all
-run-backed families, the intake metrics included. Unknown scopes and
-unsupported windows are errors, not empty reports.
+`window`, established defaults stay unchanged: seven days for throughput and
+`cost_week` (over runs *started*, unlike the 28-day usage metrics below,
+which read `ended_at`), 28 days for production ratios, operations, usage,
+and the intake metrics, and 14 days for the hour metrics. An explicit window
+overrides all run-backed families, the intake metrics included. Unknown
+scopes and unsupported windows are errors, not empty reports.
 
 Every definition in the response registry carries `coverage`:
 `scope_aware` means it follows that subtree; `instance_wide` means it does
@@ -2113,16 +2115,23 @@ pane reused from an earlier run is never billed twice. Rules:
 ```sh
 factory run show <run-id>        # the usage block
 factory task show <id>           # every run's usage and the sum
-factory cost --by issue --since 7d   # task | issue | scope | agent | provider
+factory cost --by issue --since 7d   # task | issue | scope | agent | provider | workflow
 factory cost --by agent --scope projects/factory --since 2026-09-01
 factory cost --by provider --since 30d
+factory cost --by workflow --since 7d
 ```
 
 `GET /api/costs?group_by=&from=&to=&scope=`, `GET /api/tasks/{id}/usage` and
 `GET /api/runs/{id}/usage` answer the same. Grouping by `issue` reads the
-task's `issue=<n>` label. Sums are over the runs that knew the number, and
-beside them is how many did not: an unmeasured run is counted, never dropped
-and never free. The registry metrics `unit_cost`, `tokens_per_run` and
+task's `issue=<n>` label; grouping by `workflow` (#164) reads the task's own
+`workflow_origin.workflow_id`, labelled with that workflow definition's name
+-- `(no workflow)` for a standalone task, `(deleted task)` when the task
+itself is gone (its workflow is unknown, never "standalone"). Both
+`factory cost` and `GET /api/costs` read `Engine::spend`, the one path every
+consumer of spend -- the CLI, the HTTP endpoint, and the `cost_week` metric
+below -- calls. Sums are over the runs that knew the number, and beside them
+is how many did not: an unmeasured run is counted, never dropped and never
+free. The registry metrics `unit_cost`, `tokens_per_run`, `cost_week` and
 `estimate_accuracy` (#168) read the same usage and run data (see "Goals").
 
 Each group's row also carries its own estimate-vs-actual (#168):
@@ -2168,9 +2177,8 @@ Intervals are bounded by when the runtime sampled each reading (the contract's
 to the runs active when it was sampled; a runtime that gives no sample time
 has the request time stand in.
 
-Not yet (v3 and later): workflow cost grouping, budgets, Scenario cost
-drivers, policy/metric follow-through, and runtime-specific observation work
-tracked outside Factory.
+Not yet (v3 and later): budgets, Scenario cost drivers, the `budget_within`
+policy check, and runtime-specific observation work tracked outside Factory.
 
 ## Workflows
 
