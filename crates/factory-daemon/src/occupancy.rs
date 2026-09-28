@@ -418,6 +418,13 @@ impl Engine {
             return Ok(());
         };
         self.check_run_token(&run, turn.token.as_deref(), task_id)?;
+        // `#178`: Claude Code's own session id, when the hook payload names
+        // one -- `--continue`'s fallback source for which session to resume,
+        // kept even though this particular turn end may settle into nothing.
+        if turn.session_id.is_some() {
+            self.patch_run(&run, RunPatch { turn_ended_session_id: turn.session_id.clone(), ..Default::default() })
+                .await;
+        }
         let action = hook_turn_ended_action(&turn, run.status);
         // A turn ended, so the usage so far is worth a reading (#117) --
         // taken off this request, which is the harness's own hook waiting
@@ -1247,7 +1254,12 @@ mod tests {
             worktree_branch: None,
             runtime: "herdr".into(),
             session: None,
+            last_session: None,
             token: None,
+            spent_token: None,
+            superseded_tokens: Vec::new(),
+            continued_from: None,
+            resumed_session: None,
             original_estimate: None,
             provider_account: None,
             re_estimate: None,
@@ -1261,6 +1273,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            turn_ended_session_id: None,
             required_steps: Vec::new(),
             usage: None,
             queued_at: None,
@@ -1708,6 +1721,7 @@ mod tests {
             error_details: None,
             last_message: None,
             token: None,
+            session_id: None,
         }
     }
 

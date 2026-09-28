@@ -557,7 +557,16 @@ impl TaskStore for SqliteStore {
                 worktree_branch: None,
                 runtime: new.runtime.clone(),
                 session: None,
+                last_session: None,
                 token: Some(new.token.clone()),
+                spent_token: None,
+                // Set right after, in the same `update_run` call that
+                // records `original_estimate`/`provider_account`, when this
+                // is a `--continue` dispatch -- `create_run` itself has no
+                // notion of a previous run.
+                superseded_tokens: Vec::new(),
+                continued_from: None,
+                resumed_session: None,
                 original_estimate: None,
                 provider_account: None,
                 re_estimate: None,
@@ -577,6 +586,7 @@ impl TaskStore for SqliteStore {
                 block_suspected_since: None,
                 turn_ended_at: None,
                 turn_end_reason: None,
+                turn_ended_session_id: None,
                 required_steps: Vec::new(),
                 usage: None,
             };
@@ -640,7 +650,11 @@ impl TaskStore for SqliteStore {
                 run.session = None;
             }
             if let Some(v) = patch.session {
-                run.session = Some(v);
+                run.session = Some(v.clone());
+                run.last_session = Some(v);
+            }
+            if let Some(v) = patch.last_session {
+                run.last_session = Some(v);
             }
             if let Some(v) = patch.original_estimate {
                 run.original_estimate = Some(v);
@@ -665,6 +679,18 @@ impl TaskStore for SqliteStore {
             }
             if patch.clear_token {
                 run.token = None;
+            }
+            if let Some(v) = patch.spent_token {
+                run.spent_token = Some(v);
+            }
+            if !patch.superseded_tokens.is_empty() {
+                run.superseded_tokens = patch.superseded_tokens;
+            }
+            if let Some(v) = patch.continued_from {
+                run.continued_from = Some(v);
+            }
+            if let Some(v) = patch.resumed_session {
+                run.resumed_session = Some(v);
             }
             if let Some(v) = patch.ended_at {
                 run.ended_at = Some(v);
@@ -694,6 +720,9 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.turn_end_reason {
                 run.turn_end_reason = Some(v);
+            }
+            if let Some(v) = patch.turn_ended_session_id {
+                run.turn_ended_session_id = Some(v);
             }
             // A run that reached a terminal state is over, whether or not the
             // caller remembered to say when.

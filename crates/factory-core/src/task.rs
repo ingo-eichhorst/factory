@@ -903,6 +903,13 @@ pub struct TurnEnded {
     /// The run's token, checked exactly as `TaskReport::token` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The harness's own session id, when the hook payload names one --
+    /// Claude Code's `Stop`/`StopFailure` always does. Recorded on the run
+    /// (`Run::turn_ended_session_id`) as `--continue`'s (#178) fallback
+    /// source for which session to resume, used only when the previous
+    /// run's usage snapshots never saw one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[cfg(test)]

@@ -44,6 +44,13 @@ pub struct TaskBinding {
     /// run that used the scope directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// Set only when this run is `factory task run --continue` (#178) having
+    /// actually resumed the harness's own conversation -- mirrors
+    /// `Run::resumed_session`. Tells `reporting_contract`/`prompt` to say
+    /// earlier report commands, if any linger in the resumed history, are
+    /// void, and names the session being picked back up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_session: Option<String>,
     /// This task's direct parents in a workflow, each with the output it
     /// finished with -- empty for a root node or a task outside any
     /// workflow. Computed once, at dispatch (`Engine::dispatch`), from that
@@ -410,7 +417,22 @@ impl AgentContext {
         } else {
             ""
         };
-        contract + explicit_note + &verification
+        // `#178`: this run picked an earlier, infrastructure-failed run's
+        // conversation back up. Whatever `factory task report` command sits
+        // earlier in this same history belonged to that run, which is over
+        // -- reporting with it now gets refused (`Engine::check_run_token`,
+        // `Engine::caller_for`) with exactly the reason this sentence gives,
+        // so the agent hears it before it happens rather than only after.
+        let resumed_note = if binding.resumed_session.is_some() {
+            "\n\nThis run picked up an earlier session of this same task, after that \
+             run ended on an infrastructure failure. Any `factory task report` command \
+             you see earlier in this conversation's history belonged to that run and is \
+             void now -- a newer run exists. Use only the commands above, which carry \
+             this run's own token."
+        } else {
+            ""
+        };
+        contract + explicit_note + resumed_note + &verification
     }
 
     /// A short, adapter-neutral guide to Factory itself: what it is, who this
@@ -888,6 +910,29 @@ pub trait Agent: Send + Sync {
     fn health_probe(&self) -> Option<crate::harness::HealthProbe> {
         None
     }
+
+    /// How to pick a harness's own conversation back up by its session id
+    /// (`#178`, `factory task run --continue`), declared the same way as
+    /// `health_probe` -- never run, only asked. `None`, the default and what
+    /// a plugin gets (the out-of-process protocol has no wire for this), means
+    /// this harness never resumes: `--continue` falls back to a fresh session
+    /// and journals why. Only the built-in `HarnessAgent` overrides it, and
+    /// only for `claude-code` and `codex`.
+    fn resume_spec(&self, session_id: &str) -> Option<ResumeSpec> {
+        let _ = session_id;
+        None
+    }
+}
+
+/// What `Agent::resume_spec` hands back: the extra arguments that make the
+/// harness's own CLI pick up an existing conversation instead of starting a
+/// new one. Prepended to `LaunchSpec::args`, ahead of anything
+/// `append_declared_args` adds -- a subcommand like codex's `resume <id>`
+/// has to come first; a flag like claude's `--resume <id>` does not care,
+/// but prepending is correct either way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeSpec {
+    pub args: Vec<String>,
 }
 
 #[cfg(test)]
@@ -961,6 +1006,7 @@ mod tests {
             attempt: 1,
             token: "tok".into(),
             worktree_branch: None,
+            resumed_session: None,
             upstream: Vec::new(),
             knowledge: None,
             required_steps: Vec::new(),

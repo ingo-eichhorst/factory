@@ -10,7 +10,7 @@ use factory_core::adapter::agent::{
 use factory_core::adapter::runtime::{
     RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
 };
-use factory_core::adapter::TaskStore;
+use factory_core::adapter::{Agent, AgentRuntime, TaskStore};
 use factory_core::config::{Factory, Sandbox, ScopeAgent, SHELL_HARNESS};
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
@@ -75,6 +75,38 @@ pub(crate) enum CapacityEvent {
     /// The scheduler tick's own sweep: try every waiting task, for a
     /// restart, a raised limit, or a `Release` this channel dropped.
     Sweep,
+}
+
+/// Where `place_run` should put a run's working directory -- pulled out so
+/// the decision of *which* is `resolve_continue`'s alone, and `place_run`
+/// itself only ever carries one out (`#178`).
+enum Workspace {
+    /// Today's behaviour: `git worktree add` a new one, or work in the scope
+    /// directly when the task has no worktree of its own.
+    Fresh,
+    /// `factory task run --continue`, having confirmed the previous run's
+    /// worktree is still one of the scope's registered worktrees
+    /// (`worktree::is_registered`): reuse it exactly as it stands, on its
+    /// own branch, rather than cutting a new one.
+    Reuse { path: PathBuf, branch: String },
+}
+
+/// What `resolve_continue` decided about a `--continue` request: resume, with
+/// everything `dispatch` needs to launch into the same conversation, or fall
+/// back to a fresh session with the exact reason to journal (`#178`).
+enum ContinueOutcome {
+    Resume(ResumePlan),
+    Fresh { reason: String },
+}
+
+struct ResumePlan {
+    /// The harness's own session id being picked back up.
+    session_id: String,
+    /// `Agent::resume_spec`'s args, prepended to the launch.
+    resume_args: Vec<String>,
+    /// `Some` only when the task uses a worktree of its own and the previous
+    /// run's is still there to reuse.
+    workspace: Option<(PathBuf, String)>,
 }
 
 /// Why a `schedule_skipped` entry's slots passed -- `data.reason` on the
@@ -1066,7 +1098,7 @@ impl Engine {
                 }
                 Ok(Payload::Deleted { deleted })
             }
-            Request::TaskRun { id, reason } => {
+            Request::TaskRun { id, reason, continue_run } => {
                 let task = self.require(&id).await?;
                 // The gate (`#119`): an item still in intake has not been
                 // released, and nothing but a decision releases it.
@@ -1094,6 +1126,42 @@ impl Engine {
                         wait.since.to_rfc3339(),
                     )));
                 }
+                // `#178`: `--continue` is refused outright -- not merely
+                // fallen back from -- unless the task's newest run is
+                // terminal and ended on an infrastructure failure.
+                // `resolve_continue` decides, per session, whether that run
+                // can actually be resumed; this only decides whether asking
+                // is sensible at all.
+                let continue_from = if continue_run {
+                    let Some(prev) = self.store.runs(&id, 1).await?.into_iter().next() else {
+                        return Err(FactoryError::BadRequest("this task has no previous run to continue".into()));
+                    };
+                    if !prev.status.is_terminal() {
+                        return Err(FactoryError::BadRequest(format!(
+                            "attempt {} of this task is still {}; cancel it before continuing",
+                            prev.attempt,
+                            prev.status.as_str()
+                        )));
+                    }
+                    let infra = match prev.fail_kind {
+                        Some(kind) if kind.is_infrastructure() => {
+                            kind != FailKind::DispatchFailed || prev.last_session.is_some()
+                        }
+                        _ => false,
+                    };
+                    if !infra {
+                        return Err(FactoryError::BadRequest(format!(
+                            "attempt {} of this task ended {}, which is not an infrastructure failure; \
+                             --continue is only for an ack timeout, a run timeout, a session gone, or a \
+                             dispatch failure after a session had already come up",
+                            prev.attempt,
+                            prev.fail_kind.map_or(prev.status.as_str(), FailKind::as_str),
+                        )));
+                    }
+                    Some(prev)
+                } else {
+                    None
+                };
                 // Who asked, written down before the run exists: the record
                 // otherwise says only that a run was `manual`, which a
                 // person and an agent both are (`#106`).
@@ -1104,11 +1172,16 @@ impl Engine {
                 // which does not exist yet: the Operations report leaves a
                 // run an agent asked for out of the interventions by it.
                 let asked = crate::operations::Asked::new(caller, reason);
+                let words = if let Some(prev) = &continue_from {
+                    format!("{} (continuing attempt {})", asked.words(), prev.attempt)
+                } else {
+                    asked.words()
+                };
                 self.entry(
                     &id,
                     asked.entry(
                         crate::operations::RUN_REQUESTED_KIND,
-                        format!("run requested {}", asked.words()),
+                        format!("run requested {words}"),
                         serde_json::json!({ "queued_at": due.queued_at }),
                     ),
                 )
@@ -1117,7 +1190,10 @@ impl Engine {
                 // Dispatch can take a minute: opening a pane, waiting for an
                 // agent to be ready. The caller gets its answer now.
                 tokio::spawn(async move {
-                    engine.start_run_due(&id, Trigger::Manual, due).await;
+                    match continue_from {
+                        Some(prev) => engine.start_run_due_continue(&id, due, prev).await,
+                        None => engine.start_run_due(&id, Trigger::Manual, due).await,
+                    }
                 });
                 Ok(Payload::Ok)
             }
@@ -2432,6 +2508,20 @@ impl Engine {
     /// the dispatch got going. Failures here end the run rather than
     /// escaping, because nobody is waiting on the answer.
     pub async fn start_run_due(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due) {
+        self.start_run_due_inner(task_id, trigger, due, None).await
+    }
+
+    /// `factory task run --continue` (`#178`): the same dispatch path, with
+    /// the run being resumed carried through to `Engine::dispatch`, which
+    /// asks `resolve_continue` what to do with it. A thin wrapper rather
+    /// than a new parameter on `start_run_due` itself, so its dozen other
+    /// callers -- the scheduler, retries, waiting-slot releases -- need no
+    /// change at all.
+    pub async fn start_run_due_continue(self: &Arc<Self>, task_id: &str, due: Due, continue_from: Run) {
+        self.start_run_due_inner(task_id, Trigger::Manual, due, Some(continue_from)).await
+    }
+
+    async fn start_run_due_inner(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) {
         // However it was asked for, an item still in intake is not started --
         // and not failed either, which is what a dispatch error below would
         // do to it (`#119`).
@@ -2445,7 +2535,7 @@ impl Engine {
                 return;
             }
         }
-        let run = match self.dispatch(task_id, trigger, due).await {
+        let run = match self.dispatch(task_id, trigger, due, continue_from).await {
             Ok(run) => run,
             // Blocked, not failed: `harness_gate` has already said why on
             // the task, and there is no run to close.
@@ -2559,7 +2649,7 @@ impl Engine {
         self.record_bench_task_state(task_id).await;
     }
 
-    async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due) -> Result<Run> {
+    async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) -> Result<Run> {
         let task = self.require(task_id).await?;
         // Resolve again rather than trusting what was written down: the config
         // may have changed since the task was created.
@@ -2595,6 +2685,17 @@ impl Engine {
             )));
         }
 
+        // `#178`: decided before the run row exists, since none of it needs
+        // one -- `resolve_continue` only ever reads the previous run and this
+        // dispatch's freshly resolved agent/runtime.
+        let continue_outcome = match &continue_from {
+            Some(prev) => Some(
+                self.resolve_continue(&task, (&agent_name, &adapter_name), agent.as_ref(), runtime.as_ref(), prev, &scope_path)
+                    .await,
+            ),
+            None => None,
+        };
+
         // What `done` will need, fixed now (`#118`) -- before the run row
         // exists, so a plan that cannot be resolved fails the dispatch
         // rather than letting the work start unplanned.
@@ -2627,17 +2728,39 @@ impl Engine {
                 })
                 .await?
         };
-        let run = self
-            .store
-            .update_run(
-                &run.id,
-                &RunPatch {
-                    original_estimate: task.effective_estimate(),
-                    provider_account,
-                    ..Default::default()
-                },
+        let mut initial_patch = RunPatch {
+            original_estimate: task.effective_estimate(),
+            provider_account,
+            ..Default::default()
+        };
+        // `#178`: recorded whether or not the continuation actually managed
+        // to resume -- `continued_from` and the voided-token chain both hold
+        // regardless, since this run is `--continue`'s answer either way;
+        // `resumed_session` only when it truly resumed.
+        if let Some(prev) = &continue_from {
+            let mut superseded = prev.superseded_tokens.clone();
+            if let Some(spent) = &prev.spent_token {
+                superseded.push(spent.clone());
+            }
+            initial_patch.superseded_tokens = superseded;
+            initial_patch.continued_from = Some(prev.id.clone());
+        }
+        if let Some(ContinueOutcome::Resume(plan)) = &continue_outcome {
+            initial_patch.resumed_session = Some(plan.session_id.clone());
+        }
+        let run = self.store.update_run(&run.id, &initial_patch).await?;
+        if let Some(ContinueOutcome::Fresh { reason }) = &continue_outcome {
+            self.entry(
+                task_id,
+                TaskEntry::new(
+                    "daemon",
+                    "continue_fallback",
+                    format!("continuing attempt {}'s session was not possible: {reason}; dispatching fresh", run.attempt.saturating_sub(1)),
+                )
+                .in_run(&run.id),
             )
-            .await?;
+            .await;
+        }
 
         // The run exists from here on, so it holds its share of the power
         // assertion from here on too -- every `?` below this point ends the
@@ -2699,8 +2822,18 @@ impl Engine {
         // the run row already exists, so it is named after it. Nothing below
         // this point may hand the agent the scope itself when the checkbox is
         // on: a failure here ends the run right here, with git's own
-        // complaint, rather than quietly falling back to the scope.
-        let (cwd, run) = self.place_run(&task, run, &scope_path).await?;
+        // complaint, rather than quietly falling back to the scope. A
+        // `--continue` that resumed and has a worktree of its own to go back
+        // to reuses it instead (`Workspace::Reuse`); every other case is
+        // `Fresh`, today's behaviour unchanged.
+        let workspace = match &continue_outcome {
+            Some(ContinueOutcome::Resume(plan)) => match &plan.workspace {
+                Some((path, branch)) => Workspace::Reuse { path: path.clone(), branch: branch.clone() },
+                None => Workspace::Fresh,
+            },
+            _ => Workspace::Fresh,
+        };
+        let (cwd, run) = self.place_run(&task, run, &scope_path, workspace).await?;
 
         // Resolved the same way `caller_for` resolves it for every other
         // request, off the agent this run actually landed on rather than
@@ -2741,6 +2874,7 @@ impl Engine {
                 attempt: run.attempt,
                 token,
                 worktree_branch: run.worktree_branch.clone(),
+                resumed_session: run.resumed_session.clone(),
                 upstream,
                 knowledge,
                 required_steps: run.required_steps.clone(),
@@ -2754,6 +2888,14 @@ impl Engine {
         };
 
         let mut launch = agent.launch_spec(&ctx).await?;
+        // `#178`: the resume args go first -- `codex resume <id>` is a
+        // subcommand, which has to lead, and a flag like claude's
+        // `--resume <id>` does not mind leading either.
+        if let Some(ContinueOutcome::Resume(plan)) = &continue_outcome {
+            let mut args = plan.resume_args.clone();
+            args.append(&mut launch.args);
+            launch.args = args;
+        }
         append_declared_args(&mut launch, declaration.as_ref());
         // A task's stored `scope` can still be a scope's legacy bare name --
         // canonicalize it the same way `start_agent` does, so a legacy-named
@@ -2815,6 +2957,77 @@ impl Engine {
         Ok(run)
     }
 
+    /// Whether `factory task run --continue`'s (`#178`) previous run can
+    /// really be resumed, and with what. Every fallback below ends in
+    /// `ContinueOutcome::Fresh`, never an error: a `--continue` that cannot
+    /// continue still dispatches, exactly as a plain `task run` would,
+    /// journaled with the one reason it fell back rather than left to a
+    /// person to guess from a session that just looks fresh.
+    async fn resolve_continue(
+        &self,
+        task: &Task,
+        (agent_name, adapter_name): (&str, &str),
+        agent: &dyn Agent,
+        runtime: &dyn AgentRuntime,
+        prev: &Run,
+        scope_path: &Path,
+    ) -> ContinueOutcome {
+        // Rule 5: the previous run's agent is not necessarily this
+        // dispatch's -- the task may have been edited since. Resuming a
+        // `codex` conversation with `claude-code`'s launch args makes no
+        // sense, so this is checked before anything else.
+        if prev.agent != agent_name || prev.adapter != adapter_name {
+            return ContinueOutcome::Fresh {
+                reason: format!(
+                    "the task's agent changed since the previous run (was {}/{}, now {agent_name}/{adapter_name})",
+                    prev.agent, prev.adapter
+                ),
+            };
+        }
+
+        // The previous run's newest usage snapshot entry for this adapter,
+        // or -- failing that -- the session id a `turn-ended` hook recorded
+        // on it. Never "the latest session in this directory" (rule 6).
+        let snapshots = self.store.usage_snapshots(&prev.id).await.unwrap_or_default();
+        let session_id = factory_core::usage::newest_session_id_for_adapter(&snapshots, adapter_name)
+            .or_else(|| prev.turn_ended_session_id.clone());
+        let Some(session_id) = session_id else {
+            return ContinueOutcome::Fresh { reason: "no session id was recorded for the previous run".into() };
+        };
+
+        let Some(resume) = agent.resume_spec(&session_id) else {
+            return ContinueOutcome::Fresh { reason: format!("the {adapter_name} adapter declares no resume") };
+        };
+
+        let workspace = if task.worktree {
+            match &prev.worktree_path {
+                Some(path) if worktree::is_registered(scope_path, Path::new(path)).await => {
+                    Some((PathBuf::from(path), prev.worktree_branch.clone().unwrap_or_default()))
+                }
+                _ => {
+                    return ContinueOutcome::Fresh { reason: "the previous run's worktree is gone".into() };
+                }
+            }
+        } else {
+            None
+        };
+
+        // Rule 1: never run two processes on one conversation. An error
+        // asking is treated the same as "not confirmed gone" -- silence is
+        // not the same as a `Gone` answer.
+        let confirmed_gone = match &prev.last_session {
+            Some(session) => matches!(runtime.status(session).await, Ok(RuntimeStatus::Gone)),
+            None => false,
+        };
+        if !confirmed_gone {
+            return ContinueOutcome::Fresh {
+                reason: "the previous run's session is not confirmed gone".into(),
+            };
+        }
+
+        ContinueOutcome::Resume(ResumePlan { session_id, resume_args: resume.args, workspace })
+    }
+
     /// Where a run actually works: its own worktree, or the scope directly.
     /// Pulled out of `dispatch` so the decision -- and the one way it can
     /// fail -- has no need of a real agent or runtime on the other end of it,
@@ -2823,10 +3036,41 @@ impl Engine {
     /// `task.worktree` off is the whole of the "quietly ignored" case this
     /// function refuses to have: it is checked once, here, and every path out
     /// of it either returns the scope path unchanged or a worktree that
-    /// `git worktree add` actually made. There is no third path.
-    async fn place_run(&self, task: &Task, run: Run, scope_path: &Path) -> Result<(PathBuf, Run)> {
+    /// `git worktree add` actually made (`Workspace::Fresh`) or that a
+    /// previous run already made and `--continue` (`#178`) is reusing
+    /// (`Workspace::Reuse`). There is no other path.
+    async fn place_run(&self, task: &Task, run: Run, scope_path: &Path, workspace: Workspace) -> Result<(PathBuf, Run)> {
         if !task.worktree {
             return Ok((scope_path.to_path_buf(), run));
+        }
+        if let Workspace::Reuse { path, branch } = workspace {
+            // Already confirmed still registered by `resolve_continue` --
+            // nothing here runs `git worktree add` again, and nothing resets
+            // it: a bench reset on a tree an agent is about to pick back up
+            // would wipe exactly the work `--continue` exists to save.
+            let run = self
+                .store
+                .update_run(
+                    &run.id,
+                    &RunPatch {
+                        worktree_path: Some(path.display().to_string()),
+                        worktree_branch: Some(branch.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            self.bus.publish(Event::RunUpdated { run: run.clone() });
+            self.entry(
+                &run.task_id,
+                TaskEntry::new(
+                    "daemon",
+                    "worktree",
+                    format!("resuming in {} on {branch}", path.display()),
+                )
+                .in_run(&run.id),
+            )
+            .await;
+            return Ok((path, run));
         }
         let branch = worktree::branch_name(&task.id, &task.title, run.attempt);
         let dir = self.factory_snapshot().worktrees_dir().join(&run.id);
@@ -3017,6 +3261,12 @@ impl Engine {
         };
         match given {
             Some(given) if given == expected => Ok(()),
+            // `#178`: a stale token this exact run's `--continue` replaced,
+            // told apart from a plain wrong one -- see `caller_for`'s own
+            // copy of this check.
+            Some(given) if run.superseded_tokens.iter().any(|t| t == given) => Err(FactoryError::Denied(format!(
+                "a newer run of task {task_id} exists; use the latest reporting commands"
+            ))),
             Some(_) => Err(FactoryError::Denied(format!(
                 "wrong token for attempt {} of task {task_id}",
                 run.attempt
@@ -3192,6 +3442,13 @@ impl Engine {
         patch: RunPatch,
         _why: &str,
     ) -> Result<Run> {
+        // `#178`: what `token` is about to lose to `clear_token` below,
+        // carried forward as `spent_token` -- read back off the store rather
+        // than trusted from a caller, since nothing that reaches `finish_run`
+        // is handed the run it is closing. A later `--continue`'s new run
+        // copies this into `superseded_tokens`, which is the only thing that
+        // ever reads it; no request is ever authorized by it.
+        let spent_token = self.store.get_run(run_id).await.ok().flatten().and_then(|r| r.token);
         let run = self
             .store
             .update_run(
@@ -3200,6 +3457,7 @@ impl Engine {
                     status: Some(status),
                     clear_session: true,
                     clear_token: true,
+                    spent_token,
                     // A run that has ended is not waiting on anybody, so the
                     // block's own clock and the runtime's standing guess both
                     // go with the session -- `blocked_since` is documented to
@@ -3684,7 +3942,20 @@ impl Engine {
             }
             // The last reading, while the session is still there to ask.
             Box::pin(self.snapshot_usage(run, factory_core::usage::SnapshotPoint::RunEnd)).await;
-            let _ = runtime.stop(session).await;
+            // `#178`: a failed stop used to be silently discarded here (`let
+            // _ =`); journaled instead, since `resolve_continue`'s "never
+            // run two processes on one conversation" check relies on the
+            // runtime's own word that this session is gone, and a stop that
+            // did not take is exactly what would make that check right to
+            // refuse a later `--continue`.
+            if let Err(e) = runtime.stop(session).await {
+                self.entry(
+                    &run.task_id,
+                    TaskEntry::new("daemon", "stop_failed", format!("could not stop the session: {e}"))
+                        .in_run(&run.id),
+                )
+                .await;
+            }
         }
     }
 
@@ -5623,7 +5894,7 @@ mod tests {
         // `dispatch` directly rather than through `start_run` is what lets
         // this test see the assertion still held: `start_run` would carry
         // the same error straight into `fail_run` and release it again.
-        let err = engine.dispatch(&task.id, Trigger::Manual, Due::now()).await.unwrap_err();
+        let err = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap_err();
         assert!(err.to_string().contains("not a git repository"), "got: {err}");
 
         assert_eq!(
@@ -5813,6 +6084,7 @@ mod tests {
             error_details: None,
             last_message: Some("I think that is everything.".into()),
             token: token.map(str::to_string),
+            session_id: None,
         }
     }
 
@@ -6307,7 +6579,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (cwd, run) = engine.place_run(&task, run, &scope_dir).await.unwrap();
+        let (cwd, run) = engine.place_run(&task, run, &scope_dir, Workspace::Fresh).await.unwrap();
         assert_eq!(cwd, scope_dir, "the checkbox is off, so this stays the scope itself");
         assert!(run.worktree_path.is_none());
         assert!(run.worktree_branch.is_none());
@@ -6399,7 +6671,7 @@ mod tests {
             .unwrap();
         let run_id = run.id.clone();
 
-        let (cwd, run) = engine.place_run(&task, run, &scope_dir).await.unwrap();
+        let (cwd, run) = engine.place_run(&task, run, &scope_dir, Workspace::Fresh).await.unwrap();
         assert_ne!(cwd, scope_dir, "the checkbox is on, so this is not the scope itself");
         assert_eq!(cwd, engine.factory_snapshot().worktrees_dir().join(&run_id), "named after the run");
         assert!(cwd.join(".git").exists(), "a real worktree, not just a path");
@@ -6650,7 +6922,12 @@ mod tests {
             worktree_branch: None,
             runtime: "herdr".into(),
             session: None,
+            last_session: None,
             token: None,
+            spent_token: None,
+            superseded_tokens: Vec::new(),
+            continued_from: None,
+            resumed_session: None,
             original_estimate: None,
             provider_account: None,
             re_estimate: None,
@@ -6667,6 +6944,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            turn_ended_session_id: None,
             required_steps: Vec::new(),
             usage: None,
         };
@@ -6697,7 +6975,12 @@ mod tests {
             worktree_branch: None,
             runtime: "herdr".into(),
             session: None,
+            last_session: None,
             token: None,
+            spent_token: None,
+            superseded_tokens: Vec::new(),
+            continued_from: None,
+            resumed_session: None,
             original_estimate: None,
             provider_account: None,
             re_estimate: None,
@@ -6716,6 +6999,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            turn_ended_session_id: None,
             required_steps: Vec::new(),
             usage: None,
         };
@@ -6862,7 +7146,12 @@ mod tests {
             worktree_branch: None,
             runtime: "herdr".into(),
             session: None,
+            last_session: None,
             token: None,
+            spent_token: None,
+            superseded_tokens: Vec::new(),
+            continued_from: None,
+            resumed_session: None,
             original_estimate: None,
             provider_account: None,
             re_estimate: None,
@@ -6879,6 +7168,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            turn_ended_session_id: None,
             required_steps: Vec::new(),
             usage: None,
         };
@@ -7352,5 +7642,410 @@ mod tests {
         assert_eq!(engine.require(&fine.id).await.unwrap().status, TaskStatus::Pending);
         assert_eq!(engine.migrate_failed_tasks().await, 0, "nothing writes failed any more, so a second start finds none");
         std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    // ==================================================================
+    // #178: `factory task run --continue` after an infrastructure failure
+    // ==================================================================
+    mod continue_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use factory_core::adapter::agent::{LaunchKind, ResumeSpec};
+        use factory_core::adapter::runtime::RuntimeEventStream;
+        use factory_core::task::SessionRef;
+        use factory_core::usage::{HarnessUsage, SessionUsage, SnapshotPoint, UsageSnapshot};
+        use std::sync::Mutex;
+
+        /// Declares `resume_spec` when `resumable`, exactly the shape
+        /// `claude-code`/`codex` are given in `factory-plugins`; `false` is
+        /// every other built-in's shape (`pi`, `opencode`, and -- used
+        /// directly in one test below -- `shell`).
+        struct RecordingAgent {
+            resumable: bool,
+        }
+
+        #[async_trait]
+        impl Agent for RecordingAgent {
+            fn name(&self) -> &str {
+                "recording"
+            }
+            async fn launch_spec(&self, _ctx: &AgentContext) -> Result<LaunchSpec> {
+                Ok(LaunchSpec { kind: LaunchKind::Command(vec!["true".into()]), args: Vec::new(), env: Default::default() })
+            }
+            async fn prompt(&self, _ctx: &AgentContext) -> Result<String> {
+                Ok(String::new())
+            }
+            fn resume_spec(&self, session_id: &str) -> Option<ResumeSpec> {
+                self.resumable.then(|| ResumeSpec { args: vec!["--resume".into(), session_id.into()] })
+            }
+        }
+
+        /// A runtime that opens a session without doing anything real
+        /// (`capacity_tests::StubRuntime`'s own comment explains why), with
+        /// two knobs this module's tests need on top: every `StartRequest`
+        /// it was asked to `start` (so a test can inspect the resume args
+        /// and the working directory an agent actually launched into), and
+        /// a configurable `status` answer (so a test can say whether the
+        /// previous run's session is confirmed gone).
+        struct RecordingRuntime {
+            status: Mutex<RuntimeStatus>,
+            starts: Mutex<Vec<StartRequest>>,
+        }
+
+        impl RecordingRuntime {
+            fn new(status: RuntimeStatus) -> Self {
+                Self { status: Mutex::new(status), starts: Mutex::new(Vec::new()) }
+            }
+        }
+
+        #[async_trait]
+        impl AgentRuntime for RecordingRuntime {
+            fn name(&self) -> &str {
+                "stub-run"
+            }
+            async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
+                self.starts.lock().unwrap().push(req.clone());
+                Ok(SessionRef { runtime: "stub-run".into(), handle: format!("stub-{}", req.id), meta: Default::default() })
+            }
+            async fn submit(&self, _session: &SessionRef, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn status(&self, _session: &SessionRef) -> Result<RuntimeStatus> {
+                Ok(*self.status.lock().unwrap())
+            }
+            async fn send_text(&self, _session: &SessionRef, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send_keys(&self, _session: &SessionRef, _keys: &[String]) -> Result<()> {
+                Ok(())
+            }
+            async fn read(&self, _session: &SessionRef, _lines: u32) -> Result<String> {
+                Ok(String::new())
+            }
+            async fn stop(&self, _session: &SessionRef) -> Result<()> {
+                Ok(())
+            }
+            async fn watch(&self) -> Result<Option<RuntimeEventStream>> {
+                Ok(None)
+            }
+        }
+
+        fn continue_engine(scope_path: PathBuf, resumable: bool, runtime_status: RuntimeStatus) -> (Arc<Engine>, Arc<RecordingRuntime>) {
+            let config = Config {
+                version: 1,
+                instance: Instance { id: "test".into(), name: "test".into() },
+                daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+                roles: Default::default(),
+                dashboard: None,
+                policies: Default::default(),
+                quality: Default::default(),
+                scope: None,
+                scopes: vec![Scope {
+                    id: "scope-id".into(),
+                    name: "demo".into(),
+                    path: scope_path,
+                    agent: None,
+                    agents: Vec::new(),
+                    runtime: None,
+                    git: None,
+                    task_store: None,
+                    max_sessions: None,
+                    roles: Default::default(),
+                    dashboard: None,
+                    policies: Default::default(),
+                    quality: Default::default(),
+                    intake: Default::default(),
+                    dependencies: Default::default(),
+                }],
+                infrastructure: Default::default(),
+                plugins_dir: None,
+            };
+            let factory = Factory {
+                root: std::env::temp_dir().join(format!("factory-continue-test-{}", uuid::Uuid::new_v4())),
+                config,
+            };
+            let mut registry = Registry::with_builtins();
+            registry.add_agent(Arc::new(RecordingAgent { resumable }), "test");
+            let runtime = Arc::new(RecordingRuntime::new(runtime_status));
+            registry.add_runtime(runtime.clone(), "test");
+            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+            let engine = Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()));
+            (engine, runtime)
+        }
+
+        async fn task_for(engine: &Arc<Engine>, worktree: bool) -> Task {
+            engine
+                .create(NewTask {
+                    title: "resume me".into(),
+                    instructions: "true".into(),
+                    scope: Some("demo".into()),
+                    agent: Some("recording".into()),
+                    runtime: Some("stub-run".into()),
+                    worktree: Some(worktree),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        }
+
+        fn harness_usage(session_id: &str, adapter: &str) -> HarnessUsage {
+            serde_json::from_value(serde_json::json!({ "session_id": session_id, "adapter": adapter })).unwrap()
+        }
+
+        /// A later usage snapshot naming `session_id` for the `recording`
+        /// adapter -- what `resolve_continue` reads to find a resumable
+        /// session (`usage::newest_session_id_for_adapter`).
+        async fn seed_session_id(engine: &Arc<Engine>, run: &Run, session_id: &str) {
+            engine
+                .store
+                .append_usage(&UsageSnapshot {
+                    run_id: run.id.clone(),
+                    task_id: run.task_id.clone(),
+                    point: SnapshotPoint::RunEnd,
+                    at: Utc::now(),
+                    runtime: "stub-run".into(),
+                    usage: Some(SessionUsage {
+                        schema: 1,
+                        handle: None,
+                        sampled_at: None,
+                        sessions: vec![harness_usage(session_id, "recording")],
+                    }),
+                    unknown: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        /// A real dispatch (fresh, not `--continue`) failed with `kind` --
+        /// what every fallback and success test in this module starts from,
+        /// so the previous run's session, worktree and token are exactly
+        /// what a real `dispatch` would have left, not a hand-rolled
+        /// approximation of it.
+        async fn dispatched_then_failed(engine: &Arc<Engine>, task: &Task, kind: FailKind) -> Run {
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            engine.fail_run(&run.id, kind, "infra hiccup").await;
+            engine.store.get_run(&run.id).await.unwrap().unwrap()
+        }
+
+        async fn git_scope_dir(name: &str) -> PathBuf {
+            let dir = temp_dir(name);
+            for args in [
+                vec!["init", "-q"],
+                vec!["config", "user.email", "factory@example.com"],
+                vec!["config", "user.name", "factory"],
+                vec!["commit", "-q", "--allow-empty", "-m", "base"],
+            ] {
+                assert!(tokio::process::Command::new("git").args(&args).current_dir(&dir).status().await.unwrap().success());
+            }
+            dir
+        }
+
+        async fn continue_fallback_reasons(engine: &Engine, task_id: &str) -> Vec<String> {
+            engine
+                .store
+                .entries(task_id, 50)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.kind == "continue_fallback")
+                .map(|e| e.message)
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn continuing_resumes_in_the_same_worktree_with_a_new_token() {
+            let scope_dir = git_scope_dir("continue-resume").await;
+            let (engine, runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, true).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            assert!(prev.worktree_path.is_some(), "sanity: the failed run got a worktree");
+            seed_session_id(&engine, &prev, "sess-123").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert_eq!(run.worktree_path, prev.worktree_path, "the same worktree, not a fresh one");
+            assert_eq!(run.resumed_session.as_deref(), Some("sess-123"));
+            assert_eq!(run.continued_from.as_deref(), Some(prev.id.as_str()));
+            assert_ne!(run.token, prev.token, "a new token");
+            assert!(run.superseded_tokens.contains(prev.spent_token.as_ref().unwrap()), "{:?}", run.superseded_tokens);
+
+            let starts = runtime.starts.lock().unwrap();
+            let start = starts.last().unwrap();
+            assert_eq!(start.launch.args.first().map(String::as_str), Some("--resume"), "{:?}", start.launch.args);
+            assert_eq!(start.launch.args.get(1).map(String::as_str), Some("sess-123"), "{:?}", start.launch.args);
+            assert_eq!(start.cwd, PathBuf::from(prev.worktree_path.clone().unwrap()));
+
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_no_session_id_was_recorded() {
+            let scope_dir = temp_dir("continue-no-session-id");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            // No usage snapshot seeded, and no `turn-ended` hook ever fired:
+            // nothing to resume from.
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            assert_eq!(run.continued_from.as_deref(), Some(prev.id.as_str()), "recorded even though it fell back");
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("no session id was recorded")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_the_adapter_declares_no_resume() {
+            let scope_dir = temp_dir("continue-no-resume-spec");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), false, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &prev, "sess-456").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("declares no resume")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_the_previous_session_is_not_confirmed_gone() {
+            let scope_dir = temp_dir("continue-not-gone");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Working);
+            let task = task_for(&engine, false).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &prev, "sess-789").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("not confirmed gone")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_the_worktree_is_gone() {
+            let scope_dir = git_scope_dir("continue-worktree-gone").await;
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, true).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &prev, "sess-gone").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            // Removed by hand -- Factory itself never does this -- the way
+            // `worktree::is_registered` is meant to catch.
+            std::fs::remove_dir_all(prev.worktree_path.as_ref().unwrap()).unwrap();
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            assert_ne!(run.worktree_path, prev.worktree_path, "a fresh worktree, not the missing one");
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("worktree is gone")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_the_agent_changed_since_the_previous_run() {
+            let scope_dir = temp_dir("continue-agent-changed");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &prev, "sess-changed").await;
+            let mut prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            // Nothing changed the task's own agent -- only the *previous
+            // run's own record* of what it ran as, which is what a task
+            // whose agent was edited after that run would actually look
+            // like from `resolve_continue`'s side.
+            prev.agent = "someone-else".into();
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("agent changed")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_is_refused_outright_when_the_newest_run_did_not_fail_on_infrastructure() {
+            let scope_dir = temp_dir("continue-not-infra");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            dispatched_then_failed(&engine, &task, FailKind::AgentFailed).await;
+
+            let response = engine
+                .handle_request(Request::TaskRun { id: task.id.clone(), reason: None, continue_run: true })
+                .await;
+            let message = match response {
+                Response::Error { message, .. } => message,
+                other => panic!("expected a refusal, got {other:?}"),
+            };
+            assert!(message.contains("not an infrastructure failure"), "{message}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_is_refused_outright_when_the_task_has_no_previous_run() {
+            let scope_dir = temp_dir("continue-no-previous-run");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+
+            let response = engine
+                .handle_request(Request::TaskRun { id: task.id.clone(), reason: None, continue_run: true })
+                .await;
+            let message = match response {
+                Response::Error { message, .. } => message,
+                other => panic!("expected a refusal, got {other:?}"),
+            };
+            assert!(message.contains("no previous run"), "{message}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_stale_token_after_continue_names_the_newer_run_instead_of_a_generic_refusal() {
+            let scope_dir = temp_dir("continue-stale-token");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &prev, "sess-stale").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            let old_token = prev.spent_token.clone().expect("sanity: finish_run recorded it");
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+            assert!(run.resumed_session.is_some(), "sanity: this one actually resumed");
+
+            let stale_report = TaskReport {
+                status: Some(RunStatus::Running),
+                message: Some("still going".into()),
+                result: None,
+                send_to: None,
+                error: None,
+                token: Some(old_token),
+            };
+            let err = engine.report(&task.id, stale_report).await.unwrap_err();
+            assert!(err.to_string().contains("a newer run"), "{err}");
+            assert!(err.to_string().contains(&task.id), "{err}");
+
+            // The new run's own token still works.
+            let fresh_report = TaskReport {
+                status: Some(RunStatus::Running),
+                message: Some("continuing".into()),
+                result: None,
+                send_to: None,
+                error: None,
+                token: run.token.clone(),
+            };
+            assert!(engine.report(&task.id, fresh_report).await.is_ok());
+
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
     }
 }

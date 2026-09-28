@@ -1094,6 +1094,15 @@ enum TaskCmd {
         id: Option<String>,
         #[arg(long)]
         reason: Option<String>,
+        /// Resume the task's newest run's harness session (`#178`) instead
+        /// of starting fresh. Refused unless that run is terminal and ended
+        /// on an infrastructure failure (an ack timeout, a run timeout, a
+        /// session gone, or a dispatch failure after a session had already
+        /// come up); from there Factory falls back to a fresh session --
+        /// journaled with the reason -- for anything that stops the resume
+        /// itself from going through.
+        #[arg(long = "continue")]
+        continue_run: bool,
     },
     /// Stop a running task and close its session. Journaled with who
     /// asked, and why if you say.
@@ -4393,6 +4402,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     .send(Request::TaskRun {
                         id: created.id.clone(),
                         reason: None,
+                        continue_run: false,
                     })
                     .await?;
             }
@@ -4526,10 +4536,14 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             })
         }
 
-        TaskCmd::Run { id, reason } => {
+        TaskCmd::Run { id, reason, continue_run } => {
             let id = need_id(id)?;
-            client.send(Request::TaskRun { id: id.clone(), reason }).await?;
-            println!("dispatching {id}");
+            client.send(Request::TaskRun { id: id.clone(), reason, continue_run }).await?;
+            if continue_run {
+                println!("continuing {id}");
+            } else {
+                println!("dispatching {id}");
+            }
             Ok(())
         }
 
@@ -4824,6 +4838,10 @@ fn turn_ended_from_hook(
         error_details: text("error_details"),
         last_message,
         token: token.filter(|t| !t.is_empty()),
+        // `#178`: Claude Code's Stop/StopFailure payload always names its
+        // own session -- kept on the run as `--continue`'s fallback source
+        // for which session to resume.
+        session_id: text("session_id"),
     }
 }
 
@@ -6232,6 +6250,36 @@ mod tests {
         assert_eq!(turn.last_message.as_deref(), Some("pong"));
         assert_eq!(turn.token.as_deref(), Some("tok"));
         assert!(turn.error.is_none());
+    }
+
+    /// `#178`: Claude Code's own session id, carried on the run as
+    /// `--continue`'s fallback source for which session to resume.
+    #[test]
+    fn a_live_stop_payload_carries_its_own_session_id() {
+        let turn = turn_ended_from_hook(HookEvent::Stop, &hook(LIVE_STOP), Some("tok".into()));
+        assert_eq!(turn.session_id.as_deref(), Some("93b16ca2-62a5-493a-ad7a-fd2d2d4df973"));
+    }
+
+    #[test]
+    fn a_payload_naming_no_session_leaves_it_unset() {
+        let turn = turn_ended_from_hook(HookEvent::Stop, &hook(LIVE_STOP_WITH_BACKGROUND), None);
+        assert!(turn.session_id.is_none());
+    }
+
+    /// `#178`: `factory task run --continue <id>` parses to `continue_run`.
+    #[test]
+    fn task_run_continue_flag_parses() {
+        let cli = Cli::try_parse_from(["factory", "task", "run", "t1", "--continue"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Task(TaskCmd::Run { id: Some(ref id), continue_run: true, .. }) if id == "t1"
+        ));
+    }
+
+    #[test]
+    fn task_run_without_the_flag_does_not_continue() {
+        let cli = Cli::try_parse_from(["factory", "task", "run", "t1"]).unwrap();
+        assert!(matches!(cli.command, Command::Task(TaskCmd::Run { continue_run: false, .. })));
     }
 
     #[test]

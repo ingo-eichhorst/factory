@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use factory_core::adapter::agent::{
-    truncate_tail, Agent, AgentContext, LaunchKind, LaunchSpec, UpstreamOutput,
+    truncate_tail, Agent, AgentContext, LaunchKind, LaunchSpec, ResumeSpec, UpstreamOutput,
     UPSTREAM_RESULT_BYTE_CAP,
 };
 use factory_core::adapter::KnowledgeHints;
@@ -145,9 +145,53 @@ impl Agent for HarnessAgent {
         Some(HealthProbe::version(self.harness.clone()))
     }
 
+    /// `#178`: only `claude` and `codex` ever get a `--continue` past
+    /// `resolve_continue`'s other checks -- `pi`, `opencode` and `shell`
+    /// declare none, which is what sends `--continue` straight to the
+    /// fresh-session fallback for them, journaled with this exact reason.
+    fn resume_spec(&self, session_id: &str) -> Option<ResumeSpec> {
+        match self.harness.as_str() {
+            "claude" => Some(ResumeSpec { args: vec!["--resume".into(), session_id.into()] }),
+            // A subcommand, not a flag -- `Engine::dispatch` prepends this
+            // ahead of everything else `launch_spec` and the scope's own
+            // declared args add, which is what keeps it first.
+            "codex" => Some(ResumeSpec { args: vec!["resume".into(), session_id.into()] }),
+            _ => None,
+        }
+    }
+
     async fn prompt(&self, ctx: &AgentContext) -> Result<String> {
         let binding = ctx.binding()?;
         let task = &binding.task;
+        // `#178`: a resumed run's prompt is the short continue note the
+        // triage asked for, not the task replayed in full -- the harness's
+        // own resumed conversation already has the original instructions,
+        // any upstream output and knowledge hints in it from the run this
+        // one picked up from.
+        if let Some(session_id) = &binding.resumed_session {
+            let mut prompt = String::new();
+            if self.harness == "codex" {
+                prompt.push_str(&ctx.factory_guide());
+                prompt.push_str("\n\n---\n\n");
+            }
+            prompt.push_str(&format!(
+                "Factory is continuing this task (\"{title}\", {id}): the previous run of it \
+                 ended on an infrastructure failure, and this session ({session_id}) picks the \
+                 same conversation back up in the same working directory. You are the same \
+                 agent -- carry on from where you left off rather than starting over.\n\
+                 \n\
+                 ---\n\
+                 {contract}",
+                title = task.title,
+                id = task.id,
+                contract = if self.harness == "codex" {
+                    ctx.reporting_contract_explicit()
+                } else {
+                    ctx.reporting_contract()
+                },
+            ));
+            return Ok(prompt);
+        }
         let instructions = if task.instructions.trim().is_empty() {
             "(no further detail was given -- work from the title)"
         } else {
@@ -511,6 +555,7 @@ mod tests {
                 attempt: 1,
                 token: "tok".into(),
                 worktree_branch,
+                resumed_session: None,
                 upstream: Vec::new(),
                 knowledge: None,
                 required_steps: Vec::new(),

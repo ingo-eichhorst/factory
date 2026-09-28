@@ -24,8 +24,8 @@ use factory_core::event::Event;
 use factory_core::run::{Run, RunPatch};
 use factory_core::task::Task;
 use factory_core::usage::{
-    allocate_plan_share, run_usage, CostGroupBy, CostReport, CostRow, EstimateComparison, ReEstimate,
-    RunUsage, RunUsageEntry, SnapshotPoint, TaskUsage, UsageSnapshot,
+    allocate_plan_share, run_usage, run_usage_with_prior, CostGroupBy, CostReport, CostRow, EstimateComparison,
+    HarnessUsage, ReEstimate, RunUsage, RunUsageEntry, SnapshotPoint, TaskUsage, UsageSnapshot,
 };
 
 use crate::engine::Engine;
@@ -135,7 +135,18 @@ impl Engine {
         let allocation = allocate_plan_share(&recent, &snapshots_by_run);
         for recent_run in &recent {
             let Some(snapshots) = snapshots_by_run.get(&recent_run.id) else { continue };
-            let mut usage = run_usage(snapshots);
+            // `#178`: a run that resumed another's session gets that
+            // session's baseline backfilled from the previous run's own
+            // `RunEnd` reading, when this run's `Dispatch` snapshot never
+            // saw it -- see `run_usage_with_prior`.
+            let prior = match (&recent_run.resumed_session, &recent_run.continued_from) {
+                (Some(session_id), Some(previous_run_id)) => self
+                    .prior_run_end_usage(session_id, previous_run_id)
+                    .await
+                    .map(|usage| (session_id.clone(), usage)),
+                _ => None,
+            };
+            let mut usage = run_usage_with_prior(snapshots, prior.as_ref().map(|(id, u)| (id.as_str(), u)));
             usage.plan_share = allocation.shares.get(&recent_run.id).cloned().unwrap_or_default();
             usage.plan_share_unknowns = allocation.unknown.get(&recent_run.id).cloned().unwrap_or_default();
             if !usage.plan_share_unknowns.is_empty() {
@@ -152,6 +163,20 @@ impl Engine {
                 Err(e) => tracing::warn!(run = %recent_run.id, error = %e, "could not record a run's usage"),
             }
         }
+    }
+
+    /// `#178`: the previous run's newest `RunEnd` reading for `session_id`,
+    /// looked up by hand rather than out of `recent` above -- a resumed
+    /// session's previous run ended long enough ago that it can easily sit
+    /// outside `capture_usage_snapshot`'s own 8-day attribution window.
+    async fn prior_run_end_usage(&self, session_id: &str, previous_run_id: &str) -> Option<HarnessUsage> {
+        let snapshots = self.store.usage_snapshots(previous_run_id).await.ok()?;
+        let mut run_ends: Vec<&UsageSnapshot> =
+            snapshots.iter().filter(|s| s.point == SnapshotPoint::RunEnd).collect();
+        run_ends.sort_by_key(|s| s.at);
+        run_ends.iter().rev().find_map(|s| {
+            s.usage.as_ref()?.sessions.iter().find(|h| h.session_id == session_id).cloned()
+        })
     }
 
     async fn record_re_estimate(&self, run: &Run) {
@@ -833,6 +858,7 @@ mod tests {
                     error_details: None,
                     last_message: None,
                     token: run.token.clone(),
+                    session_id: None,
                 },
             )
             .await
@@ -878,6 +904,7 @@ mod tests {
                     error_details: None,
                     last_message: None,
                     token: reference_run.token.clone(),
+                    session_id: None,
                 },
             )
             .await
@@ -903,6 +930,7 @@ mod tests {
                     error_details: None,
                     last_message: None,
                     token: run.token.clone(),
+                    session_id: None,
                 },
             )
             .await
@@ -990,6 +1018,7 @@ mod tests {
                     error_details: None,
                     last_message: None,
                     token: reference_run.token.clone(),
+                    session_id: None,
                 },
             )
             .await
@@ -1016,6 +1045,7 @@ mod tests {
                     error_details: None,
                     last_message: None,
                     token: run.token.clone(),
+                    session_id: None,
                 },
             )
             .await
