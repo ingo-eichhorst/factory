@@ -48,6 +48,13 @@
 //! no estimate to compare against. With none left in any of the three, the
 //! value is `None` and the reason says how many finished runs there were.
 //!
+//! `cost_week` (#164) is `Engine::spend` itself, called directly rather than
+//! through the `needs_runs` prefetch above -- the trailing 7 days of runs
+//! *started* (`Engine::spend`'s own rule), not the `ended_at` rule the
+//! three metrics above use. `None`, with a reason naming the known sum and
+//! the counts, whenever any run in the window is unknown, cost-unknown or
+//! partial.
+//!
 //! The four intake metrics (`ready_rate`, `needs_info_rate`,
 //! `duplicate_rate`, `intake_lead_time`, #165) are
 //! `factory_core::intake::registry_metric` over decision events read off the
@@ -317,7 +324,7 @@ impl Engine {
             if def_result.is_err() {
                 continue;
             }
-            let (value, series) = self.compute_one(id, &sources, now, window).await?;
+            let (value, series) = self.compute_one(id, &sources, now, window, canonical_scope).await?;
             computed.insert(id.clone(), value);
             if let Some(s) = series {
                 computed_series.insert(id.clone(), s);
@@ -464,13 +471,17 @@ impl Engine {
 
     /// One available, non-`quality.*` metric's value, and its series when
     /// it has one, off the backing reads `sources` already gathered (each
-    /// field `Some` exactly when some id needs it).
+    /// field `Some` exactly when some id needs it). `scope` is the request's
+    /// own canonicalised scope name (or `None`, unscoped) -- always given,
+    /// unlike `sources`' fields, since it costs nothing to pass and
+    /// `cost_week` needs it to call `Engine::spend` directly.
     async fn compute_one(
         &self,
         id: &MetricId,
         sources: &ComputeSources<'_>,
         now: DateTime<Utc>,
         window: Option<MetricsWindow>,
+        scope: Option<&str>,
     ) -> Result<(MetricValue, Option<MetricSeries>)> {
         let production = sources.production;
         let policy_report = sources.policy_report;
@@ -513,6 +524,8 @@ impl Engine {
                 usage_value(id, runs.expect("needs_runs set"), now, window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS)),
                 None,
             )
+        } else if id.as_str() == "cost_week" {
+            (self.cost_week_value(id, scope, now, window).await?, None)
         } else if is_hours_metric(id.as_str()) {
             let totals = sources.hours.expect("needs_hours set");
             let seconds = if id.as_str() == "agent_hours" { totals.busy_seconds } else { totals.blocked_seconds };
@@ -642,6 +655,50 @@ impl Engine {
             as_of: run.ended_at.unwrap_or(run.started_at),
             reason: None,
         })
+    }
+
+    /// `cost_week` (#164): `Engine::spend`'s own known sum over runs
+    /// started in the trailing window -- `window`'s own days when given, 7
+    /// otherwise, an unnormalised sum either way (`throughput_week`'s own
+    /// rule for an explicit window). `Engine::spend`, not the `needs_runs`
+    /// prefetch: there is exactly one path to a spend figure, and this is
+    /// it. `None`, with a reason naming the known sum and the counts,
+    /// whenever the window holds a run whose usage is unknown, whose cost
+    /// is unknown, or whose reading is a lower bound -- any one of those
+    /// makes the sum something other than the whole truth.
+    async fn cost_week_value(
+        &self,
+        id: &MetricId,
+        scope: Option<&str>,
+        now: DateTime<Utc>,
+        window: Option<MetricsWindow>,
+    ) -> Result<MetricValue> {
+        let days = window.map(MetricsWindow::days).unwrap_or(7);
+        let report = self
+            .spend(&factory_core::usage::SpendQuery {
+                scope: scope.map(str::to_string),
+                from: Some(now - chrono::Duration::days(days)),
+                to: Some(now),
+                group_by: factory_core::usage::CostGroupBy::Scope,
+            })
+            .await?;
+        let total = &report.total;
+        let unmeasured = total.runs_unknown + total.runs_cost_unknown;
+        let lower_bound = total.runs_partial;
+        if unmeasured + lower_bound > 0 {
+            let known_runs = total.runs.saturating_sub(unmeasured).saturating_sub(lower_bound);
+            return Ok(MetricValue {
+                id: id.clone(),
+                value: None,
+                as_of: now,
+                reason: Some(format!(
+                    "${:.2} known over {known_runs} of {} runs started in the trailing {days} days; \
+                     {unmeasured} unmeasured, {lower_bound} a lower bound -- see factory cost --since {days}d",
+                    total.cost_usd, total.runs,
+                )),
+            });
+        }
+        Ok(MetricValue { id: id.clone(), value: Some(total.cost_usd), as_of: now, reason: None })
     }
 
     /// Unscoped, like `production.rs`'s own read: a goal label names an
@@ -2503,6 +2560,183 @@ mod tests {
         assert_eq!(get("tokens_per_run").value, Some(2_000.0));
     }
 
+    // ----------------------------------------------------------- cost_week (#164)
+
+    #[tokio::test]
+    async fn cost_week_is_none_with_the_known_sum_and_counts_until_every_run_is_measured() {
+        let (engine, database) = scoped_engine();
+        let now = Utc::now();
+        let ids = [MetricId::new("cost_week").unwrap()];
+
+        timed_run(
+            &engine,
+            &database,
+            "costed",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::hours(3),
+            Some(now - chrono::Duration::hours(2)),
+            Some(measured(2.0, 200)),
+        )
+        .await;
+        let computed = engine.metrics(&ids, now).await.unwrap();
+        assert_eq!(metric(&computed, "cost_week").value, Some(2.0), "the only run in the window, fully measured");
+
+        // An unknown run joins the window: the value drops out, with a
+        // reason naming the known sum and the counts.
+        timed_run(
+            &engine,
+            &database,
+            "unmeasured",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::hours(2),
+            Some(now - chrono::Duration::hours(1)),
+            Some(RunUsage::unknown("no source for usage", 1)),
+        )
+        .await;
+        let computed = engine.metrics(&ids, now).await.unwrap();
+        let value = metric(&computed, "cost_week");
+        assert_eq!(value.value, None);
+        let reason = value.reason.as_deref().unwrap();
+        assert!(reason.contains("$2.00"), "{reason}");
+        assert!(reason.contains("1 of 2"), "{reason}");
+        assert!(reason.contains("1 unmeasured"), "{reason}");
+        assert!(reason.contains("0 a lower bound"), "{reason}");
+        assert!(reason.contains("factory cost --since 7d"), "{reason}");
+
+        // A partial run (a lower bound) joins too: still no value, and its
+        // own count says so.
+        let mut lower_bound = measured(0.5, 50);
+        lower_bound.partial = true;
+        timed_run(
+            &engine,
+            &database,
+            "partial",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::hours(1),
+            Some(now - chrono::Duration::minutes(30)),
+            Some(lower_bound),
+        )
+        .await;
+        let computed = engine.metrics(&ids, now).await.unwrap();
+        let value = metric(&computed, "cost_week");
+        assert_eq!(value.value, None);
+        assert!(value.reason.as_deref().unwrap().contains("1 a lower bound"), "{value:?}");
+    }
+
+    #[tokio::test]
+    async fn cost_week_follows_the_scope_and_window_the_request_asks_for() {
+        let (engine, database) = scoped_engine();
+        let now = Utc::now();
+        let ids = [MetricId::new("cost_week").unwrap()];
+
+        timed_run(
+            &engine,
+            &database,
+            "work run",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::hours(2),
+            Some(now - chrono::Duration::hours(1)),
+            Some(measured(2.0, 200)),
+        )
+        .await;
+        timed_run(
+            &engine,
+            &database,
+            "side run",
+            "side",
+            RunStatus::Done,
+            now - chrono::Duration::hours(2),
+            Some(now - chrono::Duration::hours(1)),
+            Some(measured(90.0, 9_000)),
+        )
+        .await;
+        // Outside the default 7-day window, inside a 14-day one.
+        timed_run(
+            &engine,
+            &database,
+            "nine days ago",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::days(9),
+            Some(now - chrono::Duration::days(9) + chrono::Duration::hours(1)),
+            Some(measured(4.0, 400)),
+        )
+        .await;
+
+        let scoped = engine.metrics_for(&ids, now, Some("work"), None).await.unwrap();
+        assert_eq!(metric(&scoped, "cost_week").value, Some(2.0), "only the work run, inside the default window");
+
+        let all = engine.metrics_for(&ids, now, None, None).await.unwrap();
+        assert_eq!(metric(&all, "cost_week").value, Some(92.0), "work + side, both inside the default window");
+
+        let widened = engine.metrics_for(&ids, now, Some("work"), Some(MetricsWindow::FourteenDays)).await.unwrap();
+        assert_eq!(
+            metric(&widened, "cost_week").value,
+            Some(6.0),
+            "the 14-day window also catches the nine-days-ago run, unnormalised"
+        );
+    }
+
+    /// A run that *started* before the trailing week but *ended* inside it
+    /// must be absent from `cost_week` -- the mutation this guards against
+    /// is re-deriving the metric from `usage_metric`'s own `ended_at` rule
+    /// (or the `needs_runs` prefetch) instead of calling `Engine::spend`.
+    #[tokio::test]
+    async fn cost_week_counts_a_run_by_when_it_started_not_when_it_ended() {
+        let (engine, database) = scoped_engine();
+        let now = Utc::now();
+        let ids = [MetricId::new("cost_week").unwrap()];
+
+        timed_run(
+            &engine,
+            &database,
+            "started before the window",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::days(8),
+            Some(now - chrono::Duration::hours(1)),
+            Some(measured(50.0, 5_000)),
+        )
+        .await;
+        timed_run(
+            &engine,
+            &database,
+            "inside the window",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::hours(2),
+            Some(now - chrono::Duration::hours(1)),
+            Some(measured(3.0, 300)),
+        )
+        .await;
+
+        let computed = engine.metrics_for(&ids, now, Some("work"), None).await.unwrap();
+        assert_eq!(
+            metric(&computed, "cost_week").value,
+            Some(3.0),
+            "the eight-day-old run started outside the trailing week, however recently it ended"
+        );
+
+        let spend = engine
+            .spend(&factory_core::usage::SpendQuery {
+                scope: Some("work".into()),
+                from: Some(now - chrono::Duration::days(7)),
+                to: Some(now),
+                group_by: factory_core::usage::CostGroupBy::Scope,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            metric(&computed, "cost_week").value,
+            Some(spend.total.cost_usd),
+            "cost_week is exactly Engine::spend's own total for the same window and scope"
+        );
+    }
+
     #[tokio::test]
     async fn estimate_accuracy_reads_each_runs_original_estimate_against_its_wall_time() {
         let engine = test_engine(Vec::new());
@@ -2731,6 +2965,7 @@ mod tests {
         assert!(has("throughput_week"), "fixed metrics are always in the default set");
         assert!(has("unit_cost"), "a fixed metric, so in the default set");
         assert!(has("tokens_per_run"));
+        assert!(has("cost_week"), "a fixed metric, so in the default set (#164)");
         assert!(has("estimate_accuracy"), "a fixed metric, so in the default set (#168)");
         assert!(has("compliance.cra"), "implied by the loaded policy catalogue");
         assert!(has("open_controls.cra"));

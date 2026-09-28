@@ -1100,6 +1100,8 @@ pub enum CostGroupBy {
     Agent,
     /// The configured provider account snapshotted on the run.
     Provider,
+    /// The task's `workflow_origin.workflow_id`, when it has one (#164).
+    Workflow,
 }
 
 impl CostGroupBy {
@@ -1110,6 +1112,7 @@ impl CostGroupBy {
             Self::Scope => "scope",
             Self::Agent => "agent",
             Self::Provider => "provider",
+            Self::Workflow => "workflow",
         }
     }
 }
@@ -1123,7 +1126,10 @@ impl std::str::FromStr for CostGroupBy {
             "scope" => Self::Scope,
             "agent" => Self::Agent,
             "provider" => Self::Provider,
-            other => return Err(format!("cannot group costs by {other:?}: use task, issue, scope, agent or provider")),
+            "workflow" => Self::Workflow,
+            other => return Err(format!(
+                "cannot group costs by {other:?}: use task, issue, scope, agent, provider or workflow"
+            )),
         })
     }
 }
@@ -1243,6 +1249,23 @@ impl CostRow {
     pub fn runs_costed(&self) -> u32 {
         self.runs - self.runs_unknown - self.runs_cost_unknown
     }
+}
+
+/// What `Engine::spend` reads (#164): runs that started in `[from, to)`
+/// (`from` defaults to thirty days before `to`, `to` to now), narrowed to
+/// `scope`'s own subtree when given, summed per `group_by`. Plain serde
+/// data -- the same shape whether it comes off the wire (`Request::Costs`)
+/// or is built in-process (`cost_week`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpendQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub group_by: CostGroupBy,
 }
 
 /// `factory cost`'s and `GET /api/costs`' answer.
@@ -1819,11 +1842,12 @@ mod tests {
             CostGroupBy::Scope,
             CostGroupBy::Agent,
             CostGroupBy::Provider,
+            CostGroupBy::Workflow,
         ] {
             assert_eq!(g.as_str().parse::<CostGroupBy>().unwrap(), g);
             assert_eq!(serde_json::to_value(g).unwrap(), serde_json::json!(g.as_str()));
         }
-        assert!("workflow".parse::<CostGroupBy>().is_err());
+        assert!("bogus".parse::<CostGroupBy>().is_err());
     }
 
     #[test]

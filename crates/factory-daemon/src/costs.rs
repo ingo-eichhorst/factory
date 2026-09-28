@@ -25,7 +25,7 @@ use factory_core::run::{Run, RunPatch};
 use factory_core::task::Task;
 use factory_core::usage::{
     allocate_plan_share, run_usage, run_usage_with_prior, CostGroupBy, CostReport, CostRow, EstimateComparison,
-    HarnessUsage, ReEstimate, RunUsage, RunUsageEntry, SnapshotPoint, TaskUsage, UsageSnapshot,
+    HarnessUsage, ReEstimate, RunUsage, RunUsageEntry, SnapshotPoint, SpendQuery, TaskUsage, UsageSnapshot,
 };
 
 use crate::engine::Engine;
@@ -35,6 +35,10 @@ const DEFAULT_WINDOW_DAYS: i64 = 30;
 
 /// A run's `issue` when its task has no `issue=<n>` label.
 const NO_ISSUE: &str = "(no issue)";
+
+/// A run's `workflow` when its task carries no `workflow_origin` (#164): a
+/// standalone task, never a workflow run's own concern.
+const NO_WORKFLOW: &str = "(no workflow)";
 
 impl Engine {
     /// Ask the run's runtime what its session has used, keep the answer (or
@@ -385,18 +389,19 @@ impl Engine {
         })
     }
 
-    /// `Request::Costs`: runs that started in `[from, to)`, summed per
-    /// group. Read on request from the runs themselves -- there is no second
-    /// store of costs to drift from them.
-    pub(crate) async fn costs_report(
-        &self,
-        group_by: CostGroupBy,
-        from: Option<DateTime<Utc>>,
-        to: Option<DateTime<Utc>>,
-        scope: Option<&str>,
-    ) -> Result<CostReport> {
-        let to = to.unwrap_or_else(Utc::now);
-        let from = from.unwrap_or(to - Duration::days(DEFAULT_WINDOW_DAYS));
+    /// The only spend read (#164): usage and cost summed over the runs that
+    /// started in `q.from..q.to`, grouped by `q.group_by`, narrowed to
+    /// `q.scope`'s own subtree when given. Read on request from the runs
+    /// themselves -- there is no second store of costs to drift from them.
+    /// Not wrapped: every consumer calls this and nothing else --
+    /// `Request::Costs` and `cost_week` today; phase 2/3's Budget tab,
+    /// `budget_within` and the Scenario cost drivers must too, when they
+    /// arrive -- a wrapper would leave the inner function reachable too,
+    /// which is a second path. This is the future `Provide<Spend>` of #193
+    /// phase 3.
+    pub(crate) async fn spend(&self, q: &SpendQuery) -> Result<CostReport> {
+        let to = q.to.unwrap_or_else(Utc::now);
+        let from = q.from.unwrap_or(to - Duration::days(DEFAULT_WINDOW_DAYS));
         if from >= to {
             return Err(factory_core::FactoryError::BadRequest(format!(
                 "the window is empty: {from} is not before {to}"
@@ -405,7 +410,7 @@ impl Engine {
         let snapshot = self.factory_snapshot();
         // A scope means its whole subtree, the reading Operations, Policy
         // and Scenarios give it; a name that resolves to nothing is refused.
-        let (scope_name, members) = match scope {
+        let (scope_name, members) = match q.scope.as_deref() {
             None => (None, None),
             Some(name) => {
                 let (asked, subtree) = crate::policies::subtree_scopes(&snapshot, Some(name))?;
@@ -431,6 +436,30 @@ impl Engine {
             }
         }
 
+        // Every workflow definition a task in this window points to, looked
+        // up once per id and cached -- the `tasks` map's own pattern above.
+        // Only built for `CostGroupBy::Workflow`, so no other grouping pays
+        // for a workflow store round trip it never asked for. A deleted
+        // definition (`get_definition` answers `None`, or errors) caches as
+        // `None`: the group still keys by `workflow_id`, just unlabelled.
+        let mut workflow_names: BTreeMap<String, Option<String>> = BTreeMap::new();
+        if q.group_by == CostGroupBy::Workflow {
+            for task in tasks.values().flatten() {
+                let Some(origin) = &task.workflow_origin else { continue };
+                if workflow_names.contains_key(&origin.workflow_id) {
+                    continue;
+                }
+                let name = self
+                    .workflows
+                    .get_definition(&origin.workflow_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|def| def.name);
+                workflow_names.insert(origin.workflow_id.clone(), name);
+            }
+        }
+
         let now = Utc::now();
         let mut rows: BTreeMap<String, CostRow> = BTreeMap::new();
         let mut total = CostRow::new("total", None);
@@ -448,7 +477,7 @@ impl Engine {
                     continue;
                 }
             }
-            let (key, label) = group_key(group_by, run, task, |s| snapshot.canonical_scope_name(s));
+            let (key, label) = group_key(q.group_by, run, task, |s| snapshot.canonical_scope_name(s), &workflow_names);
             let terminal_wall = run
                 .status
                 .is_terminal()
@@ -481,7 +510,7 @@ impl Engine {
         let mut rows: Vec<CostRow> = rows.into_values().collect();
         CostReport::sort_rows(&mut rows);
         Ok(CostReport {
-            group_by,
+            group_by: q.group_by,
             from,
             to,
             scope: scope_name,
@@ -492,11 +521,15 @@ impl Engine {
 }
 
 /// Which group a run falls in, and a readable label when the key is an id.
+/// `workflow_names` is `spend`'s own memoised `workflow_id -> definition
+/// name` lookup -- empty, and never consulted, for every grouping but
+/// `Workflow`.
 fn group_key(
     group_by: CostGroupBy,
     run: &Run,
     task: Option<&Task>,
     canonical: impl Fn(&str) -> String,
+    workflow_names: &BTreeMap<String, Option<String>>,
 ) -> (String, Option<String>) {
     match group_by {
         CostGroupBy::Task => (
@@ -522,6 +555,19 @@ fn group_key(
             None,
         ),
         CostGroupBy::Provider => (run.provider_account.clone().unwrap_or_else(|| "(unknown provider)".into()), None),
+        // A deleted task's workflow is unknown, so it is never `NO_WORKFLOW`
+        // -- that means "standalone", a positive fact a deleted task cannot
+        // offer.
+        CostGroupBy::Workflow => match task {
+            None => ("(deleted task)".into(), None),
+            Some(t) => match &t.workflow_origin {
+                None => (NO_WORKFLOW.into(), None),
+                Some(origin) => (
+                    origin.workflow_id.clone(),
+                    workflow_names.get(&origin.workflow_id).cloned().flatten(),
+                ),
+            },
+        },
     }
 }
 
@@ -614,9 +660,10 @@ mod tests {
     use factory_core::adapter::{AgentRuntime, RuntimeStatus, StartRequest};
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
     use factory_core::error::FactoryError;
-    use factory_core::run::{RunStatus, Trigger};
-    use factory_core::task::{NewTask, SessionRef, TaskPatch, TaskReport};
+    use factory_core::run::{NewRun, RunStatus, Trigger};
+    use factory_core::task::{NewTask, SessionRef, TaskPatch, TaskReport, WorkflowOrigin};
     use factory_core::usage::{HarnessUsage, SessionUsage, TokenCounts, UsageCost, UsageState};
+    use factory_core::workflow::{WorkflowDefinition, WorkflowDraft};
     use factory_plugins::{Registry, SqliteStore};
     use std::collections::VecDeque;
     use std::path::PathBuf;
@@ -709,6 +756,19 @@ mod tests {
         measured
     }
 
+    /// A run's own already-derived `usage` (`Run.usage`), for the tests that
+    /// write it onto a run directly rather than driving it through a
+    /// `MeteredRuntime` snapshot.
+    fn known_run_usage(input: u64, usd: f64) -> RunUsage {
+        RunUsage {
+            state: UsageState::Known,
+            reason: None,
+            tokens: TokenCounts { input: Some(input), output: Some(0), cache_read: Some(0), cache_write: Some(0) },
+            cost_usd: Some(usd),
+            ..RunUsage::unknown("", 2)
+        }
+    }
+
     fn engine(answers: Vec<Answer>) -> Arc<Engine> {
         engine_with_delays(answers, Vec::new())
     }
@@ -790,6 +850,17 @@ mod tests {
         engine.start_run(&task.id, Trigger::Manual).await;
         let run = engine.store.active_run(&task.id).await.unwrap().expect("dispatched");
         (task, run)
+    }
+
+    /// `Engine::spend`'s query, spelled the way `costs_report`'s old
+    /// positional call used to read.
+    fn spend_query(
+        group_by: CostGroupBy,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+        scope: Option<&str>,
+    ) -> SpendQuery {
+        SpendQuery { scope: scope.map(str::to_string), from, to, group_by }
     }
 
     async fn done(engine: &Arc<Engine>, task: &Task, run: &Run) -> Run {
@@ -1257,7 +1328,7 @@ mod tests {
         let (t2, r2) = dispatched(&engine, None).await;
         done(&engine, &t2, &r2).await;
 
-        let by_issue = engine.costs_report(CostGroupBy::Issue, None, None, None).await.unwrap();
+        let by_issue = engine.spend(&spend_query(CostGroupBy::Issue, None, None, None)).await.unwrap();
         assert_eq!(by_issue.rows.len(), 2);
         assert_eq!(by_issue.rows[0].key, "issue=117", "most expensive first");
         assert!((by_issue.rows[0].cost_usd - 1.25).abs() < 1e-9);
@@ -1267,16 +1338,16 @@ mod tests {
         assert_eq!(by_issue.total.runs_unknown, 1, "counted, never dropped");
         assert_eq!(by_issue.total.tokens.input, 1_000);
 
-        let by_agent = engine.costs_report(CostGroupBy::Agent, None, None, None).await.unwrap();
+        let by_agent = engine.spend(&spend_query(CostGroupBy::Agent, None, None, None)).await.unwrap();
         assert_eq!(by_agent.rows.len(), 1);
         assert_eq!(by_agent.rows[0].key, "demo/shell");
         assert_eq!(by_agent.rows[0].runs, 2);
 
-        let by_scope = engine.costs_report(CostGroupBy::Scope, None, None, Some("demo")).await.unwrap();
+        let by_scope = engine.spend(&spend_query(CostGroupBy::Scope, None, None, Some("demo"))).await.unwrap();
         assert_eq!(by_scope.rows[0].key, "demo");
         assert_eq!(by_scope.scope.as_deref(), Some("demo"));
 
-        let by_task = engine.costs_report(CostGroupBy::Task, None, None, None).await.unwrap();
+        let by_task = engine.spend(&spend_query(CostGroupBy::Task, None, None, None)).await.unwrap();
         assert_eq!(by_task.rows[0].key, t1.id);
         assert_eq!(by_task.rows[0].label.as_deref(), Some("costly"));
 
@@ -1285,18 +1356,137 @@ mod tests {
             .update_run(&r1.id, &RunPatch { provider_account: Some("claude-max".into()), ..Default::default() })
             .await
             .unwrap();
-        let by_provider = engine.costs_report(CostGroupBy::Provider, None, None, None).await.unwrap();
+        let by_provider = engine.spend(&spend_query(CostGroupBy::Provider, None, None, None)).await.unwrap();
         assert!(by_provider.rows.iter().any(|row| row.key == "claude-max"));
 
         // A window before any of it holds nothing; an empty one is refused.
         let past = Utc::now() - Duration::days(400);
         let none = engine
-            .costs_report(CostGroupBy::Task, Some(past), Some(past + Duration::days(1)), None)
+            .spend(&spend_query(CostGroupBy::Task, Some(past), Some(past + Duration::days(1)), None))
             .await
             .unwrap();
         assert!(none.rows.is_empty());
-        assert!(engine.costs_report(CostGroupBy::Task, Some(past), Some(past), None).await.is_err());
-        assert!(engine.costs_report(CostGroupBy::Task, None, None, Some("nope")).await.is_err());
+        assert!(engine.spend(&spend_query(CostGroupBy::Task, Some(past), Some(past), None)).await.is_err());
+        assert!(engine.spend(&spend_query(CostGroupBy::Task, None, None, Some("nope"))).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn costs_group_by_workflow_labels_the_live_one_and_counts_the_rest() {
+        let engine = engine(vec![]);
+
+        // A standalone task, dispatched the ordinary way -- no runtime
+        // answer is queued for it, so it lands unknown and is counted, not
+        // dropped. Done first: `capture_usage_snapshot` recomputes usage
+        // for every run in its own 8-day attribution window, which would
+        // otherwise clobber the two hand-set rows built below.
+        let (standalone_task, standalone_run) = dispatched(&engine, None).await;
+        done(&engine, &standalone_task, &standalone_run).await;
+
+        // A task whose workflow definition is still around: keyed by its
+        // id, labelled with its name. Built straight against the store,
+        // past the runtime entirely, so no further snapshot capture touches
+        // it.
+        let definition = WorkflowDefinition::from_draft(WorkflowDraft {
+            name: "release train".into(),
+            scope: "demo".into(),
+            ..Default::default()
+        });
+        engine.workflows.put_definition(&definition).await.unwrap();
+        let origin = WorkflowOrigin {
+            workflow_id: definition.id.clone(),
+            workflow_run_id: "wfrun-1".into(),
+            node_id: "n1".into(),
+        };
+        let wf_task = engine
+            .create_workflow_task(
+                NewTask {
+                    title: "wf task".into(),
+                    instructions: "true".into(),
+                    scope: Some("demo".into()),
+                    agent: Some("shell".into()),
+                    worktree: Some(false),
+                    ..Default::default()
+                },
+                origin,
+                "wf-task-1".into(),
+            )
+            .await
+            .unwrap();
+        let wf_run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: wf_task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "metered".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &wf_run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(Utc::now()),
+                    usage: Some(known_run_usage(1_000, 2.0)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // A run whose task was deleted: built straight against the store,
+        // so no task row was ever created for it -- `store.get` on its
+        // `task_id` answers `None`, the same as a task that existed and was
+        // removed. Its workflow is unknown, never "standalone".
+        let ghost_run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: "ghost-task".into(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "metered".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &ghost_run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(Utc::now()),
+                    usage: Some(known_run_usage(500, 1.0)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let report = engine.spend(&spend_query(CostGroupBy::Workflow, None, None, None)).await.unwrap();
+        let by_key = |key: &str| report.rows.iter().find(|r| r.key == key);
+
+        let wf_row = by_key(&definition.id).expect("the live workflow's own row");
+        assert_eq!(wf_row.label.as_deref(), Some("release train"));
+        assert!((wf_row.cost_usd - 2.0).abs() < 1e-9);
+
+        let deleted_row = by_key("(deleted task)").expect("the deleted task's own row");
+        assert_eq!(deleted_row.label, None, "a deleted task's workflow is unknown, never labelled");
+        assert!((deleted_row.cost_usd - 1.0).abs() < 1e-9);
+
+        let standalone_row = by_key(NO_WORKFLOW).expect("the standalone task's own row");
+        assert_eq!(standalone_row.runs_unknown, 1, "no runtime answer was queued for it");
+
+        assert_eq!(report.total.runs, 3);
     }
 
     #[tokio::test]
@@ -1341,7 +1531,7 @@ mod tests {
         let wide_run = engine.store.active_run(&wide.id).await.unwrap().expect("dispatched");
         done(&engine, &wide, &wide_run).await;
 
-        let report = engine.costs_report(CostGroupBy::Task, None, None, None).await.unwrap();
+        let report = engine.spend(&spend_query(CostGroupBy::Task, None, None, None)).await.unwrap();
         let t1_row = report.rows.iter().find(|r| r.key == t1.id).expect("t1's own row");
         assert_eq!(t1_row.estimated_runs, 1);
         assert_eq!(t1_row.within_range, 0, "a real run is never exactly 900s long");

@@ -161,10 +161,11 @@ enum Command {
         scope: Option<String>,
     },
     /// What runs used and cost, summed per task, GitHub issue (`issue=<n>`
-    /// label), scope, agent or provider (#117). Usage comes from the agent runtime;
-    /// a run it could not measure is counted as unknown, never as free.
+    /// label), scope, agent, provider or workflow (#117, #164). Usage comes
+    /// from the agent runtime; a run it could not measure is counted as
+    /// unknown, never as free.
     Cost {
-        /// task, issue, scope, agent or provider.
+        /// task, issue, scope, agent, provider or workflow.
         #[arg(long, default_value = "task")]
         by: String,
         /// Runs started since this: `7d`, `12h`, `2026-09-01` or RFC 3339.

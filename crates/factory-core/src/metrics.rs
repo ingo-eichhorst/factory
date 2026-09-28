@@ -423,6 +423,25 @@ fn tokens_per_run_def() -> MetricDef {
     )
 }
 
+/// `cost_week` (#164): known API-equivalent USD over runs *started* in the
+/// trailing 7 days -- `Engine::spend`'s own window rule, not the `ended_at`
+/// rule the two defs above use, since this is `Engine::spend` itself and no
+/// other read.
+fn cost_week_def() -> MetricDef {
+    fixed(
+        "cost_week",
+        "Cost per week",
+        "Known API-equivalent USD spent over runs started in the trailing 7 days -- \
+         Engine::spend's own window (runs started, not ended), not unit_cost/tokens_per_run's \
+         rule. No value, with a reason naming the known sum and the counts, when any run in the \
+         window is unknown, cost-unknown or partial: a lower bound must never read as the whole \
+         truth.",
+        Unit::Usd,
+        Better::Lower,
+        "Engine::spend over runs started in the trailing 7 days (TaskStore::runs_between)",
+    )
+}
+
 fn estimate_accuracy_def() -> MetricDef {
     fixed(
         "estimate_accuracy",
@@ -641,6 +660,7 @@ pub fn registry() -> Vec<MetricDef> {
         time_to_recover_p50_def(),
         unit_cost_def(),
         tokens_per_run_def(),
+        cost_week_def(),
         estimate_accuracy_def(),
         ready_rate_def(),
         needs_info_rate_def(),
@@ -691,6 +711,7 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         ["time_to_recover_p50"] => time_to_recover_p50_def(),
         ["unit_cost"] => unit_cost_def(),
         ["tokens_per_run"] => tokens_per_run_def(),
+        ["cost_week"] => cost_week_def(),
         ["estimate_accuracy"] => estimate_accuracy_def(),
         ["ready_rate"] => ready_rate_def(),
         ["needs_info_rate"] => needs_info_rate_def(),
@@ -884,6 +905,7 @@ mod tests {
             "time_to_recover_p50",
             "unit_cost",
             "tokens_per_run",
+            "cost_week",
             "estimate_accuracy",
             "ready_rate",
             "needs_info_rate",
@@ -963,6 +985,14 @@ mod tests {
             assert_eq!((def.unit, def.better), (unit, Better::Lower), "{id}");
         }
         assert_eq!(serde_json::to_value(Unit::Usd).unwrap(), serde_json::json!("usd"));
+    }
+
+    #[test]
+    fn cost_week_is_a_scope_aware_usd_metric_where_lower_is_better() {
+        let def = resolve(&MetricId::new("cost_week").unwrap()).unwrap();
+        assert!(def.available);
+        assert_eq!(def.unavailable_reason, None);
+        assert_eq!((def.unit, def.better, def.coverage), (Unit::Usd, Better::Lower, MetricCoverage::ScopeAware));
     }
 
     #[test]
