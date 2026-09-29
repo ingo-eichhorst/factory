@@ -347,12 +347,14 @@ impl Engine {
     /// names, no ancestor roll-up -- the caller already decided whether that
     /// is one exact scope or a whole subtree) and to `categories` when
     /// either is given, together with its `required_steps` (frozen at
-    /// dispatch, `Run::required_steps`) and every attestation it collected
-    /// (`PolicyStore::step_attestations_for`, one batch read). A bench
-    /// attempt's task (`Task::bench_origin`) is always left out -- its own
-    /// case gate judges it, the same rule `required_steps_for_task` already
-    /// applies, so a plan on top would never apply to it anyway. This
-    /// becomes `Provide<…>` in `#193` phase 3; until then it wraps
+    /// dispatch, `Run::required_steps`), its `fail_kind` (`None` for a run
+    /// that ended `Done` -- `conformance_rate` reads this to exclude an
+    /// infrastructure failure from its ratio), and every attestation it
+    /// collected (`PolicyStore::step_attestations_for`, one batch read). A
+    /// bench attempt's task (`Task::bench_origin`) is always left out -- its
+    /// own case gate judges it, the same rule `required_steps_for_task`
+    /// already applies, so a plan on top would never apply to it anyway.
+    /// This becomes `Provide<…>` in `#193` phase 3; until then it wraps
     /// `PolicyStore` exactly where the table already lives.
     pub(crate) async fn attested_runs(
         &self,
@@ -377,6 +379,7 @@ impl Engine {
             agent: String,
             status: RunStatus,
             ended_at: chrono::DateTime<Utc>,
+            fail_kind: Option<factory_core::run::FailKind>,
             required_steps: Vec<RequiredStep>,
         }
         let mut resolved = Vec::new();
@@ -407,6 +410,7 @@ impl Engine {
                 agent: run.agent.clone(),
                 status: run.status,
                 ended_at: run.ended_at.expect("retained above"),
+                fail_kind: run.fail_kind,
                 required_steps: run.required_steps.clone(),
             });
         }
@@ -426,6 +430,7 @@ impl Engine {
                 agent: r.agent,
                 status: r.status,
                 ended_at: r.ended_at,
+                fail_kind: r.fail_kind,
                 required_steps: r.required_steps,
             })
             .collect())

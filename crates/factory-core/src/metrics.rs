@@ -394,7 +394,10 @@ fn conformance_rate_def(category: &str) -> MetricDef {
              attestation, by someone other than the run's own agent, passed -- among the \
              category's finished runs, over the trailing 28 days. A held run that was \
              cancelled or failed without passing evidence counts against the rate; an unheld \
-             run (nothing ever required of it) is left out of both sides."
+             run (nothing ever required of it) is left out of both sides, as is a held run \
+             whose own failure never reached an agent (an ack timeout, a run timeout, a \
+             vanished session, a dispatch that never happened) -- it produced no work to \
+             conform or not."
         ),
         Unit::Ratio,
         Better::Higher,

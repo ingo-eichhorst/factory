@@ -17,7 +17,7 @@
 //! that dependency rather than the two modules importing each other.
 
 use crate::control_plan::{self, AttestationVerdict, RequiredStep, StepAttestation, StepKind};
-use crate::run::RunStatus;
+use crate::run::{FailKind, RunStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -35,9 +35,10 @@ pub struct AttestedRun {
     /// -- never rolled up to an ancestor: the same exact-scope rule
     /// `task`/`workflow` checks already follow.
     pub scope: String,
-    /// `control_plan::effective_category(task.category)` as it stood when
-    /// the run was resolved -- a task recategorised later does not rewrite
-    /// what an old run was planned and judged as.
+    /// `control_plan::effective_category(task.category)`, read off the
+    /// task's *current* record, not something frozen at dispatch -- a task
+    /// recategorised later moves its past runs along with it, the same as
+    /// every other field `Engine::attested_runs` reads off the live task.
     pub category: String,
     /// The run's own executing agent -- `step_evidence`'s and `conforms`'s
     /// own exclusion, the same rule `control_plan::judge` applies: nothing
@@ -48,6 +49,11 @@ pub struct AttestedRun {
     /// only returns finished runs -- kept as the same type `Run::ended_at`
     /// is, rather than asserting it away.
     pub ended_at: DateTime<Utc>,
+    /// Why the run ended `Failed` or `Cancelled`, straight off `Run::fail_kind`
+    /// -- `None` for a run that ended `Done`. [`Self::is_infrastructure_failure`]
+    /// is the one thing this module reads it for: `conformance_rate` excludes
+    /// a run that never reached an agent from both sides of the ratio.
+    pub fail_kind: Option<FailKind>,
     /// This run's own control plan, fixed at dispatch (`Run::required_steps`).
     pub required_steps: Vec<RequiredStep>,
     /// Every attestation this run has collected, whatever step or round --
@@ -105,6 +111,18 @@ impl AttestedRun {
         self.required_steps.iter().any(|s| s.kind.enforced())
     }
 
+    /// Whether this run's own failure, if it has one, never reached an
+    /// agent at all (`FailKind::is_infrastructure`: an ack timeout, a run
+    /// timeout, a vanished session, or a dispatch that never happened).
+    /// `conformance_rate` excludes a run like this from both sides of its
+    /// ratio -- it produced no work to conform or not, so counting it
+    /// against the rate would turn a conformance metric into a reliability
+    /// one. A person's or an agent's own cancellation, and an agent-reported
+    /// failure, are not infrastructure and still count against it.
+    pub fn is_infrastructure_failure(&self) -> bool {
+        self.fail_kind.is_some_and(FailKind::is_infrastructure)
+    }
+
     /// The `done` gate's own verdict for the whole run, reused rather than
     /// re-derived: `control_plan::judge` with `since` at the dawn of time,
     /// so a step attested in *any* verification round still counts, not
@@ -141,17 +159,22 @@ pub struct ConformanceFigure {
 /// `conformance_rate.<category>`'s figure: `conforms()` runs over `held()`
 /// runs, among `runs` of `category` -- `runs` is expected already narrowed
 /// to finished runs of the scope subtree and window a caller asked about
-/// (`Engine::attested_runs`); this only filters by category and by
-/// `held()`, never by scope or time. A held run that was cancelled or
-/// failed without passing evidence still counts, against the rate --
-/// declared but not shown to be met is not met, the same rule
-/// `quality::quality_def` states for its own share. `None`, with a reason,
-/// when nothing held is left -- an unknown category, or a known one
-/// nothing has run yet.
+/// (`Engine::attested_runs`); this only filters by category, by `held()`,
+/// and by [`AttestedRun::is_infrastructure_failure`], never by scope or
+/// time. A held run that was cancelled by a person or an agent, or that the
+/// agent itself reported failed, without passing evidence, still counts
+/// against the rate -- declared but not shown to be met is not met, the
+/// same rule `quality::quality_def` states for its own share. A held run
+/// that failed on infrastructure -- an ack timeout, a run timeout, a
+/// vanished session, a dispatch that never happened -- is excluded from
+/// both the numerator and the denominator: it never reached an agent, so it
+/// says nothing about whether the work conforms. `None`, with a reason,
+/// when nothing held is left -- an unknown category, a known one nothing
+/// has run yet, or one where every held run failed on infrastructure.
 pub fn conformance_rate(runs: &[AttestedRun], category: &str) -> ConformanceFigure {
     let held: Vec<&AttestedRun> = runs
         .iter()
-        .filter(|r| r.category == category && r.held())
+        .filter(|r| r.category == category && r.held() && !r.is_infrastructure_failure())
         .collect();
     if held.is_empty() {
         return ConformanceFigure {
@@ -277,6 +300,7 @@ mod tests {
             agent: "worker".into(),
             status,
             ended_at,
+            fail_kind: None,
             required_steps: required,
             attestations,
         }
@@ -454,6 +478,76 @@ mod tests {
             "one of two held feature runs conforms; the unheld run and the other category are left out"
         );
         assert_eq!(figure.as_of, Some(t0));
+    }
+
+    #[test]
+    fn conformance_rate_excludes_infrastructure_failures_but_still_counts_an_agent_failure() {
+        let t0 = Utc::now();
+        let conforming = run(
+            RunStatus::Done,
+            "feature",
+            vec![step("tests", StepKind::Gate)],
+            vec![attest(
+                "tests",
+                AttestationVerdict::Pass,
+                control_plan::GATE_ACTOR,
+                t0,
+            )],
+            t0,
+        );
+        let mut dispatch_failed = run(
+            RunStatus::Failed,
+            "feature",
+            vec![step("tests", StepKind::Gate)],
+            vec![],
+            t0,
+        );
+        dispatch_failed.fail_kind = Some(FailKind::DispatchFailed);
+        let mut ack_timeout = run(
+            RunStatus::Failed,
+            "feature",
+            vec![step("tests", StepKind::Gate)],
+            vec![],
+            t0,
+        );
+        ack_timeout.fail_kind = Some(FailKind::AckTimeout);
+        let mut agent_failed = run(
+            RunStatus::Failed,
+            "feature",
+            vec![step("tests", StepKind::Gate)],
+            vec![],
+            t0,
+        );
+        agent_failed.fail_kind = Some(FailKind::AgentFailed);
+
+        // Infrastructure failures alone: nothing held is left.
+        let figure = conformance_rate(&[dispatch_failed.clone(), ack_timeout.clone()], "feature");
+        assert_eq!(
+            figure.value, None,
+            "a dispatch failure and an ack timeout never reached an agent"
+        );
+        assert!(figure.reason.is_some());
+
+        // Mixed with a conforming run: the infrastructure failures are
+        // simply absent from the denominator, not counted against it.
+        let figure = conformance_rate(
+            &[conforming.clone(), dispatch_failed, ack_timeout],
+            "feature",
+        );
+        assert_eq!(
+            figure.value,
+            Some(1.0),
+            "the one held, non-infrastructure run conforms"
+        );
+
+        // An agent-reported failure is not infrastructure and still counts
+        // against the rate, exactly as a cancellation does.
+        let figure = conformance_rate(&[conforming, agent_failed], "feature");
+        assert_eq!(
+            figure.value,
+            Some(0.5),
+            "the agent failure counts against the rate, unlike the infrastructure ones"
+        );
     }
 
     #[test]

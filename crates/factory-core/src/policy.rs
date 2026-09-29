@@ -4394,6 +4394,7 @@ mod tests {
             agent: "worker".to_string(),
             status,
             ended_at,
+            fail_kind: None,
             required_steps: required,
             attestations,
         }
