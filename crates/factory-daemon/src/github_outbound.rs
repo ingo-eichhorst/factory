@@ -513,7 +513,7 @@ mod tests {
         let reference = format!("https://github.com/acme/{scope}/issues/{number}");
         let record = Intake {
             stage: IntakeStage::Received,
-            source: Box::new(IntakeSource { kind: SourceKind::Github, reference: Some(reference), provider: None, relayed_by: None }),
+            source: Box::new(IntakeSource { kind: SourceKind::Github, reference: Some(reference), provider: None, relayed_by: None, repository: None, number: None, external_id: None }),
             requester: "octocat".into(),
             received_at: Utc::now(),
             triage: None,

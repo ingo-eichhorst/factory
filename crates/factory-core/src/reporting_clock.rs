@@ -400,7 +400,7 @@ mod tests {
             item: item.into(),
             scope: scope.into(),
             awareness_at,
-            source: IntakeSource { kind: crate::intake::SourceKind::Cli, reference: None, provider: None, relayed_by: None },
+            source: IntakeSource { kind: crate::intake::SourceKind::Cli, reference: None, provider: None, relayed_by: None, repository: None, number: None, external_id: None },
             confirmed_by: "owner".into(),
             confirmed_at: awareness_at,
             parent: parent.map(str::to_string),

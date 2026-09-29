@@ -99,6 +99,9 @@ pub enum Trigger {
     Retry,
     Agent,
     Workflow,
+    /// Released automatically because every task named in `depends_on`
+    /// completed successfully.
+    Dependency,
     /// Started as one attempt of a bench run -- see `bench::BenchOrigin`,
     /// which the task itself carries.
     Bench,
@@ -112,6 +115,7 @@ impl Trigger {
             Self::Retry => "retry",
             Self::Agent => "agent",
             Self::Workflow => "workflow",
+            Self::Dependency => "dependency",
             Self::Bench => "bench",
         }
     }

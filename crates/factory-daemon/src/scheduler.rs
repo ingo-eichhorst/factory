@@ -82,6 +82,23 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
             Err(e) => tracing::warn!("could not look for due tasks: {e}"),
         }
 
+        // -- dependency-released tasks ----------------------------------
+        // Decomposition roots are started by intake itself. Every later
+        // part waits as an ordinary Pending task until all of its declared
+        // predecessors are Done; the status transition at dispatch keeps
+        // the next tick from claiming it a second time.
+        match engine.dependency_ready_tasks().await {
+            Ok(tasks) => {
+                for task in tasks {
+                    let engine = engine.clone();
+                    tokio::spawn(async move {
+                        engine.start_run_due(&task.id, Trigger::Dependency, crate::engine::Due::now()).await;
+                    });
+                }
+            }
+            Err(error) => tracing::warn!("could not look for dependency-ready tasks: {error}"),
+        }
+
         // -- tasks held on a harness that did not start (#131) ---------------
         // Rate-limited and backgrounded inside; this only ever starts it.
         engine.recheck_harnesses();

@@ -1111,6 +1111,13 @@ impl Engine {
                         "this task is still in intake: triage it and release it (factory intake decide) before it can run".into(),
                     ));
                 }
+                let blockers = self.dependency_blockers(&task).await?;
+                if !blockers.is_empty() {
+                    return Err(FactoryError::BadRequest(format!(
+                        "this task is waiting for: {}",
+                        blockers.join(", ")
+                    )));
+                }
                 // A task is a standing intent; a run is one attempt at it. Two
                 // attempts at once would race for the same working directory.
                 if let Some(run) = self.store.active_run(&id).await? {
@@ -2499,6 +2506,47 @@ impl Engine {
         Ok(task)
     }
 
+    /// Human-readable dependencies that are not successfully complete.
+    /// Missing ids block too: silently treating a deleted prerequisite as
+    /// success would run work with an input it never received.
+    async fn dependency_blockers(&self, task: &Task) -> Result<Vec<String>> {
+        let mut blockers = Vec::new();
+        for id in &task.depends_on {
+            match self.store.get(id).await? {
+                Some(parent) if parent.status == TaskStatus::Done => {}
+                Some(parent) => blockers.push(format!(
+                    "{} ({}, {})",
+                    parent.title,
+                    parent.id,
+                    parent.status.as_str()
+                )),
+                None => blockers.push(format!("{id} (missing)")),
+            }
+        }
+        Ok(blockers)
+    }
+
+    /// Pending decomposition tasks which became runnable since the last
+    /// scheduler tick, including never-started roots recovered after a
+    /// restart. `runs == 0` is deliberate: plan release starts a task once;
+    /// retrying an attempt that failed remains an explicit act.
+    pub(crate) async fn dependency_ready_tasks(&self) -> Result<Vec<Task>> {
+        let tasks = self.store.list(&TaskFilter::default()).await?;
+        let mut ready = Vec::new();
+        for task in tasks.into_iter().filter(|task| {
+            task.status == TaskStatus::Pending
+                && task.runs == 0
+                && task.slot_wait.is_none()
+                && task.parent_task_id.is_some()
+                && task.decomposition_part.is_some()
+        }) {
+            if self.dependency_blockers(&task).await?.is_empty() {
+                ready.push(task);
+            }
+        }
+        Ok(ready)
+    }
+
     // -- running -----------------------------------------------------------
 
     /// Start one attempt at a task and hand it to an agent, due now -- what
@@ -2539,6 +2587,25 @@ impl Engine {
                 )
                 .await;
                 return;
+            }
+            match self.dependency_blockers(&task).await {
+                Ok(blockers) if !blockers.is_empty() => {
+                    self.entry(
+                        task_id,
+                        TaskEntry::new(
+                            "daemon",
+                            "dependency_held",
+                            format!("not started: waiting for {}", blockers.join(", ")),
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(task = task_id, "could not check dependencies: {error}");
+                    return;
+                }
+                _ => {}
             }
         }
         let run = match self.dispatch(task_id, trigger, due, continue_from).await {
@@ -3132,15 +3199,37 @@ impl Engine {
         Ok((dir, run))
     }
 
-    /// This task's direct parents in a workflow, in the definition's own edge
-    /// order (deterministic run to run), with the result each finished with.
-    /// Empty for a root node or a task outside any workflow at all. A store
-    /// or workflow-run read failure is logged and treated as "nothing found"
-    /// rather than failing the dispatch -- the task still runs, just without
-    /// the section or file it would otherwise have carried.
+    /// This task's direct dependencies -- decomposition predecessors first,
+    /// then workflow parents in definition order -- with the result each
+    /// finished with. A store or workflow-run read failure is logged and
+    /// treated as "nothing found" rather than failing dispatch.
     async fn upstream_outputs(&self, task: &Task) -> Vec<UpstreamOutput> {
+        let mut outputs = Vec::new();
+        for parent_task_id in &task.depends_on {
+            match self.store.get(parent_task_id).await {
+                Ok(Some(parent)) => outputs.push(UpstreamOutput {
+                    node_id: parent.decomposition_part.clone().unwrap_or_else(|| "dependency".into()),
+                    task_id: parent.id.clone(),
+                    title: parent.title.clone(),
+                    result: parent
+                        .result
+                        .as_deref()
+                        .map(|result| truncate_tail(result, UPSTREAM_RESULT_BYTE_CAP).into_owned()),
+                }),
+                Ok(None) => tracing::warn!(
+                    task = task.id,
+                    parent_task = parent_task_id,
+                    "dependency task no longer exists"
+                ),
+                Err(error) => tracing::warn!(
+                    task = task.id,
+                    parent_task = parent_task_id,
+                    "reading dependency output: {error}"
+                ),
+            }
+        }
         let Some(origin) = &task.workflow_origin else {
-            return Vec::new();
+            return outputs;
         };
         let run = match self.workflows.get_run(&origin.workflow_run_id).await {
             Ok(Some(run)) => run,
@@ -3150,7 +3239,7 @@ impl Engine {
                     workflow_run = origin.workflow_run_id,
                     "workflow run not found; dispatching without upstream outputs"
                 );
-                return Vec::new();
+                return outputs;
             }
             Err(error) => {
                 tracing::warn!(
@@ -3158,11 +3247,10 @@ impl Engine {
                     workflow_run = origin.workflow_run_id,
                     "reading workflow run for upstream outputs: {error}"
                 );
-                return Vec::new();
+                return outputs;
             }
         };
 
-        let mut outputs = Vec::new();
         for edge in run.definition.edges.iter().filter(|edge| edge.to == origin.node_id) {
             let Some(parent_task_id) = run
                 .nodes

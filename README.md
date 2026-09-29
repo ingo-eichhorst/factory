@@ -1591,6 +1591,30 @@ route to a scope and, optionally, a workflow. `factory_core::intake` is pure
 owns the transitions: receive, triage, assess, decide (`ready`, `needs-info`,
 `split`, or `wontfix` with a verified reason).
 
+**GitHub receipt and decomposition (`#180`).** A scope whose `git` is a
+GitHub remote polls open issues carrying the explicit `factory:intake` label.
+Title, body and comments are copied into one Intake item. While that item is
+still in Intake, later edits synchronize; a changed issue in `needs-info`
+returns to Received for triage. Once released, Factory is canonical and the
+GitHub issue is only an outbound mirror. The source keeps repository, issue
+number and GitHub's stable external id as well as the public URL, so a renamed
+repository does not create a second item; older URL-only rows are upgraded on
+their next poll.
+
+An assessment may include two to eight `split` parts. The original shape is
+still a proposal for the manual `intake decide <id> split` fallback. A plan
+whose parts also provide `owns`, `interface`, and `estimate_seconds` is executable:
+`intake assess --decide` validates standalone instructions and acceptance,
+an acyclic graph, estimates, and disjoint ownership between parallel parts,
+then creates ordinary tasks directly. Each child stores `parent_task_id`,
+`decomposition_part`, and task-id `depends_on` fields; labels are only a
+compatibility mirror. Root tasks start immediately. Successors appear in the
+Scheduled column and are dispatched once all prerequisites are `Done`; their
+prompts receive each prerequisite's result as upstream output. A failed or
+missing prerequisite never silently releases a child. Automatic plans are
+one level deep, leave `routing.workflow` empty, and do not create GitHub
+child issues.
+
 **Per-scope definitions of ready (`#169`).** The seven axes are fixed —
 compiled in, never removed — but a scope can add its own checks on top of
 them, and tighten two of the built-in rules, the same add-or-tighten,
@@ -1814,7 +1838,7 @@ person, or a role given the standing permission, has to ask for it.
   `needs_info` -> `needs-info`, `wontfix` -> `wontfix` (plus `duplicate` or
   `invalid` for those two wontfix reasons); areas are added as given;
   `remove` is always the other two state labels, so the three stay mutually
-  exclusive on the issue. `needs-triage` is never touched -- the poller keys
+  exclusive on the issue. `factory:intake` is never touched -- the poller keys
   on it, and removing it is a person's own decision.
 - **Stored state.** `Intake.outbound: Option<Box<OutboundRecord>>`
   (`awaiting_approval` | `published` | `failed`, the comment id and URL, the
