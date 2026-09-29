@@ -6,7 +6,7 @@
 
 use crate::config::DependencyService;
 use chrono::{DateTime, Utc};
-use factory_kernel::Duration;
+use factory_kernel::{Duration, Fact, L2};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -399,6 +399,12 @@ pub struct DoctorReport {
 /// it at all. Only a *later* `not_affected`/`false_positive` in the newest
 /// built/running document that mentions the vulnerability excludes it
 /// (`latest_vex`), and an excluded item carries no clock deadlines.
+///
+/// L2's own fact for the L0 catalogue (#193, phase 2) -- stays here rather
+/// than moving into `factory-kernel`, since it carries `Attachment` and
+/// `LifecycleState`, L2's own SBOM-lifecycle vocabulary; `impl Fact` is
+/// still declared right below (a foreign trait on a local type, which
+/// Rust's orphan rule allows regardless of where the type itself lives).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExploitedFinding {
     pub scope: String,
@@ -427,6 +433,15 @@ pub struct ExploitedFinding {
 }
 
 /// The policy evaluator's compact view of a Dependencies report.
+///
+/// This is L2's own fact for the L0 catalogue (#193, phase 2), but the type
+/// itself stays here rather than moving into `factory-kernel`: `open` is
+/// keyed by [`Severity`], L2's own status enum (`Severity::from_cyclonedx`),
+/// and L0 must not absorb a producing level's vocabulary ahead of the crate
+/// split that is supposed to draw that boundary (phase 4). Rust's orphan
+/// rule still allows `impl Fact for DependenciesFact` here, a foreign trait
+/// on a local type -- see `factory_kernel::facts::FACT_CATALOGUE` for the
+/// full accounting of what moved and what did not.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DependenciesFact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -437,6 +452,14 @@ pub struct DependenciesFact {
     pub open: BTreeMap<Severity, u32>,
     #[serde(default)]
     pub exploited_open: u32,
+}
+
+impl Fact for DependenciesFact {
+    type Producer = L2;
+}
+
+impl Fact for ExploitedFinding {
+    type Producer = L2;
 }
 
 #[cfg(test)]
