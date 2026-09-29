@@ -259,6 +259,80 @@ pub async fn changes_since(dir: &Path, scope_path: &Path, since: chrono::DateTim
     (!parts.is_empty()).then(|| parts.join("; "))
 }
 
+/// What `release` did with one worktree (`#178`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Release {
+    /// Removed. Its branch was deleted too when every commit on it is on a
+    /// remote or another branch; otherwise the branch stays, holding
+    /// `unpushed` commits nothing else has.
+    Removed { branch_deleted: bool, unpushed: u32 },
+    /// Left exactly as it is, and why -- work in it that removing would
+    /// throw away, or git refusing.
+    Kept { reason: String },
+    /// Not a worktree of the scope any more: removed by hand, or never made.
+    Gone,
+}
+
+/// Release a run's worktree once nothing will resume in it (`#178`) --
+/// carefully, unlike `remove`, which is the bench's evidence-clearing
+/// variant. Nothing that is not already safe elsewhere is thrown away:
+///
+/// * uncommitted changes (tracked or untracked; ignored build output like
+///   `target/` does not count) keep the worktree, untouched -- refusing is
+///   the triage's choice over pushing a salvage branch, which would be an
+///   external side effect;
+/// * a clean worktree is removed with a plain `git worktree remove` (never
+///   `--force`), and its branch deleted only when every commit on it is
+///   also on a remote-tracking ref or another local branch. A branch with
+///   commits nothing else has stays, so the commits do too.
+pub async fn release(scope_path: &Path, dir: &Path, branch: Option<&str>) -> Release {
+    if !is_registered(scope_path, dir).await {
+        return Release::Gone;
+    }
+    match git_read(dir, &["status", "--porcelain"]).await {
+        None => return Release::Kept { reason: "git could not say whether it holds uncommitted work".into() },
+        Some(status) if !status.is_empty() => {
+            return Release::Kept {
+                reason: format!("{} uncommitted change(s) in it", status.lines().count()),
+            };
+        }
+        Some(_) => {}
+    }
+    let unpushed = match branch {
+        Some(branch) => {
+            let head = format!("refs/heads/{branch}");
+            // `--exclude` before `--branches` takes the name as `--branches`
+            // sees it, without `refs/heads/` -- spelled with it, it excludes
+            // nothing, and the branch's own commits count as "elsewhere".
+            let exclude = format!("--exclude={branch}");
+            git_read(scope_path, &["rev-list", "--count", &head, "--not", &exclude, "--branches", "--remotes"])
+                .await
+                .and_then(|n| n.parse::<u32>().ok())
+        }
+        None => Some(0),
+    };
+    let output = Command::new("git").arg("-C").arg(scope_path).args(["worktree", "remove"]).arg(dir).output().await;
+    match output {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Release::Kept { reason: format!("git worktree remove refused: {stderr}") };
+        }
+        Err(e) => return Release::Kept { reason: format!("running git: {e}") },
+    }
+    let branch_deleted = match (branch, unpushed) {
+        (Some(branch), Some(0)) => Command::new("git")
+            .arg("-C")
+            .arg(scope_path)
+            .args(["branch", "-D", branch])
+            .output()
+            .await
+            .is_ok_and(|o| o.status.success()),
+        _ => false,
+    };
+    Release::Removed { branch_deleted, unpushed: unpushed.unwrap_or(0) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +361,32 @@ mod tests {
         let wt = root.join("wt");
         git(&scope, &["worktree", "add", "-q", "-b", "work", wt.to_str().unwrap()]);
         (scope, wt)
+    }
+
+    #[tokio::test]
+    async fn release_refuses_uncommitted_work_and_keeps_a_branch_with_commits_nothing_else_has() {
+        // Uncommitted work: the worktree stays exactly as it is.
+        let (scope, wt) = scope_with_worktree();
+        std::fs::write(wt.join("new.txt"), "draft\n").unwrap();
+        match release(&scope, &wt, Some("work")).await {
+            Release::Kept { reason } => assert!(reason.contains("1 uncommitted change"), "{reason}"),
+            other => panic!("expected kept, got {other:?}"),
+        }
+        assert!(wt.join("new.txt").exists());
+
+        // Committed but on no other branch: removed, the branch kept.
+        git(&wt, &["add", "."]);
+        git(&wt, &["commit", "-q", "-m", "work"]);
+        assert_eq!(release(&scope, &wt, Some("work")).await, Release::Removed { branch_deleted: false, unpushed: 1 });
+        assert!(!wt.exists());
+        git(&scope, &["rev-parse", "--verify", "refs/heads/work"]);
+        assert_eq!(release(&scope, &wt, Some("work")).await, Release::Gone, "a second release finds nothing");
+
+        // Everything on it is on main too: removed, and the branch with it.
+        let (scope, wt) = scope_with_worktree();
+        assert_eq!(release(&scope, &wt, Some("work")).await, Release::Removed { branch_deleted: true, unpushed: 0 });
+        let out = std::process::Command::new("git").arg("-C").arg(&scope).args(["rev-parse", "--verify", "-q", "refs/heads/work"]).output().unwrap();
+        assert!(!out.status.success(), "the branch had nothing of its own");
     }
 
     #[tokio::test]

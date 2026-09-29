@@ -3139,6 +3139,123 @@ impl Engine {
         ContinueOutcome::Resume(ResumePlan { session_id, resume_args: resume.args, workspace })
     }
 
+    /// `#178`: release every worktree `task`'s runs worked in -- one per
+    /// directory, since a resumed run shares its predecessor's -- through
+    /// `worktree::release`, which throws nothing away: uncommitted work
+    /// keeps the worktree, and a branch with commits nothing else has keeps
+    /// the branch. Journaled either way (`worktree_released`,
+    /// `worktree_kept`); a worktree kept for the same reason as last time is
+    /// not journaled again, so a restart's sweep does not repeat itself.
+    /// The caller has decided nothing will resume in them any more.
+    pub(crate) async fn release_task_worktrees(&self, task: &Task, why: &str) {
+        let Ok(scope_path) = self.factory_snapshot().scope_path(&task.scope) else {
+            return;
+        };
+        let runs = self.store.runs(&task.id, 10_000).await.unwrap_or_default();
+        let mut seen = std::collections::BTreeSet::new();
+        for run in runs.iter().rev() {
+            let Some(path) = &run.worktree_path else { continue };
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let outcome = worktree::release(&scope_path, Path::new(path), run.worktree_branch.as_deref()).await;
+            let branch = run.worktree_branch.clone().unwrap_or_default();
+            let (kind, words, data) = match outcome {
+                worktree::Release::Gone => continue,
+                worktree::Release::Removed { branch_deleted, unpushed } => {
+                    let about_branch = if branch_deleted {
+                        format!("its branch {branch}, all of it also elsewhere, deleted")
+                    } else if unpushed > 0 {
+                        format!("its branch {branch} kept: {unpushed} commit(s) on no remote or other branch")
+                    } else {
+                        format!("its branch {branch} kept")
+                    };
+                    (
+                        "worktree_released",
+                        format!("{why}: removed the worktree {path}; {about_branch}"),
+                        serde_json::json!({ "path": path, "branch": branch, "branch_deleted": branch_deleted, "unpushed": unpushed }),
+                    )
+                }
+                worktree::Release::Kept { reason } => {
+                    let already = self.store.entries(&task.id, 200).await.unwrap_or_default().iter().any(|e| {
+                        e.kind == "worktree_kept"
+                            && e.data.as_ref().is_some_and(|d| d["path"] == path.as_str() && d["reason"] == reason.as_str())
+                    });
+                    if already {
+                        continue;
+                    }
+                    (
+                        "worktree_kept",
+                        format!(
+                            "{why}, but the worktree {path} was kept: {reason}. Factory does not throw work away -- \
+                             commit or discard it, and the next release takes the worktree"
+                        ),
+                        serde_json::json!({ "path": path, "branch": branch, "reason": reason }),
+                    )
+                }
+            };
+            let mut entry = TaskEntry::new("daemon", kind, words).with_data(data);
+            entry = entry.in_run(&run.id);
+            self.entry(&task.id, entry).await;
+        }
+    }
+
+    /// `#178`: a task outside any workflow is done with its worktrees once
+    /// it is settled for good -- done, or closed -- and nothing is left to
+    /// resume in them. A bench attempt's worktree is its evidence and is
+    /// the bench's to clean; a scheduled task keeps standing, so it is
+    /// never settled here.
+    pub(crate) async fn release_if_settled(&self, task_id: &str) {
+        let Ok(Some(task)) = self.store.get(task_id).await else { return };
+        if task.workflow_origin.is_some() || task.bench_origin.is_some() || task.schedule.is_some() {
+            return;
+        }
+        if !task.status.is_terminal() || self.store.active_run(task_id).await.ok().flatten().is_some() {
+            return;
+        }
+        let why = match (&task.closure, task.close_reason()) {
+            (Some(_), Some(reason)) => format!("the task is closed ({})", reason.label()),
+            _ => "the task is finished".to_string(),
+        };
+        self.release_task_worktrees(&task, &why).await;
+    }
+
+    /// `#178`'s start-up sweep: every directory under the instance's
+    /// worktrees is named after the run that made it, so walking that
+    /// directory -- rather than every task ever -- finds exactly the
+    /// worktrees that still exist, and each is released if the work it
+    /// belongs to finished while the daemon was down.
+    pub fn spawn_worktree_sweep(self: &Arc<Self>) {
+        let engine = self.clone();
+        tokio::spawn(async move { engine.sweep_worktrees().await });
+    }
+
+    pub(crate) async fn sweep_worktrees(&self) {
+        let dir = self.factory_snapshot().worktrees_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        let mut workflows_seen = std::collections::BTreeSet::new();
+        let mut tasks_seen = std::collections::BTreeSet::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(Some(run)) = self.store.get_run(&name).await else { continue };
+            let Ok(Some(task)) = self.store.get(&run.task_id).await else { continue };
+            match &task.workflow_origin {
+                Some(origin) => {
+                    if workflows_seen.insert(origin.workflow_run_id.clone()) {
+                        if let Ok(Some(workflow)) = self.workflows.get_run(&origin.workflow_run_id).await {
+                            self.release_finished_workflow(&workflow).await;
+                        }
+                    }
+                }
+                None => {
+                    if tasks_seen.insert(task.id.clone()) {
+                        self.release_if_settled(&task.id).await;
+                    }
+                }
+            }
+        }
+    }
+
     /// Where a run actually works: its own worktree, or the scope directly.
     /// Pulled out of `dispatch` so the decision -- and the one way it can
     /// fail -- has no need of a real agent or runtime on the other end of it,
@@ -3661,6 +3778,9 @@ impl Engine {
         }
         self.mirror_to_task(&run).await;
         self.settle_retry(&run).await;
+        // `#178`: a one-off task that just finished for good lets its
+        // worktrees go -- nothing will resume in them.
+        self.release_if_settled(&run.task_id).await;
         Ok(run)
     }
 

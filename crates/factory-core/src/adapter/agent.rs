@@ -480,12 +480,15 @@ impl AgentContext {
              coding agents and tracks what happens. A scope is a place work \
              happens -- a project with its own agents and configuration. A \
              task is the standing intent: what to do, and with which agent; \
-             a run is one attempt at it, with its own session and outcome. \
-             Status comes only from an agent calling `task report`, never \
-             from what a terminal looks like. Creating a task does not \
+             a run is one attempt at it, with its own session and outcome -- \
+             a workflow sending work back for another round is another run \
+             of the same task, which picks up its previous session unless it \
+             cannot. Status comes only from an agent calling `task report`, \
+             never from what a terminal looks like. Creating a task does not \
              start it, and there is no queue that will: an unscheduled task \
-             stays pending until someone runs it with `task run <id>`, and a \
-             scheduled one waits for its slot.\n\n",
+             stays pending until someone runs it with `task run <id>`, a \
+             scheduled one waits for its slot, and a workflow step waits on \
+             the steps before it (its `after`) and starts when they finish.\n\n",
         );
 
         match &self.task {

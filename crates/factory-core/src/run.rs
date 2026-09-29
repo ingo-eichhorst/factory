@@ -263,8 +263,11 @@ pub struct Run {
     /// own: the branch it is on and the path it was checked out at. `None`
     /// for a run that worked in the scope directly, and for any run this
     /// daemon made before the field existed. Set once, when the worktree is
-    /// made, and never cleared -- the daemon does not clean these up, so this
-    /// is the only record of where the work went once the run ends.
+    /// made (or reused, by a rework round or `--continue`), and never
+    /// cleared -- not even once the daemon has released the worktree after
+    /// the work it belongs to finished (`#178`; the journal says what was
+    /// removed and what was kept), so this stays the record of where the
+    /// work went.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -364,6 +364,10 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // Reconcile persisted workflow decisions only after runtimes and standing
     // agents are available. Recovery reuses task ids recorded before a crash.
     engine.recover_workflows().await;
+    // `#178`: worktrees of work that finished while the daemon was down --
+    // a workflow run that ended, a task that was closed. In the background:
+    // git is slow on a big checkout, and nothing below waits on it.
+    engine.spawn_worktree_sweep();
     // The one place a bench attempt's gate actually runs -- started before
     // recovery below, so anything it enqueues has a consumer immediately.
     engine.spawn_bench_judge();

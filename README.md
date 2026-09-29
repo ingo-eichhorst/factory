@@ -2267,8 +2267,11 @@ policy check, and runtime-specific observation work tracked outside Factory.
 
 A workflow is reusable Process-level intent: a scoped, finite DAG of ordinary
 task templates. A workflow run keeps an immutable snapshot of the definition
-revision it started with. Root nodes create and run tasks immediately; every
-other node waits until all incoming predecessors have reported `done`.
+revision it started with. Starting a run creates every task node's task at
+once (`#178`): root nodes run immediately, and every other node's task is
+**waiting** -- `pending`, with an `after:` trigger naming the tasks it waits
+on in place of a schedule -- until all incoming predecessors have reported
+`done`, when it fires the same way a cron slot that has come due does.
 Fan-out starts every newly eligible node and fan-in waits for every parent.
 A failed or cancelled task stops the attempt and leaves downstream nodes
 `skipped` -- a task blocked by a failed run is a failed node, even though
@@ -2283,8 +2286,10 @@ Workflow definitions and runs are daemon orchestration state. They are stored
 in additive tables in the instance root's `.factory/factory.db`, never in a
 scope config or browser storage, even when that scope uses a plugin task store.
 Each spawned task carries `workflow_origin` with the definition, run, and node
-IDs. The run persists its chosen task ID before task creation, so restart
-reconciliation recreates that exact decision instead of spawning a duplicate.
+IDs. The run persists its chosen task IDs before task creation, and a node's
+launch (`launched_round`) before its run is asked for, so restart
+reconciliation recreates that exact decision instead of spawning a duplicate,
+finishes a launch a crash interrupted, and never starts a task still waiting.
 A row neither table can decode is skipped (and named in a warning) rather than
 failing the whole list or recovery pass; fetching it directly is still an
 error, but only for that one id.
@@ -2294,10 +2299,12 @@ authority over tasks.** A run remembers who started it (the owner, or a scoped
 agent) and re-checks that actor's *current* role -- not a snapshot of what it
 could do at the moment it clicked Run -- against the same `task.create` and
 `task.run` authority a hand-typed request would need, every time a node
-spawns: the first preflight before anything is persisted, and again at every
-later spawn a downstream fan-out or a restart recovery makes. A role that has
-since lost the grant fails just that node (recorded as its error) rather than
-the run silently keeping the authority it started with.
+spawns or starts: the first preflight before anything is persisted, again
+when the tasks are made, and again at every later start a downstream fan-out,
+a rework round or a restart recovery makes. A role that has since lost the
+grant fails just that node (recorded as its error) rather than the run
+silently keeping the authority it started with; the node's task, made while
+the role still allowed it, never runs and is closed as not planned.
 
 The web UI exposes **Workflows** beside **Tasks**. Its canvas supports moving,
 connecting, duplicating and deleting task nodes, with pan/zoom, zoom/fit
@@ -2314,8 +2321,11 @@ edits its ordered `check:` and `agent:` **exits**. The canvas draws each exit
 as a labelled conditional edge with its order, condition and (for a backward
 exit) round budget. Run mode distinguishes nodes skipped by a route, shows a
 routed node as `done → target`, and still shows each backward round, links to
-the tasks earlier rounds superseded, who sent the work back, and the values
-the run was started with.
+who sent the work back and the values the run was started with; a node
+whose task is waiting on its upstream reads `waiting`. A round is a run of
+the node's one task, so the task's own run list shows every round (labelled
+`rework round k`, with the findings it was sent back with); only a run from
+before `#178` still links the separate tasks its rounds superseded.
 
 A node's task is dispatched with its **direct parents'** outputs, never a
 transitive ancestor's — computed at dispatch from that moment's workflow-run
@@ -2377,14 +2387,12 @@ edges:
   `skipped_by_route` with a reason such as `skipped (review -> ready)`; those
   nodes count as finished, and a child is eligible when every predecessor is
   done or skipped by route and at least one is done. A backward exit sends the
-  path from `to` through the reporting node back to `unstarted`. Each
-  re-spawned task is
-  titled `(... rework k)`, the node run keeps its earlier tasks in
-  `superseded_task_ids`, and `to`'s new task is dispatched with the sender's
-  `--result` as an extra upstream entry, "... sent this work back -- rework
-  round k of N". Once every round is used, another `--send-to` is refused and
-  tells the agent to report `blocked` with the open findings. A superseded
-  task's late state changes are ignored. Stored legacy
+  path from `to` through the reporting node back for another round -- see
+  *Rework rounds* below: each node on it runs again **as a new run of its
+  own task**, and `to`'s run is dispatched with the sender's `--result` as
+  an extra upstream entry, "... sent this work back -- rework round k of N".
+  Once every round is used, another `--send-to` is refused and tells the
+  agent to report `blocked` with the open findings. Stored legacy
   `rework: { to, max_rounds }` definitions and run snapshots load as one
   `agent:` exit, so an in-flight loop keeps its remaining rounds.
 - **Failures do not route.** `failed` means the attempt broke and fails the
@@ -2404,6 +2412,61 @@ factory workflow runs <id>
 factory workflow run <run-id>        # nodes, tasks, rework rounds
 factory workflow cancel <run-id>
 ```
+
+### Rework rounds, waiting steps and worktrees (#178)
+
+**A rework round is a new run of the same task, not a new task.** When a
+review sends work back, every node on the path back to it keeps its task;
+the round is that task's next run. `Run::round` and `Run::feedback` (who
+sent it back, round k of N, and what they said) travel on the run, the title
+never changes, and a `done` task going back on the line is journaled with
+why. The prompt says "rework round k of N" from that run data.
+
+**By default a round resumes the previous run's session**: the same worktree
+and the same harness conversation (`codex resume <id>`, `claude --resume
+<id>`), with the feedback as the resumed turn's prompt and the *new* run's
+reporting contract -- which says every earlier report command in the
+history is void. It goes through the same path as `factory task run
+--continue` below, with every check that has, plus two of its own: a node
+with `session: fresh` (the inspector's "Fresh session every rework round",
+for a step that must judge independently of its earlier rounds) and a round
+past `daemon.resume_round_cap` (default 5; 0 makes every round fresh) start
+fresh. Any fallback is journaled (`continue_fallback`) with its reason, and
+still runs the round. A resumed agent is told what moved since its previous
+run ended: new commits on its branch and on the scope's default branch, and
+whether merging now conflicts (local refs; nothing is fetched). Usage is
+baselined off the previous run, so a round is billed for its own turns only.
+
+**A step waiting on its upstream is a task from the start.** Its `after:`
+trigger names the tasks it waits on (with their titles), and a step below a
+node that routes work forward one way or another is marked *conditional*.
+The board files it under *scheduled later* -- "waiting on *Implement #119*"
+where a cron task shows its next slot -- and neither `isDue` nor Operations'
+`queue_depth` counts it as due. `factory task run` refuses it (`--ignore-wait`
+starts it anyway, journaled, and the workflow then counts the step as
+started). When the workflow run ends, a waiting task it never reached --
+a branch the route did not take, or steps the run ended before -- is closed
+as not planned with the reason; one that ran in an earlier round keeps its
+last outcome. A cancelled workflow closes its waiting tasks with it.
+
+**Worktrees are released once nothing can resume in them.** A workflow run's
+worktrees stay while it runs -- a later node or a round may resume in any of
+them -- and all go once it is *completely* finished: the run terminal and
+every task it made done or closed. A failed node's task waits for a person,
+who may `--continue` it, so the worktrees wait with it until it is closed. A
+task outside a workflow lets its worktrees go when it is done or closed (a
+scheduled task, which keeps standing, and a bench attempt, whose worktree is
+its evidence, never do). Releasing never throws work away: a worktree with
+uncommitted changes is kept, untouched, and journaled (`worktree_kept`);
+a clean one is removed with a plain `git worktree remove`, and its branch
+deleted only when every commit on it is also on a remote or another branch
+-- otherwise the branch stays, and the journal says how many commits it
+holds (`worktree_released`). On start-up the daemon sweeps
+`.factory/worktrees/` for anything that finished while it was down.
+
+A workflow run already in flight when this shipped (`rounds_as_runs` absent)
+finishes the way it started: its rounds are new `(rework N)` tasks, created
+when their turn comes.
 
 ## Compliant workflows
 
@@ -2659,8 +2722,9 @@ socket and HTTP interfaces) resumes a task's newest run instead of starting a
 fresh one. It is refused outright unless that run is terminal and ended on an
 infrastructure failure -- `FailKind::AckTimeout`, `RunTimeout`, `SessionGone`,
 or `DispatchFailed` after a session had already come up -- never on an
-ordinary retry, a workflow rework, or a feedback round, which all keep
-today's fresh-session behaviour unchanged. Everything below that gate is a
+ordinary retry, which keeps a fresh session. A workflow rework round goes
+through the same resume path on its own, by default (see *Rework rounds,
+waiting steps and worktrees* above). Everything below that gate is a
 fallback, never an error: a `--continue` that cannot actually resume still
 dispatches, exactly as a plain `task run` would, with a `continue_fallback`
 journal entry naming the one reason it fell back.
@@ -2711,11 +2775,16 @@ journal entry naming the one reason it fell back.
   automated tests exercise every fallback with stub adapters and runtimes,
   never a real harness login.
 
-Left out of this first slice (tracked on
-[#178](https://github.com/ingo-eichhorst/factory/issues/178)): resume as the
-default for workflow feedback rounds, a "what changed since" summary in the
-resumed prompt, `pi`'s own session-file resume, and any worktree lifetime or
-cleanup policy.
+A resumed run is also told what moved since its previous run ended (new
+commits on its branch and on the scope's default branch, and whether merging
+now conflicts), and a round's contract voids the report that closed the last
+round too. Still left out (tracked on
+[#178](https://github.com/ingo-eichhorst/factory/issues/178)): `pi`'s own
+session-file resume, detecting a harness upgrade or a changed role/guide as a
+reason to start fresh, delivering feedback into a previous pane that is
+still alive (a round whose old session is not confirmed gone starts fresh
+instead), and an age or count cap on the worktrees a standing scheduled task
+accumulates.
 
 ## Configuration
 
@@ -2745,6 +2814,7 @@ daemon:
   harness_health:              # check a harness starts before a dispatch (#131)
     enabled: true
     timeout_seconds: 10
+  resume_round_cap: 5          # last rework round that resumes its session (#178)
 
 infrastructure:              # optional: the AI accounts behind the agents, and backups
   providers:

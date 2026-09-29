@@ -35,7 +35,7 @@ mod tests {
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
     use factory_core::role::Role;
     use factory_core::run::RunStatus;
-    use factory_core::task::{NewTask, SessionRef, TaskFilter, TaskReport};
+    use factory_core::task::{NewTask, SessionRef, TaskEntry, TaskFilter, TaskReport};
     use factory_core::workflow::{
         CanvasPoint, WorkflowActor, WorkflowEdge, WorkflowExit, WorkflowNode, WorkflowNodeKind,
     };
@@ -2015,6 +2015,145 @@ mod tests {
         assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Done);
     }
 
+    // --- #178: worktrees go once nothing will resume in them ---
+
+    /// `engine()` whose "demo" scope is a real git repository with one
+    /// commit, so a node with `worktree: true` gets a real worktree.
+    fn engine_in_git() -> Arc<Engine> {
+        let base = engine();
+        let mut config = base.factory_snapshot().config.clone();
+        let repo = std::env::temp_dir().join(format!("factory-workflow-git-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["-c", "user.email=f@e", "-c", "user.name=f", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "base"],
+        ] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(&args).status().unwrap().success());
+        }
+        config.scopes[0].path = repo;
+        let root = base.factory_snapshot().root.clone();
+        let mut registry = Registry::with_builtins();
+        registry.add_runtime(Arc::new(QuietRuntime), "test");
+        Arc::new(Engine::new(
+            Factory { root, config },
+            registry,
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
+    }
+
+    fn worktree_node(id: &str) -> WorkflowNode {
+        let mut n = node(id);
+        n.task.worktree = Some(true);
+        n
+    }
+
+    async fn worktree_of(engine: &Arc<Engine>, task_id: &str) -> PathBuf {
+        let run = wait_for_run(engine, task_id, 1).await;
+        for _ in 0..400 {
+            if let Some(path) = engine.store.get_run(&run.id).await.unwrap().unwrap().worktree_path {
+                return PathBuf::from(path);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("no worktree for {task_id}");
+    }
+
+    fn kinds(entries: &[TaskEntry]) -> Vec<&str> {
+        entries.iter().map(|e| e.kind.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_workflows_worktrees_stay_while_it_runs_and_go_when_it_is_finished() {
+        let engine = engine_in_git();
+        let definition = create(&engine, vec![worktree_node("a"), worktree_node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let all = tasks(&engine).await;
+        let (a, b) = (task_of(&all, "a"), task_of(&all, "b"));
+        let a_dir = worktree_of(&engine, &a.id).await;
+        finish(&engine, &a.id, RunStatus::Done).await;
+        let b_dir = worktree_of(&engine, &b.id).await;
+        assert!(a_dir.exists(), "a later node or a round may still resume in a's worktree");
+        finish(&engine, &b.id, RunStatus::Done).await;
+        assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Done);
+        assert!(!a_dir.exists() && !b_dir.exists(), "a finished workflow takes all of its worktrees");
+        let entries = engine.store.entries(&a.id, 50).await.unwrap();
+        let released = entries.iter().find(|e| e.kind == "worktree_released").unwrap_or_else(|| panic!("{:?}", kinds(&entries)));
+        assert!(released.message.contains("is finished") && released.message.contains("deleted"), "{}", released.message);
+    }
+
+    #[tokio::test]
+    async fn a_worktree_holding_uncommitted_work_is_kept_and_journaled_never_thrown_away() {
+        let engine = engine_in_git();
+        let definition = create(&engine, vec![worktree_node("a")], vec![]).await;
+        engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let a = task_of(&tasks(&engine).await, "a");
+        let dir = worktree_of(&engine, &a.id).await;
+        std::fs::write(dir.join("half-done.txt"), "work in progress\n").unwrap();
+        finish(&engine, &a.id, RunStatus::Done).await;
+        assert!(dir.join("half-done.txt").exists(), "nothing is thrown away");
+        let entries = engine.store.entries(&a.id, 50).await.unwrap();
+        let kept = entries.iter().find(|e| e.kind == "worktree_kept").unwrap_or_else(|| panic!("{:?}", kinds(&entries)));
+        assert!(kept.message.contains("1 uncommitted change"), "{}", kept.message);
+
+        // Once it is safe, the start-up sweep takes it -- and journals a
+        // kept worktree only once, however often it looks.
+        engine.sweep_worktrees().await;
+        let again = engine.store.entries(&a.id, 50).await.unwrap();
+        assert_eq!(again.iter().filter(|e| e.kind == "worktree_kept").count(), 1);
+        std::fs::remove_file(dir.join("half-done.txt")).unwrap();
+        engine.sweep_worktrees().await;
+        assert!(!dir.exists(), "the sweep released it once it was clean");
+    }
+
+    #[tokio::test]
+    async fn a_failed_nodes_worktree_waits_for_a_person_and_goes_when_its_task_is_closed() {
+        use factory_core::protocol::{Request, Response};
+        let engine = engine_in_git();
+        let definition = create(&engine, vec![worktree_node("a"), worktree_node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let a = task_of(&tasks(&engine).await, "a");
+        let dir = worktree_of(&engine, &a.id).await;
+        finish(&engine, &a.id, RunStatus::Failed).await;
+        assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Failed);
+        assert!(dir.exists(), "a person may still --continue the failed node in it");
+
+        let closed = engine
+            .handle_request(Request::TaskClose {
+                id: a.id.clone(),
+                reason: factory_core::task::CloseReason::NotPlanned,
+                duplicate_of: None,
+                note: Some("giving up".into()),
+            })
+            .await;
+        assert!(matches!(closed, Response::Ok { .. }), "{closed:?}");
+        assert!(!dir.exists(), "closing the last unsettled task finishes the workflow, and its worktrees go");
+    }
+
+    #[tokio::test]
+    async fn a_one_off_task_outside_a_workflow_lets_its_worktree_go_when_it_is_done() {
+        let engine = engine_in_git();
+        let task = engine
+            .create(NewTask {
+                title: "one-off".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                runtime: Some("quiet".into()),
+                worktree: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let dir = worktree_of(&engine, &task.id).await;
+        finish(&engine, &task.id, RunStatus::Done).await;
+        assert!(!dir.exists());
+        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        assert!(entries.iter().any(|e| e.kind == "worktree_released" && e.message.contains("the task is finished")), "{:?}", kinds(&entries));
+    }
+
     #[tokio::test]
     async fn a_run_is_started_with_its_inputs_written_into_every_node() {
         let engine = engine();
@@ -2314,8 +2453,10 @@ impl Engine {
         self.workflows.put_run(&run).await?;
         self.bus
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
-        // Its waiting tasks close with it (`#178`).
+        // Its waiting tasks close with it (`#178`), and once nothing of it is
+        // still running or waiting on a person, its worktrees go too.
         self.settle_unreached_tasks(&run).await;
+        self.release_finished_workflow(&run).await;
         Ok(run)
     }
 
@@ -2396,6 +2537,7 @@ impl Engine {
             self.bus.publish(Event::WorkflowRunUpdated { run: run.clone() });
             // Idempotent, and a restart's repair of one that never got done.
             self.settle_unreached_tasks(&run).await;
+            self.release_finished_workflow(&run).await;
             return Ok(());
         }
 
@@ -2452,6 +2594,7 @@ impl Engine {
             self.workflows.put_run(&run).await?;
             self.bus.publish(Event::WorkflowRunUpdated { run: run.clone() });
             self.settle_unreached_tasks(&run).await;
+            self.release_finished_workflow(&run).await;
             return Ok(());
         }
 
@@ -3196,6 +3339,37 @@ impl Engine {
         }
         self.store.update(&task.id, &TaskPatch { clear_after: true, ..Default::default() }).await?;
         Ok(())
+    }
+
+    /// `#178`: a workflow run's worktrees go once it is *completely*
+    /// finished -- the run itself terminal, and every task it ever made
+    /// settled for good: done, or closed. A node blocked on a failure is not:
+    /// its task waits for a person, who may yet `--continue` it in exactly
+    /// the worktree this would take away, so the run's worktrees wait with
+    /// it until that task is closed (closing it comes back here). Every task
+    /// of the run is released together, rounds and legacy rework tasks
+    /// included. Idempotent, and cheap on a run already released.
+    pub(crate) async fn release_finished_workflow(&self, run: &WorkflowRun) {
+        if !run.status.is_terminal() {
+            return;
+        }
+        let task_ids: Vec<&String> = run
+            .nodes
+            .iter()
+            .flat_map(|n| n.task_id.iter().chain(n.superseded_task_ids.iter()))
+            .collect();
+        let mut settled = Vec::new();
+        for id in task_ids {
+            let Ok(Some(task)) = self.store.get(id).await else { continue };
+            if !task.status.is_terminal() || self.store.active_run(id).await.ok().flatten().is_some() {
+                return;
+            }
+            settled.push(task);
+        }
+        let why = format!("workflow run {} is finished", run.id);
+        for task in settled {
+            self.release_task_worktrees(&task, &why).await;
+        }
     }
 
     pub(crate) async fn sync_workflow_for_task(self: &Arc<Self>, task_id: &str) {
