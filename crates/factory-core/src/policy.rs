@@ -104,6 +104,7 @@ use crate::role::Grant;
 use crate::run::RunStatus;
 use crate::workflow::WorkflowRunStatus;
 use chrono::{DateTime, Utc};
+use factory_kernel::{Fact, L3, L4, L5};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -303,29 +304,21 @@ pub enum Check {
 /// "does it hold" would be a guess (ADR 0004's "facts only, no
 /// heuristics"). [`load_all`] checks a `fact` string against this at parse
 /// time ([`FindingKind::UnknownDaemonFact`]), so an authoring mistake shows
-/// up on the catalogue, not only once a report is evaluated.
-///
-/// - `foreman_enabled` -- `daemon.foreman.enabled`.
-/// - `http_loopback_only` -- every `http` interface the daemon mounts binds
-///   to a loopback address, or none is mounted at all.
-/// - `power_assertion` -- `daemon.power_assertion`.
-/// - `backup_recent` -- `#154`: the newest backup is within its schedule (or
-///   the unscheduled yardstick) plus grace -- [`crate::backup::BackupFact::recent`].
-/// - `backup_offsite` -- `#154`: the destination is not on the same device
-///   as the instance root -- [`crate::backup::BackupFact::offsite`].
-/// - `backup_verified` -- `#154`: the newest verification of a snapshot
-///   still in the destination passed, within 30 days --
-///   [`crate::backup::BackupFact::verified`].
-pub const KNOWN_DAEMON_FACTS: &[&str] =
-    &["foreman_enabled", "http_loopback_only", "power_assertion", "backup_recent", "backup_offsite", "backup_verified"];
+/// up on the catalogue, not only once a report is evaluated. Moved to the
+/// L0 kernel beside [`DaemonFact`] (#193, phase 2) and re-exported here
+/// unchanged -- see `factory_kernel::facts`'s own doc comment for the full
+/// vocabulary list.
+pub use factory_kernel::KNOWN_DAEMON_FACTS;
 
 /// The `secrets` check's fixed vocabulary -- exactly the locations the L2
 /// Secrets tab already reports on (`Engine::credential_inventory`): the
 /// five machine-wide locations every scope shares (an agent runs as the
 /// daemon's owner, so these are the same regardless of scope) plus a
 /// scope's own `.env`. Checked at parse time by [`load_all`]
-/// ([`FindingKind::UnknownSecretsLocation`]).
-pub const KNOWN_SECRETS_LOCATIONS: &[&str] = &["anthropic", "github", "aws", "netrc", "ssh", "scope_env"];
+/// ([`FindingKind::UnknownSecretsLocation`]). Moved to the L0 kernel beside
+/// [`SecretsPresence`](factory_kernel::SecretsPresence) (#193, phase 2) and
+/// re-exported here unchanged.
+pub use factory_kernel::KNOWN_SECRETS_LOCATIONS;
 
 impl Check {
     /// The `check:` value this variant was written as -- used to build a
@@ -1070,6 +1063,18 @@ pub struct TaskFact {
     pub runs: Vec<RunFact>,
 }
 
+/// `TaskFact`'s producer, for the L0 fact catalogue (#193, phase 2). Stays
+/// here rather than moving into `factory-kernel`: `RunFact::status` is
+/// `crate::run::RunStatus`, L4's own status enum, and L0 must not become the
+/// next hub by absorbing a producing level's vocabulary ahead of the crate
+/// split that is supposed to draw that boundary (phase 4). See
+/// `factory_kernel::facts`'s own doc comment and `FACT_CATALOGUE` for the
+/// full accounting; Rust's orphan rule allows this `impl` of a foreign
+/// trait on a local type regardless of where `TaskFact` itself lives.
+impl Fact for TaskFact {
+    type Producer = L4;
+}
+
 /// Enough about one of a workflow's runs for `evaluate`'s `workflow` check
 /// to judge it without reading a `WorkflowRun` itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1095,6 +1100,14 @@ pub struct WorkflowFact {
     pub runs: Vec<WorkflowRunFact>,
 }
 
+/// `WorkflowFact`'s producer -- see [`TaskFact`]'s own `impl Fact` for why
+/// this stays here rather than moving into `factory-kernel`
+/// (`WorkflowRunFact::status` is `crate::workflow::WorkflowRunStatus`, L4's
+/// own status enum).
+impl Fact for WorkflowFact {
+    type Producer = L4;
+}
+
 /// One case as it stood in a dataset's newest *settled* bench run
 /// (`BenchRun::settled`) -- `gated` is `Case::gate.is_some()` at the moment
 /// that run started, and `verdicts` is every attempt's verdict for this case
@@ -1118,6 +1131,13 @@ pub struct GateFact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
     pub cases: Vec<GateCase>,
+}
+
+/// `GateFact`'s producer -- see [`TaskFact`]'s own `impl Fact` for why this
+/// stays here rather than moving into `factory-kernel` (`GateCase::verdicts`
+/// is `Vec<crate::bench::Verdict>`, L5's own status enum).
+impl Fact for GateFact {
+    type Producer = L5;
 }
 
 /// One agent Factory would actually dispatch in the evaluated scope --
@@ -1147,23 +1167,26 @@ pub struct AgentFact {
     pub has_sandbox: bool,
 }
 
-/// The `daemon` check's whole fixed vocabulary ([`KNOWN_DAEMON_FACTS`]),
-/// resolved once per report by the engine (`Engine::daemon_facts`) rather
-/// than per scope -- the daemon's own configuration is the same wherever
-/// it is asked from, the same reasoning `Evidence::gates` already uses for
-/// datasets.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DaemonFact {
-    pub foreman_enabled: bool,
-    /// `None` when it could not be determined -- a mounted `http`
-    /// interface whose `bind` does not parse as a socket address.
-    /// `Some(true)` covers both "every mounted `http` interface binds to a
-    /// loopback address" and "the daemon mounts no `http` interface at
-    /// all": nothing is exposed beyond loopback either way.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub http_loopback_only: Option<bool>,
-    pub power_assertion: bool,
+/// `AgentFact`'s producer -- see [`TaskFact`]'s own `impl Fact` for the
+/// general reasoning; `AgentFact` is the widest of the four still here,
+/// since `grants` is `BTreeSet<crate::role::Grant>`, the whole cross-level
+/// authorization vocabulary `access.rs` matches exhaustively, not just one
+/// level's own status enum.
+impl Fact for AgentFact {
+    type Producer = L3;
 }
+
+/// The `daemon` check's own configuration facts, resolved once per report by
+/// the engine (`Engine::daemon_facts`) rather than per scope -- the daemon's
+/// own configuration is the same wherever it is asked from, the same
+/// reasoning `Evidence::gates` already uses for datasets. Moved to the L0
+/// kernel as `DaemonConfigFact` (#193, phase 2: no field's type is owned by
+/// another level's module) and re-exported here unchanged under its old
+/// name, so nothing below still calls it `DaemonFact` has to change --
+/// `factory_kernel::facts`'s own doc comment explains the rename (it
+/// disambiguates from `protocol::DaemonFacts`, the unrelated L1 wire
+/// payload) and carries its `impl Fact` (`Producer = L1`).
+pub use factory_kernel::DaemonConfigFact as DaemonFact;
 
 /// The value [`KNOWN_DAEMON_FACTS`]'s names read off `evidence` -- outer
 /// `None` for a name whose source was never gathered (`evidence.daemon`/
@@ -1231,21 +1254,28 @@ pub struct Evidence {
     /// scoped slice of the L2 Secrets tab's own inventory
     /// (`Engine::credential_inventory`). A location absent from this map was
     /// never asked about, not confirmed absent -- see `direct_status`'s
-    /// `secrets` arm.
+    /// `secrets` arm. Typed as [`factory_kernel::SecretsPresence`] (#193,
+    /// phase 2), a kernel type alias for exactly the `BTreeMap<String,
+    /// bool>` this field always was -- nothing about building or reading it
+    /// changes.
     #[serde(default)]
-    pub secrets: BTreeMap<String, bool>,
+    pub secrets: factory_kernel::SecretsPresence,
     /// The daemon-config facts `Check::Daemon` can name -- see
     /// [`DaemonFact`]. `None` means "never gathered".
     #[serde(default)]
     pub daemon: Option<DaemonFact>,
     /// Dependency evidence derived from the L2 report. `None` means it was
-    /// never gathered, not an empty inventory.
+    /// never gathered, not an empty inventory. `DependenciesFact` stays in
+    /// `factory_core::dependencies` rather than the L0 kernel (#193, phase
+    /// 2): it carries `Severity`, L2's own status enum -- see
+    /// `factory_kernel::facts::FACT_CATALOGUE` for the full accounting.
     #[serde(default)]
     pub dependencies: Option<DependenciesFact>,
     /// `#154`: the `backup_recent`/`backup_offsite`/`backup_verified` names
     /// `Check::Daemon` can also mean -- see [`crate::backup::BackupFact`].
     /// `None` means "never gathered", the same as `daemon`; gathered lazily,
-    /// only when some applicable control names a `backup_*` fact.
+    /// only when some applicable control names a `backup_*` fact. Moved to
+    /// the L0 kernel and re-exported here unchanged (#193, phase 2).
     #[serde(default)]
     pub backup: Option<crate::backup::BackupFact>,
     /// `#158`: every finished run `Engine::attested_runs` resolved for the
@@ -4774,5 +4804,78 @@ mod tests {
             evaluate(&applied, &evidence, now)[0].status.kind(),
             StatusKind::Stale
         );
+    }
+
+    // -- #193 phase 2: the fact vocabulary moved, the wire form did not -----
+
+    /// A lock on `Evidence`'s own JSON shape, touching every field the L0
+    /// kernel move (`DaemonFact`'s rename to `DaemonConfigFact`,
+    /// `secrets`'s retyping to `factory_kernel::SecretsPresence`, `backup`'s
+    /// move) could plausibly have disturbed. `daemon` and `backup` each
+    /// cover both the `Some` and the `skip_serializing_if`-omitted arm of
+    /// their own `Option` fields, so a field silently reappearing (or
+    /// disappearing) on the wire fails this test, not just a type check.
+    #[test]
+    fn evidence_serializes_exactly_as_it_did_before_the_fact_types_moved() {
+        let mut secrets = factory_kernel::SecretsPresence::new();
+        secrets.insert("github".to_string(), true);
+        secrets.insert("scope_env".to_string(), false);
+
+        let evidence = Evidence {
+            tags: BTreeSet::from(["reviewed".to_string()]),
+            secrets,
+            daemon: Some(DaemonFact { foreman_enabled: true, http_loopback_only: None, power_assertion: true }),
+            dependencies: Some(DependenciesFact {
+                declared_sbom_at: Some("2026-09-01T00:00:00Z".parse().unwrap()),
+                built_sbom_at: None,
+                open: BTreeMap::from([(Severity::High, 2)]),
+                exploited_open: 1,
+            }),
+            backup: Some(crate::backup::BackupFact {
+                at: "2026-09-29T00:00:00Z".parse().unwrap(),
+                configured: true,
+                newest: Some("2026-09-28T00:00:00Z".parse().unwrap()),
+                recent: Some(true),
+                offsite: None,
+                verified: Some(false),
+                last_verified: None,
+            }),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&evidence).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "tags": ["reviewed"],
+                "attestations": [],
+                "tasks": {},
+                "workflows": {},
+                "gates": {},
+                "agents": null,
+                "secrets": {"github": true, "scope_env": false},
+                "daemon": {"foreman_enabled": true, "power_assertion": true},
+                "dependencies": {
+                    "declared_sbom_at": "2026-09-01T00:00:00Z",
+                    "open": {"high": 2},
+                    "exploited_open": 1
+                },
+                "backup": {
+                    "at": "2026-09-29T00:00:00Z",
+                    "configured": true,
+                    "newest": "2026-09-28T00:00:00Z",
+                    "recent": true,
+                    "offsite": null,
+                    "verified": false,
+                    "last_verified": null
+                },
+                "attested": null
+            })
+        );
+
+        // And it round-trips: the L0 move did not add a field this build's
+        // own `Evidence` cannot read back.
+        let back: Evidence = serde_json::from_value(json).unwrap();
+        assert_eq!(back, evidence);
     }
 }

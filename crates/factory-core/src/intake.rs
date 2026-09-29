@@ -58,6 +58,7 @@ use crate::run::Run;
 use crate::task::{Task, TaskStatus};
 use crate::usage::SnapshotPoint;
 use chrono::{DateTime, Utc};
+use factory_kernel::{Fact, L4};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -409,8 +410,16 @@ pub fn decide_security(
 /// A confirmed security report, once it has left `possible` behind: the
 /// awareness time (always [`Intake::received_at`], never the confirmation or
 /// fix time), the source and who confirmed it, over the scope subtree
-/// (`Engine::confirmed_security_reports`). Plain serde data with no methods,
-/// so `#193`'s later move into an L0 fact port carries it unchanged; the CRA
+/// (`Engine::confirmed_security_reports`). Plain serde data with no methods
+/// of its own.
+///
+/// `#193` phase 2 considered moving this into the L0 kernel outright, as
+/// its own doc comment once predicted, but `source` is [`IntakeSource`],
+/// which has an `identity()` method of its own -- L4's own vocabulary, not
+/// something this type can carry into L0 unchanged the way `Duration` did
+/// in phase 1. It stays in `factory_core::intake` and implements
+/// [`factory_kernel::Fact`] locally instead (`Producer = L4`, a foreign
+/// trait on a local type, which Rust's orphan rule allows); the CRA
 /// reporting clock (`#157`, phase 2) is the one thing that ever reads it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfirmedSecurityReport {
@@ -427,6 +436,10 @@ pub struct ConfirmedSecurityReport {
     /// is the split's time, not the original receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+}
+
+impl Fact for ConfirmedSecurityReport {
+    type Producer = L4;
 }
 
 /// `task`'s confirmed report, if it has one -- whatever the task's current

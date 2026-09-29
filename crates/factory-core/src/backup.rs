@@ -683,35 +683,12 @@ pub const VERIFIED_WITHIN_DAYS: i64 = 30;
 /// here reads a clock, a store or a disk. `#155`'s repository and Time
 /// Machine probes are deliberately not part of this fact -- see the
 /// module's own header.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackupFact {
-    /// The instant this fact was derived -- the same "now" a policy report
-    /// or a metric call reads every other fact against, and a metric
-    /// value's own `as_of`.
-    pub at: DateTime<Utc>,
-    /// Whether `infrastructure.backup` names a destination at all.
-    pub configured: bool,
-    /// The newest archive's timestamp -- `None` before the first backup, or
-    /// when the destination cannot be listed at all.
-    pub newest: Option<DateTime<Utc>>,
-    /// Within its schedule (or the unscheduled yardstick) plus
-    /// [`GRACE_HOURS`]. `None` when the destination is missing or
-    /// unmounted: even "no" would be a guess about an archive nobody can
-    /// currently list.
-    pub recent: Option<bool>,
-    /// The destination is not on the same device as the instance root.
-    /// `None` when that cannot be determined -- the destination is
-    /// missing, or its device could not be read.
-    pub offsite: Option<bool>,
-    /// The newest verification of a snapshot still in the destination
-    /// passed, within [`VERIFIED_WITHIN_DAYS`] days of `at`. `None` when
-    /// the destination is missing or unmounted.
-    pub verified: Option<bool>,
-    /// The same verification `verified` is read from, whatever it decided
-    /// -- present even when `verified` is `Some(false)` (failed, or too
-    /// old), so a reader can say why.
-    pub last_verified: Option<VerifySummary>,
-}
+///
+/// Moved to the L0 kernel (#193, phase 2: no field's type is owned by
+/// another level's module) and re-exported here unchanged, along with
+/// [`VerifySummary`], so nothing that builds or reads a `BackupFact`
+/// changes -- see `factory_kernel::facts`'s own doc comment.
+pub use factory_kernel::BackupFact;
 
 /// [`BackupFact`]'s whole derivation, pure so every row of the triage's
 /// semantics table (issue `#154`) is a plain unit test with no filesystem,
@@ -1022,12 +999,12 @@ pub struct SnapshotRow {
     pub encrypted: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerifySummary {
-    pub snapshot: String,
-    pub at: DateTime<Utc>,
-    pub ok: bool,
-}
+/// One verification of a snapshot still present in a backup destination --
+/// carried by [`BackupFact::last_verified`] whatever
+/// [`BackupFact::verified`] itself decided, so a reader can say why. Moved
+/// to the L0 kernel beside [`BackupFact`] (#193, phase 2) and re-exported
+/// here unchanged.
+pub use factory_kernel::VerifySummary;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupFailure {
