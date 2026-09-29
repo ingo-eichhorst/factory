@@ -378,6 +378,43 @@ fn rework_rate_def() -> MetricDef {
     )
 }
 
+/// `#158`, phase 1: `Engine::attested_runs`'s batch read of finished runs
+/// and their `StepAttestation`s, shared by `conformance_rate.<category>` and
+/// `gate_fail_rate` -- one read behind both, like `OPERATIONS_SOURCE` above.
+const ATTESTATION_SOURCE: &str =
+    "Engine::attested_runs's finished runs and StepAttestations (factory_core::conformance), trailing 28 days";
+
+fn conformance_rate_def(category: &str) -> MetricDef {
+    fixed(
+        &format!("conformance_rate.{category}"),
+        &format!("Conformance rate ({category})"),
+        &format!(
+            "Share of {category}'s *held* runs (at least one enforced required step) that \
+             actually conformed to their own control plan -- every enforced step's newest \
+             attestation, by someone other than the run's own agent, passed -- among the \
+             category's finished runs, over the trailing 28 days. A held run that was \
+             cancelled or failed without passing evidence counts against the rate; an unheld \
+             run (nothing ever required of it) is left out of both sides."
+        ),
+        Unit::Ratio,
+        Better::Higher,
+        ATTESTATION_SOURCE,
+    )
+}
+
+fn gate_fail_rate_def() -> MetricDef {
+    fixed(
+        "gate_fail_rate",
+        "Gate fail rate",
+        "Failed gate attestations over every gate attestation, across every category and \
+         every re-verification round, over the trailing 28 days. A round the andon stopped \
+         at its first failure still counts every attestation that round actually left.",
+        Unit::Ratio,
+        Better::Lower,
+        ATTESTATION_SOURCE,
+    )
+}
+
 fn time_to_recover_p50_def() -> MetricDef {
     fixed(
         "time_to_recover_p50",
@@ -657,6 +694,8 @@ pub fn registry() -> Vec<MetricDef> {
         queue_wait_p95_def(),
         fail_rate_def(),
         rework_rate_def(),
+        gate_fail_rate_def(),
+        conformance_rate_def("<category>"),
         time_to_recover_p50_def(),
         unit_cost_def(),
         tokens_per_run_def(),
@@ -708,6 +747,8 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         ["queue_wait_p95"] => queue_wait_p95_def(),
         ["fail_rate"] => fail_rate_def(),
         ["rework_rate"] => rework_rate_def(),
+        ["gate_fail_rate"] => gate_fail_rate_def(),
+        ["conformance_rate", category] => conformance_rate_def(category),
         ["time_to_recover_p50"] => time_to_recover_p50_def(),
         ["unit_cost"] => unit_cost_def(),
         ["tokens_per_run"] => tokens_per_run_def(),
@@ -902,6 +943,8 @@ mod tests {
             "queue_wait_p95",
             "fail_rate",
             "rework_rate",
+            "gate_fail_rate",
+            "conformance_rate.<category>",
             "time_to_recover_p50",
             "unit_cost",
             "tokens_per_run",
@@ -1073,6 +1116,37 @@ mod tests {
             resolve(&MetricId::new("goal_tasks_done").unwrap()),
             Err(MetricError::Unknown(_))
         ));
+    }
+
+    /// `#158`: `conformance_rate.<category>` binds like `compliance.<framework>`;
+    /// bare `conformance_rate` and a three-segment id are `Unknown`, the same
+    /// rule every other single-parameter family follows.
+    #[test]
+    fn resolve_binds_conformance_rate_and_gate_fail_rate() {
+        let def = resolve(&MetricId::new("conformance_rate.feature").unwrap()).unwrap();
+        assert_eq!(def.id, "conformance_rate.feature");
+        assert!(def.title.contains("feature"));
+        assert!(def.description.contains("feature"));
+        assert_eq!(
+            (def.unit, def.better, def.coverage),
+            (Unit::Ratio, Better::Higher, MetricCoverage::ScopeAware)
+        );
+
+        assert!(matches!(
+            resolve(&MetricId::new("conformance_rate").unwrap()),
+            Err(MetricError::Unknown(_))
+        ));
+        assert!(matches!(
+            resolve(&MetricId::new("conformance_rate.feature.extra").unwrap()),
+            Err(MetricError::Unknown(_))
+        ));
+
+        let def = resolve(&MetricId::new("gate_fail_rate").unwrap()).unwrap();
+        assert_eq!(def.id, "gate_fail_rate");
+        assert_eq!(
+            (def.unit, def.better, def.coverage),
+            (Unit::Ratio, Better::Lower, MetricCoverage::ScopeAware)
+        );
     }
 
     #[test]

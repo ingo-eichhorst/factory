@@ -213,6 +213,9 @@ export function reasonCheckKinds(reasons) {
 /// purpose -- it is closed right here, with the Attest form below, not by
 /// following a link. `daemon` points at L1 Infrastructure (merged as `#86`/
 /// `#87`, the `infrastructure` page under level `infra`) now that it exists.
+/// `attested` (`#158`) points at Tasks, same as `task` -- what closes the
+/// gap is a run of the named category actually attesting the step, and
+/// that is where runs live.
 const REMEDIATION = {
   knowledge: { page: "knowledge", label: "Knowledge" },
   task: { page: "tasks", label: "Tasks" },
@@ -223,6 +226,7 @@ const REMEDIATION = {
   secrets: { page: "secrets", label: "Secrets" },
   dependencies: { page: "dependencies", label: "Dependencies" },
   daemon: { page: "infrastructure", label: "Infrastructure" },
+  attested: { page: "tasks", label: "Tasks" },
 };
 
 /// A link to the exact tag node in the Knowledge graph, so following it lands
@@ -307,6 +311,8 @@ export function describeCheck(check) {
       return `daemon: ${check.fact}`;
     case "dependencies":
       return describeDependencies(check);
+    case "attested":
+      return `attested: ${check.category}/${check.step} (max_age ${check.max_age})`;
     default:
       return check.check;
   }

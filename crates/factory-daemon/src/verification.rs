@@ -20,17 +20,19 @@
 
 use crate::engine::Engine;
 use chrono::Utc;
+use factory_core::conformance::AttestedRun;
 use factory_core::control_plan::{
     self, AttestationVerdict, ControlPlan, RequiredStep, StepAttestation, GATE_ACTOR,
 };
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
+use factory_core::operations::Window;
 use factory_core::policy;
 use factory_core::quality;
 use factory_core::run::{BlockSource, Run, RunPatch, RunStatus};
-use factory_core::task::{Task, TaskEntry};
+use factory_core::task::{Task, TaskEntry, TaskFilter};
 use factory_core::workflow::{WorkflowDefinition, WorkflowLint, IMPLICIT_NODE};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -338,6 +340,97 @@ impl Engine {
         self.policies.step_attestations(run_id).await
     }
 
+    /// `#158` phase 1: the one L4-owned read the `attested` policy check and
+    /// both `conformance_rate.<category>`/`gate_fail_rate` share -- every
+    /// finished run whose `ended_at` falls in `window` (`(from, to]`,
+    /// `operations::is_finished`), narrowed to `scopes` (canonical scope
+    /// names, no ancestor roll-up -- the caller already decided whether that
+    /// is one exact scope or a whole subtree) and to `categories` when
+    /// either is given, together with its `required_steps` (frozen at
+    /// dispatch, `Run::required_steps`) and every attestation it collected
+    /// (`PolicyStore::step_attestations_for`, one batch read). A bench
+    /// attempt's task (`Task::bench_origin`) is always left out -- its own
+    /// case gate judges it, the same rule `required_steps_for_task` already
+    /// applies, so a plan on top would never apply to it anyway. This
+    /// becomes `Provide<…>` in `#193` phase 3; until then it wraps
+    /// `PolicyStore` exactly where the table already lives.
+    pub(crate) async fn attested_runs(
+        &self,
+        scopes: Option<&BTreeSet<String>>,
+        categories: Option<&BTreeSet<String>>,
+        window: Window,
+    ) -> Result<Vec<AttestedRun>> {
+        let mut runs = self.store.runs_between(window.from, window.to).await?;
+        runs.retain(|r| r.ended_at.is_some_and(|ended| window.contains(ended)));
+        if runs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let snapshot = self.factory_snapshot();
+        let tasks = self.store.list(&TaskFilter::default()).await?;
+        let tasks_by_id: BTreeMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
+
+        struct Resolved {
+            run_id: String,
+            task_id: String,
+            scope: String,
+            category: String,
+            agent: String,
+            status: RunStatus,
+            ended_at: chrono::DateTime<Utc>,
+            required_steps: Vec<RequiredStep>,
+        }
+        let mut resolved = Vec::new();
+        for run in runs {
+            let Some(task) = tasks_by_id.get(run.task_id.as_str()) else {
+                continue;
+            };
+            if task.bench_origin.is_some() {
+                continue;
+            }
+            let scope = snapshot.canonical_scope_name(&task.scope);
+            if let Some(scopes) = scopes {
+                if !scopes.contains(&scope) {
+                    continue;
+                }
+            }
+            let category = control_plan::effective_category(task.category.as_deref()).to_string();
+            if let Some(categories) = categories {
+                if !categories.contains(&category) {
+                    continue;
+                }
+            }
+            resolved.push(Resolved {
+                run_id: run.id.clone(),
+                task_id: task.id.clone(),
+                scope,
+                category,
+                agent: run.agent.clone(),
+                status: run.status,
+                ended_at: run.ended_at.expect("retained above"),
+                required_steps: run.required_steps.clone(),
+            });
+        }
+        if resolved.is_empty() {
+            return Ok(Vec::new());
+        }
+        let run_ids: Vec<String> = resolved.iter().map(|r| r.run_id.clone()).collect();
+        let mut attestations_by_run = self.policies.step_attestations_for(&run_ids).await?;
+        Ok(resolved
+            .into_iter()
+            .map(|r| AttestedRun {
+                attestations: attestations_by_run.remove(&r.run_id).unwrap_or_default(),
+                run_id: r.run_id,
+                task_id: r.task_id,
+                scope: r.scope,
+                category: r.category,
+                agent: r.agent,
+                status: r.status,
+                ended_at: r.ended_at,
+                required_steps: r.required_steps,
+            })
+            .collect())
+    }
+
     /// `factory workflow lint`: the plan, the injection and the ordering
     /// violations for a stored workflow, a task's implicit workflow, or --
     /// with neither -- just a scope's plan for one category.
@@ -407,10 +500,12 @@ mod tests {
 
     use super::*;
     use crate::access::Caller;
+    use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::{AgentRuntime, StartRequest};
+    use factory_core::bench::BenchOrigin;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
     use factory_core::operations::{ExceptionKind, HealthWindow};
-    use factory_core::run::Trigger;
+    use factory_core::run::{NewRun, Trigger};
     use factory_core::task::{NewTask, SessionRef, TaskReport};
     use factory_core::workflow::{CanvasPoint, WorkflowDraft, WorkflowEdge, WorkflowNode, WorkflowNodeKind, WorkflowNodeStatus};
     use factory_plugins::{Registry, SqliteStore};
@@ -732,5 +827,139 @@ mod tests {
         assert_eq!(gate.status, WorkflowNodeStatus::Done, "the gate mirrors its attestation");
         assert!(gate.task_id.is_none(), "a gate never spawns a task");
         assert!(wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().task_id.is_some(), "b starts on verified work");
+    }
+
+    // -- attested_runs (#158) ------------------------------------------------
+
+    #[tokio::test]
+    async fn attested_runs_narrows_by_scope_category_and_window_and_excludes_bench_origin() {
+        let (engine, work) = engine(TESTS_FOR_FEATURES);
+        std::fs::write(work.join("built.txt"), "ok").unwrap();
+
+        // A feature-category run that is held to `tests` and passes it.
+        let feature_task = task(&engine, Some("feature")).await;
+        engine.start_run(&feature_task.id, Trigger::Manual).await;
+        let run = report_done(&engine, &feature_task.id).await;
+        let feature_run = settled(&engine, &run.id).await;
+        assert_eq!(feature_run.status, RunStatus::Done);
+
+        // A docs-category run: this catalogue requires nothing of `docs`, so
+        // it is never held to anything and finishes without verification.
+        let docs_task = task(&engine, Some("docs")).await;
+        engine.start_run(&docs_task.id, Trigger::Manual).await;
+        let docs_run = report_done(&engine, &docs_task.id).await;
+        assert_eq!(docs_run.status, RunStatus::Done);
+
+        // A bench-origin task's run, built directly through the store --
+        // `required_steps_for_task` never plans one (`#118`), so nothing in
+        // the ordinary dispatch path can produce one to exercise here.
+        let now = Utc::now();
+        let bench_task = {
+            let new = NewTask {
+                title: "bench case".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                runtime: Some("quiet".into()),
+                worktree: Some(false),
+                category: Some("feature".into()),
+                ..Default::default()
+            };
+            let mut t = task_from_new(new, "demo".into(), "shell".into(), "quiet".into());
+            t.bench_origin = Some(BenchOrigin {
+                bench_run_id: "br1".into(),
+                case_id: "c1".into(),
+                agent: "shell".into(),
+                attempt: 1,
+            });
+            engine.store.create(&t).await.unwrap()
+        };
+        let bench_run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: bench_task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "quiet".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &bench_run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(now),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let window = Window {
+            from: now - chrono::Duration::days(1),
+            to: now + chrono::Duration::minutes(1),
+        };
+        let all = engine.attested_runs(None, None, window).await.unwrap();
+        let run_ids: BTreeSet<&str> = all.iter().map(|r| r.run_id.as_str()).collect();
+        assert!(run_ids.contains(feature_run.id.as_str()));
+        assert!(run_ids.contains(docs_run.id.as_str()));
+        assert!(
+            !run_ids.contains(bench_run.id.as_str()),
+            "bench-origin runs are excluded"
+        );
+
+        // Category narrows to the one feature run, with its attestation.
+        let feature_only = engine
+            .attested_runs(None, Some(&BTreeSet::from(["feature".to_string()])), window)
+            .await
+            .unwrap();
+        assert_eq!(feature_only.len(), 1);
+        assert_eq!(feature_only[0].run_id, feature_run.id);
+        assert_eq!(feature_only[0].category, "feature");
+        assert_eq!(feature_only[0].attestations.len(), 1, "grouped per run");
+        assert_eq!(
+            feature_only[0].attestations[0].verdict,
+            AttestationVerdict::Pass
+        );
+        assert_eq!(feature_only[0].attestations[0].step, "tests");
+
+        // Out-of-window: a run ending exactly at `from` is outside `(from, to]`.
+        let exact_from = Window {
+            from: feature_run.ended_at.unwrap(),
+            to: feature_run.ended_at.unwrap(),
+        };
+        assert!(engine
+            .attested_runs(None, None, exact_from)
+            .await
+            .unwrap()
+            .is_empty());
+        let too_early = Window {
+            from: now - chrono::Duration::days(30),
+            to: now - chrono::Duration::days(20),
+        };
+        assert!(engine
+            .attested_runs(None, None, too_early)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Scope filter: a scope name nothing here canonicalises to excludes
+        // everything; the fixture's own scope keeps the two non-bench runs.
+        let other_scope = engine
+            .attested_runs(Some(&BTreeSet::from(["other".to_string()])), None, window)
+            .await
+            .unwrap();
+        assert!(other_scope.is_empty());
+        let demo_scope = engine
+            .attested_runs(Some(&BTreeSet::from(["demo".to_string()])), None, window)
+            .await
+            .unwrap();
+        assert_eq!(demo_scope.len(), 2);
     }
 }

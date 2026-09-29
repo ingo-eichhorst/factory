@@ -281,6 +281,12 @@ test("closingLinks points a daemon reason at L1 Infrastructure", () => {
   assert.match(links[0].href, /^#demo\/infrastructure$/);
 });
 
+test("closingLinks points an attested reason at Tasks (#158)", () => {
+  const links = closingLinks("demo", ["attested: feature/tests -- 1 of 1 run(s) within 1w did not pass: run r1 (task t1)"]);
+  assert.deepEqual(links.map((l) => l.label), ["Tasks"]);
+  assert.match(links[0].href, /^#demo\/tasks$/);
+});
+
 test("defaultKnowledgeTag matches ControlRef::default_tag's own construction", () => {
   assert.equal(defaultKnowledgeTag("cra/annex-i-2-1"), "control/cra/annex-i-2-1");
 });
@@ -316,6 +322,10 @@ test("describeCheck matches the CLI's own describe_check, one line per check kin
   assert.equal(
     describeCheck({ check: "dependencies", sbom_max_age: "30d", built_sbom: true, max_open: { critical: 0, high: 1 }, exploited_open: 0 }),
     "dependencies: SBOM max_age 30d, built SBOM required, critical <= 0, high <= 1, exploited <= 0",
+  );
+  assert.equal(
+    describeCheck({ check: "attested", category: "feature", step: "tests", max_age: "1w" }),
+    "attested: feature/tests (max_age 1w)",
   );
 });
 
