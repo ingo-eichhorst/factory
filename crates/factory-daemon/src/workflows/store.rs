@@ -362,6 +362,7 @@ mod tests {
             },
             gate: None,
             exits,
+            session: Default::default(),
         };
         let definition = WorkflowDefinition::from_draft(WorkflowDraft {
             name: "legacy review loop".into(),

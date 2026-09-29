@@ -22,6 +22,7 @@ use factory_core::protocol::{
 use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
 use factory_core::run::{BlockSource, FailKind, NewRun, Run, RunFeedback, RunPatch, RunStatus, Trigger};
+use factory_core::workflow::NodeSession;
 use factory_core::task::{
     NewTask, PendingRetry, RetryPolicy, SlotWait, Task, TaskEntry, TaskFailure, TaskFilter, TaskPatch,
     TaskReport, TaskStatus, WorkflowOrigin,
@@ -89,6 +90,17 @@ enum Workspace {
     /// (`worktree::is_registered`): reuse it exactly as it stands, on its
     /// own branch, rather than cutting a new one.
     Reuse { path: PathBuf, branch: String },
+}
+
+/// `Engine::workflow_round`'s answer (`#178`): the round of its workflow node
+/// a task is being dispatched for, what sent it back, and whether that node
+/// resumes its session for a round. The default is a task outside any
+/// workflow, or a node on its first pass.
+#[derive(Default)]
+struct WorkflowRound {
+    round: u32,
+    feedback: Option<RunFeedback>,
+    session: NodeSession,
 }
 
 /// What `resolve_continue` decided about a `--continue` request: resume, with
@@ -1195,7 +1207,7 @@ impl Engine {
                 // agent to be ready. The caller gets its answer now.
                 tokio::spawn(async move {
                     match continue_from {
-                        Some(prev) => engine.start_run_due_continue(&id, due, prev).await,
+                        Some(prev) => engine.start_run_due_continue(&id, Trigger::Manual, due, prev).await,
                         None => engine.start_run_due(&id, Trigger::Manual, due).await,
                     }
                 });
@@ -2523,8 +2535,12 @@ impl Engine {
     /// than a new parameter on `start_run_due` itself, so its dozen other
     /// callers -- the scheduler, retries, waiting-slot releases -- need no
     /// change at all.
-    pub async fn start_run_due_continue(self: &Arc<Self>, task_id: &str, due: Due, continue_from: Run) {
-        self.start_run_due_inner(task_id, Trigger::Manual, due, Some(continue_from)).await
+    ///
+    /// A workflow rework round (`#178`) comes through here too, as
+    /// `Trigger::Workflow`: its previous run is the round before, which it
+    /// resumes by default.
+    pub async fn start_run_due_continue(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Run) {
+        self.start_run_due_inner(task_id, trigger, due, Some(continue_from)).await
     }
 
     async fn start_run_due_inner(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) {
@@ -2694,10 +2710,21 @@ impl Engine {
         // `#178`: decided before the run row exists, since none of it needs
         // one -- `resolve_continue` only ever reads the previous run and this
         // dispatch's freshly resolved agent/runtime.
+        // `#178`: which round of its workflow node this run is, and what the
+        // node that sent the work back said -- on the run, not in a title.
+        let round = self.workflow_round(&task).await;
         let continue_outcome = match &continue_from {
             Some(prev) => Some(
-                self.resolve_continue(&task, (&agent_name, &adapter_name), agent.as_ref(), runtime.as_ref(), prev, &scope_path)
-                    .await,
+                self.resolve_continue(
+                    &task,
+                    (&agent_name, &adapter_name),
+                    agent.as_ref(),
+                    runtime.as_ref(),
+                    prev,
+                    &scope_path,
+                    &round,
+                )
+                .await,
             ),
             None => None,
         };
@@ -2734,14 +2761,11 @@ impl Engine {
                 })
                 .await?
         };
-        // `#178`: which round of its workflow node this run is, and what the
-        // node that sent the work back said -- on the run, not in a title.
-        let (round, feedback) = self.workflow_round(&task).await;
         let mut initial_patch = RunPatch {
             original_estimate: task.effective_estimate(),
             provider_account,
-            round: (round > 0).then_some(round),
-            feedback,
+            round: (round.round > 0).then_some(round.round),
+            feedback: round.feedback.clone(),
             ..Default::default()
         };
         // `#178`: recorded whether or not the continuation actually managed
@@ -2766,7 +2790,10 @@ impl Engine {
                 TaskEntry::new(
                     "daemon",
                     "continue_fallback",
-                    format!("continuing attempt {}'s session was not possible: {reason}; dispatching fresh", run.attempt.saturating_sub(1)),
+                    format!(
+                        "continuing attempt {}'s session was not possible: {reason}; dispatching fresh",
+                        continue_from.as_ref().map_or(run.attempt.saturating_sub(1), |prev| prev.attempt)
+                    ),
                 )
                 .in_run(&run.id),
             )
@@ -2872,6 +2899,13 @@ impl Engine {
         // and never again for this run -- the same once-at-dispatch rule.
         let quality = self.quality_context(&task.scope).await;
 
+        // `#178` rule 4: a resumed agent remembers the files as they were
+        // when its previous run ended; say what moved since.
+        let since_last_run = match (&continue_outcome, continue_from.as_ref().and_then(|prev| prev.ended_at)) {
+            (Some(ContinueOutcome::Resume(_)), Some(ended)) => worktree::changes_since(&cwd, &scope_path, ended).await,
+            _ => None,
+        };
+
         let ctx = AgentContext {
             scope: task.scope.clone(),
             agent_name: agent_name.clone(),
@@ -2886,6 +2920,8 @@ impl Engine {
                 token,
                 worktree_branch: run.worktree_branch.clone(),
                 resumed_session: run.resumed_session.clone(),
+                round: run.round,
+                since_last_run,
                 upstream,
                 knowledge,
                 required_steps: run.required_steps.clone(),
@@ -2982,7 +3018,27 @@ impl Engine {
         runtime: &dyn AgentRuntime,
         prev: &Run,
         scope_path: &Path,
+        round: &WorkflowRound,
     ) -> ContinueOutcome {
+        // A rework round (`#178`) resumes by default, unless its node asks
+        // for a fresh session every round, or the conversation has already
+        // carried more rounds than the daemon lets one carry.
+        if round.round > 0 {
+            if round.session == NodeSession::Fresh {
+                return ContinueOutcome::Fresh {
+                    reason: "this workflow step asks for a fresh session every round (session: fresh)".into(),
+                };
+            }
+            let cap = self.factory_snapshot().config.daemon.resume_round_cap;
+            if round.round > cap {
+                return ContinueOutcome::Fresh {
+                    reason: format!(
+                        "rework round {} is past the resume cap of {cap} round(s) (daemon.resume_round_cap)",
+                        round.round
+                    ),
+                };
+            }
+        }
         // Rule 5: the previous run's agent is not necessarily this
         // dispatch's -- the task may have been edited since. Resuming a
         // `codex` conversation with `claude-code`'s launch args makes no
@@ -3003,6 +3059,14 @@ impl Engine {
         let session_id = factory_core::usage::newest_session_id_for_adapter(&snapshots, adapter_name)
             .or_else(|| prev.turn_ended_session_id.clone());
         let Some(session_id) = session_id else {
+            // Say the more fundamental of the two when both hold: an adapter
+            // that cannot resume at all (`shell`, `pi`) never records a
+            // session id to resume with either. `resume_spec` is a pure
+            // declaration, so asking it about a placeholder id is only
+            // asking whether it resumes.
+            if agent.resume_spec("-").is_none() {
+                return ContinueOutcome::Fresh { reason: format!("the {adapter_name} adapter declares no resume") };
+            }
             return ContinueOutcome::Fresh { reason: "no session id was recorded for the previous run".into() };
         };
 
@@ -3227,22 +3291,29 @@ impl Engine {
     /// for -- 0 outside a workflow and on a first pass -- and, when the work
     /// was sent back, what the sending node's newest run said, captured now
     /// so the round's run keeps it after the sender's next round moves on.
-    async fn workflow_round(&self, task: &Task) -> (u32, Option<RunFeedback>) {
+    async fn workflow_round(&self, task: &Task) -> WorkflowRound {
         let Some(origin) = &task.workflow_origin else {
-            return (0, None);
+            return WorkflowRound::default();
         };
         let Ok(Some(run)) = self.workflows.get_run(&origin.workflow_run_id).await else {
-            return (0, None);
+            return WorkflowRound::default();
         };
         let Some(node) = run
             .nodes
             .iter()
             .find(|node| node.node_id == origin.node_id && node.task_id.as_deref() == Some(task.id.as_str()))
         else {
-            return (0, None);
+            return WorkflowRound::default();
         };
+        let session = run
+            .definition
+            .nodes
+            .iter()
+            .find(|n| n.id == origin.node_id)
+            .map(|n| n.session)
+            .unwrap_or_default();
         let Some(request) = node.rework_request.clone() else {
-            return (node.round, None);
+            return WorkflowRound { round: node.round, feedback: None, session };
         };
         let sender_run = match self.store.runs(&request.from_task, 1).await {
             Ok(runs) => runs.into_iter().next(),
@@ -3257,9 +3328,9 @@ impl Engine {
         };
         let said: Vec<&str> = said.into_iter().flatten().map(str::trim).filter(|s| !s.is_empty()).collect();
         let text = truncate_tail(&said.join("\n\n"), UPSTREAM_RESULT_BYTE_CAP).into_owned();
-        (
-            node.round,
-            Some(RunFeedback {
+        WorkflowRound {
+            round: node.round,
+            feedback: Some(RunFeedback {
                 from_node: request.from_node,
                 from_task: request.from_task,
                 from_run,
@@ -3267,7 +3338,8 @@ impl Engine {
                 max_rounds: request.max_rounds,
                 text,
             }),
-        )
+            session,
+        }
     }
 
     /// Agent-selectable exits for this exact workflow-node round. This is

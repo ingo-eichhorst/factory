@@ -132,6 +132,82 @@ mod tests {
         }
     }
 
+    /// `#178`: a runtime that says a session is `Gone` once it has been
+    /// stopped -- what herdr says of a closed pane, and what
+    /// `resolve_continue` needs to hear before it will resume a conversation
+    /// from disk (rule 1). Every other runtime here answers `Working`
+    /// forever, so no test on them can ever reach a resume. Records each
+    /// launch (args and cwd) and prompt by run id.
+    struct ResumableRuntime {
+        starts: std::sync::Mutex<Vec<StartRequest>>,
+        prompts: std::sync::Mutex<Vec<(String, String)>>,
+        stopped: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    }
+
+    impl ResumableRuntime {
+        fn new() -> Self {
+            Self { starts: Default::default(), prompts: Default::default(), stopped: Default::default() }
+        }
+        fn start_for(&self, run_id: &str) -> Option<StartRequest> {
+            self.starts.lock().unwrap().iter().find(|s| s.id == run_id).cloned()
+        }
+        fn prompt_for(&self, run_id: &str) -> Option<String> {
+            self.prompts.lock().unwrap().iter().find(|(h, _)| h == run_id).map(|(_, p)| p.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentRuntime for ResumableRuntime {
+        fn name(&self) -> &str {
+            "quiet"
+        }
+        async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
+            self.starts.lock().unwrap().push(req.clone());
+            Ok(SessionRef { runtime: "quiet".into(), handle: req.id.clone(), meta: Default::default() })
+        }
+        async fn submit(&self, session: &SessionRef, text: &str) -> Result<()> {
+            self.prompts.lock().unwrap().push((session.handle.clone(), text.to_string()));
+            Ok(())
+        }
+        async fn status(&self, session: &SessionRef) -> Result<factory_core::adapter::RuntimeStatus> {
+            Ok(if self.stopped.lock().unwrap().contains(&session.handle) {
+                factory_core::adapter::RuntimeStatus::Gone
+            } else {
+                factory_core::adapter::RuntimeStatus::Working
+            })
+        }
+        async fn send_text(&self, _: &SessionRef, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_keys(&self, _: &SessionRef, _: &[String]) -> Result<()> {
+            Ok(())
+        }
+        async fn read(&self, _: &SessionRef, _: u32) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn stop(&self, session: &SessionRef) -> Result<()> {
+            self.stopped.lock().unwrap().insert(session.handle.clone());
+            Ok(())
+        }
+    }
+
+    /// `engine()` on `runtime`, with `daemon` adjusted by `tweak`.
+    fn engine_on(runtime: Arc<dyn AgentRuntime>, tweak: impl FnOnce(&mut DaemonConfig)) -> Arc<Engine> {
+        let base = engine();
+        let mut config = base.factory_snapshot().config.clone();
+        tweak(&mut config.daemon);
+        let root = base.factory_snapshot().root.clone();
+        let mut registry = Registry::with_builtins();
+        registry.add_runtime(runtime, "test");
+        Arc::new(Engine::new(
+            Factory { root, config },
+            registry,
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
+    }
+
     fn engine() -> Arc<Engine> {
         let root =
             std::env::temp_dir().join(format!("factory-workflow-test-{}", uuid::Uuid::new_v4()));
@@ -312,6 +388,7 @@ mod tests {
             },
             gate: None,
             exits: Vec::new(),
+            session: Default::default(),
         }
     }
 
@@ -336,6 +413,7 @@ mod tests {
             },
             gate: None,
             exits: Vec::new(),
+            session: Default::default(),
         }
     }
 
@@ -1661,6 +1739,140 @@ mod tests {
         );
     }
 
+    // --- #178: a rework round resumes its previous run's session ---
+
+    /// Run `review_loop` on `engine` up to the moment the review sends the
+    /// work back, with the first implement run having recorded `session`
+    /// as its harness session id. Returns (implement task, its first run,
+    /// review task).
+    async fn send_back_once(
+        engine: &Arc<Engine>,
+        definition: &WorkflowDefinition,
+        session: Option<&str>,
+    ) -> (factory_core::Task, factory_core::run::Run, factory_core::Task) {
+        engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let implement = wait_for_tasks(engine, 1).await.pop().unwrap();
+        let first = wait_for_run(engine, &implement.id, 1).await;
+        if let Some(session) = session {
+            engine
+                .store
+                .update_run(
+                    &first.id,
+                    &factory_core::run::RunPatch { turn_ended_session_id: Some(session.into()), ..Default::default() },
+                )
+                .await
+                .unwrap();
+        }
+        finish_with_result(engine, &implement.id, "PR https://example.test/pr/1").await;
+        let review = of_node(&wait_for_tasks(engine, 2).await, "review")[0].clone();
+        review_fails(engine, &review.id, "the parser test is missing").await;
+        (implement, first, review)
+    }
+
+    #[tokio::test]
+    async fn a_rework_round_resumes_the_previous_runs_conversation_and_reports_on_its_own_token() {
+        let runtime = Arc::new(ResumableRuntime::new());
+        let engine = engine_on(runtime.clone(), |_| {});
+        let definition = review_loop(&engine, 5).await;
+        let (implement, first, _) = send_back_once(&engine, &definition, Some("sess-1")).await;
+
+        let second = wait_for_run(&engine, &implement.id, 2).await;
+        let prompt = loop {
+            if let Some(p) = runtime.prompt_for(&second.id) {
+                break p;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        let second = engine.store.get_run(&second.id).await.unwrap().unwrap();
+        assert_eq!(second.resumed_session.as_deref(), Some("sess-1"));
+        assert_eq!(second.continued_from.as_deref(), Some(first.id.as_str()));
+        assert_eq!(second.round, 1);
+        let start = runtime.start_for(&second.id).unwrap();
+        assert_eq!(&start.launch.args[..2], ["--resume", "sess-1"], "claude is launched into its own session");
+        assert_eq!(start.cwd, runtime.start_for(&first.id).unwrap().cwd, "in the same working directory");
+        assert!(prompt.contains("rework round 1"), "{prompt}");
+        assert!(prompt.contains("the parser test is missing"), "the feedback is the resumed turn's prompt: {prompt}");
+        assert!(prompt.contains("void now"), "earlier report commands are void: {prompt}");
+        assert!(!prompt.contains("do the thing"), "the task is not replayed into its own conversation: {prompt}");
+
+        // The previous run's token is dead, with a reason; the new one works.
+        let stale = engine
+            .report(&implement.id, TaskReport {
+                status: Some(RunStatus::Done), message: None, result: None, send_to: None, error: None,
+                token: first.token.clone(),
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(stale.contains("a newer run of task"), "{stale}");
+        finish_with_result(&engine, &implement.id, "fixed").await;
+        assert_eq!(engine.store.get_run(&second.id).await.unwrap().unwrap().status, RunStatus::Done);
+    }
+
+    async fn fallback_reason(engine: &Arc<Engine>, task_id: &str) -> String {
+        for _ in 0..400 {
+            let entries = engine.store.entries(task_id, 100).await.unwrap();
+            if let Some(entry) = entries.iter().find(|e| e.kind == "continue_fallback") {
+                return entry.message.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("no continue_fallback entry on {task_id}");
+    }
+
+    #[tokio::test]
+    async fn a_rework_round_falls_back_to_fresh_and_says_why() {
+        // No session id was ever recorded for the previous run.
+        let engine = engine_on(Arc::new(ResumableRuntime::new()), |_| {});
+        let definition = review_loop(&engine, 5).await;
+        let (implement, _, _) = send_back_once(&engine, &definition, None).await;
+        assert!(fallback_reason(&engine, &implement.id).await.contains("no session id was recorded"));
+        let second = wait_for_run(&engine, &implement.id, 2).await;
+        assert!(second.resumed_session.is_none());
+        assert_eq!(second.round, 1, "a fresh round is still the round");
+
+        // The node opts out of resuming.
+        let engine = engine_on(Arc::new(ResumableRuntime::new()), |_| {});
+        let mut definition = review_loop(&engine, 5).await;
+        let mut draft = WorkflowDraft {
+            name: definition.name.clone(),
+            scope: "demo".into(),
+            nodes: definition.nodes.clone(),
+            edges: definition.edges.clone(),
+            ..Default::default()
+        };
+        draft.nodes.iter_mut().find(|n| n.id == "implement").unwrap().session = factory_core::workflow::NodeSession::Fresh;
+        definition = engine.update_workflow(&definition.id, draft).await.unwrap();
+        let (implement, _, _) = send_back_once(&engine, &definition, Some("sess-1")).await;
+        assert!(fallback_reason(&engine, &implement.id).await.contains("session: fresh"));
+
+        // Past the round cap.
+        let engine = engine_on(Arc::new(ResumableRuntime::new()), |d| d.resume_round_cap = 0);
+        let definition = review_loop(&engine, 5).await;
+        let (implement, _, _) = send_back_once(&engine, &definition, Some("sess-1")).await;
+        assert!(fallback_reason(&engine, &implement.id).await.contains("resume cap of 0"));
+
+        // The shell agent never resumes: the review's own round says so.
+        let engine = engine_on(Arc::new(ResumableRuntime::new()), |_| {});
+        let definition = review_loop(&engine, 5).await;
+        let (implement, _, review) = send_back_once(&engine, &definition, Some("sess-1")).await;
+        wait_for_run(&engine, &implement.id, 2).await;
+        finish(&engine, &implement.id, RunStatus::Done).await;
+        wait_for_run(&engine, &review.id, 2).await;
+        let why = fallback_reason(&engine, &review.id).await;
+        assert!(why.contains("the shell adapter declares no resume"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn a_rework_round_never_resumes_a_session_that_is_not_confirmed_gone() {
+        // `QuietRuntime` answers `Working` for every session, stopped or not.
+        let engine = engine();
+        let definition = review_loop(&engine, 5).await;
+        let (implement, _, _) = send_back_once(&engine, &definition, Some("sess-1")).await;
+        assert!(fallback_reason(&engine, &implement.id).await.contains("not confirmed gone"));
+        assert!(wait_for_run(&engine, &implement.id, 2).await.resumed_session.is_none());
+    }
+
     #[tokio::test]
     async fn a_run_is_started_with_its_inputs_written_into_every_node() {
         let engine = engine();
@@ -2306,10 +2518,28 @@ impl Engine {
         for task_id in to_start {
             let engine = self.clone();
             tokio::spawn(async move {
-                engine.start_run(&task_id, Trigger::Workflow).await;
+                engine.launch_node_task(&task_id).await;
             });
         }
         Ok(())
+    }
+
+    /// Hand a launched node's task its run (`#178`). A task that has run
+    /// before is on a rework round, and its newest run -- the round before --
+    /// is what this one continues: same worktree and same conversation by
+    /// default, `resolve_continue` falling back to fresh (journaled) when it
+    /// cannot. A task that never ran just starts.
+    async fn launch_node_task(self: &Arc<Self>, task_id: &str) {
+        let previous = match self.store.runs(task_id, 1).await {
+            Ok(runs) => runs.into_iter().next().filter(|r| r.status.is_terminal()),
+            Err(_) => None,
+        };
+        match previous {
+            Some(prev) => {
+                self.start_run_due_continue(task_id, Trigger::Workflow, crate::engine::Due::now(), prev).await
+            }
+            None => self.start_run(task_id, Trigger::Workflow).await,
+        }
     }
 
     async fn evaluate_node_exits(&self, run: &mut WorkflowRun, from: &str) -> Result<()> {
@@ -2798,7 +3028,7 @@ impl Engine {
                         {
                             let engine = self.clone();
                             tokio::spawn(async move {
-                                engine.start_run(&task_id, Trigger::Workflow).await;
+                                engine.launch_node_task(&task_id).await;
                             });
                         }
                     }

@@ -779,6 +779,7 @@ mod tests {
             },
             gate: None,
             exits: Vec::new(),
+            session: Default::default(),
         }
     }
 

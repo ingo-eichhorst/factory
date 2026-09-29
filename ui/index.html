@@ -528,6 +528,9 @@
             <label>Scope<input id="workflow-node-scope" type="text" readonly></label>
             <label>Agent<select id="workflow-node-agent"></select></label>
             <label class="check"><input id="workflow-node-worktree" type="checkbox" checked> Own worktree</label>
+            <!-- `#178`: a rework round resumes the node's previous session
+                 unless the node asks for a fresh one every round. -->
+            <label class="check" title="Off: a rework round picks this step's previous session back up, in the same worktree. On: every round starts a fresh session -- for a step that must judge independently of its earlier rounds."><input id="workflow-node-fresh" type="checkbox"> Fresh session every rework round</label>
             <label>Estimate (seconds)<input id="workflow-node-estimate" type="number" min="1"></label>
             <label>Acknowledgement timeout (seconds)<input id="workflow-node-ack" type="number" min="1"></label>
             <label>Run timeout (seconds)<input id="workflow-node-timeout" type="number" min="1"></label>

@@ -31,6 +31,28 @@ pub struct WorkflowNode {
     /// none holds the node's ordinary outgoing edges remain the default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exits: Vec<WorkflowExit>,
+    /// Whether a rework round of this node picks its previous run's session
+    /// back up (`#178`) -- the default, since checking one's own findings or
+    /// fixing what a reviewer found is what a remembered context is good at
+    /// -- or always starts fresh, for a step that must judge independently
+    /// of its own earlier rounds (an attestation step, say).
+    #[serde(default, skip_serializing_if = "NodeSession::is_resume")]
+    pub session: NodeSession,
+}
+
+/// See [`WorkflowNode::session`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeSession {
+    #[default]
+    Resume,
+    Fresh,
+}
+
+impl NodeSession {
+    pub fn is_resume(&self) -> bool {
+        *self == Self::Resume
+    }
 }
 
 /// One ordered conditional route out of a task node (`#149`). Exactly one of
@@ -64,6 +86,8 @@ struct WorkflowNodeWire {
     pub exits: Vec<WorkflowExit>,
     #[serde(default)]
     pub rework: Option<LegacyReworkSpec>,
+    #[serde(default)]
+    pub session: NodeSession,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +121,7 @@ impl<'de> Deserialize<'de> for WorkflowNode {
             task: wire.task,
             gate: wire.gate,
             exits: wire.exits,
+            session: wire.session,
         })
     }
 }
@@ -677,6 +702,7 @@ impl WorkflowDefinition {
                 },
                 gate: None,
                 exits: Vec::new(),
+                session: Default::default(),
             }],
             edges: Vec::new(),
             revision: 1,
@@ -779,6 +805,7 @@ impl WorkflowDefinition {
                         locked: true,
                     }),
                     exits: Vec::new(),
+                    session: Default::default(),
                 });
                 chain_edges.push(WorkflowEdge {
                     id: fresh(format!("{previous}->{gate_id}"), &mut edge_ids),
@@ -1261,6 +1288,7 @@ mod tests {
             },
             gate: None,
             exits: Vec::new(),
+            session: Default::default(),
         }
     }
 
@@ -1457,6 +1485,7 @@ mod tests {
                 ..Default::default()
             }),
             exits: Vec::new(),
+            session: Default::default(),
         }
     }
 

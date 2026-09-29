@@ -795,6 +795,13 @@ pub struct DaemonConfig {
     /// Check a harness starts before handing it a task (`#131`).
     #[serde(default)]
     pub harness_health: HarnessHealthConfig,
+    /// The last workflow rework round that resumes its previous run's
+    /// session (`#178`); a round past it starts fresh, journaled. A resumed
+    /// conversation carries every earlier round in its history, and past a
+    /// point that is more noise than memory. 5 by default -- the same budget
+    /// a review loop is usually given -- and 0 makes every round fresh.
+    #[serde(default = "default_resume_round_cap")]
+    pub resume_round_cap: u32,
 }
 
 /// How the daemon checks that a harness starts before dispatching to it.
@@ -925,6 +932,9 @@ fn default_runtime() -> String {
 fn default_power_assertion() -> bool {
     true
 }
+fn default_resume_round_cap() -> u32 {
+    5
+}
 /// Three attempts, five minutes apart. Enough to ride out the transient
 /// failures a retry is for -- a runtime hiccup, a moment's network trouble --
 /// without turning into a slow-motion version of the very cadence the task's
@@ -961,6 +971,7 @@ impl Default for DaemonConfig {
             foreman: ForemanConfig::default(),
             power_assertion: default_power_assertion(),
             harness_health: HarnessHealthConfig::default(),
+            resume_round_cap: default_resume_round_cap(),
         }
     }
 }

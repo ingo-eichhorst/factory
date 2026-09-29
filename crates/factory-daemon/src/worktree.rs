@@ -1,6 +1,7 @@
 //! A run's own git worktree: made before the agent starts, never inside the
-//! scope, and never cleaned up once it exists -- see `AGENTS.md` and the
-//! ticket this implements for why.
+//! scope. A later run of the same task may resume in it (`#178`: a rework
+//! round, or `--continue`), and the daemon itself releases it once the work
+//! it belongs to is finished -- see `release` for when and how carefully.
 //!
 //! Two separate questions live here, and they are answered two separate ways
 //! on purpose. Whether a scope *can* have a worktree at all is advisory: it
@@ -204,9 +205,108 @@ pub async fn remove(scope_path: &Path, dir: &Path, branch: &str) -> Result<(), S
     Err(stderr)
 }
 
+/// `git -C dir <args>`, its stdout trimmed, or `None` when git did not
+/// succeed -- for the read-only questions below, where an answer git cannot
+/// give is simply not part of the answer.
+async fn git_read(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git").arg("-C").arg(dir).args(args).output().await.ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// `#178` rule 4: what moved in the repository since a previous run ended,
+/// for a run that resumes its conversation in `dir` -- that agent's memory
+/// of the files is exactly that old. New commits on the branch checked out
+/// in `dir`, new commits on the scope's own current branch (`main`, as a
+/// rule), and whether merging that into this one would now conflict.
+/// `None` when nothing moved, or when git could not say. Local refs only:
+/// nothing here fetches, so a push nobody fetched yet is not seen.
+pub async fn changes_since(dir: &Path, scope_path: &Path, since: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let since_arg = format!("--since={}", since.to_rfc3339());
+    let commits = |rev: String| {
+        let since_arg = since_arg.clone();
+        async move {
+            let text = git_read(dir, &["log", "--oneline", "--no-decorate", &since_arg, "-n", "20", &rev]).await?;
+            Some(text.lines().map(str::to_string).collect::<Vec<_>>())
+        }
+    };
+    let branch = git_read(dir, &["symbolic-ref", "--short", "HEAD"]).await;
+    let default = git_read(scope_path, &["symbolic-ref", "--short", "HEAD"]).await;
+    let mut parts = Vec::new();
+    if let Some(on_branch) = commits("HEAD".into()).await.filter(|c| !c.is_empty()) {
+        parts.push(format!(
+            "{} new commit(s) on {} ({})",
+            on_branch.len(),
+            branch.as_deref().unwrap_or("this branch"),
+            on_branch.join("; ")
+        ));
+    }
+    if let Some(default) = default.filter(|d| Some(d) != branch.as_ref()) {
+        if let Some(on_default) = commits(default.clone()).await.filter(|c| !c.is_empty()) {
+            parts.push(format!("{} new commit(s) on {default} ({})", on_default.len(), on_default.join("; ")));
+            // Exit 1 with conflicts, 0 clean; anything else is no answer.
+            let merge = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["merge-tree", "--write-tree", "--quiet", "HEAD", &default])
+                .output()
+                .await
+                .ok();
+            if merge.is_some_and(|m| m.status.code() == Some(1)) {
+                parts.push(format!("merging {default} into this branch now conflicts"));
+            }
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A scope repository on `main` with one commit, and a worktree of it on
+    /// `work` -- the shape every run's worktree has.
+    fn scope_with_worktree() -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("factory-worktree-test-{}", uuid::Uuid::new_v4()));
+        let scope = root.join("scope");
+        std::fs::create_dir_all(&scope).unwrap();
+        git(&scope, &["init", "-q", "-b", "main"]);
+        std::fs::write(scope.join("a.txt"), "one\n").unwrap();
+        git(&scope, &["add", "."]);
+        git(&scope, &["commit", "-q", "-m", "first"]);
+        let wt = root.join("wt");
+        git(&scope, &["worktree", "add", "-q", "-b", "work", wt.to_str().unwrap()]);
+        (scope, wt)
+    }
+
+    #[tokio::test]
+    async fn changes_since_names_new_commits_on_both_sides_and_a_conflict() {
+        let (scope, wt) = scope_with_worktree();
+        let since = chrono::Utc::now() - chrono::Duration::seconds(2);
+        assert_eq!(
+            changes_since(&wt, &scope, chrono::Utc::now() + chrono::Duration::seconds(5)).await,
+            None,
+            "nothing moved after the previous run"
+        );
+        std::fs::write(wt.join("a.txt"), "branch\n").unwrap();
+        git(&wt, &["commit", "-q", "-am", "on the branch"]);
+        std::fs::write(scope.join("a.txt"), "main\n").unwrap();
+        git(&scope, &["commit", "-q", "-am", "on main"]);
+        let said = changes_since(&wt, &scope, since).await.expect("both sides moved");
+        assert!(said.contains("on work") && said.contains("on the branch"), "{said}");
+        assert!(said.contains("on main (") && said.contains("on main"), "{said}");
+        assert!(said.contains("merging main into this branch now conflicts"), "{said}");
+    }
 
     #[test]
     fn a_fresh_worktrees_branch_is_derived_from_the_task_and_reads_like_its_title() {

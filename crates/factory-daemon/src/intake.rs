@@ -1837,6 +1837,7 @@ mod tests {
                     },
                     gate: None,
                     exits: Vec::new(),
+                    session: Default::default(),
                 }],
                 ..Default::default()
             })
@@ -2155,6 +2156,7 @@ mod tests {
                     },
                     gate: None,
                     exits: Vec::new(),
+                    session: Default::default(),
                 }],
                 ..Default::default()
             })

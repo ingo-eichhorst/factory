@@ -30,6 +30,10 @@ pub struct LaunchSpec {
     pub env: BTreeMap<String, String>,
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 /// What ties a launch to one attempt at one task. Absent when the agent is
 /// being started to stand there rather than to do something.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +55,20 @@ pub struct TaskBinding {
     /// void, and names the session being picked back up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_session: Option<String>,
+    /// Which workflow rework round this run is (`Run::round`, `#178`): 0 on
+    /// a first pass and outside a workflow. A resumed run with a round is a
+    /// feedback round picking its own earlier conversation back up; without
+    /// one it is `--continue` after an infrastructure failure. Absent on the
+    /// wire when 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub round: u32,
+    /// For a resumed run only: what moved in the repository since the run it
+    /// picks up from ended -- commits on its branch and on the scope's
+    /// default branch, and whether the two now conflict (`#178` rule 4). An
+    /// agent's memory of the files is that old; this says how stale it is.
+    /// `None` when nothing moved or it could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_last_run: Option<String>,
     /// This task's direct parents in a workflow, each with the output it
     /// finished with -- empty for a root node or a task outside any
     /// workflow. Computed once, at dispatch (`Engine::dispatch`), from that
@@ -423,14 +441,25 @@ impl AgentContext {
         // -- reporting with it now gets refused (`Engine::check_run_token`,
         // `Engine::caller_for`) with exactly the reason this sentence gives,
         // so the agent hears it before it happens rather than only after.
-        let resumed_note = if binding.resumed_session.is_some() {
-            "\n\nThis run picked up an earlier session of this same task, after that \
-             run ended on an infrastructure failure. Any `factory task report` command \
-             you see earlier in this conversation's history belonged to that run and is \
-             void now -- a newer run exists. Use only the commands above, which carry \
-             this run's own token."
-        } else {
-            ""
+        let resumed_note = match (&binding.resumed_session, binding.round) {
+            (None, _) => "",
+            (Some(_), 0) => {
+                "\n\nThis run picked up an earlier session of this same task, after that \
+                 run ended on an infrastructure failure. Any `factory task report` command \
+                 you see earlier in this conversation's history belonged to that run and is \
+                 void now -- a newer run exists. Use only the commands above, which carry \
+                 this run's own token."
+            }
+            // `#178`: a feedback round resumed its own earlier conversation,
+            // which ended with that round's report -- the command most
+            // likely to be copied again, and the one that no longer works.
+            (Some(_), _) => {
+                "\n\nThis run is a rework round of this same task, picking up the session of \
+                 its previous run. Every `factory task report` command earlier in this \
+                 conversation's history -- including the one that reported that run done -- \
+                 belonged to a run that is over, and is void now: a newer run exists. Use \
+                 only the commands above, which carry this run's own token."
+            }
         };
         contract + explicit_note + resumed_note + &verification
     }
@@ -1007,6 +1036,8 @@ mod tests {
             token: "tok".into(),
             worktree_branch: None,
             resumed_session: None,
+            round: 0,
+            since_last_run: None,
             upstream: Vec::new(),
             knowledge: None,
             required_steps: Vec::new(),

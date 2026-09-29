@@ -174,22 +174,42 @@ impl Agent for HarnessAgent {
                 prompt.push_str(&ctx.factory_guide());
                 prompt.push_str("\n\n---\n\n");
             }
-            prompt.push_str(&format!(
-                "Factory is continuing this task (\"{title}\", {id}): the previous run of it \
-                 ended on an infrastructure failure, and this session ({session_id}) picks the \
-                 same conversation back up in the same working directory. You are the same \
-                 agent -- carry on from where you left off rather than starting over.\n\
-                 \n\
-                 ---\n\
-                 {contract}",
-                title = task.title,
-                id = task.id,
-                contract = if self.harness == "codex" {
-                    ctx.reporting_contract_explicit()
-                } else {
-                    ctx.reporting_contract()
-                },
-            ));
+            let contract = if self.harness == "codex" {
+                ctx.reporting_contract_explicit()
+            } else {
+                ctx.reporting_contract()
+            };
+            if binding.round == 0 {
+                prompt.push_str(&format!(
+                    "Factory is continuing this task (\"{title}\", {id}): the previous run of it \
+                     ended on an infrastructure failure, and this session ({session_id}) picks the \
+                     same conversation back up in the same working directory. You are the same \
+                     agent -- carry on from where you left off rather than starting over.\n",
+                    title = task.title,
+                    id = task.id,
+                ));
+            } else {
+                // `#178`: a feedback round. The feedback is the prompt of the
+                // resumed turn -- the task itself is already in this
+                // conversation, from the round this one picks up from.
+                prompt.push_str(&format!(
+                    "Factory is running this task (\"{title}\", {id}) again as rework round {round}. \
+                     This session ({session_id}) picks your own previous run of it back up, in the \
+                     same working directory: you are the same agent, with the same history. Address \
+                     what follows, then report on this run.\n",
+                    title = task.title,
+                    id = task.id,
+                    round = binding.round,
+                ));
+                if !binding.upstream.is_empty() {
+                    prompt.push('\n');
+                    prompt.push_str(&upstream_section(&binding.upstream));
+                }
+            }
+            if let Some(changes) = &binding.since_last_run {
+                prompt.push_str(&format!("\nSince your previous run ended: {changes}\n"));
+            }
+            prompt.push_str(&format!("\n---\n{contract}"));
             return Ok(prompt);
         }
         let instructions = if task.instructions.trim().is_empty() {
@@ -556,6 +576,8 @@ mod tests {
                 token: "tok".into(),
                 worktree_branch,
                 resumed_session: None,
+                round: 0,
+                since_last_run: None,
                 upstream: Vec::new(),
                 knowledge: None,
                 required_steps: Vec::new(),

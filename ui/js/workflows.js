@@ -587,7 +587,7 @@ function renderInspector() {
   $("workflow-node-fields").hidden = !node;
   const key = `${mode}:${graph.id}:${selectedNode || ""}:${graph.revision}:${currentRun?.id || ""}`;
   const selectionChanged = key !== inspectorRenderedFor;
-  for (const id of ["workflow-name", "workflow-description", "workflow-node-title", "workflow-node-instructions", "workflow-node-agent", "workflow-node-worktree", "workflow-node-estimate", "workflow-node-ack", "workflow-node-timeout", "workflow-node-blocked"]) {
+  for (const id of ["workflow-name", "workflow-description", "workflow-node-title", "workflow-node-instructions", "workflow-node-agent", "workflow-node-worktree", "workflow-node-fresh", "workflow-node-estimate", "workflow-node-ack", "workflow-node-timeout", "workflow-node-blocked"]) {
     $(id).disabled = readOnly;
   }
   $("workflow-scope").value = graph.scope;
@@ -615,6 +615,7 @@ function renderInspector() {
   $("workflow-node-instructions").value = node.task.instructions || "";
   $("workflow-node-agent").value = node.task.agent || "";
   $("workflow-node-worktree").checked = node.task.worktree !== false;
+  $("workflow-node-fresh").checked = node.session === "fresh";
   $("workflow-node-estimate").value = node.task.estimate_seconds ?? "";
   $("workflow-node-ack").value = node.task.ack_timeout_seconds ?? "";
   $("workflow-node-timeout").value = node.task.timeout_seconds ?? "";
@@ -794,6 +795,7 @@ function readEditor() {
     node.task.scope = current.scope;
     node.task.agent = $("workflow-node-agent").value || null;
     node.task.worktree = $("workflow-node-worktree").checked;
+    if ($("workflow-node-fresh").checked) node.session = "fresh"; else delete node.session;
     node.task.estimate_seconds = number("workflow-node-estimate");
     node.task.ack_timeout_seconds = number("workflow-node-ack");
     node.task.timeout_seconds = number("workflow-node-timeout");
@@ -1229,7 +1231,7 @@ export function wireWorkflows() {
   for (const button of $("workflow-mode").querySelectorAll("[data-mode]")) {
     button.onclick = () => setMode(button.dataset.mode);
   }
-  for (const id of ["workflow-name", "workflow-description", "workflow-node-title", "workflow-node-instructions", "workflow-node-agent", "workflow-node-worktree", "workflow-node-estimate", "workflow-node-ack", "workflow-node-timeout", "workflow-node-blocked"]) {
+  for (const id of ["workflow-name", "workflow-description", "workflow-node-title", "workflow-node-instructions", "workflow-node-agent", "workflow-node-worktree", "workflow-node-fresh", "workflow-node-estimate", "workflow-node-ack", "workflow-node-timeout", "workflow-node-blocked"]) {
     $(id).oninput = () => { readEditor(); markDirty(); renderCanvas(); renderSummary(); renderNodeUses(); };
   }
   const canvas = $("workflow-canvas");
