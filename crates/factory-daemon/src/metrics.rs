@@ -168,6 +168,14 @@ fn is_quality_metric(id: &str) -> bool {
     id.starts_with("quality.")
 }
 
+/// `#158` phase 1: `conformance_rate.<category>` and `gate_fail_rate`, the
+/// two registry families `Engine::attested_runs` backs -- one read shared
+/// by both, whatever mix of categories and however many of the two a
+/// request actually asks for.
+fn is_attestation_metric(id: &str) -> bool {
+    id.starts_with("conformance_rate.") || id == "gate_fail_rate"
+}
+
 impl Engine {
     /// Compute every id in `ids` (deduplicated), lazily: nothing not asked
     /// for is ever touched, and each backing read is shared by every id that
@@ -255,6 +263,7 @@ impl Engine {
         let needs_hours = computing.iter().any(|(id, r)| r.is_ok() && is_hours_metric(id.as_str()));
         let needs_intake = computing.iter().any(|(id, r)| r.is_ok() && is_intake_metric(id.as_str()));
         let needs_backup = computing.iter().any(|(id, r)| r.is_ok() && is_backup_metric(id.as_str()));
+        let needs_attested = computing.iter().any(|(id, r)| r.is_ok() && is_attestation_metric(id.as_str()));
 
         let production = if needs_production {
             Some(self.metric_production(canonical_scope, &target_scopes, window, now).await?)
@@ -309,11 +318,27 @@ impl Engine {
         // `capture` with `backup_report` but not its repository or Time
         // Machine probes.
         let backup_fact = if needs_backup { Some(self.backup_fact(now).await?) } else { None };
+        // `#158`: one read shared by `conformance_rate.<category>` (any
+        // number of distinct categories a request asks for) and
+        // `gate_fail_rate` (every category) -- `categories: None`, so the
+        // pure figure functions do their own per-category filtering rather
+        // than this fetching once per category asked for.
+        let attested = if needs_attested {
+            let days = window
+                .map(MetricsWindow::days)
+                .unwrap_or(OPERATIONS_WINDOW_DAYS);
+            let attestation_window = factory_core::operations::Window::trailing(now, days);
+            let scopes = canonical_scope.map(|_| &target_scope_names);
+            Some(self.attested_runs(scopes, None, attestation_window).await?)
+        } else {
+            None
+        };
 
         let sources = ComputeSources {
             production: production.as_ref(),
             policy_report: policy_report.as_ref(),
             runs: runs.as_deref(),
+            attested: attested.as_deref(),
             hours: hours.as_ref(),
             intake: intake_input.as_ref(),
             backup: backup_fact.as_ref(),
@@ -538,6 +563,11 @@ impl Engine {
             (compliance_value(id, policy_report.expect("needs_policy set"), framework, now), None)
         } else if let Some(framework) = id.as_str().strip_prefix("open_controls.") {
             (open_controls_value(id, policy_report.expect("needs_policy set"), framework, now), None)
+        } else if let Some(category) = id.as_str().strip_prefix("conformance_rate.") {
+            (attestation_metric_value(id, sources.attested.expect("needs_attested set"), category, now), None)
+        } else if id.as_str() == "gate_fail_rate" {
+            let figure = factory_core::conformance::gate_fail_rate(sources.attested.expect("needs_attested set"));
+            (figure_to_value(id, &figure, now), None)
         } else if let Some(dataset) = id.as_str().strip_prefix("bench.resolve_rate.") {
             (self.bench_resolve_rate_value(id, dataset, now).await?, None)
         } else if let Some(rest) = id.as_str().strip_prefix("goal_tasks_done.") {
@@ -584,30 +614,71 @@ impl Engine {
         let policies_dir = snapshot.policies_dir();
         let goals_dir = factory_core::goals::goals_dir(&snapshot.root);
         let quality_dir = snapshot.quality_dir();
-        let (frameworks, catalogue, characteristics): (Vec<String>, GoalsCatalogue, BTreeSet<String>) =
-            tokio::task::spawn_blocking(move || {
-                let (catalogues, _findings) = factory_core::policy::load_all(&policies_dir);
-                let frameworks = catalogues.into_iter().map(|c| c.framework).collect();
-                let catalogue = factory_core::goals::load(&goals_dir);
-                // Every characteristic any loaded profile declares an
-                // attribute under -- the `quality.<characteristic>` twin of
-                // one `compliance.<framework>` per loaded catalogue.
-                let characteristics = factory_core::quality::load(&quality_dir)
-                    .profiles
-                    .values()
-                    .flat_map(|p| &p.attributes)
-                    .map(|a| factory_core::quality::characteristic_of(&a.id).to_string())
-                    .collect();
-                (frameworks, catalogue, characteristics)
-            })
-            .await
-            .unwrap_or_default();
+        let (frameworks, catalogue, characteristics, attested_categories): (
+            Vec<String>,
+            GoalsCatalogue,
+            BTreeSet<String>,
+            BTreeSet<String>,
+        ) = tokio::task::spawn_blocking(move || {
+            let (catalogues, _findings) = factory_core::policy::load_all(&policies_dir);
+            // `#158`: every literal category (`*` skipped -- it names no
+            // one category) any loaded catalogue's `requires:` names, the
+            // `conformance_rate.<category>` twin of `compliance.<framework>`
+            // above.
+            let mut attested_categories: BTreeSet<String> = BTreeSet::new();
+            for cat in &catalogues {
+                for control in &cat.controls {
+                    for requirement in &control.requires {
+                        attested_categories.extend(
+                            requirement
+                                .applies_to
+                                .iter()
+                                .filter(|c| c.as_str() != "*")
+                                .cloned(),
+                        );
+                    }
+                }
+            }
+            let frameworks = catalogues.into_iter().map(|c| c.framework).collect();
+            let catalogue = factory_core::goals::load(&goals_dir);
+            let quality_catalogue = factory_core::quality::load(&quality_dir);
+            // Every characteristic any loaded profile declares an
+            // attribute under -- the `quality.<characteristic>` twin of
+            // one `compliance.<framework>` per loaded catalogue.
+            let characteristics = quality_catalogue
+                .profiles
+                .values()
+                .flat_map(|p| &p.attributes)
+                .map(|a| factory_core::quality::characteristic_of(&a.id).to_string())
+                .collect();
+            for profile in quality_catalogue.profiles.values() {
+                for attribute in &profile.attributes {
+                    for requirement in &attribute.requires {
+                        attested_categories.extend(
+                            requirement
+                                .applies_to
+                                .iter()
+                                .filter(|c| c.as_str() != "*")
+                                .cloned(),
+                        );
+                    }
+                }
+            }
+            (frameworks, catalogue, characteristics, attested_categories)
+        })
+        .await
+        .unwrap_or_default();
 
         for framework in &frameworks {
             if let Ok(id) = MetricId::new(format!("compliance.{framework}")) {
                 ids.push(id);
             }
             if let Ok(id) = MetricId::new(format!("open_controls.{framework}")) {
+                ids.push(id);
+            }
+        }
+        for category in &attested_categories {
+            if let Ok(id) = MetricId::new(format!("conformance_rate.{category}")) {
                 ids.push(id);
             }
         }
@@ -1069,6 +1140,9 @@ struct ComputeSources<'a> {
     hours: Option<&'a HoursTotals>,
     intake: Option<&'a IntakeInput>,
     backup: Option<&'a factory_core::backup::BackupFact>,
+    /// `#158`: `Engine::attested_runs`'s finished runs, shared by
+    /// `conformance_rate.<category>` and `gate_fail_rate`.
+    attested: Option<&'a [factory_core::conformance::AttestedRun]>,
 }
 
 /// What `Engine::intake_facts` read for one call: the decision facts
@@ -1248,6 +1322,35 @@ fn open_controls_value(id: &MetricId, report: &PolicyReport, framework: &str, no
         as_of: now,
         reason: None,
     }
+}
+
+/// `#158`: a `factory_core::conformance::ConformanceFigure` as a
+/// `MetricValue` -- `as_of` falls back to `now` only when the figure itself
+/// has none, the same rule `intake_value` and the operations metrics keep.
+fn figure_to_value(
+    id: &MetricId,
+    figure: &factory_core::conformance::ConformanceFigure,
+    now: DateTime<Utc>,
+) -> MetricValue {
+    MetricValue {
+        id: id.clone(),
+        value: figure.value,
+        as_of: figure.as_of.unwrap_or(now),
+        reason: figure.reason.clone(),
+    }
+}
+
+fn attestation_metric_value(
+    id: &MetricId,
+    runs: &[factory_core::conformance::AttestedRun],
+    category: &str,
+    now: DateTime<Utc>,
+) -> MetricValue {
+    figure_to_value(
+        id,
+        &factory_core::conformance::conformance_rate(runs, category),
+        now,
+    )
 }
 
 #[cfg(test)]
@@ -3170,6 +3273,282 @@ mod tests {
         assert_eq!(
             metric(&after, "duplicate_rate").reason.as_deref(),
             Some("no triage decisions in the trailing 28 days")
+        );
+    }
+
+    // -- conformance_rate / gate_fail_rate (#158) ----------------------------
+
+    #[test]
+    fn is_attestation_metric_names_only_the_two_new_families() {
+        assert!(is_attestation_metric("gate_fail_rate"));
+        assert!(is_attestation_metric("conformance_rate.feature"));
+        assert!(
+            !is_attestation_metric("first_pass_yield"),
+            "a request for it alone must never trigger the read"
+        );
+        assert!(!is_attestation_metric("fail_rate"));
+    }
+
+    /// `root` (`.`), with `work` (`projects/work`) and its sibling `side`
+    /// (`projects/side`) -- no policy or quality catalogue at all: neither
+    /// `conformance_rate.<category>` nor `gate_fail_rate` reads one, only
+    /// `Engine::attested_runs`.
+    fn subtree_engine() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!(
+            "factory-metrics-conformance-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut root_scope: Scope =
+            serde_yaml_ng::from_str("id: root-id\nname: company\n").unwrap();
+        root_scope.path = PathBuf::from(".");
+        let mut work: Scope = serde_yaml_ng::from_str("id: work-id\nname: work\n").unwrap();
+        work.path = PathBuf::from("projects/work");
+        let mut side: Scope = serde_yaml_ng::from_str("id: side-id\nname: side\n").unwrap();
+        side.path = PathBuf::from("projects/side");
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig::default(),
+            scope: Some(root_scope.clone()),
+            scopes: vec![root_scope, work, side],
+            roles: Default::default(),
+            dashboard: None,
+            policies: Default::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(
+            Factory { root, config },
+            Registry::with_builtins(),
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
+    }
+
+    /// A finished, held `category` run in `scope`: one gate step (`tests`),
+    /// attested by `GATE_ACTOR` with `verdict`, both dated `ended_at` --
+    /// built directly through the store and `PolicyStore`, the same shape
+    /// `policies::tests::attested_feature_run` builds for the check itself.
+    async fn held_run(
+        engine: &Arc<Engine>,
+        scope: &str,
+        category: &str,
+        ended_at: DateTime<Utc>,
+        verdict: factory_core::control_plan::AttestationVerdict,
+    ) -> Run {
+        use factory_core::control_plan::{RequiredStep, StepAttestation, StepKind, GATE_ACTOR};
+        let task = engine
+            .store
+            .create(&task_from_new(
+                NewTask {
+                    title: format!("t-{}", uuid::Uuid::new_v4()),
+                    category: Some(category.into()),
+                    ..Default::default()
+                },
+                scope.into(),
+                "worker".into(),
+                "shell".into(),
+            ))
+            .await
+            .unwrap();
+        let run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "worker".into(),
+                adapter: "shell".into(),
+                runtime: "shell".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        let required = vec![RequiredStep {
+            step: "tests".into(),
+            kind: StepKind::Gate,
+            command: Some("true".into()),
+            timeout_seconds: None,
+            required_by: Vec::new(),
+            node_id: None,
+        }];
+        let run = engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(ended_at),
+                    required_steps: Some(required),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let attestation = StepAttestation {
+            id: uuid::Uuid::new_v4().to_string(),
+            run_id: run.id.clone(),
+            task_id: task.id.clone(),
+            scope: scope.into(),
+            category: category.into(),
+            step: "tests".into(),
+            kind: StepKind::Gate,
+            actor: GATE_ACTOR.to_string(),
+            verdict,
+            required_by: Vec::new(),
+            command: Some("true".into()),
+            exit_code: Some(
+                if verdict == factory_core::control_plan::AttestationVerdict::Pass {
+                    0
+                } else {
+                    1
+                },
+            ),
+            output: None,
+            dir: "/tmp".into(),
+            commit: None,
+            dirty: None,
+            node_id: None,
+            at: ended_at,
+        };
+        engine
+            .policies
+            .append_step_attestation(&attestation)
+            .await
+            .unwrap();
+        run
+    }
+
+    #[tokio::test]
+    async fn conformance_rate_and_gate_fail_rate_read_exact_ratios_and_narrow_by_scope() {
+        use factory_core::control_plan::AttestationVerdict::{Fail, Pass};
+        let engine = subtree_engine();
+        let base = Utc::now();
+
+        // `work`: one conforming, one failing.
+        held_run(&engine, "work", "feature", base, Pass).await;
+        held_run(&engine, "work", "feature", base, Fail).await;
+        // `side`, a sibling of `work`: one conforming -- must not count once
+        // scoped to `work`.
+        held_run(&engine, "side", "feature", base, Pass).await;
+
+        let ids: Vec<MetricId> = ["conformance_rate.feature", "gate_fail_rate"]
+            .into_iter()
+            .map(|id| MetricId::new(id).unwrap())
+            .collect();
+
+        // `now` is captured fresh, after every fixture run's own `started_at`
+        // was auto-assigned by the store -- `runs_between`'s own
+        // `started_at <= to` guard needs `to` no earlier than that.
+        let now = Utc::now();
+        let work_only = engine
+            .metrics_for(&ids, now, Some("work"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            metric(&work_only, "conformance_rate.feature").value,
+            Some(0.5)
+        );
+        assert_eq!(metric(&work_only, "gate_fail_rate").value, Some(0.5));
+
+        // Unscoped: 2 of 3 held runs conform; 1 of 3 gate attestations failed.
+        let all = engine.metrics_for(&ids, now, None, None).await.unwrap();
+        assert_eq!(
+            metric(&all, "conformance_rate.feature").value,
+            Some(2.0 / 3.0)
+        );
+        assert_eq!(metric(&all, "gate_fail_rate").value, Some(1.0 / 3.0));
+    }
+
+    #[tokio::test]
+    async fn conformance_rate_is_none_with_a_reason_for_an_unknown_category() {
+        let engine = subtree_engine();
+        let now = Utc::now();
+        let ids = vec![MetricId::new("conformance_rate.nonexistent").unwrap()];
+        let metrics = engine.metrics_for(&ids, now, None, None).await.unwrap();
+        assert_eq!(metric(&metrics, "conformance_rate.nonexistent").value, None);
+        assert!(metric(&metrics, "conformance_rate.nonexistent")
+            .reason
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_day_window_drops_a_run_the_default_28d_window_would_still_count() {
+        use factory_core::control_plan::AttestationVerdict::Pass;
+        let engine = subtree_engine();
+        let base = Utc::now();
+        held_run(&engine, "work", "feature", base, Pass).await;
+        held_run(
+            &engine,
+            "work",
+            "feature",
+            base - chrono::Duration::days(2),
+            Pass,
+        )
+        .await;
+
+        let ids = vec![MetricId::new("conformance_rate.feature").unwrap()];
+        let now = Utc::now();
+        let default_window = engine
+            .metrics_for(&ids, now, Some("work"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            metric(&default_window, "conformance_rate.feature").value,
+            Some(1.0),
+            "both runs conform"
+        );
+
+        // `queue_wait_p95`'s own family reads runs by `ended_at`, doubled for
+        // recovery streaks; `attested_runs` reads a plain single window, so
+        // an explicit `day` keeps only the run from the last 24h.
+        let day_only = engine
+            .metrics_for(&ids, now, Some("work"), Some(MetricsWindow::Day))
+            .await
+            .unwrap();
+        assert_eq!(
+            metric(&day_only, "conformance_rate.feature").value,
+            Some(1.0),
+            "still 1.0 -- the older run is simply gone"
+        );
+
+        // A held run in the trailing 28d that the `day` window drops changes
+        // the denominator, provable by adding a failing one just inside the
+        // day window and a passing one just outside it.
+        held_run(
+            &engine,
+            "work",
+            "feature",
+            base,
+            factory_core::control_plan::AttestationVerdict::Fail,
+        )
+        .await;
+        let now = Utc::now();
+        let day_only = engine
+            .metrics_for(&ids, now, Some("work"), Some(MetricsWindow::Day))
+            .await
+            .unwrap();
+        assert_eq!(
+            metric(&day_only, "conformance_rate.feature").value,
+            Some(0.5),
+            "the 2-day-old pass is out of the day window"
+        );
+        let default_window = engine
+            .metrics_for(&ids, now, Some("work"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            metric(&default_window, "conformance_rate.feature").value,
+            Some(2.0 / 3.0),
+            "the default 28d window still counts all three"
         );
     }
 }

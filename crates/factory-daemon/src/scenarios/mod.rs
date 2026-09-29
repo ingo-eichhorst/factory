@@ -1471,4 +1471,177 @@ mod tests {
         let live = engine.triggered_signposts(chrono::Utc::now()).await.unwrap();
         assert!(live.iter().any(|t| t.scenario == "backup-watch"), "{live:?}");
     }
+
+    // -- #158: gate_fail_rate as a signpost ----------------------------------
+    //
+    // `gate_fail_rate` is a registry metric like any other -- no scenario
+    // code changed to support it. A lock test proving the wiring holds, the
+    // same shape the backup signpost tests above use.
+
+    /// A one-scope instance with one scenario, `gate-watch`, whose only
+    /// signpost is `{ metric: gate_fail_rate, above: 0.5 }`.
+    fn gate_fail_rate_signpost_test_engine() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!(
+            "factory-scenarios-gate-signpost-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join(".factory/scenarios")).unwrap();
+        std::fs::write(
+            root.join(".factory/scenarios/gate-watch.yaml"),
+            "name: gate-watch\ntitle: Gate failures\nsignposts:\n  - { metric: gate_fail_rate, above: 0.5 }\n",
+        )
+        .unwrap();
+        let mut company: Scope =
+            serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(
+            factory,
+            Registry::with_builtins(),
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_signpost_on_gate_fail_rate_is_quiet_with_no_runs_and_triggers_once_a_gate_fails() {
+        use factory_core::adapter::store::task_from_new;
+        use factory_core::control_plan::{
+            AttestationVerdict, RequiredStep, StepAttestation, StepKind, GATE_ACTOR,
+        };
+        use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
+        use factory_core::task::NewTask;
+
+        let engine = gate_fail_rate_signpost_test_engine();
+
+        // No runs at all yet: `gate_fail_rate` has no value, so the
+        // signpost reads `no_data`, never `triggered`.
+        let report = engine.scenarios_report(None).await.unwrap();
+        let result = find(&report, "gate-watch");
+        let sp = result
+            .signposts
+            .iter()
+            .find(|s| s.metric.as_str() == "gate_fail_rate")
+            .unwrap();
+        assert_eq!(sp.state, scenario::SignpostState::NoData, "{sp:?}");
+        assert!(
+            !report.triggered.iter().any(|t| t.scenario == "gate-watch"),
+            "{:?}",
+            report.triggered
+        );
+
+        // One held run whose gate failed: `gate_fail_rate` is 1.0.
+        let task = engine
+            .store
+            .create(&task_from_new(
+                NewTask {
+                    title: "t".into(),
+                    category: Some("feature".into()),
+                    ..Default::default()
+                },
+                "company".into(),
+                "worker".into(),
+                "shell".into(),
+            ))
+            .await
+            .unwrap();
+        let run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "worker".into(),
+                adapter: "shell".into(),
+                runtime: "shell".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        let required = vec![RequiredStep {
+            step: "tests".into(),
+            kind: StepKind::Gate,
+            command: Some("true".into()),
+            timeout_seconds: None,
+            required_by: Vec::new(),
+            node_id: None,
+        }];
+        let now = chrono::Utc::now();
+        let run = engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(now),
+                    required_steps: Some(required),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        engine
+            .policies
+            .append_step_attestation(&StepAttestation {
+                id: uuid::Uuid::new_v4().to_string(),
+                run_id: run.id.clone(),
+                task_id: task.id.clone(),
+                scope: "company".into(),
+                category: "feature".into(),
+                step: "tests".into(),
+                kind: StepKind::Gate,
+                actor: GATE_ACTOR.to_string(),
+                verdict: AttestationVerdict::Fail,
+                required_by: Vec::new(),
+                command: Some("true".into()),
+                exit_code: Some(1),
+                output: None,
+                dir: "/tmp".into(),
+                commit: None,
+                dirty: None,
+                node_id: None,
+                at: now,
+            })
+            .await
+            .unwrap();
+
+        let report = engine.scenarios_report(None).await.unwrap();
+        let result = find(&report, "gate-watch");
+        let sp = result
+            .signposts
+            .iter()
+            .find(|s| s.metric.as_str() == "gate_fail_rate")
+            .unwrap();
+        assert_eq!(sp.state, scenario::SignpostState::Triggered, "{sp:?}");
+        assert!(
+            report.triggered.iter().any(|t| t.scenario == "gate-watch"),
+            "{:?}",
+            report.triggered
+        );
+
+        let live = engine
+            .triggered_signposts(chrono::Utc::now())
+            .await
+            .unwrap();
+        assert!(live.iter().any(|t| t.scenario == "gate-watch"), "{live:?}");
+    }
 }

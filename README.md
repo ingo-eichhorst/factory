@@ -784,7 +784,7 @@ empty one is a finding and the control stays applicable — and every `n/a`, at
 whichever scope declared it, is always listed rather than left silent: ISO
 27001 calls this a Statement of Applicability, and ADR 0004 keeps the name.
 
-**Checks and statuses.** Evidence is evaluated per check kind, and all ten
+**Checks and statuses.** Evidence is evaluated per check kind, and all eleven
 are evaluated for real: `knowledge` (a vault page tagged
 `control/<framework>/<id>`, or a check's own `tag`), `attestation` (an
 unexpired, unwithdrawn attestation recorded for the control), `task` and
@@ -865,6 +865,22 @@ controls actually name one:
   limit, and KEV/EUVD findings do not exceed `exploited_open`. It reads the
   same derived projection as L2 Dependencies; no policy-specific copy is
   stored.
+- **`attested { category, step, max_age }`** (`#158`, phase 1) — whether
+  finished runs of `category` actually *conformed* to their own control
+  plan's `step`, not just that a person said so: every enforced step's
+  newest attestation, by someone other than the run's own agent, passed.
+  `max_age` is required, since coverage needs a window. Satisfied when at
+  least one `done` run of `category` ended within `max_age` and every one
+  that did passed `step`; stale when none did but the newest one in
+  `(max_age, 2×max_age]` passed; open when an in-window run is missing or
+  failed evidence for `step` (naming up to three, including one never held
+  to it at all), or when nothing ended `done` within `2×max_age`. Evidence
+  is one L4-owned read (`Engine::attested_runs`, `factory-daemon/src/verification.rs`)
+  of finished runs and their `StepAttestation`s, shared with the
+  `conformance_rate.<category>`/`gate_fail_rate` metrics below so a run is
+  never judged twice; a review or approval step leaves no attestation in v1
+  (`#118`), so a check on one reads `open` until that lands. `refs` names
+  the task and run behind each reason, the same as `task`/`workflow`.
 
 Neither `roles`/`sandbox`/`secrets`/`daemon`/`dependencies` carries a `refs` entry: nothing
 behind them is an id a UI could link to yet (an agent name is not one of
@@ -1052,6 +1068,8 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `blocked_hours` | blocked hours inside those run blocks, included in rather than subtracted from agent hours | occupancy `blocked_seconds` |
 | `compliance.<framework>` | share of counted controls satisfied, attested, or n/a | the selected scope's policy subtree rollup |
 | `open_controls.<framework>` | count of counted controls still open or stale | the selected scope's policy subtree rollup |
+| `conformance_rate.<category>` | `conforms()/held()` (every enforced required step's newest non-self attestation passed, among runs held to at least one) over finished runs of `category`, trailing 28 days; a held run whose own failure never reached an agent (`FailKind::is_infrastructure`: an ack timeout, a run timeout, a vanished session, a dispatch that never happened) is excluded from both sides of the ratio | `Engine::attested_runs`'s finished runs and `StepAttestation`s (`factory_core::conformance`, #158) |
+| `gate_fail_rate` | failed gate attestations over every gate attestation, across every category and re-verification round, trailing 28 days | `Engine::attested_runs`'s finished runs and `StepAttestation`s (`factory_core::conformance`, #158) |
 | `bench.resolve_rate.<dataset>` | the newest settled bench run's resolve rate | `bench::aggregate` |
 | `goal_tasks_done.<objective>.<kr>` | count of tasks labelled `goal=<objective>/<kr>` whose status is `done` | task labels, through `TaskStore` |
 | `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met | the selected scope's quality subtree — see "Quality attributes" |

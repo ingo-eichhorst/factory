@@ -9,6 +9,7 @@ pub mod bench;
 pub mod benchmark;
 pub mod building;
 pub mod config;
+pub mod conformance;
 pub mod control_plan;
 pub mod dashboard;
 pub mod dataset;

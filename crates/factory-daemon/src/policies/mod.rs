@@ -102,6 +102,50 @@ fn needs_dependencies_facts(applied: &[policy::Applied]) -> bool {
         .any(|check| matches!(check, policy::Check::Dependencies { .. }))
 }
 
+/// Whether any check among `applied` is `attested` -- gates
+/// `Engine::attested_runs`, the one part of this module's evidence
+/// gathering that reads finished runs and their `StepAttestation`s (`#158`).
+fn needs_attested_facts(applied: &[policy::Applied]) -> bool {
+    applied
+        .iter()
+        .flat_map(|a| &a.evidence)
+        .any(|check| matches!(check, policy::Check::Attested { .. }))
+}
+
+/// Every category an `attested` check among `applied`'s controls names, and
+/// the widest of those controls' own effective `max_age`
+/// (`Applied::max_age`, already folded and tightened) -- what
+/// `Engine::attested_runs`'s window covers, `now - 2*that`, so
+/// `direct_status`'s own `2*W` stale lookback never reads short of what was
+/// fetched, however many `attested` checks the scope's controls carry, each
+/// with its own window. `Applied::max_age` is always `Some` on a control
+/// carrying an `attested` check -- `Check::own_max_age` always returns one
+/// for it -- so this never has to fall back to a default.
+fn attested_categories(
+    applied: &[policy::Applied],
+) -> (BTreeSet<String>, Option<factory_core::policy::Duration>) {
+    let mut categories = BTreeSet::new();
+    let mut widest: Option<factory_core::policy::Duration> = None;
+    for a in applied {
+        if !a
+            .evidence
+            .iter()
+            .any(|c| matches!(c, policy::Check::Attested { .. }))
+        {
+            continue;
+        }
+        for check in &a.evidence {
+            if let policy::Check::Attested { category, .. } = check {
+                categories.insert(category.clone());
+            }
+        }
+        if let Some(w) = a.max_age {
+            widest = Some(widest.map_or(w, |cur| cur.max(w)));
+        }
+    }
+    (categories, widest)
+}
+
 /// Every agent Factory would actually dispatch in `scope` --
 /// `Scope::agents_with`, which folds in a synthesised foreman when
 /// `daemon.foreman` covers this scope. That is a deliberate choice, not an
@@ -491,6 +535,38 @@ impl Engine {
         Ok((gates, daemon_fact, credential_rows, backup_fact))
     }
 
+    /// `#158`: `scope`'s own `attested` evidence, gathered only when
+    /// `applied` actually names the check -- `None` when it does not,
+    /// distinct from the empty `Vec` a scope with nothing attested yet
+    /// would carry. Exact scope, no ancestor roll-up -- the same rule
+    /// `task`/`workflow` checks already follow -- over
+    /// `now - 2*widest(applied)`, so `direct_status`'s own stale lookback
+    /// (`2*W`) always has enough history behind it, whichever `attested`
+    /// check on this scope needs the longest window.
+    async fn attested_evidence(
+        &self,
+        scope: &str,
+        applied: &[policy::Applied],
+    ) -> Result<Option<Vec<factory_core::conformance::AttestedRun>>> {
+        if !needs_attested_facts(applied) {
+            return Ok(None);
+        }
+        let (categories, widest) = attested_categories(applied);
+        let w = widest
+            .unwrap_or(factory_core::policy::Duration::from_hours(0))
+            .as_time_delta();
+        let now = Utc::now();
+        let window = factory_core::operations::Window {
+            from: now - (w + w),
+            to: now,
+        };
+        let scopes: BTreeSet<String> = std::iter::once(scope.to_string()).collect();
+        Ok(Some(
+            self.attested_runs(Some(&scopes), Some(&categories), window)
+                .await?,
+        ))
+    }
+
     /// One scope's own `Evidence`, built from `applied` (its own applicable
     /// controls) plus the subtree-wide facts `dataset_level_facts` already
     /// resolved -- task/workflow resolution and the `agents`/`secrets` facts
@@ -533,6 +609,7 @@ impl Engine {
         } else {
             None
         };
+        let attested = self.attested_evidence(&t.name, applied).await?;
         Ok(policy::Evidence {
             tags: tags.clone(),
             attestations: all_attestations
@@ -548,6 +625,7 @@ impl Engine {
             daemon: daemon_fact,
             dependencies,
             backup: backup_fact,
+            attested,
         })
     }
 
@@ -736,6 +814,7 @@ impl Engine {
         } else {
             None
         };
+        let attested = self.attested_evidence(&scope_obj.name, &applied).await?;
         let evidence = policy::Evidence {
             tags,
             attestations: history.clone(),
@@ -747,6 +826,7 @@ impl Engine {
             daemon,
             dependencies,
             backup,
+            attested,
         };
         let evaluated = policy::evaluate(&applied, &evidence, Utc::now())
             .into_iter()
@@ -1088,12 +1168,18 @@ mod tests {
     //! on disk, a real scope tree, and the store behind `Engine`.
 
     use super::*;
+    use chrono::DateTime;
+    use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::TaskStore;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, InterfaceConfig, PolicyDeclaration, Scope};
+    use factory_core::control_plan::{
+        AttestationVerdict, RequiredStep, StepAttestation, StepKind, GATE_ACTOR,
+    };
     use factory_core::dependencies::AttachmentKind;
-    use factory_core::policy::{ControlStatus, StatusKind};
+    use factory_core::policy::{ControlRef, ControlStatus, StatusKind};
     use factory_core::protocol::Payload;
     use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
+    use factory_core::task::NewTask;
     use factory_plugins::{Registry, SqliteStore};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -2216,5 +2302,246 @@ mod tests {
         let clock = restarted.policy_clock(Some("demo")).await.unwrap();
         let found = clock.items.iter().find(|i| i.item == item).unwrap();
         assert_eq!(found.deadlines[0].state, ClockDeadlineState::Met);
+    }
+
+    // -- attested (#158) ------------------------------------------------
+
+    #[tokio::test]
+    async fn needs_attested_facts_is_false_for_a_catalogue_with_no_attested_check() {
+        let engine = test_engine();
+        let (catalogues, _findings, _tags) = engine.load_catalogues_and_tags().await.unwrap();
+        let chain = engine.policy_chain("company");
+        let (applied, _findings) = policy::applicable(&catalogues, &chain);
+        assert!(
+            !needs_attested_facts(&applied),
+            "cra.yaml here names no attested check"
+        );
+    }
+
+    /// A single scope, one control with an `attested` check (`category:
+    /// feature`, `step: tests`, `max_age: 7d`) -- everything else this
+    /// module's evidence gathering could name is left out, so the only
+    /// thing that can move the control off `open` is the run this test
+    /// builds directly through the store.
+    fn attested_test_engine() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!(
+            "factory-policies-attested-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/house.yaml"),
+            "framework: house\n\
+             title: House rules\n\
+             kind: best-practice\n\
+             controls:\n\
+             \x20\x20- id: tested\n\x20\x20\x20\x20title: Feature work passes tests\n\x20\x20\x20\x20evidence:\n\
+             \x20\x20\x20\x20\x20\x20- check: attested\n\x20\x20\x20\x20\x20\x20\x20\x20category: feature\n\x20\x20\x20\x20\x20\x20\x20\x20step: tests\n\x20\x20\x20\x20\x20\x20\x20\x20max_age: 7d\n",
+        )
+        .unwrap();
+
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig::default(),
+            scope: None,
+            scopes: vec![scope_at("demo-id", "demo", ".", "")],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration {
+                frameworks: vec!["house".to_string()],
+                ..Default::default()
+            },
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(
+            factory,
+            registry,
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
+    }
+
+    /// A finished `feature`-category run in `scope`, held to one gate step
+    /// (`tests`), attested by `GATE_ACTOR` with `verdict`, both dated
+    /// `ended_at` -- built directly through the store and `PolicyStore`,
+    /// bypassing dispatch and verification entirely: this module's own
+    /// evidence gathering is what is under test, not the verifier.
+    async fn attested_feature_run(
+        engine: &Arc<Engine>,
+        scope: &str,
+        ended_at: DateTime<Utc>,
+        verdict: AttestationVerdict,
+    ) -> factory_core::run::Run {
+        let new = NewTask {
+            title: "add the thing".into(),
+            instructions: "true".into(),
+            scope: Some(scope.to_string()),
+            agent: Some("shell".into()),
+            runtime: Some("quiet".into()),
+            worktree: Some(false),
+            category: Some("feature".into()),
+            ..Default::default()
+        };
+        let task = task_from_new(new, scope.to_string(), "shell".into(), "quiet".into());
+        let task = engine.store.create(&task).await.unwrap();
+        let run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "quiet".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        let required = vec![RequiredStep {
+            step: "tests".into(),
+            kind: StepKind::Gate,
+            command: Some("true".into()),
+            timeout_seconds: None,
+            required_by: Vec::new(),
+            node_id: None,
+        }];
+        let run = engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(ended_at),
+                    required_steps: Some(required),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let attestation = StepAttestation {
+            id: uuid::Uuid::new_v4().to_string(),
+            run_id: run.id.clone(),
+            task_id: task.id.clone(),
+            scope: scope.to_string(),
+            category: "feature".to_string(),
+            step: "tests".to_string(),
+            kind: StepKind::Gate,
+            actor: GATE_ACTOR.to_string(),
+            verdict,
+            required_by: Vec::new(),
+            command: Some("true".to_string()),
+            exit_code: Some(if verdict == AttestationVerdict::Pass {
+                0
+            } else {
+                1
+            }),
+            output: None,
+            dir: "/tmp".to_string(),
+            commit: None,
+            dirty: None,
+            node_id: None,
+            at: ended_at,
+        };
+        engine
+            .policies
+            .append_step_attestation(&attestation)
+            .await
+            .unwrap();
+        run
+    }
+
+    #[tokio::test]
+    async fn policy_report_and_policy_control_agree_on_an_attested_control_through_satisfied_stale_and_open(
+    ) {
+        let engine = attested_test_engine();
+        let control = ControlRef::new("house", "tested");
+        let now = Utc::now();
+
+        // A run an hour old: well within the 7d `max_age` -- satisfied.
+        let run = attested_feature_run(
+            &engine,
+            "demo",
+            now - chrono::Duration::hours(1),
+            AttestationVerdict::Pass,
+        )
+        .await;
+        let report = engine.policy_report(Some("demo")).await.unwrap();
+        assert_eq!(
+            report.rows[0].statuses[0].status.kind(),
+            StatusKind::Satisfied
+        );
+        let detail = engine
+            .policy_control(control.clone(), "demo")
+            .await
+            .unwrap();
+        assert_eq!(detail.status.kind(), StatusKind::Satisfied);
+
+        // Moved back through a `RunPatch` to 10 days: outside 7d, inside
+        // 2*7d -- stale, not open.
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    ended_at: Some(now - chrono::Duration::days(10)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let report = engine.policy_report(Some("demo")).await.unwrap();
+        assert_eq!(report.rows[0].statuses[0].status.kind(), StatusKind::Stale);
+        let detail = engine
+            .policy_control(control.clone(), "demo")
+            .await
+            .unwrap();
+        assert_eq!(detail.status.kind(), StatusKind::Stale);
+
+        // Moved back further, past 2*7d -- open.
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    ended_at: Some(now - chrono::Duration::days(20)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let report = engine.policy_report(Some("demo")).await.unwrap();
+        assert_eq!(report.rows[0].statuses[0].status.kind(), StatusKind::Open);
+        let detail = engine.policy_control(control, "demo").await.unwrap();
+        assert_eq!(detail.status.kind(), StatusKind::Open);
+    }
+
+    #[tokio::test]
+    async fn policy_report_and_policy_control_agree_that_a_failed_gate_stays_open() {
+        let engine = attested_test_engine();
+        let control = ControlRef::new("house", "tested");
+        let now = Utc::now();
+        attested_feature_run(
+            &engine,
+            "demo",
+            now - chrono::Duration::hours(1),
+            AttestationVerdict::Fail,
+        )
+        .await;
+
+        let report = engine.policy_report(Some("demo")).await.unwrap();
+        assert_eq!(report.rows[0].statuses[0].status.kind(), StatusKind::Open);
+        let detail = engine.policy_control(control, "demo").await.unwrap();
+        assert_eq!(detail.status.kind(), StatusKind::Open);
     }
 }
