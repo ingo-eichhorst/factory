@@ -511,6 +511,18 @@ pub struct Task {
     /// parsing labels or titles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_origin: Option<WorkflowOrigin>,
+    /// The larger task this task was decomposed from. Unlike the matching
+    /// labels used by older intake splits, this is executable task data: it
+    /// survives adapters that do not preserve labels and can be followed by
+    /// schedulers and UIs without parsing prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    /// Stable id of this part within its parent's decomposition plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decomposition_part: Option<String>,
+    /// Tasks that must finish successfully before this task may run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
     /// The bench attempt that created this task, when there is one. Follows
     /// `workflow_origin`'s own shape and reason for existing: `#[serde(default)]`
     /// reads a task written before this field existed as `None`, and a task
@@ -638,6 +650,12 @@ pub struct NewTask {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decomposition_part: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -801,6 +819,9 @@ pub struct TaskFilter {
     pub status: Option<TaskStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Direct decomposition children of this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }

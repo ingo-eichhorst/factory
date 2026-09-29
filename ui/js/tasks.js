@@ -10,7 +10,7 @@ import { scheduleLabel } from "./schedule.js";
 import { describeWorkflowOrigin } from "./workflows.js";
 import { entryKindLabel, entryTone } from "./operations-model.js";
 import { estimateComparisonView, newestRead, runUsageView, taskUsageLine } from "./usage-model.js";
-import { columnFor, standing, taskActions, isSettled, CLOSE_REASONS, closeBody } from "./task-model.js";
+import { columnFor, standing, taskActions, isSettled, relationLabel, CLOSE_REASONS, closeBody } from "./task-model.js";
 import { notStartedNote } from "./pending-model.js";
 
 export { scheduleLabel };
@@ -91,16 +91,18 @@ function standingDetail(detail, full) {
 /// Only what `/api/tasks` already serves: title, short id, status, scope,
 /// agent, the schedule rule or the run count, its estimate when it has one,
 /// and how long the newest run has been going.
-function taskCard(t) {
+function taskCard(t, tasks) {
   const bits = [];
   bits.push(t.schedule ? scheduleLabel(t.schedule) : (t.runs ? `${t.runs} run${t.runs === 1 ? "" : "s"}` : "no runs yet"));
   if (t.estimate_seconds) bits.push(`est. ${shortSpan(t.estimate_seconds)}`);
   if (!isSettled(t) && t.status !== "pending" && t.last_run_at) bits.push(since(t.last_run_at));
   const wt = t.worktree ? ` <span class="tag" title="runs in a git worktree of its own">worktree</span>` : "";
+  const relation = relationLabel(t, tasks);
   return `
     <div class="kbc" data-id="${esc(t.id)}">
       <div class="kbc-top">${statusBadge(t.status)}<code class="id">${esc(t.id.slice(0, 8))}</code></div>
       <div class="title">${esc(t.title)}</div>
+      ${relation ? `<div class="sub">${esc(relation)}</div>` : ""}
       <div class="sub">${esc(t.scope)} · ${esc(t.agent)}${wt}</div>
       <div class="sub">${esc(bits.join(" · "))}${pausedTag(t)}</div>
       ${standingHtml(t)}
@@ -118,7 +120,7 @@ function renderBoard(rows) {
     return `
       <div class="kbcol" data-col="${c.key}">
         <div class="kbcol-head"><span>${esc(c.label)}</span><span class="kbcol-count">${items.length}</span></div>
-        <div class="kbcol-body">${items.length ? items.map(taskCard).join("") : `<div class="kbcol-empty">—</div>`}</div>
+        <div class="kbcol-body">${items.length ? items.map(task => taskCard(task, state.tasks)).join("") : `<div class="kbcol-empty">—</div>`}</div>
       </div>`;
   }).join("");
   for (const el of $("kanban").querySelectorAll(".kbc")) {
@@ -139,6 +141,7 @@ export function renderTasks() {
   $("tasks").innerHTML = rows.map(t => `
     <tr class="row" data-id="${esc(t.id)}">
       <td><div class="title">${esc(t.title)}</div>
+          ${relationLabel(t, state.tasks) ? `<div class="sub">${esc(relationLabel(t, state.tasks))}</div>` : ""}
           <div class="sub">${esc(scheduleLabel(t.schedule))}${pausedTag(t)}</div></td>
       <td>${statusBadge(t.status)}${standingHtml(t)}</td>
       <td class="sub">${t.runs || 0}</td>

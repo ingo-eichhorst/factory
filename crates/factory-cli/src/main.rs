@@ -316,7 +316,7 @@ enum IntakeCmd {
         #[arg(long)]
         file: PathBuf,
         /// Also apply what the rules give: ready releases, needs-info sends
-        /// it back.
+        /// it back, and a complete executable split expands into tasks.
         #[arg(long)]
         decide: bool,
     },
@@ -328,7 +328,7 @@ enum IntakeCmd {
         #[arg(value_parser = ["ready", "needs-info", "split", "wontfix"])]
         decision: String,
         /// split: the parts as a JSON array of `{id, title, instructions,
-        /// depends_on, acceptance}` (`-` for stdin). Absent takes the
+        /// depends_on, acceptance, owns, interface, estimate_seconds}` (`-` for stdin). Absent takes the
         /// assessment's proposal.
         #[arg(long)]
         file: Option<PathBuf>,
@@ -950,6 +950,9 @@ enum TaskCmd {
         status: Option<StatusFilter>,
         #[arg(long)]
         scope: Option<String>,
+        /// Only direct children produced from this parent task.
+        #[arg(long)]
+        parent: Option<String>,
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -2148,7 +2151,16 @@ fn intake_item_text(task: &Task) -> String {
             out.push_str(&format!("  summary    {}\n", t.assessment.summary));
         }
         if !t.assessment.split.is_empty() {
-            out.push_str(&format!("  proposed split into {} parts:\n", t.assessment.split.len()));
+            let executable = t
+                .assessment
+                .split
+                .iter()
+                .any(|p| !p.owns.is_empty() || p.estimate_seconds.is_some());
+            out.push_str(&format!(
+                "  {} into {} parts:\n",
+                if executable { "executable plan" } else { "proposed split" },
+                t.assessment.split.len()
+            ));
             for p in &t.assessment.split {
                 let after = if p.depends_on.is_empty() {
                     String::new()
@@ -2770,7 +2782,7 @@ async fn dataset_cmd(json: bool, client: &Client, cmd: DatasetCmd) -> Result<()>
                 task_ids
             } else if scope.is_some() || status.is_some() {
                 let payload = client
-                    .send(Request::TaskList(TaskFilter { status, scope, limit: None }))
+                    .send(Request::TaskList(TaskFilter { status, scope, ..Default::default() }))
                     .await?;
                 match payload {
                     Payload::Tasks { tasks } => tasks.into_iter().map(|t| t.id).collect(),
@@ -4377,6 +4389,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
         TaskCmd::List {
             status,
             scope,
+            parent,
             limit,
         } => {
             // `failed` and `closed` are not one stored status each, so the
@@ -4387,6 +4400,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 .send(Request::TaskList(TaskFilter {
                     status: status.and_then(StatusFilter::wire),
                     scope,
+                    parent_task_id: parent,
                     limit: if narrowed { None } else { limit },
                 }))
                 .await?;
@@ -4461,6 +4475,9 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     scope,
                     agent,
                     runtime,
+                    parent_task_id: None,
+                    decomposition_part: None,
+                    depends_on: Vec::new(),
                     schedule,
                     estimate_seconds: estimate_range.as_ref().map(|value| value.time.expected),
                     estimate: estimate_range,
@@ -6892,6 +6909,10 @@ mod tests {
         assert!("nonsense".parse::<StatusFilter>().is_err());
         assert_eq!(StatusFilter::Failed.wire(), Some(TaskStatus::Blocked));
         assert_eq!(StatusFilter::Closed.wire(), None);
+        match parse(&["task", "list", "--parent", "parent-id"]).command {
+            Command::Task(TaskCmd::List { parent: Some(parent), .. }) => assert_eq!(parent, "parent-id"),
+            _ => panic!("task list --parent"),
+        }
     }
 
     #[test]

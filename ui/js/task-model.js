@@ -75,7 +75,7 @@ export function closeReason(t) {
 /// deliberately closed. A legacy `failed` row goes there too.
 export function columnFor(t) {
   if (t.status === "blocked" || t.status === "failed") return "blocked";
-  if (t.status === "pending") return t.schedule ? "scheduled" : "manual";
+  if (t.status === "pending") return (t.schedule || (t.depends_on || []).length) ? "scheduled" : "manual";
   // `verifying` is still in progress: the agent said done and the daemon is
   // running the steps its control plan requires (`#118`).
   if (t.status === "dispatching" || t.status === "running" || t.status === "verifying") return "active";
@@ -100,6 +100,10 @@ export function standing(t) {
     const kind = t.failure ? failKindLabel(t.failure.kind) : "a failure";
     return { tone: "wait", text: `retrying after ${kind} (retry ${t.pending_retry.attempts})`, detail: t.error || null };
   }
+  if (t.status === "pending" && (t.depends_on || []).length) {
+    const count = t.depends_on.length;
+    return { tone: "wait", text: `waiting for ${count} prerequisite${count === 1 ? "" : "s"}`, detail: null };
+  }
   if (t.status === "done" && t.routed_to) {
     return { tone: "closed", text: `done → ${t.routed_to}`, detail: null };
   }
@@ -110,6 +114,17 @@ export function standing(t) {
     return { tone: "closed", text, detail: c.note || null };
   }
   return null;
+}
+
+/// A decomposition child's compact place in its parent, using task data --
+/// never the compatibility labels. `tasks` is the map already held by the
+/// client; the id remains useful when the closed parent is outside a scope
+/// filter or an older server omitted it from a partial response.
+export function relationLabel(t, tasks) {
+  if (!t?.parent_task_id) return null;
+  const parent = tasks?.get?.(t.parent_task_id);
+  const part = t.decomposition_part ? `part ${t.decomposition_part}` : "child task";
+  return `${part} of ${parent?.title || t.parent_task_id.slice(0, 8)}`;
 }
 
 /// Which of the modal's task actions apply. Run and Cancel follow the
