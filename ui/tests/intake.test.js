@@ -36,7 +36,11 @@ test("no browser dialogs, no poll, and nothing posted outside Factory", () => {
   assert.doesNotMatch(code, /(?<![.\w])(alert|confirm|prompt)\(/);
   assert.doesNotMatch(view, /setInterval/);
   assert.match(view, /scrim\(/);
-  for (const path of code.match(/\/api\/[a-z/]+/g) || []) assert.match(path, /^\/api\/intake/, path);
+  // `/api/policy/clock` (`#157`/`#170` phase 2) is the one exception: a
+  // read-only join against the reporting clock through the router, never a
+  // write and never GitHub -- the same door the L6 Policy tab reads it
+  // through.
+  for (const path of code.match(/\/api\/[a-z/]+/g) || []) assert.match(path, /^\/api\/(intake|policy\/clock)/, path);
 });
 
 test("the assess dialog renders the routed scope's own extra checks and holds the assessment to them (#169)", () => {
@@ -62,6 +66,17 @@ test("the security fast lane has its own badge, band styling and owner dialogs (
   assert.match(view, /function openSecurityDecisionDialog\(verdict, card\)/);
   assert.match(view, /flagSecurityRequest\(card\.id/);
   assert.match(view, /securityDecisionRequest\(card\.id, verdict/);
+});
+
+test("a confirmed report's own deadlines are read through the router, never computed here (#157/#170 phase 2)", () => {
+  assert.match(css, /\.s-due \{/);
+  assert.match(css, /\.s-overdue \{/);
+  assert.match(css, /\.s-late \{/);
+  assert.match(view, /hasConfirmedSecurityReport\(board\)/);
+  assert.match(view, /api\(`\/api\/policy\/clock\$\{query\}`\)/);
+  assert.match(view, /function clockDeadlinesHtml\(card\)/);
+  assert.match(view, /function clockDeadlinesBlock\(card\)/);
+  assert.match(view, /reportDeadlines\(clockIdx, card, nowFromClock\(clock\)\)/);
 });
 
 test("approving a GitHub publish is its own dialog, journaled through the daemon like every other action (#171)", () => {
@@ -123,6 +138,54 @@ test("a selected scope is one scoped read", async () => {
   state.scope = "web";
   await loadIntake();
   assert.deepEqual(requested, ["/api/intake?scope=web"]);
+  state.scope = null;
+});
+
+test("a confirmed security report reads the reporting clock and shows its deadlines; an ordinary board never asks (#157/#170 phase 2)", async () => {
+  const el = stubPage(IDS);
+  // Baseline: the fixture carries no flag at all (`intake-model.test.js`'s
+  // own words for it), so `loadIntake` never has a reason to read the
+  // clock -- the common case costs nothing extra.
+  const requested = [];
+  globalThis.fetch = answering(DATA, requested);
+  state.scope = null;
+  await loadIntake();
+  assert.deepEqual(requested, ["/api/intake"]);
+
+  // Now the received item is a confirmed security report.
+  const withConfirmed = JSON.parse(JSON.stringify(DATA));
+  const reportId = withConfirmed.board.columns.received[0].id;
+  withConfirmed.board.columns.received[0].security = { state: "confirmed", flagged_by: "the owner", flagged_at: "2026-09-23T10:00:00Z", reason: "looks real" };
+  const clock = {
+    now: "2026-09-24T12:00:00Z",
+    items: [
+      {
+        item: { kind: "report", item: reportId },
+        scope: "web",
+        awareness_at: "2026-09-20T12:00:00Z",
+        reported_now: true,
+        deadlines: [
+          { deadline: "early_warning", due_at: "2026-09-21T12:00:00Z", state: "met", submission: { attestation: "a1", at: "2026-09-21T00:00:00Z", by: "owner" } },
+          { deadline: "notification", due_at: "2026-09-23T12:00:00Z", state: "overdue", submission: null },
+        ],
+      },
+    ],
+  };
+  const requested2 = [];
+  globalThis.fetch = async (path) => {
+    requested2.push(path);
+    const data = path.startsWith("/api/policy/clock") ? { kind: "policy_clock", clock } : { kind: "intake_board", board: withConfirmed.board };
+    return { status: 200, statusText: "OK", json: async () => ({ status: "ok", data }) };
+  };
+  await loadIntake();
+  assert.deepEqual([...requested2].sort(), ["/api/intake", "/api/policy/clock"]);
+
+  const html = el.intake.innerHTML;
+  assert.match(html, /ik-fast-lane/);
+  assert.match(html, /ik-sec-confirmed/);
+  assert.match(html, /class="badge s-met"[^>]*>24h early warning: met</);
+  assert.match(html, /class="badge s-overdue"[^>]*>72h notification: overdue</);
+
   state.scope = null;
 });
 

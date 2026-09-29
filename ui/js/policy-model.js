@@ -20,6 +20,7 @@
 
 import { routeHref } from "./scopes.js";
 import { nodeTail } from "./knowledge-graph.js";
+import { clockRows } from "./clock-model.js";
 
 // ------------------------------------------------------------------ status
 
@@ -469,4 +470,58 @@ export function refLinks(scope, refs) {
     }
   }
   return links;
+}
+
+// ------------------------------------------------------ reporting clock
+
+/// A clock item's own link (`#157`/`#170` phase 2): a report opens its task
+/// (`taskHref`, the same door every other task reference on this tab uses);
+/// a finding has no task of its own, so it opens Dependencies instead --
+/// the same split the Inbox's own `clockFindingHref` makes (`dashboard.js`).
+function clockItemHref(scope, ref) {
+  return ref.kind === "report" ? taskHref(scope, ref.item) : routeHref(scope, "dependencies");
+}
+
+/// A clock item's own short label: a finding by its vulnerability id, a
+/// report by the first segment of its task id -- the same truncation
+/// `cardNote`'s "part of item …" already uses for a parent id
+/// (`intake-model.js`).
+function clockItemText(ref) {
+  return ref.kind === "report" ? `report ${ref.item.slice(0, 8)}` : ref.vulnerability;
+}
+
+/// The Policy tab's own reporting-clock table (`#157`/`#170` phase 2): one
+/// row per deadline, or one row for an excluded finding (nothing left to
+/// report, so no deadline of its own -- `excluded` set, every other field
+/// `null`). `clockRows` (`clock-model.js`) already resolved every state and
+/// due text; this only adds the table's own link and flattens an item's
+/// deadlines into the rows a `<tbody>` draws straight from. `[]` for a
+/// `null` clock (not read, or the read failed) -- the section then shows
+/// its own empty state, same as an instance with nothing on the clock yet.
+export function policyClockRows(clock, nowIso) {
+  const rows = [];
+  for (const item of clockRows(clock, nowIso)) {
+    const href = clockItemHref(item.scope, item.ref);
+    const itemText = clockItemText(item.ref);
+    if (item.excluded) {
+      rows.push({ key: item.key, href, itemText, scope: item.scope, excluded: item.excluded, label: null, dueAt: null, state: null, stateLabel: null, text: null, submission: null });
+      continue;
+    }
+    for (const d of item.deadlines) {
+      rows.push({
+        key: `${item.key}:${d.deadline}`,
+        href,
+        itemText,
+        scope: item.scope,
+        excluded: null,
+        label: d.label,
+        dueAt: d.dueAt,
+        state: d.state,
+        stateLabel: d.stateLabel,
+        text: d.text,
+        submission: d.submission,
+      });
+    }
+  }
+  return rows;
 }

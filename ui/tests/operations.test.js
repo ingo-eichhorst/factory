@@ -53,6 +53,11 @@ test("the Inbox no longer derives its own list from the task list", () => {
   assert.match(wiring, /inbox: \{ onShow: loadInbox \}/);
 });
 
+test("a policy_changed event reloads the Inbox too, since a clock submission can flip one of its rows to met (#157/#170 phase 2)", () => {
+  assert.match(dashboard, /api\("\/api\/policy\/clock"\)/);
+  assert.match(wiring, /ev\.type === "policy_changed" && state\.tab === "inbox"\) loadInbox\(\);/);
+});
+
 test("a paused schedule is marked wherever a scheduled task is drawn", () => {
   // Card, table row and modal meta all go through the one helper.
   assert.equal((tasks.match(/\$\{pausedTag\(t\)\}/g) || []).length, 3);
@@ -150,7 +155,11 @@ test("the Inbox lists the attention queue, every scope, with the reason inline",
   globalThis.fetch = answering(REPORT, requested);
   state.scope = "gamma"; // the Inbox ignores the rail
   await loadInbox();
-  assert.deepEqual(requested, ["/api/operations"]);
+  // The reporting clock (`#157`/`#170` phase 2) is read alongside the
+  // attention queue now -- `answering` hands both the same operations-
+  // shaped body, so the clock side contributes nothing (`.clock` is
+  // `undefined` on it), same as a daemon that predates the endpoint.
+  assert.deepEqual([...requested].sort(), ["/api/operations", "/api/policy/clock"]);
   const html = el.inbox.innerHTML;
   assert.equal((html.match(/class="inbox-item"/g) || []).length, REPORT.attention.length);
   assert.match(html, /summarise support inbox<\/b> — blocked/);
@@ -166,6 +175,53 @@ test("the Inbox says when there is nothing, and when it could not ask", async ()
   globalThis.fetch = async () => { throw new Error("offline"); };
   await loadInbox();
   assert.match(el.inbox.innerHTML, /not available right now/);
+});
+
+test("the Inbox also lists the reporting clock's overdue and due-soon deadlines (#157/#170 phase 2)", async () => {
+  const el = stubPage(["inbox"]);
+  state.tasks = new Map([["task-1", { title: "Checkout crashes on coupon" }]]);
+  const clock = {
+    now: "2026-09-24T12:00:00Z",
+    items: [
+      {
+        item: { kind: "report", item: "task-1" },
+        scope: "web",
+        awareness_at: "2026-09-20T12:00:00Z",
+        reported_now: true,
+        deadlines: [{ deadline: "notification", due_at: "2026-09-24T09:00:00Z", state: "overdue", submission: null }],
+      },
+      {
+        item: { kind: "finding", scope: "demo", vulnerability: "CVE-2026-1234" },
+        scope: "demo",
+        awareness_at: "2026-09-23T12:00:00Z",
+        reported_now: true,
+        deadlines: [{ deadline: "early_warning", due_at: "2026-09-24T13:00:00Z", state: "due", submission: null }],
+      },
+      {
+        // met -- never a to-do
+        item: { kind: "finding", scope: "demo", vulnerability: "CVE-old" },
+        scope: "demo",
+        awareness_at: "2026-09-01T12:00:00Z",
+        reported_now: true,
+        deadlines: [{ deadline: "early_warning", due_at: "2026-09-02T12:00:00Z", state: "met", submission: { attestation: "a1", at: "2026-09-02T00:00:00Z", by: "owner" } }],
+      },
+    ],
+  };
+  globalThis.fetch = async (path) => {
+    if (path === "/api/policy/clock") return { status: 200, statusText: "OK", json: async () => ({ status: "ok", data: { kind: "policy_clock", clock } }) };
+    return { status: 200, statusText: "OK", json: async () => ({ status: "ok", data: { kind: "operations", report: { ...REPORT, attention: [] } } }) };
+  };
+  await loadInbox();
+  const html = el.inbox.innerHTML;
+  assert.equal((html.match(/class="inbox-item"/g) || []).length, 2, "the met deadline is not a to-do");
+  // The overdue report leads (a fault outranks a warning), named by its
+  // task's own title, not its bare id.
+  assert.match(html, /Checkout crashes on coupon<\/b> — 72h notification, overdue/);
+  assert.match(html, /overdue by/);
+  // The due-soon finding names the vulnerability, since it has no task.
+  assert.match(html, /CVE-2026-1234<\/b> — 24h early warning, due soon/);
+  assert.match(html, /due in/);
+  state.tasks = new Map();
 });
 
 // --------------------------------------------------------------- dialogs

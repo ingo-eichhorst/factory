@@ -25,6 +25,7 @@ import {
   estimateText,
   fmtAge,
   flagSecurityRequest,
+  hasConfirmedSecurityReport,
   infoRequest,
   nextActions,
   outboundInfo,
@@ -157,6 +158,20 @@ test("the security fast lane gates release, split and wontfix, and only the owne
   assert.ok(dismissedActions.includes("wontfix"), "an ordinary item again");
   assert.ok(!dismissedActions.includes("flag_security"), "already carries a flag");
   assert.ok(!dismissedActions.includes("security_confirm") && !dismissedActions.includes("security_dismiss"));
+});
+
+test("hasConfirmedSecurityReport is true only once a report is confirmed -- the reporting clock's only ever have a report: item for that state (#157/#170 phase 2)", () => {
+  assert.equal(hasConfirmedSecurityReport(board), false, "the fixture carries no flag at all");
+  assert.equal(hasConfirmedSecurityReport(null), false);
+
+  const withPossible = { ...board, columns: { ...board.columns, needs_info: [{ ...card("needs_info"), security: { state: "possible", flagged_by: "x", flagged_at: "t" } }] } };
+  assert.equal(hasConfirmedSecurityReport(withPossible), false, "possible is not yet worth a clock read");
+
+  const withDismissed = { ...board, columns: { ...board.columns, needs_info: [{ ...card("needs_info"), security: { state: "dismissed", flagged_by: "x", flagged_at: "t" } }] } };
+  assert.equal(hasConfirmedSecurityReport(withDismissed), false);
+
+  const withConfirmed = { ...board, columns: { ...board.columns, ready: [{ ...card("ready"), security: { state: "confirmed", flagged_by: "x", flagged_at: "t" } }] } };
+  assert.equal(hasConfirmedSecurityReport(withConfirmed), true);
 });
 
 test("a decided GitHub item with an outbound record offers publish, on a ready card too (#171)", () => {

@@ -226,6 +226,18 @@ tr.row:hover { background: var(--panel-2); }
 /* Held in the intake gate (#119): not on the line, so no wash of its own. */
 .s-intake { color: var(--signal-ink); border-style: dashed; }
 
+/* The CRA Art. 14 reporting clock's own deadline states (`#157`/`#170`
+   phase 2), shared by Intake, the Inbox and L6 Policy through the shared
+   `.badge s-*` convention: `.s-met` is already Quality's (#107, the same
+   word and meaning -- on time); `s-due`/`s-overdue`/`s-late` are new here.
+   `due` stays neutral (nothing is wrong yet, the same reading `.s-stale`
+   gives an aging-but-not-broken control); `overdue` is a fault; `late` is a
+   miss that was eventually put right, drawn as a warning rather than a
+   fire. */
+.s-due { color: var(--muted); }
+.s-overdue { color: var(--fault); border-color: transparent; background: var(--fault-wash); }
+.s-late { color: var(--wait); border-color: transparent; background: var(--wait-wash); }
+
 /* ---------------------------------------------------------- intake board
    The Tasks board's columns and cards, with the seven readiness axes as a
    row of marks: pass, fail, tolerated (a cheap observability gap) and not

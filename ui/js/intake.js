@@ -42,6 +42,7 @@ import {
   estimateText,
   fmtAge,
   flagSecurityRequest,
+  hasConfirmedSecurityReport,
   infoRequest,
   nextActions,
   outboundInfo,
@@ -63,23 +64,45 @@ import {
   wontfixDraft,
   workflowIn,
 } from "./intake-model.js";
+import { clockIndex, nowFromClock, reportDeadlines } from "./clock-model.js";
 
 let board = null;
 let boardError = null;
 let asked = 0;
 let visible = false;
 
+/// The reporting clock (`#157`/`#170` phase 2), read alongside the board
+/// only when it might say something -- `hasConfirmedSecurityReport`, below.
+/// `null` covers both "not read" and "the read failed": either way, the
+/// card and modal fall back to showing no deadlines, never a broken page --
+/// `clockIndex(null)` is an empty map, so `reportDeadlines` simply finds
+/// nothing.
+let clock = null;
+let clockIdx = clockIndex(null);
+
 export async function loadIntake() {
   const mine = ++asked;
   const scope = state.scope;
+  const query = scope === null ? "" : `?scope=${encodeURIComponent(scope)}`;
   let answer = null;
   let error = null;
   try {
-    answer = await api(`/api/intake${scope === null ? "" : `?scope=${encodeURIComponent(scope)}`}`);
+    answer = await api(`/api/intake${query}`);
   } catch (e) { error = e.message; }
   if (mine !== asked) return;
   board = answer ? answer.board : null;
   boardError = error;
+  if (board && hasConfirmedSecurityReport(board)) {
+    try {
+      clock = (await api(`/api/policy/clock${query}`)).clock;
+    } catch {
+      clock = null;
+    }
+    if (mine !== asked) return;
+  } else {
+    clock = null;
+  }
+  clockIdx = clockIndex(clock);
   renderIntake();
 }
 
@@ -124,6 +147,25 @@ function securityBadge(card) {
   return `<span class="badge ik-sec ik-sec-${esc(flag.state)}" title="${esc(flag.reason || "")}">${esc(label)}</span>`;
 }
 
+/// A confirmed report's own CRA Art. 14 deadlines (`#157`/`#170` phase 2),
+/// one badge per deadline -- empty when the clock was not read (no confirmed
+/// report on this board) or has nothing for this card yet (`reportDeadlines`
+/// resolves one split hop, never further; see its own comment). Only the 24h
+/// early warning and 72h notification exist -- the 14-day final report is
+/// `#157` phases 2-3, still without a source for the corrective-measure time
+/// it would run from.
+function clockDeadlinesHtml(card) {
+  if (!clock) return "";
+  const item = reportDeadlines(clockIdx, card, nowFromClock(clock));
+  if (!item) return "";
+  return item.deadlines
+    .map(
+      (d) =>
+        `<span class="badge s-${esc(d.state)}" title="${esc(d.text)} · due ${esc(d.dueAt)}">${esc(d.label)}: ${esc(d.stateLabel)}</span>`,
+    )
+    .join("");
+}
+
 /// A decided GitHub item's outbound state (`#171`), shown wherever a card or
 /// the item modal says what is happening to it -- empty for anything not
 /// from GitHub or with nothing decided yet.
@@ -138,11 +180,12 @@ export function intakeCard(card, axes = board ? board.axes : []) {
   const note = cardNote(card);
   const outbound = outboundNote(card);
   const badge = securityBadge(card);
+  const deadlines = clockDeadlinesHtml(card);
   return `
     <div class="kbc ik-card${badge ? " ik-fast-lane" : ""}" data-id="${esc(card.id)}" tabindex="0" role="button">
       <div class="kbc-top"><span class="ik-marks" aria-label="readiness axes">${marksRow(card, axes)}</span>
         <span class="sub" title="waiting since ${esc(card.received_at)}">${esc(fmtAge(card.age_seconds))}</span></div>
-      ${badge ? `<div class="ik-chips">${badge}</div>` : ""}
+      ${badge ? `<div class="ik-chips">${badge}${deadlines}</div>` : ""}
       <div class="title">${esc(card.title)}</div>
       <div class="sub">${esc(card.scope)} · from ${esc(card.requester)} · ${esc(sourceText(card.source))}</div>
       ${chips(card)}
@@ -246,7 +289,25 @@ function securityBlock(card) {
     ? `<br><span class="sub">decided by ${esc(flag.decided_by)} at ${esc(flag.decided_at)}${flag.evidence ? `: ${esc(flag.evidence)}` : ""}</span>`
     : "";
   return `<p>${securityBadge(card)} ${flag.reason ? esc(flag.reason) : `<span class="sub">no reason given</span>`}
-    <br><span class="sub">flagged by ${esc(flag.flagged_by)} at ${esc(flag.flagged_at)}</span>${decided}</p>`;
+    <br><span class="sub">flagged by ${esc(flag.flagged_by)} at ${esc(flag.flagged_at)}</span>${decided}</p>
+    ${clockDeadlinesBlock(card)}`;
+}
+
+/// The item modal's own reporting-clock block (`#157`/`#170` phase 2): each
+/// deadline's due time, state and -- once one exists -- who submitted and
+/// when. Read through the router (`GET /api/policy/clock`), never computed
+/// here; empty for anything `clockDeadlinesHtml` would also skip.
+function clockDeadlinesBlock(card) {
+  if (!clock) return "";
+  const item = reportDeadlines(clockIdx, card, nowFromClock(clock));
+  if (!item) return "";
+  return `<label>CRA Art. 14 reporting clock <span class="sub">only the 24h/72h deadlines exist yet -- the 14-day final report is #157 phases 2-3</span></label>
+    <ul class="sub">${item.deadlines
+      .map(
+        (d) => `<li><span class="badge s-${esc(d.state)}">${esc(d.stateLabel)}</span> ${esc(d.label)}, due ${esc(d.dueAt)} -- ${esc(d.text)}
+          ${d.submission ? `<br>submitted by ${esc(d.submission.by)} at ${esc(d.submission.at)}` : ""}</li>`,
+      )
+      .join("")}</ul>`;
 }
 
 /// The item modal's outbound block (`#171`): the GitHub publish state, the

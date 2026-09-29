@@ -1026,10 +1026,32 @@ attestation` — `direct_status` skips it — so an ordinary attestation still
 has to cover the control as a whole; the clock mark is additional evidence
 of one specific deadline, not a substitute.
 
-Left for a later phase: the 14-day final report, whether reachability
-(C(2026) 5252) gates reportability or is display-only, observed services,
-and all of the UI — Intake, the Inbox and L6 Policy showing these deadlines
-by reading `/api/policy/clock` is `#170` phase 2's own work.
+**The UI (`#170` phase 2)** reads the clock through the same router, never
+computing a deadline itself: `ui/js/clock-model.js` is the one pure module
+that shapes a `ReportingClock` answer into rows, shared by all three
+surfaces —
+
+- **Intake** reads `/api/policy/clock` only once a card on the loaded board
+  carries a *confirmed* security report (the only state the clock ever has
+  a `report:` item for), and shows that report's own deadlines as badges on
+  its card and in the item modal, resolving a split part one hop up to its
+  parent (the clock itself already folds a deeper chain to its true root;
+  a card more than one split away from that root shows nothing).
+- **The Inbox** reads the whole instance's clock alongside `/api/operations`
+  and adds its own overdue and due-soon deadlines (a `finding:` item too,
+  linked to Dependencies) to the daemon's attention queue — a second,
+  independent list, since a clock deadline is not one of `operations.rs`'s
+  own exception kinds.
+- **L6 Policy** shows every item on the clock over the selected subtree —
+  `finding:` and `report:` alike, including an excluded finding's own note —
+  in its own section, read independently of the framework board above it.
+
+A clock read failure degrades gracefully everywhere: the rest of each page
+still renders, and the clock's own section or badges simply have nothing to
+show.
+
+Left for a later phase: the 14-day final report, and whether reachability
+(C(2026) 5252) gates reportability or is display-only.
 
 ## Goals
 
@@ -1779,12 +1801,19 @@ it away.
   badge and a left band on a fast-lane card, the flag's detail in the item
   modal, and confirm/dismiss buttons with an evidence prompt -- the browser
   sends no token, so every UI caller already is the owner `IntakeSecurity`
-  requires. The agent guide's `intake.assess` line mentions `flag-security`
-  and says confirming or dismissing is the owner's alone.
+  requires. Once confirmed, the card and item modal also show its reporting
+  clock deadlines (`#170` phase 2, `ui/js/clock-model.js`), read through
+  `GET /api/policy/clock` -- never computed here either. The agent guide's
+  `intake.assess` line mentions `flag-security` and says confirming or
+  dismissing is the owner's alone.
 
-Left out on purpose, for phase 2 (`#157`): the 24-hour/72-hour/14-day
-deadlines and any countdown state, notifications, a text or LLM classifier,
-GitHub security advisories, and the Inbox.
+Left out on purpose: any countdown state of intake's own (the reporting
+clock -- see "Policies" below -- computes deadlines fresh on every read, and
+`#170` phase 2 shows a confirmed report's own 24-hour/72-hour deadlines as
+badges on its card and in the item modal, and on the Inbox), notifications,
+a text or LLM classifier, and GitHub security advisories. The 14-day final
+report is still `#157` phases 2-3, without a source yet for the
+corrective-measure time it would run from.
 
 **Outbound: approved GitHub triage comments and labels (`#171`).** Intake's
 first outward effect: one maintained triage comment plus labels on the

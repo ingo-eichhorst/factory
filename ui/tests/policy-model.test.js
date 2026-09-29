@@ -17,6 +17,7 @@ import {
   looksLikeExpiry,
   notApplicableRows,
   openTaskFor,
+  policyClockRows,
   reasonCheckKinds,
   refLinks,
   remediateAction,
@@ -414,6 +415,55 @@ test("refLinks deep-links a bench_run and sends workflow_run to the Workflows vi
 
 test("refLinks never links an attestation ref -- the modal's own table already shows it", () => {
   assert.deepEqual(refLinks("demo", [{ kind: "attestation", id: "att-1" }]), []);
+});
+
+// ------------------------------------------------------ reporting clock
+
+test("policyClockRows flattens a report to a task link and a finding to Dependencies, one row per deadline (#157/#170 phase 2)", () => {
+  const clock = {
+    now: "2026-09-24T12:00:00Z",
+    items: [
+      {
+        item: { kind: "report", item: "task-1" },
+        scope: "demo",
+        awareness_at: "2026-09-20T12:00:00Z",
+        reported_now: true,
+        deadlines: [
+          { deadline: "early_warning", due_at: "2026-09-21T12:00:00Z", state: "met", submission: { attestation: "a1", at: "2026-09-21T00:00:00Z", by: "owner" } },
+          { deadline: "notification", due_at: "2026-09-23T12:00:00Z", state: "overdue", submission: null },
+        ],
+      },
+      {
+        item: { kind: "finding", scope: "demo", vulnerability: "CVE-2026-1234" },
+        scope: "demo",
+        awareness_at: "2026-09-23T12:00:00Z",
+        reported_now: false,
+        excluded: "not_affected",
+        deadlines: [],
+      },
+    ],
+  };
+  const rows = policyClockRows(clock, "2026-09-24T12:00:00Z");
+  assert.equal(rows.length, 3, "two deadlines for the report, one row for the excluded finding");
+
+  const [met, overdue, excluded] = rows;
+  assert.equal(met.href, "#demo/tasks/task/task-1", "a report opens its own task");
+  assert.equal(met.itemText, "report task-1");
+  assert.equal(met.state, "met");
+  assert.equal(met.submission.by, "owner");
+
+  assert.equal(overdue.key, "report:task-1:notification");
+  assert.equal(overdue.state, "overdue");
+  assert.equal(overdue.submission, null);
+
+  assert.equal(excluded.href, "#demo/dependencies", "a finding has no task of its own");
+  assert.equal(excluded.itemText, "CVE-2026-1234");
+  assert.equal(excluded.excluded, "not_affected");
+  assert.equal(excluded.label, null, "no deadline of its own to show");
+});
+
+test("policyClockRows degrades to [] with no clock, same as clockRows itself", () => {
+  assert.deepEqual(policyClockRows(null, "2026-09-24T12:00:00Z"), []);
 });
 
 test("attestBody refuses empty evidence or expiry with a sentence, and drops an empty note", () => {
