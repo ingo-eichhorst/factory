@@ -220,6 +220,28 @@ impl FailKind {
     }
 }
 
+/// Why a run is a rework round (`#178`): who sent the work back, the round
+/// it is out of the rounds the exit allows, and what they said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunFeedback {
+    /// The workflow node that sent the work back, and its task.
+    pub from_node: String,
+    pub from_task: String,
+    /// That task's run whose verdict this is, when it could be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_run: Option<String>,
+    pub round: u32,
+    pub max_rounds: u32,
+    /// The sending run's result and error as it reported them -- empty
+    /// when it said nothing.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
     pub id: String,
@@ -299,6 +321,19 @@ pub struct Run {
     /// warn about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_session: Option<String>,
+    /// Which workflow round this attempt is (`#178`): 0 on a node's first
+    /// pass and on every task outside a workflow, `k` on the `k`th time a
+    /// workflow sent the node's work back. A rework round is a new run of
+    /// the same task, never a new task, so this -- not the title -- is where
+    /// the round lives. Stamped at dispatch from the node's own round.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub round: u32,
+    /// What the node that sent this work back said, kept on the run it was
+    /// sent back to (`#178`): the sending task's own `result`/`error` move on
+    /// with its next round, and this is the durable copy of the one this
+    /// round was asked to address. `None` on a first pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<RunFeedback>,
     /// The task estimate as it stood when this attempt was dispatched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_estimate: Option<crate::task::Estimate>,
@@ -497,6 +532,11 @@ pub struct RunPatch {
     /// See `Run::continued_from`. Set once, at dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continued_from: Option<String>,
+    /// See `Run::round` and `Run::feedback`, stamped once at dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<RunFeedback>,
     /// See `Run::resumed_session`. Set once, at dispatch, only when a
     /// continuation actually resumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]

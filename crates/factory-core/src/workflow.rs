@@ -996,10 +996,20 @@ pub struct WorkflowNodeRun {
     /// pass; otherwise the backwards-exit rounds it has used.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub round: u32,
-    /// The tasks earlier rounds spawned here, oldest first. Kept so their
-    /// history stays findable; never mirrored, never recreated.
+    /// The tasks earlier rounds spawned here, oldest first -- only ever on a
+    /// run from before rounds were runs (`WorkflowRun::rounds_as_runs` off).
+    /// Kept so their history stays findable; never mirrored, never recreated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub superseded_task_ids: Vec<String>,
+    /// The round this node's task was last handed a run for (`#178`), or
+    /// `None` while it has not been handed one at all. The node is *launched*
+    /// for its current round when this equals `round`: only then does its
+    /// status follow its task's, since a task sent back for another round
+    /// still reads as the last one's `done` until its next run starts.
+    /// Persisted before that run is asked for, so a restart can finish the
+    /// launch rather than make a second one. Unused on a legacy run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_round: Option<u32>,
     /// On the node work was sent back to: who sent it and why, which its
     /// next task is dispatched with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1070,8 +1080,28 @@ pub struct WorkflowRun {
     /// `definition`; kept to say so.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, String>,
+    /// Whether a round sent back through this run is a new run of the same
+    /// task (`#178`) rather than a new `(rework N)` task beside it. Every
+    /// run started by this build says so; one already in flight from before
+    /// reads `false` and finishes the way it started -- there is no
+    /// migration of the rework tasks it already made.
+    #[serde(default)]
+    pub rounds_as_runs: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl WorkflowNodeRun {
+    /// Handed a run for the round it is on (see `launched_round`). A legacy
+    /// run's node counts as launched as soon as it has a task, which is
+    /// exactly what having one meant there.
+    pub fn launched(&self, rounds_as_runs: bool) -> bool {
+        if rounds_as_runs {
+            self.launched_round == Some(self.round)
+        } else {
+            self.task_id.is_some()
+        }
+    }
 }
 
 impl WorkflowRun {
@@ -1092,6 +1122,7 @@ impl WorkflowRun {
                     error: None,
                     round: 0,
                     superseded_task_ids: Vec::new(),
+                    launched_round: None,
                     rework_request: None,
                     exits_evaluated: false,
                     routed_to: None,
@@ -1104,6 +1135,7 @@ impl WorkflowRun {
             error: None,
             started_by,
             inputs: BTreeMap::new(),
+            rounds_as_runs: true,
             created_at: now,
             updated_at: now,
         }
@@ -1124,8 +1156,9 @@ pub enum SendBack {
 impl WorkflowRun {
     /// Send `from`'s work back through its declared backwards exit, if it has one
     /// and a round is left: every node on the path from the target down to
-    /// `from` goes back to `unstarted` with its task moved to
-    /// `superseded_task_ids` and its round counted up, the target is told
+    /// `from` goes back to `unstarted` with its round counted up -- keeping
+    /// its task, whose next run is that round (`#178`; a legacy run instead
+    /// moves the task to `superseded_task_ids` for a new one) -- the target is told
     /// who sent it back, and the not-yet-started nodes below `from` (a gate
     /// mirrored `skipped` off the failed run, say) are `unstarted` again.
     /// Nothing is spawned here; the next advance does that.
@@ -1167,8 +1200,12 @@ impl WorkflowRun {
                 }
                 continue;
             }
-            if let Some(task) = node.task_id.take() {
-                node.superseded_task_ids.push(task);
+            // `#178`: the same task runs again -- its next run is the round.
+            // Only a legacy run moves the task aside for a new one.
+            if !self.rounds_as_runs {
+                if let Some(task) = node.task_id.take() {
+                    node.superseded_task_ids.push(task);
+                }
             }
             node.status = WorkflowNodeStatus::Unstarted;
             node.error = None;
@@ -1691,9 +1728,43 @@ mod tests {
         node.task_id = (!task.is_empty()).then(|| task.to_string());
     }
 
+    /// `#178`: a round is a new run of the same task. The path back keeps
+    /// every task it had; only rounds and statuses move, and nothing is
+    /// ever superseded.
+    #[test]
+    fn sending_back_keeps_each_nodes_task_for_its_next_round() {
+        let mut run = WorkflowRun::new(reviewing(2), WorkflowActor::Owner);
+        assert!(run.rounds_as_runs, "every run this build starts has rounds as runs");
+        ran(&mut run, "triage", WorkflowNodeStatus::Done, "t1");
+        ran(&mut run, "implement", WorkflowNodeStatus::Done, "i1");
+        ran(&mut run, "implement.tests", WorkflowNodeStatus::Done, "");
+        ran(&mut run, "review", WorkflowNodeStatus::Done, "r1");
+        for id in ["triage", "implement", "review"] {
+            run.nodes.iter_mut().find(|n| n.node_id == id).unwrap().launched_round = Some(0);
+        }
+        assert_eq!(run.send_back("review", "implement"), SendBack::Sent { round: 1, max_rounds: 2 });
+        let node = |run: &WorkflowRun, id: &str| run.nodes.iter().find(|n| n.node_id == id).unwrap().clone();
+        let implement = node(&run, "implement");
+        assert_eq!(implement.task_id.as_deref(), Some("i1"), "the same task runs the round");
+        assert!(implement.superseded_task_ids.is_empty());
+        assert_eq!(implement.status, WorkflowNodeStatus::Unstarted);
+        assert_eq!(implement.round, 1);
+        assert!(!implement.launched(true), "round 1 has not been handed a run yet");
+        assert_eq!(
+            implement.rework_request,
+            Some(ReworkRequest { from_node: "review".into(), from_task: "r1".into(), round: 1, max_rounds: 2 })
+        );
+        let review = node(&run, "review");
+        assert_eq!(review.task_id.as_deref(), Some("r1"));
+        assert!(!review.launched(true));
+        assert!(node(&run, "triage").launched(true), "above the target is untouched");
+    }
+
     #[test]
     fn sending_back_resets_the_path_keeps_history_and_stops_at_the_budget() {
         let mut run = WorkflowRun::new(reviewing(2), WorkflowActor::Owner);
+        // A run from before rounds were runs finishes the way it started.
+        run.rounds_as_runs = false;
         ran(&mut run, "triage", WorkflowNodeStatus::Done, "t1");
         ran(&mut run, "implement", WorkflowNodeStatus::Done, "i1");
         ran(&mut run, "implement.tests", WorkflowNodeStatus::Done, "");

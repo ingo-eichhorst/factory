@@ -138,3 +138,18 @@ export function closeBody(reason, duplicateOf, note) {
   if (n) body.note = n;
   return body;
 }
+
+/// `#178`: a workflow rework round is a new run of the same task, so the
+/// round lives on the run. "rework round 2" on such a run, "" on a first
+/// pass or any run outside a workflow.
+export function runRoundLabel(run) {
+  return run?.round > 0 ? `rework round ${run.round}` : "";
+}
+
+/// What the node that sent this round back said, headed with who it was and
+/// which round of how many -- or null on a run that was not sent back.
+export function runFeedback(run) {
+  const f = run?.feedback;
+  if (!f) return null;
+  return { heading: `Sent back by ${f.from_node}: round ${f.round} of ${f.max_rounds}`, text: f.text || "" };
+}

@@ -567,6 +567,8 @@ impl TaskStore for SqliteStore {
                 superseded_token_sha256s: Vec::new(),
                 continued_from: None,
                 resumed_session: None,
+                round: 0,
+                feedback: None,
                 original_estimate: None,
                 provider_account: None,
                 re_estimate: None,
@@ -691,6 +693,12 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.resumed_session {
                 run.resumed_session = Some(v);
+            }
+            if let Some(v) = patch.round {
+                run.round = v;
+            }
+            if let Some(v) = patch.feedback {
+                run.feedback = Some(v);
             }
             if let Some(v) = patch.ended_at {
                 run.ended_at = Some(v);

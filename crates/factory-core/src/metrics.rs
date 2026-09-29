@@ -298,8 +298,9 @@ fn first_pass_yield_def() -> MetricDef {
         "First-pass yield",
         "Finished runs that ended done without being rework -- a re-attempt of work that did \
          not succeed, not merely a repeat firing -- over finished, over the trailing 28 days. \
-         Not `1 - reworked/finished`: a run scrapped on every attempt is `0.0` here, whatever \
-         `reworked` says.",
+         A workflow rework round is a run of the same task (since #178), so it counts here as \
+         rework, not as one more task's first pass. Not `1 - reworked/finished`: a run \
+         scrapped on every attempt is `0.0` here, whatever `reworked` says.",
         Unit::Ratio,
         Better::Higher,
         "production.rs's daily grid (/api/production): finished and first_pass, trailing 28 days",
@@ -370,8 +371,12 @@ fn rework_rate_def() -> MetricDef {
         "rework_rate",
         "Rework rate",
         "reworked/finished, over the trailing 28 days -- production.rs's own reworked \
-         bucket: a retry, or a manual or workflow run of a task whose previous attempt failed \
-         or was cancelled. A scheduled firing is never rework, however many came before it.",
+         bucket: a workflow rework round (a run with round > 0 -- since #178 a round is a new \
+         run of the same task, where it used to be a `(rework N)` task counted as first \
+         pass), a retry, or a manual or workflow run of a task whose previous attempt failed \
+         or was cancelled. A scheduled firing is never rework, however many came before it. \
+         Throughput and cycle time count runs, so a round is one more finished run there, \
+         exactly as a rework task was.",
         Unit::Ratio,
         Better::Lower,
         OPERATIONS_SOURCE,

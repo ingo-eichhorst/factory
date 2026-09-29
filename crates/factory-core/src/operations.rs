@@ -16,8 +16,10 @@
 //! cannot reach the daemon's; production.rs stays the source of truth, and
 //! a test here pins the same edge cases its own tests do. Rework in
 //! particular is not `attempt > 1` -- a scheduled task's every firing bumps
-//! `attempt` -- but a `retry`, or a `manual`/`workflow` run whose task's
-//! previous attempt failed or was cancelled ([`is_rework`]).
+//! `attempt` -- but a workflow rework round (`Run::round > 0`: since `#178`
+//! a round is a new run of the same task, not a new task), a `retry`, or a
+//! `manual`/`workflow` run whose task's previous attempt failed or was
+//! cancelled ([`is_rework`]).
 //!
 //! * **cycle time** -- `started_at` to `ended_at` of a run that ended
 //!   `done`. Done only: a failed or cancelled run did not complete the
@@ -121,11 +123,17 @@ pub fn predecessors(runs: &[Run]) -> Predecessors<'_> {
 }
 
 /// production.rs's `is_rework`: a re-attempt of work that did not succeed.
-/// A `retry` always is; a `manual` or `workflow` run is when the same
+/// A workflow rework round (`Run::round > 0`, `#178`) always is -- its
+/// predecessor ended `done`, but the node that judged it sent it back. A
+/// `retry` always is; a `manual` or `workflow` run is when the same
 /// task's previous attempt ended failed or cancelled; a `schedule`, `bench`
 /// or `agent` run never is -- each is the next occurrence of standing work.
 /// A predecessor older than the runs handed over reads as "did not fail".
 pub fn is_rework(run: &Run, prev: &Predecessors<'_>) -> bool {
+    // A workflow rework round (`#178`) always is -- see production.rs.
+    if run.round > 0 {
+        return true;
+    }
     match run.trigger {
         Trigger::Retry => true,
         Trigger::Manual | Trigger::Workflow if run.attempt > 1 => matches!(
@@ -1766,6 +1774,8 @@ mod tests {
             superseded_token_sha256s: Vec::new(),
             continued_from: None,
             resumed_session: None,
+            round: 0,
+            feedback: None,
             original_estimate: None,
             provider_account: None,
             re_estimate: None,
@@ -1846,6 +1856,21 @@ mod tests {
         assert!(is_reworked(&retry, &prev), "a retry is rework even with no predecessor in view");
         let again = run("d", "v", 7, RunStatus::Done, 10, Some(5));
         assert!(!is_reworked(&again, &predecessors(std::slice::from_ref(&again))), "a predecessor out of view did not fail");
+    }
+
+    /// `#178`: a rework round follows a `done` run -- its predecessor did
+    /// not fail, the reviewer sent it back -- and is rework all the same.
+    #[test]
+    fn a_workflow_rework_round_is_rework_after_a_done_predecessor() {
+        let mut first = run("a", "t", 1, RunStatus::Done, 30, Some(20));
+        first.trigger = Trigger::Workflow;
+        let mut round = run("b", "t", 2, RunStatus::Done, 10, Some(5));
+        round.trigger = Trigger::Workflow;
+        round.round = 1;
+        let runs = vec![first.clone(), round.clone()];
+        let prev = predecessors(&runs);
+        assert!(is_first_pass(&first, &prev));
+        assert!(is_reworked(&round, &prev) && !is_first_pass(&round, &prev));
     }
 
     #[test]

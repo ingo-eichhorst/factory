@@ -10,7 +10,7 @@ use factory_core::event::Event;
 #[cfg(test)]
 use factory_core::run::FailKind;
 use factory_core::run::{RunStatus, Trigger};
-use factory_core::task::{Task, TaskEntry, TaskStatus, WorkflowOrigin};
+use factory_core::task::{Task, TaskEntry, TaskPatch, TaskStatus, WorkflowOrigin};
 use factory_core::workflow::{
     SendBack, WorkflowDefinition, WorkflowDraft, WorkflowNodeKind, WorkflowNodeStatus, WorkflowRun, WorkflowRunStatus,
 };
@@ -442,6 +442,20 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         panic!("no prompt captured for task {task_id}");
+    }
+
+    /// Poll until `task_id` has its `attempt`th run -- a rework round is a
+    /// new run of the same task (`#178`), so this, not a task count, is what
+    /// says a round has started.
+    async fn wait_for_run(engine: &Arc<Engine>, task_id: &str, attempt: u32) -> factory_core::run::Run {
+        for _ in 0..400 {
+            let runs = engine.store.runs(task_id, 50).await.unwrap();
+            if let Some(run) = runs.into_iter().find(|r| r.attempt == attempt) {
+                return run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("task {task_id} never got run {attempt}");
     }
 
     #[tokio::test]
@@ -1265,35 +1279,83 @@ mod tests {
                     .is_some_and(|data| data["routed_to"] == "implement")
         }));
 
-        let all = wait_for_tasks(&engine, 3).await;
-        let again = of_node(&all, "implement").into_iter().find(|t| t.id != first.id).unwrap().clone();
-        assert_eq!(again.title, "implement (rework 1)");
-        let prompt = wait_for_prompt(&engine, &recorder, &again.id).await;
+        // `#178`: the round is a second run of the same implement task --
+        // no `(rework 1)` task beside it, the title untouched, the round and
+        // the findings on the run itself.
+        let second = wait_for_run(&engine, &first.id, 2).await;
+        assert_eq!(tasks(&engine).await.len(), 2, "a round never creates a task");
+        let again = engine.store.get(&first.id).await.unwrap().unwrap();
+        assert_eq!(again.title, "implement");
+        assert_eq!(second.round, 1);
+        assert_eq!(second.trigger, Trigger::Workflow);
+        let feedback = second.feedback.clone().expect("the round carries its findings");
+        assert_eq!(feedback.from_node, "review");
+        assert_eq!(feedback.from_task, review.id);
+        assert_eq!((feedback.round, feedback.max_rounds), (1, 5));
+        assert!(feedback.text.contains("the parser test is missing"), "{feedback:?}");
+        let prompt = wait_for_prompt(&engine, &recorder, &first.id).await;
         assert!(prompt.contains("sent this work back -- rework round 1 of 5"), "{prompt}");
         assert!(prompt.contains("the parser test is missing"), "{prompt}");
+        let entries = engine.store.entries(&first.id, 50).await.unwrap();
+        assert!(
+            entries.iter().any(|e| e.kind == "round" && e.message.contains("rework round 1 of 5")),
+            "the journal says why a done task runs again: {entries:#?}"
+        );
 
         let midway = engine.workflow_run(&run.id).await.unwrap();
         assert_eq!(midway.status, WorkflowRunStatus::Running);
-        assert_eq!(node_run(&midway, "implement").superseded_task_ids, vec![first.id.clone()]);
-        assert_eq!(node_run(&midway, "review").superseded_task_ids, vec![review.id.clone()]);
+        assert!(node_run(&midway, "implement").superseded_task_ids.is_empty());
+        assert_eq!(node_run(&midway, "implement").task_id.as_deref(), Some(first.id.as_str()));
+        assert_eq!(node_run(&midway, "review").task_id.as_deref(), Some(review.id.as_str()));
         assert_eq!(node_run(&midway, "review").round, 1);
+        assert_eq!(node_run(&midway, "review").status, WorkflowNodeStatus::Unstarted);
         assert_eq!(node_run(&midway, "ship").status, WorkflowNodeStatus::Unstarted);
 
-        // The superseded review saying anything more changes nothing.
+        // The review's own last-round task state says nothing about round 1.
         engine.record_workflow_task_state(&review.id).await;
         assert_eq!(
             node_run(&engine.workflow_run(&run.id).await.unwrap(), "review").status,
             WorkflowNodeStatus::Unstarted
         );
 
-        finish_with_result(&engine, &again.id, "PR https://example.test/pr/1, fixed").await;
-        let all = wait_for_tasks(&engine, 4).await;
-        let second_review = of_node(&all, "review").into_iter().find(|t| t.id != review.id).unwrap().clone();
-        assert_eq!(second_review.title, "review (rework 1)");
-        finish(&engine, &second_review.id, RunStatus::Done).await;
-        let ship = of_node(&wait_for_tasks(&engine, 5).await, "ship")[0].clone();
+        finish_with_result(&engine, &first.id, "PR https://example.test/pr/1, fixed").await;
+        let second_review = wait_for_run(&engine, &review.id, 2).await;
+        assert_eq!(second_review.round, 1);
+        assert!(second_review.feedback.is_none(), "only the node sent back to gets the findings");
+        assert_eq!(engine.store.get(&review.id).await.unwrap().unwrap().title, "review");
+        finish(&engine, &review.id, RunStatus::Done).await;
+        let ship = of_node(&wait_for_tasks(&engine, 3).await, "ship")[0].clone();
         finish(&engine, &ship.id, RunStatus::Done).await;
         assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Done);
+        let rounds: Vec<u32> = engine.store.runs(&first.id, 10).await.unwrap().iter().rev().map(|r| r.round).collect();
+        assert_eq!(rounds, vec![0, 1], "the task's run list shows each round");
+    }
+
+    /// `#178`'s migration rule: a run already in flight from before rounds
+    /// were runs finishes the way it started -- its round is a new
+    /// `(rework N)` task, and the task it supersedes stays as it was.
+    #[tokio::test]
+    async fn a_legacy_run_in_flight_still_gives_a_round_a_task_of_its_own() {
+        let engine = engine();
+        let definition = review_loop(&engine, 5).await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let mut legacy = engine.workflow_run(&run.id).await.unwrap();
+        legacy.rounds_as_runs = false;
+        for node in &mut legacy.nodes {
+            node.launched_round = None;
+        }
+        engine.workflows.put_run(&legacy).await.unwrap();
+
+        let first = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        finish(&engine, &first.id, RunStatus::Done).await;
+        let review = of_node(&wait_for_tasks(&engine, 2).await, "review")[0].clone();
+        review_fails(&engine, &review.id, "missing test").await;
+        let all = wait_for_tasks(&engine, 3).await;
+        let again = of_node(&all, "implement").into_iter().find(|t| t.id != first.id).unwrap().clone();
+        assert_eq!(again.title, "implement (rework 1)");
+        assert_eq!(engine.store.runs(&first.id, 10).await.unwrap().len(), 1, "the superseded task never runs again");
+        let midway = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(node_run(&midway, "implement").superseded_task_ids, vec![first.id.clone()]);
     }
 
     #[tokio::test]
@@ -1321,15 +1383,10 @@ mod tests {
         finish(&engine, &implement.id, RunStatus::Done).await;
         let review = of_node(&wait_for_tasks(&engine, 2).await, "review")[0].clone();
         review_fails(&engine, &review.id, "still wrong").await;
-        let all = wait_for_tasks(&engine, 3).await;
-        let again = of_node(&all, "implement").into_iter().find(|t| t.id != implement.id).unwrap().clone();
-        finish(&engine, &again.id, RunStatus::Done).await;
-        let all = wait_for_tasks(&engine, 4).await;
-        let last = of_node(&all, "review")
-            .into_iter()
-            .find(|t| t.id != review.id)
-            .unwrap()
-            .clone();
+        wait_for_run(&engine, &implement.id, 2).await;
+        finish(&engine, &implement.id, RunStatus::Done).await;
+        wait_for_run(&engine, &review.id, 2).await;
+        let last = review.clone();
         let active = loop {
             if let Some(active) = engine.store.active_run(&last.id).await.unwrap() {
                 break active;
@@ -1356,9 +1413,10 @@ mod tests {
         assert_eq!(run.status, WorkflowRunStatus::Running);
         assert_eq!(
             tasks(&engine).await.len(),
-            4,
+            2,
             "nothing spawned past the budget"
         );
+        assert_eq!(engine.store.runs(&implement.id, 10).await.unwrap().len(), 2, "and no third implement round");
     }
 
     #[tokio::test]
@@ -1864,12 +1922,12 @@ impl Engine {
             run.status = WorkflowRunStatus::Cancelled;
             run.updated_at = Utc::now();
             let mut task_ids = Vec::new();
+            let rounds_as_runs = run.rounds_as_runs;
             for node in &mut run.nodes {
                 if !node.status.is_terminal() {
-                    if let Some(task_id) = &node.task_id {
-                        task_ids.push(task_id.clone());
-                    } else {
-                        node.status = WorkflowNodeStatus::Skipped;
+                    match &node.task_id {
+                        Some(task_id) if node.launched(rounds_as_runs) => task_ids.push(task_id.clone()),
+                        _ => node.status = WorkflowNodeStatus::Skipped,
                     }
                 }
             }
@@ -1886,7 +1944,11 @@ impl Engine {
             }
         }
         let mut run = self.workflow_run(id).await?;
+        let rounds_as_runs = run.rounds_as_runs;
         for node in &mut run.nodes {
+            if !node.launched(rounds_as_runs) {
+                continue;
+            }
             if let Some(task_id) = &node.task_id {
                 if let Some(task) = self.store.get(task_id).await? {
                     node.status = node_status(&task);
@@ -1914,10 +1976,18 @@ impl Engine {
         // neighbour failed does not freeze mid-flight forever just because
         // the workflow gave up on the run as a whole -- see issue #45's node
         // overlay requirement and the README.
+        let rounds_as_runs = run.rounds_as_runs;
         for node in &mut run.nodes {
             let Some(task_id) = node.task_id.clone() else {
                 continue;
             };
+            // `#178`: a node sent back for another round keeps its task, and
+            // that task still reads as the last round's outcome until its
+            // next run is asked for. Until then the node's status is the
+            // engine's own, not its task's.
+            if !node.launched(rounds_as_runs) {
+                continue;
+            }
             match self.store.get(&task_id).await {
                 Ok(Some(task)) => {
                     // A check-exit error blocks the workflow node after its
@@ -2114,8 +2184,14 @@ impl Engine {
             // The spawned task carries the category it was planned as, so
             // its own record says what its run was held to.
             template.category = Some(run.definition.node_category(snapshot_node));
-            let round = run.nodes.iter().find(|n| n.node_id == node_id).map_or(0, |n| n.round);
-            if round > 0 {
+            let (round, existing) = run
+                .nodes
+                .iter()
+                .find(|n| n.node_id == node_id)
+                .map_or((0, None), |n| (n.round, n.task_id.clone()));
+            // A legacy run (`rounds_as_runs` off) still gives each round a
+            // task of its own, titled for it; a current one never does.
+            if round > 0 && !run.rounds_as_runs {
                 template.title = format!("{} (rework {round})", template.title);
             }
 
@@ -2138,6 +2214,34 @@ impl Engine {
                 continue;
             }
 
+            // `#178`: the node already has a task -- work sent back for
+            // another round -- so the round is that task's next run. The
+            // task goes back to `pending` first, with the journal saying
+            // why, so that from the moment the node is persisted as
+            // launched its mirror reads the round that is coming rather
+            // than the last one's `done`; a crash in between leaves the node
+            // unlaunched and the next advance simply does this again.
+            if let (Some(task_id), true) = (existing, run.rounds_as_runs) {
+                if let Err(error) = self.reopen_for_round(&run, &node_id, &task_id, round).await {
+                    let node = run.nodes.iter_mut().find(|node| node.node_id == node_id).expect("snapshot node");
+                    node.status = WorkflowNodeStatus::Failed;
+                    node.error = Some(error.to_string());
+                    run.status = WorkflowRunStatus::Failed;
+                    run.failure_node_id = Some(node_id);
+                    run.error = Some(error.to_string());
+                    continue;
+                }
+                let node = run.nodes.iter_mut().find(|node| node.node_id == node_id).expect("snapshot node");
+                node.launched_round = Some(round);
+                node.status = WorkflowNodeStatus::Pending;
+                node.error = None;
+                run.updated_at = Utc::now();
+                self.workflows.put_run(&run).await?;
+                self.bus.publish(Event::WorkflowRunUpdated { run: run.clone() });
+                to_start.push(task_id);
+                continue;
+            }
+
             let task_id = uuid::Uuid::new_v4().to_string();
             let node_run = run
                 .nodes
@@ -2145,6 +2249,7 @@ impl Engine {
                 .find(|node| node.node_id == node_id)
                 .expect("snapshot node");
             node_run.task_id = Some(task_id.clone());
+            node_run.launched_round = Some(round);
             node_run.status = WorkflowNodeStatus::Pending;
             run.updated_at = Utc::now();
             // Persist the decision before creating or publishing the task. A
@@ -2376,12 +2481,23 @@ impl Engine {
             })
             .collect();
         for (gate_id, subject, step) in gates {
-            let Some(task_id) = run.nodes.iter().find(|n| n.node_id == subject).and_then(|n| n.task_id.clone()) else {
+            let Some(subject_node) = run.nodes.iter().find(|n| n.node_id == subject) else {
                 continue;
             };
+            let Some(task_id) = subject_node.task_id.clone() else {
+                continue;
+            };
+            let subject_round = subject_node.round;
+            // `#178`: a subject sent back for another round has only its
+            // last round's run to show until the next one exists -- a gate
+            // never reads that as this round's verdict.
+            let launched = subject_node.launched(run.rounds_as_runs);
             let Ok(Some(subject_run)) = self.store.runs(&task_id, 1).await.map(|r| r.into_iter().next()) else {
                 continue;
             };
+            if run.rounds_as_runs && (!launched || subject_run.round < subject_round) {
+                continue;
+            }
             let (status, error) = match subject_run.status {
                 RunStatus::Done => (WorkflowNodeStatus::Done, None),
                 RunStatus::Verifying => (WorkflowNodeStatus::Verifying, None),
@@ -2425,6 +2541,43 @@ impl Engine {
         }
     }
 
+    /// `#178`: put a node's task back on the line for another round -- a
+    /// `done` task running again, which the journal says, and why. The run
+    /// itself is asked for by the caller once the node's launch is
+    /// persisted; this only makes the task read as the round to come.
+    async fn reopen_for_round(&self, run: &WorkflowRun, node_id: &str, task_id: &str, round: u32) -> Result<()> {
+        let request = run.nodes.iter().find(|n| n.node_id == node_id).and_then(|n| n.rework_request.clone());
+        let was = self.require(task_id).await?.status;
+        self.store
+            .update(task_id, &TaskPatch { status: Some(TaskStatus::Pending), ..Default::default() })
+            .await?;
+        let words = match &request {
+            Some(r) => format!(
+                "rework round {round} of {}: {} sent the work back, so this task runs again (it was {})",
+                r.max_rounds,
+                r.from_node,
+                was.as_str()
+            ),
+            None => format!(
+                "rework round {round}: work was sent back through this step, so this task runs again (it was {})",
+                was.as_str()
+            ),
+        };
+        self.entry(
+            task_id,
+            TaskEntry::new("daemon", "round", words).with_data(serde_json::json!({
+                "round": round,
+                "max_rounds": request.as_ref().map(|r| r.max_rounds),
+                "sent_back_by": request.as_ref().map(|r| r.from_node.clone()),
+                "workflow_run": run.id,
+                "was": was.as_str(),
+            })),
+        )
+        .await;
+        self.publish_task(task_id).await;
+        Ok(())
+    }
+
     pub(crate) async fn sync_workflow_for_task(self: &Arc<Self>, task_id: &str) {
         let Ok(Some(task)) = self.store.get(task_id).await else {
             return;
@@ -2463,8 +2616,15 @@ impl Engine {
             return;
         };
         // A task an earlier rework round superseded speaks for nobody: the
-        // node has moved on to a newer one (`#140`).
-        if run.nodes.iter().all(|node| node.node_id != origin.node_id || node.task_id.as_deref() != Some(task_id)) {
+        // node has moved on to a newer one (`#140`). Nor does one whose node
+        // was sent back for a round its task has not been handed yet
+        // (`#178`): what it says is the last round's.
+        let rounds_as_runs = run.rounds_as_runs;
+        if run.nodes.iter().all(|node| {
+            node.node_id != origin.node_id
+                || node.task_id.as_deref() != Some(task_id)
+                || !node.launched(rounds_as_runs)
+        }) {
             return;
         }
         let Some(node) = run
@@ -2607,12 +2767,27 @@ impl Engine {
             // of the same crash window.
             if let Ok(current) = self.workflow_run(&run.id).await {
                 for node in current.nodes {
-                    let Some(task_id) = node.task_id else {
+                    if !node.launched(current.rounds_as_runs) {
+                        continue;
+                    }
+                    let Some(task_id) = node.task_id.clone() else {
                         continue;
                     };
                     if let Ok(Some(task)) = self.store.get(&task_id).await {
+                        // `#178`: a round is a run of a task that already has
+                        // some, so "never ran" means "has no run for the
+                        // round its node was launched for".
+                        let newest_round = match self.store.runs(&task_id, 1).await {
+                            Ok(runs) => runs.first().map(|r| r.round),
+                            Err(_) => continue,
+                        };
+                        let round_unrun = if current.rounds_as_runs {
+                            newest_round.is_none_or(|r| r < node.round)
+                        } else {
+                            task.runs == 0
+                        };
                         if task.status == TaskStatus::Pending
-                            && task.runs == 0
+                            && round_unrun
                             && self
                                 .store
                                 .active_run(&task_id)

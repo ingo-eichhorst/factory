@@ -4485,6 +4485,8 @@ mod tests {
                 superseded_token_sha256s: Vec::new(),
                 continued_from: None,
                 resumed_session: None,
+                round: 0,
+                feedback: None,
                 original_estimate: None,
                 provider_account: None,
                 re_estimate: None,

@@ -10,7 +10,7 @@ import { scheduleLabel } from "./schedule.js";
 import { describeWorkflowOrigin } from "./workflows.js";
 import { entryKindLabel, entryTone } from "./operations-model.js";
 import { estimateComparisonView, newestRead, runUsageView, taskUsageLine } from "./usage-model.js";
-import { columnFor, standing, taskActions, isSettled, CLOSE_REASONS, closeBody } from "./task-model.js";
+import { columnFor, standing, taskActions, isSettled, CLOSE_REASONS, closeBody, runRoundLabel, runFeedback } from "./task-model.js";
 import { notStartedNote } from "./pending-model.js";
 
 export { scheduleLabel };
@@ -354,6 +354,8 @@ export function renderModal() {
   if (r) meta += usageHtml(r.usage, usageEntry);
   const total = state.taskUsage && state.taskUsage.task_id === t.id ? taskUsageLine(state.taskUsage.total) : null;
   if (total) meta += `<div class="sub">${esc(total)}</div>`;
+  const feedback = runFeedback(r);
+  if (feedback) meta += `<label>${esc(feedback.heading)}</label><pre>${esc(feedback.text || "(no findings were given)")}</pre>`;
   if (r && r.result) meta += `<label>Result</label><pre>${esc(r.result)}</pre>`;
   if (r && r.error) meta += `<label>Error</label><pre>${esc(r.error)}</pre>`;
   $("m-meta").innerHTML = meta;
@@ -363,7 +365,7 @@ export function renderModal() {
       ? Math.round((new Date(r.ended_at) - new Date(r.started_at)) / 1000) + "s"
       : since(r.started_at);
     return `<button class="${r.id === state.run ? "on" : ""}" data-run="${esc(r.id)}">
-      ${statusBadge(r.status)} attempt ${r.attempt}
+      ${statusBadge(r.status)} attempt ${r.attempt}${runRoundLabel(r) ? ` · ${esc(runRoundLabel(r))}` : ""}
       <span class="sub">${esc(r.trigger)} · ${new Date(r.started_at).toLocaleTimeString()} · ${secs}</span>
     </button>`;
   }).join("") : `<div class="sub">Not run yet.</div>`;

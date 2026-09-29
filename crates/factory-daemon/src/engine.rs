@@ -21,7 +21,7 @@ use factory_core::protocol::{
 };
 use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
-use factory_core::run::{BlockSource, FailKind, NewRun, Run, RunPatch, RunStatus, Trigger};
+use factory_core::run::{BlockSource, FailKind, NewRun, Run, RunFeedback, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
     NewTask, PendingRetry, RetryPolicy, SlotWait, Task, TaskEntry, TaskFailure, TaskFilter, TaskPatch,
     TaskReport, TaskStatus, WorkflowOrigin,
@@ -2734,9 +2734,14 @@ impl Engine {
                 })
                 .await?
         };
+        // `#178`: which round of its workflow node this run is, and what the
+        // node that sent the work back said -- on the run, not in a title.
+        let (round, feedback) = self.workflow_round(&task).await;
         let mut initial_patch = RunPatch {
             original_estimate: task.effective_estimate(),
             provider_account,
+            round: (round > 0).then_some(round),
+            feedback,
             ..Default::default()
         };
         // `#178`: recorded whether or not the continuation actually managed
@@ -2852,7 +2857,7 @@ impl Engine {
         // was created (`create_workflow_task`) -- so a restart's recovery
         // pass, which dispatches through this same function, needs no
         // change of its own to pick this up.
-        let upstream = self.upstream_outputs(&task).await;
+        let upstream = self.upstream_outputs(&task, run.feedback.as_ref()).await;
         let agent_exits = self.agent_exit_context(&task).await;
         let knowledge = self.knowledge_hints(&task, &run.id).await;
         // Same chain the L6 tab and `policy attest` fold against
@@ -3138,7 +3143,7 @@ impl Engine {
     /// or workflow-run read failure is logged and treated as "nothing found"
     /// rather than failing the dispatch -- the task still runs, just without
     /// the section or file it would otherwise have carried.
-    async fn upstream_outputs(&self, task: &Task) -> Vec<UpstreamOutput> {
+    async fn upstream_outputs(&self, task: &Task, feedback: Option<&RunFeedback>) -> Vec<UpstreamOutput> {
         let Some(origin) = &task.workflow_origin else {
             return Vec::new();
         };
@@ -3198,37 +3203,71 @@ impl Engine {
         }
         // Work sent back here comes with what the node that sent it said:
         // the result from `done --send-to`, or the error/results retained by
-        // an in-flight run loaded from the legacy failure-routing format.
-        let request = run
+        // an in-flight run loaded from the legacy failure-routing format --
+        // read once, at dispatch, into the run's own `feedback` (`#178`).
+        if let Some(feedback) = feedback {
+            let title = match self.store.get(&feedback.from_task).await {
+                Ok(Some(sender)) => sender.title,
+                _ => feedback.from_node.clone(),
+            };
+            outputs.push(UpstreamOutput {
+                node_id: feedback.from_node.clone(),
+                task_id: feedback.from_task.clone(),
+                title: format!(
+                    "{title} sent this work back -- rework round {} of {}",
+                    feedback.round, feedback.max_rounds
+                ),
+                result: (!feedback.text.is_empty()).then(|| feedback.text.clone()),
+            });
+        }
+        outputs
+    }
+
+    /// `#178`: the round of its workflow node a task is being dispatched
+    /// for -- 0 outside a workflow and on a first pass -- and, when the work
+    /// was sent back, what the sending node's newest run said, captured now
+    /// so the round's run keeps it after the sender's next round moves on.
+    async fn workflow_round(&self, task: &Task) -> (u32, Option<RunFeedback>) {
+        let Some(origin) = &task.workflow_origin else {
+            return (0, None);
+        };
+        let Ok(Some(run)) = self.workflows.get_run(&origin.workflow_run_id).await else {
+            return (0, None);
+        };
+        let Some(node) = run
             .nodes
             .iter()
             .find(|node| node.node_id == origin.node_id && node.task_id.as_deref() == Some(task.id.as_str()))
-            .and_then(|node| node.rework_request.clone());
-        if let Some(request) = request {
-            match self.store.get(&request.from_task).await {
-                Ok(Some(reviewer)) => {
-                    let said: Vec<&str> = [reviewer.error.as_deref(), reviewer.result.as_deref()]
-                        .into_iter()
-                        .flatten()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    outputs.push(UpstreamOutput {
-                        node_id: request.from_node.clone(),
-                        task_id: reviewer.id.clone(),
-                        title: format!(
-                            "{} sent this work back -- rework round {} of {}",
-                            reviewer.title, request.round, request.max_rounds
-                        ),
-                        result: (!said.is_empty())
-                            .then(|| truncate_tail(&said.join("\n\n"), UPSTREAM_RESULT_BYTE_CAP).into_owned()),
-                    });
-                }
-                Ok(None) => tracing::warn!(task = task.id, from_task = request.from_task, "rework source no longer exists"),
-                Err(error) => tracing::warn!(task = task.id, from_task = request.from_task, "reading rework source: {error}"),
+        else {
+            return (0, None);
+        };
+        let Some(request) = node.rework_request.clone() else {
+            return (node.round, None);
+        };
+        let sender_run = match self.store.runs(&request.from_task, 1).await {
+            Ok(runs) => runs.into_iter().next(),
+            Err(error) => {
+                tracing::warn!(task = task.id, from_task = request.from_task, "reading rework source: {error}");
+                None
             }
-        }
-        outputs
+        };
+        let (from_run, said) = match &sender_run {
+            Some(r) => (Some(r.id.clone()), [r.error.as_deref(), r.result.as_deref()]),
+            None => (None, [None, None]),
+        };
+        let said: Vec<&str> = said.into_iter().flatten().map(str::trim).filter(|s| !s.is_empty()).collect();
+        let text = truncate_tail(&said.join("\n\n"), UPSTREAM_RESULT_BYTE_CAP).into_owned();
+        (
+            node.round,
+            Some(RunFeedback {
+                from_node: request.from_node,
+                from_task: request.from_task,
+                from_run,
+                round: request.round,
+                max_rounds: request.max_rounds,
+                text,
+            }),
+        )
     }
 
     /// Agent-selectable exits for this exact workflow-node round. This is
@@ -6955,6 +6994,8 @@ mod tests {
             superseded_token_sha256s: Vec::new(),
             continued_from: None,
             resumed_session: None,
+            round: 0,
+            feedback: None,
             original_estimate: None,
             provider_account: None,
             re_estimate: None,
@@ -7008,6 +7049,8 @@ mod tests {
             superseded_token_sha256s: Vec::new(),
             continued_from: None,
             resumed_session: None,
+            round: 0,
+            feedback: None,
             original_estimate: None,
             provider_account: None,
             re_estimate: None,
@@ -7179,6 +7222,8 @@ mod tests {
             superseded_token_sha256s: Vec::new(),
             continued_from: None,
             resumed_session: None,
+            round: 0,
+            feedback: None,
             original_estimate: None,
             provider_account: None,
             re_estimate: None,

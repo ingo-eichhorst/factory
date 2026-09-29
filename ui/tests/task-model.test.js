@@ -115,3 +115,15 @@ test("the board takes its column from task-model, and the modal offers close and
   assert.match(tasks, /id="m-reopen"/);
   assert.match(tasks, /\/api\/tasks\/\$\{state\.open\}\/close/);
 });
+
+test("#178: a rework round is labelled from its run, with its findings", async () => {
+  const { runRoundLabel, runFeedback } = await import("../js/task-model.js");
+  assert.equal(runRoundLabel({ round: 0 }), "");
+  assert.equal(runRoundLabel({}), "");
+  assert.equal(runRoundLabel({ round: 2 }), "rework round 2");
+  assert.equal(runFeedback({}), null);
+  assert.deepEqual(
+    runFeedback({ round: 1, feedback: { from_node: "review", from_task: "r", round: 1, max_rounds: 5, text: "fix the parser" } }),
+    { heading: "Sent back by review: round 1 of 5", text: "fix the parser" },
+  );
+});

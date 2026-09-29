@@ -18,6 +18,9 @@
 //!   rework (the bug fixed here) read a healthy recurring task as almost
 //!   entirely rework. The true signal is `Run::trigger`, fixed by
 //!   `is_rework`:
+//!     - a workflow rework round (`Run::round > 0`) is always rework: since
+//!       `#178` a round is a new run of the same task, whose predecessor
+//!       ended `done` -- its reviewer sent it back all the same;
 //!     - `Trigger::Retry` is always rework -- it exists (see `Trigger`'s own
 //!       doc comment) only as the daemon's automatic retry of a run that
 //!       just failed.
@@ -249,6 +252,14 @@ fn bucket_bounds(bin: ProductionBin, from: DateTime<Utc>, now: DateTime<Utc>) ->
 /// than its window) looks up as `None`, read the same as "did not fail":
 /// no evidence of a failure to correct, so not rework.
 fn is_rework(run: &Run, predecessor_status: &BTreeMap<(&str, u32), RunStatus>) -> bool {
+    // A workflow's rework round (`#178`): the same task run again because
+    // the node that judged it sent the work back -- a correction, whatever
+    // its predecessor's own status (that run ended `done`; its reviewer did
+    // not accept it). Rounds are runs now, so this is the only thing that
+    // makes one count; a `(rework N)` task from before counted as first pass.
+    if run.round > 0 {
+        return true;
+    }
     match run.trigger {
         // The daemon's own automatic retry of a run that just failed -- see
         // `Trigger::Retry`'s own doc comment. Always rework, whatever
@@ -359,6 +370,8 @@ mod tests {
             superseded_token_sha256s: Vec::new(),
             continued_from: None,
             resumed_session: None,
+            round: 0,
+            feedback: None,
             original_estimate: None,
             provider_account: None,
             re_estimate: None,
@@ -440,6 +453,22 @@ mod tests {
         assert_eq!(b.scrapped, 2, "failed and cancelled are both scrap");
         assert_eq!(b.reworked, 1, "only the retry-triggered run is rework");
         assert_eq!(b.first_pass, 1, "only the done, non-rework run is first-pass");
+    }
+
+    /// `#178`: a workflow rework round is a second run of the same task
+    /// after a `done` one -- the reviewer sent it back -- and is rework.
+    #[test]
+    fn a_workflow_rework_round_is_rework_though_its_predecessor_was_done() {
+        let from = floor_to(ProductionBin::Day, at(0));
+        let now = from + Duration::hours(1);
+        let first = run("r1", "t1", 1, RunStatus::Done, Trigger::Workflow, from, Some(from + Duration::seconds(100)));
+        let mut round = run("r2", "t1", 2, RunStatus::Done, Trigger::Workflow, from, Some(from + Duration::seconds(200)));
+        round.round = 1;
+        let runs = [first, round];
+        let buckets = bucket(&classify_all(&runs), ProductionBin::Day, from, now);
+        assert_eq!(buckets[0].finished, 2);
+        assert_eq!(buckets[0].reworked, 1, "the round is rework");
+        assert_eq!(buckets[0].first_pass, 1, "the first pass is not");
     }
 
     #[test]
