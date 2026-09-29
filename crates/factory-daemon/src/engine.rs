@@ -1262,6 +1262,12 @@ impl Engine {
             Request::TaskClose { id, reason, duplicate_of, note } => {
                 let asked = crate::operations::Asked::new(caller, note);
                 let task = self.close_task(&id, reason, duplicate_of, &asked).await?;
+                // `#178`: a closed task outside a workflow lets its worktrees
+                // go -- here, not inside `close_task`, which holds the
+                // schedule lock and must not wait on git. A workflow's go
+                // when the whole run is finished, which the sync below
+                // gets to.
+                self.release_if_settled(&id).await;
                 self.sync_workflow_for_task(&id).await;
                 self.sync_bench_for_task(&id).await;
                 Ok(Payload::Task { task })

@@ -533,10 +533,6 @@ impl Engine {
         )
         .await;
         self.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
-        // `#178`: a closed task outside a workflow lets its worktrees go; a
-        // workflow's go when the whole run is finished (`sync_workflow_for_task`
-        // after this, from the request handler, gets there).
-        self.release_if_settled(id).await;
         Ok(updated)
     }
 

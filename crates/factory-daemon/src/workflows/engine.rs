@@ -2536,6 +2536,9 @@ impl Engine {
             self.workflows.put_run(&run).await?;
             self.bus.publish(Event::WorkflowRunUpdated { run: run.clone() });
             // Idempotent, and a restart's repair of one that never got done.
+            // Outside the lock: releasing a worktree is git work that can take
+            // seconds, and every workflow report waits on this lock.
+            drop(_guard);
             self.settle_unreached_tasks(&run).await;
             self.release_finished_workflow(&run).await;
             return Ok(());
@@ -2593,6 +2596,7 @@ impl Engine {
             run.updated_at = Utc::now();
             self.workflows.put_run(&run).await?;
             self.bus.publish(Event::WorkflowRunUpdated { run: run.clone() });
+            drop(_guard);
             self.settle_unreached_tasks(&run).await;
             self.release_finished_workflow(&run).await;
             return Ok(());
@@ -2824,10 +2828,11 @@ impl Engine {
         self.workflows.put_run(&run).await?;
         self.bus
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
+        drop(_guard);
         if run.status.is_terminal() {
             self.settle_unreached_tasks(&run).await;
+            self.release_finished_workflow(&run).await;
         }
-        drop(_guard);
         for task_id in to_start {
             let engine = self.clone();
             tokio::spawn(async move {
