@@ -423,8 +423,11 @@ mod tests {
             )],
             t0,
         );
-        let failing = run(
-            RunStatus::Failed,
+        // A held run that was cancelled without passing evidence -- the
+        // assessment's own rule -- still counts against the rate; it is
+        // not simply left out the way an unheld run is.
+        let cancelled_without_evidence = run(
+            RunStatus::Cancelled,
             "feature",
             vec![step("tests", StepKind::Gate)],
             vec![],
@@ -443,9 +446,13 @@ mod tests {
             )],
             t0,
         );
-        let runs = vec![conforming, failing, unheld, other_category];
+        let runs = vec![conforming, cancelled_without_evidence, unheld, other_category];
         let figure = conformance_rate(&runs, "feature");
-        assert_eq!(figure.value, Some(0.5), "one of two held feature runs conforms; the unheld run and the other category are left out");
+        assert_eq!(
+            figure.value,
+            Some(0.5),
+            "one of two held feature runs conforms; the unheld run and the other category are left out"
+        );
         assert_eq!(figure.as_of, Some(t0));
     }
 
