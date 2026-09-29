@@ -69,9 +69,9 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
   };
   globalThis.document = { ...bare, getElementById: (id) => elements[id] || null };
 
-  let requested;
+  const requested = [];
   globalThis.fetch = async (path) => {
-    requested = path;
+    requested.push(path);
     return {
       status: 200,
       statusText: "OK",
@@ -130,7 +130,10 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
   state.scope = "demo";
 
   await loadPolicy();
-  assert.equal(requested, "/api/policy?scope=demo");
+  // The reporting clock (`#157`/`#170` phase 2) is read alongside the
+  // report now, under the same scope query. ("/clock" sorts before "?" in
+  // plain string order.)
+  assert.deepEqual([...requested].sort(), ["/api/policy/clock?scope=demo", "/api/policy?scope=demo"]);
   assert.match(elements["policy-cards"].innerHTML, /Cyber Resilience Act/);
   assert.match(elements["policy-cards"].innerHTML, /not compliant/);
   assert.match(elements["policy-gaps"].innerHTML, /cra\/annex-i-2-1/);
@@ -169,4 +172,75 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
   globalThis.document = bare;
   state.scope = null;
   renderPolicy(); // no throw with document stubbed back to the bare shim
+});
+
+test("the reporting clock section renders a deadline row and an excluded row, independent of the framework board (#157/#170 phase 2)", async () => {
+  const elements = {
+    "policy-scope-note": { textContent: "" },
+    "policy-error": { textContent: "", hidden: true },
+    "policy-export": { href: "" },
+    "policy-cards": { innerHTML: "" },
+    "policy-count": { textContent: "" },
+    "policy-empty": { hidden: false },
+    "policy-gaps": { innerHTML: "", querySelectorAll: () => [] },
+    "policy-no-gaps": { hidden: false },
+    "policy-na": { innerHTML: "" },
+    "policy-no-na": { hidden: false },
+    "policy-findings": { innerHTML: "" },
+    "policy-no-findings": { hidden: false },
+    "policy-clock": { innerHTML: "" },
+    "policy-no-clock": { hidden: false },
+  };
+  globalThis.document = { ...bare, getElementById: (id) => elements[id] || null };
+
+  const clock = {
+    now: "2026-09-24T12:00:00Z",
+    items: [
+      {
+        item: { kind: "report", item: "task-1" },
+        scope: "demo",
+        awareness_at: "2026-09-20T12:00:00Z",
+        reported_now: true,
+        deadlines: [{ deadline: "notification", due_at: "2026-09-23T12:00:00Z", state: "overdue", submission: null }],
+      },
+      {
+        item: { kind: "finding", scope: "demo", vulnerability: "CVE-2026-1234" },
+        scope: "demo",
+        awareness_at: "2026-09-23T12:00:00Z",
+        excluded: "not_affected",
+        reported_now: false,
+        deadlines: [],
+      },
+    ],
+  };
+  globalThis.fetch = async (path) => ({
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      status: "ok",
+      data: path.startsWith("/api/policy/clock")
+        ? { kind: "policy_clock", clock }
+        : { kind: "policy", report: { scope: "demo", rows: [], rollup: [], not_applicable: [], findings: [], catalogues: [] } },
+    }),
+  });
+  state.scope = "demo";
+  await loadPolicy();
+
+  const html = elements["policy-clock"].innerHTML;
+  assert.match(html, /report task-1/, "a report's own text is its short id, since it carries no title of its own");
+  assert.match(html, /72h notification/);
+  assert.match(html, /class="badge s-overdue">overdue</);
+  assert.match(html, /overdue by/);
+  assert.match(html, /CVE-2026-1234/);
+  assert.match(html, /excluded: not_affected/);
+  assert.equal(elements["policy-no-clock"].hidden, true, "two rows on screen -> the empty state is hidden");
+
+  globalThis.fetch = async () => { throw new Error("offline"); };
+  await loadPolicy();
+  assert.equal(elements["policy-clock"].innerHTML, "", "a failed clock read clears the last answer, same as the board itself");
+  assert.equal(elements["policy-no-clock"].hidden, false);
+
+  delete globalThis.fetch;
+  globalThis.document = bare;
+  state.scope = null;
 });

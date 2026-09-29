@@ -31,6 +31,7 @@ import {
   gapRows,
   kindLabel,
   notApplicableRows,
+  policyClockRows,
   refLinks,
   remediateAction,
   remediateBody,
@@ -38,11 +39,20 @@ import {
   statusOf,
   taskHref,
 } from "./policy-model.js";
+import { nowFromClock } from "./clock-model.js";
 
 /// Answers can arrive out of order when the rail moves quickly; only the
 /// newest request is allowed to draw -- the same guard `roles.js`'s
 /// `loadRoles` uses for the same reason.
 let asked = 0;
+
+/// The last `/api/policy/clock` answer (`#157`/`#170` phase 2), fetched
+/// alongside `/api/policy` under the same `asked` guard. `null` covers both
+/// "not read" and "the read failed": either way the clock section below
+/// just has nothing to show, the same "an optional addition, not the
+/// report itself" treatment the Inbox gives it (`dashboard.js`) -- it never
+/// blanks the rest of the tab, which still draws off `state.policy` alone.
+let clock = null;
 
 /// The control detail modal currently open, `{scope, control}`, or `null`.
 /// Not routed into the URL -- like `roles.js`'s edit form and
@@ -211,6 +221,11 @@ export function renderPolicy() {
     exportLink.href = `/api/policy/export${query}`;
   }
 
+  // Its own read, independent of `report` below: a failed `/api/policy`
+  // fetch never hides a clock that did come back, and a failed clock read
+  // never blanks the rest of this tab -- see `clock`'s own comment.
+  renderClockSection();
+
   const report = state.policyError ? null : state.policy;
   const cardsEl = $("policy-cards");
   const countEl = $("policy-count");
@@ -258,19 +273,69 @@ export function renderPolicy() {
   if (noFindings) noFindings.hidden = (report.findings || []).length !== 0;
 }
 
+// ------------------------------------------------------------ reporting clock
+
+function clockTableRow(row) {
+  if (row.excluded) {
+    return `<tr>
+      <td><a href="${esc(row.href)}">${esc(row.itemText)}</a></td>
+      <td>${esc(row.scope)}</td>
+      <td colspan="4" class="sub">excluded: ${esc(row.excluded)}</td>
+    </tr>`;
+  }
+  return `<tr>
+    <td><a href="${esc(row.href)}">${esc(row.itemText)}</a></td>
+    <td>${esc(row.scope)}</td>
+    <td>${esc(row.label)}</td>
+    <td class="sub">${esc(when(row.dueAt))}</td>
+    <td><span class="badge s-${esc(row.state)}">${esc(row.stateLabel)}</span></td>
+    <td class="sub">${esc(row.text)}${row.submission ? ` -- ${esc(row.submission.by)}, ${esc(when(row.submission.at))}` : ""}</td>
+  </tr>`;
+}
+
+/// The Policy tab's own CRA Art. 14 reporting clock section (`#157`/`#170`
+/// phase 2): drawn from `clock` alone, independent of the framework board
+/// above -- called from `renderPolicy` before its own failed-fetch early
+/// return, so neither read's failure ever hides the other's answer. Only
+/// the 24h early warning and 72h notification exist; the 14-day final
+/// report is `#157` phases 2-3, still without a source for the
+/// corrective-measure time it would run from.
+function renderClockSection() {
+  const body = $("policy-clock");
+  const emptyEl = $("policy-no-clock");
+  const rows = clock ? policyClockRows(clock, nowFromClock(clock)) : [];
+  if (body) body.innerHTML = rows.map(clockTableRow).join("");
+  if (emptyEl) emptyEl.hidden = rows.length !== 0;
+}
+
+async function fetchPolicyReport(query) {
+  try {
+    return { report: (await api(`/api/policy${query}`)).report, error: null };
+  } catch (e) {
+    return { report: null, error: e.message };
+  }
+}
+
+/// Never throws: a failed or missing clock read (an older daemon predating
+/// `#157`, say) just leaves `clock` `null`, and `renderClockSection` shows
+/// its own empty state -- it never blocks `state.policy` from loading or
+/// rendering.
+async function fetchClock(query) {
+  try {
+    return (await api(`/api/policy/clock${query}`)).clock;
+  } catch {
+    return null;
+  }
+}
+
 export async function loadPolicy() {
   const mine = ++asked;
   const query = state.scope === null ? "" : `?scope=${encodeURIComponent(state.scope)}`;
-  try {
-    const answer = await api(`/api/policy${query}`);
-    if (mine !== asked) return;
-    state.policy = answer.report;
-    state.policyError = null;
-  } catch (e) {
-    if (mine !== asked) return;
-    state.policy = null;
-    state.policyError = e.message;
-  }
+  const [policyResult, clockResult] = await Promise.all([fetchPolicyReport(query), fetchClock(query)]);
+  if (mine !== asked) return;
+  state.policy = policyResult.report;
+  state.policyError = policyResult.error;
+  clock = clockResult;
   renderPolicy();
 }
 
