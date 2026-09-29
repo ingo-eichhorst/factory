@@ -362,6 +362,7 @@ mod tests {
             },
             gate: None,
             exits,
+            expand: None,
         };
         let definition = WorkflowDefinition::from_draft(WorkflowDraft {
             name: "legacy review loop".into(),

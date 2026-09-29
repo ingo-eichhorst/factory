@@ -847,11 +847,9 @@ impl Engine {
         }
     }
 
-    /// Execute a triager's complete decomposition plan. These are ordinary
-    /// runnable tasks, not child intake items: intake has already proved the
-    /// plan's parts small, bounded and verifiable. Root parts start at once;
-    /// dependent parts remain pending until the scheduler observes every
-    /// prerequisite as `Done`.
+    /// Execute a complete plan as one generated workflow.  Its expand node
+    /// materialises every internal child, roots start at once, dependants
+    /// remain scheduled, and the workflow owns integration through one PR.
     async fn intake_expand_plan(self: &Arc<Self>, caller: &Caller, item: &Task) -> Result<Task> {
         if item.parent_task_id.is_some() {
             return Err(FactoryError::BadRequest(
@@ -866,67 +864,17 @@ impl Engine {
             .map_err(|error| FactoryError::BadRequest(format!("the executable plan: {error}")))?;
         let parts = intake::split_parts(&record, &triage.assessment.split)
             .map_err(FactoryError::BadRequest)?;
-        let ordered = intake::split_order(&parts).expect("validate_plan refuses dependency cycles");
-        let existing = self.store.list(&TaskFilter::default()).await?;
-        let mut made: BTreeMap<String, Task> = BTreeMap::new();
-
-        for part in ordered {
-            if let Some(task) = existing.iter().find(|task| {
-                task.parent_task_id.as_deref() == Some(item.id.as_str())
-                    && task.decomposition_part.as_deref() == Some(part.id.as_str())
-            }) {
-                made.insert(part.id.clone(), task.clone());
-                continue;
-            }
-
-            let dependencies: Vec<String> = part
-                .depends_on
-                .iter()
-                .map(|id| {
-                    made.get(id)
-                        .map(|task| task.id.clone())
-                        .expect("parts are ordered after their dependencies")
-                })
-                .collect();
-            let acceptance = part.acceptance.as_deref().expect("validate_plan requires acceptance").trim();
-            let ownership = part.owns.iter().map(|owned| owned.trim()).collect::<Vec<_>>().join(", ");
-            let interface = part.interface.as_deref().expect("validate_plan requires an interface").trim();
-            let instructions = format!(
-                "{}\n\nDone when: {}\n\nOwned surface: {}\n\nInterface / hand-off: {}\n\n---\nPart {} of task {} ({}). The parent request, for context:\n\n{}",
-                part.instructions.trim(),
-                acceptance,
-                ownership,
-                interface,
-                part.id,
-                item.id,
-                item.title,
-                item.instructions.trim(),
-            );
-            let mut labels = item.labels.clone();
-            labels.insert(intake::PARENT_LABEL.into(), item.id.clone());
-            labels.insert(intake::PART_LABEL.into(), part.id.clone());
-            let child = self
-                .create(NewTask {
-                    title: part.title.trim().to_string(),
-                    instructions,
-                    scope: Some(triage.assessment.routing.scope.clone()),
-                    agent: triage.assessment.routing.agent.clone(),
-                    parent_task_id: Some(item.id.clone()),
-                    decomposition_part: Some(part.id.clone()),
-                    depends_on: dependencies,
-                    estimate_seconds: part.estimate_seconds,
-                    labels,
-                    category: Some(triage.assessment.category.clone()),
-                    ..Default::default()
-                })
-                .await?;
-            made.insert(part.id.clone(), child);
-        }
-
-        let children: Vec<Task> = parts.iter().filter_map(|part| made.get(&part.id).cloned()).collect();
+        let workflow = self
+            .start_decomposition_workflow(item, &parts, &triage.assessment.routing, caller)
+            .await?;
+        let children = self
+            .store
+            .list(&TaskFilter { parent_task_id: Some(item.id.clone()), ..Default::default() })
+            .await?;
         let result = format!(
-            "expanded into {} tasks: {}",
+            "expanded into {} tasks in workflow {}: {}",
             children.len(),
+            workflow.id,
             children.iter().map(|task| format!("{} ({})", task.title, task.id)).collect::<Vec<_>>().join("; ")
         );
         let now = Utc::now();
@@ -934,7 +882,7 @@ impl Engine {
             decision: Decision::Split { parts: parts.clone() },
             by: caller.describe(),
             at: now,
-            workflow_run: None,
+            workflow_run: Some(workflow.id.clone()),
             parts: children.iter().map(|task| task.id.clone()).collect(),
         };
         let mut next = record;
@@ -964,11 +912,6 @@ impl Engine {
         )
         .await;
 
-        for child in children.into_iter().filter(|child| {
-            child.depends_on.is_empty() && child.status == TaskStatus::Pending && child.runs == 0
-        }) {
-            self.start_run_due(&child.id, Trigger::Dependency, Due::now()).await;
-        }
         Ok(task)
     }
 
@@ -1982,6 +1925,7 @@ mod tests {
                     },
                     gate: None,
                     exits: Vec::new(),
+                    expand: None,
                 }],
                 ..Default::default()
             })
@@ -2363,6 +2307,7 @@ mod tests {
                     },
                     gate: None,
                     exits: Vec::new(),
+                    expand: None,
                 }],
                 ..Default::default()
             })

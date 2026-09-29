@@ -67,10 +67,11 @@ struct GithubComment {
 
 pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
+    let mut etags = HashMap::new();
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            _ = ticker.tick() => poll_once(&engine, Path::new("gh")).await,
+            _ = ticker.tick() => poll_once_conditional(&engine, Path::new("gh"), &mut etags).await,
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() { return; }
             }
@@ -80,7 +81,20 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
 
 /// Poll every GitHub-backed scope once. Failures are deliberately contained
 /// to one scope so the next repository, and the next interval, still run.
+#[cfg(test)]
 async fn poll_once(engine: &Engine, gh: &Path) {
+    poll_once_inner(engine, gh, None).await;
+}
+
+async fn poll_once_conditional(engine: &Engine, gh: &Path, etags: &mut HashMap<String, String>) {
+    poll_once_inner(engine, gh, Some(etags)).await;
+}
+
+async fn poll_once_inner(
+    engine: &Engine,
+    gh: &Path,
+    mut etags: Option<&mut HashMap<String, String>>,
+) {
     let tasks = match engine.store.list(&TaskFilter::default()).await {
         Ok(tasks) => tasks,
         Err(error) => {
@@ -110,6 +124,20 @@ async fn poll_once(engine: &Engine, gh: &Path) {
         let Some(repo) = scope.git.as_deref().and_then(github_repo) else {
             continue;
         };
+        if let Some(cache) = etags.as_deref_mut() {
+            match repository_changed(gh, &repo, cache.get(&repo).map(String::as_str)).await {
+                Ok(ConditionalPoll::Unchanged) => continue,
+                Ok(ConditionalPoll::Changed(etag)) => {
+                    if let Some(etag) = etag {
+                        cache.insert(repo.clone(), etag);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(scope = %scope.name, repository = %repo, "could not conditionally poll GitHub intake: {error}");
+                    continue;
+                }
+            }
+        }
         let issues = match list_issues(gh, &repo).await {
             Ok(issues) => issues,
             Err(error) => {
@@ -182,6 +210,67 @@ async fn poll_once(engine: &Engine, gh: &Path) {
             }
         }
     }
+}
+
+enum ConditionalPoll {
+    Unchanged,
+    Changed(Option<String>),
+}
+
+/// Probe the fixed labelled-issues URL with an ETag.  A 304 stops the poll
+/// before the heavier issue/comment query and does not consume GitHub's core
+/// REST rate limit; after a change, the existing detail path performs the
+/// paged/comment-rich read.
+async fn repository_changed(
+    gh: &Path,
+    repo: &str,
+    etag: Option<&str>,
+) -> Result<ConditionalPoll, String> {
+    // The newest updated match invalidates this cache regardless of how many
+    // labelled issues exist. The detail read still pages the complete set.
+    let endpoint = format!(
+        "repos/{repo}/issues?state=open&labels=factory%3Aintake&sort=updated&direction=desc&per_page=1"
+    );
+    let mut command = tokio::process::Command::new(gh);
+    command
+        .kill_on_drop(true)
+        .args(["api", "--include", "--method", "GET"]);
+    if let Some(etag) = etag {
+        command.args(["-H", &format!("If-None-Match: {etag}")]);
+    }
+    command.arg(endpoint);
+    let output = tokio::time::timeout(GH_TIMEOUT, command.output())
+        .await
+        .map_err(|_| format!("gh api timed out after {} seconds", GH_TIMEOUT.as_secs()))?
+        .map_err(|error| format!("starting gh: {error}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let status = text
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("HTTP/")
+                .and_then(|rest| rest.split_whitespace().nth(1))
+        })
+        .and_then(|code| code.parse::<u16>().ok());
+    if status == Some(304) {
+        return Ok(ConditionalPoll::Unchanged);
+    }
+    if !output.status.success() || status.is_some_and(|code| !(200..300).contains(&code)) {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("gh api conditional request failed with {}", output.status)
+        } else {
+            format!(
+                "gh api conditional request failed with {}: {stderr}",
+                output.status
+            )
+        });
+    }
+    let etag = text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("etag")
+            .then(|| value.trim().to_string())
+    });
+    Ok(ConditionalPoll::Changed(etag))
 }
 
 fn issue_text(issue: &GithubIssue) -> String {
@@ -502,6 +591,39 @@ mod tests {
         );
         assert_eq!(github_repo("https://gitlab.com/acme/widgets.git"), None);
         assert_eq!(github_repo("main"), None);
+    }
+
+    #[tokio::test]
+    async fn conditional_poll_reuses_the_fixed_url_etag_and_accepts_not_modified() {
+        let scratch = Scratch::new();
+        let log = scratch.0.join("args");
+        let gh = scratch.fixture(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  *If-None-Match*) printf 'HTTP/2 304\\n\\n' ;;\n  *) printf 'HTTP/2 200\\netag: \\\"version-1\\\"\\n\\n[]' ;;\nesac\n",
+            log.display()
+        ));
+
+        let first = repository_changed(&gh, "acme/widgets", None).await.unwrap();
+        let etag = match first {
+            ConditionalPoll::Changed(Some(etag)) => etag,
+            _ => panic!("the initial response should retain its ETag"),
+        };
+        assert_eq!(etag, "\"version-1\"");
+        assert!(matches!(
+            repository_changed(&gh, "acme/widgets", Some(&etag))
+                .await
+                .unwrap(),
+            ConditionalPoll::Unchanged
+        ));
+
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert_eq!(
+            calls
+                .matches("repos/acme/widgets/issues?state=open&labels=factory%3Aintake&sort=updated&direction=desc&per_page=1")
+                .count(),
+            2,
+            "the cache key is the same fixed URL on every poll: {calls}"
+        );
+        assert!(calls.contains("If-None-Match: \"version-1\""), "{calls}");
     }
 
     #[test]
